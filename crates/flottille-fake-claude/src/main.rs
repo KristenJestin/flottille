@@ -50,6 +50,7 @@
 //! | `{"think_hidden": true}` | a `signature_delta`, then a thinking block with no text and its signature, as Claude sends a thought whose display is omitted |
 //! | `{"tool": {"id", "name", "input", "result"}}` | an `assistant` message with the `tool_use`, then a `user` message with its `tool_result` |
 //! | `{"mcp": {"tool": "fs_list", "arguments": {}}}` | calls the tool on the HTTP MCP server `--mcp-config` named (initialize, then `tools/call`), as `claude` does; the answer recorded |
+//! | `{"mcp": {"tool": "fs_list", "arguments": {}, "id": "a"}}` | the same, announced first by an `assistant` message with the `tool_use` and handed to the server as `claudecode/toolUseId` (the id made of the process number and `a`); `"unseen": true` leaves the announcement out |
 //! | `{"permission": {"tool": "Bash", "input": {}}}` | a `can_use_tool` control request, the answer recorded |
 //! | `{"compaction": true}` | a `compacting` status, then a `compact_boundary` |
 //! | `{"retry": true}` | an `api_retry` message: the provider is overloaded |
@@ -531,12 +532,28 @@ impl Fake {
     /// A call on the MCP server, as `claude` makes it. What it said before travels through the
     /// bridge, so the call waits a little for it to reach the daemon first: the call lands
     /// between the pieces of the message under way.
-    fn call_mcp(&self, call: &Value) {
-        std::thread::sleep(Duration::from_millis(300));
+    fn call_mcp(&mut self, call: &Value) {
         let tool = call["tool"].as_str().unwrap_or_default();
+        // With an `id`, the call is the tool use `claude` announces on its output before the
+        // request, and carries as `claudecode/toolUseId`: the process number makes it one of this
+        // session, as a real tool use's id is. `unseen` leaves the announcement out.
+        let tool_use = call["id"]
+            .as_str()
+            .map(|id| format!("toolu_{}_{id}", std::process::id()));
+        if let Some(id) = &tool_use
+            && call["unseen"] != true
+        {
+            let message = self.message(call);
+            self.assistant(
+                &message,
+                json!({"type": "tool_use", "id": id, "name": format!("mcp__flottille__{tool}"),
+                    "input": call["arguments"]}),
+            );
+        }
+        std::thread::sleep(Duration::from_millis(300));
         let outcome = match &self.mcp {
             None => Err("no MCP server was configured".to_owned()),
-            Some(server) => mcp_call(server, tool, &call["arguments"]),
+            Some(server) => mcp_call(server, tool, &call["arguments"], tool_use.as_deref()),
         };
         let (status, body) = match outcome {
             Ok((status, body)) => (status, body),
@@ -569,7 +586,12 @@ impl Fake {
 }
 
 /// A tool called on an HTTP MCP server: the status and the answer of its `tools/call`.
-fn mcp_call(server: &Value, tool: &str, arguments: &Value) -> Result<(u16, Value), String> {
+fn mcp_call(
+    server: &Value,
+    tool: &str,
+    arguments: &Value,
+    tool_use: Option<&str>,
+) -> Result<(u16, Value), String> {
     let url = server["url"].as_str().ok_or("the MCP server has no url")?;
     let mut headers: Vec<(String, String)> = server["headers"]
         .as_object()
@@ -592,11 +614,14 @@ fn mcp_call(server: &Value, tool: &str, arguments: &Value) -> Result<(u16, Value
         &headers,
         &json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
     )?;
+    let mut params = json!({"name": tool, "arguments": arguments});
+    if let Some(id) = tool_use {
+        params["_meta"] = json!({"claudecode/toolUseId": id});
+    }
     let (status, body, _) = post(
         url,
         &headers,
-        &json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
-            "params": {"name": tool, "arguments": arguments}}),
+        &json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": params}),
     )?;
     Ok((status, body))
 }

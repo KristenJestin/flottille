@@ -809,15 +809,19 @@ them: no tool of an agent does.
 
 `tool_results.show` and `tool_results.set` read and keep the limit above which a tool result is
 cut at the source (`docs/tools.md`, "Long results"): `limit` in `tool-results.toml` of
-Flottille's configuration folder.
+Flottille's configuration folder; and whether `fs_read` says a page is unchanged instead of
+sending it again (`docs/tools.md`, "Files"): `unchanged`, `true` or `false`, false when it is
+absent (off until what it saves is measured, `docs/tools.md`, "Files").
 
-- `tool_results.show` answers `{"limit"}`: a number of characters, or `"off"` when results are
-  returned whole. With no file, `8000`. `invalid-config` when the file cannot be read, names
-  another key, or holds a `limit` that is neither `"off"` nor a whole number from 4000 to 40000.
-- `tool_results.set {limit}` takes a number of characters or `"off"`, writes the file
-  (`limit = 16000`, or `limit = "off"`) and answers as `tool_results.show`; `invalid-params` for
-  anything else, a number out of the range and a missing `limit` included (a client leaves null
-  fields out, so `"off"` is a word).
+- `tool_results.show` answers `{"limit", "unchanged"}`: a number of characters, or `"off"` when
+  results are returned whole (with no file, `8000`), and a boolean. `invalid-config` when the file
+  cannot be read, names another key, holds a `limit` that is neither `"off"` nor a whole number
+  from 4000 to 40000, or an `unchanged` that is not a boolean.
+- `tool_results.set {limit?, unchanged?}` takes a number of characters or `"off"`, a boolean, or
+  both, keeps what it is not given as the file says, writes the file (`limit = 16000`, or
+  `limit = "off"`, then `unchanged = true` when it is on) and answers as `tool_results.show`;
+  `invalid-params` for anything else, a number out of the range and neither field given included
+  (a client leaves null fields out, so `"off"` is a word).
 
 The daemon reads the file at every tool call: a change applies to the next result of every
 running session. `tool_results.set` emits `tool_results.changed` with what it answers. The user's
@@ -1588,8 +1592,14 @@ its parent writes to it, and the sentence names its root.
 to the session as it is, whatever the setting `after_expiry`; left out, the setting decides.
 
 `images` is a list of `{"mime", "data"}`, `data` the image's bytes in base64: a pasted or dropped
-picture, sent as ACP image blocks after the message's text. With images, the message may be
-empty. `mime` is `image/png`, `image/jpeg`, `image/gif` or `image/webp`; a message carries 20
+picture, sent as ACP image blocks where the message puts them. The message marks a picture by
+`[Image N: <name>]`, `N` counted from 1 in the message: the prompt is the text up to the marker of
+the first image, that image's block, the text up to the next marker, and so on (the k-th image
+goes after the first marker numbered k; another marker of that number, or one whose number names
+no image, is text). An image without a marker is marked after the text, `[Image N: <file name>]`,
+and its block goes there: the stored message keeps the text as it was sent, and the
+`agent.prompted` event the text with every marker, its images in that order. With images, the
+message may be empty. `mime` is `image/png`, `image/jpeg`, `image/gif` or `image/webp`; a message carries 20
 images at most, 5 MiB each (20 is the least of what the providers document: the Claude API takes
 100 or more images per request, the OpenAI API 1500, and OpenCode leaves the count to its
 provider; the Claude API also asks every image of a request of more than 20 to be 2000 px at most

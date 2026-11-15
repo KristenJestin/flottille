@@ -492,8 +492,10 @@ async fn start_with(
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .kill_on_drop(true);
-            let mut child = crate::children::spawn(crate::children::in_own_session(&mut command))
-                .map_err(|error| format!("{}: {error}", words[0]))?;
+            let mut child = crate::children::spawn(crate::landlock::confined(
+                crate::children::in_own_session(&mut command),
+            ))
+            .map_err(|error| format!("{}: {error}", words[0]))?;
             let leader = child.id();
             let (Some(stdout), Some(stdin), Some(stderr)) =
                 (child.stdout.take(), child.stdin.take(), child.stderr.take())

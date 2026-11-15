@@ -10,7 +10,6 @@
 //! A message sent from the composer while the root works shows here at once, being sent, and
 //! becomes the waiting one in its place once the daemon put it in the queue.
 
-use crate::steps::commanded_text;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -24,7 +23,7 @@ use gpui_kit::{
 };
 
 use crate::actions::Command;
-use crate::session::{NOT_SENT_LINE, Pending, RETRY, Reply, SENDING, command_chips};
+use crate::session::{NOT_SENT_LINE, Pending, RETRY, Reply, SENDING};
 use crate::session_link::Queued;
 use crate::shell::Shell;
 
@@ -254,6 +253,7 @@ impl Render for QueuedMessages {
                         .collect(),
                     Entry::Sending(p) => p.images.iter().cloned().map(Some).collect(),
                 };
+                let count = pictures.len();
                 let thumbs = (!pictures.is_empty()).then(|| {
                     div()
                         .id(ElementId::Name(format!("queued-{key}-images").into()))
@@ -283,11 +283,27 @@ impl Render for QueuedMessages {
                             .test_support()
                         }))
                 });
-                // What the user typed, each command a chip in it.
-                let shown = match commands.is_empty() {
-                    true => text.clone().into_any_element(),
-                    false => commanded_text(&text, &command_chips(&text, &commands), cx)
-                        .into_any_element(),
+                // What the user typed, each command and each picture a chip where it was put: a
+                // marker typed by hand, with no picture of its place, stays text.
+                let pieces = crate::tokens::pieces_of(
+                    &text,
+                    |name| commands.iter().any(|known| known == name),
+                    |at, found| {
+                        (at < count).then(|| {
+                            gpui_design_system::Token::new(
+                                format!("picture-{at}"),
+                                crate::tokens::picture_look(found.number, &found.name, None),
+                            )
+                        })
+                    },
+                );
+                let shown = match crate::tokens::has_tokens(&pieces) {
+                    false => text.clone().into_any_element(),
+                    true => gpui_design_system::TokenText::new(
+                        SharedString::from(format!("queued-{key}-tokens")),
+                        pieces,
+                    )
+                    .into_any_element(),
                 };
                 // One line says where it is: waiting, being sent, or refused and why.
                 let waits_id = ElementId::Name(format!("queued-{key}-waits").into());

@@ -1926,6 +1926,8 @@ fn renew(
             return false;
         }
     };
+    // The new session has seen no page of any file: what the old one was shown is not before it.
+    daemon.mcp.kept.compacted(id);
     // No process runs here: the old session is over, and nothing will load it.
     if let Some((provider, native)) = replaced {
         (provider.forget_session)(&daemon.paths, &native);
@@ -2002,6 +2004,9 @@ pub fn change(
     });
     if let Err(error) = result {
         eprintln!("flottille daemon: agent {id}: {error}");
+    }
+    if state.is_final() {
+        daemon.mcp.kept.ended(id);
     }
 }
 
@@ -2275,6 +2280,18 @@ impl acp::Events for Recorder {
             }
         } else {
             self.said();
+        }
+        if name == "agent.compacted" {
+            self.daemon.mcp.kept.compacted(&self.agent);
+        }
+        if name == "agent.tool_call"
+            && data["update"] == false
+            && let Some(id) = data["id"].as_str()
+        {
+            self.daemon
+                .mcp
+                .kept
+                .called(&self.daemon.paths, &self.agent, id);
         }
         self.record(name, data, activity);
         if name == "agent.compacted" {

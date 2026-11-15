@@ -820,8 +820,10 @@ async fn run(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    let mut child = crate::children::spawn(crate::children::in_own_session(&mut command))
-        .map_err(|error| format!("{}: {error}", program[0]))?;
+    let mut child = crate::children::spawn(crate::landlock::confined(
+        crate::children::in_own_session(&mut command),
+    ))
+    .map_err(|error| format!("{}: {error}", program[0]))?;
     let leader = child.id();
     let stdout = tokio::spawn(kept(child.stdout.take()));
     let stderr = tokio::spawn(kept(child.stderr.take()));
@@ -910,8 +912,10 @@ async fn reload(
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    let mut child = crate::children::spawn(crate::children::in_own_session(&mut command))
-        .map_err(|error| format!("{}: {error}", program[0]))?;
+    let mut child = crate::children::spawn(crate::landlock::confined(
+        crate::children::in_own_session(&mut command),
+    ))
+    .map_err(|error| format!("{}: {error}", program[0]))?;
     let leader = child.id();
     let stderr = tokio::spawn(kept(child.stderr.take()));
     let status = match tokio::time::timeout(LOGIN_LIMIT, child.wait()).await {

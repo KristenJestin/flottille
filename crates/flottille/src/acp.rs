@@ -50,6 +50,28 @@ fn prompt_text(text: String) -> Result<String, String> {
     }
 }
 
+/// The blocks of a prompt: its text cut at each image's place, the image after the text before
+/// it. ACP's blocks are a list, so the agent reads each picture where the user put it.
+fn interleaved(
+    text: &str,
+    images: impl Iterator<Item = (usize, ImageContent)>,
+) -> Vec<ContentBlock> {
+    let mut blocks = Vec::new();
+    let mut from = 0;
+    for (place, image) in images {
+        let place = place.clamp(from, text.len());
+        if place > from {
+            blocks.push(ContentBlock::Text(TextContent::new(&text[from..place])));
+        }
+        blocks.push(ContentBlock::Image(image));
+        from = place;
+    }
+    if from < text.len() || blocks.is_empty() {
+        blocks.push(ContentBlock::Text(TextContent::new(&text[from..])));
+    }
+    blocks
+}
+
 /// A text kept in an event is cut here.
 const TEXT_LIMIT: usize = 64 * 1024;
 
@@ -470,6 +492,7 @@ async fn drive(
             let mut text = prompt_text(prompt.text)?;
             // What cannot go to the agent is said in the text, which the event keeps: the
             // user's words are never lost, and the window shows why a picture is not there.
+            // Each image goes where its marker is in the text (`places`).
             let mut sent = Vec::new();
             let mut notes = Vec::new();
             if !takes_images && !prompt.images.is_empty() {
@@ -479,9 +502,9 @@ async fn drive(
                     if count == 1 { "" } else { "s" }
                 ));
             } else {
-                for name in prompt.images {
+                for (name, place) in prompt.images.into_iter().zip(prompt.places) {
                     match events.image(&name) {
-                        Some((mime, data)) => sent.push((name, mime, data)),
+                        Some((mime, data)) => sent.push((name, place, mime, data)),
                         None => notes.push(format!("[image {name} is missing]")),
                     }
                 }
@@ -493,10 +516,10 @@ async fn drive(
             let names: Vec<String> = sent.iter().map(|(name, ..)| name.clone()).collect();
             events.turn_started(&text, &names, &prompt.typed, &prompt.deliveries);
             turns.running = true;
-            let mut blocks = vec![ContentBlock::Text(TextContent::new(text))];
-            blocks.extend(
+            let blocks = interleaved(
+                &text,
                 sent.into_iter()
-                    .map(|(_, mime, data)| ContentBlock::Image(ImageContent::new(data, mime))),
+                    .map(|(_, place, mime, data)| (place, ImageContent::new(data, mime))),
             );
             let request = PromptRequest::new(native_id.clone(), blocks);
             turn = Some(Box::pin(cx.send_request(request).block_task()));

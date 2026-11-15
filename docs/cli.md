@@ -702,6 +702,21 @@ list would keep (`printf %s "$TOKEN" | flottille vault set jira`). Refused for a
 secret (6 characters at least), a name that is not letters, digits, `.`, `_` and `-`, or an
 unknown project. `--json` prints `vault.set`.
 
+### `flottille vault edit <name>`
+
+Changes what an entry says, with `--description <line>`, `--url <url>`, `--username <login>` and
+`--project <project>`: each flag given replaces its value, and each flag left out keeps the
+entry's. An empty value clears it, so `--project ""` makes the entry every project's again. The
+secret and the use the entry is bound to (`--for`) are kept as they are; the command never reads
+a secret. To replace the secret, use `vault set`, which reads it from the standard input, so that
+it never reaches the shell's history: `printf %s "$TOKEN" | flottille vault set jira`. Refused
+for an entry the vault does not hold. `--json` prints `vault.set`.
+
+```
+$ flottille vault edit jira --url https://tracker.example.org
+Changed jira; its secret is kept as it was.
+```
+
 ### `flottille vault remove <name>`
 
 Removes the entry and its secret from the keyring. An entry bound to a feature that names it is
