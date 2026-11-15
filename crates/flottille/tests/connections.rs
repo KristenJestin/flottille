@@ -5735,7 +5735,10 @@ fn a_shown_browser_gets_the_display_variables() {
         display_of(&user, "browser"),
         json!({"WAYLAND_DISPLAY": "wayland-test", "DISPLAY": null,
             "XDG_RUNTIME_DIR": folder.to_str().unwrap(),
-            "DBUS_SESSION_BUS_ADDRESS": null, "runtime_files": ["wayland-test"]})
+            "DBUS_SESSION_BUS_ADDRESS": null,
+            "AGENT_BROWSER_SOCKET_DIR": user.path("state/flottille/connections/browser")
+                .to_str().unwrap(),
+            "runtime_files": ["wayland-test"]})
     );
     let started = logged(&user, "browser", "start");
     assert_eq!(started.last().unwrap()["config"]["headed"], json!(true));

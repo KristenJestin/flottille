@@ -858,6 +858,16 @@ impl ConnectionsSection {
         self.form_error.as_ref().map(ToString::to_string)
     }
 
+    /// Under the switch, while it is on: why the browser of the server that runs is not shown.
+    pub fn headless_said(&self) -> Option<String> {
+        let Form::Editing(Some(name)) = &self.form else {
+            return None;
+        };
+        let why = self.server(name)?.headless?;
+        (self.headed && self.reach == Reach::Command)
+            .then(|| format!("The browser is not shown, it runs headless: {why}"))
+    }
+
     /// The review's search field, once the dialog has drawn it.
     pub fn review_search(&self) -> Option<Entity<InputState>> {
         self.review
@@ -2003,15 +2013,7 @@ impl ConnectionsSection {
                 this.headed = !this.headed;
                 cx.notify();
             }));
-        // Under the switch, while it is on: why the browser that runs is not shown.
-        let why_headless = original
-            .as_deref()
-            .and_then(|name| self.server(name))
-            .and_then(|server| server.headless)
-            .filter(|_| self.headed && self.reach == Reach::Command)
-            .map(|why| {
-                SharedString::from(format!("The browser is not shown, it runs headless: {why}"))
-            });
+        let why_headless = self.headless_said().map(SharedString::from);
         let body = div()
             .id("connection-form")
             .max_h(window.viewport_size().height - px(240.))

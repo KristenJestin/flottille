@@ -2942,7 +2942,9 @@ fn a_browser_that_could_not_be_shown_says_why_under_its_switch(cx: &mut TestAppC
     open_the_form_of(&shell, cx, "browser");
     settle(cx);
     assert!(visible(cx, "connection-headed-why"));
-    let said = everything_said(cx);
+    let said = section(&shell, cx)
+        .read_with(cx, |s, _| s.headless_said())
+        .expect("it says why");
     assert!(said.contains("not shown"), "{said}");
     assert!(said.contains("Wayland socket"), "{said}");
     // Turned off in the form, there is nothing to say: it folds away.
