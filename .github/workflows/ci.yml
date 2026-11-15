@@ -4,19 +4,22 @@ on:
   pull_request:
   push:
     # A feature branch's pushes are verified, then published as its alpha (`publish`).
-    branches: [main, dev, "feat/**", "fix/**"]
+    # A stable line's (stable/X.Y) and the next version's (next/X.Y) are published as their
+    # pre-releases, -rc.N and -next.N.
+    branches: [main, dev, "stable/*", "next/*", "feat/**", "fix/**"]
   workflow_dispatch:
 
 # A push makes the runs of the same ref's older pushes useless: they are cancelled, so that the
-# queue holds only what is current. Not on dev and main, whose runs publish and always finish.
+# queue holds only what is current. Not on dev, main, a stable or next line or a stable line's
+# release tag, whose runs publish and always finish.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/dev' && github.ref != 'refs/heads/main' }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/dev' && github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/heads/stable/') && !startsWith(github.ref, 'refs/heads/next/') && !startsWith(github.ref, 'refs/tags/v') }}
 
 jobs:
   commit-messages:
     # A feature branch's commits are judged on its pull request, as before its pushes ran here.
-    if: github.event_name != 'push' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev'
+    if: github.event_name != 'push' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev' || startsWith(github.ref, 'refs/heads/stable/') || startsWith(github.ref, 'refs/heads/next/')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -24,9 +27,10 @@ jobs:
           fetch-depth: 0
       # The first push of a branch has no `before` (forty zeros): every commit it holds is checked.
       # Not on `main`, nor on a pull request into it: it brings commits already judged as pull
-      # requests, squashed by GitHub with ` (#n)` added to the subject.
+      # requests, squashed by GitHub with ` (#n)` added to the subject. Not on a run started by
+      # hand or by a workflow, which has no `before`: what it builds was judged on its push.
       - name: Check the Angular commit convention
-        if: github.base_ref != 'main' && github.ref != 'refs/heads/main'
+        if: github.base_ref != 'main' && github.ref != 'refs/heads/main' && github.event_name != 'workflow_dispatch'
         run: |
           base="${{ github.event.pull_request.base.sha || github.event.before }}"
           head="${{ github.event.pull_request.head.sha || github.sha }}"
@@ -46,9 +50,10 @@ jobs:
 
   # A release moves main to a commit of dev (docs/releases.md): when that commit's push run on dev
   # succeeded, its `verify` passed there and main does not run it again. Anything else (no such
-  # run, a failed one, an error of the API) says nothing, and main runs `verify` itself.
+  # run, a failed one, an error of the API) says nothing, and main runs `verify` itself. A line's
+  # release, built on its tag `vX.Y.Z`, asks the same of the push run on its line `stable/X.Y`.
   verified-on-dev:
-    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    if: (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     permissions:
       actions: read
@@ -61,11 +66,20 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          if n=$(gh api "repos/$GH_REPO/actions/workflows/ci.yml/runs?head_sha=$GITHUB_SHA&event=push&branch=dev&status=success" --jq .total_count) && [ "$n" -gt 0 ]; then
-            echo "::notice::$GITHUB_SHA passed on dev: verify is not run again."
+          branch=dev
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            # A tag of another form says nothing: verify runs.
+            if ! [[ $GITHUB_REF_NAME =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+              echo "::notice::$GITHUB_REF_NAME is not a line's release: verify runs here."
+              exit 0
+            fi
+            branch=stable/${BASH_REMATCH[1]}.${BASH_REMATCH[2]}
+          fi
+          if n=$(gh api "repos/$GH_REPO/actions/workflows/ci.yml/runs?head_sha=$GITHUB_SHA&event=push&branch=$branch&status=success" --jq .total_count) && [ "$n" -gt 0 ]; then
+            echo "::notice::$GITHUB_SHA passed on $branch: verify is not run again."
             echo "verified=true" >> "$GITHUB_OUTPUT"
           else
-            echo "::notice::No successful push run of $GITHUB_SHA on dev: verify runs here."
+            echo "::notice::No successful push run of $GITHUB_SHA on $branch: verify runs here."
           fi
 
   # Whether the Rust suite has anything to say about this change: a pull request that touches
@@ -219,9 +233,10 @@ jobs:
   # `build` runs the branch's code with a token that can only read; `publish`, once `verify`
   # passed on the pushed commit, runs none of it and alone may write the releases and the tags.
   # main is built when the `Release` workflow (release.yml) starts this one on it: the ref it moved
-  # with its own token started no push run.
+  # with its own token started no push run. So is a stable line's release, on the tag it made, and
+  # next/X.Y once forward.yml merged dev into it.
   build:
-    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/heads/next/')))
     # Old enough a C library that the binary runs on current Arch and Debian stable.
     runs-on: ubuntu-22.04
     permissions:
@@ -241,6 +256,33 @@ jobs:
         run: |
           skip() { echo "::notice::$1: nothing is published."; echo "skip=true" >> "$GITHUB_OUTPUT"; exit 0; }
           at=$GITHUB_SHA
+          # A line's release (release.yml): the tag vX.Y.Z it put on a commit of stable/X.Y, with
+          # the version of that commit's release candidate (-rc). Its changelog is the line's
+          # commits since the line's previous tag.
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            if ! [[ $GITHUB_REF_NAME =~ ^v((0|[1-9][0-9]*)\.(0|[1-9][0-9]*))\.(0|[1-9][0-9]*)$ ]]; then
+              echo "::error::$GITHUB_REF_NAME is not a stable version: nothing was published."
+              exit 1
+            fi
+            line=stable/${BASH_REMATCH[1]}
+            version=${GITHUB_REF_NAME#v}
+            if ! git merge-base --is-ancestor "$at" "origin/$line"; then
+              echo "::error::$at is not a commit of $line: a line's release is made by the Release workflow only (docs/releases.md), nothing was published."
+              exit 1
+            fi
+            if ! git tag --points-at "$at" | grep -qE "^v${version//./\\.}-rc\.[0-9]+$"; then
+              echo "::error::$at has no release candidate of $version: nothing was published."
+              exit 1
+            fi
+            read -r _ since <<< "$(tools/version.sh base --branch "$line" --at "$at^")"
+            tools/changelog.sh "$since..$at" > "$RUNNER_TEMP/changelog.md"
+            {
+              echo "channel=stable"
+              echo "version=$version"
+              echo "tag=$GITHUB_REF_NAME"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           case "$GITHUB_REF_NAME" in
             main)
               channel=stable
@@ -251,7 +293,7 @@ jobs:
                 exit 1
               fi
               ;;
-            dev) channel=beta ;;
+            dev | stable/* | next/*) channel=beta ;;
             *) channel=alpha ;;
           esac
           status=0
@@ -261,7 +303,7 @@ jobs:
           [ "$status" -eq 0 ] || exit "$status"
           # Every build is its own release, an alpha's too: nothing is ever replaced.
           tag="v$version"
-          tools/changelog.sh --at "$at" > "$RUNNER_TEMP/changelog.md"
+          tools/changelog.sh --at "$at" --branch "$GITHUB_REF_NAME" > "$RUNNER_TEMP/changelog.md"
           {
             echo "channel=$channel"
             echo "version=$version"
@@ -292,6 +334,10 @@ jobs:
           # The install.sh of this very commit: main has none before the first stable release.
           install="curl -fsSL https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$GITHUB_SHA/install.sh | sh -s -- --channel $CHANNEL"
           if [ "$CHANNEL" = alpha ]; then install="$install --branch '$GITHUB_REF_NAME'"; fi
+          # A stable line's builds, and the next version's, are not dev's: this very version.
+          if [ "$GITHUB_REF_TYPE" = tag ] || [[ $GITHUB_REF_NAME == stable/* || $GITHUB_REF_NAME == next/* ]]; then
+            install="curl -fsSL https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$GITHUB_SHA/install.sh | sh -s -- --version $VERSION"
+          fi
           {
             echo "Flottille $VERSION, $CHANNEL, built from ${GITHUB_SHA:0:12}."
             echo
@@ -341,8 +387,10 @@ jobs:
           TAG: ${{ needs.build.outputs.tag }}
         run: |
           # Read right before publishing: a push over this commit publishes itself, after it, and
-          # a deleted branch publishes nothing.
-          if tip=$(gh api "repos/$GH_REPO/git/ref/heads/$GITHUB_REF_NAME" --jq .object.sha 2> "$RUNNER_TEMP/tip.err"); then
+          # a deleted branch publishes nothing. A line's release tag must still name this commit.
+          path="git/ref/heads/$GITHUB_REF_NAME" jq=.object.sha
+          if [ "$GITHUB_REF_TYPE" = tag ]; then path="commits/$GITHUB_REF_NAME" jq=.sha; fi
+          if tip=$(gh api "repos/$GH_REPO/$path" --jq "$jq" 2> "$RUNNER_TEMP/tip.err"); then
             if [ "$tip" != "$GITHUB_SHA" ]; then echo "::notice::$GITHUB_REF_NAME moved on to $tip: nothing is published."; exit 0; fi
           elif grep -q 'HTTP 404' "$RUNNER_TEMP/tip.err"; then
             echo "::notice::$GITHUB_REF_NAME was deleted: nothing is published."; exit 0
@@ -356,9 +404,22 @@ jobs:
             if [ "$draft" = true ]; then gh release delete "$TAG" --yes; else echo "::notice::$TAG is already published."; exit 0; fi
           fi
           # The files go with the release in this one call: an immutable release takes none after.
-          if [ "$CHANNEL" = stable ]; then
+          if [ "$CHANNEL" = stable ] && [ "$GITHUB_REF_NAME" = main ]; then
             # On the commit released, the same on main and on dev: the next betas count from it.
             gh release create "$TAG" release/assets/* --target "$GITHUB_SHA" --title "$title" --notes-file release/notes.md --latest
+          elif [ "$CHANNEL" = stable ]; then
+            # A line's, on its tag: the stable channel takes the latest release, so it is marked
+            # latest when above the one marked (the newest line's fix reaches its users), never
+            # when below (an older line's would take the channel back). Not knowing, nothing.
+            latest=--latest
+            if current=$(gh api "repos/$GH_REPO/releases/latest" --jq .tag_name 2> "$RUNNER_TEMP/latest.err"); then
+              if [ "$(printf '%s\n%s\n' "${current#v}" "$VERSION" | sort -V | tail -n 1)" != "$VERSION" ] || [ "${current#v}" = "$VERSION" ]; then
+                latest=--latest=false
+              fi
+            elif ! grep -q 'HTTP 404' "$RUNNER_TEMP/latest.err"; then
+              cat "$RUNNER_TEMP/latest.err" >&2; exit 1
+            fi
+            gh release create "$TAG" release/assets/* --target "$GITHUB_SHA" --title "$title" --notes-file release/notes.md "$latest"
           else
             gh release create "$TAG" release/assets/* --target "$GITHUB_SHA" --title "$title" --notes-file release/notes.md --prerelease --latest=false
           fi

@@ -132,6 +132,19 @@ impl Repo {
         dev
     }
 
+    /// A release of a maintenance line as the `Release` workflow makes it: the annotated tag
+    /// `v<version>` on HEAD, its message naming the line, `stable/X.Y`.
+    fn line_release(&self, version: &str) {
+        let line = version.rsplit_once('.').unwrap().0;
+        self.git(&[
+            "tag",
+            "-a",
+            &format!("v{version}"),
+            "-m",
+            &format!("stable/{line}"),
+        ]);
+    }
+
     /// `tools/changelog.sh` in this repository.
     fn changelog(&self, args: &[&str]) -> String {
         let output = Command::new(tool("tools/changelog.sh"))
@@ -597,6 +610,319 @@ fn release_as_across_a_fast_forward_release() {
     assert_eq!(repo.next(&["stable"]), "0.2.1");
 }
 
+// The maintenance lines.
+
+/// main released 0.3.0, dev went on to the 0.4 betas, and the line `stable/0.3` started from
+/// that tag with one of dev's fixes brought to it. On the line.
+fn a_line_of_0_3() -> Repo {
+    let repo = Repo::new();
+    repo.commit("feat(core): start");
+    repo.git(&["checkout", "--quiet", "-b", "dev"]);
+    repo.commit("feat(gui): add a page (#10)");
+    repo.release_by_fast_forward("0.3.0");
+    repo.commit("feat(cli)!: rename the commands (#11)");
+    repo.commit("fix(store): a lock (#12)");
+    repo.git(&["checkout", "--quiet", "-b", "stable/0.3", "v0.3.0"]);
+    repo.commit("fix(store): a lock (#13)");
+    repo
+}
+
+#[test]
+fn a_line_counts_from_its_own_latest_tag() {
+    let repo = a_line_of_0_3();
+    repo.line_release("0.3.1");
+    repo.commit("fix(cli): a typo (#14)");
+    repo.commit("fix(gui): a colour (#15)");
+    // dev's 0.4.0, higher, is not in the line's history: it counts for nothing there.
+    repo.git(&["checkout", "--quiet", "dev"]);
+    repo.release_by_fast_forward("0.4.0");
+    repo.git(&["checkout", "--quiet", "stable/0.3"]);
+
+    assert_eq!(repo.next(&["beta", "--branch", "stable/0.3"]), "0.3.2-rc.2");
+    assert_eq!(repo.next(&["stable", "--branch", "stable/0.3"]), "0.3.2");
+    // Its name as git has it when none is given.
+    assert_eq!(repo.next(&["beta"]), "0.3.2-rc.2");
+    assert!(
+        repo.next(&["base", "--branch", "stable/0.3"])
+            .starts_with("v0.3.1 "),
+        "the line's own tag is its base"
+    );
+}
+
+#[test]
+fn a_line_bumps_the_patch_only() {
+    let repo = a_line_of_0_3();
+    repo.commit("feat(gui): a page after all (#14)");
+    repo.commit("fix(cli)!: a flag renamed (#15)");
+    repo.commit("fix(store): a new schema (#16)\n\nBREAKING CHANGE: the old store is not read");
+
+    assert_eq!(repo.next(&["stable", "--branch", "stable/0.3"]), "0.3.1");
+    assert_eq!(repo.next(&["beta", "--branch", "stable/0.3"]), "0.3.1-rc.4");
+
+    // From 1.0 on too: a feature is the minor on dev, the patch on a line.
+    let repo = Repo::new();
+    repo.commit("feat(core): start");
+    repo.tag("v1.2.0");
+    repo.git(&["checkout", "--quiet", "-b", "stable/1.2"]);
+    repo.commit("feat(gui): a page after all (#14)");
+    assert_eq!(repo.next(&["stable", "--branch", "stable/1.2"]), "1.2.1");
+}
+
+#[test]
+fn release_as_is_refused_on_a_line() {
+    let repo = a_line_of_0_3();
+    repo.commit("fix(cli): a typo (#14)\n\nRelease-As: 0.3.5");
+    let refused = repo.head();
+
+    for channel in ["stable", "beta"] {
+        let output = repo.version(&[channel, "--branch", "stable/0.3"]);
+        assert_eq!(output.status.code(), Some(1), "{channel}: {output:?}");
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(error.contains(&refused), "{channel}: {error}");
+        assert!(
+            error.contains("Release-As") && error.contains("stable/0.3"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn dev_stays_above_a_version_a_line_released() {
+    let repo = Repo::new();
+    repo.commit("feat(core): start");
+    repo.git(&["checkout", "--quiet", "-b", "dev"]);
+    repo.commit("feat(gui): add a page (#10)");
+    repo.release_by_fast_forward("0.3.0");
+    repo.commit("fix(store): a lock (#12)");
+    // Alone, dev's fix is the next patch.
+    assert_eq!(repo.next(&["beta", "--branch", "dev"]), "0.3.1-beta.1");
+
+    // The same fix released on the line as 0.3.1.
+    repo.git(&["checkout", "--quiet", "-b", "stable/0.3", "v0.3.0"]);
+    repo.commit("fix(store): a lock (#13)");
+    repo.line_release("0.3.1");
+    repo.git(&["checkout", "--quiet", "dev"]);
+
+    // dev goes to the next minor, above every version of the line.
+    assert_eq!(repo.next(&["beta", "--branch", "dev"]), "0.4.0-beta.1");
+    let dev = repo.head();
+    assert_eq!(
+        repo.next(&["stable", "--branch", "main", "--at", &dev]),
+        "0.4.0"
+    );
+    // And so does a branch of dev.
+    repo.git(&["checkout", "--quiet", "-b", "fix/x"]);
+    repo.commit("fix(cli): a typo");
+    assert_eq!(
+        repo.next(&["alpha", "--branch", "fix/x"]),
+        "0.4.0-alpha.fix-x.2"
+    );
+}
+
+#[test]
+fn each_line_counts_its_own_with_stable_0_3_and_next_0_5_while_dev_is_0_4() {
+    let repo = Repo::new();
+    repo.commit("feat(core): start");
+    repo.git(&["checkout", "--quiet", "-b", "dev"]);
+    repo.commit("feat(gui): add a page (#10)");
+    repo.release_by_fast_forward("0.3.0");
+    repo.commit("feat(specs): the specs (#20)\n\nRelease-As: 0.4.0");
+    // The fix line of 0.3, released once.
+    repo.git(&["checkout", "--quiet", "-b", "stable/0.3", "v0.3.0"]);
+    repo.commit("fix(gui): a colour (#14)");
+    repo.line_release("0.3.1");
+    repo.commit("fix(cli): a typo (#15)");
+    // The version after dev's, started early, then dev merged forward into it.
+    repo.git(&["checkout", "--quiet", "-b", "next/0.5", "dev"]);
+    repo.commit("feat(remote): a phone (#30)");
+    repo.git(&["checkout", "--quiet", "dev"]);
+    repo.commit("fix(cli): a typo (#21)");
+    repo.git(&["checkout", "--quiet", "next/0.5"]);
+    repo.git(&[
+        "merge",
+        "--quiet",
+        "--no-ff",
+        "-m",
+        "chore(repo): merge dev into next/0.5",
+        "dev",
+    ]);
+
+    let on = |branch: &str| {
+        repo.git(&["checkout", "--quiet", branch]);
+        repo.next(&["beta", "--branch", branch])
+    };
+    assert_eq!(on("stable/0.3"), "0.3.2-rc.1");
+    // dev above every stable line, below next.
+    assert_eq!(on("dev"), "0.4.0-beta.2");
+    assert_eq!(on("next/0.5"), "0.5.0-next.3");
+    repo.git(&["checkout", "--quiet", "next/0.5"]);
+    assert_eq!(repo.next(&["stable", "--branch", "next/0.5"]), "0.5.0");
+}
+
+#[test]
+fn a_next_line_not_above_dev_is_refused() {
+    let repo = Repo::new();
+    repo.commit("feat(core): start");
+    repo.tag("v0.3.0");
+    repo.git(&["checkout", "--quiet", "-b", "dev"]);
+    repo.commit("feat(specs): the specs (#20)\n\nRelease-As: 0.4.0");
+    repo.git(&["checkout", "--quiet", "-b", "next/0.4"]);
+    repo.commit("feat(remote): a phone (#30)");
+
+    let output = repo.version(&["beta", "--branch", "next/0.4"]);
+
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("next/0.4 is not above dev's 0.4.0"),
+        "{output:?}"
+    );
+}
+
+#[test]
+fn two_lines_at_once_each_count_their_own() {
+    let repo = Repo::new();
+    repo.commit("feat(core): start");
+    repo.git(&["checkout", "--quiet", "-b", "dev"]);
+    repo.commit("feat(gui): add a page (#10)");
+    repo.release_by_fast_forward("0.3.0");
+    repo.commit("feat(cli)!: rename the commands (#11)");
+    repo.release_by_fast_forward("0.4.0");
+    repo.commit("feat(store)!: a new schema (#12)");
+    repo.commit("fix(gui): a colour (#13)");
+    repo.git(&["checkout", "--quiet", "-b", "stable/0.3", "v0.3.0"]);
+    repo.commit("fix(gui): a colour (#14)");
+    repo.line_release("0.3.1");
+    repo.commit("fix(cli): a typo (#15)");
+    repo.git(&["checkout", "--quiet", "-b", "stable/0.4", "v0.4.0"]);
+    repo.commit("fix(gui): a colour (#16)");
+
+    let on = |line: &str, channel: &str| {
+        repo.git(&["checkout", "--quiet", line]);
+        repo.next(&[channel, "--branch", line])
+    };
+    assert_eq!(on("stable/0.3", "beta"), "0.3.2-rc.1");
+    assert_eq!(on("stable/0.4", "beta"), "0.4.1-rc.1");
+    assert_eq!(on("stable/0.4", "stable"), "0.4.1");
+
+    repo.line_release("0.4.1");
+    repo.commit("fix(cli): a typo (#17)");
+    assert_eq!(on("stable/0.4", "beta"), "0.4.2-rc.1");
+    assert_eq!(on("stable/0.3", "beta"), "0.3.2-rc.1");
+    assert_eq!(on("dev", "beta"), "0.5.0-beta.2");
+}
+
+#[test]
+fn dev_and_a_stable_line_never_compute_the_same_version() {
+    // dev took only fixes since 0.3.0, and the line stable/0.3 one of them: both are 0.3.1
+    // before either is released.
+    let repo = Repo::new();
+    repo.commit("feat(core): start");
+    repo.git(&["checkout", "--quiet", "-b", "dev"]);
+    repo.commit("feat(gui): add a page (#10)");
+    repo.release_by_fast_forward("0.3.0");
+    repo.commit("fix(store): a lock (#12)");
+    repo.git(&["checkout", "--quiet", "-b", "stable/0.3", "v0.3.0"]);
+    repo.commit("fix(store): a lock (#13)");
+
+    let on = |branch: &str, channel: &str| {
+        repo.git(&["checkout", "--quiet", branch]);
+        repo.next(&[channel, "--branch", branch])
+    };
+    // Their pre-releases have names of their own.
+    assert_eq!(on("dev", "beta"), "0.3.1-beta.1");
+    assert_eq!(on("stable/0.3", "beta"), "0.3.1-rc.1");
+
+    // dev released 0.3.1 first: the line goes above it, never to a tag dev holds.
+    repo.git(&["checkout", "--quiet", "dev"]);
+    repo.release_by_fast_forward("0.3.1");
+    assert_eq!(on("stable/0.3", "beta"), "0.3.2-rc.1");
+    assert_eq!(on("stable/0.3", "stable"), "0.3.2");
+}
+
+#[test]
+fn a_next_line_publishes_next_pre_releases() {
+    let repo = Repo::new();
+    repo.commit("feat(core): start");
+    repo.git(&["checkout", "--quiet", "-b", "dev"]);
+    repo.commit("feat(specs): the specs (#20)\n\nRelease-As: 0.4.0");
+    repo.git(&["checkout", "--quiet", "-b", "next/0.5"]);
+    repo.commit("feat(remote): a phone (#30)");
+    let sha = repo.head();
+
+    assert_eq!(repo.next(&["beta", "--branch", "next/0.5"]), "0.5.0-next.3");
+    repo.git(&["checkout", "--quiet", "dev"]);
+    assert_eq!(repo.next(&["beta", "--branch", "dev"]), "0.4.0-beta.2");
+
+    // CI publishes it under that name.
+    let (output, outputs, _) = version_step(&repo, "next/0.5", "branch", &sha);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        outputs,
+        "channel=beta\nversion=0.5.0-next.3\ntag=v0.5.0-next.3\n"
+    );
+}
+
+#[test]
+fn a_stable_line_publishes_rc_pre_releases() {
+    let repo = a_line_of_0_3();
+    let sha = repo.head();
+    assert_eq!(repo.next(&["beta", "--branch", "stable/0.3"]), "0.3.1-rc.1");
+    repo.commit("fix(cli): a typo (#14)");
+    assert_eq!(repo.next(&["beta", "--branch", "stable/0.3"]), "0.3.1-rc.2");
+    repo.git(&["checkout", "--quiet", "dev"]);
+
+    let (output, outputs, _) = version_step(&repo, "stable/0.3", "branch", &sha);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        outputs,
+        "channel=beta\nversion=0.3.1-rc.1\ntag=v0.3.1-rc.1\n"
+    );
+
+    // A line's release takes its rc, nothing else of that version.
+    repo.git(&["tag", "v0.3.1-beta.1", &sha]);
+    let released = run_release_of(&repo, "stable/0.3", &sha, "refs/heads/dev");
+    assert!(!released.output.status.success(), "{:?}", released.output);
+    assert!(repo.git(&["tag", "--list", "v0.3.1"]).is_empty());
+    repo.git(&["tag", "v0.3.1-rc.1", &sha]);
+    let released = run_release_of(&repo, "stable/0.3", &sha, "refs/heads/dev");
+    assert!(released.output.status.success(), "{:?}", released.output);
+    assert_eq!(repo.git(&["rev-parse", "v0.3.1^{commit}"]), sha);
+}
+
+#[test]
+fn a_line_with_nothing_since_its_tag_publishes_nothing() {
+    // Just cut from its tag: no commit of its own.
+    let repo = Repo::new();
+    repo.commit("feat(core): start");
+    repo.git(&["checkout", "--quiet", "-b", "dev"]);
+    repo.commit("feat(gui): add a page (#10)");
+    repo.release_by_fast_forward("0.3.0");
+    repo.commit("fix(store): a lock (#12)");
+    repo.git(&["checkout", "--quiet", "-b", "stable/0.3", "v0.3.0"]);
+    let cut = repo.head();
+    let nothing = |repo: &Repo| {
+        for channel in ["stable", "beta", "alpha"] {
+            let output = repo.version(&[channel, "--branch", "stable/0.3"]);
+            assert_eq!(output.status.code(), Some(3), "{channel}: {output:?}");
+            assert_eq!(String::from_utf8_lossy(&output.stdout), "", "{channel}");
+        }
+    };
+    nothing(&repo);
+
+    // Nor right after its release.
+    repo.commit("fix(store): a lock (#13)");
+    repo.line_release("0.3.1");
+    nothing(&repo);
+    repo.git(&["checkout", "--quiet", "dev"]);
+
+    // CI's push run of the line skips.
+    let (output, outputs, _) = version_step(&repo, "stable/0.3", "branch", &cut);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(outputs, "skip=true\n");
+}
+
 // The changelog.
 
 #[test]
@@ -692,6 +1018,21 @@ fn two_releases_in_a_row_the_second_merges_its_version_is_the_next_and_its_chang
         repo.changelog(&["--at", &dev]),
         "### Fixes\n\n- **cli**: a typo (#21)\n\n\
          ### Other changes\n\n- **repo**: say more (#22)\n"
+    );
+}
+
+#[test]
+fn a_line_s_changelog_lists_its_commits_since_its_previous_tag() {
+    let repo = a_line_of_0_3();
+    repo.line_release("0.3.1");
+    repo.commit("fix(cli): a typo (#14)");
+    repo.git(&["checkout", "--quiet", "dev"]);
+    repo.release_by_fast_forward("0.4.0");
+    repo.git(&["checkout", "--quiet", "stable/0.3"]);
+
+    assert_eq!(
+        repo.changelog(&["--at", "HEAD", "--branch", "stable/0.3"]),
+        "### Fixes\n\n- **cli**: a typo (#14)\n"
     );
 }
 
@@ -1188,6 +1529,53 @@ fn install_sh_takes_the_most_recent_build_and_an_exact_version() {
 }
 
 #[test]
+fn the_beta_channel_never_takes_a_next_or_rc_release() {
+    // A stable line's rc and the next version's pre-release, published after dev's beta.
+    let releases = Releases::serve();
+    let programs = tempfile::tempdir().unwrap();
+    betas(
+        &releases,
+        programs.path(),
+        &[
+            ("0.5.0-next.2", "2026-11-04T11:00:00Z"),
+            ("0.3.2-rc.1", "2026-11-04T10:00:00Z"),
+            ("0.4.0-beta.3", "2026-11-04T09:00:00Z"),
+        ],
+    );
+
+    let home = tempfile::tempdir().unwrap();
+    let output = install(home.path(), &releases, &["--channel", "beta"]);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        installed_version(home.path()),
+        "flottille 0.4.0-beta.3 (test, 000000000000)"
+    );
+    // Each is installed by its version.
+    for version in ["0.5.0-next.2", "0.3.2-rc.1"] {
+        let home = tempfile::tempdir().unwrap();
+        let output = install(home.path(), &releases, &["--version", version]);
+        assert!(output.status.success(), "{version}: {output:?}");
+        assert_eq!(
+            installed_version(home.path()),
+            format!("flottille {version} (test, 000000000000)")
+        );
+    }
+
+    let user = User::new().with_env("FLOTTILLE_RELEASES", &releases.api());
+    let binary = installed();
+    let output = user
+        .command_through(&binary, &["update", "--channel", "beta"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let said = Command::new(&binary).arg("--version").output().unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&said.stdout).trim(),
+        "flottille 0.4.0-beta.3 (test, 000000000000)"
+    );
+}
+
+#[test]
 fn install_sh_does_not_offer_a_draft() {
     let releases = Releases::serve();
     let programs = tempfile::tempdir().unwrap();
@@ -1487,11 +1875,63 @@ fn step_script(workflow: &str, id: &str) -> String {
 const FAKE_GH: &str = r#"#!/usr/bin/env bash
 set -euo pipefail
 echo "$*" >> "$FAKE_GH_LOG"
+# A call that fails as GitHub may fail, to run a workflow again after it.
+if [ -n "${FAKE_GH_FAIL:-}" ] && [[ "$*" == $FAKE_GH_FAIL ]]; then echo "gh: Server Error (HTTP 500)" >&2; exit 1; fi
 cd "$FAKE_GH_REPO"
+# The pull requests opened, one `<base> <head>` per line.
+prs=$(git rev-parse --git-dir)/fake-prs
+touch "$prs"
 exists() { git cat-file -e "$1^{commit}" 2> /dev/null; }
+# The fields given with -f, as `field[name]`.
+declare -A field=()
+args=("$@")
+jq= base_arg= head_arg=
+for ((i = 0; i < ${#args[@]}; i++)); do
+  if [ "${args[i]}" = -f ]; then kv=${args[i + 1]}; field["${kv%%=*}"]=${kv#*=}; fi
+  if [ "${args[i]}" = --jq ]; then jq=${args[i + 1]}; fi
+  if [ "${args[i]}" = --base ]; then base_arg=${args[i + 1]}; fi
+  if [ "${args[i]}" = --head ]; then head_arg=${args[i + 1]}; fi
+done
 case "$1 ${2:-}" in
   "api repos/o/r/git/ref/heads/"*)
     git rev-parse --verify -q "refs/heads/${2#repos/o/r/git/ref/heads/}" || { echo "gh: Not Found (HTTP 404)" >&2; exit 1; } ;;
+  "api repos/o/r/git/ref/tags/"*)
+    git rev-parse --verify -q "refs/tags/${2#repos/o/r/git/ref/tags/}" || { echo "gh: Not Found (HTTP 404)" >&2; exit 1; } ;;
+  # What `--jq '.[] | "\(.object.sha) \(.ref)"'` makes of the answer: an annotated tag's object
+  # is the tag's, not its commit.
+  "api repos/o/r/git/matching-refs/"*)
+    git for-each-ref --format='%(objectname) %(refname)' "refs/${2#repos/o/r/git/matching-refs/}*" ;;
+  "api repos/o/r/commits/"*)
+    git rev-parse --verify -q "${2#repos/o/r/commits/}^{commit}" || { echo "gh: No commit found (HTTP 422)" >&2; exit 1; } ;;
+  # An annotated tag's object, no ref pointing at it yet.
+  "api repos/o/r/git/tags")
+    [ "${field[type]:-}" = commit ] && exists "${field[object]:-}" || { echo "gh: unexpected $*" >&2; exit 2; }
+    git tag -a "${field[tag]}" -m "${field[message]}" "${field[object]}"
+    git rev-parse "refs/tags/${field[tag]}"
+    git tag --delete "${field[tag]}" > /dev/null ;;
+  # A ref made, never one moved.
+  "api repos/o/r/git/refs")
+    git update-ref "${field[ref]}" "${field[sha]}" "" 2> /dev/null || { echo "gh: Reference already exists (HTTP 422)" >&2; exit 1; }
+    echo '{}' ;;
+  # What the few `--jq` asked make of a commit.
+  "api repos/o/r/git/commits/"*)
+    c=${2#repos/o/r/git/commits/}
+    exists "$c" || { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }
+    case "$jq" in
+      .tree.sha) git rev-parse "$c^{tree}" ;;
+      ".parents[0].sha") git rev-parse "$c^" ;;
+      .message) git log -1 --format=%B "$c" ;;
+      *) echo "gh: unexpected $*" >&2; exit 2 ;;
+    esac ;;
+  "api repos/o/r/git/commits")
+    git commit-tree "${field[tree]}" -p "${field["parents[]"]}" -m "${field[message]}" ;;
+  # A merge into a branch, made there: its commit, or 409 when it does not merge.
+  "api repos/o/r/merges")
+    base=$(git rev-parse --verify -q "refs/heads/${field[base]}") || { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }
+    tree=$(git merge-tree --write-tree "$base" "${field[head]}" 2> /dev/null) || { echo "gh: Merge conflict (HTTP 409)" >&2; exit 1; }
+    sha=$(git commit-tree "$tree" -p "$base" -p "${field[head]}" -m "${field[commit_message]}")
+    git update-ref "refs/heads/${field[base]}" "$sha" "$base"
+    echo "$sha" ;;
   "api repos/o/r/compare/"*)
     range=${2#repos/o/r/compare/} base=${range%%...*} head=${range#*...}
     exists "$base" && exists "$head" || { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }
@@ -1500,12 +1940,26 @@ case "$1 ${2:-}" in
     elif git merge-base --is-ancestor "$head" "$base"; then echo behind
     else echo diverged; fi ;;
   "api -X")
+    if [ "$3" = DELETE ]; then
+      ref=refs/${4#repos/o/r/git/refs/}
+      git rev-parse -q --verify "$ref" > /dev/null || { echo "gh: Reference does not exist (HTTP 422)" >&2; exit 1; }
+      git update-ref -d "$ref"
+      exit 0
+    fi
     [ "$3 $4" = "PATCH repos/o/r/git/refs/heads/main" ] && [ "$7 $8" = "-F force=false" ] || { echo "gh: unexpected $*" >&2; exit 2; }
     sha=${6#sha=}
     exists "$sha" && git merge-base --is-ancestor main "$sha" || { echo "gh: Update is not a fast forward (HTTP 422)" >&2; exit 1; }
     git update-ref refs/heads/main "$sha"
     echo '{}' ;;
-  "workflow run") ;;
+  "pr create") echo "$base_arg $head_arg" >> "$prs" ;;
+  # The heads of those opened, into `--base` or from `--head` when given.
+  "pr list")
+    while read -r base head; do
+      if [ -n "$base_arg" ] && [ "$base" != "$base_arg" ]; then continue; fi
+      if [ -n "$head_arg" ] && [ "$head" != "$head_arg" ]; then continue; fi
+      echo "$head"
+    done < "$prs" ;;
+  "workflow run" | "pr comment") ;;
   *) echo "gh: unexpected $*" >&2; exit 2 ;;
 esac
 "#;
@@ -1518,6 +1972,11 @@ struct Released {
 }
 
 fn run_release(repo: &Repo, commit: &str, git_ref: &str) -> Released {
+    run_release_of(repo, "dev", commit, git_ref)
+}
+
+/// The `Release` workflow asked to release `commit` of `branch`.
+fn run_release_of(repo: &Repo, branch: &str, commit: &str, git_ref: &str) -> Released {
     let bin = tempfile::tempdir().unwrap();
     let gh = bin.path().join("gh");
     std::fs::write(&gh, FAKE_GH).unwrap();
@@ -1543,11 +2002,18 @@ fn run_release(repo: &Repo, commit: &str, git_ref: &str) -> Released {
         .env("PATH", path)
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_NOSYSTEM", "1")
+        // Who makes the tags and the commits of the fake API.
+        .env("GIT_AUTHOR_NAME", "Test")
+        .env("GIT_AUTHOR_EMAIL", "test@example.invalid")
+        .env("GIT_COMMITTER_NAME", "Test")
+        .env("GIT_COMMITTER_EMAIL", "test@example.invalid")
         .env("FAKE_GH_REPO", repo.dir.path())
         .env("FAKE_GH_LOG", &log)
         .env("GH_REPO", "o/r")
         .env("GITHUB_REF", git_ref)
+        .env("BRANCH", branch)
         .env("COMMIT", commit)
+        .env("RUNNER_TEMP", bin.path())
         .output()
         .unwrap();
     Released {
@@ -1724,9 +2190,652 @@ fn the_release_workflow_runs_no_code_of_the_branch_and_interpolates_no_input() {
     }
 }
 
+/// The line `stable/0.3` with its head's rc published, as CI publishes it on
+/// the push (a lightweight tag, made by `gh release create`). On dev.
+fn a_line_ready_for_a_release() -> Repo {
+    let repo = a_line_of_0_3();
+    repo.tag("v0.3.1-rc.1");
+    repo.git(&["checkout", "--quiet", "dev"]);
+    repo
+}
+
+#[test]
+fn a_line_s_commit_released_tags_it_and_leaves_main() {
+    let repo = a_line_ready_for_a_release();
+    let line = repo.git(&["rev-parse", "stable/0.3"]);
+    let main = repo.git(&["rev-parse", "main"]);
+
+    let released = run_release_of(&repo, "stable/0.3", "stable/0.3", "refs/heads/dev");
+
+    assert!(released.output.status.success(), "{:?}", released.output);
+    assert_eq!(released.main, main, "main does not move for a line");
+    assert!(!released.calls.contains("PATCH"), "{}", released.calls);
+    // The version its rc had, on that very commit, the tag naming its line.
+    assert_eq!(repo.git(&["rev-parse", "v0.3.1^{commit}"]), line);
+    assert_eq!(repo.git(&["cat-file", "-t", "v0.3.1"]), "tag");
+    assert_eq!(
+        repo.git(&["tag", "--list", "--format=%(contents:subject)", "v0.3.1"]),
+        "stable/0.3"
+    );
+    assert!(
+        released
+            .calls
+            .ends_with("workflow run ci.yml --ref v0.3.1\n"),
+        "{}",
+        released.calls
+    );
+    // The line then counts from it.
+    repo.git(&["checkout", "--quiet", "stable/0.3"]);
+    repo.commit("fix(cli): a typo (#14)");
+    assert_eq!(repo.next(&["beta", "--branch", "stable/0.3"]), "0.3.2-rc.1");
+}
+
+#[test]
+fn a_line_s_older_commit_is_released_by_its_full_sha() {
+    let repo = a_line_ready_for_a_release();
+    let older = repo.git(&["rev-parse", "stable/0.3"]);
+    repo.git(&["checkout", "--quiet", "stable/0.3"]);
+    repo.commit("fix(cli): a typo (#14)");
+    repo.tag("v0.3.1-rc.2");
+    repo.git(&["checkout", "--quiet", "dev"]);
+
+    let released = run_release_of(&repo, "stable/0.3", &older, "refs/heads/dev");
+
+    assert!(released.output.status.success(), "{:?}", released.output);
+    assert_eq!(repo.git(&["rev-parse", "v0.3.1^{commit}"]), older);
+}
+
+#[test]
+fn a_commit_on_no_line_nor_dev_is_refused() {
+    let repo = a_line_ready_for_a_release();
+    let dev = repo.head();
+    let tags = repo.git(&["tag", "--list"]);
+
+    // A commit of dev is not one of the line.
+    let released = run_release_of(&repo, "stable/0.3", &dev, "refs/heads/dev");
+    assert!(!released.output.status.success(), "{:?}", released.output);
+    assert!(
+        String::from_utf8_lossy(&released.output.stdout).contains("not a commit of stable/0.3"),
+        "{:?}",
+        released.output
+    );
+    assert!(
+        !released.calls.contains("workflow run"),
+        "{}",
+        released.calls
+    );
+
+    // A branch that is neither dev nor a line, or the head of another branch than the one named.
+    for (branch, commit) in [
+        ("main", dev.as_str()),
+        ("feat/x", dev.as_str()),
+        ("stable/0.3.1", dev.as_str()),
+        ("stable/x", dev.as_str()),
+        ("stable/03", dev.as_str()),
+        ("stable/0.3; touch pwned", dev.as_str()),
+        ("next/0.5", dev.as_str()),
+        ("stable/0.3", "dev"),
+        ("dev", "stable/0.3"),
+    ] {
+        let released = run_release_of(&repo, branch, commit, "refs/heads/dev");
+        assert!(
+            !released.output.status.success(),
+            "{branch} {commit}: {:?}",
+            released.output
+        );
+        assert_eq!(released.calls, "", "{branch} {commit}");
+    }
+    assert!(!repo.dir.path().join("pwned").exists());
+
+    // A line that does not exist.
+    let released = run_release_of(&repo, "stable/9.9", &dev, "refs/heads/dev");
+    assert!(!released.output.status.success(), "{:?}", released.output);
+    assert!(
+        !released.calls.contains("workflow run"),
+        "{}",
+        released.calls
+    );
+
+    assert_eq!(repo.git(&["tag", "--list"]), tags, "no tag was made");
+}
+
+#[test]
+fn a_line_s_commit_without_an_rc_is_refused() {
+    // Its push run published nothing (it failed, or the line moved on before): nothing says it
+    // passed `verify`, nor which version it is.
+    let repo = a_line_ready_for_a_release();
+    repo.git(&["checkout", "--quiet", "stable/0.3"]);
+    repo.commit("fix(cli): a typo (#14)");
+    repo.git(&["checkout", "--quiet", "dev"]);
+
+    let released = run_release_of(&repo, "stable/0.3", "stable/0.3", "refs/heads/dev");
+
+    assert!(!released.output.status.success(), "{:?}", released.output);
+    assert!(
+        String::from_utf8_lossy(&released.output.stdout).contains("No release candidate"),
+        "{:?}",
+        released.output
+    );
+    assert!(repo.git(&["tag", "--list", "v0.3.2"]).is_empty());
+    assert!(
+        !released.calls.contains("workflow run"),
+        "{}",
+        released.calls
+    );
+}
+
+#[test]
+fn a_line_s_release_run_again_tags_nothing_and_starts_the_build_again() {
+    let repo = a_line_ready_for_a_release();
+    run_release_of(&repo, "stable/0.3", "stable/0.3", "refs/heads/dev");
+    let tag = repo.git(&["rev-parse", "v0.3.1"]);
+
+    let released = run_release_of(&repo, "stable/0.3", "stable/0.3", "refs/heads/dev");
+
+    assert!(released.output.status.success(), "{:?}", released.output);
+    assert_eq!(repo.git(&["rev-parse", "v0.3.1"]), tag);
+    assert!(
+        !released.calls.contains("repos/o/r/git/refs "),
+        "{}",
+        released.calls
+    );
+    assert!(
+        released
+            .calls
+            .ends_with("workflow run ci.yml --ref v0.3.1\n"),
+        "{}",
+        released.calls
+    );
+}
+
+#[test]
+fn a_line_s_release_whose_tag_is_on_another_commit_is_refused() {
+    let repo = a_line_ready_for_a_release();
+    let dev = repo.head();
+    repo.git(&["tag", "v0.3.1", &dev]);
+
+    let released = run_release_of(&repo, "stable/0.3", "stable/0.3", "refs/heads/dev");
+
+    assert!(!released.output.status.success(), "{:?}", released.output);
+    assert_eq!(
+        repo.git(&["rev-parse", "v0.3.1"]),
+        dev,
+        "the tag is not moved"
+    );
+    assert!(
+        !released.calls.contains("workflow run"),
+        "{}",
+        released.calls
+    );
+}
+
+#[test]
+fn the_hook_refuses_a_commit_on_a_stable_or_next_line_as_on_dev() {
+    let guard = |branch: &str| {
+        Command::new(tool("tools/branch-guard.sh"))
+            .arg(branch)
+            .output()
+            .unwrap()
+    };
+    for branch in ["main", "dev", "stable/0.3", "stable/1.12", "next/0.5"] {
+        let output = guard(branch);
+        assert!(!output.status.success(), "{branch}: {output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(branch),
+            "{branch}: {output:?}"
+        );
+    }
+    for branch in [
+        "feat/930-lines",
+        "fix/930-lines",
+        "backport/931-0.3",
+        "forward/0123456789ab-0.5",
+    ] {
+        let output = guard(branch);
+        assert!(output.status.success(), "{branch}: {output:?}");
+    }
+}
+
+/// The step `id` of a workflow run with `env` against a throwaway repository, `FAKE_GH`
+/// standing for GitHub's API on it. Its output and the calls `gh` was given.
+fn run_step(repo: &Repo, workflow: &str, id: &str, env: &[(&str, &str)]) -> (Output, String) {
+    let bin = tempfile::tempdir().unwrap();
+    let gh = bin.path().join("gh");
+    std::fs::write(&gh, FAKE_GH).unwrap();
+    std::fs::set_permissions(&gh, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let log = bin.path().join("gh.log");
+    std::fs::write(&log, "").unwrap();
+    let script = bin.path().join("step.sh");
+    std::fs::write(&script, step_script(workflow, id)).unwrap();
+    let mut command = Command::new("bash");
+    command
+        .args(["--noprofile", "--norc", "-eo", "pipefail"])
+        .arg(&script)
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                bin.path().display(),
+                std::env::var("PATH").unwrap()
+            ),
+        )
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_AUTHOR_NAME", "Test")
+        .env("GIT_AUTHOR_EMAIL", "test@example.invalid")
+        .env("GIT_COMMITTER_NAME", "Test")
+        .env("GIT_COMMITTER_EMAIL", "test@example.invalid")
+        .env("FAKE_GH_REPO", repo.dir.path())
+        .env("FAKE_GH_LOG", &log)
+        .env("GH_REPO", "o/r")
+        .env("RUNNER_TEMP", bin.path());
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    let output = command.output().unwrap();
+    (output, std::fs::read_to_string(&log).unwrap())
+}
+
+/// The backport workflow for the pull request #20, merged into dev by `squash`, so labelled.
+fn backport(repo: &Repo, squash: &str, labels: &str) -> (Output, String) {
+    run_step(
+        repo,
+        ".github/workflows/backport.yml",
+        "backport",
+        &[
+            ("PR", "20"),
+            ("SQUASH", squash),
+            ("TITLE", "fix(cli): a typo"),
+            ("LABELS", labels),
+        ],
+    )
+}
+
+#[test]
+fn a_backport_label_cherry_picks_the_squash_onto_a_branch_of_the_line_and_opens_its_pull_request() {
+    let repo = a_line_of_0_3();
+    let line = repo.head();
+    repo.git(&["checkout", "--quiet", "dev"]);
+    repo.commit("fix(cli): a typo (#20)");
+    let squash = repo.head();
+
+    let (output, calls) = backport(&repo, &squash, r#"["type:fix", "backport 0.3"]"#);
+
+    assert!(output.status.success(), "{output:?}");
+    let branch = "backport/20-0.3";
+    assert_eq!(repo.git(&["rev-parse", &format!("{branch}~1")]), line);
+    assert_eq!(
+        repo.git(&["rev-parse", "stable/0.3"]),
+        line,
+        "the line is not moved"
+    );
+    // The line's files and the squash's change, nothing of dev's other commits.
+    assert_eq!(
+        repo.git(&["diff", "--name-only", "stable/0.3", branch]),
+        repo.git(&["diff", "--name-only", &format!("{squash}~1"), &squash])
+    );
+    let message = repo.git(&["log", "-1", "--format=%B", branch]);
+    assert!(message.starts_with("fix(cli): a typo (#20)"), "{message}");
+    assert!(
+        message.ends_with(&format!("(cherry picked from commit {squash})")),
+        "{message}"
+    );
+    assert_eq!(repo.git(&["branch", "--list", "backport-work/*"]), "");
+    assert!(
+        calls.contains(
+            "pr create --base stable/0.3 --head backport/20-0.3 --title fix(cli): a typo"
+        ),
+        "{calls}"
+    );
+    assert!(
+        calls.ends_with("workflow run ci.yml --ref backport/20-0.3\n"),
+        "{calls}"
+    );
+
+    // Run again (another label added), it brings nothing twice.
+    let (output, calls) = backport(&repo, &squash, r#"["backport 0.3", "area:gui"]"#);
+    assert!(output.status.success(), "{output:?}");
+    assert!(!calls.contains("pr create"), "{calls}");
+}
+
+#[test]
+fn a_pull_request_without_a_backport_label_brings_nothing() {
+    let repo = a_line_of_0_3();
+    repo.git(&["checkout", "--quiet", "dev"]);
+    repo.commit("fix(cli): a typo (#20)");
+    let squash = repo.head();
+
+    let (output, calls) = backport(
+        &repo,
+        &squash,
+        r#"["type:fix", "backport 0.3.1", "backport"]"#,
+    );
+
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(calls, "");
+}
+
+#[test]
+fn a_backport_that_does_not_apply_says_so_on_the_pull_request_and_opens_nothing() {
+    let repo = a_line_of_0_3();
+    std::fs::write(repo.dir.path().join("notes"), "the line's").unwrap();
+    repo.git(&["add", "--all"]);
+    repo.git(&[
+        "commit",
+        "--quiet",
+        "-m",
+        "fix(cli): the line's notes (#19)",
+    ]);
+    repo.git(&["checkout", "--quiet", "dev"]);
+    std::fs::write(repo.dir.path().join("notes"), "dev's").unwrap();
+    repo.git(&["add", "--all"]);
+    repo.git(&["commit", "--quiet", "-m", "fix(cli): dev's notes (#20)"]);
+    let squash = repo.head();
+
+    let (output, calls) = backport(&repo, &squash, r#"["backport 0.3"]"#);
+
+    assert!(!output.status.success(), "{output:?}");
+    let comment = calls
+        .lines()
+        .find(|l| l.starts_with("pr comment 20"))
+        .unwrap_or_else(|| panic!("{calls}"));
+    assert!(comment.contains("does not apply"), "{comment}");
+    assert!(comment.contains(&squash), "{comment}");
+    assert!(!calls.contains("pr create"), "{calls}");
+    assert!(!calls.contains("workflow run"), "{calls}");
+    assert_eq!(repo.git(&["branch", "--list", "backport*"]), "");
+}
+
+/// dev, and next/0.5 started from it with a feature of its own. On dev.
+fn dev_with_a_next_line() -> Repo {
+    let repo = Repo::new();
+    repo.commit("feat(core): start");
+    repo.git(&["checkout", "--quiet", "-b", "dev"]);
+    repo.commit("feat(specs): the specs (#20)\n\nRelease-As: 0.4.0");
+    repo.git(&["checkout", "--quiet", "-b", "next/0.5"]);
+    repo.commit("feat(remote): a phone (#30)");
+    repo.git(&["checkout", "--quiet", "dev"]);
+    repo
+}
+
+fn forward(repo: &Repo) -> (Output, String) {
+    let sha = repo.git(&["rev-parse", "dev"]);
+    run_step(
+        repo,
+        ".github/workflows/forward.yml",
+        "forward",
+        &[("GITHUB_SHA", &sha)],
+    )
+}
+
+#[test]
+fn every_commit_of_dev_is_merged_forward_into_next() {
+    let repo = dev_with_a_next_line();
+    let next = repo.git(&["rev-parse", "next/0.5"]);
+    repo.commit("fix(cli): a typo (#21)");
+    let dev = repo.head();
+
+    let (output, calls) = forward(&repo);
+
+    assert!(output.status.success(), "{output:?}");
+    // A merge commit, next's own line first, never a squash.
+    assert_eq!(repo.git(&["rev-parse", "next/0.5^1"]), next);
+    assert_eq!(repo.git(&["rev-parse", "next/0.5^2"]), dev);
+    assert_eq!(
+        repo.git(&["log", "-1", "--format=%s", "next/0.5"]),
+        "chore(repo): merge dev into next/0.5"
+    );
+    assert!(
+        calls.ends_with("workflow run ci.yml --ref next/0.5\n"),
+        "{calls}"
+    );
+    // next stays above dev.
+    repo.git(&["checkout", "--quiet", "next/0.5"]);
+    assert_eq!(repo.next(&["beta", "--branch", "next/0.5"]), "0.5.0-next.4");
+    repo.git(&["checkout", "--quiet", "dev"]);
+
+    // Run again: nothing more to merge.
+    let merged = repo.git(&["rev-parse", "next/0.5"]);
+    let (output, calls) = forward(&repo);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(repo.git(&["rev-parse", "next/0.5"]), merged);
+    assert!(!calls.contains("merges"), "{calls}");
+}
+
+#[test]
+fn a_commit_of_dev_that_does_not_merge_forward_opens_a_pull_request_with_the_conflict() {
+    let repo = dev_with_a_next_line();
+    repo.git(&["checkout", "--quiet", "next/0.5"]);
+    std::fs::write(repo.dir.path().join("notes"), "next's").unwrap();
+    repo.git(&["add", "--all"]);
+    repo.git(&[
+        "commit",
+        "--quiet",
+        "-m",
+        "feat(remote): next's notes (#31)",
+    ]);
+    let next = repo.head();
+    repo.git(&["checkout", "--quiet", "dev"]);
+    std::fs::write(repo.dir.path().join("notes"), "dev's").unwrap();
+    repo.git(&["add", "--all"]);
+    repo.git(&["commit", "--quiet", "-m", "fix(cli): dev's notes (#21)"]);
+    let dev = repo.head();
+
+    let (output, calls) = forward(&repo);
+
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        repo.git(&["rev-parse", "next/0.5"]),
+        next,
+        "next is not moved"
+    );
+    let branch = format!("forward/{}-0.5", &dev[..12]);
+    assert_eq!(repo.git(&["rev-parse", &branch]), dev);
+    assert!(
+        calls.contains(&format!(
+            "pr create --base next/0.5 --head {branch} --title chore(repo): merge dev into next/0.5"
+        )),
+        "{calls}"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("does not merge"),
+        "{output:?}"
+    );
+    assert!(!calls.contains("workflow run"), "{calls}");
+
+    // Run again: the branch and its pull request are there already.
+    let (output, calls) = forward(&repo);
+    assert!(output.status.success(), "{output:?}");
+    assert!(!calls.contains("pr create"), "{calls}");
+}
+
+/// dev and next/0.5 changing the same file: dev's commit does not merge forward. On dev.
+fn dev_that_does_not_merge_forward() -> Repo {
+    let repo = dev_with_a_next_line();
+    repo.git(&["checkout", "--quiet", "next/0.5"]);
+    std::fs::write(repo.dir.path().join("notes"), "next's").unwrap();
+    repo.git(&["add", "--all"]);
+    repo.git(&[
+        "commit",
+        "--quiet",
+        "-m",
+        "feat(remote): next's notes (#31)",
+    ]);
+    repo.git(&["checkout", "--quiet", "dev"]);
+    std::fs::write(repo.dir.path().join("notes"), "dev's").unwrap();
+    repo.git(&["add", "--all"]);
+    repo.git(&["commit", "--quiet", "-m", "fix(cli): dev's notes (#21)"]);
+    repo
+}
+
+#[test]
+fn a_push_to_dev_while_a_forward_pull_request_is_open_opens_no_other() {
+    let repo = dev_that_does_not_merge_forward();
+    let (output, calls) = forward(&repo);
+    assert!(output.status.success(), "{output:?}");
+    assert!(calls.contains("pr create"), "{calls}");
+    let next = repo.git(&["rev-parse", "next/0.5"]);
+
+    // dev moves on while that pull request is open.
+    repo.commit("fix(gui): a colour (#22)");
+    let later = repo.head();
+    let (output, calls) = forward(&repo);
+
+    assert!(output.status.success(), "{output:?}");
+    assert!(!calls.contains("pr create"), "{calls}");
+    assert!(!calls.contains("merges"), "{calls}");
+    assert!(!calls.contains("git/refs "), "{calls}");
+    assert_eq!(repo.git(&["rev-parse", "next/0.5"]), next);
+    assert_eq!(
+        repo.git(&["branch", "--list", &format!("forward/{}-0.5", &later[..12])]),
+        ""
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("is open"),
+        "{output:?}"
+    );
+}
+
+#[test]
+fn a_forward_run_again_after_its_pull_request_failed_opens_it() {
+    let repo = dev_that_does_not_merge_forward();
+    let dev = repo.head();
+    let failing = |repo: &Repo| {
+        run_step(
+            repo,
+            ".github/workflows/forward.yml",
+            "forward",
+            &[("GITHUB_SHA", &dev), ("FAKE_GH_FAIL", "pr create*")],
+        )
+    };
+    let (output, _) = failing(&repo);
+    assert!(!output.status.success(), "{output:?}");
+    let branch = format!("forward/{}-0.5", &dev[..12]);
+    assert_eq!(
+        repo.git(&["rev-parse", &branch]),
+        dev,
+        "the branch was made"
+    );
+
+    let (output, calls) = forward(&repo);
+
+    assert!(output.status.success(), "{output:?}");
+    assert!(
+        calls.contains(&format!("pr create --base next/0.5 --head {branch}")),
+        "{calls}"
+    );
+}
+
+#[test]
+fn a_backport_run_again_after_a_failure_finishes_it() {
+    let setup = || {
+        let repo = a_line_of_0_3();
+        repo.git(&["checkout", "--quiet", "dev"]);
+        repo.commit("fix(cli): a typo (#20)");
+        let squash = repo.head();
+        (repo, squash)
+    };
+    let failing = |repo: &Repo, squash: &str, fail: &str| {
+        run_step(
+            repo,
+            ".github/workflows/backport.yml",
+            "backport",
+            &[
+                ("PR", "20"),
+                ("SQUASH", squash),
+                ("TITLE", "fix(cli): a typo"),
+                ("LABELS", r#"["backport 0.3"]"#),
+                ("FAKE_GH_FAIL", fail),
+            ],
+        )
+    };
+
+    // The branch made, its pull request not: the run again opens it, and builds it.
+    let (repo, squash) = setup();
+    let (output, _) = failing(&repo, &squash, "pr create*");
+    assert!(!output.status.success(), "{output:?}");
+    let made = repo.git(&["rev-parse", "backport/20-0.3"]);
+    let (output, calls) = backport(&repo, &squash, r#"["backport 0.3"]"#);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(repo.git(&["rev-parse", "backport/20-0.3"]), made);
+    assert!(
+        calls.contains("pr create --base stable/0.3 --head backport/20-0.3"),
+        "{calls}"
+    );
+    assert!(
+        calls.ends_with("workflow run ci.yml --ref backport/20-0.3\n"),
+        "{calls}"
+    );
+    // Opened: a third run opens nothing.
+    let (output, calls) = backport(&repo, &squash, r#"["backport 0.3"]"#);
+    assert!(output.status.success(), "{output:?}");
+    assert!(!calls.contains("pr create"), "{calls}");
+
+    // A failure mid-pick removes its work branch, and the run again brings it.
+    let (repo, squash) = setup();
+    let (output, _) = failing(&repo, &squash, "api repos/o/r/merges*");
+    assert!(!output.status.success(), "{output:?}");
+    assert_eq!(repo.git(&["branch", "--list", "backport*"]), "");
+    // One left by a run cut short is not in the way.
+    repo.git(&["branch", "backport-work/20-0.3", "stable/0.3"]);
+    let (output, calls) = backport(&repo, &squash, r#"["backport 0.3"]"#);
+    assert!(output.status.success(), "{output:?}");
+    assert!(calls.contains("pr create"), "{calls}");
+    assert_eq!(repo.git(&["branch", "--list", "backport-work/*"]), "");
+}
+
+#[test]
+fn the_backport_and_forward_workflows_run_no_code_of_any_branch_with_the_least_rights() {
+    for (name, id) in [("backport", "backport"), ("forward", "forward")] {
+        let path = format!(".github/workflows/{name}.yml");
+        let workflow = std::fs::read_to_string(tool(&path)).unwrap();
+        // No checkout, no action: only `gh` through the API.
+        assert!(!workflow.contains("uses:"), "{name}");
+        assert!(workflow.contains("permissions: {}\n"), "{name}");
+        let rights: Vec<&str> = workflow
+            .lines()
+            .map(str::trim)
+            .filter(|l| l.ends_with(": write") || l.ends_with(": read"))
+            .collect();
+        assert_eq!(
+            rights,
+            ["contents: write", "pull-requests: write", "actions: write"],
+            "{name}"
+        );
+        let script = step_script(&path, id);
+        assert!(!script.contains("${{"), "{name}: {script}");
+        assert!(!script.contains("force"), "{name}: {script}");
+        for line in script.lines().filter(|l| !l.trim_start().starts_with('#')) {
+            assert!(
+                !line
+                    .split_whitespace()
+                    .any(|word| word.rsplit(['(', '=', ';', '|', '&']).next() == Some("git")),
+                "{name}: {line}"
+            );
+        }
+    }
+    let backport = std::fs::read_to_string(tool(".github/workflows/backport.yml")).unwrap();
+    assert!(
+        backport.contains(
+            "  pull_request_target:\n    types: [closed, labeled]\n    branches: [dev]\n"
+        )
+    );
+    assert!(backport.contains("if: github.event.pull_request.merged == true"));
+    let forward = std::fs::read_to_string(tool(".github/workflows/forward.yml")).unwrap();
+    assert!(forward.contains("on:\n  push:\n    branches: [dev]\n"));
+}
+
 /// `ci.yml`'s step that computes the version, run as on a run of main at `sha`, in a clone of
 /// the repository with its `origin`. Its outputs, or its failure.
 fn version_step_on_main(repo: &Repo, sha: &str) -> (Output, String) {
+    let (output, outputs, _) = version_step(repo, "main", "branch", sha);
+    (output, outputs)
+}
+
+/// `ci.yml`'s step that computes the version, run as on a run of the ref `name` (a `branch` or
+/// a `tag`) at `sha`, in a clone of the repository with its `origin`. Its outputs, or its
+/// failure, and the changelog it wrote.
+fn version_step(repo: &Repo, name: &str, kind: &str, sha: &str) -> (Output, String, String) {
     let clone = tempfile::tempdir().unwrap();
     repo.git(&[
         "clone",
@@ -1746,13 +2855,18 @@ fn version_step_on_main(repo: &Repo, sha: &str) -> (Output, String) {
         .current_dir(clone.path())
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GITHUB_REF_NAME", "main")
+        .env("GITHUB_REF_NAME", name)
+        .env("GITHUB_REF_TYPE", kind)
         .env("GITHUB_SHA", sha)
         .env("GITHUB_OUTPUT", &outputs)
         .env("RUNNER_TEMP", temp.path())
         .output()
         .unwrap();
-    (output, std::fs::read_to_string(&outputs).unwrap())
+    (
+        output,
+        std::fs::read_to_string(&outputs).unwrap(),
+        std::fs::read_to_string(temp.path().join("changelog.md")).unwrap_or_default(),
+    )
 }
 
 #[test]
@@ -1781,6 +2895,83 @@ fn a_push_to_main_that_is_not_a_commit_of_dev_publishes_nothing_and_fails() {
     assert!(!output.status.success(), "{output:?}");
     assert!(
         String::from_utf8_lossy(&output.stdout).contains("is not a commit of dev"),
+        "{output:?}"
+    );
+    assert_eq!(outputs, "");
+}
+
+#[test]
+fn the_pushes_of_a_line_are_published_as_its_rcs() {
+    let repo = a_line_of_0_3();
+    let sha = repo.head();
+    repo.git(&["checkout", "--quiet", "dev"]);
+
+    let (output, outputs, changelog) = version_step(&repo, "stable/0.3", "branch", &sha);
+
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        outputs,
+        "channel=beta\nversion=0.3.1-rc.1\ntag=v0.3.1-rc.1\n"
+    );
+    assert_eq!(changelog, "### Fixes\n\n- **store**: a lock (#13)\n");
+}
+
+/// The line `stable/0.3` at 0.3.1, then a fix whose rc was published and that
+/// the `Release` workflow tagged `v0.3.2`. On dev; the commit tagged.
+fn a_line_tagged_for_its_release() -> (Repo, String) {
+    let repo = a_line_of_0_3();
+    repo.line_release("0.3.1");
+    repo.commit("fix(cli): a typo (#14)");
+    repo.tag("v0.3.2-rc.1");
+    repo.line_release("0.3.2");
+    let sha = repo.head();
+    repo.git(&["checkout", "--quiet", "dev"]);
+    (repo, sha)
+}
+
+#[test]
+fn a_line_s_tag_is_built_as_its_stable_release_with_the_line_s_changelog() {
+    let (repo, sha) = a_line_tagged_for_its_release();
+
+    let (output, outputs, changelog) = version_step(&repo, "v0.3.2", "tag", &sha);
+
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(outputs, "channel=stable\nversion=0.3.2\ntag=v0.3.2\n");
+    assert_eq!(changelog, "### Fixes\n\n- **cli**: a typo (#14)\n");
+}
+
+#[test]
+fn a_tag_not_on_its_line_publishes_nothing_and_fails() {
+    let (repo, _) = a_line_tagged_for_its_release();
+    // A tag of the line's form on a commit of dev, with a candidate of that version beside it.
+    let dev = repo.head();
+    repo.tag("v0.3.3-rc.1");
+    repo.line_release("0.3.3");
+
+    let (output, outputs, _) = version_step(&repo, "v0.3.3", "tag", &dev);
+
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("not a commit of stable/0.3"),
+        "{output:?}"
+    );
+    assert_eq!(outputs, "");
+}
+
+#[test]
+fn a_tag_without_its_rc_publishes_nothing_and_fails() {
+    let (repo, _) = a_line_tagged_for_its_release();
+    repo.git(&["checkout", "--quiet", "stable/0.3"]);
+    repo.commit("fix(gui): a colour (#15)");
+    repo.line_release("0.3.3");
+    let sha = repo.head();
+    repo.git(&["checkout", "--quiet", "dev"]);
+
+    let (output, outputs, _) = version_step(&repo, "v0.3.3", "tag", &sha);
+
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("has no release candidate of"),
         "{output:?}"
     );
     assert_eq!(outputs, "");
@@ -2872,7 +4063,14 @@ set -euo pipefail
 echo "$*" >> "$FAKE_GH_LOG"
 touch "$FAKE_GH_STATE"
 case "$1 $2" in
-  "api repos/o/r/git/ref/heads/"*) echo "$FAKE_TIP" ;;
+  "api repos/o/r/git/ref/heads/"* | "api repos/o/r/commits/"*) echo "$FAKE_TIP" ;;
+  # The tag of the release marked latest, none, or the API failing.
+  "api repos/o/r/releases/latest")
+    case "${FAKE_LATEST:-}" in
+      "") echo "gh: Not Found (HTTP 404)" >&2; exit 1 ;;
+      error) echo "gh: Server Error (HTTP 502)" >&2; exit 1 ;;
+      *) echo "$FAKE_LATEST" ;;
+    esac ;;
   "release view")
     tag=$3
     if grep -qx "$tag" "$FAKE_GH_STATE"; then echo false
@@ -3059,6 +4257,11 @@ fn a_branch_that_moved_on_publishes_nothing() {
 /// The step of `verified-on-dev` on main at `abc123`, with a `gh` that answers the query of the
 /// runs with `count` (`None`: the API fails): what it wrote to `$GITHUB_OUTPUT`, and the query.
 fn verified_on_dev(count: Option<u32>) -> (Output, String, String) {
+    verified_on("main", "branch", count)
+}
+
+/// The step of `verified-on-dev` on the ref `name` (a `branch` or a `tag`) at `abc123`.
+fn verified_on(name: &str, kind: &str, count: Option<u32>) -> (Output, String, String) {
     let fake = Fake::new();
     let answer = match count {
         Some(count) => format!("echo {count}"),
@@ -3076,6 +4279,8 @@ fn verified_on_dev(count: Option<u32>) -> (Output, String, String) {
         &[
             ("GH_TOKEN", "unused"),
             ("GITHUB_SHA", "abc123"),
+            ("GITHUB_REF_NAME", name),
+            ("GITHUB_REF_TYPE", kind),
             ("GITHUB_OUTPUT", outputs.to_str().unwrap()),
         ],
     );
@@ -3117,6 +4322,107 @@ fn main_runs_verify_itself_when_the_api_fails() {
 
     assert!(output.status.success(), "{output:?}");
     assert_eq!(written, "");
+}
+
+#[test]
+fn a_line_s_release_skips_verify_for_a_commit_whose_push_run_on_its_line_succeeded() {
+    let (output, written, log) = verified_on("v0.3.2", "tag", Some(1));
+
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(written, "verified=true\n");
+    let query = log.lines().next().unwrap();
+    for part in [
+        "head_sha=abc123",
+        "event=push",
+        "branch=stable/0.3",
+        "status=success",
+    ] {
+        assert!(query.contains(part), "{part}: {query}");
+    }
+
+    // A tag that is not a stable version asks nothing: `verify` runs.
+    let (output, written, log) = verified_on("v0.3.2-beta.1", "tag", Some(1));
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(written, "");
+    assert_eq!(log, "");
+}
+
+/// `publish` of a line's release `v0.3.2` on its tag, the tag naming `tip`, the release marked
+/// latest being `latest` (none when empty, `error` for an API that fails).
+fn publish_line_release(fake: &Fake, tip: &str, latest: &str) -> Output {
+    fake.run(
+        &step_script(".github/workflows/ci.yml", "publish"),
+        &[
+            ("GH_TOKEN", "unused"),
+            ("CHANNEL", "stable"),
+            ("VERSION", "0.3.2"),
+            ("TAG", "v0.3.2"),
+            ("GITHUB_REF_NAME", "v0.3.2"),
+            ("GITHUB_REF_TYPE", "tag"),
+            ("GITHUB_SHA", "abc123"),
+            ("FAKE_TIP", tip),
+            ("FAKE_LATEST", latest),
+        ],
+    )
+}
+
+fn created(fake: &Fake) -> String {
+    let log = fake.log();
+    log.lines()
+        .find(|l| l.starts_with("release create"))
+        .unwrap_or_else(|| panic!("{log}"))
+        .to_owned()
+}
+
+#[test]
+fn a_line_s_release_is_published_on_its_tag() {
+    // A tag that names another commit now publishes nothing.
+    let fake = Fake::new();
+    let output = publish_line_release(&fake, "def456", "v0.3.1");
+    assert!(output.status.success(), "{output:?}");
+    assert!(!fake.log().contains("release create"), "{}", fake.log());
+
+    let output = publish_line_release(&fake, "abc123", "v0.3.1");
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(fake.tags(), ["v0.3.2"]);
+    assert!(fake.log().contains("api repos/o/r/commits/v0.3.2"));
+    assert!(!created(&fake).contains("--prerelease"));
+
+    // main's stable release is always marked latest.
+    let fake = Fake::new();
+    let output = fake.publish("stable", "main", "0.4.0");
+    assert!(output.status.success(), "{output:?}");
+    assert!(created(&fake).ends_with(" --latest"), "{}", created(&fake));
+}
+
+#[test]
+fn a_line_s_release_above_the_latest_is_marked_latest() {
+    // The stable channel reads the latest release: the newest line's fix reaches its users.
+    for latest in ["v0.3.1", "v0.3.0", ""] {
+        let fake = Fake::new();
+        let output = publish_line_release(&fake, "abc123", latest);
+        assert!(output.status.success(), "{latest}: {output:?}");
+        let created = created(&fake);
+        assert!(created.ends_with(" --latest"), "{latest}: {created}");
+        assert!(!created.contains("--prerelease"), "{created}");
+    }
+}
+
+#[test]
+fn a_line_s_release_below_the_latest_is_not() {
+    // An older line's: the stable channel keeps the newer release.
+    for latest in ["v0.4.0", "v0.3.10", "v0.3.2"] {
+        let fake = Fake::new();
+        let output = publish_line_release(&fake, "abc123", latest);
+        assert!(output.status.success(), "{latest}: {output:?}");
+        let created = created(&fake);
+        assert!(created.ends_with(" --latest=false"), "{latest}: {created}");
+    }
+    // Not knowing which is latest, nothing is published: run again, it is.
+    let fake = Fake::new();
+    let output = publish_line_release(&fake, "abc123", "error");
+    assert!(!output.status.success(), "{output:?}");
+    assert!(!fake.log().contains("release create"), "{}", fake.log());
 }
 
 #[test]
@@ -3167,7 +4473,9 @@ fn publish_never_runs_on_a_commit_no_verify_passed_on() {
     // Only main asks dev.
     let asks = job("verified-on-dev");
     assert!(
-        asks.contains("if: github.ref == 'refs/heads/main' &&"),
+        asks.contains(
+            "if: (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) &&"
+        ),
         "{asks}"
     );
 }
