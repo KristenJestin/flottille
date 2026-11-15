@@ -41,6 +41,7 @@ use crate::message_checks::MessageChecks;
 use crate::programs::{ProgramChecks, ProgramState, ProgramValue, program_block};
 use crate::project::{only_at_root, repository_label};
 use crate::project_removal::ProjectRemoval;
+use crate::proposed_rules::ProposedRules;
 use crate::repositories::{ProjectRepositories, RepositoryInfo};
 use crate::rules::RulesEditor;
 use crate::setup::SetupSection;
@@ -373,6 +374,8 @@ pub enum Reveal {
     Tasks,
     Feature(String),
     Vault,
+    /// Its rules, and the rules proposed for it.
+    Rules,
 }
 
 impl Reveal {
@@ -383,6 +386,7 @@ impl Reveal {
             Reveal::Tasks => "tasks",
             Reveal::Feature(_) => "features",
             Reveal::Vault => "vault",
+            Reveal::Rules => "instructions",
         };
         SECTIONS
             .iter()
@@ -451,6 +455,8 @@ pub struct ProjectSettingsPage {
     narrow: bool,
     /// This project's own rules (`docs/projects.md`, "Rules").
     rules: Entity<RulesEditor>,
+    /// The rules proposed for it, under them (`docs/projects.md`, "Proposed rules").
+    proposed_rules: Entity<ProposedRules>,
     /// The checks of its agents' messages, under its rules (`docs/projects.md`, "Message checks").
     message_checks: Entity<MessageChecks>,
     /// Each repository's commit checks, under the message checks (`docs/projects.md`, "Commit
@@ -484,6 +490,7 @@ impl ProjectSettingsPage {
             let (shell, project) = (shell.clone(), name.clone());
             cx.new(|_| RulesEditor::new(shell, Some(project)))
         };
+        let proposed_rules = cx.new(|_| ProposedRules::new(shell.clone(), name.clone()));
         let message_checks = cx.new(|_| MessageChecks::new(shell.clone(), name.clone()));
         let commit_checks = cx.new(|_| CommitChecks::new(shell.clone(), name.clone()));
         let convention = |kind, cx: &mut Context<Self>| {
@@ -586,6 +593,7 @@ impl ProjectSettingsPage {
             removal,
             narrow: false,
             rules,
+            proposed_rules,
             message_checks,
             commit_checks,
             branch_format,
@@ -606,6 +614,10 @@ impl ProjectSettingsPage {
 
     pub fn rules(&self) -> &Entity<RulesEditor> {
         &self.rules
+    }
+
+    pub fn proposed_rules(&self) -> &Entity<ProposedRules> {
+        &self.proposed_rules
     }
 
     pub fn message_checks(&self) -> &Entity<MessageChecks> {
@@ -2860,7 +2872,16 @@ impl Render for ProjectSettingsPage {
             ],
             "tasks" => vec![("tasks", self.tasks.clone().into_any_element())],
             "instructions" => vec![
-                ("rules", self.rules.clone().into_any_element()),
+                (
+                    "rules",
+                    // The rules proposed come and go under the rules, with the gap above them.
+                    div()
+                        .flex()
+                        .flex_col()
+                        .child(self.rules.clone())
+                        .child(self.proposed_rules.clone())
+                        .into_any_element(),
+                ),
                 ("commands", self.commands.clone().into_any_element()),
                 ("skills", self.skills.clone().into_any_element()),
                 ("checks", self.message_checks.clone().into_any_element()),

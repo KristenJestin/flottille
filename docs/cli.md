@@ -1239,7 +1239,7 @@ The rules proposed for your projects from the failures their agents keep making,
 to add or dismiss them (`docs/projects.md`, "Proposed rules"), the oldest first: each its number,
 its project, the tool whose calls were refused, how many times and in how many sessions, and the
 rule. `--project` lists one project's. `--json` prints `rules.proposals`. The window adds or
-dismisses them (the project's Settings, "Rules"; `rules.proposal.accept`,
+dismisses them (the project's Settings, Instructions; `rules.proposal.accept`,
 `rules.proposal.dismiss`).
 
 ```

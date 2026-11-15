@@ -1289,6 +1289,35 @@ impl Shell {
                     section.update(cx, |section, cx| section.answered(saved, window, cx));
                 }
             }
+            Outcome::ProposalAnswered {
+                project,
+                proposal,
+                added,
+                result,
+            } => {
+                let page = self
+                    .project_settings
+                    .clone()
+                    .filter(|page| page.read(cx).name() == project);
+                if let Some(page) = page {
+                    let (section, rules) = {
+                        let page = page.read(cx);
+                        (page.proposed_rules().clone(), page.rules().clone())
+                    };
+                    // The rule added is in the project's rules: the editor shows them again.
+                    if added && result.is_ok() {
+                        rules.update(cx, |editor, cx| editor.read(cx));
+                    }
+                    section.update(cx, |section, cx| {
+                        section.answered(proposal, added, result, cx)
+                    });
+                } else if let Err(why) = result {
+                    toast(
+                        Toast::failure("The proposed rule was not answered").detail(why),
+                        cx,
+                    );
+                }
+            }
             Outcome::CommitChecks {
                 project,
                 read,
@@ -2511,6 +2540,7 @@ impl Shell {
                     false => format!("pull-{}", forged.seq),
                 },
                 session,
+                project: None,
                 label: forged.said.clone(),
                 detail: forged.excerpt.clone(),
                 at: forged.at,
@@ -2526,6 +2556,11 @@ impl Shell {
         let items: Vec<(BellItem, String)> = bell
             .into_iter()
             .map(|item| {
+                // A rule proposed for a project is the project's: it names it.
+                if let Some(project) = &item.project {
+                    let title = format!("For {project}");
+                    return (item, title);
+                }
                 let title = snapshot
                     .session(&item.session)
                     .map(|s| match &s.started_by {
@@ -3107,16 +3142,25 @@ impl Shell {
         self.bell_open
     }
 
-    /// Opens what a bell item waits in: its session.
+    /// Opens what a bell item waits in: its session, or for a rule proposed for a project, the
+    /// project's Settings where it is answered.
     pub fn choose(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let session = self
+        let item = self
             .snapshot
             .bell
             .iter()
             .find(|item| item.key == key)
-            .map(|item| item.session.clone());
-        if let Some(session) = session {
-            self.open(Selection::Session(session), window, cx);
+            .cloned();
+        match item {
+            Some(BellItem {
+                project: Some(project),
+                ..
+            }) => {
+                let at = crate::project_settings::Reveal::Rules;
+                self.open_project_settings_at(&project, at, window, cx);
+            }
+            Some(item) => self.open(Selection::Session(item.session), window, cx),
+            None => {}
         }
     }
 
@@ -3548,9 +3592,10 @@ impl Render for BellList {
                 let key = item.key.clone();
                 let leading = match self.marks.get(&item.key) {
                     Some(mark) => mark.clone().into_any_element(),
-                    None => icon(match item.key.starts_with("ticket-") {
-                        true => glyphs::TICKET,
-                        false => glyphs::PULL_REQUEST,
+                    None => icon(match item.key.split_once('-').map(|(kind, _)| kind) {
+                        Some("ticket") => glyphs::TICKET,
+                        Some("rule") => glyphs::RULE,
+                        _ => glyphs::PULL_REQUEST,
                     })
                     .size(px(14.))
                     .text_color(p.acc)

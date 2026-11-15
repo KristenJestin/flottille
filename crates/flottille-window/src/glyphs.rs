@@ -15,6 +15,8 @@ pub const TICKET: Icon = Icon::Lucide("ticket");
 /// A picture of a message: its chip in the text.
 pub const PICTURE: Icon = Icon::Lucide("image");
 pub const MILESTONE: Icon = Icon::Lucide("milestone");
+/// A rule proposed for a project: a written page.
+pub const RULE: Icon = Icon::Lucide("file-text");
 /// The stop action: a small filled square, not Lucide's square in a circle, which blurs into a
 /// muddy ring when it is drawn at 14 px.
 pub const STOP: Icon = Icon::Filled(STOP_PATH);

@@ -492,6 +492,11 @@ fn matters(event: &Event) -> bool {
         Some("project" | "approval" | "daemon" | "workspace") => true,
         // A subscription opening or ending moves the session from waiting to rest.
         Some("subscription") => true,
+        // A rule proposed for a project, or answered, rings the bell or leaves it.
+        Some("rules") => matches!(
+            name,
+            "rules.proposed" | "rules.proposal_accepted" | "rules.proposal_dismissed"
+        ),
         // A following that pauses or resumes shows on its row in the rail.
         Some("session") => name.starts_with("session.following_"),
         // A command starting or ending shows in the tree; its output is no event.
@@ -612,6 +617,7 @@ fn read(conn: &mut Conn, briefs: &mut Briefs, seen: &Seen) -> Result<Snapshot> {
         subscriptions: &subscriptions,
     });
     snapshot.project_changes = seen.project_changes.load(Ordering::Relaxed);
+    snapshot.with_proposals(&conn.request("rules.proposals", json!({}))?);
     Ok(snapshot)
 }
 

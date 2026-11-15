@@ -22,6 +22,55 @@ pub struct Snapshot {
     pub project_changes: u64,
     /// The root of each agent's tree, by the agent's id: the session it belongs to.
     pub roots: HashMap<String, String>,
+    /// The rules proposed for the projects that wait for the user (`rules.proposals`), oldest
+    /// first.
+    pub proposals: Vec<ProposedRule>,
+}
+
+/// A rule proposed for a project from a failure its agents keep making (`docs/projects.md`,
+/// "Proposed rules").
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ProposedRule {
+    pub id: u64,
+    pub project: String,
+    pub tool: String,
+    pub rule: String,
+    pub count: u64,
+    pub sessions: u64,
+    /// The failures behind it, oldest first.
+    pub calls: Vec<ProposedCall>,
+    pub at: u64,
+}
+
+/// One failure behind a proposed rule: the session it happened in, and what its refusal said.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ProposedCall {
+    pub session: String,
+    pub error: String,
+}
+
+impl ProposedRule {
+    pub fn of(value: &Value) -> ProposedRule {
+        let text = |value: &Value, key: &str| value[key].as_str().unwrap_or_default().to_owned();
+        ProposedRule {
+            id: number(value, "id"),
+            project: text(value, "project"),
+            tool: text(value, "tool"),
+            rule: text(value, "rule"),
+            count: number(value, "count"),
+            sessions: number(value, "sessions"),
+            calls: value["calls"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|call| ProposedCall {
+                    session: text(call, "session"),
+                    error: text(call, "error"),
+                })
+                .collect(),
+            at: number(value, "at"),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -237,13 +286,16 @@ pub struct Session {
     pub pilot: Option<String>,
 }
 
-/// One thing that waits for the user. Choosing it opens its session.
+/// One thing that waits for the user. Choosing it opens its session, or for a rule proposed for
+/// a project, that project's Settings.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BellItem {
     /// `request-<n>`.
     pub key: String,
-    /// The root agent of the session it belongs to.
+    /// The root agent of the session it belongs to; empty for a project's.
     pub session: String,
+    /// The project it belongs to, when it is no session's: a rule proposed for it.
+    pub project: Option<String>,
     pub label: String,
     pub detail: String,
     pub at: u64,
@@ -581,6 +633,26 @@ fn under_an_ended<'a>(
 }
 
 impl Snapshot {
+    /// The rules proposed for the projects (`rules.proposals`): each also rings the bell, which
+    /// opens its project's Settings.
+    pub fn with_proposals(&mut self, listed: &Value) {
+        self.proposals = list(listed, "proposals")
+            .iter()
+            .map(ProposedRule::of)
+            .collect();
+        for proposal in &self.proposals {
+            self.bell.push(BellItem {
+                key: format!("rule-{}", proposal.id),
+                session: String::new(),
+                project: Some(proposal.project.clone()),
+                label: "Proposes a rule".into(),
+                detail: proposal.rule.clone(),
+                at: proposal.at,
+            });
+        }
+        self.bell.sort_by_key(|item| item.at);
+    }
+
     /// What waits for the user is the daemon's to say, as `flottille status` shows it:
     ///
     /// - a session is a root agent and its tree, in its root's place;
@@ -612,6 +684,7 @@ impl Snapshot {
                 label: format!("Request #{n} waits for you"),
                 detail: crate::session_link::Request::of(request).asked(),
                 at: number(request, "created_at"),
+                project: None,
             });
         }
         for root in agents.iter().filter(|agent| asks_the_user(agent)) {
@@ -629,6 +702,7 @@ impl Snapshot {
                     detail: question.text.clone(),
                     at: question.at,
                     session: id.clone(),
+                    project: None,
                 });
             }
         }
@@ -873,6 +947,7 @@ impl Snapshot {
             workspaces,
             bell,
             project_changes: 0,
+            proposals: Vec::new(),
             roots: parents
                 .keys()
                 .map(|id| ((*id).to_owned(), root_of(&parents, id).to_owned()))

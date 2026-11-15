@@ -443,9 +443,11 @@ the judge used is recorded like a turn (`turn_usage`, role `rules`, agent and se
 
 **Proposing.** A proposal waits for the user: `rules.proposed` puts it in the inbox (kind
 `proposed_rule`, `flottille inbox`), `flottille rules proposals` and `rules.proposals` list it, and
-the window shows it in the bell and as a card in the project's Settings, "Rules": the rule, editable,
-how many times and in how many sessions the failure was seen, and the failures behind it, each of
-which opens its session. **Add to the project's rules** (`rules.proposal.accept {proposal,
+the window rings the bell with it (which opens the project's Settings) and shows it in the
+project's Settings, Instructions, under its rules ("Proposed rules", a row each, which unfolds as it
+comes and folds away once answered): the rule in a field to edit, how many times and in how many
+sessions the failure was seen, and the failures behind it, each a button that opens its session
+(its tooltip what the refusal said). **Add to the project's rules** (`rules.proposal.accept {proposal,
 text?}`) puts the text, as edited, at the end of the project's own rules, after a blank line (its
 rules become that text when it had none); the limit of the rules holds. Like every change of the
 rules, it reaches the sessions created after it, never one that runs: rules are frozen per session
