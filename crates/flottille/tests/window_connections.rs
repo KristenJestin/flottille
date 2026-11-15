@@ -3451,6 +3451,20 @@ fn open_frame_by_frame(
     watched: &[&str],
     hidden: &[&str],
 ) -> Opening {
+    open_frame_by_frame_while(shell, cx, name, ready, watched, hidden, |_| {})
+}
+
+/// `open_frame_by_frame`, with `while_asked` called after each frame drawn before the data, with
+/// the number of those frames so far: a test that holds the server's answer releases it there.
+fn open_frame_by_frame_while(
+    shell: &Entity<Shell>,
+    cx: &mut VisualTestContext,
+    name: &str,
+    ready: &str,
+    watched: &[&str],
+    hidden: &[&str],
+    mut while_asked: impl FnMut(usize),
+) -> Opening {
     open_page(shell, cx);
     until(shell, cx, "its row", |cx| {
         visible(cx, &format!("connection-{name}"))
@@ -3475,6 +3489,7 @@ fn open_frame_by_frame(
         if !present(cx, ready) {
             assert!(Instant::now() < deadline, "the data never came");
             opening.loading.push(skeleton);
+            while_asked(opening.loading.len());
             std::thread::sleep(Duration::from_millis(25));
             continue;
         }
@@ -3624,6 +3639,9 @@ fn opening_a_group_of_the_review_still_unfolds_it(cx: &mut TestAppContext) {
     );
 }
 
+/// Frames drawn while the held server is asked, before the test lets its listing go.
+const LOADING_FRAMES: usize = 10;
+
 #[gpui_kit::test]
 fn a_review_whose_server_is_asked_shows_one_loading_state_then_fades_to_its_content(
     cx: &mut TestAppContext,
@@ -3631,25 +3649,36 @@ fn a_review_whose_server_is_asked_shows_one_loading_state_then_fades_to_its_cont
     let user = user();
     turn_on(&user);
     declare_waiting(&user, "almanac");
-    // The server is slow to list its tools, so that frames are drawn while it is asked.
-    let mut slow = almanac();
-    slow["list_sleep_ms"] = json!(500);
-    write_script(&user, "almanac", &slow);
+    // The server holds its listing until the test lets it go, so the frames drawn while it is
+    // asked do not depend on how long the machine takes to draw them.
+    let release = user.path("almanac-release");
+    let mut held = almanac();
+    held["list_when"] = json!(release.display().to_string());
+    write_script(&user, "almanac", &held);
     let (shell, cx) = window(&user, cx);
     let watched = [
         "connection-review-group-judged",
         "connection-review-row-3-search",
     ];
-    let opening = open_frame_by_frame(
+    let opening = open_frame_by_frame_while(
         &shell,
         cx,
         "almanac",
         "connection-review-row-3-search",
         &watched,
         &[],
+        |asked| {
+            if asked == LOADING_FRAMES {
+                std::fs::write(&release, "").unwrap();
+            }
+        },
     );
     // One loading state while the server is asked, from the first frame to the data.
-    assert!(!opening.loading.is_empty(), "the server was asked");
+    assert!(
+        opening.loading.len() >= LOADING_FRAMES,
+        "the server was asked: {} frames drawn before its answer",
+        opening.loading.len()
+    );
     assert!(
         opening.loading.iter().all(|shown| *shown),
         "{:?}",
