@@ -570,6 +570,7 @@ const SERVED: [Definition; 33] = [
                 "name": {"type": "string"},
                 "repositories": {"type": "array", "items": {"type": "string"}, "description": "create: by path."},
                 "branch": {"type": "string", "description": "create: give it when the repository has a naming convention (its AGENTS.md, CONTRIBUTING, or the branches it already has to read), with the ticket's key when the workspace has a ticket (fix/ABC-12-login). Left out, <branch prefix>/<name> is the fallback (the name alone when the project has no prefix). An existing branch is checked out. rename_branch: the new name. A branch the workspace starts or renames to must match the project's branch format when it has one (project settings says it): the refusal names the pattern."},
+                "base": {"type": ["string", "object"], "additionalProperties": {"type": "string"}, "description": "create: the branch it starts from in place of the base rule, on the remote: one for every repository, or {path: branch}. Its pull requests target it."},
                 "repository": {"type": "string", "description": "rename_branch: by path; every repository of the workspace when left out."},
                 "ticket": {"type": ["string", "null"], "description": "#123 or ABC-123."}
             }, "required": ["action"], "additionalProperties": false})
@@ -716,7 +717,7 @@ const SERVED: [Definition; 33] = [
                 "new_workspace": {"type": "string", "description": "With led or handed: the name of a new workspace to make for the session. Not with workspace."},
                 "repositories": {"type": "array", "items": {"type": "string"}, "description": "With new_workspace: its repositories, by path; the project's when left out."},
                 "branch": {"type": "string", "description": "With new_workspace: its branch, as workspace create takes it. Name it when the repository has a naming convention (its AGENTS.md, CONTRIBUTING, the branches it has, the project's branch format), with the ticket's key when there is one (feat/ABC-8-pickup-dashboard); the card shows it, and it is the branch made. Left out, <branch prefix>/<name>. An existing branch is resumed."},
-                "base": {"type": "object", "additionalProperties": {"type": "string"}, "description": "With new_workspace: the branch a repository starts from, by path ({\"api\": \"develop\"}), in place of its base rule."}
+                "base": {"type": ["string", "object"], "additionalProperties": {"type": "string"}, "description": "With new_workspace: the branch it starts from in place of the base rule: one for every repository, or by path ({\"api\": \"develop\"})."}
             }, "required": ["kind", "title", "brief"], "additionalProperties": false})
         },
     },

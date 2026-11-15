@@ -794,7 +794,21 @@ async fn create(daemon: Arc<Daemon>, asked: WorkspaceCreate) -> Answer {
             }
             None => repository.base.clone(),
         };
-        let base = up_to_date_base(&main, path, &repository.remote, &rule, asked.offline).await?;
+        let base = up_to_date_base(&main, path, &repository.remote, &rule, asked.offline)
+            .await
+            .map_err(|failure| match asked.bases.get(path) {
+                // A branch of its own that neither the remote nor the repository has: the rule
+                // it was to replace is what the agent can choose from.
+                Some(chosen) if failure.message.contains("has none of its base branches") => {
+                    Failure::refused(format!(
+                        "{chosen} is not a branch of the remote {} nor a local one in {path}: \
+                         the base rule of {path} is {}; nothing was created",
+                        repository.remote,
+                        repository.base.join(", ")
+                    ))
+                }
+                _ => failure,
+            })?;
         let local = commit_of(&main, &format!("refs/heads/{branch}"))
             .await?
             .is_some();
@@ -894,6 +908,32 @@ pub async fn may_resume(project: &Project, asked: Option<&[String]>, branch: &st
         }
     }
     false
+}
+
+/// The base an agent chooses for a new workspace: one branch, taken from every repository the
+/// workspace takes, or a branch for each repository named, by path (`docs/tools.md`).
+#[derive(Clone, Debug, serde::Deserialize)]
+#[serde(untagged)]
+pub enum BaseChoice {
+    Every(String),
+    Each(BTreeMap<String, String>),
+}
+
+impl BaseChoice {
+    /// The branch of each repository, by path, as `workspace.create`'s `bases` takes it.
+    pub fn by_path(
+        self,
+        project: &Project,
+        repositories: Option<&[String]>,
+    ) -> Result<BTreeMap<String, String>, Failure> {
+        match self {
+            BaseChoice::Each(each) => Ok(each),
+            BaseChoice::Every(branch) => Ok(taken_repositories(project, repositories)?
+                .into_iter()
+                .map(|path| (path, branch.clone()))
+                .collect()),
+        }
+    }
 }
 
 pub fn taken_repositories(
