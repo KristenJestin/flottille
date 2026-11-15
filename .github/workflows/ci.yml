@@ -68,6 +68,50 @@ jobs:
             echo "::notice::No successful push run of $GITHUB_SHA on dev: verify runs here."
           fi
 
+  # Whether the Rust suite has anything to say about this change: a pull request that touches
+  # `apps/android/` and `site/` only (docs/remote.md, "The repository") leaves it out. Anything
+  # else runs it, and so does every push and every manual run: a push publishes, and main is
+  # released from a commit that ran it. A failure here says nothing (`rust` stays empty): the
+  # suite then runs, as if it had said so.
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      rust: ${{ steps.decide.outputs.rust }}
+    steps:
+      - if: github.event_name == 'pull_request'
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Does the Rust suite have to run
+        id: decide
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if [ "$EVENT_NAME" != pull_request ]; then
+            echo "::notice::$EVENT_NAME: the Rust suite runs."
+            echo "rust=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Not read as a stream: a failure of git must fail this step, not say "nothing changed".
+          files=$(git diff --name-only --no-renames "$BASE...$HEAD")
+          rust=false
+          while IFS= read -r path; do
+            case "$path" in
+              apps/android/* | site/*) ;;
+              *)
+                echo "::notice::${path:-no file}: the Rust suite runs."
+                rust=true
+                break
+                ;;
+            esac
+          done <<< "$files"
+          # A change of no file at all is not one to skip the suite for.
+          if [ -z "$files" ]; then rust=true; fi
+          if [ "$rust" = false ]; then echo "::notice::Only apps/android/ and site/ changed: the Rust suite does not run."; fi
+          echo "rust=$rust" >> "$GITHUB_OUTPUT"
+
   # No real agent, no real configuration: the suites run against a fake ACP agent and throwaway
   # repositories (see AGENTS.md, Testing).
   #
@@ -78,9 +122,10 @@ jobs:
   # partition builds the tests itself, from the cache: about four minutes, when an archive built
   # once (6 GB, 37 GB extracted) took longer to pack, upload, download and extract.
   check:
-    needs: verified-on-dev
+    needs: [verified-on-dev, changes]
     # `verified-on-dev` is skipped off main: `!cancelled()` keeps that from skipping this job.
-    if: ${{ !cancelled() && needs.verified-on-dev.outputs.verified != 'true' }}
+    # Left out only when `changes` said so, not when it said nothing.
+    if: ${{ !cancelled() && needs.verified-on-dev.outputs.verified != 'true' && needs.changes.outputs.rust != 'false' }}
     runs-on: ubuntu-latest
     env:
       # An incremental cache is only written here, never reused by the next run.
@@ -111,8 +156,8 @@ jobs:
         continue-on-error: true
 
   test:
-    needs: verified-on-dev
-    if: ${{ !cancelled() && needs.verified-on-dev.outputs.verified != 'true' }}
+    needs: [verified-on-dev, changes]
+    if: ${{ !cancelled() && needs.verified-on-dev.outputs.verified != 'true' && needs.changes.outputs.rust != 'false' }}
     runs-on: ubuntu-latest
     strategy:
       # Every partition says what fails in it, not only the first one to fail.
@@ -148,8 +193,9 @@ jobs:
 
   # The required check: one job that always ends, success or failure, whatever happened to the
   # partitions (failed, cancelled, never started), so that it never waits on a job skipped.
+  # `check` and `test` skipped are a pass only when `changes` said the suite is not needed.
   verify:
-    needs: [verified-on-dev, check, test]
+    needs: [verified-on-dev, changes, check, test]
     # Skipped only when this commit passed it on dev (on main, see `verified-on-dev`).
     if: ${{ always() && needs.verified-on-dev.outputs.verified != 'true' }}
     runs-on: ubuntu-latest
@@ -159,11 +205,15 @@ jobs:
         env:
           CHECK: ${{ needs.check.result }}
           TEST: ${{ needs.test.result }}
+          RUST: ${{ needs.changes.outputs.rust }}
         run: |
-          if [ "$CHECK" != success ] || [ "$TEST" != success ]; then
-            echo "::error::check: $CHECK, test: $TEST."
-            exit 1
+          if [ "$CHECK" = success ] && [ "$TEST" = success ]; then exit 0; fi
+          if [ "$RUST" = false ] && [ "$CHECK" = skipped ] && [ "$TEST" = skipped ]; then
+            echo "::notice::The Rust suite was not needed for this change."
+            exit 0
           fi
+          echo "::error::check: $CHECK, test: $TEST, rust suite needed: ${RUST:-unknown}."
+          exit 1
 
   # The packages (docs/releases.md): main is stable, dev beta, a feature branch its own alpha.
   # `build` runs the branch's code with a token that can only read; `publish`, once `verify`
