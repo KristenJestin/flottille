@@ -19,6 +19,10 @@ const RULE: &str = "Never read the user's login folders such as ~/.ssh: ask the 
 /// A token of the kind `secrets` recognises anywhere: never shown to the judge.
 const TOKEN: &str = "ghp_fakefakefakefakefakefakefakefake0001";
 
+/// How many letters lead the token in the long path: the refusal, cut at 484 characters, keeps the
+/// first fourteen of the token.
+const LONG: usize = 453;
+
 /// A user whose sessions make, on their message `read the key <n>`, a call of `fs_read` refused
 /// for a login's place, a different file each time; on `write it`, a `run` refused for shell
 /// syntax. The judge, when there is one, says `judge`. Their judge is asked at every failure.
@@ -36,6 +40,13 @@ fn user_judged_by(judge: Option<Value>) -> User {
             ]})
         })
         .collect();
+    // A path so long that the refusal naming it is cut where the token ends: the cut falls in the
+    // middle of the token.
+    let long = format!("~/.ssh/{}/{TOKEN}", "a".repeat(LONG));
+    turns.push(json!({"when": "read the long key", "do": [
+        {"mcp": {"tool": "fs_read", "arguments": {"path": long}}},
+        {"say": "done"}
+    ]}));
     turns.push(json!({"when": "write it", "do": [
         {"mcp": {"tool": "run", "arguments": {"line": format!("echo {TOKEN} | tee notes.txt")}}},
         {"say": "done"}
@@ -318,4 +329,34 @@ fn the_judge_never_sees_an_unmasked_secret() {
     // Nor is the secret in what the user is shown.
     let shown = proposals(&user)[0].to_string();
     assert!(!shown.contains(TOKEN), "{shown}");
+}
+
+#[test]
+fn a_refusal_s_stored_error_never_holds_part_of_a_secret() {
+    let user = user(true);
+    for _ in 0..3 {
+        session(&user, "read the long key");
+    }
+    eventually("the proposal", || proposals(&user).len() == 1);
+    // The cut leaves `ghp_` and ten letters of the token: too few for the mask to know it, and a
+    // part of a secret all the same.
+    let part = &TOKEN[..14];
+    let stored = store(&user).refused_calls("app", 0).unwrap();
+    assert_eq!(stored.len(), 3);
+    for (event, _) in &stored {
+        let error = event.data["error"].as_str().unwrap();
+        // The refusal is the long one, cut: the test cuts where it means to.
+        assert!(error.contains("‹+"), "{error}");
+        assert!(!error.contains("ghp_"), "{error}");
+        assert!(!error.contains(part), "{error}");
+        assert!(
+            !event.data.to_string().contains("fakefakefake"),
+            "{}",
+            event.data
+        );
+    }
+    let shown = proposals(&user)[0].to_string();
+    assert!(!shown.contains("fakefakefake"), "{shown}");
+    let prompts = judge_prompts(&user);
+    assert!(!prompts[0].contains("fakefakefake"), "{}", prompts[0]);
 }
