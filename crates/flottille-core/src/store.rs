@@ -841,6 +841,20 @@ impl Store {
         Store::prepare(Connection::open_in_memory()?)
     }
 
+    /// Opens a store another process keeps, to read it: SQLite refuses every write, and nothing
+    /// is migrated or pragma'd, because `open` writes (its migrations' immediate transaction, the
+    /// `user_version`) and such a write between the read and the write of the owner's deferred
+    /// transaction fails that one with `SQLITE_BUSY_SNAPSHOT`.
+    pub fn open_read_only(path: &Path) -> Result<Store> {
+        let connection =
+            Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        connection.busy_timeout(std::time::Duration::from_secs(10))?;
+        Ok(Store {
+            connection,
+            confined: Confined::default(),
+        })
+    }
+
     fn prepare(mut connection: Connection) -> Result<Store> {
         connection.pragma_update(None, "journal_mode", "WAL")?;
         connection.pragma_update(None, "foreign_keys", true)?;
@@ -4035,6 +4049,27 @@ mod tests {
         let error = Store::open(&path).err().unwrap();
 
         assert!(error.to_string().contains("newer Flottille"), "{error}");
+    }
+
+    #[test]
+    fn a_store_opened_read_only_reads_what_the_owner_wrote_and_refuses_to_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("flottille.db");
+        let owner = Store::open(&path).unwrap();
+        owner.append_event("seen", json!({"n": 1})).unwrap();
+
+        let reader = Store::open_read_only(&path).unwrap();
+
+        assert_eq!(reader.events_after(0, 10).unwrap().len(), 1);
+        assert!(reader.append_event("again", json!({})).is_err());
+        assert_eq!(owner.events_after(0, 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_store_never_made_is_not_opened_read_only() {
+        let dir = tempfile::tempdir().unwrap();
+
+        assert!(Store::open_read_only(&dir.path().join("none.db")).is_err());
     }
 
     fn a_post(kind: &str, comment_id: Option<&str>, fingerprint: Option<&str>) -> Post {

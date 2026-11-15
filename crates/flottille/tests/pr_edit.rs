@@ -113,7 +113,7 @@ fn allowed(user: &User, answer: Answer) -> Answer {
     let number = held(&answer);
     user.call("approval.approve", json!({"number": number}))
         .unwrap();
-    let store = || Store::open(&user.path("state/flottille/flottille.db")).unwrap();
+    let store = || Store::open_read_only(&user.path("state/flottille/flottille.db")).unwrap();
     let id = format!("approval-{number}");
     eventually("the answer", || store().delivery(&id).unwrap().is_some());
     let text = store().delivery(&id).unwrap().unwrap().body;

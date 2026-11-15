@@ -88,7 +88,7 @@ fn held(answer: Answer) -> u64 {
 }
 
 fn store(user: &User) -> Store {
-    Store::open(&user.path("state/flottille/flottille.db")).unwrap()
+    Store::open_read_only(&user.path("state/flottille/flottille.db")).unwrap()
 }
 
 /// The user's pending requests, as `flottille approvals --json` gives them.
@@ -316,7 +316,10 @@ fn a_request_held_by_an_agent_is_not_the_user_s_until_it_is_forwarded_to_them() 
     let (id, _, workspace) = session(&user);
     // Until the tree (#7) every agent is a root, whose requests are the user's: a child's
     // request, held by its parent, is written as #7 will write it.
-    let (request, _) = store(&user)
+    // Written with the daemon running: a child's request, as the tree will make it, which the
+    // daemon under test must serve.
+    let (request, _) = Store::open(&user.path("state/flottille/flottille.db"))
+        .unwrap()
         .ask(&Request {
             number: 0,
             agent: id.clone(),
@@ -350,7 +353,8 @@ fn a_request_held_by_an_agent_is_not_the_user_s_until_it_is_forwarded_to_them() 
         assert!(error.contains("held by agent parent0000ab"), "{error}");
     }
 
-    store(&user)
+    Store::open(&user.path("state/flottille/flottille.db"))
+        .unwrap()
         .forward(
             request.number,
             "parent0000ab",

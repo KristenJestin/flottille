@@ -65,7 +65,7 @@ fn eventually(what: &str, check: impl Fn() -> bool) {
 }
 
 fn store(user: &User) -> Store {
-    Store::open(&user.path("state/flottille/flottille.db")).unwrap()
+    Store::open_read_only(&user.path("state/flottille/flottille.db")).unwrap()
 }
 
 fn set_mode(user: &User, agent: &str, mode: &str) {

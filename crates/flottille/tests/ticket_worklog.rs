@@ -170,7 +170,7 @@ fn root_in(user: &User) -> (Mcp, String) {
 }
 
 fn store(user: &User) -> Store {
-    Store::open(&user.path("state/flottille/flottille.db")).unwrap()
+    Store::open_read_only(&user.path("state/flottille/flottille.db")).unwrap()
 }
 
 fn eventually(what: &str, check: impl Fn() -> bool) {
@@ -540,7 +540,12 @@ fn time_spent_sums_the_turns_of_a_session() {
     rows.extend(turn("elsewhere", "other", 1_000, 60 * minute, &["a"]));
     // A long silence between the turns is not work: the sum is of the turns.
     rows.extend(turn(&root, &root, 10_000_000_000, 3 * minute, &["a"]));
-    store(&user).record_turn_usage(&rows).unwrap();
+    // Written with the daemon running: the fake agent cannot be made to take its turns at these
+    // times, and the rows are only what the tool sums.
+    Store::open(&user.path("state/flottille/flottille.db"))
+        .unwrap()
+        .record_turn_usage(&rows)
+        .unwrap();
 
     let answer = mcp.call("tickets", json!({"action": "time_spent"}));
     assert!(!answer.error, "{}", answer.text);

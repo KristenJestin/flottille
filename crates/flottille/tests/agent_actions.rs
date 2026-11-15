@@ -107,7 +107,7 @@ fn refused(answer: Answer) -> String {
 }
 
 fn store(user: &User) -> Store {
-    Store::open(&user.path("state/flottille/flottille.db")).unwrap()
+    Store::open_read_only(&user.path("state/flottille/flottille.db")).unwrap()
 }
 
 fn request(user: &User, number: u64) -> Value {

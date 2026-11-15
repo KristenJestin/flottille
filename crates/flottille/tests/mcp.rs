@@ -1938,7 +1938,7 @@ fn a_codex_session_is_behind_while_its_list_is_not_the_one_it_started_with() {
 
 /// The tool list the agent was last given, as stored with it.
 fn given(user: &User, id: &str) -> Value {
-    let store = Store::open(&user.path("state/flottille/flottille.db")).unwrap();
+    let store = Store::open_read_only(&user.path("state/flottille/flottille.db")).unwrap();
     let given = store.agent_tools_given(id).unwrap().expect("a list given");
     serde_json::from_str(&given).unwrap()
 }
