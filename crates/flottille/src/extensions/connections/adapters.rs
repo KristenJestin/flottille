@@ -292,11 +292,12 @@ impl Adapter {
         ));
         said.push(match sites {
             [] => "its browser is kept to the sites of the vault entries bound to this connection \
-                   (allowedDomains, in that configuration) once one is bound with a web address: \
-                   none is yet"
+                   (allowedDomains, in that configuration) once one is bound with a web address, \
+                   and to the hosts the connection's sites add: none is yet"
                 .to_owned(),
             sites => format!(
                 "its browser is kept to the sites of the vault entries bound to this connection \
+                 and to the hosts the connection's sites add, such as a single sign-on's \
                  (allowedDomains, in that configuration, which the server's tool calls read): {}. \
                  The session cannot load, nor send a request or open a socket to, any other \
                  domain, and WebRTC is off; it is not an operating system firewall, and a login \
@@ -439,11 +440,16 @@ fn site(text: &str) -> Option<String> {
     usable.then(|| host.to_owned())
 }
 
-/// The hosts of the vault entries bound to the connection `name`, whatever the project: the
-/// sites its browser is kept to, each as the entry's URL gives it, sorted. An entry without a
-/// usable web address has none.
-pub fn sites(daemon: &Daemon, name: &str) -> Vec<String> {
-    let this = uses::connection(name);
+/// Whether `host` is one site of the list agent-browser reads, written as a URL's host is.
+pub fn is_site(host: &str) -> bool {
+    site(&format!("https://{host}/")).as_deref() == Some(host)
+}
+
+/// The hosts of the vault entries bound to the connection, whatever the project, and those its
+/// declaration adds (`sites`): the sites its browser is kept to, each entry's as its URL gives it,
+/// sorted. An entry without a usable web address has none.
+pub fn sites(daemon: &Daemon, declaration: &Declaration) -> Vec<String> {
+    let this = uses::connection(&declaration.name);
     let mut hosts: Vec<String> = daemon
         .read(|store| store.vault_entries())
         .unwrap_or_default()
@@ -451,6 +457,7 @@ pub fn sites(daemon: &Daemon, name: &str) -> Vec<String> {
         .filter(|entry| entry.bound.as_deref() == Some(&this))
         .filter_map(|entry| entry.url)
         .filter_map(|text| site(&text))
+        .chain(declaration.sites.iter().cloned())
         .collect();
     hosts.sort();
     hosts.dedup();
@@ -467,7 +474,7 @@ pub fn kept_to(daemon: &Daemon, adapter: &Adapter, declaration: &Declaration) ->
     };
     match adapter.drops_allowlist(words, &declaration.env) {
         Some(_) => Vec::new(),
-        None => sites(daemon, &declaration.name),
+        None => sites(daemon, declaration),
     }
 }
 
@@ -692,7 +699,7 @@ async fn run(
 ) -> Result<String, String> {
     let folder = folder(daemon, &declaration.name);
     flottille_core::paths::ensure_private_dir(&folder).map_err(|error| error.to_string())?;
-    let sites = sites(daemon, &declaration.name);
+    let sites = sites(daemon, declaration);
     let options = start_options(&folder, &sites)?;
     let token = super::oauth::random(32)?;
     let socket = socket_file(&folder);

@@ -5171,6 +5171,80 @@ fn login_is_refused_when_the_users_own_config_would_be_ignored() {
 }
 
 #[test]
+fn a_sign_in_gets_the_extra_hosts_the_user_adds() {
+    let user = user();
+    browser_declared(
+        &user,
+        &agent_browser("0.43.0"),
+        json!({"fail": true}),
+        &[],
+        json!({"sites": ["sso.example.net", "id.example.org"]}),
+    );
+    let (_, mcp) = signed_up(&user);
+    refused(mcp.call(
+        "conn_browser",
+        json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+    ));
+    // The entry's host and the hosts of the single sign-on, sorted, for the login and the
+    // page's reload after its failure.
+    let sites = Some(json!([
+        "id.example.org",
+        "shop.example.com",
+        "sso.example.net"
+    ]));
+    assert_eq!(allowed(&logged(&user, "browser", "login")[0]), sites);
+    assert_eq!(allowed(&logged(&user, "browser", "open")[0]), sites);
+    // Where the review says the sites today.
+    let review = user
+        .call("connection.review", json!({"name": "browser"}))
+        .unwrap();
+    let changed = review["adapter"]["changed"].to_string();
+    assert!(
+        changed.contains("id.example.org, shop.example.com, sso.example.net"),
+        "{changed}"
+    );
+    // Kept in the declaration, and taken out with null.
+    let listed = connection(&user, "browser");
+    assert_eq!(
+        listed["sites"],
+        json!(["sso.example.net", "id.example.org"])
+    );
+    user.call("connection.edit", json!({"name": "browser", "sites": null}))
+        .unwrap();
+    assert_eq!(connection(&user, "browser")["sites"], Value::Null);
+    // What is no host of a site is refused, saying what one is.
+    for odd in [
+        "https://sso.example.net",
+        "sso.example.net:8443",
+        "sso.example.net/login",
+        "*.example.net",
+        "a,b.example.net",
+        "-sso.example.net",
+        "SSO.example.net",
+        "",
+    ] {
+        let (_, error) = user
+            .call(
+                "connection.edit",
+                json!({"name": "browser", "sites": [odd]}),
+            )
+            .unwrap_err();
+        assert!(error.contains("sites"), "{odd}: {error}");
+    }
+    // The command line adds them too.
+    let output = user.run(&["connection", "edit", "browser", "--site", "sso.example.net"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        connection(&user, "browser")["sites"],
+        json!(["sso.example.net"])
+    );
+}
+
+#[test]
 fn an_entry_whose_host_is_no_usable_site_is_refused() {
     for url in [
         "https://shop.example.com,evil.example.net/login",

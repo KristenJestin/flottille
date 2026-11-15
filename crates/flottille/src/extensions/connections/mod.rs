@@ -154,6 +154,9 @@ pub struct Declaration {
     pub except: Vec<String>,
     /// The OAuth client id the user registered with the server's authorization server, for a URL.
     pub client_id: Option<String>,
+    /// Hosts the user adds to the sites an adapter keeps the browser to, beside those of the
+    /// vault entries: a single sign-on's, which a sign-in goes through.
+    pub sites: Vec<String>,
 }
 
 /// How the daemon reaches the server.
@@ -176,6 +179,7 @@ const KEYS: &[&str] = &[
     "only",
     "except",
     "client_id",
+    "sites",
 ];
 
 impl Declaration {
@@ -325,6 +329,24 @@ impl Declaration {
                 return Err(format!("{at}.client_id: must be a client id, on one line"));
             }
         }
+        let sites = match table.get("sites") {
+            None => Vec::new(),
+            Some(value) => value
+                .as_array()
+                .and_then(|hosts| {
+                    hosts
+                        .iter()
+                        .map(|host| host.as_str().map(str::to_owned))
+                        .collect::<Option<Vec<String>>>()
+                })
+                .ok_or_else(|| format!("{at}.sites: must be a list of hosts"))?,
+        };
+        if let Some(host) = sites.iter().find(|host| !adapters::is_site(host)) {
+            return Err(format!(
+                "{at}.sites: {host:?} is no host of a site: one host each, as \"sso.example.com\", \
+                 in lower case, with no scheme, port, path, comma, wildcard or space"
+            ));
+        }
         Ok(Declaration {
             name,
             about,
@@ -335,6 +357,7 @@ impl Declaration {
             only,
             except,
             client_id,
+            sites,
         })
     }
 
@@ -366,6 +389,9 @@ impl Declaration {
         }
         if let Some(id) = &self.client_id {
             table["client_id"] = json!(id);
+        }
+        if !self.sites.is_empty() {
+            table["sites"] = json!(self.sites);
         }
         table
     }
@@ -1871,7 +1897,7 @@ async fn review(daemon: &Arc<Daemon>, params: Value) -> std::result::Result<Valu
     changed_event(daemon, &name, None);
     let row = row(daemon, &name);
     let config = adapters::config_of(daemon, &name);
-    let sites = adapters::sites(daemon, &name);
+    let sites = adapters::sites(daemon, &declaration);
     Ok(diff(&declaration, &row, &listing, &config, &sites))
 }
 

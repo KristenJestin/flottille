@@ -843,6 +843,7 @@ command = ["almanac", "mcp"]
 env     = { ALMANAC_TOKEN = { vault = "almanac-token" } }
 only    = { }                        # limits on arguments, below
 except  = ["client-site"]            # projects whose agents do not get it
+sites   = [ ]                        # hosts an adapter adds to the browser's sites ("Adapters")
 ```
 
 **On, it is given to every agent of every project**, and off to none, **except the projects its
@@ -1283,7 +1284,14 @@ way in:
   server's tools and them. It is **not an operating system firewall**, and agent-browser calls its
   blocking of WebSocket and EventSource best effort. A login that redirects to another domain to
   sign in (a single sign-on) fails, and so does a login page whose scripts or styles come from
-  another domain: those are not the entries'. The file is written when the server starts and when
+  another domain: those are not the entries'. **The user adds such hosts** in the connection's
+  declaration, `sites = ["sso.example.com"]` (`flottille connection add|edit --site HOST`): one
+  host each, written as a URL's host is (lower case, no scheme, port, path, comma, wildcard or
+  space; anything else is refused, saying what a host is), added to the entries' hosts in the
+  list, which the review shows where it shows the entries' sites. They are the user's alone (an
+  agent's request sets no `sites`), and not part of what trust is given to: an edit of them does
+  not ask for a new review, and they are in the list from the next start or login, as an entry
+  bound after the server started is. The file is written when the server starts and when
   a login runs, and tool calls read it when they run: an entry bound after the server started is
   in the list from the next of either. **An entry whose URL host holds a comma, a `*`, a space or
   starts with `-` is no usable site** (agent-browser reads the list by commas and `*` as a
