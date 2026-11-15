@@ -2339,10 +2339,12 @@ fn a_call_running_when_the_connection_is_turned_off_answers_that_it_failed() {
             "arguments": {"query": "a"}}),
             )
         });
-        eventually("the server started", || {
-            !logged(&user, "almanac", "start").is_empty()
+        // The call itself, not a start: an earlier start (the review's) may be what was logged.
+        eventually("the server received the search call", || {
+            logged(&user, "almanac", "received")
+                .iter()
+                .any(|line| line["tool"] == "search")
         });
-        std::thread::sleep(Duration::from_millis(300));
         user.call(
             "connection.edit",
             json!({"name": "almanac", "enabled": false}),
