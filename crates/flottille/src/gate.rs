@@ -2201,16 +2201,56 @@ fn walks_secrets(call: &Call, layer: &[String]) -> Option<String> {
     None
 }
 
-/// Whether a `grep`'s options make it read every file below the folders it names.
+/// Whether a `grep`'s options make it read every file below the folders it names: `-r`, `-R`, or
+/// `-d recurse` spelled any way getopt takes it (in a cluster, its value attached, any
+/// unambiguous start of `--directories` and of `recurse`).
 fn greps_recursively(args: &[String]) -> bool {
-    shorts(args).any(|word| word[1..].contains(['r', 'R']))
-        || args.iter().any(|word| {
-            abbreviates(word, "recursive", 4) || abbreviates(word, "dereference-recursive", 4)
-        })
-        || args.windows(2).any(|w| w[0] == "-d" && w[1] == "recurse")
-        || args
-            .iter()
-            .any(|w| w == "-drecurse" || w == "--directories=recurse")
+    // GNU grep's short options that take a value, attached or the next word.
+    const VALUED: &str = "ABCDdefmX";
+    let recurse =
+        |value: Option<&str>| value.is_some_and(|v| v.len() >= 3 && "recurse".starts_with(v));
+    let mut words = args
+        .iter()
+        .map(String::as_str)
+        .take_while(|word| *word != "--");
+    while let Some(word) = words.next() {
+        if word.starts_with("--") {
+            if abbreviates(word, "recursive", 4) || abbreviates(word, "dereference-recursive", 4) {
+                return true;
+            }
+            if abbreviates(word, "directories", 2) {
+                let value = match word.split_once('=') {
+                    Some((_, value)) => Some(value),
+                    None => words.next(),
+                };
+                if recurse(value) {
+                    return true;
+                }
+            }
+            continue;
+        }
+        let Some(cluster) = word.strip_prefix('-').filter(|cluster| !cluster.is_empty()) else {
+            continue;
+        };
+        for (at, letter) in cluster.char_indices() {
+            if letter == 'r' || letter == 'R' {
+                return true;
+            }
+            if VALUED.contains(letter) {
+                let rest = &cluster[at + 1..];
+                let value = if rest.is_empty() {
+                    words.next()
+                } else {
+                    Some(rest)
+                };
+                if letter == 'd' && recurse(value) {
+                    return true;
+                }
+                break;
+            }
+        }
+    }
+    false
 }
 
 /// Whether a layer's program reads every file below the folders it names, or below the folder it
@@ -7972,6 +8012,43 @@ mod tests {
         ] {
             let verdict = fixture.run(&line);
             assert!(!denied(&verdict), "{line}: {verdict:?}");
+        }
+    }
+
+    #[test]
+    fn grep_s_every_spelling_of_recurse_is_recursive() {
+        let mut fixture = Fixture::workspace();
+        let base = fixture.root.parent().unwrap().parent().unwrap().to_owned();
+        let state = with_keys(&mut fixture, base.join("xdg/state/flottille"));
+        let s = state.display();
+        for spelling in [
+            "--directories recurse",
+            "--directories=recurse",
+            "--dir=recurse",
+            "--direc recurse",
+            "--di=rec",
+            "-ad recurse",
+            "-adrecurse",
+            "-d rec",
+            "-drecu",
+            "-a -d recurse",
+            "-in -d recurse",
+        ] {
+            refused_for_the_keys(&fixture, &format!("grep {spelling} x {s}"));
+        }
+        // Another value of `-d`, or an `r` that is an option's value, reads one file.
+        for args in [
+            &["-d", "read"][..],
+            &["-d", "re"],
+            &["-dskip"],
+            &["--directories=skip"],
+            &["--de=recurse"],
+            &["-er"],
+            &["-e", "-r"],
+            &["-m", "-r"],
+        ] {
+            let args: Vec<String> = args.iter().map(|word| word.to_string()).collect();
+            assert!(!greps_recursively(&args), "{args:?}");
         }
     }
 }
