@@ -248,8 +248,9 @@ const SECRET_PARAMETERS: [&[&str]; 5] = [
 ];
 
 /// The last words of a name that say its value is a secret, whatever comes before
-/// (`x_user_token`, `subscription-key`, `client_secret`), unless the words before are of
-/// `HARMLESS`.
+/// (`x_user_token`, `subscription-key`, `client_secret`), unless it is a token or a key whose
+/// words before are of `HARMLESS_TOKENS` or `HARMLESS_KEYS`. A plural is the same word
+/// (`access_tokens`, `apiKeys`).
 const SECRET_ENDS: [&str; 10] = [
     "token",
     "key",
@@ -278,18 +279,38 @@ const RUN_TOGETHER_ENDS: [&str; 10] = [
     "privatekey",
 ];
 
-/// The words before a secret's end that make it none, run together: a page's or a cursor's
-/// position (`pageToken`, `next_page_token`, `cursor_key`), a sync's state, a project's key, an
-/// idempotency key.
-const HARMLESS: [&str; 8] = [
+/// The words before `token`, run together, that make it none: a page's or a cursor's position
+/// (`pageToken`, `next_page_token`, `pagination_token`, `resume_token`), a sync's state.
+const HARMLESS_TOKENS: [&str; 8] = [
     "page",
     "next",
     "nextpage",
     "continuation",
     "cursor",
     "sync",
+    "pagination",
+    "resume",
+];
+
+/// The words before `key`, run together, that make it none: where a record is (`issueKey`,
+/// `partition_key`, `sort_key`, `object_key`, `last_evaluated_key`), a cache's, a project's or an
+/// idempotency key, and a key that is public (`public_key`, `publishable_key`, `site_key`).
+const HARMLESS_KEYS: [&str; 15] = [
+    "cursor",
     "project",
     "idempotency",
+    "issue",
+    "space",
+    "partition",
+    "cache",
+    "object",
+    "public",
+    "publishable",
+    "site",
+    "sort",
+    "lastevaluated",
+    "page",
+    "next",
 ];
 
 /// A parameter's name in lowercase words: split at `_`, `-`, `.` and where a capital follows a
@@ -318,8 +339,8 @@ fn words_of(name: &str) -> Vec<String> {
         .collect()
 }
 
-/// Whether a parameter named `name` would carry a secret: it ends with a secret's word, and what
-/// comes before is not `HARMLESS`; or it is one of `SECRET_PARAMETERS`.
+/// Whether a parameter named `name` would carry a secret: it ends with a secret's word, singular
+/// or plural, and it is no token or key of harmless words; or it is one of `SECRET_PARAMETERS`.
 fn secret_parameter(name: &str) -> bool {
     let words = words_of(name);
     let Some((last, before)) = words.split_last() else {
@@ -327,12 +348,22 @@ fn secret_parameter(name: &str) -> bool {
     };
     let before = before.concat();
     let ends_secret = |end: &str| {
-        let rest = match last == end {
-            true => Some(""),
-            false if RUN_TOGETHER_ENDS.contains(&end) => last.strip_suffix(end),
-            false => None,
-        };
-        rest.is_some_and(|rest| !HARMLESS.contains(&format!("{before}{rest}").as_str()))
+        [last.as_str()]
+            .into_iter()
+            .chain(last.strip_suffix('s'))
+            .any(|last| {
+                let rest = match last == end {
+                    true => Some(""),
+                    false if RUN_TOGETHER_ENDS.contains(&end) => last.strip_suffix(end),
+                    false => None,
+                };
+                let harmless: &[&str] = match end {
+                    "token" => &HARMLESS_TOKENS,
+                    "key" => &HARMLESS_KEYS,
+                    _ => &[],
+                };
+                rest.is_some_and(|rest| !harmless.contains(&format!("{before}{rest}").as_str()))
+            })
     };
     SECRET_PARAMETERS
         .iter()
