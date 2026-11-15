@@ -212,7 +212,8 @@ fn a_daemon_started_while_the_stop_waits_does_not_make_the_stop_fail() {
         asked.elapsed(),
         String::from_utf8_lossy(&stopped.stderr)
     );
-    assert!(!alive(first));
+    // The lock is let go of as the daemon exits, before its process is gone and reaped.
+    within(10, "the first daemon exits", || !alive(first));
 }
 
 #[test]
