@@ -956,7 +956,8 @@ pub async fn stop_all(daemon: &Arc<Daemon>) {
 /// two, half of it left unmasked.
 fn not_started(why: &str, mask: impl FnOnce(&str) -> String) -> String {
     format!(
-        "the connection could not start: {}",
+        "{}{}",
+        flottille_core::vault::NOT_STARTED,
         super::short_to(&mask(why), super::START_CHARS)
     )
 }

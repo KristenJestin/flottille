@@ -46,9 +46,15 @@ pub const SIGNED_OUT: &str = " is signed out (";
 /// was given, which no sign-in changes. It names where each went and the entry, never the value.
 pub const REFUSED_ENTRY: &str = "the server refused the request (401) with";
 
-/// Whether what the daemon said is that the server refused the vault entries its requests carried.
+/// How the daemon begins what it says of a connection whose server did not start.
+pub const NOT_STARTED: &str = "the connection could not start: ";
+
+/// Whether what the daemon said is that the server refused the vault entries its requests carried:
+/// by how it begins, so that a failure that only quotes it is none.
 pub fn refused_entry(said: &str) -> bool {
-    said.contains(REFUSED_ENTRY)
+    said.strip_prefix(NOT_STARTED)
+        .unwrap_or(said)
+        .starts_with(REFUSED_ENTRY)
 }
 
 /// Whether what the daemon said of a connection's server is that a sign-in is missing.
