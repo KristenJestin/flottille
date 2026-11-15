@@ -504,20 +504,21 @@ pub fn start_options(folder: &Path, sites: &[String]) -> Result<Vec<String>, Str
     Ok(vec!["--config".into(), file.display().to_string()])
 }
 
-/// `bytes` in `file`, the user's alone, written whole or not at all.
+/// `bytes` in `file`, the user's alone, written whole or not at all. Each write has a temporary
+/// file of its own beside it (a new name, created exclusively): a server's start and a login write
+/// the file at once, and one shared name let each truncate or move the other's.
 fn written(file: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
-    let new = file.with_extension("new");
-    let mut out = std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(&new)?;
-    out.write_all(bytes)?;
-    out.sync_all()?;
-    std::fs::rename(&new, file)
+    use std::os::unix::fs::PermissionsExt;
+    let folder = file.parent().unwrap_or(Path::new("."));
+    let mut new = tempfile::Builder::new()
+        .prefix(".agent-browser.")
+        .suffix(".new")
+        .permissions(std::fs::Permissions::from_mode(0o600))
+        .tempfile_in(folder)?;
+    new.write_all(bytes)?;
+    new.as_file().sync_all()?;
+    new.persist(file).map(drop).map_err(|failed| failed.error)
 }
 
 // ── Its own actions ──────────────────────────────────────────────────────────────────────────
@@ -1080,6 +1081,41 @@ mod tests {
         let eval_on = |_: &str| "judged";
         let why = at_turn(Some(&pin("0.43.0")), eval_on).unwrap_err();
         assert!(why.contains("agent_browser_eval"), "{why}");
+    }
+
+    #[test]
+    fn two_writers_at_once_never_lose_a_list() {
+        use std::os::unix::fs::PermissionsExt;
+        let folder = tempfile::tempdir().unwrap();
+        let file = config_file(folder.path());
+        let lists = [
+            r#"{"allowedDomains":["shop.example.com"]}"#,
+            r#"{"plugins":[]}"#,
+        ];
+        // A server's start and a login, each writing its own list at the same moment.
+        let writers: Vec<_> = lists
+            .into_iter()
+            .map(|list| {
+                let file = file.clone();
+                std::thread::spawn(move || {
+                    for _ in 0..300 {
+                        written(&file, list.as_bytes()).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for writer in writers {
+            writer.join().unwrap();
+        }
+        let left = std::fs::read_to_string(&file).unwrap();
+        assert!(lists.contains(&left.as_str()), "{left}");
+        let mode = std::fs::metadata(&file).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+        let names: Vec<_> = std::fs::read_dir(folder.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["agent-browser.json"], "no temporary file is left");
     }
 
     #[test]
