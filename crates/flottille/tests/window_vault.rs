@@ -220,7 +220,7 @@ fn the_vault_page_adds_replaces_and_removes_an_entry_and_never_shows_its_secret(
     type_in(&section, VaultSection::description_field, "Logs time", cx);
     click("save-vault-entry", cx);
     until(&shell, cx, "the entry is saved with a secret", |cx| {
-        listed(&user)[0]["description"] == "Logs time"
+        listed(&user)[0]["description"] == "Logs time" && !section.read_with(cx, |s, _| s.is_open())
     });
     settle(cx);
 

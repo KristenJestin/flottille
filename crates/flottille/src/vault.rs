@@ -1159,7 +1159,7 @@ mod tests {
     }
 
     async fn listed(daemon: &std::sync::Arc<Daemon>) -> Vec<Entry> {
-        ok(daemon.read(|store| store.vault_entries()))
+        daemon.read(|store| store.vault_entries()).unwrap()
     }
 
     #[tokio::test]
