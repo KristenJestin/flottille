@@ -226,8 +226,8 @@ const TOOL_RESULTS_SENTENCE: &str = "A longer result reaches the agent as its st
      the agent reads the rest when it needs it.";
 
 /// What the switch that says a file is unchanged does, under its label.
-pub const UNCHANGED_HINT: &str = "A file you already read and that has not changed since is \
-     answered in one line, unless the session was compacted.";
+pub const UNCHANGED_HINT: &str = "A file the agent already read and that has not changed \
+     since is answered in one line, unless the session was compacted.";
 
 /// The days the Sessions select offers. The daemon takes any number from 1 to 90
 /// (`docs/protocol.md`): a file edited by hand keeps its own, shown as one more option.
@@ -1284,8 +1284,8 @@ impl SettingsPage {
             .unwrap_or(Some(8_000))
     }
 
-    /// Whether the switch shows "unchanged" as said: what it was asked to become while the daemon
-    /// has not answered.
+    /// Whether the daemon last said `fs_read` answers "unchanged" for a file the agent already
+    /// read (`None` before it said), whatever was asked since.
     pub fn unchanged_said(&self) -> Option<bool> {
         self.unchanged
     }
@@ -1333,6 +1333,7 @@ impl SettingsPage {
         written: bool,
         cx: &mut Context<Self>,
     ) {
+        let asked_unchanged = self.unchanged_pending.is_some();
         if written {
             self.tool_results_pending = None;
             self.unchanged_pending = None;
@@ -1343,7 +1344,12 @@ impl SettingsPage {
                 self.unchanged = Some(unchanged);
             }
             Err(why) if written => toast(
-                Toast::failure("The limit of tool results was not kept").detail(why),
+                Toast::failure(if asked_unchanged {
+                    "The switch for unchanged files was not kept"
+                } else {
+                    "The limit of tool results was not kept"
+                })
+                .detail(why),
                 cx,
             ),
             Err(_) => {}
@@ -1381,7 +1387,7 @@ impl SettingsPage {
         let p = palette(cx);
         let unchanged = Switch::new(
             "tool-results-unchanged-switch",
-            self.unchanged_pending.or(self.unchanged).unwrap_or(true),
+            self.unchanged_pending.or(self.unchanged).unwrap_or(false),
             "Say when a file is unchanged",
         )
         .hint(UNCHANGED_HINT)
