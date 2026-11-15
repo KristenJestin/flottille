@@ -848,7 +848,8 @@ run follows its run and forge subscribe a pull request's checks.`
 **`vault {action: "list"}`** lists the entries of the user's vault the agent's project sees
 (`docs/vault.md`): each name with what it is for, its URL and its username, one field a line (the
 use an entry is bound to is not told: it could name another project). It is
-listed to an agent whose project sees at least one entry or has a connection (a tool that could
+listed to an agent whose project sees at least one entry, misses one a feature names, or has a
+connection whose `login` takes one (a tool that could
 only say the vault is empty and offer nothing to ask is not listed), and the agents of every project get or lose it when an entry is set or
 removed. No action returns a secret: any other action is refused, saying that a secret is never
 shown and that its name is given to the tool that needs it, which puts the secret where it goes
@@ -856,18 +857,20 @@ itself. A read: the gate allows it in every mode.
 
 **`vault {action: "ask", name, why, url?, username?, for?, project?}`** asks the user to add a new
 entry (`docs/vault.md`, "Asking the user for an entry"): `url` where the secret goes, `username` the
-account, `for` its one use (`worklog`, or `connection:<name>` for a connection's `login`),
-`project` `this` or `every` (a connection's entry is every project's). The user sees a card that
-opens Settings, Vault's form of a new entry prefilled with it, the URL's host on a line of its
-own; an entry a feature names (`worklog_token`) is prefilled by the feature. A refusal that met a
+account, `for` its one use (`worklog`, or `connection:<name>` for a connection the user declared),
+`project` `this` or `every` (a connection's entry is every project's). The daemon reads `url` as a
+connection's `login` does and refuses one that is no `https` address (or `http` on this machine),
+plain `http` to another machine included. The user sees a card that opens Settings, Vault's form
+of a new entry prefilled with it, the host the daemon read (in ASCII) on a line of its own; an
+entry a feature names (`worklog_token`) is prefilled by the feature. A refusal that met a
 missing entry offers it (`tickets log_time`: `… or ask the user for it, who types only the
 secret: vault {action: "ask", name: "jira-time", why: "<what you need it for>"} …`; a browser
 connection's `login`, with its `url` and `for: "connection:<name>"`). It answers at once; the
 user's save or dismissal comes later as a `vault` delivery that never holds the secret. A name
 the vault already holds is refused, naming it (`use it`, or `ask under another name` when the
-project does not see it); a second ask for a name while one is open joins it. The schema has no
-field for a secret, and an argument it does not know is refused. The tool is listed to an agent
-whose project sees an entry, misses one a feature names, or has a connection.
+project does not see it); a second ask for a name while one is open joins it when it is of the
+same project or every project's, and is refused otherwise (`ask under another name`). The schema
+has no field for a secret, and an argument it does not know is refused.
 
 ## Connections
 

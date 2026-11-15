@@ -895,15 +895,19 @@ for an entry a feature names and that is missing.
 
 Both writes emit `vault.changed`, and give the agents of every project the tools their roles have
 now (`vault` is listed to an agent whose project sees an entry, misses one a feature names, or has
-a connection). A set answers the open requests for that entry's name (`set`).
+a connection whose `login` takes one). A set answers the open requests for that entry's name
+(`set`), telling only the agents whose project sees the entry; an entry bound to a connection on
+plain `http` to another machine is refused, and so is an entry an open request with
+`takes_username` asks for, saved without a username.
 
 The requests agents made for an entry (`docs/vault.md`, "Asking the user for an entry"):
 
 - `vault.asks` answers `{"asks": [{"ask", "at", "agent", "project", "name", "why", "description",
-  "url", "username", "for", "every", "takes_username", "joined"}]}`, the open requests, oldest
-  first; `ask` is the number of its `vault.asked` event, `project` the asking agent's, `every`
-  whether the entry is every project's, `description`, `url`, `username` and `for` what prefills
-  the form of a new entry (`null` when not given), `joined` the agents whose ask joined it. The
+  "url", "host", "username", "for", "every", "takes_username", "joined"}]}`, the open requests,
+  oldest first; `ask` is the number of its `vault.asked` event, `project` the asking agent's,
+  `every` whether the entry is every project's, `description`, `url`, `username` and `for` what
+  prefills the form of a new entry (`null` when not given), `host` where the secret goes as the
+  daemon read `url`, `joined` the agents whose ask joined it. The
   entry is set with `vault.set`, which answers the open requests for its name.
 - `vault.ask_dismiss {ask}` closes it, answers `{"dismissed": <request>}`, and hands each agent
   `the user dismissed the request …`; `not-found` when no such request is open.

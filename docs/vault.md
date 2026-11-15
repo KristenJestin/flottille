@@ -112,7 +112,7 @@ entry it makes bound to the project's worklog.
 ## What agents see
 
 The `vault` tool, listed to an agent whose project sees at least one entry, misses one a feature
-names, or has a connection (`docs/tools.md`, "The vault"): `vault {action: "list"}` gives the name, the description, the URL and the username of each
+names, or has a connection whose `login` takes one (`docs/tools.md`, "The vault"): `vault {action: "list"}` gives the name, the description, the URL and the username of each
 entry the agent's project sees, so that it knows what exists and what it is for. No action returns
 a secret. An entry of another project is not listed, and is no entry for a tool of the agent's.
 
@@ -124,8 +124,11 @@ the vault does not hold. It may ask the user to add **any new entry**: the ask i
 an entry to the vault, not a request with rules of its own.
 
 - **`vault {action: "ask", name, why, url?, username?, for?, project?}`.** `name` is the new
-  entry's name; `url` the address the secret is for; `username` the account; `for` the use it is
-  bound to, `worklog` (the agent's project's) or `connection:<name>`, or none; `project` `this`
+  entry's name; `url` the address the secret is for, which the daemon reads as a connection's
+  `login` does (a backslash is a `/`, a domain is said in ASCII) and refuses when it is no `https`
+  address, or `http` on this machine; `username` the account; `for` the use it is bound to,
+  `worklog` (the agent's project's) or `connection:<name>` (a connection the user declared), or
+  none; `project` `this`
   (the agent's project's alone) or `every`, a connection's entry being every project's. A name
   the vault already holds is refused, naming it: the agent uses it (when its project sees it) or
   asks under another name. An entry a feature of Flottille names and the project misses (today
@@ -136,18 +139,24 @@ an entry to the vault, not a request with rules of its own.
   name, a browser connection's `login` with its name and `for: "connection:<name>"`
   (`docs/extensions.md`, "Connections"). The ask answers at once: nothing waits for the user.
 - **A way in to the vault's own form.** The user sees one card in the session of the agent that
-  asked (and an inbox entry): the entry's name, the host of its URL **on a line of its own**
-  (where the secret will go: the agent chose it), what it is for, its use, its project and the
-  agent's reason, with **Add to the vault** and **Dismiss**. Add to the vault opens Settings,
-  Vault's form of a new entry, prefilled with all of it, the agent's reason under what it is for:
-  the user changes any field, types the secret and saves, with the checks of that form (plain
-  `http` to another machine refused for a connection's entry), or closes it and nothing is
-  stored. There is no second form.
-- **One request a name.** While a request for a name is open, another ask for it joins it.
-  Dismiss closes the request; the name may be asked for again.
-- **Answered when the entry is saved**, from that form or any other way: each agent that asked is
-  handed a delivery, `the user set the vault entry <name>`, never the secret; or `the user
-  dismissed …`.
+  asked (and an inbox entry, which names the host and whose entry it is, the project's or every
+  project's): the entry's name, the host of its URL **on a line of its own** (where the secret
+  will go: the agent chose it; the daemon's reading, never the window's), what it is for, its use,
+  its project and the agent's reason, with **Add to the vault** and **Dismiss** (disabled while
+  its call runs). Add to the vault opens Settings, Vault's form of a new entry, prefilled with all
+  of it, the agent's reason under what it is for, and what it will be bound to ("For …") with the
+  host its secret goes to ("Goes to …", while the URL is the one asked) and **Remove the
+  binding**: the user changes any field, types the secret and saves, with the checks of that form
+  (plain `http` to another machine refused for a connection's entry; the username required when
+  the feature that asked reads it, the worklog's), or closes it and nothing is stored. There is
+  no second form.
+- **One request a name.** While a request for a name is open, another ask for it joins it when it
+  is the same project's or the request is every project's; another project's agent is refused
+  (`ask under another name`), and told nothing of it. Dismiss closes the request; the name may be
+  asked for again.
+- **Answered when the entry is saved**, from that form or any other way: each agent that asked
+  and whose project sees the entry is handed a delivery, `the user set the vault entry <name>`,
+  never the secret; on Dismiss each is handed `the user dismissed …`.
 
 The secret goes from the form's field to the keyring as any secret set from the window: it never
 reaches the agent, an event, a log or an error.
