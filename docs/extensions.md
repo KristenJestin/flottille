@@ -961,6 +961,7 @@ env     = { ALMANAC_TOKEN = { vault = "almanac-token" } }
 only    = { }                        # limits on arguments, below
 except  = ["client-site"]            # projects whose agents do not get it
 sites   = [ ]                        # hosts an adapter adds to the browser's sites ("Adapters")
+headed  = false                      # an adapter's browser shown on the screen ("Adapters")
 ```
 
 **On, it is given to every agent of every project**, and off to none, **except the projects its
@@ -1449,7 +1450,44 @@ way in:
   bound to the connection**, the entries' hosts and the `sites` alike: a host one entry's sign-in
   needs is allowed in the login of every other, so the password of an entry whose site redirects
   to another entry's sign-on host reaches that host. Entries whose sign-ins must not share their
-  hosts go in connections of their own. The file is written when
+  hosts go in connections of their own.
+- **The browser can be shown.** A connection's server runs with the environment of a run, without
+  `XDG_RUNTIME_DIR` nor the display variables, so its browser is headless and `--headed` fails
+  (no runtime folder, no Wayland display). `headed = true` (`flottille connection edit --headed`
+  or `--headless`, the connection's form in the window, a toggle *Show the browser*, off by
+  default) has the adapter write `"headed": true` in the configuration file it writes and gives
+  the server the session's display, **never the user's real `XDG_RUNTIME_DIR`** (it holds the
+  session bus, hence the keyring, and the user's other sockets): the daemon makes a runtime folder
+  of the connection's own, `$XDG_RUNTIME_DIR/flottille/display/<connection>` (mode 0700, removed
+  when the server stops), holding a hard link of the session's Wayland socket alone, and the
+  server's `XDG_RUNTIME_DIR` is that folder, with `WAYLAND_DISPLAY`; `DISPLAY` is given only when
+  the session has no Wayland, and `DBUS_SESSION_BUS_ADDRESS` never. That folder is the one part of
+  the user's runtime folder Landlock leaves within the server's and its login's reach
+  (`docs/vault.md`, "The runtime folder"); the bus's address is not given, and the rest of the
+  runtime folder is denied where Landlock allows it. Below Landlock's ninth ABI a process that
+  guesses the bus's path can still connect to it, a gap of every run's (#976). When the folder cannot be made
+  (the filesystem refuses the hard link, the socket is not there) the browser runs headless and the
+  daemon says why, in its log and in the form, under the switch (kept there while a call runs),
+  never with the real folder. Off, the server gets no display variable of the daemon's; **whether
+  the browser is shown or not, it is never given `DBUS_SESSION_BUS_ADDRESS`**, and both the server
+  and its login run get `AGENT_BROWSER_SOCKET_DIR` naming the connection's own folder
+  (agent-browser puts its daemon's socket there, else under `$XDG_RUNTIME_DIR`), so they reach the
+  same browser and the removal of a display folder never takes a live socket. One browser per
+  connection, in the mode the switch says: a login uses the server's display folder (the running
+  server's own, else made under the connection's name for the time of the login), and the browser
+  agent-browser's daemon runs, which outlives the command that started it (a login's or the
+  server's), is closed (`agent-browser close`, on that socket folder) when the server is stopped
+  (an edit of what trust is given to, the switch included, turning it off, removing it) and when
+  the daemon stops; the next start, of the server or of a login, starts a browser in the mode the
+  switch says. **Showing the browser has a risk, said beside the switch and in the review**: with
+  X11 the browser can read the keys typed in other windows and type into them (a terminal's
+  included), and on some Wayland compositors a client can capture the screen and the clipboard. The daemon
+  removes every display folder when it starts, under its lock, and makes the last folder of a
+  connection itself, never taking one over. The folder is
+  made by one function (`display.rs`), which a run that opens windows reuses. It is the user's
+  alone (an agent's request sets no `headed`), **part of what trust is given to** and said in the
+  review, and the user's own edit stops the running server at once, the next start applying it,
+  as an edit of `sites` does; an edit made in the file waits for its review. The file is written when
   a login runs, and tool calls read it when they run: an entry bound after the server started is
   in the list from the next of either. **An entry whose URL host holds a comma, a `*`, a space or
   starts with `-` is no usable site** (agent-browser reads the list by commas and `*` as a

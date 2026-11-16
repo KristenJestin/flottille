@@ -77,6 +77,11 @@ struct Server {
     /// Its tools listed again after it said they changed: one listing at a time, of the server
     /// that runs.
     noticed: Mutex<Noticed>,
+    /// Why the browser of the server it last kept runs headless: said while a call holds the
+    /// turn, which hides the server itself.
+    headless: Mutex<Option<String>>,
+    /// The browser its server or a login started, which outlives them: closed when it stops.
+    browser: Mutex<Option<super::adapters::Browser>>,
 }
 
 #[derive(Default)]
@@ -186,6 +191,10 @@ struct Running {
     expires_at: Option<u64>,
     /// Set when one of its answers was cut for its size.
     cut: Cut,
+    /// The runtime folder of its shown browser, removed when it stops, and its variables.
+    display: Option<crate::display::Shown>,
+    /// Why its browser runs headless though the user shows it, when it cannot be shown.
+    headless: Option<String>,
 }
 
 impl Running {
@@ -248,10 +257,41 @@ pub(super) async fn exclusively<T>(
     work.await
 }
 
+/// `exclusively`, `work` given the display variables of the server that runs, if it shows its
+/// browser: a login reaches the browser in the server's display folder.
+pub(super) async fn exclusively_shown<T, F: std::future::Future<Output = T>>(
+    daemon: &Daemon,
+    name: &str,
+    work: impl FnOnce(Option<crate::display::Shown>) -> F,
+) -> T {
+    let server = server_of(daemon, name);
+    let turn = server.turn.lock().await;
+    let served = turn
+        .as_ref()
+        .and_then(|running| running.display.as_ref())
+        .cloned();
+    work(served).await
+}
+
+/// The browser `browser` may now run for the connection, to close when its server stops.
+pub(super) fn browser_started(daemon: &Daemon, name: &str, browser: super::adapters::Browser) {
+    *server_of(daemon, name).browser.lock().unwrap() = Some(browser);
+}
+
 /// Whether the connection's server runs.
 pub fn running(daemon: &Daemon, name: &str) -> bool {
     existing(daemon, name)
         .is_some_and(|server| server.turn.try_lock().map_or(true, |turn| turn.is_some()))
+}
+
+/// Why the browser of its running server is not shown though the user shows it, if it is not.
+pub fn headless(daemon: &Daemon, name: &str) -> Option<String> {
+    let server = existing(daemon, name)?;
+    match server.turn.try_lock() {
+        Ok(turn) => turn.as_ref()?.headless.clone(),
+        // A call holds the turn: the reason of the server it last kept, not nothing for a moment.
+        Err(_) => server.headless.lock().unwrap().clone(),
+    }
 }
 
 /// Why its server could not start the last time, if it did not.
@@ -532,6 +572,9 @@ async fn start_with(
         start,
     };
     let mut expires_at = None;
+    // The browser's display folder, removed when the server is dropped.
+    let mut display = None;
+    let mut headless = None;
     let cut = Cut::default();
     let (service, leader) = match &declaration.reach {
         Reach::Command(words) => {
@@ -541,11 +584,23 @@ async fn start_with(
             let options = match adapter {
                 Some(adapter) => {
                     let sites = super::adapters::kept_to(daemon, adapter, declaration);
-                    super::adapters::start_options(&folder, &sites)?
+                    (display, headless) =
+                        super::adapters::shown(daemon, declaration, &declaration.name);
+                    if let Some(browser) = super::adapters::browser(daemon, declaration) {
+                        browser_started(daemon, &declaration.name, browser);
+                    }
+                    super::adapters::start_options(&folder, &sites, display.is_some())?
                 }
                 None => Vec::new(),
             };
             let mut env = crate::runs::beside(daemon)?;
+            if adapter.is_some() {
+                super::adapters::display(
+                    &mut env,
+                    display.as_ref().map(|shown| &shown.env),
+                    &folder,
+                );
+            }
             // Every value it was given, masked in what it says whatever its variable is named.
             let mut given = Vec::new();
             for (name, secret) in secrets(daemon, &declaration.name, &declaration.env).await? {
@@ -563,8 +618,9 @@ async fn start_with(
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .kill_on_drop(true);
-            let mut child = crate::children::spawn(crate::landlock::confined(
+            let mut child = crate::children::spawn(crate::landlock::confined_but(
                 crate::children::in_own_session(&mut command),
+                display.as_ref().map(|shown| &shown.folder),
             ))
             .map_err(|error| format!("{}: {error}", words[0]))?;
             let leader = child.id();
@@ -693,6 +749,8 @@ async fn start_with(
                 start,
                 expires_at,
                 cut: cut.clone(),
+                display,
+                headless,
             })
             .await;
             return Err(why);
@@ -721,6 +779,8 @@ async fn start_with(
         start,
         expires_at,
         cut,
+        display,
+        headless,
     })
 }
 
@@ -834,6 +894,7 @@ fn keep(
     let start = running.start;
     *server.leader.lock().unwrap() = running.leader;
     *server.failing.lock().unwrap() = None;
+    *server.headless.lock().unwrap() = running.headless.clone();
     *turn = Some(running);
     let (daemon, name, server) = (Arc::downgrade(daemon), name.to_owned(), server.clone());
     tokio::spawn(async move {
@@ -890,11 +951,25 @@ pub async fn stop(daemon: &Arc<Daemon>, name: &str) {
         return;
     };
     let mut turn = server.turn.lock().await;
-    if let Some(running) = turn.take() {
+    let stopped = turn.take();
+    let running = stopped.is_some();
+    if let Some(running) = stopped {
         *server.leader.lock().unwrap() = None;
         stop_running(running).await;
-        drop(turn);
+    }
+    // Under the turn, so no login nor start meets the browser as it closes.
+    closed(daemon, &server).await;
+    drop(turn);
+    if running {
         super::changed_event(daemon, name, None);
+    }
+}
+
+/// The browser the server or a login of it started, closed: the next start applies the switch.
+async fn closed(daemon: &Daemon, server: &Server) {
+    let browser = server.browser.lock().unwrap().take();
+    if let Some(browser) = browser {
+        super::adapters::close(daemon, &browser).await;
     }
 }
 
@@ -939,7 +1014,9 @@ pub async fn stop_all(daemon: &Arc<Daemon>) {
         .values()
         .cloned()
         .collect();
-    for server in servers {
+    // At once, not one after another: each close is bounded, but a daemon with several shown
+    // browsers must not wait for the sum of them.
+    futures::future::join_all(servers.iter().map(|server| async move {
         let leader = server.leader.lock().unwrap().take();
         if let Some(leader) = leader {
             crate::children::end_session(leader).await;
@@ -949,7 +1026,9 @@ pub async fn stop_all(daemon: &Arc<Daemon>) {
         {
             stop_running(running).await;
         }
-    }
+        closed(daemon, server).await;
+    }))
+    .await;
 }
 
 /// Why the server could not start, masked by `mask` before it is cut: a secret is never cut in
