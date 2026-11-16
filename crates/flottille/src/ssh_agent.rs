@@ -1,6 +1,6 @@
 //! The user's SSH agent, lent to a run that is itself a `git push` the gate let through, and to
-//! the git reads made for it (`docs/vault.md`, "The runtime folder"): its environment names the
-//! socket, and Landlock lets it connect to that socket alone. Every other run gets no
+//! the dry run made for its checks (`docs/vault.md`, "The runtime folder"): its environment names
+//! the socket, and Landlock lets it connect to that socket alone. Every other run gets no
 //! `SSH_AUTH_SOCK` (`runs::defend`).
 
 use std::collections::BTreeMap;
@@ -46,7 +46,8 @@ struct Found {
 
 static FOUND: OnceLock<Option<Found>> = OnceLock::new();
 
-/// Finds the user's SSH agent, its `git` and its `ssh`, at the daemon's start, before anything runs.
+/// Finds the user's SSH agent, its `git` and its `ssh`, at the daemon's start, before anything
+/// runs.
 pub fn find(paths: &Paths) {
     FOUND.get_or_init(|| match found(paths) {
         Ok(found) => Some(found),
