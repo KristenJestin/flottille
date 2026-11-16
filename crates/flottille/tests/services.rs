@@ -1249,16 +1249,16 @@ fn with_a_child(user: &User, name: &str, port: u16) -> String {
 
 /// The pid a `--child` server printed after `what`, `leader` or `child`.
 fn printed_pid(user: &User, name: &str, what: &str) -> u32 {
-    let mut found = None;
+    let found = std::cell::Cell::new(None);
     eventually(&format!("{name}'s {what}"), || {
         let output = user.call("service.output", json!({"name": name})).unwrap();
-        found = output["output"].as_str().unwrap().lines().find_map(|line| {
+        found.set(output["output"].as_str().unwrap().lines().find_map(|line| {
             line.strip_prefix(&format!("{what} "))
                 .and_then(|pid| pid.parse().ok())
-        });
-        found.is_some()
+        }));
+        found.get().is_some()
     });
-    found.unwrap()
+    found.get().unwrap()
 }
 
 fn kill(pid: u32) {
