@@ -217,6 +217,14 @@ options and the remote's transport), a connection's server and its login:
   `$XDG_RUNTIME_DIR/flottille/display/<connection>`, which holds a hard link of the Wayland socket
   alone (`docs/extensions.md`, "Adapters"), without the right to link or move a file out of it.
   The folder is the one the daemon made, never one a variable of the connection names.
+- the same rules keep the user's `~/.ssh` (and its target, when it is a link) out of reach for
+  writing: what the user's `ssh` reads there (`config` and its `Match exec`, `ProxyCommand`) would
+  run with the SSH agent at the next push lent it. A rule on a folder holds for everything beneath
+  it, and Landlock only grants, so `~/.ssh` is left out like a runtime folder: the home and the
+  folders on the way to it get no rule of their own but one for reading, on the home, and each of
+  their other entries gets every right. Nothing in `~/.ssh` is created, changed, renamed, moved in
+  or removed; reading it stays allowed, so the lent push's `ssh` still reads its configuration and
+  `known_hosts`. What it costs is said in "The gaps".
 
 **The SSH agent is lent to a push alone.** What the daemon runs gets no `SSH_AUTH_SOCK`, but a run
 that is itself a `git push` (its own line, no wrapper) the user, the judge or Full mode let
@@ -290,12 +298,20 @@ The gaps, where the platform does not allow more:
   `SSH_AUTH_SOCK`, but one that guesses the agent's path can still connect to it, as to the bus;
 - what `ssh` reads is not pinned: the user's `~/.ssh/config` may run a program
   (`ProxyCommand`, `Match exec`) with the agent's socket, and pinning it would break jump hosts.
-  Runs may write under the home, so from the ninth ABI the guarantee is this: code an agent wrote
-  reaches the SSH agent, at the next push the gate lets through, only through the files the
-  user's `ssh` reads from the home (`~/.ssh/config` and what it includes); a `git` or an `ssh`
-  earlier on `PATH` is not run (above). Connection sharing is off for the push itself, but a
-  master another program of the user's started (`ControlMaster` in `~/.ssh/config`) is not
-  Flottille's to close;
+  With Landlock (its second ABI or later) no command the daemon runs writes in `~/.ssh` (above),
+  and a `git` or an `ssh` earlier on `PATH` is not run (above), so code an agent wrote does not
+  reach the agent through them. An `Include` of `~/.ssh/config` that names a file outside
+  `~/.ssh` is not kept, nor is the system's `/etc/ssh/ssh_config` (not writable by the user
+  anyway). Without Landlock, whatever can write `~/.ssh/config` can run a program with the agent.
+  Connection sharing is off for the push itself, but a master another program of the user's
+  started (`ControlMaster` in `~/.ssh/config`) is not Flottille's to close;
+- keeping `~/.ssh` out has a cost, Landlock having no rule that takes a right away beneath a
+  folder it grants: the home and the folders on the way to it (`/home`) are ruled for reading
+  alone, so no command the daemon runs creates, removes or renames an entry directly in the home
+  (a dotfile made the first time, `~/.gitconfig` rewritten by `git config --global`, a shell's
+  `~/.bash_history` replaced), nor lists `/home`. What is in the home's folders (`~/.config`,
+  `~/.cache`, the projects) and its existing files keep every right. The private mount
+  namespace (#976) would mount `~/.ssh` read-only instead;
 - from the ninth ABI, a socket made after a command started directly in a folder on the way to a
   kept-out agent socket (`/tmp` for `/tmp/ssh-…/agent.…`) cannot be connected to by that command;
 - without Landlock (a kernel before 5.19, or one built without it), the process runs as before,

@@ -520,6 +520,11 @@ pending requests.
   - no push: `url./dev/null/flottille-refused-push/.pushInsteadOf` set the same way, which
     rewrites every push URL to a path that is no remote, unless the run is itself a `git push`
     (its own line, no wrapper) the user or the judge let through.
+- **A run cannot write in `~/.ssh`**, nor can any other command the daemon runs confined (a
+  service, a probe, a git read, a connection's server): with Landlock, nothing in it is created,
+  changed, renamed, moved in or removed, so no code an agent wrote changes what the user's `ssh`
+  runs at a push lent the SSH agent. Reading it stays allowed. The cost: no entry is created,
+  removed or renamed directly in the home (`docs/vault.md`, "The runtime folder" and "The gaps").
 - **A run may open windows on the user's screen** when its project says so: the setting *Agents may
   open windows on my screen* (the key `windows` of the project's file, off by default; the project's
   Settings, Tasks tab; `flottille project edit <name> --windows on|off`) is the user's alone: no
