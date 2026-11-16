@@ -253,6 +253,14 @@ fn a_refused_withdrawal_is_said_in_a_toast(cx: &mut TestAppContext) {
     });
     settle(cx);
 
+    until(&shell, cx, "the refusal is said in a toast", |cx| {
+        shell.read_with(cx, |s, cx| {
+            s.toasts().read(cx).toasts().any(|toast| {
+                toast.title() == "The write access was not withdrawn"
+                    && toast.second_line().unwrap_or_default() == "there is no such leave"
+            })
+        })
+    });
     let toasts: Vec<(String, String)> = shell.read_with(cx, |s, cx| {
         s.toasts()
             .read(cx)

@@ -174,6 +174,9 @@ fn the_settings_field_saves_the_message_checks(cx: &mut TestAppContext) {
         "{}",
         file(&user)
     );
+    until(&shell, cx, "the toast says it is saved", |cx| {
+        toasts(&shell, cx).contains(&"Message checks saved".to_owned())
+    });
     assert!(toasts(&shell, cx).contains(&"Message checks saved".to_owned()));
     assert_eq!(
         checks.read_with(cx, |c, cx| c.typed(cx)),
