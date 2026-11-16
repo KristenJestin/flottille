@@ -504,6 +504,12 @@ pending requests.
     refused anyway);
   - no `DBUS_SESSION_BUS_ADDRESS`: the session bus leads to the keyring (`docs/vault.md`, "The
     runtime folder", which also says how the runtime folder itself is denied);
+  - no `SSH_AUTH_SOCK`, unless the run is itself a `git push` (its own line, no wrapper) the user,
+    the judge or Full mode let through: it, and the git reads made for it, are lent the user's SSH
+    agent, the socket the daemon's own environment names and only it (`docs/vault.md`, "The
+    runtime folder"). Such a push to an HTTP(S) URL is refused before it runs, saying to give the
+    remote an SSH push URL (`git remote set-url --push`) or to push by hand: nothing else signs it
+    in;
   - no push: `url./dev/null/flottille-refused-push/.pushInsteadOf` set the same way, which
     rewrites every push URL to a path that is no remote, unless the run is itself a `git push`
     (its own line, no wrapper) the user or the judge let through.
