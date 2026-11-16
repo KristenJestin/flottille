@@ -92,7 +92,8 @@ Sent only on a connection that subscribed with `events.watch`. The event's field
 Every method the daemon answers is in the catalogue of `flottille-protocol`
 (`crates/flottille-protocol/src/catalogue.rs`), each with its class: `read` for one that changes
 nothing (a list, a show, a read, `events.watch`), `drive` for any other (`docs/remote.md`,
-"Roles"). A method the catalogue does not name is answered `unknown-method` before anything reads
+"Roles"), and `local` for one answered to the machine's own clients only, never over a link,
+whatever the caller's role (`remote.setup`). A method the catalogue does not name is answered `unknown-method` before anything reads
 it.
 
 ### `daemon.status`
@@ -947,15 +948,19 @@ with the reason. No method answers a private key.
   or sent a member list that does not check: the sentence says which), `needs an update`, or
   `none` before the first try. Once set up, the machines it trusts are the members' machines of
   the list as last checked.
-- `remote.setup {url, code, changes}` makes this machine the first member of the hub at `url`
-  (`docs/remote.md`, "The first member"), with the setup `code` the hub printed. `changes` are
-  what the client signed with the device key, which the daemon never holds: the device's own entry
-  as the root, a `runner`, then the declaration of this machine's key (`flottille_link::Action`,
-  `machine`). The daemon reaches the hub, pins its key, presents the code and the changes, and
-  keeps the session; it answers `{"url", "hub", "root"}` (the hub's URL as written, the
-  fingerprints of the hub's key and of the root). `refused` with the hub's sentence: a code that
-  is not the hub's, a hub that has a member already, a hub that cannot be reached (`the hub at
-  192.0.2.10:7448 is unreachable: tried 192.0.2.10:7448: Connection refused`).
+- `remote.setup {url, code, changes, replace?}` makes this machine the first member of the hub at
+  `url` (`docs/remote.md`, "The first member"), with the setup `code` the hub printed. `changes`
+  are what the client signed with the device key, which the daemon never holds: the device's own
+  entry as the root, a `runner`, after a new list id, then the declaration of this machine's key
+  (`flottille_link::Action`, `machine`), which the daemon claims with the machine's key. The
+  daemon reaches the hub, proves the code without sending it, pins the hub's key once the hub
+  proved it too, keeps the list once the hub sent it back holding the setup, and keeps the
+  session; it answers `{"url", "hub", "root"}` (the hub's URL as written, the fingerprints of the
+  hub's key and of the root). `refused` with the sentence: a code that is not the hub's, a hub
+  that has a member already, a hub that did not prove the code or withheld the setup, a machine
+  set up already without `replace: true`, a hub that cannot be reached (`the hub at
+  192.0.2.10:7448 is unreachable: tried 192.0.2.10:7448: Connection refused`). Its class is
+  `Local`: answered to this machine's own clients only, never over a link.
 - `remote.address.add {address}` declares an address of this machine: a host name or an IP
   address, and its port when it is not the link's own (`100.64.0.7`, `server.example.net:7447`).
   It answers `this` as above, and is told at once to the machines linked to this one.
