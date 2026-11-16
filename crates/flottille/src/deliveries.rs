@@ -417,9 +417,34 @@ pub fn withdraw(daemon: &Daemon, agent: &str, id: &str, images: bool) -> Result<
         Vec::new()
     };
     discard_images(&daemon.paths, agent, &delivery.images);
+    // Its pasted texts go too, unless it comes back to be edited and sent again with them.
+    if !images {
+        discard_pasted(&daemon.paths, agent, &delivery.body);
+    }
     // What the user wrote comes back, not the commands' text it was sent with.
     let text = delivery.typed.unwrap_or(delivery.body);
     Ok(json!({"agent": agent, "delivery": id, "text": text, "images": pictures}))
+}
+
+/// Removes the files of the pasted texts `text` names (#848): only those the daemon wrote for it,
+/// right in the agent's folder of images, never a file a marker typed by hand names.
+fn discard_pasted(paths: &Paths, agent: &str, text: &str) {
+    let folder = paths.images(agent);
+    for found in flottille_core::pasted::markers(text) {
+        let Some(file) = found.file else {
+            continue;
+        };
+        let Some(name) = file
+            .file_name()
+            .filter(|name| flottille_core::pasted::is_file_name(name))
+        else {
+            continue;
+        };
+        let path = folder.join(name);
+        if std::path::Path::new(&file.path) == path {
+            let _ = std::fs::remove_file(path);
+        }
+    }
 }
 
 /// Hands the root a message that waits, at once: its turn is cancelled (the ACP cancel, as the
