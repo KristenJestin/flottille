@@ -929,3 +929,189 @@ fn an_entry_without_an_address_is_bound_from_the_request_then_accepted(cx: &mut 
     );
     assert!(visible(cx, "connection-request-bind-other-key-action"));
 }
+
+// ── #1019, round 2: Share and Bind act only on what the dialog shows ─────────────────────────
+
+/// The connection `notes` the user declared at `https://old.example.com/mcp`, and an agent's
+/// edit that only gives its server the vault entry `notes-key` (every project's, no address).
+fn edit_adding_a_key(user: &User, mcp: &Mcp) -> u64 {
+    user.call(
+        "connection.add",
+        json!({"name": "notes", "about": "Notes.", "url": "https://old.example.com/mcp"}),
+    )
+    .unwrap();
+    user.call("vault.set", json!({"name": "notes-key", "secret": KEY}))
+        .unwrap();
+    held(
+        mcp,
+        json!({"action": "edit", "name": "notes",
+            "secrets": [{"in": "header", "name": "Authorization", "prefix": "Bearer ",
+                "entry": "notes-key"}]}),
+    )
+}
+
+#[gpui_kit::test]
+fn a_bind_confirmed_after_the_request_changed_binds_nothing(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, mcp) = a_root(&user);
+    let number = edit_adding_a_key(&user, &mcp);
+
+    let (shell, cx) = window(&user, cx);
+    open_card(&shell, cx, &lead, number);
+    open_dialog(&shell, cx, number);
+    assert_eq!(
+        label(cx, "connection-request-bind-notes-key-action").as_deref(),
+        Some("Bind it to old.example.com")
+    );
+    click(cx, "connection-request-bind-notes-key-action");
+    assert_eq!(
+        label(cx, "connection-request-widen-title").as_deref(),
+        Some("Bind the entry notes-key to old.example.com?")
+    );
+    // The user moves the connection meanwhile: the request would not be done any more.
+    user.call(
+        "connection.edit",
+        json!({"name": "notes", "url": "https://new.example.com/mcp"}),
+    )
+    .unwrap();
+    press(cx, "connection-request-widen-action");
+    until(&shell, cx, "the refusal is said", |cx| {
+        present(cx, "connection-request-error")
+    });
+    // Read again: stale, its lines fold away and no Accept is offered.
+    until(&shell, cx, "the line folds away", |cx| {
+        !present(cx, "connection-request-bind-notes-key")
+    });
+    assert!(!present(cx, "connection-request-accept"));
+    assert_eq!(vault_entry(&user, "notes-key").unwrap()["url"], Value::Null);
+}
+
+#[gpui_kit::test]
+fn a_request_changed_since_it_was_asked_offers_no_share_or_bind(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, mcp) = a_root(&user);
+    let number = edit_adding_a_key(&user, &mcp);
+    user.call(
+        "connection.edit",
+        json!({"name": "notes", "url": "https://new.example.com/mcp"}),
+    )
+    .unwrap();
+
+    let (shell, cx) = window(&user, cx);
+    open_card(&shell, cx, &lead, number);
+    open_dialog(&shell, cx, number);
+    assert!(!present(cx, "connection-request-accept"));
+    assert!(!present(cx, "connection-request-bind-notes-key"));
+    assert!(!present(cx, "connection-request-bind-notes-key-action"));
+}
+
+#[gpui_kit::test]
+fn no_share_or_bind_is_offered_for_an_entry_the_request_cannot_take(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, mcp) = a_root(&user);
+    // Named before it exists, then made for another use: a browser login of another site.
+    let number = hippocampe(&mcp);
+    user.call(
+        "vault.set",
+        json!({"name": "hippocampe-key", "secret": KEY, "url": "https://site.example",
+            "for": "connection:browser"}),
+    )
+    .unwrap();
+    // The project's own entry, then moved to another project after the call.
+    let folder = user.path("work/other");
+    user.git_init(&folder);
+    std::fs::write(folder.join("README.md"), "other\n").unwrap();
+    user.git(&folder, &["add", "."]);
+    user.git(&folder, &["commit", "--quiet", "-m", "start"]);
+    user.call("project.add", json!({"folder": folder, "name": "other"}))
+        .unwrap();
+    user.call(
+        "vault.set",
+        json!({"name": "recall-key", "secret": KEY, "project": "app",
+            "url": "https://recall.example.com"}),
+    )
+    .unwrap();
+    let recall = held(
+        &mcp,
+        json!({"action": "add", "name": "recall", "about": "Another memory.",
+            "url": "https://recall.example.com/mcp",
+            "secrets": [{"in": "header", "name": "Authorization", "entry": "recall-key"}]}),
+    );
+    user.call(
+        "vault.set",
+        json!({"name": "recall-key", "project": "other"}),
+    )
+    .unwrap();
+
+    let (shell, cx) = window(&user, cx);
+    open_card(&shell, cx, &lead, number);
+    open_dialog(&shell, cx, number);
+    assert!(!present(cx, "connection-request-bind-hippocampe-key"));
+    assert!(!present(cx, "connection-request-share-hippocampe-key"));
+    shell.update(cx, |shell, cx| shell.open_connection_request(recall, cx));
+    until(&shell, cx, "the other request is read", |cx| {
+        label(cx, "connection-request-name").is_some_and(|name| name.contains("recall"))
+    });
+    settle(cx);
+    assert!(!present(cx, "connection-request-share-recall-key"));
+    assert!(!present(cx, "connection-request-bind-recall-key"));
+}
+
+#[gpui_kit::test]
+fn the_confirmation_says_the_change_stays_and_the_address_it_replaces(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, mcp) = a_root(&user);
+    user.call(
+        "vault.set",
+        json!({"name": "hippocampe-key", "secret": KEY, "project": "app"}),
+    )
+    .unwrap();
+    let number = hippocampe(&mcp);
+
+    let (shell, cx) = window(&user, cx);
+    open_card(&shell, cx, &lead, number);
+    open_dialog(&shell, cx, number);
+    click(cx, "connection-request-share-hippocampe-key-action");
+    let sentence = label(cx, "connection-request-widen-sentence").unwrap_or_default();
+    assert!(
+        sentence.contains("even if you then refuse the request"),
+        "{sentence}"
+    );
+    click(cx, "connection-request-widen-cancel");
+    click(cx, "connection-request-bind-hippocampe-key-action");
+    let sentence = label(cx, "connection-request-widen-sentence").unwrap_or_default();
+    assert!(
+        sentence.contains("now no address") && sentence.contains("http://127.0.0.1:7468"),
+        "{sentence}"
+    );
+    assert!(
+        sentence.contains("even if you then refuse the request"),
+        "{sentence}"
+    );
+    click(cx, "connection-request-widen-cancel");
+
+    // An entry with an address of its own: the Confirm names the one it replaces.
+    user.call(
+        "vault.set",
+        json!({"name": "other-key", "secret": KEY, "url": "https://memory.example.com/keys"}),
+    )
+    .unwrap();
+    let other = held(
+        &mcp,
+        json!({"action": "add", "name": "recall", "about": "Another memory.",
+            "url": "http://127.0.0.1:7469/mcp",
+            "secrets": [{"in": "header", "name": "Authorization", "entry": "other-key"}]}),
+    );
+    shell.update(cx, |shell, cx| shell.open_connection_request(other, cx));
+    until(&shell, cx, "the other request is read", |cx| {
+        present(cx, "connection-request-bind-other-key-action")
+    });
+    settle(cx);
+    click(cx, "connection-request-bind-other-key-action");
+    let sentence = label(cx, "connection-request-widen-sentence").unwrap_or_default();
+    assert!(
+        sentence.contains("now https://memory.example.com/keys")
+            && sentence.contains("http://127.0.0.1:7469"),
+        "{sentence}"
+    );
+}

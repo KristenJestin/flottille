@@ -1264,7 +1264,7 @@ fn the_user_shares_or_binds_only_what_a_pending_request_names() {
     .unwrap();
     user.call(
         "connection.bind_entry",
-        json!({"number": number, "entry": "hippocampe-key"}),
+        json!({"number": number, "entry": "hippocampe-key", "host": "127.0.0.1"}),
     )
     .unwrap();
     // What else it says is kept.
@@ -1284,4 +1284,194 @@ fn the_user_shares_or_binds_only_what_a_pending_request_names() {
         )
         .unwrap_err();
     assert!(why.contains("decided"), "{why}");
+}
+
+/// The connection `notes` the user declared at `https://old.example.com/mcp`, and an agent's
+/// edit that only gives its server the vault entry `notes-key` (every project's, no address):
+/// the request's number.
+fn edit_adding_a_key(user: &User, mcp: &Mcp) -> u64 {
+    user.call(
+        "connection.add",
+        json!({"name": "notes", "about": "Notes.", "url": "https://old.example.com/mcp"}),
+    )
+    .unwrap();
+    entry(user, "notes-key", None);
+    held(&mcp.call(
+        "connections",
+        json!({"action": "edit", "name": "notes",
+            "secrets": [{"in": "header", "name": "Authorization", "prefix": "Bearer ",
+                "entry": "notes-key"}]}),
+    ))
+}
+
+#[test]
+fn share_or_bind_on_a_request_that_changed_is_refused() {
+    let user = user();
+    project(&user, "app");
+    turn_on(&user);
+    let (_, mcp) = root(&user);
+    let number = edit_adding_a_key(&user, &mcp);
+    let card = proposed(&user, number);
+    assert_eq!(card["current"], true, "{card}");
+    assert_eq!(card["secrets"][0]["host"], "old.example.com", "{card}");
+    assert_eq!(card["secrets"][0]["to_bind"], true, "{card}");
+
+    // The user moves the connection meanwhile: the request would not be done any more.
+    user.call(
+        "connection.edit",
+        json!({"name": "notes", "url": "https://new.example.com/mcp"}),
+    )
+    .unwrap();
+    assert_eq!(proposed(&user, number)["current"], false);
+    for host in ["old.example.com", "new.example.com"] {
+        let (_, why) = user
+            .call(
+                "connection.bind_entry",
+                json!({"number": number, "entry": "notes-key", "host": host}),
+            )
+            .unwrap_err();
+        assert!(why.contains("changed"), "{host}: {why}");
+    }
+    user.call("vault.set", json!({"name": "notes-key", "project": "app"}))
+        .unwrap();
+    let (_, why) = user
+        .call(
+            "connection.share_entry",
+            json!({"number": number, "entry": "notes-key"}),
+        )
+        .unwrap_err();
+    assert!(why.contains("changed"), "{why}");
+    let entry = vault_entry(&user, "notes-key");
+    assert_eq!(entry["url"], Value::Null, "{entry}");
+    assert_eq!(entry["project"], "app", "{entry}");
+}
+
+#[test]
+fn bind_is_refused_when_the_host_shown_is_not_the_one_the_daemon_reads() {
+    let user = user();
+    project(&user, "app");
+    turn_on(&user);
+    let (_, mcp) = root(&user);
+    let number = edit_adding_a_key(&user, &mcp);
+
+    // A Bind that names no host, or another one than the request sends it to, binds nothing.
+    for params in [
+        json!({"number": number, "entry": "notes-key"}),
+        json!({"number": number, "entry": "notes-key", "host": "new.example.com"}),
+    ] {
+        let (_, why) = user
+            .call("connection.bind_entry", params.clone())
+            .unwrap_err();
+        assert!(why.contains("old.example.com"), "{params}: {why}");
+    }
+    assert_eq!(vault_entry(&user, "notes-key")["url"], Value::Null);
+
+    // The host the dialog showed is the one bound.
+    user.call(
+        "connection.bind_entry",
+        json!({"number": number, "entry": "notes-key", "host": "old.example.com"}),
+    )
+    .unwrap();
+    assert_eq!(
+        vault_entry(&user, "notes-key")["url"],
+        "https://old.example.com"
+    );
+}
+
+#[test]
+fn an_agent_cannot_get_another_projects_entry_offered_for_sharing() {
+    let user = user();
+    project(&user, "app");
+    project(&user, "other");
+    turn_on(&user);
+    user.call(
+        "vault.set",
+        json!({"name": "prod-token", "secret": SECRET, "project": "other",
+            "url": "https://api.example.com"}),
+    )
+    .unwrap();
+    let (_, mcp) = root(&user);
+
+    // The agent of app names other's private entry: refused at the call, nothing is held.
+    let answer = mcp.call(
+        "connections",
+        json!({"action": "add", "name": "evil", "about": "Somewhere.",
+            "url": "https://evil.example/mcp",
+            "secrets": [{"in": "header", "name": "Authorization", "prefix": "Bearer ",
+                "entry": "prod-token"}]}),
+    );
+    assert!(answer.error, "{}", answer.text);
+    assert!(answer.text.contains("prod-token"), "{}", answer.text);
+    assert!(!answer.text.contains("other"), "{}", answer.text);
+    let pending = user.call("approval.list", json!({})).unwrap();
+    assert_eq!(pending["requests"], json!([]), "{pending}");
+
+    // Its own project's entry is the issue's case: held, Share offered.
+    user.call(
+        "vault.set",
+        json!({"name": "app-token", "secret": SECRET, "project": "app"}),
+    )
+    .unwrap();
+    let number = held(&mcp.call(
+        "connections",
+        json!({"action": "add", "name": "mine", "about": "Mine.",
+            "url": "https://mine.example.com/mcp",
+            "secrets": [{"in": "header", "name": "Authorization", "prefix": "Bearer ",
+                "entry": "app-token"}]}),
+    ));
+    let card = proposed(&user, number);
+    assert_eq!(card["secrets"][0]["share"], true, "{card}");
+
+    // Moved to another project after the call: no Share is offered, and none is done.
+    user.call(
+        "vault.set",
+        json!({"name": "app-token", "project": "other"}),
+    )
+    .unwrap();
+    let card = proposed(&user, number);
+    assert_eq!(card["secrets"][0]["share"], false, "{card}");
+    for method in ["connection.share_entry", "connection.bind_entry"] {
+        let (_, why) = user
+            .call(
+                method,
+                json!({"number": number, "entry": "app-token", "host": "mine.example.com"}),
+            )
+            .unwrap_err();
+        assert!(why.contains("app-token"), "{method}: {why}");
+    }
+    let entry = vault_entry(&user, "app-token");
+    assert_eq!(entry["project"], "other", "{entry}");
+    assert_eq!(entry["url"], Value::Null, "{entry}");
+}
+
+#[test]
+fn share_or_bind_is_refused_for_an_entry_bound_to_another_use() {
+    let user = user();
+    project(&user, "app");
+    turn_on(&user);
+    let (_, mcp) = root(&user);
+    // Named while it does not exist yet: held.
+    let number = propose_hippocampe(&mcp);
+    // Then made for another use, a browser login of another site.
+    user.call(
+        "vault.set",
+        json!({"name": "hippocampe-key", "secret": SECRET, "url": "https://site.example",
+            "for": "connection:browser"}),
+    )
+    .unwrap();
+    let card = proposed(&user, number);
+    assert_eq!(card["secrets"][0]["share"], false, "{card}");
+    assert_eq!(card["secrets"][0]["to_bind"], false, "{card}");
+    for method in ["connection.share_entry", "connection.bind_entry"] {
+        let (_, why) = user
+            .call(
+                method,
+                json!({"number": number, "entry": "hippocampe-key", "host": "127.0.0.1"}),
+            )
+            .unwrap_err();
+        assert!(why.contains("hippocampe-key"), "{method}: {why}");
+    }
+    let entry = vault_entry(&user, "hippocampe-key");
+    assert_eq!(entry["url"], "https://site.example", "{entry}");
+    assert_eq!(entry["for"], "connection:browser", "{entry}");
 }
