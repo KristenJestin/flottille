@@ -260,7 +260,7 @@ fn the_limit_is_8000_characters_until_the_user_chooses_another() {
 
     assert_eq!(
         user.call("tool_results.show", json!({})).unwrap(),
-        json!({"limit": 8000, "unchanged": false})
+        json!({"limit": 8000, "unchanged": false, "filters": true})
     );
     assert!(!user.path("config/flottille/tool-results.toml").exists());
 }
@@ -274,25 +274,25 @@ fn a_chosen_limit_is_kept_announced_and_read_back_after_a_restart() {
         .call("tool_results.set", json!({"limit": 16000}))
         .unwrap();
 
-    assert_eq!(shown, json!({"limit": 16000, "unchanged": false}));
+    assert_eq!(shown, json!({"limit": 16000, "unchanged": false, "filters": true}));
     let file = std::fs::read_to_string(user.path("config/flottille/tool-results.toml")).unwrap();
     assert!(file.contains("limit = 16000"), "{file}");
     let seen = watch.until(|e| e["name"] == "tool_results.changed");
     assert_eq!(
         seen.last().unwrap()["data"],
-        json!({"limit": 16000, "unchanged": false})
+        json!({"limit": 16000, "unchanged": false, "filters": true})
     );
     assert!(user.run(&["daemon", "stop"]).status.success());
     assert_eq!(
         user.call("tool_results.show", json!({})).unwrap(),
-        json!({"limit": 16000, "unchanged": false})
+        json!({"limit": 16000, "unchanged": false, "filters": true})
     );
     limit(&user, json!("off"));
     let file = std::fs::read_to_string(user.path("config/flottille/tool-results.toml")).unwrap();
     assert!(file.contains("limit = \"off\""), "{file}");
     assert_eq!(
         user.call("tool_results.show", json!({})).unwrap(),
-        json!({"limit": "off", "unchanged": false})
+        json!({"limit": "off", "unchanged": false, "filters": true})
     );
 }
 
@@ -510,4 +510,37 @@ fn a_daemon_cuts_whatever_its_environment_says() {
     let text = long(&mcp);
 
     assert!(text.contains("characters left out"), "{text}");
+}
+
+#[test]
+fn the_filter_switch_is_on_until_the_user_turns_it_off_and_is_kept() {
+    let user = User::with_fake_agent();
+
+    let shown = user.call("tool_results.show", json!({})).unwrap();
+    assert_eq!(shown["filters"], true);
+    let off = user
+        .call("tool_results.set", json!({"filters": false}))
+        .unwrap();
+    assert_eq!(off["filters"], false);
+    let file = std::fs::read_to_string(user.path("config/flottille/tool-results.toml")).unwrap();
+    assert!(file.contains("filters = false"), "{file}");
+    assert_eq!(
+        user.call("tool_results.show", json!({})).unwrap()["filters"],
+        false
+    );
+    // Another choice keeps it.
+    let kept = user
+        .call("tool_results.set", json!({"limit": 16000}))
+        .unwrap();
+    assert_eq!(kept["filters"], false);
+    let on = user
+        .call("tool_results.set", json!({"filters": true}))
+        .unwrap();
+    assert_eq!(on["filters"], true);
+    let file = std::fs::read_to_string(user.path("config/flottille/tool-results.toml")).unwrap();
+    assert!(!file.contains("filters"), "{file}");
+    let refused = user
+        .call("tool_results.set", json!({"filters": "yes"}))
+        .unwrap_err();
+    assert_eq!(refused.0, "invalid-params");
 }

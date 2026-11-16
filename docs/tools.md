@@ -154,7 +154,7 @@ documentation, changelogs and published source, never by running one):
 
 ## Long results
 
-A tool result longer than the limit, **8,000 characters** until the user chooses another
+A tool result longer than the limit (a command's output is filtered before, "Filtered command output"), **8,000 characters** until the user chooses another
 (Settings → Agents → Long tool results, `docs/protocol.md`, "The tool results methods"), is cut at
 the source, by Flottille and without any model, whichever agent runs and whichever tool answered.
 It is the core's own, not an extension's: every agent gets it, and it needs nothing of the agent's
@@ -375,13 +375,14 @@ own while the judge thought), it is refused (`refused: X: the path changed since
 | `tasks` | `action list \| show \| add \| edit \| remove`, `name?`, `line?`, `repository?`, `serve?`, `check?`, `read_only?`, `ask_before_running?`, `ready?`, `url?`, `needs?` | The project's tasks (`docs/projects.md`, "Tasks"). `list` gives one line each: `name: line`, and where it runs, whether it keeps running, is a check, changes nothing, is judged each time it runs, when it is ready and where it answers; `show` gives one. `ready` is `{"line"}`, `{"url"}` or `{"command"}`, `url` an address or `{"command"}`, `null` removing either; a `command` line is judged as a run of it, as the task's own line is. Every agent reads them; a root writes them ("The project"): `add` takes `name` and `line` and the flags, `edit` changes what it is given (`repository: null` puts the task back at the place's top), `remove` removes it, refused while a setup step runs it. A child's write is refused, pointing it to `ask_parent`. |
 | `run` | `task` or `line` (exactly one), `repository?`, `timeout? 1..600`, `notify? "ready"`, `why?` | Runs a task (`refused: the project has no task X: list them with tasks {"action": "list"}`) or one line, in the repository's folder (the task's, or the one named) or the place's top. Its description holds a call of each form: `{"task": "test"}`, `{"task": "dev", "notify": "ready"}`, `{"line": "cargo test -p core", "repository": "api", "timeout": 120}`. With `notify: "ready"`, for a task that says when it is ready, the agent is told when it is (below); on a task that does not, or a line, it is refused with a sentence. |
 | `services` | `action list \| show \| start \| stop \| add \| edit \| remove`, `name?`, `folder?`, `line?`, `needs?`, `ready?`, `url?`, `ask_before_running?` | The services of the machine (`docs/projects.md`, "Services"), for every agent. `list` gives one line each: `- <name>: <state> in <folder>`, why it failed, its address, and what it needs that is not running; `show` gives one with its line and the last 20 lines of its output. `list` and `show` run no command: they try again only a service seen outside Flottille whose `ready` is an address. `start` starts it, what it needs first and waited for, and answers with what it started (`Nothing started: the service X runs.` when it runs); it is judged as a run of its line in its folder, which is outside the place, as any line outside the place is; each service it starts first that Flottille does not run (one seen outside Flottille included) is held when marked `ask_before_running`, and one an agent wrote has its lines judged in the caller's mode as runs in its folder (as are the `ready` and `url` commands of a service an agent wrote and starts itself); one Flottille ran when the call was judged and that stopped since refuses it, to be called again. `stop` of a service that does not run, or runs outside Flottille, is refused at once. **`stop` is held for the user every time, in every mode, Full included**: a service is shared by every project. The call is answered at once that it is held, the result comes later as a delivery, and the request names the service and the projects' tasks that need it. A root's `add`, `edit` and `remove` are judged as a write of `tasks` is, the line (and its ready's and address's commands) as a run of it in its folder; `folder`, `ready` and `url` take `null` to remove them; `remove` is refused while a service or a project's task needs it. A child's write is refused, pointing it to `ask_parent`. Its description holds `{"action": "start", "name": "mongo"}`, `{"action": "stop", "name": "mongo"}` and an `add`. |
-| `run_status` | `run?`, `action? output \| stop \| notify`, `when? "ready"`, `tail? 1..1000`, `start?` | With no `run` (and no `action`, `tail`, `start` or `when`, refused with it): the list of the agent's commands that run and those that ended and are not dismissed (the last 30), the oldest started first, one line each: id, line (and task), folder, state, how long ago it started and its last line, masked; it gives back the id an agent lost to a compaction, to read or stop its dev server. A child lists its own; a root lists its tree's (as `run.list` with `tree` does), a child's command named by its starter's id, which only the starter reads and stops. `action output` (the default): the run's state and lines of its output, the last `tail` (40 by default), or `tail` lines from line `start`. `run` may also be the id of a cut result ("Long results"), read by lines with `start`, never stopped. `action stop`: stops the run and everything in its process group, `SIGTERM`, then `SIGKILL` 5 s later, and answers once it ended; `tail` and `start` are refused with it. `action notify` with `when: "ready"`: the agent is told when a run already started is ready, as `notify` on `run` does; refused for a run of a task that says no ready. |
+| `run_status` | `run?`, `action? output \| stop \| notify`, `when? "ready"`, `tail? 1..1000`, `start?`, `raw?` | With no `run` (and no `action`, `tail`, `start` or `when`, refused with it): the list of the agent's commands that run and those that ended and are not dismissed (the last 30), the oldest started first, one line each: id, line (and task), folder, state, how long ago it started and its last line, masked; it gives back the id an agent lost to a compaction, to read or stop its dev server. A child lists its own; a root lists its tree's (as `run.list` with `tree` does), a child's command named by its starter's id, which only the starter reads and stops. `action output` (the default): the run's state and lines of its output, the last `tail` (40 by default), or `tail` lines from line `start`; the lines are the filtered ones ("Filtered command output"), their numbers too, and `raw: true` reads the lines as the command wrote them (refused with `stop`, `notify`, no `run` or a cut result's id). `run` may also be the id of a cut result ("Long results"), read by lines with `start`, never stopped. `action stop`: stops the run and everything in its process group, `SIGTERM`, then `SIGKILL` 5 s later, and answers once it ended; `tail` and `start` are refused with it. `action notify` with `when: "ready"`: the agent is told when a run already started is ready, as `notify` on `run` does; refused for a run of a task that says no ready. |
 
 Until #131 these were `commands_list`, `commands_run` (its `command` now `task`) and
 `commands_status`. For one release a call under an old name is the new tool's (`commands_list`
 is `tasks` with `action list`), and the store renamed them in the agents' fixed lists and their
 pending requests.
 
+- **The output of a command is filtered** before the agent reads it ("Filtered command output").
 - **A line that only prints a part of a file is an `fs_read`.** A `run` of exactly `sed -n <range>p
   <file>` (`5p`, `5,20p`, `5,$p`), `head [-n N] <file>`, `tail [-n N] <file>` or `cat <file>`, with
   no `task`, `timeout` or `notify`, is read from the words the splitter below makes of it. When
@@ -580,6 +581,53 @@ pending requests.
   interrupted. When a run's own process ends, what it left in its group is killed with it. The
   runs that ended go with their session, as its images do: when its root failed or ended and
   cannot be resumed, or 7 days after a root that can (`docs/protocol.md`, `agent.image`).
+
+### Filtered command output
+
+What a command writes is made for a person watching a terminal: compile progress, download lines, a
+dot per passing test, colour codes, the same warning a hundred times. Flottille runs every command
+itself, so it takes that noise out **at the source, for every agent, with nothing installed**, and
+does so lightly: a study found that a faithful filter lowered the cost without hurting the success
+and that an aggressive rewriting cost more than it saved.
+
+- **Only the output of a command an agent runs**: what `run` answers, what `run_status` reads, and
+  the end of the output a command that outlived its call is delivered with. It is filtered before
+  the cut of a long result ("Long results"). `fs_read`, `search`, `forge`, `tickets`, `web` and
+  every other tool are never filtered: what an agent reads of a file stays byte for byte what it
+  will edit. The window shows a run's output as the command wrote it.
+- **The filters are data.** One TOML file per filter in `crates/flottille-core/filters/`, built
+  into the binary, each with its own tests (`input`, `expected`, the number of lines `removed`)
+  that `cargo test` runs. A filter matches the command by its program (`program = "cargo"`, its
+  folder ignored) and its first argument (`args = ["test", "t"]`: any of them; a `+toolchain` is
+  not an argument; no `args` is every argument): words, never a shell line. The first filter that
+  matches is the command's; a command with none is given the generic filter.
+- **What a filter may do**: remove the lines that match a pattern (`drop`); remove the escapes and
+  keep only the last state of a line redrawn with `\r` (`flottille_core::ansi::strip`); leave no
+  blank line at the start and one at most in a row; replace a run of three identical lines or more
+  with the line and `(×N)`; keep the head and the tail of an output beyond `max_lines`, with a
+  line `[… N lines left out …]` where the middle was; and replace an output left empty with
+  `on_empty` (`cargo: ok`). The generic filter does the escapes, the redrawn lines, the blank lines
+  and the runs, nothing else.
+- **A line that says error, warning, failed or panicked (in any case) or holds a place
+  (`path.ext:line`) is never removed**, whatever a filter says: no pattern, no `max_lines`, no empty
+  output takes it. A run of identical such lines is the one line and its count, which loses none of
+  what it says. A test guards it for every filter. A line that only looks like one stays too: the
+  rule is wide on purpose.
+- **The first set**: `cargo` (`build`, `check`, `clippy`, `doc`: no `Compiling`, `Checking`,
+  `Downloaded`, `Finished` line, `cargo: ok` for a build with nothing else to say; `test`: no
+  progress line and no `test … ok` line, every failure, its output and the summary of each binary
+  kept), `npm install`, `pnpm install`, `yarn install`, `pytest`, `go test`, and the progress of
+  `git fetch`, `clone`, `pull` and `push` (the refs they moved stay).
+- **Nothing is lost.** When a filter removed lines, the answer ends with one line: `[N lines
+  filtered out: read the whole output with run_status {"run": "<id>", "start": 1, "raw": true}]`.
+  `raw: true` reads the run's lines as the command wrote them, up to the 64 KiB kept. The line
+  numbers of an answer without `raw` are those of the filtered lines.
+- **The switch** is `filters` in `tool-results.toml` (`docs/protocol.md`, "The tool results
+  methods"), **on unless it says `false`**; Settings → Agents → Long tool results has it as "Filter
+  command output". It is read at every call: a change applies to the next answer of every session,
+  to the lines of a run already started too. Off, an output reaches the agent as the command wrote
+  it.
+- **Not done yet**: the turns do not record `filters` in their `tuning` (#547 adds the column).
 
 ## The forge
 

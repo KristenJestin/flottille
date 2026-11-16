@@ -593,6 +593,24 @@ impl User {
             .unwrap_or_default()
     }
 
+    /// This user with the fake `cargo` (`crates/flottille-fake-cargo`) first in its `PATH`: it
+    /// prints recorded outputs and runs nothing.
+    pub fn with_fake_cargo(self) -> User {
+        std::fs::create_dir(self.path("cargo-bin")).unwrap();
+        std::os::unix::fs::symlink(fake_cargo(), self.path("cargo-bin/cargo")).unwrap();
+        let path = format!(
+            "{}:{}",
+            self.path("cargo-bin").display(),
+            self.env
+                .iter()
+                .rev()
+                .find(|(name, _)| name == "PATH")
+                .map(|(_, value)| value.clone())
+                .unwrap_or_else(|| std::env::var("PATH").unwrap_or_default())
+        );
+        self.with_env("PATH", &path)
+    }
+
     /// This user with the fake `bkt` (`crates/flottille-fake-bkt`) first in its `PATH`, its folder
     /// `bkt`: no test ever calls Bitbucket nor uses anyone's sign-in.
     pub fn with_fake_bkt(self) -> User {
@@ -1088,6 +1106,17 @@ pub fn fake_server() -> PathBuf {
     assert!(
         path.exists(),
         "{} is missing: run the tests from the workspace's root, or `cargo build -p flottille-fake-server` first",
+        path.display()
+    );
+    path
+}
+
+/// The fake `cargo`'s binary, built beside Flottille's as the fake agent is.
+pub fn fake_cargo() -> PathBuf {
+    let path = Path::new(env!("CARGO_BIN_EXE_flottille")).with_file_name("flottille-fake-cargo");
+    assert!(
+        path.exists(),
+        "{} is missing: run the tests from the workspace's root, or `cargo build -p flottille-fake-cargo` first",
         path.display()
     );
     path
