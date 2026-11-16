@@ -48,6 +48,8 @@ const SAID_AGAIN: Duration = Duration::from_secs(60);
 /// The most keys refused said in the log within `SAID_AGAIN`: a key costs a stranger nothing, so
 /// each of its dials may bring a new one. The others are counted, and the count said.
 const MOST_SAID: usize = 16;
+/// How often the addresses one machine told are written, at most: the latest told is kept.
+const LEARN_EVERY: Duration = Duration::from_secs(2);
 /// What a client's request over a link is answered, until they are served (#813).
 const NOT_SERVED: &str = "requests from another machine's clients are not served yet";
 
@@ -165,6 +167,11 @@ pub struct Remote {
     links: std::sync::atomic::AtomicU64,
     /// The keys refused lately, as the log said them.
     refused: Mutex<Refused>,
+    /// The machines whose addresses told are being written: the latest told, not written yet.
+    learning: Mutex<HashMap<[u8; 32], Option<Vec<String>>>>,
+    /// Held while the peers' file is read and written again: apart from `peers`, so that a link
+    /// coming in is not judged after a write to the disk.
+    writing: Mutex<()>,
 }
 
 /// Starts the link: the endpoint, the loop that accepts and the one that dials. A link that
@@ -224,6 +231,8 @@ impl Remote {
             told: Mutex::new(Vec::new()),
             links: Default::default(),
             refused: Mutex::new(Refused::new(Instant::now())),
+            learning: Mutex::new(HashMap::new()),
+            writing: Mutex::new(()),
         }
     }
 
@@ -460,7 +469,7 @@ impl Remote {
             .collect();
         let file = self.folder.join(PEERS_FILE);
         // Held across the read and the write: two machines telling at once lose nothing.
-        let _kept = self.peers.lock().unwrap();
+        let _writing = self.writing.lock().unwrap();
         for _ in 0..2 {
             let read = stamp(&file);
             let Ok(mut peers) = read_json::<Peers>(&file) else {
@@ -488,6 +497,37 @@ impl Remote {
             "flottille daemon: {} kept changing, the addresses told were not kept",
             file.display()
         );
+    }
+
+    /// The addresses the machine of `key` told: written by `learn`, away from the tasks that
+    /// take links, at most once every `LEARN_EVERY` for it; the latest told is the one written.
+    fn told_by(self: &Arc<Self>, key: PublicKey, addresses: Vec<String>) {
+        {
+            let mut learning = self.learning.lock().unwrap();
+            if let Some(latest) = learning.get_mut(key.as_bytes()) {
+                *latest = Some(addresses);
+                return;
+            }
+            learning.insert(*key.as_bytes(), Some(addresses));
+        }
+        let remote = self.clone();
+        tokio::spawn(async move {
+            loop {
+                let addresses = {
+                    let mut learning = remote.learning.lock().unwrap();
+                    match learning.get_mut(key.as_bytes()).and_then(Option::take) {
+                        Some(addresses) => addresses,
+                        None => {
+                            learning.remove(key.as_bytes());
+                            return;
+                        }
+                    }
+                };
+                let writing = remote.clone();
+                let _ = tokio::task::spawn_blocking(move || writing.learn(&key, &addresses)).await;
+                tokio::time::sleep(LEARN_EVERY).await;
+            }
+        });
     }
 
     /// `remote.machines`: this machine, and the others as it sees them.
@@ -568,7 +608,7 @@ async fn serve(remote: Arc<Remote>, link: Link, name: String, generation: u64) {
     while let Some(received) = link.next().await {
         match received.message() {
             Message::Machine(MachineMessage::Addresses(addresses)) => {
-                remote.learn(&link.peer(), addresses);
+                remote.told_by(link.peer(), addresses.clone());
                 received.answer(Ok(json!({})));
             }
             Message::Client(_) => received.answer(Err(NOT_SERVED.to_owned())),
@@ -945,5 +985,23 @@ mod tests {
         );
         assert!(remote.refused_lines(None, later).is_empty());
         assert_eq!(remote.refused_lines(Some(&keys[0]), later).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_machine_telling_again_and_again_has_its_latest_written_every_2_s() {
+        let dir = tempfile::tempdir().unwrap();
+        let (remote, keys) = remote_in(dir.path(), 1);
+        let remote = Arc::new(remote);
+        for at in 0..50 {
+            remote.told_by(keys[0], vec![format!("192.0.2.{at}:4000")]);
+        }
+        // The first is written at once; those told after it wait, the latest kept.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(told(dir.path(), &keys[0]), ["192.0.2.0:4000"]);
+        tokio::time::sleep(LEARN_EVERY).await;
+        assert_eq!(told(dir.path(), &keys[0]), ["192.0.2.49:4000"]);
+        // Once written, nothing waits.
+        tokio::time::sleep(LEARN_EVERY).await;
+        assert!(remote.learning.lock().unwrap().is_empty());
     }
 }
