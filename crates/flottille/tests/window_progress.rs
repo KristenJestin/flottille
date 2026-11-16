@@ -896,3 +896,29 @@ fn a_milestone_that_goes_leaves_nothing_kept_of_it(cx: &mut TestAppContext) {
 
     assert_eq!(page.read_with(cx, |page, _| page.kept()), (2, 2));
 }
+
+#[gpui_kit::test]
+fn the_project_s_row_opens_its_page_from_its_progress(cx: &mut TestAppContext) {
+    let user = user();
+    on_github(&user);
+    let (shell, _page, cx) = open_progress(&user, cx);
+    assert_eq!(
+        shell.read_with(cx, |s, _| s.selected().cloned()),
+        Some(Selection::Progress("app".to_owned()))
+    );
+
+    // The click runs in the project's own node, which is also the one that holds the Progress
+    // row's mark: selecting must not update it twice.
+    cx.update(|window, cx| window.click("project-app", cx));
+    settle(cx);
+
+    assert_eq!(
+        shell.read_with(cx, |s, _| s.selected().cloned()),
+        Some(Selection::Project("app".to_owned()))
+    );
+    assert!(shell.read_with(cx, |s, cx| s.main().read(cx).progress_page().is_none()));
+    assert_eq!(
+        cx.update(|window, _| window.find("tree-progress-app").selected()),
+        Some(false)
+    );
+}
