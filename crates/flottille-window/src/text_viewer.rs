@@ -12,12 +12,16 @@ use gpui_kit::{
 
 /// The lines drawn: a text of a million lines is not a million rows. What follows is counted.
 const MAX_LINES: usize = 2_000;
+/// The bytes drawn, whatever the lines: a single line of a mebibyte is not laid out whole.
+const MAX_BYTES: usize = 256 * 1024;
 
 pub struct TextViewer {
     name: String,
     lines: Vec<SharedString>,
     /// How many lines the text has, those not drawn included.
     total: usize,
+    /// Lines were cut at [`MAX_BYTES`].
+    cut: bool,
     bytes: usize,
     open: bool,
 }
@@ -28,6 +32,7 @@ impl TextViewer {
             name: String::new(),
             lines: Vec::new(),
             total: 0,
+            cut: false,
             bytes: 0,
             open: false,
         }
@@ -45,11 +50,25 @@ impl TextViewer {
         self.bytes = text.len();
         self.total = text.lines().count();
         // An empty line keeps its height: a row with no text has none.
-        self.lines = text
-            .lines()
-            .take(MAX_LINES)
-            .map(|line| SharedString::from(if line.is_empty() { " " } else { line }.to_owned()))
-            .collect();
+        let mut room = MAX_BYTES;
+        self.cut = false;
+        self.lines = Vec::new();
+        for line in text.lines().take(MAX_LINES) {
+            if room == 0 {
+                self.cut = true;
+                break;
+            }
+            let mut end = line.len().min(room);
+            while !line.is_char_boundary(end) {
+                end -= 1;
+            }
+            self.cut |= end < line.len();
+            room -= end;
+            let line = &line[..end];
+            self.lines.push(SharedString::from(
+                if line.is_empty() { " " } else { line }.to_owned(),
+            ));
+        }
     }
 
     /// The modal's sentence: how long the text is, and what of it is not drawn.
@@ -60,7 +79,12 @@ impl TextViewer {
             if self.total == 1 { "" } else { "s" },
             crate::tokens::size(self.bytes)
         );
-        if self.total > self.lines.len() {
+        if self.cut {
+            sentence.push_str(&format!(
+                " · the first {} are shown",
+                crate::tokens::size(MAX_BYTES)
+            ));
+        } else if self.total > self.lines.len() {
             sentence.push_str(&format!(" · the first {} are shown", self.lines.len()));
         }
         sentence
