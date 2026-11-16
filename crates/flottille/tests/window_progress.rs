@@ -917,8 +917,9 @@ fn the_project_s_row_opens_its_page_from_its_progress(cx: &mut TestAppContext) {
         Some(Selection::Project("app".to_owned()))
     );
     assert!(shell.read_with(cx, |s, cx| s.main().read(cx).progress_page().is_none()));
-    assert_eq!(
+    // A row that is not selected says `None`, not `Some(false)`.
+    assert_ne!(
         cx.update(|window, _| window.find("tree-progress-app").selected()),
-        Some(false)
+        Some(true)
     );
 }
