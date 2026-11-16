@@ -312,14 +312,17 @@ its sign-in check only, never for anything else, and nothing it prints of the ac
 
 #### `project.set_settings`
 
-`{"name", "repositories": [{"path", "forge", "base", "depends_on"}], "tracker", "branch_prefix"?}`. Writes each listed
+`{"name", "repositories": [{"path", "forge", "base", "depends_on"}], "tracker", "branch_prefix"?, "windows"?}`. Writes each listed
 repository's `forge` (removed when `null`; a repository left out is unchanged), its `base` (the base
 branches in order of preference, one at least) and its `depends_on` (the paths of the repositories it
 depends on, `[]` for none) when they are given, and the project's `[tracker]` (removed when `null`
 or left out) in its file, where they stand, what is around them kept, and answers as
 `project.settings` (which also gives the project's `branch_prefix`). `branch_prefix` is written when
 given, `""` included (no prefix: the branch of a workspace is its name), and kept when left out;
-a space in it is refused (`invalid-config`). A `base` or a `depends_on` left out keeps the file's: a client that knows only
+a space in it is refused (`invalid-config`). `windows` (`true` or `false`) is whether the
+project's runs may open windows on the user's screen (`docs/tools.md`): `true` writes `windows =
+true`, `false` removes the key, left out keeps it; `project.settings` gives it. No tool of an agent
+gives it. A `base` or a `depends_on` left out keeps the file's: a client that knows only
 the forge is not affected. A change of base is used by the workspaces created after it; the ones
 already made keep theirs. `refused`, with nothing written, when a path is not one of the project's,
 a forge or the tracker cannot be used (naming its key), a forge is not where its repository's

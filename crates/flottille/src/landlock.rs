@@ -4,6 +4,12 @@
 //! cover every folder but the runtime ones: each entry of `/`, and of each folder on the way to
 //! one of them, but that way itself. Applied in the child before it runs its program, never to
 //! the daemon.
+//!
+//! X11's display is kept out by its abstract name, unless the program is given it (a
+//! [`crate::display::Folder`] made for X11): an X11 client reads the keys typed in other windows.
+//! The sixth ABI's scope keeps out every abstract socket made outside the program. Its sockets by
+//! their path under `/tmp/.X11-unix` stay open: a rule on `/tmp` would take from a program what
+//! it makes there, and #976 masks the folder instead (`docs/vault.md`, "The gaps").
 
 use std::ffi::{CStr, CString};
 use std::io;
@@ -21,6 +27,8 @@ const TRUNCATE: u64 = 1 << 14;
 const IOCTL_DEV: u64 = 1 << 15;
 /// Connecting to a socket by its path: only from the ninth ABI on.
 const RESOLVE_UNIX: u64 = 1 << 16;
+/// Abstract sockets made outside the program's domain are out of its reach: from the sixth ABI.
+const SCOPE_ABSTRACT_UNIX_SOCKET: u64 = 1 << 0;
 /// The rights a rule on a file, not a folder, may hold.
 const FILE_RIGHTS: u64 = EXECUTE | WRITE_FILE | READ_FILE | TRUNCATE | IOCTL_DEV | RESOLVE_UNIX;
 
@@ -76,6 +84,17 @@ fn runtime_folders() -> Vec<PathBuf> {
         .collect();
     folders.dedup();
     folders
+}
+
+/// X11's socket folder: `/tmp/.X11-unix`, or the tests' own (`FLOTTILLE_X11_SOCKETS`). The one
+/// place it is named, for the private mount namespace (#976) to mask.
+#[allow(dead_code)]
+fn x11_folder() -> Option<PathBuf> {
+    std::env::var_os("FLOTTILLE_X11_SOCKETS")
+        .map_or_else(|| PathBuf::from("/tmp/.X11-unix"), PathBuf::from)
+        .canonicalize()
+        .ok()
+        .filter(|folder| folder != Path::new("/"))
 }
 
 /// Every path under `dir` but the `denied` folders: an entry on the way to one of them is
@@ -147,7 +166,13 @@ pub fn confined_with<'a>(
             .collect();
         denied.push(socket.to_owned());
     }
-    if abi < 2 || denied.is_empty() {
+    // X11's abstract sockets too, unless given, where the kernel has the scope.
+    let given_x11 = open.is_some_and(crate::display::Folder::x11);
+    let scoped = match !given_x11 && abi >= 6 {
+        true => SCOPE_ABSTRACT_UNIX_SOCKET,
+        false => 0,
+    };
+    if abi < 2 || (denied.is_empty() && scoped == 0) {
         return command;
     }
     let mut paths = Vec::new();
@@ -159,7 +184,7 @@ pub fn confined_with<'a>(
     });
     // SAFETY: the closure allocates nothing and only makes system calls (open, fstat,
     // landlock_*, prctl, close), all async-signal-safe.
-    unsafe { command.pre_exec(move || restrict(rights, &paths, open.as_deref(), &agent)) }
+    unsafe { command.pre_exec(move || restrict(rights, &paths, open.as_deref(), scoped, &agent)) }
 }
 
 /// The rules of the user's SSH agent's socket in a command's ruleset.
@@ -172,19 +197,25 @@ struct Agent {
 }
 
 /// In the child: every path a rule with every right, `open` one without `REFER`, the `agent`'s
-/// rules, then the child bound to them.
-fn restrict(rights: u64, paths: &[CString], open: Option<&CStr>, agent: &Agent) -> io::Result<()> {
-    let handled = [rights];
-    // SAFETY: the attribute is a `u64` of the size given, which the kernel reads as the first
-    // field of its own, the rest zero.
-    let ruleset = unsafe {
-        libc::syscall(
-            libc::SYS_landlock_create_ruleset,
-            handled.as_ptr(),
-            std::mem::size_of_val(&handled),
-            0,
-        )
+/// rules, then the child bound to them and to the `scoped` scopes.
+fn restrict(
+    rights: u64,
+    paths: &[CString],
+    open: Option<&CStr>,
+    scoped: u64,
+    agent: &Agent,
+) -> io::Result<()> {
+    // The attribute's fields: the handled rights of files, of the network (none), the scopes.
+    let handled = [rights, 0, scoped];
+    // A kernel older than the scopes refuses a longer attribute: the rights' field alone then.
+    let size = match scoped {
+        0 => std::mem::size_of::<u64>(),
+        _ => std::mem::size_of_val(&handled),
     };
+    // SAFETY: the attribute is `u64` fields of the size given, which the kernel reads as the
+    // first fields of its own, the rest zero.
+    let ruleset =
+        unsafe { libc::syscall(libc::SYS_landlock_create_ruleset, handled.as_ptr(), size, 0) };
     if ruleset < 0 {
         return Err(io::Error::last_os_error());
     }
