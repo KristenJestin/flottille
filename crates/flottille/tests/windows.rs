@@ -9,8 +9,8 @@ mod common;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use common::User;
 use common::mcp::{Answer, Mcp, server_of};
+use common::{User, landlock_abi};
 use serde_json::{Value, json};
 
 /// A user whose daemon runs in a desktop session: a Wayland socket in its runtime folder, an X11
@@ -20,6 +20,7 @@ fn user_with_display() -> User {
         .with_allowing_judge()
         .with_env("WAYLAND_DISPLAY", "wayland-0")
         .with_env("DISPLAY", ":7")
+        .with_env("XAUTHORITY", "/home/someone/.Xauthority")
 }
 
 /// The session's Wayland socket, in the user's runtime folder, with the session bus's socket
@@ -109,7 +110,8 @@ fn seen(mcp: &Mcp, place: &Path) -> Value {
         place.join("seen.py"),
         "import json, os\n\
          folder = os.environ.get('XDG_RUNTIME_DIR')\n\
-         names = ['XDG_RUNTIME_DIR', 'WAYLAND_DISPLAY', 'DISPLAY', 'DBUS_SESSION_BUS_ADDRESS']\n\
+         names = ['XDG_RUNTIME_DIR', 'WAYLAND_DISPLAY', 'DISPLAY', 'XAUTHORITY',\n\
+             'DBUS_SESSION_BUS_ADDRESS']\n\
          print(json.dumps({'env': {name: os.environ.get(name) for name in names},\n\
              'files': sorted(os.listdir(folder)) if folder else None}))\n",
     )
@@ -121,6 +123,60 @@ fn seen(mcp: &Mcp, place: &Path) -> Value {
         .find(|line| line.trim_start().starts_with("{\"env\""))
         .unwrap_or_else(|| panic!("{ran}"));
     serde_json::from_str(line.trim()).unwrap()
+}
+
+/// Whether a run reaches a listening socket: by its path, under the user's X11 socket folder
+/// (the test's own), and by an abstract name; for each, `connected` or the error.
+fn reached(mcp: &Mcp, place: &Path, path: &Path, abstract_name: &str) -> Value {
+    std::fs::write(
+        place.join("reach.py"),
+        format!(
+            "import json, socket\n\
+             out = {{}}\n\
+             for name, address in [('path', {path:?}), ('abstract', '\\0' + {abstract_name:?})]:\n\
+             \x20   s = socket.socket(socket.AF_UNIX)\n\
+             \x20   try:\n\
+             \x20       s.connect(address)\n\
+             \x20       out[name] = 'connected'\n\
+             \x20   except OSError as e:\n\
+             \x20       out[name] = type(e).__name__\n\
+             print(json.dumps({{'reached': out}}))\n",
+            path = path.to_str().unwrap(),
+        ),
+    )
+    .unwrap();
+    let ran = done(mcp.call("run", json!({"line": "python3 reach.py"})));
+    let line = ran
+        .lines()
+        .find(|line| line.trim_start().starts_with("{\"reached\""))
+        .unwrap_or_else(|| panic!("{ran}"));
+    serde_json::from_str::<Value>(line.trim()).unwrap()["reached"].clone()
+}
+
+/// An X11 server of the session, as the test fakes it: its socket `X7` in the user's X11 socket
+/// folder (the test's own, `FLOTTILLE_X11_SOCKETS`), and an abstract socket of a name of its
+/// own (Landlock's scope denies every abstract socket made outside the run alike).
+fn x11_server(
+    user: &User,
+) -> (
+    std::os::unix::net::UnixListener,
+    std::os::unix::net::UnixListener,
+    PathBuf,
+    String,
+) {
+    use std::os::linux::net::SocketAddrExt;
+    let folder = user.path("x11");
+    std::fs::create_dir_all(&folder).unwrap();
+    let path = folder.join("X7");
+    let by_path = std::os::unix::net::UnixListener::bind(&path).unwrap();
+    // The user's temporary folder has a name of its own: so has the socket.
+    let unique = format!(
+        "flottille-test-x11-{}",
+        user.path("").file_name().unwrap().to_string_lossy()
+    );
+    let address = std::os::unix::net::SocketAddr::from_abstract_name(unique.as_bytes()).unwrap();
+    let by_name = std::os::unix::net::UnixListener::bind_addr(&address).unwrap();
+    (by_path, by_name, path, unique)
 }
 
 fn setting(user: &User) -> Value {
@@ -154,6 +210,43 @@ fn a_run_of_a_project_that_allows_windows_gets_the_display_alone() {
         Value::Null,
         "{seen}"
     );
+
+    // Its folder alone: the real runtime folder and the other display folders are out of reach.
+    if landlock_abi() < 2 {
+        eprintln!(
+            "skipped: this kernel's Landlock (ABI {}) is not used",
+            landlock_abi()
+        );
+        return;
+    }
+    for kept in [user.path("runtime"), display] {
+        let listed = listed(&mcp, &place, &kept);
+        assert_eq!(listed, "PermissionError", "{}: {listed}", kept.display());
+    }
+}
+
+/// Whether a run lists `folder`: `listed` or the error.
+fn listed(mcp: &Mcp, place: &Path, folder: &Path) -> String {
+    std::fs::write(
+        place.join("list.py"),
+        format!(
+            "import os\n\
+             try:\n\
+             \x20   os.listdir({folder:?})\n\
+             \x20   print('[listed]')\n\
+             except OSError as e:\n\
+             \x20   print('[' + type(e).__name__ + ']')\n",
+            folder = folder.to_str().unwrap(),
+        ),
+    )
+    .unwrap();
+    let ran = done(mcp.call("run", json!({"line": "python3 list.py"})));
+    let line = ran
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with('[') && line.ends_with(']'))
+        .unwrap_or_else(|| panic!("{ran}"));
+    line.trim_matches(['[', ']']).to_owned()
 }
 
 #[test]
@@ -182,6 +275,79 @@ fn a_run_of_a_project_that_does_not_gets_no_display() {
         assert_eq!(seen["files"], Value::Null, "{seen}");
     }
     assert_eq!(setting(&user), json!(false));
+}
+
+#[test]
+fn a_run_gets_no_xauthority() {
+    let user = user_with_display();
+    let _wayland = wayland_socket(&user);
+    let (_, mcp, place) = session(&user);
+
+    // Neither without windows nor with Wayland's.
+    for state in [None, Some("on")] {
+        if let Some(state) = state {
+            windows(&user, state);
+        }
+        let seen = seen(&mcp, &place);
+        assert_eq!(seen["env"]["XAUTHORITY"], Value::Null, "{state:?}: {seen}");
+    }
+}
+
+#[test]
+fn a_run_without_windows_cannot_reach_x11() {
+    let user = user_with_display();
+    let _wayland = wayland_socket(&user);
+    let (_listening, _named, socket, name) = x11_server(&user);
+    let (_, mcp, place) = session(&user);
+
+    // Off, and on with Wayland: X11 is the session's only without Wayland.
+    for state in [None, Some("on")] {
+        if let Some(state) = state {
+            windows(&user, state);
+        }
+        let reached = reached(&mcp, &place, &socket, &name);
+        // Connecting by a path is Landlock's from its ninth ABI, its abstract scope from the sixth.
+        match landlock_abi() {
+            abi if abi >= 9 => {
+                assert_eq!(reached["path"], "PermissionError", "{state:?}: {reached}");
+            }
+            abi => {
+                eprintln!("skipped: this kernel's Landlock (ABI {abi}) cannot deny a socket's path")
+            }
+        }
+        match landlock_abi() {
+            abi if abi >= 6 => {
+                assert_eq!(
+                    reached["abstract"], "PermissionError",
+                    "{state:?}: {reached}"
+                );
+            }
+            abi => eprintln!("skipped: this kernel's Landlock (ABI {abi}) has no abstract scope"),
+        }
+    }
+}
+
+#[test]
+fn a_run_given_x11_reaches_it() {
+    // A session without Wayland: a run of a project that allows windows gets X11's display.
+    let user = User::with_fake_agent()
+        .with_allowing_judge()
+        .with_env("DISPLAY", ":7")
+        .with_env("XAUTHORITY", "/home/someone/.Xauthority");
+    let (_listening, _named, socket, name) = x11_server(&user);
+    let (_, mcp, place) = session(&user);
+    windows(&user, "on");
+
+    let seen = seen(&mcp, &place);
+    let reached = reached(&mcp, &place, &socket, &name);
+
+    assert_eq!(seen["env"]["DISPLAY"], ":7", "{seen}");
+    assert_eq!(
+        seen["env"]["XAUTHORITY"], "/home/someone/.Xauthority",
+        "{seen}"
+    );
+    assert_eq!(reached["path"], "connected", "{reached}");
+    assert_eq!(reached["abstract"], "connected", "{reached}");
 }
 
 #[test]
