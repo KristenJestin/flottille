@@ -611,7 +611,12 @@ pending requests.
   marks their runs interrupted (`docs/projects.md`, "Services"): of the same boot only, a
   session and group whole while their leader is the process it started, else only the processes
   of that session that carry the run's marker, `FLOTTILLE_RUN=<run id>`, in their environment;
-  never a pid another program took since. A daemon that stops stops its runs,
+  never a pid another program took since. A long-lived helper that a run starts and that leaves
+  its session (a `tmux` server started detached makes a session of its own) is neither ended
+  with the run nor by this cleanup, and what it starts later, long after the run ended and at
+  anyone's request, still carries the run's marker: tmux hands the environment it started with
+  to every window it opens. The marker alone never makes a process the run's: only one in the
+  run's own session is ended. A daemon that stops stops its runs,
   interrupted. When a run's own process ends, what it left in its group is killed with it. The
   runs that ended go with their session, as its images do: when its root failed or ended and
   cannot be resumed, or 7 days after a root that can (`docs/protocol.md`, `agent.image`).
