@@ -1836,6 +1836,54 @@ fn a_connection_server_gets_no_session_bus_address() {
 }
 
 #[test]
+fn an_ordinary_connection_server_gets_no_display() {
+    let user = User::with_fake_agent()
+        .with_env("WAYLAND_DISPLAY", "wayland-test")
+        .with_env("DISPLAY", ":7")
+        .with_env("XAUTHORITY", "/home/someone/.Xauthority");
+    user.fake_script(json!({"turns": [{"when": "", "do": [{"say": "ready"}]}]}));
+    project(&user, "app");
+    let mut script = almanac();
+    script["answers"] = json!({"search": {"env": "WAYLAND_DISPLAY"},
+        "write": {"env": "DISPLAY"}, "open": {"env": "XAUTHORITY"}});
+    turn_on(&user);
+    declare(&user, "almanac", &script, json!({}));
+    user.call("connection.review", json!({"name": "almanac"}))
+        .unwrap();
+    user.call(
+        "connection.accept",
+        json!({"name": "almanac",
+            "actions": {"search": "passes", "write": "passes", "open": "passes"}}),
+    )
+    .unwrap();
+    let (_, mcp) = session(&user, "app");
+
+    for (action, arguments) in [
+        ("search", json!({"query": "a"})),
+        ("write", json!({"text": "a"})),
+        ("open", json!({})),
+    ] {
+        done(mcp.call(
+            "conn_almanac",
+            json!({"action": action, "arguments": arguments}),
+        ));
+    }
+
+    let answered: Vec<Value> = logged(&user, "almanac", "call")
+        .iter()
+        .map(|call| call["answered"].clone())
+        .collect();
+    assert_eq!(
+        answered,
+        [
+            "WAYLAND_DISPLAY is not set",
+            "DISPLAY is not set",
+            "XAUTHORITY is not set"
+        ],
+    );
+}
+
+#[test]
 fn a_vault_entry_tied_to_one_project_is_refused_for_a_connection() {
     let user = user();
     project(&user, "app");
