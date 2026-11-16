@@ -772,11 +772,22 @@ fn a_stop_refused_for_a_task_started_since_the_list_asks_first(cx: &mut TestAppC
     // The task starts after the list was read, and the window has not read it again: the
     // daemon refuses the stop, which is asked in the confirmation instead.
     running_api(&user, &["db"]);
+    // Waited for on the daemon's side only: the window is not polled meanwhile.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while user.call("service.show", json!({"name": "db"})).unwrap()["needed_now"]
+        .as_array()
+        .is_none_or(Vec::is_empty)
+    {
+        assert!(Instant::now() < deadline, "the api never needed db");
+        std::thread::sleep(Duration::from_millis(50));
+    }
     click("service-stop-db", cx);
+    // Found as soon as it opens; seen once its motion ended.
     until(&shell, cx, "the confirmation opens", |cx| {
-        has("service-stopping", cx)
+        label_of("service-stopping-needed", cx).is_some()
     });
     settle(cx);
+    assert!(has("service-stopping", cx));
     assert_eq!(
         label_of("service-stopping-needed", cx).as_deref(),
         Some("app's api needs it and is running: it goes on without it.")
