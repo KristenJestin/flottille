@@ -50,8 +50,13 @@ pub fn held_reason(args: &Value) -> String {
 }
 
 /// A `connections` call checked before the gate is asked: what a write changes, or its refusal.
-pub fn family_says(daemon: &Daemon, root: bool, args: &Value) -> Result<Vec<String>, Outcome> {
-    connections::requests::says(daemon, root, args)
+pub fn family_says(
+    daemon: &Daemon,
+    root: bool,
+    project: &str,
+    args: &Value,
+) -> Result<Vec<String>, Outcome> {
+    connections::requests::says(daemon, root, project, args)
 }
 
 /// Why the user's Accept of a held `connections` call waits: an entry it names is not right for

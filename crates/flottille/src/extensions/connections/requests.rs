@@ -493,13 +493,22 @@ fn host_of_reach(declaration: &Declaration) -> Option<String> {
 /// entry with no address) and the connection's (none for a command, whose environment holds it),
 /// which differ for every variable of a command; the one project an entry is alone to; whether a
 /// URL's secret line waits for the user to bind its entry to the connection's host (`to_bind`),
-/// and the connection's origin, the address an entry made or bound for it is given.
-fn secrets(daemon: &Daemon, declaration: &Declaration, before: Option<&Declaration>) -> Value {
+/// whether the user may share it from the request (`share`: the asking agent's own project's
+/// alone), and the connection's origin, the address an entry made or bound for it is given. An
+/// entry another use holds, or another project's, is offered neither: the request cannot take
+/// it.
+fn secrets(
+    daemon: &Daemon,
+    declaration: &Declaration,
+    before: Option<&Declaration>,
+    asker: Option<&str>,
+) -> Value {
     let entries = daemon
         .read(|store| store.vault_entries())
         .unwrap_or_default();
     let host = host_of_reach(declaration);
     let origin = origin_of(declaration);
+    let this = flottille_core::vault::connection(&declaration.name);
     let mut secrets = Vec::new();
     let lines = declaration
         .env
@@ -519,11 +528,22 @@ fn secrets(daemon: &Daemon, declaration: &Declaration, before: Option<&Declarati
             .and_then(|known| known.url.as_deref())
             .and_then(host_of);
         let differs = host.is_none() || entry_host != host;
-        let to_bind = secret
-            .is_some_and(|secret| address_problem(&entries, before, declaration, secret).is_some());
+        let takes = known.is_some_and(|known| {
+            known.usable_for(&this).is_ok()
+                && known
+                    .project
+                    .as_deref()
+                    .is_none_or(|own| Some(own) == asker)
+        });
+        let to_bind = takes
+            && secret.is_some_and(|secret| {
+                address_problem(&entries, before, declaration, secret).is_some()
+            });
+        let share = takes && known.is_some_and(|known| known.project.is_some());
         secrets.push(json!({"key": key, "name": name, "entry": entry,
-            "entry_host": entry_host, "host": host, "differs": differs,
-            "missing": known.is_none(), "project": known.and_then(|known| known.project.clone()),
+            "entry_host": entry_host, "entry_url": known.and_then(|known| known.url.clone()),
+            "host": host, "differs": differs, "missing": known.is_none(),
+            "project": known.and_then(|known| known.project.clone()), "share": share,
             "to_bind": to_bind, "origin": origin}));
     }
     Value::Array(secrets)
@@ -742,8 +762,14 @@ fn words(daemon: &Daemon, proposal: &Proposal) -> Vec<String> {
 }
 
 /// A call checked before the gate is asked: what a write changes, in words, or the tool's
-/// refusal. A child reads the connections and changes none.
-pub fn says(daemon: &Daemon, root: bool, args: &Value) -> Result<Vec<String>, Outcome> {
+/// refusal. A child reads the connections and changes none; an agent of `project` names no entry
+/// another project holds alone.
+pub fn says(
+    daemon: &Daemon,
+    root: bool,
+    project: &str,
+    args: &Value,
+) -> Result<Vec<String>, Outcome> {
     let action = args["action"].as_str().unwrap_or_default();
     if !ACTIONS.contains(&action) {
         return Err(refused(format!(
@@ -761,7 +787,9 @@ pub fn says(daemon: &Daemon, root: bool, args: &Value) -> Result<Vec<String>, Ou
         return Ok(Vec::new());
     }
     let proposal = proposal(daemon, args).map_err(refused)?;
-    // An entry another use holds is no entry for a connection: the agent named the wrong one.
+    // An entry another use holds is no entry for a connection: the agent named the wrong one. One
+    // another project holds alone is not this agent's to offer: the user would be asked to give
+    // a project's secret to a connection another project's agent chose.
     if let Some(after) = proposal
         .after
         .as_ref()
@@ -774,6 +802,12 @@ pub fn says(daemon: &Daemon, root: bool, args: &Value) -> Result<Vec<String>, Ou
         for name in after.entries() {
             if let Some(entry) = entries.iter().find(|entry| &entry.name == name) {
                 entry.usable_for(&this).map_err(refused)?;
+                if entry.project.as_deref().is_some_and(|own| own != project) {
+                    return Err(refused(format!(
+                        "the vault entry {name} belongs to one project, not this one: name an \
+                         entry this project sees, or ask for a new one (vault, action ask)"
+                    )));
+                }
             }
         }
     }
@@ -1116,19 +1150,9 @@ pub(super) fn proposed(daemon: &Daemon, params: &Value) -> Result<Value, Failure
             );
         }
     };
-    let place = daemon
-        .read(|store| store.agent(&request.agent))
-        .ok()
-        .flatten()
-        .and_then(|agent| mcp::grant_of(daemon, &agent).ok())
-        .map(|grant| grant.place);
-    let current = place.is_some_and(|place| {
-        let now: Vec<String> = words(daemon, &proposal)
-            .iter()
-            .map(|said| mcp::masked(said, &place))
-            .collect();
-        crate::actions::compared(&now) == crate::actions::compared(&request.says)
-    });
+    let place = place_of(daemon, &request);
+    let current = current(daemon, &request, &proposal, place.as_ref());
+    let asker = place.as_ref().map(|place| place.project.as_str());
     let changed = match (&proposal.before, &proposal.after) {
         (Some(before), Some(after)) => changed(before, after),
         _ => Vec::new(),
@@ -1142,20 +1166,49 @@ pub(super) fn proposed(daemon: &Daemon, params: &Value) -> Result<Value, Failure
         "changed": changed,
         "settings": proposal.settings,
         "secrets": proposal.after.as_ref().or(proposal.before.as_ref())
-            .map_or(json!([]), |shown| secrets(daemon, shown, proposal.before.as_ref())),
+            .map_or(json!([]), |shown| secrets(daemon, shown, proposal.before.as_ref(), asker)),
         "current": current,
         "why": null,
         "waits": waits(daemon, args),
     }))
 }
 
-/// `connection.share_entry` and `connection.bind_entry {number, entry}`: the user's **Share with
+/// Where the agent that made `request` runs, while it is there.
+fn place_of(daemon: &Daemon, request: &approval::Request) -> Option<crate::place::Place> {
+    daemon
+        .read(|store| store.agent(&request.agent))
+        .ok()
+        .flatten()
+        .and_then(|agent| mcp::grant_of(daemon, &agent).ok())
+        .map(|grant| grant.place)
+}
+
+/// Whether `proposal` still says what `request` said when the agent asked: one that does not
+/// would not be done.
+fn current(
+    daemon: &Daemon,
+    request: &approval::Request,
+    proposal: &Proposal,
+    place: Option<&crate::place::Place>,
+) -> bool {
+    place.is_some_and(|place| {
+        let now: Vec<String> = words(daemon, proposal)
+            .iter()
+            .map(|said| mcp::masked(said, place))
+            .collect();
+        crate::actions::compared(&now) == crate::actions::compared(&request.says)
+    })
+}
+
+/// `connection.share_entry {number, entry}` and `connection.bind_entry {number, entry, host}`: the user's **Share with
 /// every project** and **Bind it to <host>** on an agent's request (its dialog, behind the
 /// window's confirmation): the vault entry the request names is made every project's, or bound
-/// to the address the request's own connection sends it to. Only an entry the request names, only
-/// while it waits for the user, and only to the origin the daemon reads in its declaration: no
-/// word of the window's or of an agent's chooses where a secret goes, and agents reach no
-/// method of the user's door.
+/// to the address the request's own connection sends it to. Only an entry the request names and
+/// can take (not another use's, not another project's than the asking agent's), only while it
+/// waits for the user and still says what the agent asked, and only to the origin the daemon
+/// reads in its declaration, whose host is the one the confirmation showed (`host`): no word of
+/// the window's or of an agent's chooses where a secret goes, and agents reach no method of the
+/// user's door.
 pub(super) fn widened(daemon: &Daemon, method: &str, params: &Value) -> Result<Value, Failure> {
     let number = params["number"]
         .as_u64()
@@ -1190,11 +1243,34 @@ pub(super) fn widened(daemon: &Daemon, method: &str, params: &Value) -> Result<V
                 "request #{number} names no vault entry {entry}: nothing was changed"
             ))
         })?;
+    let place = place_of(daemon, &request);
+    if !current(daemon, &request, &proposal, place.as_ref()) {
+        return Err(Failure::refused(format!(
+            "request #{number} changed since the agent asked: it would not be done, and nothing \
+             was changed; refuse it, and let the agent ask again"
+        )));
+    }
+    let known = daemon
+        .read(|store| store.vault_entries())?
+        .into_iter()
+        .find(|known| known.name == entry)
+        .ok_or_else(|| Failure::new("not-found", format!("the vault has no entry {entry}")))?;
+    known
+        .usable_for(&flottille_core::vault::connection(&after.name))
+        .map_err(|why| Failure::refused(format!("{why}: nothing was changed")))?;
+    let asker = place.as_ref().map(|place| place.project.as_str());
+    if let Some(own) = known.project.as_deref().filter(|own| Some(*own) != asker) {
+        return Err(Failure::refused(format!(
+            "the vault entry {entry} is {own}'s alone, and the agent asking is not of {own}: \
+             nothing was changed"
+        )));
+    }
     match method {
         "connection.share_entry" => crate::vault::shared(daemon, entry),
         _ => {
             // Only a URL's secret line sends an entry to a host.
-            let origin = origin_of(after)
+            let (origin, host) = origin_of(after)
+                .zip(host_of_reach(after))
                 .filter(|_| after.secrets.iter().any(|secret| secret.entry == entry))
                 .ok_or_else(|| {
                     Failure::refused(format!(
@@ -1203,6 +1279,15 @@ pub(super) fn widened(daemon: &Daemon, method: &str, params: &Value) -> Result<V
                         after.name
                     ))
                 })?;
+            // The host the user confirmed, not one read since: a request moved meanwhile binds
+            // nothing.
+            if params["host"].as_str() != Some(host.as_str()) {
+                return Err(Failure::refused(format!(
+                    "the connection {} sends the vault entry {entry} to {host}, not to the host \
+                     confirmed: nothing was changed",
+                    after.name
+                )));
+            }
             crate::vault::bound_to(daemon, entry, &origin)
         }
     }
