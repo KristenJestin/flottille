@@ -1737,6 +1737,52 @@ fn bitbucket_rerun_runs_the_pull_request_pipeline_again_when_it_failed() {
 }
 
 #[test]
+fn bitbucket_rerun_runs_a_stopped_pipeline_again() {
+    let (user, mcp, rerun) = rerun_setup(json!([
+        pull_request_pipeline(8, "app/login", "STOPPED"),
+        branch_pipeline(7, "app/login", "SUCCESSFUL")
+    ]));
+
+    let answer = write(&user, &mcp, rerun);
+
+    assert!(!answer.error, "{}", answer.text);
+    assert!(
+        answer.text.contains("after #8 was stopped"),
+        "{}",
+        answer.text
+    );
+    let calls = bkt_calls(&user);
+    assert!(
+        calls.contains(
+            &"pipeline run --context cloud --workspace acme --repo app --ref app/login \
+              --selector-type pull-requests --selector-pattern **"
+                .to_owned()
+        ),
+        "{calls:?}"
+    );
+    assert_eq!(bkt_calls_starting(&user, "pipeline run"), 1);
+}
+
+#[test]
+fn bitbucket_rerun_runs_a_stopping_pipeline_again() {
+    // The merge refusal of a lone stopping build says to run it again: the rerun agrees it was
+    // stopped, whatever its result says (it has none yet).
+    let mut stopping = pull_request_pipeline(8, "app/login", "SUCCESSFUL");
+    stopping["state"] = json!({"name": "IN_PROGRESS", "stage": {"name": "STOPPING"}});
+    let (user, mcp, rerun) = rerun_setup(json!([stopping]));
+
+    let answer = write(&user, &mcp, rerun);
+
+    assert!(!answer.error, "{}", answer.text);
+    assert!(
+        answer.text.contains("after #8 was stopped"),
+        "{}",
+        answer.text
+    );
+    assert_eq!(bkt_calls_starting(&user, "pipeline run"), 1);
+}
+
+#[test]
 fn bitbucket_rerun_is_refused_when_nothing_of_the_branch_failed() {
     let (user, mcp, rerun) = rerun_setup(json!([branch_pipeline(9, "main", "FAILED")]));
     // None for the branch.
@@ -1853,6 +1899,121 @@ fn cloud_page(states: &[&str]) -> Value {
         })
         .collect();
     json!({"id": 12, "participants": participants})
+}
+
+/// A pull request pipeline of `acme/app` that the user stopped, and the build's status as Bitbucket
+/// leaves it: still `INPROGRESS`.
+fn stopped_build(number: u64) -> (Value, Value) {
+    let mut pipeline = pull_request_pipeline(number, "app/login", "STOPPED");
+    pipeline["target"]["commit"] = json!({"hash": "abc1234"});
+    (
+        pipeline,
+        json!({"state": "INPROGRESS", "name": "build", "key": format!("{number}-build"),
+            "url": format!("https://bitbucket.org/acme/app/pipelines/results/{number}")}),
+    )
+}
+
+/// The Cloud pull request #12 of `acme/app` with these `checks` and `pipelines`, and the merge
+/// asked of it.
+fn merge_with(checks: Value, pipelines: Value) -> (User, Answer) {
+    let user = User::with_fake_agent().with_fake_bkt();
+    on_bitbucket(&user, "git@bitbucket.org:acme/app.git");
+    command(&user, "merge");
+    let (_, mcp) = run(&user, "merge");
+    user.bkt_script(json!({
+        "pulls": {"acme/app": [cloud_pull(12, "acme/app", "acme/app", "main")]},
+        "checks": {"acme/app": {"12": checks}},
+        "pipelines": {"acme/app": pipelines},
+        "api": {"/repositories/acme/app/pullrequests/12": cloud_page(&[])}}));
+    let answer = write(&user, &mcp, json!({"action": "merge", "repository": "."}));
+    (user, answer)
+}
+
+#[test]
+fn a_stopped_pipeline_s_inprogress_status_does_not_refuse_the_merge_for_running_checks() {
+    let (stopped, status) = stopped_build(606);
+    let green = pull_request_pipeline(603, "app/login", "SUCCESSFUL");
+
+    let (user, answer) = merge_with(
+        json!([
+            {"state": "SUCCESSFUL", "name": "build", "key": "603-build",
+             "url": "https://bitbucket.org/acme/app/pipelines/results/603"},
+            status
+        ]),
+        json!([stopped, green]),
+    );
+
+    assert!(!answer.error, "{}", answer.text);
+    assert_eq!(bkt_calls_starting(&user, "pr merge"), 1);
+}
+
+#[test]
+fn a_lone_stopped_build_refuses_the_merge_and_says_how_to_run_it_again() {
+    let (stopped, status) = stopped_build(606);
+
+    let (user, answer) = merge_with(json!([status]), json!([stopped]));
+
+    assert!(answer.error, "{}", answer.text);
+    assert!(
+        answer
+            .text
+            .contains("its checks were stopped (build): run them again with forge checks"),
+        "{}",
+        answer.text
+    );
+    assert!(!answer.text.contains("still running"), "{}", answer.text);
+    assert_eq!(bkt_calls_starting(&user, "pr merge"), 0);
+}
+
+#[test]
+fn a_stopped_build_with_a_failed_step_refuses_the_merge_after_a_green_one() {
+    let (stopped, _) = stopped_build(606);
+    let green = pull_request_pipeline(603, "app/login", "SUCCESSFUL");
+    let step = |number: u64, name: &str, state: &str| {
+        json!({"state": state, "name": name, "key": format!("{number}-{name}"),
+            "url": format!("https://bitbucket.org/acme/app/pipelines/results/{number}")})
+    };
+
+    let (user, answer) = merge_with(
+        json!([
+            step(603, "test", "SUCCESSFUL"),
+            step(606, "test", "FAILED"),
+            step(606, "lint", "STOPPED")
+        ]),
+        json!([stopped, green]),
+    );
+
+    assert!(answer.error, "{}", answer.text);
+    assert!(
+        answer.text.contains("its checks fail (test"),
+        "{}",
+        answer.text
+    );
+    assert_eq!(bkt_calls_starting(&user, "pr merge"), 0);
+}
+
+#[test]
+fn a_halted_build_after_a_green_one_refuses_the_merge_as_still_running() {
+    let (mut halted, status) = stopped_build(606);
+    halted["state"] = json!({"name": "IN_PROGRESS", "stage": {"name": "HALTED"}});
+    let green = pull_request_pipeline(603, "app/login", "SUCCESSFUL");
+
+    let (user, answer) = merge_with(
+        json!([
+            {"state": "SUCCESSFUL", "name": "build", "key": "603-build",
+             "url": "https://bitbucket.org/acme/app/pipelines/results/603"},
+            status
+        ]),
+        json!([halted, green]),
+    );
+
+    assert!(answer.error, "{}", answer.text);
+    assert!(
+        answer.text.contains("its checks are still running (build)"),
+        "{}",
+        answer.text
+    );
+    assert_eq!(bkt_calls_starting(&user, "pr merge"), 0);
 }
 
 #[test]
@@ -2464,6 +2625,149 @@ fn a_method_a_data_center_repository_forbids_is_refused_naming_the_allowed_ones(
         "{}",
         answer.text
     );
+}
+
+/// A Cloud pull request #12 of `acme/app` that is green and approved, `page` its own page and
+/// `script` what else the fake `bkt` is told; the merge by squash is then asked of it.
+fn cloud_merge(user: &User, page: Value, script: Value) -> Answer {
+    on_bitbucket(user, "git@bitbucket.org:acme/app.git");
+    command(user, "merge");
+    let (_, mcp) = run(user, "merge");
+    let mut held = json!({
+        "pulls": {"acme/app": [cloud_pull(12, "acme/app", "acme/app", "main")]},
+        "checks": {"acme/app": {"12": [{"state": "SUCCESSFUL", "name": "build"}]}},
+        "api": {"/repositories/acme/app/pullrequests/12": page}});
+    for (key, value) in script.as_object().unwrap() {
+        held[key] = value.clone();
+    }
+    user.bkt_script(held);
+    write(user, &mcp, json!({"action": "merge", "repository": "."}))
+}
+
+#[test]
+fn a_refused_merge_says_the_server_s_reason_first() {
+    let user = User::with_fake_agent().with_fake_bkt();
+    let token = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    let mut page = cloud_page(&["approved"]);
+    page["destination"] = json!({"branch": {"name": "main",
+        "merge_strategies": ["merge_commit"], "default_merge_strategy": "merge_commit"}});
+    let reason = "400 Bad Request: a required merge check has not passed";
+
+    let answer = cloud_merge(
+        &user,
+        page,
+        json!({"refuses": {"acme/app": format!("{reason} ({token})")}}),
+    );
+
+    assert!(answer.error, "{}", answer.text);
+    let said = answer.text.find(reason).expect(&answer.text);
+    let read = answer
+        .text
+        .find("acme/app does not allow merging by squash: it allows merge (method)")
+        .expect(&answer.text);
+    assert!(
+        said < read,
+        "the server's reason comes first: {}",
+        answer.text
+    );
+    assert!(!answer.text.contains(token), "{}", answer.text);
+    assert!(answer.text.contains("[masked]"), "{}", answer.text);
+
+    // A method the repository does allow: the server's refusal is the whole answer.
+    let user = User::with_fake_agent().with_fake_bkt();
+    let mut page = cloud_page(&["approved"]);
+    page["destination"] = json!({"branch": {"name": "main",
+        "merge_strategies": ["squash", "merge_commit"], "default_merge_strategy": "squash"}});
+    let answer = cloud_merge(&user, page, json!({"refuses": {"acme/app": reason}}));
+    assert!(answer.error, "{}", answer.text);
+    assert!(answer.text.contains(reason), "{}", answer.text);
+    assert!(!answer.text.contains("does not allow"), "{}", answer.text);
+}
+
+#[test]
+fn strategies_that_cannot_be_read_are_not_none_allowed() {
+    let reason = "400 Bad Request: the pull request is out of date";
+    let unknown = "which merge methods the repository allows could not be read";
+
+    // The page says no `merge_strategies`, and one that says an empty list is no different.
+    for destination in [
+        json!({"branch": {"name": "main"}}),
+        json!({"branch": {"name": "main", "merge_strategies": []}}),
+    ] {
+        let user = User::with_fake_agent().with_fake_bkt();
+        let mut page = cloud_page(&["approved"]);
+        page["destination"] = destination;
+        let answer = cloud_merge(&user, page, json!({"refuses": {"acme/app": reason}}));
+
+        assert!(answer.error, "{}", answer.text);
+        assert!(answer.text.contains(reason), "{}", answer.text);
+        assert!(answer.text.contains(unknown), "{}", answer.text);
+        assert!(!answer.text.contains("does not allow"), "{}", answer.text);
+        assert!(!answer.text.contains("none of"), "{}", answer.text);
+    }
+
+    // The page cannot be read once the merge is refused.
+    let user = User::with_fake_agent().with_fake_bkt();
+    let answer = cloud_merge(
+        &user,
+        cloud_page(&["approved"]),
+        json!({"refuses": {"acme/app": reason},
+            "after_merge": {"/repositories/acme/app/pullrequests/12": "500 Internal Server Error"}}),
+    );
+
+    assert!(answer.error, "{}", answer.text);
+    assert!(answer.text.contains(reason), "{}", answer.text);
+    assert!(answer.text.contains(unknown), "{}", answer.text);
+    assert!(!answer.text.contains("does not allow"), "{}", answer.text);
+}
+
+#[test]
+fn a_merge_that_times_out_is_read_back() {
+    // `bkt pr merge` outlasts the 2 s the forge's calls are cut after, here; the page it leaves is
+    // what `after_merge` says.
+    let merging = |after: Value| {
+        let user = User::with_fake_agent()
+            .with_fake_bkt()
+            .with_env("FLOTTILLE_FORGE_TIMEOUT_MS", "2000");
+        cloud_merge(
+            &user,
+            cloud_page(&["approved"]),
+            json!({"merge_delay_ms": 6000,
+                "after_merge": {"/repositories/acme/app/pullrequests/12": after}}),
+        )
+    };
+    let timeout = "the merge did not answer within 2 s: it may have happened; check the pull \
+                   request";
+
+    // It went through meanwhile: said merged.
+    let answer = merging(json!({"id": 12, "state": "MERGED"}));
+    assert!(!answer.error, "{}", answer.text);
+    assert!(answer.text.contains("was merged"), "{}", answer.text);
+    assert!(
+        answer.text.contains("did not answer within 2 s"),
+        "{}",
+        answer.text
+    );
+
+    // It did not: said so, with the timeout.
+    let answer = merging(json!({"id": 12, "state": "OPEN"}));
+    assert!(answer.error, "{}", answer.text);
+    assert!(answer.text.contains(timeout), "{}", answer.text);
+    assert!(answer.text.contains("still open"), "{}", answer.text);
+    assert!(answer.text.contains("not merged"), "{}", answer.text);
+
+    // The read back fails too: neither merged nor not merged is claimed.
+    let answer = merging(json!("500 Internal Server Error"));
+    assert!(answer.error, "{}", answer.text);
+    assert!(answer.text.contains(timeout), "{}", answer.text);
+    assert!(
+        answer.text.contains("could not be read back"),
+        "{}",
+        answer.text
+    );
+    assert!(!answer.text.contains("still open"), "{}", answer.text);
+    assert!(!answer.text.contains("not merged"), "{}", answer.text);
+    assert!(!answer.text.contains("was merged"), "{}", answer.text);
 }
 
 /// A root agent started in `login` with no command: its id and MCP session.

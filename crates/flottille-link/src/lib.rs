@@ -1,16 +1,20 @@
-//! Flottille's link between the user's devices (`docs/remote.md`): it will hold identity, keys,
-//! the member list, joining, the transport and request signing. Here: the keys.
+//! Flottille's link between the user's devices (`docs/remote.md`): identity, keys, the member
+//! list, the invitation, request signing, and the link itself between two machines, over a
+//! transport only `transport.rs` names.
 //!
 //! A device's identity is the public half of an Ed25519 key. The private half never leaves the
 //! types of this crate: no method returns it, `Debug` prints the key's fingerprint only, and it is
 //! zeroized when dropped. This crate knows no daemon and no store: the caller names the key folder
 //! and hands its keyring in.
 
+mod address;
 mod hello;
 mod invitation;
+mod link;
 mod members;
 mod request;
 mod serial;
+mod transport;
 mod words;
 
 use std::fmt;
@@ -24,8 +28,12 @@ use ed25519_dalek::{SECRET_KEY_LENGTH, SigningKey, VerifyingKey};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
+pub use address::Address;
 pub use hello::{Hello, NeedsUpdate, PeerState, choose};
 pub use invitation::{Invitation, InvitationAsk, InvitationError, Token};
+pub use link::{
+    Accepting, Endpoint, FRAME_LIMIT, Link, LinkError, MachineMessage, Message, Received, Traffic,
+};
 pub use members::{
     Action, Change, ChangeHash, ListError, Member, MemberList, Members, Role, Signature,
 };

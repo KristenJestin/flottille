@@ -358,9 +358,10 @@ server (nothing here calls Bitbucket). Files are the repository's, lines those o
   required` while one has not decided, else `approved`; none when nobody was asked. It is not
   Bitbucket's merge check.
 - **A check is a commit status of the pull request's source commit**, which is where Pipelines
-  and the other build tools report: `SUCCESSFUL` is `passing`, `FAILED`, `STOPPED` and the like
-  are `failing`, anything else (`INPROGRESS`) is `pending`. Pipelines are on Cloud only
-  (`pkg/cmd/pipeline/pipeline.go:20-27`).
+  and the other build tools report: `SUCCESSFUL` is `passing`, `STOPPED` is `stopped`, `FAILED`
+  and the like are `failing`, anything else (`INPROGRESS`) is `pending`. A stop is neither a
+  failure nor a check that runs, and the mark of the checks as one is `failing`, else `pending`,
+  else `stopped`, else `passing`. Pipelines are on Cloud only (`pkg/cmd/pipeline/pipeline.go:20-27`).
 - **Which statuses count (Cloud).** A Pipelines build leaves its statuses on the commit, and
   a rerun leaves new ones beside the earlier build's, so the statuses are told apart by the pipeline
   each links to (`…/pipelines/results/<build>`, found among the newest 50 pipelines of the API):
@@ -375,6 +376,25 @@ server (nothing here calls Bitbucket). Files are the repository's, lines those o
   gives them. **Known limits**: only the newest 50 pipelines are read (no second page), so a status
   of an older build is kept as it is; and a "re-run failed steps" in Bitbucket's page keeps the
   build number, so the statuses of the build are all that are read. Both fail safe.
+- **A status is checked against its pipeline (Cloud).** Bitbucket leaves the status of a stopped
+  build at `INPROGRESS`, which would be `pending` for ever. A status that still says it runs
+  takes the word of its pipeline when that ended (`state.name` `COMPLETED`: its
+  `state.result.name`, `SUCCESSFUL`, `FAILED`, `ERROR` or `STOPPED`) or stopped (`IN_PROGRESS`
+  with `state.stage.name` `STOPPING`: `STOPPED`); a status that already says how it
+  ended is kept. A `PAUSED` stage (a manual step waits) and a `HALTED` one are not a stop and stay
+  `pending`: Bitbucket's API says a halted pipeline can be resumed (the scope `pipeline:write`
+  "resumes halted pipelines"; its pipeline `status` filter lists `HALTED` beside `PAUSED`).
+  **Assumed**: a `STOPPING` pipeline ends `STOPPED`; the stage is not in Bitbucket's published API
+  schema (its stages are `RUNNING` and `PAUSED`). A build with a failed step is never put aside as
+  stopped, whatever its pipeline says.
+  **A stop is not a verdict**: a stopped build does not take the place of the latest build of its
+  pipeline on the head while another build of it has statuses there, so a green #603 stands when
+  #606 of the same pipeline was stopped, and a failed one stands too. A stopped build that is the
+  only one says `stopped`, and the merge is refused saying `its checks were stopped (…): run them
+  again with forge checks`. Bitbucket Data Center has no pipelines: its statuses are read as `bkt`
+  gives them, a `STOPPED` one being `stopped`. **Open**: whether Bitbucket's own merge checks
+  count a `STOPPED` status against the merge is not known without a real Bitbucket; Flottille
+  refuses on it either way, which tells the agent to run the pipeline again.
 - **Flottille's own rerun is a branch run.** `bkt` has no way to start a pull request's pipeline:
   `forge` `checks` runs the branch with `--selector-type pull-requests`, which Bitbucket records as
   a branch run (`pipeline_ref_target`) of the pull requests' definition. It has no `BITBUCKET_PR_*`
@@ -421,23 +441,33 @@ the base the repository started from: its rule's, or the `base` the workspace wa
   `--message M` (subject and body in one text, as Bitbucket takes it); left out, the server writes
   its own. Not yet seen on a real server: that Cloud and Data Center keep it as the squashed
   commit's message. When the server refuses the merge, the
-  strategies the repository allows are read (Cloud: `destination.branch.merge_strategies` of the
-  pull request's own page; Data Center: the `enabled` ones of `mergeConfig.strategies[].id` in
-  `/rest/api/1.0/projects/{key}/repos/{repo}/settings/pull-requests`, both through `bkt api`,
-  **assumed shapes**) and, when the method is not among them, the refusal names the methods they
-  allow, then the strategies it allows that no method reaches (`ff`, `squash-ff-only`,
-  `fast_forward`…) as it names them; otherwise the server's own refusal is the result. Before it, as for GitHub, it is refused
+  answer says first what `bkt pr merge` said (its message, masked, up to 600 characters), then
+  Flottille's reading of it: the strategies the repository allows are read (Cloud:
+  `destination.branch.merge_strategies` of the pull request's own page; Data Center: the `enabled`
+  ones of `mergeConfig.strategies[].id` in `/rest/api/1.0/projects/{key}/repos/{repo}/settings/pull-requests`,
+  both through `bkt api`, **assumed shapes**) and, when the method is not among them, the reading
+  names the methods they allow, then the strategies it allows that no method reaches (`ff`,
+  `squash-ff-only`, `fast_forward`…) as it names them; when the method is among them, the server's
+  own refusal is the result. **A list that is absent, empty or unreadable is "unknown", never "none
+  allowed"**: the answer gives the server's refusal alone and says that which methods the
+  repository allows could not be read. "None of squash, merge and rebase" is said only when the
+  list is present and holds strategies that no method reaches. A `bkt pr merge` that does not
+  answer within the time of the forge's calls (30 s) is said as a timeout (`the merge did not
+  answer within N s: it may have happened; check the pull request`) and the pull request's page is
+  read back before anything else is said: it says `merged` (the answer is that it was merged), or
+  the state it is still in (so it was not merged yet), and a read back that fails says so, claiming
+  neither. Before the merge, as for GitHub, it is refused
   when no check ran on the pull request (`bkt pr checks` lists none, or answers `"statuses": null`
   for a commit with no status; an answer without `statuses` is not that: the checks could not be
   read, and nothing is merged), while a check of the pull
-  request fails or runs, or while the review is `changes requested`
+  request fails, runs or was stopped, or while the review is `changes requested`
   (Data Center: a reviewer's `NEEDS_WORK` in the list; Cloud: a participant's `changes_requested`
   on the pull request's own page, read with `bkt api`), unless the user waives it.
 - `checks`: **Cloud only**; `bkt` has no re-run of one pipeline, only `pipeline run`, which starts
   one again. The newest 50 pipelines of the repository are read from the API (`sort=-created_on`,
   see the table), and the branch's are the ones whose `target.ref_name` is the branch (pushed) or
   whose `target.source` is (a pull request's). It is done when the newest of them (the highest
-  `build_number`) ended `FAILED` or `ERROR`; otherwise it is refused. A branch's pipeline is run
+  `build_number`) ended `FAILED`, `ERROR` or `STOPPED`; otherwise it is refused. A branch's pipeline is run
   again with `--ref <branch>`; a pull request's with `--ref <branch> --selector-type pull-requests
   --selector-pattern <its target.selector.pattern>` (`**` when it says none). **Assumed, and the
   maintainer checks it**: that Bitbucket runs the pull request's pipeline for a branch trigger

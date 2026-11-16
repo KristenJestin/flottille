@@ -1053,12 +1053,15 @@ async fn read_round(
     Ok(Some(listing.note))
 }
 
-/// The checks as one mark: `failing` when one fails, else `pending` when one runs, else `passing`.
+/// The checks as one mark: `failing` when one fails, else `pending` when one runs, else `stopped`
+/// when one was stopped, else `passing`.
 fn mark(checks: &[Check]) -> &'static str {
     if checks.iter().any(|c| c.state == "failing") {
         "failing"
     } else if checks.iter().any(|c| c.state == "pending") {
         "pending"
+    } else if checks.iter().any(|c| c.state == "stopped") {
+        "stopped"
     } else {
         "passing"
     }
