@@ -2413,6 +2413,7 @@ dependencies = [
  "gpui-design-system",
  "gpui-kit",
  "image",
+ "jiff",
  "libc",
  "lyon_tessellation",
  "serde_json",

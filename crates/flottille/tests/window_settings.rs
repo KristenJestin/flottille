@@ -22,7 +22,14 @@ use gpui_kit::{Entity, TestAppContext, VisualTestContext, px, size};
 use serde_json::json;
 
 /// The tabs, in order.
-const TABS: [&str; 5] = ["agents", "approvals", "features", "vault", "general"];
+const TABS: [&str; 6] = [
+    "agents",
+    "approvals",
+    "features",
+    "vault",
+    "general",
+    "usage",
+];
 
 /// The tabs of the window before the redesign: none is left.
 const FORMER: [&str; 11] = [
@@ -150,7 +157,7 @@ fn tab(shell: &Entity<Shell>, cx: &mut VisualTestContext, key: &str) {
 }
 
 #[gpui_kit::test]
-fn settings_has_five_tabs_and_opens_on_agents(cx: &mut TestAppContext) {
+fn settings_has_six_tabs_and_opens_on_agents(cx: &mut TestAppContext) {
     let user = user();
     let (shell, cx) = window(&user, cx);
     let page = open_settings(&shell, cx);

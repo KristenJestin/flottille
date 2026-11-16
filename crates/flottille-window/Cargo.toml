@@ -23,6 +23,8 @@ futures = { version = "0.3.32", default-features = false, features = ["std"] }
 # Already built for GPUI, which takes the window icon as one of its images; only the PNG decoder.
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 gpui-kit = { version = "=0.8.0", default-features = false, features = ["assets"] }
+# Already built for the daemon; the Usage tab's days are the user's local days.
+jiff = "0.2.38"
 libc = "0.2.191"
 # Already built for GPUI's paths; only its `LineJoin` and `LineCap`, which the mark's strokes round.
 lyon_tessellation = "1.0.23"

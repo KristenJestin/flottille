@@ -35,17 +35,19 @@ use crate::extensions::connections::{self, ConnectionsSection};
 use crate::providers::{NewSession, Provider, Providers};
 use crate::rules::RulesEditor;
 use crate::shell::Shell;
+use crate::usage::UsageSection;
 use crate::vault::VaultSection;
 use crate::workspaces_folder::WorkspacesFolder;
 
 /// The tabs of the page, in order: each one's key and label. A new part of Flottille adds none
 /// (rule 13): it is a row of Features.
-pub const SECTIONS: [(&str, &str); 5] = [
+pub const SECTIONS: [(&str, &str); 6] = [
     ("agents", "Agents"),
     ("approvals", "Approvals"),
     ("features", "Features"),
     ("vault", "Vault"),
     ("general", "General"),
+    ("usage", "Usage"),
 ];
 
 /// The blocks of the Agents tab, top to bottom: each one is a section of the page, entering on its
@@ -251,6 +253,8 @@ pub const DEVELOPER_HINT: &str = "Why each call was allowed, held or refused, on
 
 pub struct SettingsPage {
     shell: WeakEntity<Shell>,
+    /// The Usage tab, read again each time it is shown.
+    usage: Entity<UsageSection>,
     providers: Providers,
     /// A switch flipped, until the daemon lists the provider so: what it was asked to become.
     pending: HashMap<String, bool>,
@@ -359,6 +363,7 @@ pub const JUDGE_USAGE: &str = "Used by sessions in **Auto**, chosen in each sess
 pub const JUDGE_QUOTA: &str = "Each decision is a turn of this model, on your own quota.";
 
 impl SettingsPage {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         shell: WeakEntity<Shell>,
         rules: Entity<RulesEditor>,
@@ -367,8 +372,10 @@ impl SettingsPage {
         workspaces: Entity<WorkspacesFolder>,
         vault: Entity<VaultSection>,
         connections: Entity<ConnectionsSection>,
+        usage: Entity<UsageSection>,
     ) -> Self {
         Self {
+            usage,
             rules,
             judge_guidance,
             compaction_guidance,
@@ -416,6 +423,9 @@ impl SettingsPage {
         let entry = entry.min(SECTIONS.len() - 1);
         if self.tab != entry {
             self.tab = entry;
+            if SECTIONS[entry].0 == "usage" {
+                self.usage.update(cx, |usage, cx| usage.read(cx));
+            }
             cx.notify();
         }
     }
@@ -920,6 +930,10 @@ impl SettingsPage {
 
     pub fn vault(&self) -> &Entity<VaultSection> {
         &self.vault
+    }
+
+    pub fn usage(&self) -> &Entity<UsageSection> {
+        &self.usage
     }
 
     pub fn connections(&self) -> &Entity<ConnectionsSection> {
@@ -2310,6 +2324,7 @@ impl Render for SettingsPage {
             ],
             "features" => vec![("features", self.features_tab(cx))],
             "vault" => vec![("vault", self.vault.clone().into_any_element())],
+            "usage" => vec![("usage", self.usage.clone().into_any_element())],
             _ => vec![
                 ("appearance", self.appearance_section(cx).into_any_element()),
                 ("workspaces", self.workspaces.clone().into_any_element()),

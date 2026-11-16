@@ -49,6 +49,7 @@ use crate::session::{Chose, Follow, Opened, Reply, SessionPage};
 use crate::session_link::PullRequest;
 use crate::settings::{Reveal, SettingsPage};
 use crate::tree::{EndedNode, ProjectNode, SessionRow, Sidebar};
+use crate::usage::UsageSection;
 use crate::vault::VaultSection;
 use crate::workspaces_folder::WorkspacesFolder;
 
@@ -302,6 +303,7 @@ impl Shell {
         let compaction_guidance = cx.new(|_| RulesEditor::compaction(this.clone()));
         let workspaces = cx.new(|_| WorkspacesFolder::new(this.clone(), None));
         let vault = cx.new(|_| VaultSection::new(this.clone()));
+        let usage = cx.new(|_| UsageSection::new(this.clone()));
         let connections = cx.new(|_| ConnectionsSection::new(this.clone(), vault.clone()));
         {
             let reading = connections.clone();
@@ -316,6 +318,7 @@ impl Shell {
                 workspaces.clone(),
                 vault.clone(),
                 connections.clone(),
+                usage.clone(),
             )
         });
         let services = {
@@ -1655,6 +1658,14 @@ impl Shell {
                         section.answered(shown, written, window, cx)
                     });
                 }
+            }
+            Outcome::Usage {
+                project,
+                days,
+                read,
+            } => {
+                let section = self.settings.read(cx).usage().clone();
+                section.update(cx, |section, cx| section.answered(project, days, read, cx));
             }
             Outcome::Skills { project, listed } => {
                 if let Some(page) = self.settings_of_project(&project, cx) {

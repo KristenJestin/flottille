@@ -473,6 +473,12 @@ pub enum Command {
     WorkspacesFolderRead {
         project: Option<String>,
     },
+    /// What agents used over the last `days`, of every project or of one (`usage.stats`, by day,
+    /// by model and by tuning).
+    UsageRead {
+        project: Option<String>,
+        days: u64,
+    },
     /// Keeps it (`workspaces_folder.set`): the default's `place` and `path`, or a project's own
     /// folder in `path` (none follows the default).
     WorkspacesFolderSet {
@@ -1025,6 +1031,12 @@ pub enum Outcome {
         project: Option<String>,
         written: bool,
         shown: Result<crate::workspaces_folder::Shown, String>,
+    },
+    /// What `usage.stats` said of the last `days`, or why it could not be read.
+    Usage {
+        project: Option<String>,
+        days: u64,
+        read: Result<crate::usage::Usage, String>,
     },
     /// What `.claude` holds of a kind, each file with its state, or why it cannot be read.
     ClaudeFound {
@@ -2007,6 +2019,34 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
                 shown: shown.and_then(|shown| shown).map(|shown| Shown::of(&shown)),
                 written: false,
                 project,
+            }
+        }
+        Command::UsageRead { project, days } => {
+            let until = jiff::Zoned::now().date();
+            let since = until
+                .checked_sub(jiff::Span::new().days(days.saturating_sub(1) as i64))
+                .unwrap_or(until);
+            let ask = |by: &str| {
+                ask_alone(
+                    connect,
+                    "usage.stats",
+                    json!({"project": project, "since": since.to_string(),
+                        "until": until.to_string(), "by": by}),
+                    bounds.quick,
+                )
+                .and_then(|answer| answer)
+            };
+            let read = ask("day").and_then(|by_day| {
+                Ok(crate::usage::Usage::of(
+                    &by_day,
+                    &ask("model")?,
+                    &ask("tuning")?,
+                ))
+            });
+            Outcome::Usage {
+                project,
+                days,
+                read,
             }
         }
         Command::WorkspacesFolderRead { project } => {
