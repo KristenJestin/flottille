@@ -1384,6 +1384,111 @@ fn a_service_left_by_a_daemon_that_was_killed_is_ended_and_started_again() {
     assert_eq!(service_runs(&user, "db"), 1);
 }
 
+/// This machine's boot, as the daemon records it with each run process.
+fn this_boot() -> String {
+    std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
+        .unwrap()
+        .trim()
+        .to_owned()
+}
+
+/// The process's start, in clock ticks after boot.
+fn start_ticks(pid: u32) -> u64 {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+    let fields: Vec<&str> = stat
+        .rsplit_once(')')
+        .unwrap()
+        .1
+        .split_whitespace()
+        .collect();
+    fields[19].parse().unwrap()
+}
+
+/// `line` run by `sh` in a session of its own, with `env` added: its pid, which is its session's.
+fn in_a_session(line: &str, env: &[(&str, &str)]) -> std::process::Child {
+    let mut command = Command::new("sh");
+    command
+        .args(["-c", line])
+        .envs(env.iter().copied())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    // SAFETY: setsid is async-signal-safe, which is all a pre_exec closure may call.
+    unsafe {
+        std::os::unix::process::CommandExt::pre_exec(&mut command, || {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        })
+    };
+    command.spawn().unwrap()
+}
+
+/// Kills the daemon as a crash would, writes the record of a run process into its store, as a
+/// daemon that died leaves it, then starts it again and waits until it settled the records.
+fn started_again_with_a_record(user: &User, pid: u32, started: u64, run: &str, boot: &str) {
+    let daemon = user.status()["pid"].as_u64().unwrap() as u32;
+    kill(daemon);
+    eventually("the daemon is gone", || !alive(daemon));
+    let store = rusqlite::Connection::open(user.path("state/flottille/flottille.db")).unwrap();
+    store
+        .execute(
+            "INSERT INTO run_processes (pid, started, run, boot) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![pid, started, run, boot],
+        )
+        .unwrap();
+    drop(store);
+    user.status();
+    eventually("the records settled", || {
+        let store = rusqlite::Connection::open(user.path("state/flottille/flottille.db")).unwrap();
+        store
+            .query_row("SELECT count(*) FROM run_processes", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap()
+            == 0
+    });
+}
+
+#[test]
+fn a_session_with_a_recorded_sid_that_is_not_ours_stays_alive() {
+    let user = User::new();
+    user.status();
+    // A program of the user's own, started by its desktop in a session whose leader is gone.
+    let mut leader = in_a_session("sleep 60 & echo $!", &[]);
+    let session = leader.id();
+    let mut line = String::new();
+    BufReader::new(leader.stdout.take().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    let program: u32 = line.trim().parse().unwrap();
+    let _left = Left(vec![program]);
+    leader.wait().unwrap();
+    assert!(alive(program));
+
+    // A record of a run whose leader had the pid of that session's, from this boot.
+    started_again_with_a_record(&user, session, 0, "r1", &this_boot());
+
+    assert!(alive(program), "the user's own program was killed");
+}
+
+#[test]
+fn records_of_another_boot_are_dropped_unsignalled() {
+    let user = User::new();
+    user.status();
+    // Everything of a leftover run, its marker and start included, but its boot.
+    let mut process = in_a_session("exec sleep 60", &[("FLOTTILLE_RUN", "r1")]);
+    let pid = process.id();
+    let _left = Left(vec![pid]);
+
+    started_again_with_a_record(&user, pid, start_ticks(pid), "r1", "another-boot");
+
+    assert!(alive(pid), "a process of another boot's record was killed");
+    let _ = process.kill();
+    let _ = process.wait();
+}
+
 #[test]
 fn a_resumed_setup_step_starts_its_services_after_the_leftovers_are_ended() {
     let user = User::with_fake_agent();
@@ -1430,7 +1535,7 @@ fn a_resumed_setup_step_starts_its_services_after_the_leftovers_are_ended() {
 
 #[test]
 fn a_task_s_agent_is_told_when_a_service_it_needs_stops() {
-    let user = User::with_fake_agent();
+    let user = User::with_fake_agent().with_env("FLOTTILLE_TEST_FOLLOW_MS", "200");
     let port = free_port();
     services_file(&user, &with_a_child(&user, "db", port));
     project(&user, &[]);
@@ -1463,15 +1568,15 @@ fn a_task_s_agent_is_told_when_a_service_it_needs_stops() {
         .unwrap()
         .to_string();
     assert!(listed.contains("\"needs_stopped\":[\"db\"]"), "{listed}");
-    // Told once.
-    std::thread::sleep(Duration::from_secs(1));
+    // Told once, after many more turns of the follower than one.
+    std::thread::sleep(Duration::from_secs(2));
     let all = prompted_within(&user, 1, &["[flottille:service-stopped]"]);
     assert_eq!(all.len(), 1, "{all:?}");
 }
 
 #[test]
 fn an_outside_service_that_stops_answering_is_said_to_what_needs_it() {
-    let user = User::with_fake_agent();
+    let user = User::with_fake_agent().with_env("FLOTTILLE_TEST_FOLLOW_MS", "200");
     let (mut outside, address) = by_hand();
     services_file(
         &user,
@@ -1491,10 +1596,10 @@ fn an_outside_service_that_stops_answering_is_said_to_what_needs_it() {
     let _ = outside.kill();
     let _ = outside.wait();
 
-    // Tried every 15 s.
+    // Tried at every turn of the follower (15 s, 200 ms here), then told once.
     let told = prompted_within(
         &user,
-        40,
+        5,
         &[
             "[flottille:service-stopped]",
             "db, which api needs, stopped",
@@ -1503,6 +1608,9 @@ fn an_outside_service_that_stops_answering_is_said_to_what_needs_it() {
     assert!(told[0].contains(&run), "{told:?}");
     let status = done(mcp.call("run_status", json!({"run": run})));
     assert!(status.contains("needs db, stopped"), "{status}");
+    std::thread::sleep(Duration::from_secs(2));
+    let all = prompted_within(&user, 1, &["[flottille:service-stopped]"]);
+    assert_eq!(all.len(), 1, "{all:?}");
 }
 
 #[test]
