@@ -632,24 +632,19 @@ fn a_push_with_exec_path_is_refused() {
         ),
     );
 
-    for push in [format!(
+    let push = format!(
         "git --exec-path={} push origin HEAD:refs/heads/exec",
         user.path("work/app/bin").display()
-    )] {
-        let answer = line(&user, &mcp, &push);
+    );
+    let answer = line(&user, &mcp, &push);
 
-        assert!(answer.error, "{push}: {}", answer.text);
-        assert!(
-            answer.text.contains("--exec-path"),
-            "{push}: {}",
-            answer.text
-        );
-        assert!(
-            answer.text.contains("nothing was pushed"),
-            "{push}: {}",
-            answer.text
-        );
-    }
+    assert!(answer.error, "{}", answer.text);
+    assert!(answer.text.contains("--exec-path"), "{}", answer.text);
+    assert!(
+        answer.text.contains("nothing was pushed"),
+        "{}",
+        answer.text
+    );
     assert!(!remote_has(&user, "exec"));
     let said = std::fs::read_to_string(&planted).unwrap_or_default();
     assert!(!said.contains(socket(&user).to_str().unwrap()), "{said:?}");
