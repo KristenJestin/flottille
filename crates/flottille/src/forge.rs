@@ -4110,6 +4110,27 @@ mod tests {
     }
 
     #[test]
+    fn a_stopped_check_blocks_the_merge_and_says_how_to_run_it_again() {
+        let blocked = |checks: &[(&str, &'static str)]| {
+            let checks: Vec<(String, &'static str)> =
+                checks.iter().map(|(n, s)| ((*n).to_owned(), *s)).collect();
+            blocks(&checks, None, None)
+        };
+        assert_eq!(
+            blocked(&[("build", "stopped"), ("lint", "passing")]).as_deref(),
+            Some("its checks were stopped (build): run them again with forge checks")
+        );
+        // A stop is not a failure, nor a check that runs.
+        assert_eq!(
+            blocked(&[("build", "stopped"), ("lint", "pending")]).as_deref(),
+            Some(
+                "its checks were stopped (build): run them again with forge checks, \
+                 its checks are still running (lint)"
+            )
+        );
+    }
+
+    #[test]
     fn a_pull_request_s_state_says_draft_merged_and_closed() {
         let state = |value: Value| Pull::of(&value).unwrap().state;
         assert_eq!(state(json!({"number": 1, "state": "OPEN"})), "open");

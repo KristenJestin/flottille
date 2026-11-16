@@ -1735,6 +1735,10 @@ mod tests {
         assert_eq!(checks(&[]), None);
         assert_eq!(checks(&["passing", "skipped"]).as_deref(), Some("passing"));
         assert_eq!(checks(&["passing", "pending"]).as_deref(), Some("pending"));
+        // A stop is neither a failure nor a run that goes on.
+        assert_eq!(checks(&["passing", "stopped"]).as_deref(), Some("stopped"));
+        assert_eq!(checks(&["stopped", "pending"]).as_deref(), Some("pending"));
+        assert_eq!(checks(&["stopped", "failing"]).as_deref(), Some("failing"));
         assert_eq!(
             checks(&["pending", "failing", "passing"]).as_deref(),
             Some("failing")

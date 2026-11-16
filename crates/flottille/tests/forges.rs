@@ -1049,6 +1049,30 @@ fn cloud_pipeline(build: u64, kind: &str, commit: &str, result: &str) -> Value {
         "state": {"name": "COMPLETED", "result": {"name": result}}})
 }
 
+/// `pipeline` in the `state` Bitbucket gives it as it ends or stops: `COMPLETED` with a result
+/// (`STOPPED` for one the user stopped), or `IN_PROGRESS` with a `stage` (`HALTED`, `STOPPING`,
+/// `PAUSED`), whatever its steps' statuses still say.
+fn in_state(mut pipeline: Value, state: Value) -> Value {
+    pipeline["state"] = state;
+    pipeline
+}
+
+/// A pull request pipeline the user stopped: finished, with the result `STOPPED`.
+fn stopped_pipeline(build: u64) -> Value {
+    in_state(
+        cloud_pipeline(build, "pull request", HEAD, "STOPPED"),
+        json!({"name": "COMPLETED", "result": {"name": "STOPPED"}}),
+    )
+}
+
+/// A pull request pipeline still `IN_PROGRESS`, in the `stage` named.
+fn staged_pipeline(build: u64, stage: &str) -> Value {
+    in_state(
+        cloud_pipeline(build, "pull request", HEAD, "SUCCESSFUL"),
+        json!({"name": "IN_PROGRESS", "stage": {"name": stage}}),
+    )
+}
+
 /// The commit status a step of pipeline `build` leaves on the head.
 fn step_status(build: u64, name: &str, state: &str) -> Value {
     json!({"state": state, "key": format!("{build}-{name}"), "name": name,
@@ -1183,6 +1207,105 @@ fn a_rerun_replaces_the_failed_run_in_the_count() {
         "checks: pending (test pending)",
         "{text}"
     );
+}
+
+/// The `checks:` line of a pull request whose build 603 went through and whose build 606, `latest`,
+/// has `statuses`.
+fn after_a_green_build(latest: Value, statuses: &[Value]) -> String {
+    let mut all = vec![step_status(603, "test", "SUCCESSFUL")];
+    all.extend_from_slice(statuses);
+    let text = shown_with(
+        &now_text(),
+        json!(all),
+        json!([
+            latest,
+            cloud_pipeline(603, "pull request", HEAD, "SUCCESSFUL")
+        ]),
+    );
+    checks_line(&text).to_owned()
+}
+
+#[test]
+fn an_inprogress_status_of_a_stopped_pipeline_is_not_pending() {
+    // Bitbucket left the status of the stopped #606 at `INPROGRESS`.
+    let line = after_a_green_build(
+        stopped_pipeline(606),
+        &[step_status(606, "test", "INPROGRESS")],
+    );
+
+    assert_eq!(line, "checks: passing (test passing)");
+}
+
+#[test]
+fn a_halted_or_stopping_pipeline_is_not_running() {
+    for stage in ["HALTED", "STOPPING"] {
+        let line = after_a_green_build(
+            staged_pipeline(606, stage),
+            &[step_status(606, "test", "INPROGRESS")],
+        );
+
+        assert_eq!(line, "checks: passing (test passing)", "{stage}");
+    }
+}
+
+#[test]
+fn a_stopped_rerun_does_not_hide_the_finished_build_before_it() {
+    // The earlier build's verdict stands, whichever it is: a stop is not one.
+    let line = after_a_green_build(
+        stopped_pipeline(606),
+        &[
+            step_status(606, "test", "SUCCESSFUL"),
+            step_status(606, "lint", "STOPPED"),
+        ],
+    );
+    assert_eq!(line, "checks: passing (test passing)");
+
+    let text = shown_with(
+        &now_text(),
+        json!([
+            step_status(603, "test", "FAILED"),
+            step_status(606, "test", "STOPPED")
+        ]),
+        json!([
+            stopped_pipeline(606),
+            cloud_pipeline(603, "pull request", HEAD, "FAILED")
+        ]),
+    );
+    assert_eq!(
+        checks_line(&text),
+        "checks: failing (test failing)",
+        "{text}"
+    );
+}
+
+#[test]
+fn a_lone_stopped_build_says_stopped_and_can_be_rerun() {
+    let text = shown_with(
+        &now_text(),
+        json!([
+            step_status(606, "test", "SUCCESSFUL"),
+            step_status(606, "lint", "INPROGRESS"),
+            step_status(606, "build", "STOPPED")
+        ]),
+        json!([stopped_pipeline(606)]),
+    );
+
+    assert_eq!(
+        checks_line(&text),
+        "checks: stopped (test passing, lint stopped, build stopped)",
+        "{text}"
+    );
+}
+
+#[test]
+fn a_paused_pipeline_stays_waiting() {
+    // A manual step waits: nothing is stopped, the run is not over.
+    let line = after_a_green_build(
+        staged_pipeline(606, "PAUSED"),
+        &[step_status(606, "test", "INPROGRESS")],
+    );
+
+    assert_eq!(line, "checks: pending (test pending)");
 }
 
 #[test]

@@ -1737,6 +1737,33 @@ fn bitbucket_rerun_runs_the_pull_request_pipeline_again_when_it_failed() {
 }
 
 #[test]
+fn bitbucket_rerun_runs_a_stopped_pipeline_again() {
+    let (user, mcp, rerun) = rerun_setup(json!([
+        pull_request_pipeline(8, "app/login", "STOPPED"),
+        branch_pipeline(7, "app/login", "SUCCESSFUL")
+    ]));
+
+    let answer = write(&user, &mcp, rerun);
+
+    assert!(!answer.error, "{}", answer.text);
+    assert!(
+        answer.text.contains("after #8 was stopped"),
+        "{}",
+        answer.text
+    );
+    let calls = bkt_calls(&user);
+    assert!(
+        calls.contains(
+            &"pipeline run --context cloud --workspace acme --repo app --ref app/login \
+              --selector-type pull-requests --selector-pattern **"
+                .to_owned()
+        ),
+        "{calls:?}"
+    );
+    assert_eq!(bkt_calls_starting(&user, "pipeline run"), 1);
+}
+
+#[test]
 fn bitbucket_rerun_is_refused_when_nothing_of_the_branch_failed() {
     let (user, mcp, rerun) = rerun_setup(json!([branch_pipeline(9, "main", "FAILED")]));
     // None for the branch.
@@ -1853,6 +1880,70 @@ fn cloud_page(states: &[&str]) -> Value {
         })
         .collect();
     json!({"id": 12, "participants": participants})
+}
+
+/// A pull request pipeline of `acme/app` that the user stopped, and the build's status as Bitbucket
+/// leaves it: still `INPROGRESS`.
+fn stopped_build(number: u64) -> (Value, Value) {
+    let mut pipeline = pull_request_pipeline(number, "app/login", "STOPPED");
+    pipeline["target"]["commit"] = json!({"hash": "abc1234"});
+    (
+        pipeline,
+        json!({"state": "INPROGRESS", "name": "build", "key": format!("{number}-build"),
+            "url": format!("https://bitbucket.org/acme/app/pipelines/results/{number}")}),
+    )
+}
+
+/// The Cloud pull request #12 of `acme/app` with these `checks` and `pipelines`, and the merge
+/// asked of it.
+fn merge_with(checks: Value, pipelines: Value) -> (User, Answer) {
+    let user = User::with_fake_agent().with_fake_bkt();
+    on_bitbucket(&user, "git@bitbucket.org:acme/app.git");
+    command(&user, "merge");
+    let (_, mcp) = run(&user, "merge");
+    user.bkt_script(json!({
+        "pulls": {"acme/app": [cloud_pull(12, "acme/app", "acme/app", "main")]},
+        "checks": {"acme/app": {"12": checks}},
+        "pipelines": {"acme/app": pipelines},
+        "api": {"/repositories/acme/app/pullrequests/12": cloud_page(&[])}}));
+    let answer = write(&user, &mcp, json!({"action": "merge", "repository": "."}));
+    (user, answer)
+}
+
+#[test]
+fn a_stopped_pipeline_s_inprogress_status_does_not_refuse_the_merge_for_running_checks() {
+    let (stopped, status) = stopped_build(606);
+    let green = pull_request_pipeline(603, "app/login", "SUCCESSFUL");
+
+    let (user, answer) = merge_with(
+        json!([
+            {"state": "SUCCESSFUL", "name": "build", "key": "603-build",
+             "url": "https://bitbucket.org/acme/app/pipelines/results/603"},
+            status
+        ]),
+        json!([stopped, green]),
+    );
+
+    assert!(!answer.error, "{}", answer.text);
+    assert_eq!(bkt_calls_starting(&user, "pr merge"), 1);
+}
+
+#[test]
+fn a_lone_stopped_build_refuses_the_merge_and_says_how_to_run_it_again() {
+    let (stopped, status) = stopped_build(606);
+
+    let (user, answer) = merge_with(json!([status]), json!([stopped]));
+
+    assert!(answer.error, "{}", answer.text);
+    assert!(
+        answer
+            .text
+            .contains("its checks were stopped (build): run them again with forge checks"),
+        "{}",
+        answer.text
+    );
+    assert!(!answer.text.contains("still running"), "{}", answer.text);
+    assert_eq!(bkt_calls_starting(&user, "pr merge"), 0);
 }
 
 #[test]
