@@ -6,6 +6,9 @@
 //! | `cargo test` | a run of the tests of a library with one failure, its progress and its passing tests | 101 |
 //! | `cargo test --green` | the same run, every test passing | 0 |
 //! | `cargo build` | the progress of a build that works | 0 |
+//! | `cargo build --many` | 300 lines of progress, then `Finished` | 0 |
+//! | `cargo build --fail` | the progress of a build, nothing that says why | 1 |
+//! | `cargo build --hang` | one line of progress, then it waits until it is stopped | none |
 //! | anything else | `error: no such subcommand` | 1 |
 
 use std::process::exit;
@@ -66,6 +69,23 @@ fn main() {
             (format!("{TEST_HEAD}{TEST_GREEN}"), 0)
         }
         Some("test") => (format!("{TEST_HEAD}{TEST_FAILING}"), 101),
+        Some("build") if args.iter().any(|a| a == "--many") => {
+            let progress: String = (1..=300)
+                .map(|n| format!("   Compiling crate-{n} v1.0.{n}\n"))
+                .collect();
+            (
+                format!("{progress}    Finished `dev` profile in 99.00s\n"),
+                0,
+            )
+        }
+        Some("build") if args.iter().any(|a| a == "--fail") => (BUILD.to_owned(), 1),
+        Some("build") if args.iter().any(|a| a == "--hang") => {
+            println!("   Compiling app v0.3.1 (/work/app)");
+            let _ = std::io::Write::flush(&mut std::io::stdout());
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
+        }
         Some("build") => (BUILD.to_owned(), 0),
         _ => ("error: no such subcommand\n".to_owned(), 1),
     };
