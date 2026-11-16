@@ -217,6 +217,14 @@ impl Remote {
         kept.read = stamp(&file);
         match read_json::<Peers>(&file) {
             Ok(peers) => {
+                // A machine trusted dials from one of its addresses, as often as not.
+                self.endpoint.know(
+                    peers
+                        .machines
+                        .iter()
+                        .flat_map(Peer::known)
+                        .filter_map(|text| Address::parse(&text).ok()?.ip()),
+                );
                 kept.said = false;
                 kept.last = peers.clone();
                 peers
