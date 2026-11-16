@@ -993,7 +993,7 @@ piece, where a name's word holds one number, at its end: `github-token-2`, `noti
 masking rule takes it for a token, so that a token
 written where a name goes is refused unsaid instead of being shown to the user as a name to save.
 `connection.proposed` gives each secret line's `missing`, `project` (the one project an entry is
-alone to), `to_bind` and `origin` (below), and `waits`, the sentence saying what each entry still
+alone to), `share`, `to_bind`, `entry_url` and `origin` (below), and `waits`, the sentence saying what each entry still
 needs. **An entry problem never makes the request stale**: only a change of the declaration itself
 does (`current`). The request stays held and **its Accept is refused while an entry it names is
 not right for it** (`approval.approve` answers why, the request still pending): one missing, one
@@ -1012,16 +1012,23 @@ request waiting, with a sentence naming both hosts (`its url: https://…, or ht
 machine`); a secret the user bound already to the same host stays when an agent edits the rest,
 and an edit that moves the URL elsewhere waits the same way, since the entry would follow it. A
 command's variables may name any entry: they are the program's, and the card says each loudly.
+An agent's `add` or `edit` naming an entry another project holds alone is refused at the call:
+only an entry of the agent's own project is offered for sharing.
 **The user mends an entry from the request, the agent never**: the request's dialog says, under
 **Where its secrets go**, `the vault entry <name> is <project>'s alone; a connection needs it for
 every project` with **Share with every project**, and `the vault entry <name> has no address; this
 connection would send it to <host>` (or `is for <other host>`) with **Bind it to <host>**. Each
 asks the window's one confirmation first, which says what it gives and to where (every project's
-agents see its metadata and every project's features may use it; its secret will be sent to
-`<host>`), then `connection.share_entry` or `connection.bind_entry {number, entry}`: the daemon
-takes only an entry the pending request names, and binds it to the origin it reads in the
+agents see its metadata and every project's features may use it; its address now, or no
+address, and the origin it gets, where its secret will be sent; and that the change stays even if
+the request is then refused), then `connection.share_entry {number, entry}` or
+`connection.bind_entry {number, entry, host}`: the daemon takes only an entry the pending request
+names and can use (not one bound to another use, not one of another project than the asking
+agent's), only while the request is still current, and binds it to the origin it reads in the
 request's own declaration (`origin`: scheme, host and port), never to an address the window or an
-agent says. The line folds away, and Accept goes through on the same request. An entry made for a
+agent says, refusing when its host is not the `host` the confirmation showed. The dialog builds
+each line from its latest reading of the request, and shows none on a request that is no longer
+current. The line folds away, and Accept goes through on the same request. An entry made for a
 connection gets the connection's address (`docs/vault.md`, "Asking the user for an entry"), so a
 key the user types for it is bound by that alone. **The agent is told up front**: the `connections`
 tool's description, and its answer to an `add` or `edit` naming entries, say that a connection's
