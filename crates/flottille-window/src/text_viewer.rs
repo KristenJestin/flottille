@@ -35,6 +35,12 @@ impl TextViewer {
 
     /// Opens `text`. What it showed last stays in it while it fades out.
     pub fn show(&mut self, name: &str, text: &str, cx: &mut Context<Self>) {
+        self.read(name, text);
+        self.open = true;
+        cx.notify();
+    }
+
+    fn read(&mut self, name: &str, text: &str) {
         self.name = name.to_owned();
         self.bytes = text.len();
         self.total = text.lines().count();
@@ -44,8 +50,20 @@ impl TextViewer {
             .take(MAX_LINES)
             .map(|line| SharedString::from(if line.is_empty() { " " } else { line }.to_owned()))
             .collect();
-        self.open = true;
-        cx.notify();
+    }
+
+    /// The modal's sentence: how long the text is, and what of it is not drawn.
+    fn sentence(&self) -> String {
+        let mut sentence = format!(
+            "{} line{} · {}",
+            self.total,
+            if self.total == 1 { "" } else { "s" },
+            crate::tokens::size(self.bytes)
+        );
+        if self.total > self.lines.len() {
+            sentence.push_str(&format!(" · the first {} are shown", self.lines.len()));
+        }
+        sentence
     }
 
     pub fn close(&mut self, cx: &mut Context<Self>) {
@@ -69,15 +87,7 @@ impl Render for TextViewer {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
         let viewer = cx.entity().downgrade();
-        let mut sentence = format!(
-            "{} line{} · {}",
-            self.total,
-            if self.total == 1 { "" } else { "s" },
-            crate::tokens::size(self.bytes)
-        );
-        if self.total > self.lines.len() {
-            sentence.push_str(&format!(" · the first {} are shown", self.lines.len()));
-        }
+        let sentence = self.sentence();
         let modal = Modal::new("pasted-text-modal", SharedString::from(self.name.clone()))
             .sentence(sentence)
             .large()
@@ -111,5 +121,31 @@ impl Render for TextViewer {
                         .test_support()
                 })),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_single_line_of_a_mebibyte_is_drawn_cut_and_the_sentence_says_so() {
+        let mut viewer = TextViewer::new();
+        viewer.read("pasted-text.txt", &"x".repeat(1024 * 1024));
+        let drawn: usize = viewer.lines.iter().map(|line| line.len()).sum();
+        assert!(drawn <= 256 * 1024, "{drawn} characters drawn");
+        assert!(drawn > 0);
+        assert_eq!(
+            viewer.sentence(),
+            "1 line · 1.0 MiB · the first 256 KiB are shown"
+        );
+    }
+
+    #[test]
+    fn a_text_drawn_whole_says_its_size_only() {
+        let mut viewer = TextViewer::new();
+        viewer.read("pasted-text.txt", "one\ntwo\n");
+        assert_eq!(viewer.lines.len(), 2);
+        assert_eq!(viewer.sentence(), "2 lines · 8 B");
     }
 }

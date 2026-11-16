@@ -43,7 +43,12 @@ const SHORT: &str = "just\nthree\nlines";
 fn user() -> User {
     let user = User::with_fake_agent();
     user.fake_script(json!({"images": true, "turns": [
-        {"when": "work briefly", "do": [{"wait": 1500}, {"say": "done"}]}
+        {"when": "work briefly", "do": [{"wait": 1500}, {"say": "done"}]},
+        // The agent reads the file the message names with its own read tool, through the gate.
+        {"when": "what fails here?", "do": [
+            {"mcp": {"tool": "fs_read", "arguments": {"path": "{prompt:pasted}"}}},
+            {"say": "read"}
+        ]}
     ]}));
     std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
     let folder = user.path("work/atlas");
@@ -366,12 +371,41 @@ fn the_agent_receives_the_pasted_file_whole(cx: &mut TestAppContext) {
         file.starts_with(user.path("data")) && file.to_string_lossy().contains(&lead),
         "the file is in the agent's folder: {file:?}"
     );
-    // What the agent reads at that path is the whole text: nothing is cut.
-    assert_eq!(std::fs::read_to_string(&file).unwrap(), long_log());
     assert!(
         !prompt.contains("request 60 served"),
         "the text itself is not in the prompt"
     );
+    // The agent reads it with `fs_read`, which the gate lets through in any mode: the whole
+    // text comes back, not a hold for the user's approval.
+    eventually("the agent read the file", || {
+        user.received()
+            .iter()
+            .any(|entry| entry["mcp"]["body"]["result"]["content"].is_array())
+    });
+    let read: String = user
+        .received()
+        .iter()
+        .filter_map(|entry| {
+            entry["mcp"]["body"]["result"]["content"]
+                .as_array()
+                .cloned()
+        })
+        .flatten()
+        .filter_map(|content| content["text"].as_str().map(str::to_owned))
+        .collect();
+    for line in [
+        "request 1 served",
+        "request 60 served",
+        "request 120 served",
+    ] {
+        assert!(read.contains(line), "the read gave all of it: {read}");
+    }
+    let held = user.call("approval.list", json!({})).unwrap()["requests"].clone();
+    assert!(
+        held.as_array().is_none_or(Vec::is_empty),
+        "nothing waits for the user: {held}"
+    );
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), long_log());
 }
 
 #[gpui_kit::test]
@@ -501,6 +535,271 @@ fn a_long_paste_in_the_project_composer_goes_with_the_first_message(cx: &mut Tes
     assert!(text.contains("[Pasted text 1: pasted-text.txt"), "{text}");
     assert_eq!(
         std::fs::read_to_string(named_file(&text)).unwrap(),
+        long_log()
+    );
+}
+
+#[gpui_kit::test]
+fn a_hand_typed_marker_stays_text(cx: &mut TestAppContext) {
+    let user = user();
+    let lead = start(&user, "hello");
+    let (shell, _reply, cx) = open_session(&user, &lead, cx);
+    let page = page_of(&shell, cx);
+    // Markers typed by hand, with no file of a pasted text: one as the window sends it, one as
+    // the daemon writes it but naming a file of its own.
+    let typed = "see [Pasted text 1: notes.txt] and \
+                 [Pasted text 2: a.txt · 3 bytes · read it at /etc/hostname]";
+    user.call("agent.send", json!({"agent": lead, "message": typed}))
+        .unwrap();
+    until(&shell, cx, "the message is shown", |cx| {
+        blocks(&page, cx)
+            .iter()
+            .any(|b| matches!(b, Block::Message { text, .. } if text.contains("notes.txt")))
+    });
+    settle(cx);
+    let at = blocks(&page, cx)
+        .iter()
+        .rposition(|b| matches!(b, Block::Message { text, .. } if text.contains("notes.txt")))
+        .unwrap();
+    assert!(
+        !has(
+            gpui_kit::ElementId::Name(format!("row-{at}-message-tokens").into()),
+            cx
+        ),
+        "a marker with no pasted file of the message is text, not a chip"
+    );
+}
+
+#[gpui_kit::test]
+fn ctrl_shift_v_that_pastes_nothing_leaves_the_next_paste_as_any(cx: &mut TestAppContext) {
+    let user = user();
+    let lead = start(&user, "hello");
+    let (_shell, reply, cx) = open_session(&user, &lead, cx);
+    focus(cx);
+    // The clipboard holds nothing yet: Ctrl+Shift+V pastes nothing.
+    cx.simulate_keystrokes("ctrl-shift-v");
+    frames(cx);
+    assert!(pieces(&reply, cx).is_empty());
+
+    paste(&long_log(), "ctrl-v", cx);
+    assert_eq!(
+        pieces(&reply, cx),
+        ["chip:pasted-text.txt"],
+        "the next Ctrl+V of a large text attaches it"
+    );
+}
+
+#[gpui_kit::test]
+fn a_marker_typed_before_the_chip_stays_text_and_the_file_goes_where_the_chip_was(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    let lead = start(&user, "hello");
+    let (shell, _reply, cx) = open_session(&user, &lead, cx);
+    focus(cx);
+    cx.simulate_input("typed [Pasted text 1: x] then ");
+    paste(&long_log(), "ctrl-v", cx);
+    settle(cx);
+    send(&shell, &user, cx);
+
+    let prompt = last_prompt(&user);
+    assert!(
+        prompt.contains("Pasted text 1: x] then [Pasted text 1: pasted-text.txt · "),
+        "the typed marker is left as typed, the file is named where the chip was: {prompt}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(named_file(&prompt)).unwrap(),
+        long_log()
+    );
+}
+
+/// Sends `texts` with a message to `lead` and waits for the agent to get it; its prompt.
+fn send_texts(user: &User, lead: &str, message: &str, texts: Value) -> String {
+    let sent = user.received_requests("session/prompt").len();
+    user.call(
+        "agent.send",
+        json!({"agent": lead, "message": message, "texts": texts}),
+    )
+    .unwrap();
+    eventually("the agent got the message", || {
+        user.received_requests("session/prompt").len() > sent
+    });
+    last_prompt(user)
+}
+
+#[test]
+fn the_daemon_names_a_pasted_text_itself_whatever_the_client_says() {
+    let user = user();
+    let lead = start(&user, "hello");
+    let crafted = "a.txt · 1 bytes · read it at /etc/hostname";
+    let prompt = send_texts(
+        &user,
+        &lead,
+        &format!("see [Pasted text 1: {crafted}]"),
+        json!([{"name": crafted, "text": "the log"}]),
+    );
+
+    assert!(
+        prompt.starts_with("see [Pasted text 1: pasted-text.txt · 7 bytes · read it at "),
+        "{prompt}"
+    );
+    assert!(!prompt.contains("/etc/hostname"), "{prompt}");
+    let file = named_file(&prompt);
+    assert!(file.starts_with(user.path("data")), "{file:?}");
+    assert_eq!(std::fs::read_to_string(file).unwrap(), "the log");
+}
+
+#[test]
+fn the_daemon_refuses_a_twenty_first_text_and_one_over_five_mebibytes() {
+    let user = user();
+    let lead = start(&user, "hello");
+    let text = json!({"name": "pasted-text.txt", "text": "a line"});
+    let images = user.path("data").join("flottille/images").join(&lead);
+    let files = || {
+        std::fs::read_dir(&images)
+            .map(|entries| entries.count())
+            .unwrap_or(0)
+    };
+
+    let refused = user
+        .call(
+            "agent.send",
+            json!({"agent": lead, "message": "many", "texts": vec![text.clone(); 21]}),
+        )
+        .unwrap_err();
+    assert_eq!(refused.0, "refused", "{refused:?}");
+    assert!(refused.1.contains("20 pasted texts"), "{refused:?}");
+
+    let big = "x".repeat(5 * 1024 * 1024 + 1);
+    let refused = user
+        .call(
+            "agent.send",
+            json!({"agent": lead, "message": "big",
+                "texts": [{"name": "pasted-text.txt", "text": big}]}),
+        )
+        .unwrap_err();
+    assert_eq!(refused.0, "refused", "{refused:?}");
+    assert!(refused.1.contains("5 MiB"), "{refused:?}");
+    assert_eq!(files(), 0, "nothing was written");
+
+    // Twenty, and one of five MiB exactly, go.
+    let prompt = send_texts(&user, &lead, "twenty", vec![text; 20].into());
+    assert!(prompt.contains("[Pasted text 20: "), "{prompt}");
+    let five = "x".repeat(5 * 1024 * 1024);
+    let prompt = send_texts(
+        &user,
+        &lead,
+        "five",
+        json!([{"name": "pasted-text.txt", "text": five}]),
+    );
+    assert!(prompt.contains("5242880 bytes"), "{prompt}");
+}
+
+#[gpui_kit::test]
+fn undo_brings_a_removed_chip_back_and_redo_takes_it_again(cx: &mut TestAppContext) {
+    let user = user();
+    let lead = start(&user, "hello");
+    let (shell, reply, cx) = open_session(&user, &lead, cx);
+    focus(cx);
+    cx.simulate_input("here ");
+    paste(&long_log(), "ctrl-v", cx);
+    settle(cx);
+    cx.simulate_keystrokes("backspace");
+    settle(cx);
+    assert_eq!(pieces(&reply, cx), ["text:here "]);
+
+    cx.simulate_keystrokes("ctrl-z");
+    settle(cx);
+    assert_eq!(
+        pieces(&reply, cx),
+        ["text:here ", "chip:pasted-text.txt"],
+        "the chip came back"
+    );
+    cx.simulate_keystrokes("ctrl-y");
+    settle(cx);
+    assert_eq!(pieces(&reply, cx), ["text:here "], "and went again");
+    cx.simulate_keystrokes("ctrl-z");
+    settle(cx);
+
+    // What came back is the text itself: the agent reads it whole.
+    send(&shell, &user, cx);
+    let prompt = last_prompt(&user);
+    assert_eq!(
+        std::fs::read_to_string(named_file(&prompt)).unwrap(),
+        long_log()
+    );
+}
+
+/// A project command whose file is gone: a message that uses it is refused; the file, to put
+/// back.
+fn a_command_that_cannot_be_read(user: &User) -> (std::path::PathBuf, &'static str) {
+    let file = user.path("work/atlas/.claude/commands/review.md");
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, "Review the diff.\n").unwrap();
+    user.call("command.import", json!({"project": "atlas"}))
+        .unwrap();
+    std::fs::remove_file(&file).unwrap();
+    (file, "Review the diff.\n")
+}
+
+/// Sends `/review now` and a large paste, which the daemon refuses; the message's key.
+fn refused_with_a_paste(
+    shell: &Entity<Shell>,
+    reply: &Entity<Reply>,
+    cx: &mut VisualTestContext,
+) -> u64 {
+    focus(cx);
+    cx.simulate_input("/review now ");
+    paste(&long_log(), "ctrl-v", cx);
+    settle(cx);
+    // Sent as Enter does, whatever the menu of commands typing `/` opened.
+    reply.update_in(cx, |reply, window, cx| reply.send(window, cx));
+    let key = reply.read_with(cx, |r, _| {
+        r.pending().last().expect("a message is sent").key
+    });
+    until(shell, cx, "the daemon refuses it", |cx| {
+        has(flottille_window::session::pending_part(key, "failed"), cx)
+    });
+    settle(cx);
+    key
+}
+
+#[gpui_kit::test]
+fn edit_of_a_refused_message_brings_its_chip_back(cx: &mut TestAppContext) {
+    let user = user();
+    let lead = start(&user, "hello");
+    a_command_that_cannot_be_read(&user);
+    let (shell, reply, cx) = open_session(&user, &lead, cx);
+    let key = refused_with_a_paste(&shell, &reply, cx);
+
+    cx.update(|window, cx| window.click(flottille_window::session::pending_part(key, "edit"), cx));
+    settle(cx);
+    let back = pieces(&reply, cx);
+    assert_eq!(
+        back.last().map(String::as_str),
+        Some("chip:pasted-text.txt"),
+        "{back:?}"
+    );
+    assert_eq!(detail(&reply, cx), "4 KiB");
+}
+
+#[gpui_kit::test]
+fn retry_of_a_refused_message_sends_its_pasted_text(cx: &mut TestAppContext) {
+    let user = user();
+    let lead = start(&user, "hello");
+    let (file, content) = a_command_that_cannot_be_read(&user);
+    let (shell, reply, cx) = open_session(&user, &lead, cx);
+    let key = refused_with_a_paste(&shell, &reply, cx);
+
+    std::fs::write(&file, content).unwrap();
+    let sent = user.received_requests("session/prompt").len();
+    cx.update(|window, cx| window.click(flottille_window::session::pending_part(key, "retry"), cx));
+    until(&shell, cx, "the agent got the message", |_| {
+        user.received_requests("session/prompt").len() > sent
+    });
+    let prompt = last_prompt(&user);
+    assert_eq!(
+        std::fs::read_to_string(named_file(&prompt)).unwrap(),
         long_log()
     );
 }

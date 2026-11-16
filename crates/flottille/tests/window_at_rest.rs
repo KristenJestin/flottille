@@ -1612,3 +1612,104 @@ fn the_window_draws_no_frame_at_rest_on_a_project_s_progress_with_a_milestone_un
         "(frames drawn, frames asked)"
     );
 }
+
+#[gpui_kit::test]
+fn the_window_draws_no_frame_at_rest_on_the_session_page_with_a_pasted_text(
+    cx: &mut TestAppContext,
+) {
+    let user = User::with_fake_agent();
+    std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
+    let folder = user.path("work/app");
+    user.git_init(&folder);
+    std::fs::write(folder.join("README.md"), "app\n").unwrap();
+    user.git(&folder, &["add", "README.md"]);
+    user.git(&folder, &["commit", "--quiet", "-m", "start"]);
+    user.call("project.add", json!({"folder": folder, "name": "app"}))
+        .unwrap();
+    let log: String = (1..=120)
+        .map(|n| format!("2026-11-15 INFO request {n} served\n"))
+        .collect();
+    // The first message carries a pasted text: the conversation shows its chip.
+    let id = user
+        .call(
+            "agent.start",
+            json!({"project": "app", "message": "see [Pasted text 1: pasted-text.txt]",
+                "texts": [{"name": "pasted-text.txt", "text": log}]}),
+        )
+        .unwrap()["agent"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    eventually("the first turn ends", || {
+        user.call("agent.show", json!({"agent": id})).unwrap()["agent"]["state"] == "idle"
+    });
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the session is in the tree", |cx| {
+        cx.update(|window, _| window.try_find(session_id(&id)).is_some())
+    });
+    settle(&shell, cx);
+    cx.update(|window, cx| window.click(session_id(&id), cx));
+    let message = |cx: &mut VisualTestContext| {
+        shell.read_with(cx, |s, cx| {
+            s.main().read(cx).session_page().and_then(|page| {
+                page.read(cx)
+                    .conversation()
+                    .read(cx)
+                    .blocks()
+                    .iter()
+                    .position(|b| {
+                        matches!(b, flottille_window::conversation::Block::Message { text, .. }
+                        if text.contains("read it at"))
+                    })
+            })
+        })
+    };
+    until(&shell, cx, "the message is shown", |cx| {
+        message(cx).is_some()
+    });
+    let at = message(cx).unwrap();
+    let chip =
+        gpui_kit::ElementId::NamedInteger(format!("row-{at}-message-tokens-token").into(), 0);
+    until(&shell, cx, "the message shows its chip", |cx| {
+        cx.update(|window, _| window.try_find(chip.clone()).is_some())
+    });
+    settle(&shell, cx);
+
+    // The viewer opened, then closed.
+    cx.update(|window, cx| window.click(chip.clone(), cx));
+    until(&shell, cx, "the text is opened", |cx| {
+        cx.update(|window, _| window.try_find("pasted-text-modal").is_some())
+    });
+    settle(&shell, cx);
+    cx.simulate_keystrokes("escape");
+    until(&shell, cx, "the viewer is closed", |cx| {
+        cx.update(|window, _| window.try_find("pasted-text-modal").is_none())
+    });
+    // A large paste in the reply field: a chip there too.
+    cx.update(|window, cx| window.click("reply-field", cx));
+    cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(log));
+    cx.simulate_keystrokes("ctrl-v");
+    until(&shell, cx, "the reply holds the chip", |cx| {
+        cx.update(|window, _| {
+            window
+                .try_find(gpui_kit::ElementId::NamedInteger(
+                    "reply-text-token".into(),
+                    0,
+                ))
+                .is_some()
+        })
+    });
+    // The toast that says it once goes away on its own: the rest is after it.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while shell.read_with(cx, |s, cx| s.toasts().read(cx).toasts().count() > 0) {
+        assert!(Instant::now() < deadline, "the toast never went");
+        step(&shell, Duration::from_millis(100), cx);
+    }
+    settle(&shell, cx);
+
+    assert_eq!(
+        frames_at_rest(&shell, cx),
+        (0, 0),
+        "(frames drawn, frames asked)"
+    );
+}

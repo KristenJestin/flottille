@@ -7011,6 +7011,76 @@ mod tests {
         assert!(denied(&fixture.file("fs_read", &path)));
     }
 
+    #[test]
+    fn reading_its_own_pasted_text_is_harmless_and_the_rest_of_the_data_folder_base() {
+        let fixture = Fixture::workspace();
+        let base = fixture.root.parent().unwrap().parent().unwrap().to_owned();
+        let data = fixture.own[0].clone();
+        let (own, other) = (data.join("images/a1"), data.join("images/b2"));
+        for folder in [&own, &other] {
+            std::fs::create_dir_all(folder).unwrap();
+        }
+        for file in [
+            own.join("0a1b2c3d4e5f-text-1.txt"),
+            own.join("0a1b2c3d4e5f-text-12.txt"),
+            own.join("0a1b2c3d4e5f-1.png"),
+            own.join("notes.txt"),
+            own.join("0a1b2c3d4e5f-text-1.txt.bak"),
+            own.join("x-text-1.txt"),
+            other.join("0a1b2c3d4e5f-text-1.txt"),
+            data.join("flottille.db"),
+        ] {
+            std::fs::write(file, "text").unwrap();
+        }
+        // A file of the agent's folder named as a pasted text, which leads to another agent's.
+        std::os::unix::fs::symlink(
+            other.join("0a1b2c3d4e5f-text-1.txt"),
+            own.join("abcdefabcdef-text-1.txt"),
+        )
+        .unwrap();
+        // A folder outside that leads into the agent's folder.
+        std::fs::create_dir_all(base.join("elsewhere")).unwrap();
+        std::os::unix::fs::symlink(&own, base.join("elsewhere/pasted")).unwrap();
+        let shown = |path: PathBuf| path.display().to_string();
+
+        for path in [
+            own.join("0a1b2c3d4e5f-text-1.txt"),
+            own.join("0a1b2c3d4e5f-text-12.txt"),
+        ] {
+            assert_eq!(
+                fixture.file("fs_read", &shown(path.clone())),
+                Verdict::Allow,
+                "{path:?}"
+            );
+        }
+        for path in [
+            other.join("0a1b2c3d4e5f-text-1.txt"),
+            own.join("0a1b2c3d4e5f-1.png"),
+            own.join("notes.txt"),
+            own.join("0a1b2c3d4e5f-text-1.txt.bak"),
+            own.join("x-text-1.txt"),
+            own.join("abcdefabcdef-text-1.txt"),
+            own.join("../b2/0a1b2c3d4e5f-text-1.txt"),
+            base.join("elsewhere/pasted/0a1b2c3d4e5f-text-1.txt"),
+            data.join("flottille.db"),
+        ] {
+            let verdict = fixture.file("fs_read", &shown(path.clone()));
+            assert!(base_class(&verdict), "{path:?}: {verdict:?}");
+            assert!(
+                reasons(&verdict).contains("Flottille's own folder"),
+                "{path:?}: {verdict:?}"
+            );
+        }
+        // Only a read: listing the folder or writing the file is what it was.
+        let file = shown(own.join("0a1b2c3d4e5f-text-1.txt"));
+        assert!(base_class(&fixture.file("fs_list", &shown(own.clone()))));
+        assert!(denied(&fixture.file("fs_write", &file)));
+        // Another agent reads the same file as any other of the data folder.
+        let mut fixture = fixture;
+        fixture.grant.agent = "b2".into();
+        assert!(base_class(&fixture.file("fs_read", &file)));
+    }
+
     const FS_TOOLS: [&str; 4] = ["fs_read", "fs_list", "fs_write", "fs_edit"];
 
     #[test]
