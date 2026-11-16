@@ -19,9 +19,8 @@ use std::time::{Duration, Instant};
 use gpui_design_system::color::mix;
 use gpui_design_system::motion::{Motion, PANEL};
 use gpui_design_system::{
-    Block, Card, Chip, Disclosure, EmptyLine, Group, Grouped, Icon, Item, Listing, PageHeader,
-    Skeleton, Type, Unfolding, awaiting, enter, hoverable, palette, presence_of, space,
-    tipped_when_cut,
+    Block, Card, Chip, Disclosure, EmptyLine, Group, Grouped, Icon, Item, Listing, Skeleton, Type,
+    Unfolding, awaiting, enter, hoverable, palette, presence_of, space, tipped_when_cut,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -355,7 +354,6 @@ pub struct ProgressPage {
     workspaces: Option<Vec<String>>,
     stale: bool,
     quiet: Option<Task<()>>,
-    narrow: bool,
 }
 
 impl ProgressPage {
@@ -380,19 +378,11 @@ impl ProgressPage {
             workspaces: None,
             stale: false,
             quiet: None,
-            narrow: false,
         }
     }
 
     pub fn project(&self) -> &str {
         &self.project
-    }
-
-    pub fn set_narrow(&mut self, narrow: bool, cx: &mut Context<Self>) {
-        if self.narrow != narrow {
-            self.narrow = narrow;
-            cx.notify();
-        }
     }
 
     /// Asks the daemon for the progress.
@@ -1012,17 +1002,12 @@ impl Render for ProgressPage {
         if !self.arriving.is_empty() {
             window.request_animation_frame();
         }
-        let pad = if self.narrow { space::LG } else { space::XXL };
         let key = |part: &str| ElementId::Name(format!("progress-{}-{part}", self.project).into());
         let jira = matches!(&self.read, Some(Ok(progress)) if progress.tracker == "jira");
         let other = self
             .milestones()
             .iter()
             .any(|m| m.open && m.counts.other > 0);
-        let header = PageHeader::new("progress-header", "Progress").path(match jira {
-            true => format!("{} · Jira versions", self.project),
-            false => format!("{} · GitHub milestones", self.project),
-        });
         let pending = self.read.is_none();
         let (problem, failed) = match &self.read {
             Some(Err(why)) => (Some(SharedString::from(why.clone())), true),
@@ -1081,9 +1066,9 @@ impl Render for ProgressPage {
                     .flex()
                     .flex_col()
                     .gap(space::LG)
-                    .child(enter(key("legend"), 1, self.legend(jira, other, cx)))
-                    .child(enter(key("list"), 2, list))
-                    .children(closed.map(|closed| enter(key("closed"), 3, closed))),
+                    .child(enter(key("legend"), 0, self.legend(jira, other, cx)))
+                    .child(enter(key("list"), 1, list))
+                    .children(closed.map(|closed| enter(key("closed"), 2, closed))),
             )
             .child(
                 presence_of(key("problem"), problem, move |why| {
@@ -1098,29 +1083,12 @@ impl Render for ProgressPage {
                 })
                 .space(space::LG),
             );
-        let column = div()
-            .max_w(space::COLUMN + pad * 2.)
-            .w_full()
-            .mx_auto()
-            .px(pad)
-            .pt(space::XXL)
-            .pb(space::XXXL)
-            .flex()
-            .flex_col()
-            .gap(space::XXL)
-            .child(enter(key("header"), 0, header))
-            .child(awaiting(
-                key("wait"),
-                pending,
-                Skeleton::new("progress-skeleton").h(px(56.)),
-                content,
-            ));
-        let page = div()
-            .id("progress-page")
-            .size_full()
-            .overflow_y_scroll()
-            .child(column)
-            .test_support();
+        let page = awaiting(
+            key("wait"),
+            pending,
+            Skeleton::new("progress-skeleton").h(px(56.)),
+            content,
+        );
         self.drawn |= self.read.as_ref().is_some_and(Result::is_ok);
         self.arriving.clear();
         page

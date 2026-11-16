@@ -1552,9 +1552,7 @@ fn the_window_draws_no_frame_at_rest_with_chips_in_the_composer_and_a_message(
 }
 
 #[gpui_kit::test]
-fn the_window_draws_no_frame_at_rest_on_a_project_s_progress_with_a_milestone_unfolded(
-    cx: &mut TestAppContext,
-) {
+fn the_window_draws_no_frame_at_rest_on_a_project_page_s_progress_tab(cx: &mut TestAppContext) {
     let user = User::with_fake_agent().with_fake_gh();
     idle_session(&user);
     let folder = user.path("work/app");
@@ -1589,21 +1587,21 @@ fn the_window_draws_no_frame_at_rest_on_a_project_s_progress_with_a_milestone_un
         shell.read_with(cx, |s, _| !s.snapshot().projects.is_empty())
     });
     shell.update_in(cx, |s, window, cx| {
-        s.open(Selection::Progress("app".into()), window, cx)
+        s.open(Selection::Project("app".into()), window, cx)
     });
-    until(&shell, cx, "the progress is read", |cx| {
-        shell.read_with(cx, |s, cx| {
-            s.main()
-                .read(cx)
-                .progress_page()
-                .is_some_and(|page| page.read(cx).is_read())
-        })
+    until(&shell, cx, "the Progress tab shows", |cx| {
+        cx.update(|window, _| window.try_find("project-tabs-progress").is_some())
+    });
+    cx.update(|window, cx| window.click("project-tabs-progress", cx));
+    until(&shell, cx, "the milestones show", |cx| {
+        cx.update(|window, _| window.try_find("progress-milestone-github-1").is_some())
     });
     settle(&shell, cx);
     cx.update(|window, cx| window.click("progress-milestone-github-1", cx));
     until(&shell, cx, "its tickets show", |cx| {
         cx.update(|window, _| window.try_find("progress-github-1-0-1").is_some())
     });
+    cx.update(|window, cx| window.blur(cx));
     settle(&shell, cx);
 
     assert_eq!(

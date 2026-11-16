@@ -1102,8 +1102,10 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   first message, and pictures taken as a session's composer does, which go with the first
   message; its place's menu ends with New workspace…; with no provider ready it says "No provider
   is ready. **Open Settings**", which opens Agents, Providers); then its tabs, **Work**, **Pull
-  requests** and **Tickets**, and **Specs** while Specs is on in the project (four at most, room
-  kept for a fifth), the chosen one alone below them (`reference/gpui.md`, rule 13). Creating a
+  requests** and **Tickets**, **Specs** while Specs is on in the project, and **Progress** while
+  the project declares a tracker (the fifth), the chosen one alone below them (`reference/gpui.md`,
+  rule 13). **Progress** is a project's milestones and their tickets (`tickets.md`, "Progress"),
+  read when the tab opens. Creating a
   workspace shows the preparation's progress and failure output, removing one asks first.
   **Work** is one column of the project's places: `main` first, then the workspaces from the
   newest to the oldest, in an order nothing changes (activity orders the sidebar, never this

@@ -806,8 +806,9 @@ What Flottille does with it:
 Seen in use: the maintainer followed how the work advanced by refreshing the forge's milestones
 page all day, while agents worked on their own (#801). Flottille already knows, for each ticket,
 the workspace and the session on it, its pull request and its checks: a project's **Progress**
-page shows each milestone with them. It is an entry of the project in the window's sidebar, under
-the project's row, for a project that declares a tracker.
+page shows each milestone with them. It is a tab of the project's page in the window, after its
+other tabs, **Progress**, for a project that declares a tracker (the sidebar is for sessions). Opening
+the tab reads it; leaving it drops what it held; back and forward return to it.
 
 - **`project.progress {project}`** (`docs/protocol.md`), and the same as lines for an agent
   through `tickets` `progress` (a read, allowed as `milestones` is), gives, in one call, every
