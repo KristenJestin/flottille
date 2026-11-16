@@ -2665,7 +2665,11 @@ fn a_refused_merge_says_the_server_s_reason_first() {
         .text
         .find("acme/app does not allow merging by squash: it allows merge (method)")
         .expect(&answer.text);
-    assert!(said < read, "the server's reason comes first: {}", answer.text);
+    assert!(
+        said < read,
+        "the server's reason comes first: {}",
+        answer.text
+    );
     assert!(!answer.text.contains(token), "{}", answer.text);
     assert!(answer.text.contains("[masked]"), "{}", answer.text);
 
@@ -2739,7 +2743,11 @@ fn a_merge_that_times_out_is_read_back() {
     let answer = merging(json!({"id": 12, "state": "MERGED"}));
     assert!(!answer.error, "{}", answer.text);
     assert!(answer.text.contains("was merged"), "{}", answer.text);
-    assert!(answer.text.contains("did not answer within 2 s"), "{}", answer.text);
+    assert!(
+        answer.text.contains("did not answer within 2 s"),
+        "{}",
+        answer.text
+    );
 
     // It did not: said so, with the timeout.
     let answer = merging(json!({"id": 12, "state": "OPEN"}));
@@ -2752,7 +2760,11 @@ fn a_merge_that_times_out_is_read_back() {
     let answer = merging(json!("500 Internal Server Error"));
     assert!(answer.error, "{}", answer.text);
     assert!(answer.text.contains(timeout), "{}", answer.text);
-    assert!(answer.text.contains("could not be read back"), "{}", answer.text);
+    assert!(
+        answer.text.contains("could not be read back"),
+        "{}",
+        answer.text
+    );
     assert!(!answer.text.contains("still open"), "{}", answer.text);
     assert!(!answer.text.contains("not merged"), "{}", answer.text);
     assert!(!answer.text.contains("was merged"), "{}", answer.text);

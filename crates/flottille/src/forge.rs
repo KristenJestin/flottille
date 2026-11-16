@@ -755,7 +755,7 @@ pub(crate) async fn gh(args: &[&str]) -> Result<(bool, String, String), Gh> {
 }
 
 /// `program <args>`, spawned without a shell with the daemon's environment (the user's own
-/// sign-in) but for what is set or removed, cut after `GH_TIME`: whether it succeeded, its output
+/// sign-in) but for what is set or removed, cut after `gh_time()`: whether it succeeded, its output
 /// and its errors.
 async fn run(
     program: &str,
@@ -763,7 +763,16 @@ async fn run(
     remove: &[&str],
     args: &[&str],
 ) -> Result<(bool, String, String), Gh> {
-    run_for(program, GH_TIME, set, remove, args).await
+    run_for(program, gh_time(), set, remove, args).await
+}
+
+/// How long a call of `gh` or `bkt` may take before it is cut.
+fn gh_time() -> Duration {
+    // Tests shorten it, so that a call that hangs is seen cut without waiting half a minute.
+    std::env::var("FLOTTILLE_FORGE_TIMEOUT_MS")
+        .ok()
+        .and_then(|ms| ms.parse().ok())
+        .map_or(GH_TIME, Duration::from_millis)
 }
 
 /// `run`, cut after `time`.
@@ -774,6 +783,25 @@ async fn run_for(
     remove: &[&str],
     args: &[&str],
 ) -> Result<(bool, String, String), Gh> {
+    match run_within(program, time, set, remove, args).await? {
+        Some(output) => Ok(output),
+        None => Err(Gh::Failed(format!(
+            "{program} {} took more than {} s",
+            args[..2].join(" "),
+            time.as_secs()
+        ))),
+    }
+}
+
+/// `run`, cut after `time`: none when it was cut, which a caller that must tell a slow call from a
+/// failed one reads.
+async fn run_within(
+    program: &str,
+    time: Duration,
+    set: &[(&str, &str)],
+    remove: &[&str],
+    args: &[&str],
+) -> Result<Option<(bool, String, String)>, Gh> {
     let mut command = tokio::process::Command::new(program);
     command.args(args).envs(set.iter().copied());
     for name in remove {
@@ -793,17 +821,13 @@ async fn run_for(
     let waited = tokio::time::timeout(time, child.wait_with_output()).await;
     Reads::ran(started.elapsed());
     match waited {
-        Ok(Ok(output)) => Ok((
+        Ok(Ok(output)) => Ok(Some((
             output.status.success(),
             String::from_utf8_lossy(&output.stdout).into_owned(),
             String::from_utf8_lossy(&output.stderr).into_owned(),
-        )),
-        Ok(Err(error)) => Err(Gh::Failed(error.to_string())),
-        Err(_) => Err(Gh::Failed(format!(
-            "{program} {} took more than {} s",
-            args[..2].join(" "),
-            time.as_secs()
         ))),
+        Ok(Err(error)) => Err(Gh::Failed(error.to_string())),
+        Err(_) => Ok(None),
     }
 }
 
@@ -1365,9 +1389,9 @@ impl Branch {
     }
 }
 
-/// The refusal of a merge by `method` that the repository does not allow, naming those it does,
+/// The reading of a merge by `method` that the repository does not allow, naming those it does,
 /// and the forge's own strategies that no method reaches, as the forge calls them.
-fn method_refused(slug: &str, method: &str, allowed: &[&str], others: &[String]) -> Outcome {
+fn method_refused(slug: &str, method: &str, allowed: &[&str], others: &[String]) -> String {
     fn listed<S: AsRef<str>>(words: &[S]) -> String {
         match words {
             [] => String::new(),
@@ -1392,10 +1416,7 @@ fn method_refused(slug: &str, method: &str, allowed: &[&str], others: &[String])
         (false, true) => format!("{} (method)", listed(allowed)),
         (false, false) => format!("{} (method), and {own}", listed(allowed)),
     };
-    Outcome::Refused(format!(
-        "refused: {slug} does not allow merging by {method}: it allows {allowed}; nothing was \
-         merged"
-    ))
+    format!("{slug} does not allow merging by {method}: it allows {allowed}; nothing was merged")
 }
 
 /// `forge`, once the gate let it through: the pull requests of the project's repositories, read
@@ -3341,7 +3362,10 @@ async fn forge_write(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcom
                             if allowed.contains(&method) {
                                 Outcome::Failed(why)
                             } else {
-                                method_refused(&slug, method, &allowed, &[])
+                                Outcome::Refused(format!(
+                                    "refused: {}",
+                                    method_refused(&slug, method, &allowed, &[])
+                                ))
                             }
                         }
                         Err(_) => Outcome::Failed(why),
