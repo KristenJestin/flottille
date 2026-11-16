@@ -721,18 +721,33 @@ on a real phone, by hand, and reported.
   socket until it dials, and links to every machine that listens. Reversible: listening on
   `0.0.0.0:7447` by default again is one line. An address declared without a port takes the link's,
   7447 when it listens nowhere. A link that came in is asked to prove its address (a QUIC retry),
-  takes at most 5 seconds to finish its TLS, 16 at once and 2 from one host (an IPv4 address, an
-  IPv6 /64), each apart; one that finds no place free is refused at once, and dials again, so that
-  a host that stalls its handshakes holds no other back. Whether a key is trusted is said after its
+  takes at most 5 seconds to finish its TLS, 256 at once (a stalled handshake costs a few
+  kilobytes), 2 from one host (an IPv4 address, an IPv6 /64) and 8 from one IPv6 /48; one that
+  finds no place free is refused at once, and dials again, so that a host that stalls its
+  handshakes holds no other back. 8 more places are kept for the IP addresses written in
+  `peers.json` (`addresses` and `told`; a name is not looked up for it), which a host not there
+  cannot take: a machine the daemon trusts that dials from one of them still finds a place when
+  strangers hold all the others. The trade-off: machines behind one IPv4 address (a NAT, a
+  carrier-grade NAT) are one host and share its 2 places, so a stranger behind the same address
+  can hold them; a trusted machine whose address is in `peers.json` still has the kept places, one
+  that dials from an address not there (behind a NAT, its told addresses are its own, not the
+  NAT's) waits until a place frees, 5 seconds at most. Whether a key is trusted is said after its
   TLS, so that the other side is told why it is refused, by the peers' file as last read (read
-  again only when it changed since); a key refused is said in the log once a minute at most. The
+  again only when it changed since). A key refused is said in the log once a minute at most, and
+  16 keys a minute at most, since a key costs a stranger nothing: past them, one line says the
+  others are counted, and the count is said when the minute ends. The
   machines a daemon trusts, and the addresses it knows them at, are in `remote/peers.json` (`{"machines": [{"name", "key", "addresses", "told"}]}`),
   which the hub will keep (#820) and a test writes until then; the addresses declared by hand in
   `remote/addresses.json`. Both are read at every round (each second): the daemon dials each
   machine it trusts and is not linked to, waiting longer after each failure (5 seconds at most).
   A file caught half written, or broken by hand, leaves the last one read whole in use (said once
-  in the log), and a told address is not written over it, nor over a file another hand changed
-  while it was being updated (read again, once).
+  in the log), and a told address is not written over it. A file another hand changed while the
+  told addresses were being written is read again, once, rather than written over; this is a
+  check, not a lock: a change made in the microseconds between the check and the rename is still
+  written over, and when the file changes again during the retry the told addresses are dropped
+  (said in the log) until the machine tells them again, at its next link or address change. The
+  told addresses are written away from the tasks that take links, at most once every 2 seconds
+  for one machine, the latest told kept.
 - Two machines that dial each other at once each hold two links: both keep the one the machine of
   the lower key dialled, and close the other (`linked already`).
 - Two machines linked tell each other their addresses at once, then whenever they change (a
