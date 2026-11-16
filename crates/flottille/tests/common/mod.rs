@@ -959,9 +959,15 @@ fn command_for(program: &Path, dir: &Path, env: &[(String, String)], args: &[&st
             "DBUS_SESSION_BUS_ADDRESS",
             format!("unix:path={}", dir.join("runtime/bus").display()),
         )
+        // X11's sockets where the machine's are: the test's own folder, never `/tmp/.X11-unix`.
+        .env("FLOTTILLE_X11_SOCKETS", dir.join("x11"))
         // No round of the items unless a test asks for it (`with_fetcher`).
         .env("FLOTTILLE_TEST_NO_FETCH", "1")
         .env_remove("TMUX");
+    // No display of the machine's: a test that wants one gives its own.
+    for name in ["WAYLAND_DISPLAY", "DISPLAY", "XAUTHORITY"] {
+        command.env_remove(name);
+    }
     // No sign-in of the machine: a provider is signed in only where a test says so, and the
     // daemon picks no Auto judge on the strength of the developer's own.
     for name in SIGN_INS {

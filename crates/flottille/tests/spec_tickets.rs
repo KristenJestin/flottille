@@ -847,7 +847,8 @@ fn a_person_s_comment_with_the_departures_words_is_not_flottille_s() {
     let read = comments_read(&user);
 
     assert!(
-        read.contains("- Alice, 2026-10-01T10:00:00.000+0000: The ticket asks"),
+        // A person's comment has its id too (#934); the record tells it is not Flottille's.
+        read.contains("- Alice [comment 20000], 2026-10-01T10:00:00.000+0000: The ticket asks"),
         "{read}"
     );
     assert!(

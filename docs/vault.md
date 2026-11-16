@@ -183,13 +183,16 @@ field), with `vault::secret`, which only a tool's own code calls and whose value
 use. It never waits for the user: an item of a locked keyring is answered at once that the keyring
 is locked and the user must unlock it, and a keyring that does not answer within 3 seconds is
 answered the same. The first users: `tickets log_time` (`docs/tickets.md`, "Logging time") and
-Connections (`docs/extensions.md`, "Connections"): a connection's `env` and `headers` name entries
+Connections (`docs/extensions.md`, "Connections"): a connection's `env` and `secrets` name entries
 of every project, read when its server starts and put in its environment or on its requests,
 never shown to an agent; an entry tied to one project, or bound to another use, is refused for
-it. A connection an agent proposes (`docs/extensions.md`, "Connections") puts an entry in a header
+it. A connection an agent proposes (`docs/extensions.md`, "Connections") puts an entry in its requests
 only when the entry's `url` has the connection's host: the `url` is where the secret may go, and
-an entry without one goes in no header an agent chose; the user's own form binds freely, and the
-card of the request says where each entry goes. `vault::secret` and the connections' reading take the use asking, and refuse an entry bound to
+an entry without one goes in no request an agent chose; the user's own form binds freely, and the
+card of the request says where each entry goes. An agent's connection may name an entry that does
+not exist yet, for the user to save (never one that looks like a secret): the request waits, its
+Accept refused while the entry is missing, and once saved the entry's host is checked as any
+other's. `vault::secret` and the connections' reading take the use asking, and refuse an entry bound to
 another.
 
 ## The runtime folder
@@ -209,11 +212,31 @@ options and the remote's transport), a connection's server and its login:
   `XDG_RUNTIME_DIR`: before it runs its program, it is bound to rules that grant every right on
   everything else (each entry of `/` and of each folder on the way to a runtime folder, symbolic
   links aside, which lead to where their target is ruled). It gets `no_new_privs` with it, so a
-  setuid program it starts gains nothing.
+  setuid program it starts gains nothing. A connection's server that shows its browser, and its
+  login (and its reload of the page), are also granted their display folder,
+  `$XDG_RUNTIME_DIR/flottille/display/<connection>`, which holds a hard link of the Wayland socket
+  alone (`docs/extensions.md`, "Adapters"), without the right to link or move a file out of it.
+  The folder is the one the daemon made, never one a variable of the connection names.
 
 The daemon's own runtime folder is denied with the rest: a `flottille daemon stop` run for an
 agent cannot read the daemon's lock, and refuses itself when the daemon does not answer, as a
 client started by an agent does.
+
+X11's display is kept out of the same processes as far as the platform allows, since an X11
+client can read the keys typed in other windows and type into them: a run, and a connection's
+server, has no `DISPLAY` and no `XAUTHORITY`, and Landlock keeps X11's abstract sockets
+(`@/tmp/.X11-unix/X0`) out of reach by its scope `LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET` (from its
+sixth ABI, Linux 6.12). Its sockets by their path, under `/tmp/.X11-unix`, are not denied: a rule
+on `/tmp` takes from a process what is made there after it started (a file made there could no
+longer be moved or linked into its worktree, a socket made there by another process could not be
+reached), so the private mount namespace of #976 masks the folder instead (below, "The gaps").
+Only a run of a project that lets its runs open windows, and a connection's browser that is
+shown, in a session without Wayland, are given X11 (`docs/tools.md`, `docs/extensions.md`): their
+display folder says so, and their process is not bound to the scope. The scope keeps out every
+abstract socket made outside the process's own Landlock domain, not X11's alone: a session bus or
+another service of the user's that listens on one (`@/tmp/dbus-…`, a container runtime's shim),
+as much as X11's. The abstract sockets the process, or one it starts, makes are its own and stay
+reachable.
 
 The gaps, where the platform does not allow more:
 
@@ -228,7 +251,27 @@ The gaps, where the platform does not allow more:
 - without Landlock (a kernel before 5.19, or one built without it), the process runs as before,
   with only the environment kept from it;
 - a bus listening on an abstract socket (`unix:abstract=…`, older setups) is not a path, and is
-  not kept out;
+  kept out only from Landlock's sixth ABI on (its abstract scope, above);
+- X11 by its socket's path, until the private mount namespace (#976) gives a run that is not
+  given X11 an empty `/tmp/.X11-unix`: at every ABI, a process can connect to
+  `/tmp/.X11-unix/X0` itself (a program of its own, or an X11 library given that path as its
+  display), and below the sixth ABI `DISPLAY=:0` set by itself is enough. The folder is not denied, since a rule on `/tmp` would
+  hold for what is made there (above). And the missing `XAUTHORITY` does not keep it out: an X11
+  client without it reads `~/.Xauthority`, which a run can read, and a display manager's own key
+  file (SDDM's `/tmp/xauth_…`) is readable too; a server that lets the user's local connections in
+  without a key (`xhost +si:localuser:…`) needs none;
+- X11 over TCP (`DISPLAY=localhost:10`, an `ssh -X` forwarding, a server listening on
+  `localhost:60…`): the network is not Landlock's here, at any ABI, so a run reaches it like any
+  port of the machine;
+- a run given X11 is not bound to the abstract scope at all, since an X11 client connects first to
+  the abstract name and does not fall back to the path when it is refused: it reaches every
+  abstract socket of the session, a session bus that `dbus-launch` put on one included, whose
+  name `/proc/net/unix` lists. Leaving it X11's path alone (a link of the socket in its display
+  folder, `DISPLAY` naming that path) depends on the client's library and could not be shown to
+  hold in tests;
+- a run given X11 gets the daemon's `XAUTHORITY` as it is: a key file in the runtime folder (as
+  some display managers put it) stays out of its reach, and X11 then refuses it, unless the
+  server lets the user's local connections in without a key;
 - a process cannot create an entry directly in a folder on the way to a runtime folder (`/`,
   `/run`, `/run/user`): they get no rule of their own, only their entries do; and an entry
   created there after the process started is denied to it. A rule on such a folder would hold

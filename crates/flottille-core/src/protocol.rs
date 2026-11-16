@@ -6,7 +6,8 @@ use serde::{Deserialize, Serialize};
 
 /// The parameters of `project.set_settings`: the forge declared for each repository named (none
 /// to declare none; a repository left out keeps its own), its base branches and dependencies
-/// when given, the project's tracker (none for none) and its branch prefix when given.
+/// when given, the project's tracker (none for none), its branch prefix and its windows setting
+/// when given.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectSettings {
@@ -18,6 +19,10 @@ pub struct ProjectSettings {
     /// The branch prefix of its workspaces, empty for none; the file's when left out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch_prefix: Option<String>,
+    /// Whether its agents' runs may open windows on the user's screen; the file's when left out.
+    /// The user's alone: an agent's `project` tool never gives it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub windows: Option<bool>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

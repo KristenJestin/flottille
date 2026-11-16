@@ -403,12 +403,12 @@ const SERVED: [Definition; 33] = [
             (never run them). list: by state (default open), label, assignee, updated_within; search asks the tracker: {\"action\":\"search\",\"query\":\"x\"}, \
             on Jira also in_comments, jql; show: a workspace's ticket (in \
             main, name workspace) or ticket, with links; detail full adds comments, \
-            yours with ids; Jira images and files are named, not shown; \
+            with ids; Jira images and files are named, not shown; \
             types: a Jira project's work item types (never guess); link_types. \
-            Writes, judged, answered at once, the result maybe later: create, comment, edit, close, \
+            Writes, judged, answered at once, the result maybe later: create, comment, reply, edit, close, \
             reopen, status, link, unlink, comment_edit, \
             comment_delete (both yours only); log_time (Jira), \
-            time_spent (this session's time, to propose). \
+            time_spent (this session's, to propose). \
             Assign only if asked (assignee \"me\": the user; \
             GitHub: assignees). Jira create: parent, sprint (see sprints). \
             Milestones (Jira: versions): milestones, progress (tickets and work); GitHub: milestone_create/_edit. \
@@ -418,7 +418,7 @@ const SERVED: [Definition; 33] = [
         destructive: false,
         schema: || {
             json!({"type": "object", "properties": {
-                "action": {"type": "string", "enum": ["list", "search", "show", "people", "types", "link_types", "sprints", "milestones", "progress", "subscribe", "unsubscribe", "create", "comment", "edit", "close", "reopen", "status", "link", "unlink", "comment_edit", "comment_delete", "milestone_create", "milestone_edit", "log_time", "time_spent"]},
+                "action": {"type": "string", "enum": ["list", "search", "show", "people", "types", "link_types", "sprints", "milestones", "progress", "subscribe", "unsubscribe", "create", "comment", "reply", "edit", "close", "reopen", "status", "link", "unlink", "comment_edit", "comment_delete", "milestone_create", "milestone_edit", "log_time", "time_spent"]},
                 "ticket": {"type": "string", "description": "#123 or ABC-123; the workspace's when left out."},
                 "duration": {"type": "string", "description": "log_time (Jira): the time spent, in Jira's form: 2h 30m, 1d, 45m (weeks, days, hours, minutes)."},
                 "started": {"type": "string", "description": "log_time: when the work started, RFC 3339 with its offset (2026-11-06T09:00:00+01:00); the duration before now when left out."},
@@ -433,7 +433,7 @@ const SERVED: [Definition; 33] = [
                 "detail": {"type": "string", "enum": ["short", "full"]},
                 "fresh": {"type": "boolean", "description": "show: read the ticket again; one read in the last 30 s is given again otherwise (detail full always reads)."},
                 "title": {"type": "string"},
-                "body": {"type": "string", "description": "create, edit: description; comment, comment_edit, log_time: the comment. Markdown, converted for Jira."},
+                "body": {"type": "string", "description": "create, edit: description; comment, reply, comment_edit, log_time: the comment. Markdown, converted for Jira."},
                 "labels": {"type": "array", "items": {"type": "string"}, "description": "create, edit: labels to add."},
                 "reason": {"enum": ["completed", "not planned"], "description": "close: completed or not planned (GitHub)."},
                 "remove_labels": {"type": "array", "items": {"type": "string"}, "description": "edit: labels to remove."},
@@ -442,7 +442,7 @@ const SERVED: [Definition; 33] = [
                 "status": {"type": "string", "description": "status: its name."},
                 "other": {"type": "string", "description": "link, unlink: the other ticket. The link reads ticket, kind, other: ABC-2 blocks ABC-1 is ticket ABC-2, kind blocks, other ABC-1."},
                 "kind": {"type": "string", "description": "link, unlink: a kind link_types lists (blocks, is blocked by, relates to; GitHub: parent of, sub-task of)."},
-                "comment": {"type": "string", "description": "comment_edit, comment_delete: the id show (detail full) gives a comment an agent posted; no one else's."},
+                "comment": {"type": "string", "description": "reply: the id show (detail full) gives any comment. comment_edit, comment_delete: one an agent posted, no one else's."},
                 "sprint": {"type": "string", "description": "create on Jira (with type): an open sprint, by the name or id sprints gives. An existing item's sprint cannot be changed (acli)."},
                 "parent": {"type": "string", "description": "create on Jira: the work item it goes under (an epic, or a sub-task's parent). An existing item's parent cannot be changed (acli)."},
                 "milestone": {"type": "string", "description": "A milestone's title or number (GitHub), a version's name or id (Jira); milestones lists them: list, search filter by it; create puts the ticket in it (Jira: with type); edit (GitHub only) moves it; milestone_edit (GitHub): the one to change."},
@@ -639,6 +639,7 @@ const SERVED: [Definition; 33] = [
                 "url": {"type": "string", "description": "add, edit: https://, or http:// on this machine; instead of a command."},
                 "env": {"type": ["object", "null"], "additionalProperties": {"type": "string"}, "description": "add, edit, for a command: each variable to the name of a vault entry (vault list); null removes them."},
                 "headers": {"type": ["object", "null"], "additionalProperties": {"type": "string"}, "description": "add, edit, for a URL: each header to the name of a vault entry; null removes them."},
+                "secrets": {"type": ["array", "null"], "items": {"type": "object", "properties": {"in": {"type": "string", "enum": ["header", "query", "cookie", "basic"]}, "name": {"type": "string"}, "prefix": {"type": "string"}, "entry": {"type": "string"}}, "required": ["in", "entry"]}, "description": "add, edit, for a URL: where each vault entry goes: a header (prefix as \"Bearer \"), a query parameter, a cookie, basic (no name); null removes them."},
                 "only": {"type": ["object", "null"], "additionalProperties": {"type": "array", "items": {"type": "string"}}, "description": "add, edit: an argument's name to the only values it may take; null removes them."},
                 "settings": {"type": "object", "additionalProperties": {"type": "string", "enum": ["judged", "passes", "asked", "off"]}, "description": "set: an action's name to its setting."}
             }, "required": ["action"], "additionalProperties": false})

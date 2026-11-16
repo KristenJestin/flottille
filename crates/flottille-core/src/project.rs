@@ -443,6 +443,11 @@ pub struct Project {
     /// Its agents get its rules alone: the user's global rules are left out (`rules_alone`).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub rules_alone: bool,
+    /// Its agents' runs may open windows on the user's screen: each gets a runtime folder of its
+    /// own holding the session's Wayland socket alone (`docs/tools.md`). The user's alone: no
+    /// agent's call sets it. Off by default.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub windows: bool,
     /// Keys of the file that are no longer read, each with what replaces it: said, never
     /// followed nor refused.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -511,6 +516,8 @@ struct File {
     extensions: BTreeMap<String, serde_json::Map<String, serde_json::Value>>,
     #[serde(default)]
     rules_alone: bool,
+    #[serde(default)]
+    windows: bool,
     /// Obsolete: read as nothing, and said (`OBSOLETE_FORGES`).
     forges: Option<toml::Value>,
 }
@@ -597,6 +604,7 @@ impl Project {
             rules: None,
             extensions: BTreeMap::new(),
             rules_alone: false,
+            windows: false,
             obsolete: Vec::new(),
         }
     }
@@ -975,6 +983,7 @@ fn check(name: &str, mut file: File, places: &Places) -> Result<Project, String>
         rules: file.rules,
         extensions: file.extensions,
         rules_alone: file.rules_alone,
+        windows: file.windows,
         obsolete,
     })
 }
