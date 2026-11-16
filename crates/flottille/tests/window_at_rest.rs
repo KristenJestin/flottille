@@ -372,6 +372,63 @@ fn the_window_draws_no_frame_at_rest_on_a_project_s_commit_checks_and_their_prop
 }
 
 #[gpui_kit::test]
+fn the_window_draws_no_frame_at_rest_on_a_project_s_proposed_rules(cx: &mut TestAppContext) {
+    // Three sessions have a call of `fs_read` refused the same way: the judge writes a rule.
+    let user = User::with_fake_agent()
+        .with_env("FLOTTILLE_RULES_EVERY_MS", "0")
+        .with_judge(json!([{"say": "Never read ~/.ssh: ask the user."}]));
+    user.fake_script(json!({"turns": [{"when": "read the key", "do": [
+        {"mcp": {"tool": "fs_read", "arguments": {"path": "~/.ssh/id_ed25519"}}},
+        {"say": "done"}
+    ]}]}));
+    idle_session(&user);
+    for _ in 0..3 {
+        let answer = user
+            .call(
+                "agent.start",
+                json!({"project": "app", "message": "read the key"}),
+            )
+            .unwrap();
+        let id = answer["agent"]["id"].as_str().unwrap().to_owned();
+        eventually("the turn ends", || {
+            user.call("agent.show", json!({"agent": id})).unwrap()["agent"]["state"] == "idle"
+        });
+    }
+    eventually("the proposal", || {
+        !user.call("rules.proposals", json!({})).unwrap()["proposals"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    });
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the project is known", |cx| {
+        shell.read_with(cx, |s, _| !s.snapshot().projects.is_empty())
+    });
+    shell.update_in(cx, |s, window, cx| {
+        s.open(Selection::ProjectSettings("app".into()), window, cx)
+    });
+    until(&shell, cx, "the project's settings are read", |cx| {
+        shell.read_with(cx, |s, cx| {
+            s.main()
+                .read(cx)
+                .project_settings_page()
+                .is_some_and(|page| page.read(cx).is_loaded())
+        })
+    });
+    cx.update(|window, cx| window.click("project-settings-tabs-instructions", cx));
+    until(&shell, cx, "the proposed rule is shown", |cx| {
+        cx.update(|window, _| window.try_find("proposed-rule-1-row").is_some())
+    });
+    settle(&shell, cx);
+
+    assert_eq!(
+        frames_at_rest(&shell, cx),
+        (0, 0),
+        "(frames drawn, frames asked)"
+    );
+}
+
+#[gpui_kit::test]
 fn the_window_draws_no_frame_at_rest_on_a_task_s_copy_dialog(cx: &mut TestAppContext) {
     let user = User::with_fake_agent();
     idle_session(&user);

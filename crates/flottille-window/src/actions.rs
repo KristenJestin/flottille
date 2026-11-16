@@ -269,6 +269,13 @@ pub enum Command {
         key: &'static str,
         value: String,
     },
+    /// Adds a rule proposed for the project to its rules, as `text` holds it, or with no text
+    /// dismisses it (`rules.proposal.accept`, `rules.proposal.dismiss`).
+    ProposalAnswer {
+        project: String,
+        proposal: u64,
+        text: Option<String>,
+    },
     /// Reads each repository's commit checks and what its hooks propose (`project.commit_checks`).
     ReadCommitChecks(String),
     /// Writes one repository's commit checks (`project.set_commit_checks`).
@@ -844,6 +851,13 @@ pub enum Outcome {
         project: String,
         key: &'static str,
         saved: Result<String, String>,
+    },
+    /// A rule proposed for the project added (`added`) or dismissed, or why it was not.
+    ProposalAnswered {
+        project: String,
+        proposal: u64,
+        added: bool,
+        result: Result<(), String>,
     },
     /// Each repository's commit checks and proposals, read or after the save of `saved`'s
     /// repository, or why nothing was read or written.
@@ -1739,6 +1753,26 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
             project,
             key,
         },
+        Command::ProposalAnswer {
+            project,
+            proposal,
+            text,
+        } => {
+            let added = text.is_some();
+            let (method, params) = match text {
+                Some(text) => (
+                    "rules.proposal.accept",
+                    json!({"proposal": proposal, "text": text}),
+                ),
+                None => ("rules.proposal.dismiss", json!({"proposal": proposal})),
+            };
+            Outcome::ProposalAnswered {
+                result: answer(ask_alone(connect, method, params, bounds.quick)).map(|_| ()),
+                project,
+                proposal,
+                added,
+            }
+        }
         Command::ReadCommitChecks(project) => Outcome::CommitChecks {
             read: answer(ask_alone(
                 connect,

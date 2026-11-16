@@ -205,9 +205,12 @@ struct Set {
 }
 
 /// Answers a `rules.*` request: `rules.show`, `rules.set`, `rules.reset`, for the user's rules
-/// (no `project`) or one project's.
+/// (no `project`) or one project's, and the rules proposed (`proposals.rs`).
 pub fn call(daemon: &Daemon, method: &str, params: Value) -> Result<Value, Failure> {
     match method {
+        "rules.proposals" | "rules.proposal.accept" | "rules.proposal.dismiss" => {
+            crate::proposals::call(daemon, method, params)
+        }
         "rules.show" => {
             let Which { project } = serde_json::from_value(params)?;
             show(daemon, project.as_deref())
@@ -329,6 +332,21 @@ pub fn set_project(
             }
             None => {}
         }
+        Ok(())
+    })
+}
+
+/// Adds `rule` at the end of the project's rules, as the file says them now: read and written
+/// under the one lock of the project's file, so that a rule set at the same time is never lost.
+pub fn append_project(daemon: &Daemon, name: &str, rule: &str) -> Result<Project, Failure> {
+    projects::rewrite(daemon, name, |project, document| {
+        let own = project.rules.clone().unwrap_or_default();
+        let text = match own.trim_end() {
+            "" => rule.to_owned(),
+            own => format!("{own}\n\n{rule}"),
+        };
+        check(&text).map_err(Failure::refused)?;
+        document["rules"] = toml_edit::value(text);
         Ok(())
     })
 }

@@ -55,6 +55,7 @@ mod program;
 mod programs;
 mod project_command;
 mod projects;
+mod proposals;
 mod providers;
 mod quota;
 mod read_commands;
@@ -214,6 +215,11 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// How agents are told to work: the rules proposed from the failures they keep making
+    Rules {
+        #[command(subcommand)]
+        action: RulesAction,
+    },
     /// Serve the pilot MCP door on standard input and output, for an agent outside Flottille
     Mcp,
     /// Speak ACP on standard input and output in front of an agent CLI: what the daemon starts
@@ -298,6 +304,18 @@ enum DeveloperAction {
     On,
     /// Stop logging
     Off,
+}
+
+#[derive(Subcommand)]
+enum RulesAction {
+    /// The rules proposed for your projects that wait for you to add or dismiss them
+    Proposals {
+        /// Those of this project only
+        #[arg(long, value_name = "PROJECT")]
+        project: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -448,6 +466,9 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         Command::Approve { number, discard } => approval_command::approve(&paths, number, discard)?,
         Command::Deny { number } => approval_command::deny(&paths, number)?,
         Command::Inbox { after, limit, json } => inbox_command::inbox(&paths, after, limit, json)?,
+        Command::Rules {
+            action: RulesAction::Proposals { project, json },
+        } => inbox_command::proposals(&paths, project.as_deref(), json)?,
         Command::Mcp => pilot::run(&paths)?,
         Command::Extensions(command) => return extensions::run(&paths, command),
         Command::Update {

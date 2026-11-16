@@ -742,6 +742,25 @@ const MIGRATIONS: &[&str] = &[
     ) STRICT;
     CREATE INDEX opened_pulls_branch ON opened_pulls (project, repository, branch);
 ",
+    "
+    -- A rule proposed for a project from a failure its agents keep making (`docs/projects.md`,
+    -- \"Proposed rules\"): one per pattern, so that a pattern answered, accepted or dismissed, is
+    -- never proposed again. `calls` holds the failures behind it, as JSON.
+    CREATE TABLE rule_proposals (
+        id         INTEGER PRIMARY KEY,
+        project    TEXT NOT NULL,
+        tool       TEXT NOT NULL,
+        pattern    TEXT NOT NULL,
+        state      TEXT NOT NULL,
+        rule       TEXT NOT NULL,
+        count      INTEGER NOT NULL,
+        sessions   INTEGER NOT NULL,
+        calls      TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        decided_at INTEGER,
+        UNIQUE (project, tool, pattern)
+    ) STRICT;
+",
 ];
 
 /// How many of each extension's own migrations were applied (`docs/extensions.md`, "Data"): its
@@ -3121,6 +3140,122 @@ impl Store {
         Ok(())
     }
 
+    /// The calls of the project's agents that were refused since `since` (milliseconds): their
+    /// `agent.tool_served` events, oldest first, with the agent of each.
+    pub fn refused_calls(&self, project: &str, since: u64) -> Result<Vec<(Event, String)>> {
+        let mut statement = self.connection.prepare_cached(
+            "SELECT e.seq, e.at, e.name, e.data, a.agent FROM agents g \
+             JOIN agent_events a ON a.agent = g.id JOIN events e ON e.seq = a.seq \
+             WHERE g.project = ?1 AND e.name = 'agent.tool_served' AND e.at >= ?2 \
+             AND json_extract(e.data, '$.outcome') = 'refused' ORDER BY e.seq",
+        )?;
+        let rows = statement.query_map(params![project, since], |row| {
+            Ok((event_row(row)?, row.get::<_, String>(4)?))
+        })?;
+        rows.map(|row| {
+            let (event, agent) = row?;
+            Ok((event?, agent))
+        })
+        .collect()
+    }
+
+    /// Whether a call of the agent was refused since `since` (milliseconds).
+    pub fn refused_since(&self, agent: &str, since: u64) -> Result<bool> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT 1 FROM agent_events a JOIN events e ON e.seq = a.seq \
+                 WHERE a.agent = ?1 AND e.name = 'agent.tool_served' AND e.at >= ?2 \
+                 AND json_extract(e.data, '$.outcome') = 'refused' LIMIT 1",
+                params![agent, since],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
+    }
+
+    /// Records a rule proposed for a project; none when its pattern was proposed before.
+    pub fn add_rule_proposal(&mut self, proposal: &RuleProposal) -> Result<Option<u64>> {
+        let added = self.connection.execute(
+            "INSERT OR IGNORE INTO rule_proposals (project, tool, pattern, state, rule, count, \
+             sessions, calls, created_at) VALUES (?1, ?2, ?3, 'open', ?4, ?5, ?6, ?7, ?8)",
+            params![
+                proposal.project,
+                proposal.tool,
+                proposal.pattern,
+                proposal.rule,
+                proposal.count,
+                proposal.sessions,
+                Value::Array(proposal.calls.clone()).to_string(),
+                proposal.created_at
+            ],
+        )?;
+        Ok((added == 1).then(|| self.connection.last_insert_rowid() as u64))
+    }
+
+    /// The rules proposed, of one project or of all, the oldest first; the open ones only, or
+    /// every one.
+    pub fn rule_proposals(&self, project: Option<&str>, open: bool) -> Result<Vec<RuleProposal>> {
+        let mut statement = self.connection.prepare_cached(
+            "SELECT id, project, tool, pattern, state, rule, count, sessions, calls, created_at, \
+             decided_at FROM rule_proposals WHERE (?1 IS NULL OR project = ?1) \
+             AND (?2 = 0 OR state = 'open') ORDER BY id",
+        )?;
+        let rows = statement.query_map(params![project, open], rule_proposal_row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn rule_proposal(&self, id: u64) -> Result<Option<RuleProposal>> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT id, project, tool, pattern, state, rule, count, sessions, calls, \
+                 created_at, decided_at FROM rule_proposals WHERE id = ?1",
+                params![id],
+                rule_proposal_row,
+            )
+            .optional()?)
+    }
+
+    /// Whether a rule was ever proposed for this pattern of the project, whatever became of it.
+    pub fn rule_proposed(&self, project: &str, tool: &str, pattern: &str) -> Result<bool> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT 1 FROM rule_proposals WHERE project = ?1 AND tool = ?2 AND pattern = ?3",
+                params![project, tool, pattern],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
+    }
+
+    /// An open proposal becomes `accepted` (with the rule as it was added) or `dismissed`; false
+    /// when it was no longer open.
+    pub fn decide_rule_proposal(
+        &mut self,
+        id: u64,
+        state: &str,
+        rule: Option<&str>,
+    ) -> Result<bool> {
+        let changed = self.connection.execute(
+            "UPDATE rule_proposals SET state = ?2, rule = coalesce(?3, rule), decided_at = ?4 \
+             WHERE id = ?1 AND state = 'open'",
+            params![id, state, rule, now_ms()],
+        )?;
+        Ok(changed == 1)
+    }
+
+    /// An accepted proposal whose rule could not be written is open again, as it was proposed.
+    pub fn reopen_rule_proposal(&mut self, id: u64, rule: &str) -> Result<bool> {
+        let changed = self.connection.execute(
+            "UPDATE rule_proposals SET state = 'open', rule = ?2, decided_at = NULL \
+             WHERE id = ?1 AND state = 'accepted'",
+            params![id, rule],
+        )?;
+        Ok(changed == 1)
+    }
+
     /// Every row of the turns' usage, in the order they were recorded.
     pub fn turn_usage(&self) -> Result<Vec<TurnUsage>> {
         let mut statement = self.connection.prepare_cached(
@@ -4007,6 +4142,43 @@ fn agent_row(row: &rusqlite::Row) -> rusqlite::Result<Result<Agent>> {
 static CLOCK_AHEAD_MS: AtomicU64 = AtomicU64::new(0);
 
 /// Milliseconds since the Unix epoch, on the clock every time of Flottille is read from.
+/// A rule proposed for a project from a failure its agents keep making.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RuleProposal {
+    pub id: u64,
+    pub project: String,
+    pub tool: String,
+    /// The refusal's text with what varies from one call to the next replaced.
+    pub pattern: String,
+    /// `open`, `accepted` or `dismissed`.
+    pub state: String,
+    pub rule: String,
+    /// How many times the pattern was seen, and in how many sessions.
+    pub count: u64,
+    pub sessions: u64,
+    /// The failures behind it: `{"seq", "at", "agent", "session", "arguments", "error"}`.
+    pub calls: Vec<Value>,
+    pub created_at: u64,
+    pub decided_at: Option<u64>,
+}
+
+fn rule_proposal_row(row: &rusqlite::Row) -> rusqlite::Result<RuleProposal> {
+    let calls: String = row.get(8)?;
+    Ok(RuleProposal {
+        id: row.get(0)?,
+        project: row.get(1)?,
+        tool: row.get(2)?,
+        pattern: row.get(3)?,
+        state: row.get(4)?,
+        rule: row.get(5)?,
+        count: row.get(6)?,
+        sessions: row.get(7)?,
+        calls: serde_json::from_str(&calls).unwrap_or_default(),
+        created_at: row.get(9)?,
+        decided_at: row.get(10)?,
+    })
+}
+
 pub fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -7410,5 +7582,50 @@ mod tests {
 
         store.set_service_writer("mongo", None).unwrap();
         assert_eq!(store.service_writer("mongo").unwrap(), None);
+    }
+
+    #[test]
+    fn a_pattern_is_proposed_once_and_answered_once() {
+        let mut store = Store::open_in_memory().unwrap();
+        let proposal = RuleProposal {
+            project: "app".into(),
+            tool: "fs_read".into(),
+            pattern: "refused: <path> is outside this agent's place".into(),
+            rule: "Read inside the project.".into(),
+            count: 3,
+            sessions: 2,
+            calls: vec![json!({"seq": 1})],
+            created_at: 5,
+            ..RuleProposal::default()
+        };
+        let id = store.add_rule_proposal(&proposal).unwrap().unwrap();
+        // The same pattern again is no new proposal; another project's is.
+        assert_eq!(store.add_rule_proposal(&proposal).unwrap(), None);
+        let other = RuleProposal {
+            project: "web".into(),
+            ..proposal.clone()
+        };
+        assert!(store.add_rule_proposal(&other).unwrap().is_some());
+        let open = store.rule_proposals(Some("app"), true).unwrap();
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0].state, "open");
+        assert_eq!(open[0].calls, [json!({"seq": 1})]);
+
+        assert!(store.decide_rule_proposal(id, "dismissed", None).unwrap());
+        assert!(
+            !store
+                .decide_rule_proposal(id, "accepted", Some("x"))
+                .unwrap()
+        );
+        assert!(store.rule_proposals(Some("app"), true).unwrap().is_empty());
+        let kept = store.rule_proposal(id).unwrap().unwrap();
+        assert_eq!(kept.state, "dismissed");
+        assert_eq!(kept.rule, "Read inside the project.");
+        assert!(
+            store
+                .rule_proposed("app", "fs_read", &proposal.pattern)
+                .unwrap()
+        );
+        assert_eq!(store.rule_proposals(None, false).unwrap().len(), 2);
     }
 }

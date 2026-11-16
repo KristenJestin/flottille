@@ -1000,7 +1000,9 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   question) and what a session did to a ticket or a pull request (opened, merged, edited or
   commented a pull request; created, edited, commented, closed or reopened a ticket, as
   `agent.tool_served` says a write of `forge` or `tickets` was done), until that session is
-  opened; each item says why it is there (`Request #3 waits for you`, `Asks you a question`,
+  opened, and each rule proposed for a project from a failure its agents keep making ("Proposes a
+  rule", the rule, "For <project>"), which opens the project's Settings where it is answered
+  (`projects.md`, "Proposed rules"); each item says why it is there (`Request #3 waits for you`, `Asks you a question`,
   `Opened a pull request`), a short excerpt (what is asked, the question, the title or the start
   of the text posted) and its session, each on one line cut with an ellipsis. What a session
   changes while its page is open is in sight, and rings nothing; what is changed lives as long

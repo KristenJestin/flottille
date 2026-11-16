@@ -2456,6 +2456,7 @@ impl acp::Events for Recorder {
 
     fn turn_ended(&self, stop_reason: &str, usage: Value, used: Vec<Used>) {
         self.said();
+        let started_at = *self.started_at.lock().unwrap();
         self.record_usage(stop_reason, used);
         // A failed turn gives back what it carried: read by no one, it goes with the next one.
         if stop_reason == "failed" {
@@ -2483,6 +2484,8 @@ impl acp::Events for Recorder {
         tree::after_turn(&self.daemon, &self.agent, stop_reason);
         // Past its threshold, or asked during the turn: summarised before its next prompt.
         crate::compaction::turn_ended(&self.daemon, &self.agent);
+        // A call refused during the turn may be one the project's agents keep making.
+        crate::proposals::turn_ended(&self.daemon, &self.agent, started_at);
     }
 }
 

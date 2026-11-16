@@ -408,6 +408,57 @@ of its agents, and has its own there as well). An agent reads the rules the agen
 the user allows, since it rewrites the instructions of every agent created after it
 (`docs/tools.md`, "The project").
 
+### Proposed rules
+
+Agents fail the same way again and again: the same refusal of the gate, the same wrong argument.
+Flottille notices it and proposes a rule; the user decides whether it goes into the project's
+rules.
+
+**Noticing.** Each call of an agent that was refused, by the gate or by the tool for its
+arguments, keeps what the refusal said (`error` of its `agent.tool_served`, masked, cut at 500
+characters; masked before it is cut). Only the refusals of Flottille's own tools are grouped: a tool
+name the agent made up is its text, not a tool. Two refused calls of a project's sessions fall into the same **pattern** when they are
+calls of the same tool whose refusals say the same once the first line is taken alone (what
+follows is the detail of one call: a diff, a list) and what varies from one call to the next is
+replaced: a quoted value (in straight or curly quotes or backticks; an apostrophe is not one) by
+`<q>`, a path or a file's name by `<path>`, a number by `<n>`, a word holding a digit (an id, a
+commit) by `<id>`. A name written bare in the text (a task's, a repository's) stays: two tasks are
+two patterns. When a turn of an agent ends after one of its calls was refused, the daemon reads the
+refused calls of the project's sessions over the last 14 days, and a pattern seen **3 times or
+more, in 2 sessions or more**, that was never proposed, is put to the judge. The read is cheap and
+done at each such turn; the judge is asked at most once an hour per project, for every pattern
+found then, one after the other.
+
+**Writing the rule.** The judge (Settings, Approvals, "Auto judge"; `docs/design.md` §7.1) is asked
+once per pattern to write one rule of one or two sentences, in the voice of the project's rules,
+saying what to do instead, never quoting a secret nor a path outside the project, or to answer
+`NONE` when no rule would help. Its instructions
+are fixed (`crates/flottille/roles/rule-proposal.md`; the user's guidance of judgements has no part
+in them); its prompt holds the tool (in a block of its own), the pattern, the last three failures (their arguments and
+refusals as recorded, masked) and the project's rules, each in a block of its own, every `&` and
+`<` escaped, the whole masked again (the place's secret files too). It runs as a judgement does: no tool, an empty folder (`rules` in
+the state folder), the judge's time limit. Nothing waits for it. With no judge (none chosen, or "No
+judge") nothing is proposed. A judge that fails, says nothing in time, tries a tool or answers
+something that is not a rule (empty, `NONE`, or longer than 600 characters) proposes nothing, said in the
+daemon's log: the pattern is put to it again at the next check that finds it, never in a loop. What
+the judge used is recorded like a turn (`turn_usage`, role `rules`, agent and session `rules`).
+
+**Proposing.** A proposal waits for the user: `rules.proposed` puts it in the inbox (kind
+`proposed_rule`, `flottille inbox`), `flottille rules proposals` and `rules.proposals` list it, and
+the window rings the bell with it (which opens the project's Settings) and shows it in the
+project's Settings, Instructions, under its rules ("Proposed rules", a row each, which unfolds as it
+comes and folds away once answered): the rule in a field to edit, how many times and in how many
+sessions the failure was seen, and the failures behind it, each a button that opens its session
+(its tooltip what the refusal said). **Add to the project's rules** (`rules.proposal.accept {proposal,
+text?}`) puts the text, as edited, at the end of the project's own rules, after a blank line (its
+rules become that text when it had none); the limit of the rules holds. The proposal is claimed
+first, so that of two answers at once one wins and the other writes nothing; a rule that cannot be
+written gives it back as open. The window, when the rules editor holds text the user has not saved,
+says that the rule was added under it. Like every change of the
+rules, it reaches the sessions created after it, never one that runs: rules are frozen per session
+for the prompt cache. **Dismiss** (`rules.proposal.dismiss {proposal}`) puts it away. A pattern
+proposed once, added or dismissed, is never proposed again for that project.
+
 ## Message checks
 
 `message_checks` lists command lines the user writes, each with `{message}` standing for a file

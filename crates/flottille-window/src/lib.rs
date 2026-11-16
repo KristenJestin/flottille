@@ -31,6 +31,7 @@ pub mod progress;
 pub mod project;
 pub mod project_removal;
 pub mod project_settings;
+pub mod proposed_rules;
 pub mod providers;
 pub mod question_card;
 pub mod queued;

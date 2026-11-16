@@ -149,7 +149,7 @@ pub trait Events: Send + Sync + 'static {
 /// What a turn used, from the prompt's answer (`docs/reference/acp.md`, "What a turn used"):
 /// Flottille's bridges say it per model in `_meta.flottille.usage`, another agent may give ACP's
 /// `usage`, and an agent that says nothing gives one entry without counts.
-fn used(answer: &Value) -> Vec<Used> {
+pub fn used(answer: &Value) -> Vec<Used> {
     let of = |usage: &Value| Used {
         model: usage["model"].as_str().map(str::to_owned),
         input: usage["inputTokens"].as_u64(),

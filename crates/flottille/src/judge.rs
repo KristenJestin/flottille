@@ -794,6 +794,8 @@ pub struct Turned {
     pub said: String,
     pub stop: String,
     pub tool: bool,
+    /// What the turn used, as its answer said it.
+    pub used: Vec<flottille_core::agent::Used>,
 }
 
 /// One turn of a model: its provider's ACP agent started in bare mode with no tool, in an empty
@@ -895,10 +897,11 @@ pub async fn one_turn(
         .await;
     let _ = child.start_kill();
     match result {
-        Ok(Ok(stop)) => Ok(Turned {
+        Ok(Ok((stop, used))) => Ok(Turned {
             said: said.lock().unwrap().clone(),
             stop,
             tool: *tool.lock().unwrap(),
+            used,
         }),
         Ok(Err(why)) => Err(why),
         Err(error) => Err(format!("the connection to the judge failed: {error}")),
@@ -916,14 +919,14 @@ impl Drop for Group {
 }
 
 /// One session of a model: open, set the model and the effort, play the prompt. Why its turn
-/// ended.
+/// ended, and what it used.
 async fn session(
     cx: ConnectionTo<AcpAgent>,
     folder: &Path,
     meta: Option<serde_json::Map<String, Value>>,
     chosen: &Model<'_>,
     prompt: &str,
-) -> Result<String, String> {
+) -> Result<(String, Vec<flottille_core::agent::Used>), String> {
     cx.send_request(
         InitializeRequest::new(ProtocolVersion::V1)
             .client_info(Implementation::new("Flottille", VERSION)),
@@ -996,10 +999,11 @@ async fn session(
         .await
         .map_err(|e| format!("its turn failed: {e}"))?;
     let answer = serde_json::to_value(&answer).unwrap_or_default();
-    Ok(answer["stopReason"]
+    let stop = answer["stopReason"]
         .as_str()
         .unwrap_or("end_turn")
-        .to_owned())
+        .to_owned();
+    Ok((stop, crate::acp::used(&answer)))
 }
 
 /// A model asked one question, as its provider's bare options take an agent: no tool, its

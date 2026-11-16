@@ -18,6 +18,42 @@ pub fn inbox(paths: &Paths, after: Option<u64>, limit: Option<usize>, json: bool
     Ok(())
 }
 
+/// `flottille rules proposals`: the rules proposed that wait for the user (`rules.proposals`).
+pub fn proposals(paths: &Paths, project: Option<&str>, json: bool) -> Result<()> {
+    let listed =
+        Client::connect_or_start(paths)?.request("rules.proposals", json!({"project": project}))?;
+    if json {
+        println!("{listed}");
+    } else {
+        print!("{}", proposals_text(&listed));
+    }
+    Ok(())
+}
+
+fn proposals_text(listed: &Value) -> String {
+    let proposals = listed["proposals"]
+        .as_array()
+        .map_or(&[][..], Vec::as_slice);
+    if proposals.is_empty() {
+        return "No rule is proposed.\n".into();
+    }
+    let mut out = String::new();
+    for proposal in proposals {
+        out.push_str(&format!(
+            "#{} for {} ({} refused {} times in {} sessions):\n",
+            proposal["id"],
+            proposal["project"].as_str().unwrap_or("?"),
+            proposal["tool"].as_str().unwrap_or("?"),
+            proposal["count"],
+            proposal["sessions"]
+        ));
+        for line in proposal["rule"].as_str().unwrap_or_default().lines() {
+            out.push_str(&format!("    {line}\n"));
+        }
+    }
+    out
+}
+
 fn inbox_text(listed: &Value) -> String {
     let entries = listed["entries"].as_array().map_or(&[][..], Vec::as_slice);
     if entries.is_empty() {
