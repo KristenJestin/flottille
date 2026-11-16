@@ -73,6 +73,10 @@ impl TextViewer {
             self.lines.push(SharedString::from(
                 if line.is_empty() { " " } else { line }.to_owned(),
             ));
+            // A line cut short ends the text drawn: a line after it would not follow it.
+            if self.cut {
+                break;
+            }
         }
     }
 
