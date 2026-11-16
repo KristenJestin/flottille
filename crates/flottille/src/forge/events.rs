@@ -51,7 +51,7 @@ fn checks_ended(item: &Item, refined: &[Ending]) -> String {
     let endings: Vec<Ending> = item
         .checks
         .iter()
-        .filter(|check| check.state == "failing")
+        .filter(|check| matches!(check.state.as_str(), "failing" | "stopped"))
         .enumerate()
         .map(|(at, check)| match refined.get(at) {
             Some(ending) => ending.clone(),
@@ -83,6 +83,13 @@ fn checks_line(item: &Item) -> String {
     let count = |state: &str| item.checks.iter().filter(|c| c.state == state).count();
     match (count("failing"), count("pending"), item.checks.len()) {
         (0, 0, 0) => "no checks".to_owned(),
+        (0, 0, _) if count("stopped") > 0 => {
+            format!(
+                "checks: {} passed, {} stopped",
+                count("passing"),
+                count("stopped")
+            )
+        }
         (0, 0, _) => match (count("passing"), count("skipped")) {
             (passed, 0) => format!("checks: {passed} passed"),
             (0, skipped) => format!("checks: {skipped} skipped"),
@@ -206,7 +213,7 @@ fn jobs_of(item: &Item) -> (Vec<Job>, usize) {
     let failing: Vec<_> = item
         .checks
         .iter()
-        .filter(|check| check.state == "failing")
+        .filter(|check| matches!(check.state.as_str(), "failing" | "stopped"))
         .collect();
     let jobs = failing.iter().take(LISTED).map(|check| Job::of(check));
     (jobs.collect(), failing.len().saturating_sub(LISTED))

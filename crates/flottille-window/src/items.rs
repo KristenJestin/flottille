@@ -225,6 +225,7 @@ fn ci_of(checks: &Value) -> Option<String> {
         _ if states.is_empty() => None,
         _ if any("failing") => Some("failing".into()),
         _ if any("pending") => Some("pending".into()),
+        _ if any("stopped") => Some("stopped".into()),
         _ => Some("passing".into()),
     }
 }
@@ -242,6 +243,7 @@ fn ci_state(ci: &str) -> AgentState {
     match ci {
         "failing" => AgentState::Failed,
         "pending" => AgentState::Running,
+        "stopped" => AgentState::Stopped,
         _ => AgentState::Completed,
     }
 }
@@ -1735,6 +1737,10 @@ mod tests {
         assert_eq!(checks(&[]), None);
         assert_eq!(checks(&["passing", "skipped"]).as_deref(), Some("passing"));
         assert_eq!(checks(&["passing", "pending"]).as_deref(), Some("pending"));
+        // A stop is neither a failure nor a run that goes on.
+        assert_eq!(checks(&["passing", "stopped"]).as_deref(), Some("stopped"));
+        assert_eq!(checks(&["stopped", "pending"]).as_deref(), Some("pending"));
+        assert_eq!(checks(&["stopped", "failing"]).as_deref(), Some("failing"));
         assert_eq!(
             checks(&["pending", "failing", "passing"]).as_deref(),
             Some("failing")

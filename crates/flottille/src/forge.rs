@@ -312,7 +312,8 @@ pub struct Pull {
     pub mergeable: Option<bool>,
     /// `approved`, `changes requested`, `review required`, or none.
     pub review: Option<&'static str>,
-    /// Each check's name and state: `passing`, `failing`, `pending` or `skipped`.
+    /// Each check's name and state: `passing`, `failing`, `pending`, `stopped` (Bitbucket's
+    /// `STOPPED`) or `skipped`.
     pub checks: Vec<(String, &'static str)>,
     /// The short commit whose checks have not started yet, when Bitbucket has no check for a head
     /// pushed a moment ago; none otherwise, and then no check at all means none ran.
@@ -419,7 +420,7 @@ impl Comment {
 
 impl Pull {
     /// The checks as one mark: `failing` when one fails, else `pending` when one runs, else
-    /// `passing`; none without checks.
+    /// `stopped` when one was stopped, else `passing`; none without checks.
     pub fn mark(&self) -> Option<&'static str> {
         let any = |state| self.checks.iter().any(|(_, s)| *s == state);
         if self.checks.is_empty() {
@@ -428,6 +429,8 @@ impl Pull {
             Some("failing")
         } else if any("pending") {
             Some("pending")
+        } else if any("stopped") {
+            Some("stopped")
         } else {
             Some("passing")
         }
@@ -2954,6 +2957,11 @@ fn blocks(
     if let Some(names) = named("failing") {
         blocks.push(format!("its checks fail ({names})"));
     }
+    if let Some(names) = named("stopped") {
+        blocks.push(format!(
+            "its checks were stopped ({names}): run them again with forge checks"
+        ));
+    }
     if let Some(names) = named("pending") {
         blocks.push(format!("its checks are still running ({names})"));
     }
@@ -4106,6 +4114,27 @@ mod tests {
         assert_eq!(
             blocked(&[("build", "skipped"), ("lint", "failing")]).as_deref(),
             Some("its checks fail (lint)")
+        );
+    }
+
+    #[test]
+    fn a_stopped_check_blocks_the_merge_and_says_how_to_run_it_again() {
+        let blocked = |checks: &[(&str, &'static str)]| {
+            let checks: Vec<(String, &'static str)> =
+                checks.iter().map(|(n, s)| ((*n).to_owned(), *s)).collect();
+            blocks(&checks, None, None)
+        };
+        assert_eq!(
+            blocked(&[("build", "stopped"), ("lint", "passing")]).as_deref(),
+            Some("its checks were stopped (build): run them again with forge checks")
+        );
+        // A stop is not a failure, nor a check that runs.
+        assert_eq!(
+            blocked(&[("build", "stopped"), ("lint", "pending")]).as_deref(),
+            Some(
+                "its checks were stopped (build): run them again with forge checks, \
+                 its checks are still running (lint)"
+            )
         );
     }
 
