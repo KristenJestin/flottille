@@ -194,6 +194,30 @@ Developer mode is on. Its log: ~/.local/state/flottille/developer.log
 
 Turns it off: nothing more is written. The log stays where it is.
 
+### `flottille usage [--project P] [--since D] [--by day|model|provider|role|tuning] [--json]`
+
+What agents used from `--since` to today, in weighted tokens, and what a task that ends merged
+costs (`docs/usage.md`): of every project, or of `--project`. `--since` is a day (`2026-11-01`) or
+a number of days ending today (`7d`), `30d` when left out; `--by` splits the totals, `day` when
+left out. `--json` prints `usage.stats`'s answer.
+
+```
+$ flottille usage --since 7d --by tuning
+Usage of every project from 2026-11-09 to 2026-11-15, in weighted tokens (input + 1.25 × cache write + 0.1 × cache read + 5 × output).
+
+Cost per merged task: 1.2M (3 merged, 1 failed).
+Left out of it: 2 in progress (12.3k), the turns in main (900).
+
+Total: 4.5M, 38% of it cache reads, 120 turns.
+
+By tuning:
+  (none)                       4.0M   40% cache reads  1.3M per merged task
+  unchanged                  500.0k   20% cache reads
+```
+
+A project without a forge adds one line, `Tasks of projects without a forge: N (…), their outcome
+not known.`, and turns missing a count say how many after the total.
+
 ### `flottille update`
 
 Replaces Flottille with the latest build of a channel (`docs/releases.md`): the one published

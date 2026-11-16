@@ -849,6 +849,39 @@ The daemon reads the file when a check is due, at its start and about once an ho
 emits `sessions.changed` with what it answers. The user's door alone reaches them: no tool of an
 agent does.
 
+### The usage methods
+
+`usage.stats {project?, since, until, by}` answers what agents used and what a task that ends
+merged costs (`docs/usage.md`), read from the turns that started from the day `since` to the day
+`until` (`2026-11-15`, the daemon's local days, both included), of every project or of
+`project`, split by `by`: `day`, `model`, `provider`, `role` or `tuning`.
+
+```json
+{"project": null, "since": "2026-11-09", "until": "2026-11-15", "by": "tuning",
+ "total": {"turns": 120, "missing": 3, "input": 81000, "cache_write": 52000,
+   "cache_read": 3400000, "output": 9000, "reasoning": 2100, "weighted": 531000.0,
+   "cache_read_share": 0.64,
+   "tasks": {"merged": {"count": 3, "weighted": 300000.0},
+     "failed": {"count": 1, "weighted": 60000.0},
+     "in_progress": {"count": 2, "weighted": 1230.0},
+     "no_forge": {"count": 0, "weighted": 0.0},
+     "main": 900.0, "cost_per_merged_task": 120000.0}},
+ "groups": [{"key": "", "turns": 100, "…": "…", "tasks": {"…": "…"}},
+   {"key": "unchanged", "turns": 20, "…": "…", "tasks": {"…": "…"}}]}
+```
+
+- Each sum gives its turns (rows: one per turn and model), `missing` (rows without one of the four
+  counts, taken as 0), the counts, `weighted` (weighted tokens), `cache_read_share` (the share of
+  `weighted` that was cache reads, 0 with none) and `tasks`: the tasks of its turns by outcome,
+  each with their number and the weighted tokens of their turns, `main` (the turns in no
+  workspace) and `cost_per_merged_task`, `null` when none was merged.
+- `groups` has one entry per `key`: with `day`, every day of the period in order, empty ones
+  included; otherwise by `weighted`, the largest first. A model the turn did not name is `null`;
+  no optimisation on is `""`.
+
+`invalid-params` for a date that is not one, an `until` before `since`, or another `by`. The
+user's door alone reaches it: no tool of an agent does.
+
 ### The workspaces folder methods
 
 `workspaces_folder.show` and `workspaces_folder.set` read and keep where workspaces go

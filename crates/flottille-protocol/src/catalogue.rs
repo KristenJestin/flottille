@@ -91,6 +91,7 @@ pub const METHODS: &[(&str, Class)] = &[
     ("appearance.set", Drive),
     ("tool_results.show", Read),
     ("tool_results.set", Drive),
+    ("usage.stats", Read),
     ("sessions.show", Read),
     ("sessions.set", Drive),
     ("workspaces_folder.show", Read),

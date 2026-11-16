@@ -78,9 +78,10 @@ The daemon records what each turn used, one row per turn and model, in the store
 `turn_usage`: the agent (its id, its title), its session (the root's id), its project and
 workspace by name, the kind of agent (`provider`), its role, the model, the start and the end of
 the turn (milliseconds), its stop reason, the tokens (`input`, `output`, `cache_read`,
-`cache_write`, `reasoning`) and the cost in USD. A count the agent did not give is `NULL`, never
-0. The rows are history: they hold no reference to the agents or the workspaces, and stay when
-those go. Nothing reads them yet.
+`cache_write`, `reasoning`), the cost in USD, and `tuning`, the optimisations on during the turn
+(`docs/usage.md`). A count the agent did not give is `NULL`, never 0. The rows are history: they
+hold no reference to the agents or the workspaces, and stay when those go. The usage statistics
+read them (`docs/usage.md`).
 
 It comes with the end of the turn, the answer to `session/prompt`, in one of two shapes:
 
