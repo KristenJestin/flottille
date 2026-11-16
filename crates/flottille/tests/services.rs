@@ -1706,6 +1706,66 @@ fn an_outside_service_that_answers_again_is_said_back() {
     assert_eq!(all.len(), 1, "{all:?}");
 }
 
+#[test]
+fn a_service_that_flaps_leaves_the_agent_told_its_last_state() {
+    let user = User::with_fake_agent().with_env("FLOTTILLE_TEST_FOLLOW_MS", "200");
+    // The agent's turn lasts until the test says so: nothing it is told is read before.
+    user.fake_script(json!({"turns": [
+        {"when": "hello", "times": 1, "do": [{"hold": "release"}]}
+    ]}));
+    let (outside, address) = by_hand();
+    let mut outside = Ended(outside);
+    services_file(
+        &user,
+        &format!(
+            "[services.db]\nfolder = \"{}\"\nline = \"{}\"\nready = {{ url = \"{address}\" }}\n",
+            folder(&user, "db").display(),
+            server(0)
+        ),
+    );
+    project(&user, &[]);
+    serving_api(&user, &["db"]);
+    let (agent, mcp) = root(&user, None);
+    set_mode(&user, &agent, "full");
+    let run = run_of(&done(mcp.call("run", json!({"task": "api"}))));
+    // Asked of the daemon, not of the agent's tools: a tool's answer would carry what waits.
+    let stopped = || {
+        user.call("run.list", json!({"tree": agent}))
+            .unwrap()
+            .to_string()
+            .contains("\"needs_stopped\":[\"db\"]")
+    };
+
+    // Stopped, back, stopped again, all in the one turn.
+    let _ = outside.0.kill();
+    let _ = outside.0.wait();
+    eventually("db seen stopped", stopped);
+    let port = address.rsplit_once(':').unwrap().1;
+    let mut again = Ended(
+        Command::new(common::fake_server())
+            .args(["--listen", port])
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    eventually("db seen back", || !stopped());
+    let _ = again.0.kill();
+    let _ = again.0.wait();
+    eventually("db seen stopped again", stopped);
+
+    std::fs::write(user.path("fake/release"), "").unwrap();
+    let told = prompted_within(&user, 10, &["[flottille:service-stopped]"]);
+    assert!(told[0].contains(&run), "{told:?}");
+    std::thread::sleep(Duration::from_secs(2));
+    let all = prompts(&user).join("\n");
+    assert_eq!(
+        all.matches("[flottille:service-stopped]").count(),
+        1,
+        "{all}"
+    );
+    assert_eq!(all.matches("[flottille:service-back]").count(), 0, "{all}");
+}
+
 /// A child of the test's, killed and waited for when the test ends, passed or not.
 struct Ended(std::process::Child);
 

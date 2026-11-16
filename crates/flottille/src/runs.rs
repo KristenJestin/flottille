@@ -2299,6 +2299,17 @@ pub(crate) fn need_changed(daemon: &Arc<Daemon>, id: &str, service: &str, how: O
     );
     let Some(agent) = &run.agent else { return };
     let task = run.name.as_deref().unwrap_or_default();
+    // What is told is the service's last state: a stop or a return still waiting for the agent
+    // (it is in a turn) gives way to this one. The service's name ends with `:` so that `db`
+    // does not take `db-replica`'s.
+    let id = |kind: &str| format!("service-{kind}-{}-{service}:", run.id);
+    let _ = daemon.write(|store| {
+        Ok((
+            (),
+            store.supersede_like(agent, &[&id("stopped"), &id("back")])?,
+        ))
+    });
+    let fresh = |kind: &str| Some(format!("{}{}", id(kind), new_id().unwrap_or_default()));
     match how {
         Some(how) => {
             let body = format!(
@@ -2310,7 +2321,7 @@ pub(crate) fn need_changed(daemon: &Arc<Daemon>, id: &str, service: &str, how: O
                 daemon,
                 agent,
                 "service-stopped",
-                None,
+                fresh("stopped"),
                 &body,
                 approval::URGENT,
             );
@@ -2325,7 +2336,7 @@ pub(crate) fn need_changed(daemon: &Arc<Daemon>, id: &str, service: &str, how: O
                 daemon,
                 agent,
                 "service-back",
-                None,
+                fresh("back"),
                 &body,
                 approval::BETWEEN_TURNS,
             );
