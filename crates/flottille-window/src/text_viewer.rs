@@ -188,6 +188,26 @@ mod tests {
     }
 
     #[test]
+    fn a_line_cut_by_the_cap_is_the_last_line_drawn() {
+        let mut viewer = TextViewer::new();
+        viewer.read(
+            "pasted-text.txt",
+            &format!("{}\nshort\n", "a".repeat(MAX_BYTES + 10)),
+        );
+        assert_eq!(viewer.lines.len(), 1);
+        assert!(viewer.cut);
+    }
+
+    #[test]
+    fn a_line_cut_inside_a_character_is_the_last_line_drawn() {
+        let mut viewer = TextViewer::new();
+        let text = format!("{}é tail\nshort\n", "a".repeat(MAX_BYTES - 1));
+        viewer.read("pasted-text.txt", &text);
+        assert_eq!(viewer.lines.len(), 1, "the rows drawn after a cut line");
+        assert!(viewer.cut);
+    }
+
+    #[test]
     fn a_text_drawn_whole_says_its_size_only() {
         let mut viewer = TextViewer::new();
         viewer.read("pasted-text.txt", "one\ntwo\n");
