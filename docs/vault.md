@@ -221,16 +221,32 @@ options and the remote's transport), a connection's server and its login:
 **The SSH agent is lent to a push alone.** What the daemon runs gets no `SSH_AUTH_SOCK`, but a run
 that is itself a `git push` (its own line, no wrapper) the user, the judge or Full mode let
 through, and the git reads made for it (the push's dry run for its checks): their `SSH_AUTH_SOCK`
-is the socket the daemon's own environment names, resolved by the daemon (links followed), never
-a path a variable of the run or the agent gives; and from Landlock's ninth ABI they are granted
-`LANDLOCK_ACCESS_FS_RESOLVE_UNIX` on that socket file alone. Landlock checks connecting from the
-socket's own path up and counts that right among a file's, so the rule on the socket grants it and
-nothing else: the runtime folder stays unlisted, its other sockets (the bus, gpg-agent) refused.
-A socket outside the runtime folder is lent the same way. Such a push signs in over SSH only: a
+is the socket the daemon's own environment named **when the daemon started**, resolved then
+(links followed) and kept with its device and inode, never a path a variable of the run or the
+agent gives. At each push the name is followed again and the socket looked at again: a link moved
+since, or a socket put in its place, lends nothing (the push runs without an agent). A socket that
+is the session bus is never lent. From Landlock's ninth ABI the push is granted
+`LANDLOCK_ACCESS_FS_RESOLVE_UNIX` on that socket file alone (its device and inode checked again in
+the child). Landlock checks connecting from the socket's own path up and counts that right among a
+file's, so the rule on the socket grants it and nothing else: the runtime folder stays unlisted,
+its other sockets (the bus, gpg-agent) refused. A socket outside the runtime folder
+(`/tmp/ssh-…/agent.…`, a password manager's under the home) is lent the same way, and from the
+ninth ABI every other command the daemon runs is kept from connecting to it: the folders on the
+way to it are ruled without the right to connect, their other entries with every right.
+
+What runs with the agent is pinned: the push's `GIT_SSH_COMMAND` is the `ssh` the daemon found on
+its own `PATH` at its start, the first one outside the user's home (`~/bin`, `~/.local/bin`, the
+projects, the agents' folders) and Flottille's folders, links followed, so a program an agent
+could write never gets the socket; it wins over `core.sshCommand` and `GIT_SSH`, which the gate
+refuses on the line anyway. No such `ssh`, no agent is lent. `GIT_ALLOW_PROTOCOL=ssh` takes away
+every other transport (`ext::` and `fd::` run a program, a path runs `git-receive-pack` here), and
+each remote's `receivepack` is set back to `git-receive-pack`, both through the environment, which
+wins over the repository's settings. A setting on the push's own line (`git -c …`,
+`--config-env`) would win over these and over the hooks' wall: such a push is refused in every
+mode, saying to set it in the repository or to push by hand. Such a push signs in over SSH only: a
 push to an HTTP(S) URL is refused before it runs (git resolves its URLs in an offline dry run),
-saying to give the remote an SSH push URL (`git remote set-url --push`) or to push by hand.
-`core.sshCommand`, `GIT_SSH` and `GIT_SSH_COMMAND` stay refused by the gate, so what speaks to the
-agent is the user's `ssh`.
+saying to give the remote an SSH push URL (`git remote set-url --push`) or to push by hand. The
+probes of a push's task (its `ready` and `url` commands) are not lent the agent.
 
 The daemon's own runtime folder is denied with the rest: a `flottille daemon stop` run for an
 agent cannot read the daemon's lock, and refuses itself when the daemon does not answer, as a
@@ -246,6 +262,12 @@ The gaps, where the platform does not allow more:
   commit signed through gpg-agent fails;
 - below the ninth ABI, connecting is not governed: a run that is not a push gets no
   `SSH_AUTH_SOCK`, but one that guesses the agent's path can still connect to it, as to the bus;
+- what `ssh` reads is not pinned: the user's `~/.ssh/config` may run a program
+  (`ProxyCommand`, `LocalCommand`, `Match exec`) with the agent's socket, and pinning it would break
+  jump hosts. What speaks to the agent is the pinned `ssh` as the user's own configuration makes
+  it, so whatever can write that file can run a program with the agent;
+- from the ninth ABI, a socket made after a command started directly in a folder on the way to a
+  kept-out agent socket (`/tmp` for `/tmp/ssh-…/agent.…`) cannot be connected to by that command;
 - without Landlock (a kernel before 5.19, or one built without it), the process runs as before,
   with only the environment kept from it;
 - a bus listening on an abstract socket (`unix:abstract=…`, older setups) is not a path, and is
