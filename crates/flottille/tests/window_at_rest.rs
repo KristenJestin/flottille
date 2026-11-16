@@ -1685,14 +1685,12 @@ fn the_window_draws_no_frame_at_rest_on_the_session_page_with_a_pasted_text(
     until(&shell, cx, "the viewer is closed", |cx| {
         cx.update(|window, _| window.try_find("pasted-text-modal").is_none())
     });
-    // A large paste in the reply field: a chip there too.
-    cx.update(|window, cx| window.click("reply-field", cx));
-    step(&shell, Duration::from_millis(16), cx);
-    cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(log));
-    cx.simulate_keystrokes("ctrl-v");
+    // A large paste in the reply field: a chip there too. Attached as a paste attaches it,
+    // without the field's focus, whose caret blinks.
     let reply = shell
         .read_with(cx, |s, _| s.reply_of(&id).cloned())
         .expect("the session has a reply field");
+    reply.update_in(cx, |reply, _, cx| reply.attach_text(log, cx));
     until(&shell, cx, "the reply holds the chip", |cx| {
         reply.read_with(cx, |r, cx| {
             r.tokens()
@@ -1702,8 +1700,6 @@ fn the_window_draws_no_frame_at_rest_on_the_session_page_with_a_pasted_text(
                 .any(|piece| matches!(piece, gpui_design_system::Piece::Token(_)))
         })
     });
-    // The field let go, as the other scenarios leave it: a focused field's caret blinks.
-    cx.update(|window, cx| window.blur(cx));
     // The toast that says it once goes away on its own: the rest is after it.
     let deadline = Instant::now() + Duration::from_secs(30);
     while shell.read_with(cx, |s, cx| s.toasts().read(cx).toasts().count() > 0) {

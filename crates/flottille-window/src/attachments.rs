@@ -276,7 +276,7 @@ impl Attachments {
 
     /// Attaches a large pasted text as a file, or says in a toast why not; the field is left as it
     /// was. Its chip goes in at the caret when the owner is next drawn ([`Attachments::place`]).
-    fn attach_text<T: 'static>(&mut self, text: String, cx: &mut Context<T>) {
+    pub fn attach_text<T: 'static>(&mut self, text: String, cx: &mut Context<T>) {
         if text.len() > flottille_core::pasted::MAX_TEXT_BYTES {
             let detail = format!(
                 "A pasted text can be {} MiB at most.",

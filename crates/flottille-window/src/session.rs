@@ -9334,6 +9334,11 @@ impl Reply {
         self.attached.attach_file(path, cx, Self::attached_of);
     }
 
+    /// Attaches a large text as a file, as a paste of it does (#848).
+    pub fn attach_text(&mut self, text: String, cx: &mut Context<Self>) {
+        self.attached.attach_text(text, cx);
+    }
+
     pub fn detach(&mut self, at: usize, window: &mut Window, cx: &mut Context<Self>) {
         self.attached.detach(at, window, cx);
     }
