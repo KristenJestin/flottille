@@ -780,6 +780,22 @@ fn a_lent_push_shares_no_ssh_connection_and_runs_no_maintenance() {
     );
 }
 
+/// Reads `~/.ssh/config`, then creates a file in `~/.ssh`, changes its `config` and moves
+/// `planted` into it, saying of each `done` or `refused`.
+const SSH_FOLDER: &str = r#"import os
+ssh = os.path.expanduser("~/.ssh")
+print("read: " + open(os.path.join(ssh, "config")).read().strip())
+def tried(what, action):
+    try:
+        action()
+        print(what + ": done")
+    except OSError as error:
+        print(what + ": refused (%s)" % error)
+tried("created", lambda: open(os.path.join(ssh, "created"), "w").close())
+tried("changed", lambda: open(os.path.join(ssh, "config"), "a").write("Match exec true\n"))
+tried("moved", lambda: os.rename("planted", os.path.join(ssh, "moved")))
+"#;
+
 #[test]
 fn a_run_cannot_write_in_the_ssh_folder() {
     if landlock_abi() < 2 {
@@ -796,22 +812,16 @@ fn a_run_cannot_write_in_the_ssh_folder() {
     std::fs::write(ssh.join("config"), "Host forge.invalid\n").unwrap();
     let mcp = session(&user, SSH_REMOTE);
     std::fs::write(user.path("work/app/planted"), "Match exec true\n").unwrap();
-    let ssh = ssh.display();
+    // A script of the agent's: the gate refuses a line that names `~/.ssh`, not what a program
+    // it runs does.
+    std::fs::write(user.path("work/app/ssh.py"), SSH_FOLDER).unwrap();
 
-    let read = done(line(&user, &mcp, &format!("cat {ssh}/config")));
-    let created = line(&user, &mcp, &format!("touch {ssh}/created")).text;
-    let changed = line(&user, &mcp, &format!("cp planted {ssh}/config")).text;
-    let moved = line(&user, &mcp, &format!("mv planted {ssh}/moved")).text;
+    let said = done(line(&user, &mcp, "python3 ssh.py"));
 
-    assert!(read.contains("exited with code 0"), "{read}");
-    assert!(read.contains("Host forge.invalid"), "{read}");
-    for (what, answer) in [
-        ("created", &created),
-        ("changed", &changed),
-        ("moved", &moved),
-    ] {
-        assert!(answer.contains("exited with code"), "{what}: ran? {answer}");
-        assert!(!answer.contains("exited with code 0"), "{what}: {answer}");
+    assert!(said.contains("exited with code 0"), "{said}");
+    assert!(said.contains("read: Host forge.invalid"), "{said}");
+    for refused in ["created: refused", "changed: refused", "moved: refused"] {
+        assert!(said.contains(refused), "{refused}: {said}");
     }
     assert!(!user.path("home/.ssh/created").exists());
     assert!(!user.path("home/.ssh/moved").exists());
