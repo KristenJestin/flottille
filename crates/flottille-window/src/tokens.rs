@@ -141,12 +141,13 @@ pub fn size(bytes: usize) -> String {
 }
 
 /// The text of `pieces` as it is sent: a picture's chip as its marker (`marker` gives it, by id,
-/// with its number), any other chip as its label.
+/// with its number), any other chip as its label. A pasted text's marker typed by hand is sent
+/// as text: only a chip's takes its file's place.
 pub fn sent_text(pieces: &[Piece], mut marker: impl FnMut(&str) -> Option<String>) -> String {
     let mut text = String::new();
     for piece in pieces {
         match piece {
-            Piece::Text(part) => text.push_str(part),
+            Piece::Text(part) => text.push_str(&flottille_core::pasted::as_typed(part)),
             Piece::Token(token) => match marker(&token.id) {
                 Some(marker) => text.push_str(&marker),
                 None => text.push_str(&token.look.label),

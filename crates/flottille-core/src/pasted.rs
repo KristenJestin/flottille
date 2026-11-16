@@ -59,6 +59,20 @@ pub fn marker(number: usize, name: &str) -> String {
     format!("{OPEN}{number}: {}]", clean(name))
 }
 
+/// `text` typed by the user with each marker it holds made text: a word joiner after its `[`,
+/// which the agent does not see, so that the daemon never takes it for a pasted text's place.
+pub fn as_typed(text: &str) -> std::borrow::Cow<'_, str> {
+    let found = markers(text);
+    if found.is_empty() {
+        return text.into();
+    }
+    let mut typed = text.to_owned();
+    for marker in found.iter().rev() {
+        typed.insert(marker.range.start + 1, '\u{2060}');
+    }
+    typed.into()
+}
+
 /// What the agent reads in its place once the file is written: the name, the size and the path.
 pub fn placed(number: usize, name: &str, bytes: usize, path: &str) -> String {
     format!(
@@ -214,6 +228,15 @@ mod tests {
         ] {
             assert!(!is_file_name(name), "{name}");
         }
+    }
+
+    #[test]
+    fn a_typed_marker_is_no_marker_once_sent() {
+        let typed = format!("a {} b", marker(1, "x"));
+        let sent = as_typed(&typed);
+        assert!(markers(&sent).is_empty(), "{sent}");
+        assert_eq!(sent.replace('\u{2060}', ""), typed);
+        assert_eq!(as_typed("no marker"), "no marker");
     }
 
     #[test]
