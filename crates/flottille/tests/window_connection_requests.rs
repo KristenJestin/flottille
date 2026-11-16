@@ -814,3 +814,65 @@ fn a_missing_entry_is_made_from_the_request_s_dialog_then_accept_goes_through(
     });
     assert!(!said.contains(SECRET));
 }
+
+/// The dialog of a request whose entry is not made yet, Accept answered that it waits for it, the
+/// button to make it shown.
+fn waiting_for_its_entry(
+    shell: &Entity<Shell>,
+    cx: &mut VisualTestContext,
+    lead: &str,
+    number: u64,
+) {
+    open_card(shell, cx, lead, number);
+    open_dialog(shell, cx, number);
+    click(cx, "connection-request-accept");
+    until(shell, cx, "the button for the entry", |cx| {
+        visible(cx, "connection-request-new-entry-notes-key")
+    });
+    settle(cx);
+}
+
+#[gpui_kit::test]
+fn the_new_entry_buttons_fold_away_with_their_block(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, mcp) = a_root(&user);
+    let number = a_bearer_request(&mcp);
+    let (shell, cx) = window(&user, cx);
+    waiting_for_its_entry(&shell, cx, &lead, number);
+
+    // Accept again: the answer is cleared, and the block folds away with its button in it.
+    press(cx, "connection-request-accept");
+    a_third_later(cx);
+    assert!(
+        visible(cx, "connection-request-new-entry-notes-key"),
+        "the button folds away with its block, it does not vanish first"
+    );
+}
+
+#[gpui_kit::test]
+fn the_new_entry_buttons_answer_only_an_accept_that_waits(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, mcp) = a_root(&user);
+    let number = a_bearer_request(&mcp);
+    let (shell, cx) = window(&user, cx);
+    open_card(&shell, cx, &lead, number);
+    open_dialog(&shell, cx, number);
+
+    // A Refuse that failed names no entry to make, though the request names a missing one.
+    let request = shell.read_with(cx, |s, _| s.connection_request().clone());
+    request.update(cx, |r, cx| {
+        r.answered(
+            flottille_window::extensions::connection_request::Then::Decided {
+                number,
+                accepted: false,
+            },
+            Err(format!(
+                "request #{number} is already decided: it was denied"
+            )),
+            cx,
+        )
+    });
+    settle(cx);
+    assert!(visible(cx, "connection-request-error"));
+    assert!(!present(cx, "connection-request-new-entry-notes-key"));
+}

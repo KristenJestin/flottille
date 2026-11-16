@@ -1268,7 +1268,8 @@ is held to Accept's rules for secrets: it waits, as Accept does, for a vault ent
 that is not made yet, and a secret line new to the connection goes only to its entry's own host
 (the user's own form, answering no request, binds freely). A request whose declaration changed since it was asked says so, and Accept is not
 offered. When Accept answers that the request names a vault entry that is not made yet, the dialog
-shows a **New entry…** button per missing entry beside the answer: it opens the vault's own entry
+shows a **New entry…** button per missing entry beside that answer (only that one: no other
+failure offers them, and they fold away with their block when it goes): it opens the vault's own entry
 dialog on the entry's name and, as its address, the host the request sends it to, the secret left
 for the user to type there (the request's dialog never holds it); saved or closed, the request's
 dialog is back, and Accept goes through once the entry exists. Everything animates as the rest of

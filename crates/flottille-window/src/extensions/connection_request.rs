@@ -8,7 +8,7 @@
 //! whose Save answers it. The results are toasts.
 
 use gpui_design_system::{
-    Button, Field, Icon, Modal, Skeleton, Tag, Toast, awaiting, palette, presence, space, toast,
+    Button, Field, Icon, Modal, Skeleton, Tag, Toast, awaiting, palette, presence_of, space, toast,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -184,6 +184,9 @@ pub struct ConnectionRequest {
     proposal: Option<Result<Proposal, String>>,
     deciding: bool,
     error: Option<SharedString>,
+    /// The entries an Accept answered it waits for, one `entry\thost` line each: what the
+    /// **New entry…** buttons are made of, kept by their block while it folds away.
+    waits_for: Option<SharedString>,
 }
 
 /// The vault entries a request names that the vault does not hold yet, each once, with the host
@@ -198,6 +201,25 @@ fn missing_entries(proposal: &Proposal) -> Vec<(String, Option<String>)> {
     missing
 }
 
+/// The missing entries as one line each, `entry\thost`: what `presence_of` keeps while it folds.
+fn said_entries(missing: &[(String, Option<String>)]) -> SharedString {
+    let lines: Vec<String> = missing
+        .iter()
+        .map(|(entry, host)| format!("{entry}\t{}", host.as_deref().unwrap_or_default()))
+        .collect();
+    lines.join("\n").into()
+}
+
+fn entries_said(said: &str) -> Vec<(String, Option<String>)> {
+    said.lines()
+        .filter_map(|line| line.split_once('\t'))
+        .map(|(entry, host)| {
+            let host = (!host.is_empty()).then(|| host.to_owned());
+            (entry.to_owned(), host)
+        })
+        .collect()
+}
+
 impl ConnectionRequest {
     pub fn new(shell: WeakEntity<Shell>) -> Self {
         Self {
@@ -207,6 +229,7 @@ impl ConnectionRequest {
             proposal: None,
             deciding: false,
             error: None,
+            waits_for: None,
         }
     }
 
@@ -235,6 +258,7 @@ impl ConnectionRequest {
         self.proposal = None;
         self.deciding = false;
         self.error = None;
+        self.waits_for = None;
         self.ask(
             "connection.proposed",
             json!({"number": number}),
@@ -294,7 +318,17 @@ impl ConnectionRequest {
                         toast(said, cx);
                     }
                     Err(why) => match self.number == Some(number) && self.open {
-                        true => self.error = Some(why.into()),
+                        true => {
+                            self.error = Some(why.into());
+                            // Accept is refused for a missing entry before anything else.
+                            self.waits_for = self
+                                .proposal
+                                .as_ref()
+                                .and_then(|p| p.as_ref().ok())
+                                .map(missing_entries)
+                                .filter(|missing| accepted && !missing.is_empty())
+                                .map(|missing| said_entries(&missing));
+                        }
                         false => toast(
                             Toast::failure(format!("Request #{number} was not answered"))
                                 .detail(why),
@@ -313,6 +347,7 @@ impl ConnectionRequest {
         };
         self.deciding = true;
         self.error = None;
+        self.waits_for = None;
         self.ask(
             "approval.approve",
             json!({"number": number}),
@@ -331,6 +366,7 @@ impl ConnectionRequest {
         };
         self.deciding = true;
         self.error = None;
+        self.waits_for = None;
         self.ask(
             "approval.deny",
             json!({"number": number}),
@@ -791,33 +827,39 @@ impl Render for ConnectionRequest {
             .test_support();
         let error = problem_line("connection-request-error", self.error.clone(), px(0.), cx);
         // Beside the answer that waits for an entry: a button to make each one the request names.
-        let missing = match (ready, &self.error) {
-            (Some(proposal), Some(_)) => missing_entries(proposal),
-            _ => Vec::new(),
-        };
-        let several = missing.len() > 1;
-        let new_entries =
-            div()
-                .flex()
-                .flex_wrap()
-                .gap(space::SM)
-                .children(missing.into_iter().map(|(entry, host)| {
-                    let label = match several {
-                        true => format!("New entry {entry}…"),
-                        false => "New entry…".to_owned(),
-                    };
-                    Button::secondary(
-                        SharedString::from(format!("connection-request-new-entry-{entry}")),
-                        SharedString::from(label),
-                    )
-                    .leading(Icon::Plus)
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.new_entry(entry.clone(), host.clone(), window, cx)
+        let this = cx.entity().downgrade();
+        let new_entries = presence_of(
+            "connection-request-new-entries",
+            self.waits_for.clone(),
+            move |said| {
+                let missing = entries_said(&said);
+                let several = missing.len() > 1;
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap(space::SM)
+                    .children(missing.into_iter().map(|(entry, host)| {
+                        let label = match several {
+                            true => format!("New entry {entry}…"),
+                            false => "New entry…".to_owned(),
+                        };
+                        let this = this.clone();
+                        Button::secondary(
+                            SharedString::from(format!("connection-request-new-entry-{entry}")),
+                            SharedString::from(label),
+                        )
+                        .leading(Icon::Plus)
+                        .on_click(move |_, window, cx| {
+                            this.update(cx, |this, cx| {
+                                this.new_entry(entry.clone(), host.clone(), window, cx)
+                            })
+                            .ok();
+                        })
                     }))
-                }));
-        let present = ready.is_some() && self.error.is_some();
-        let new_entries =
-            presence("connection-request-new-entries", present, new_entries).space(space::SM);
+                    .into_any_element()
+            },
+        )
+        .space(space::SM);
         modal = modal
             .child(body)
             .kept(stale_line)
