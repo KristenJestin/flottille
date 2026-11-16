@@ -1204,6 +1204,7 @@ async fn up_to_date_base(
         fetched_now: true,
         fetched_at: Some(now_ms()),
         note: None,
+        fetch: None,
     })
 }
 
@@ -1242,6 +1243,7 @@ async fn tracked_base(main: &Path, remote: &str, rule: &[String]) -> Result<Opti
             fetched_now: false,
             fetched_at,
             note: None,
+            fetch: None,
         }));
     }
     Ok(None)
@@ -1289,6 +1291,7 @@ async fn local_base(
                 fetched_now: false,
                 fetched_at: None,
                 note: Some(format!("{why}: started from the local {branch}")),
+                fetch: None,
             });
         }
     }
@@ -1335,6 +1338,7 @@ fn snapshot(project: &Project, taken: &[String]) -> Vec<Step> {
             failure: None,
             started_at: None,
             ended_at: None,
+            duration_ms: None,
         })
         .collect()
 }

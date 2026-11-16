@@ -88,6 +88,30 @@ pub struct Base {
     /// local main`. None when it started from the remote's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// How long reaching the remote took, when the creation did (not `--offline`, a remote there):
+    /// the listing of its branches and the fetch. None for a workspace made before it was timed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fetch: Option<Fetch>,
+}
+
+/// The time spent reaching a repository's remote when its workspace was made.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Fetch {
+    /// Milliseconds since the Unix epoch.
+    pub started_at: u64,
+    /// From a monotonic clock, in milliseconds.
+    pub duration_ms: u64,
+    pub outcome: FetchOutcome,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FetchOutcome {
+    /// The tracking refs are fresh.
+    Fetched,
+    /// The remote could not be listed or fetched, or holds none of the base branches: the base
+    /// is the one the `note` says.
+    Failed,
 }
 
 /// One step of a workspace's preparation.
@@ -109,6 +133,10 @@ pub struct Step {
     pub started_at: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ended_at: Option<u64>,
+    /// How long its last run took, in milliseconds from a monotonic clock (the two timestamps
+    /// above are the wall clock's, which can jump): none until it ended.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
 }
 
 /// What a step does, snapshotted from the setup when the workspace was created.
