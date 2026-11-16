@@ -7,6 +7,7 @@
 mod common;
 
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use common::User;
 use common::mcp::{Answer, Mcp, server_of};
@@ -46,6 +47,14 @@ fn session(user: &User) -> (Mcp, PathBuf) {
 fn ok(answer: Answer) -> String {
     assert!(!answer.error, "an error: {}", answer.text);
     answer.text
+}
+
+fn eventually(what: &str, mut check: impl FnMut() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !check() {
+        assert!(Instant::now() < deadline, "{what} never happened");
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 fn user() -> User {
@@ -97,7 +106,7 @@ fn a_filtered_result_says_how_to_read_it_whole() {
     assert_eq!(
         last,
         format!(
-            "[7 lines filtered out: read the whole output with run_status {{\"run\": \"{id}\", \
+            "[6 lines filtered out: read the whole output with run_status {{\"run\": \"{id}\", \
              \"start\": 1, \"raw\": true}}]"
         )
     );
@@ -201,4 +210,96 @@ fn the_filters_follow_the_switch_while_a_session_runs() {
 
     assert!(off.contains("Compiling"), "{off}");
     assert!(!on.contains("Compiling"), "{on}");
+}
+
+#[test]
+fn paging_a_raw_output_stays_raw() {
+    let user = user();
+    let (mcp, _) = session(&user);
+    let id = run_of(&ok(mcp.call("run", json!({"line": "cargo build --many"}))));
+
+    let first = ok(mcp.call(
+        "run_status",
+        json!({"run": id, "start": 1, "tail": 100, "raw": true}),
+    ));
+    let middle = ok(mcp.call(
+        "run_status",
+        json!({"run": id, "start": 101, "tail": 100, "raw": true}),
+    ));
+
+    for page in [&first, &middle] {
+        assert!(page.contains("Compiling crate-"), "{page}");
+        let hints: Vec<&str> = page
+            .lines()
+            .filter(|line| line.contains("lines: run_status"))
+            .collect();
+        assert!(!hints.is_empty(), "{page}");
+        for hint in hints {
+            assert!(hint.contains("\"raw\": true"), "{hint}");
+        }
+    }
+    assert!(first.contains("later lines:"), "{first}");
+    assert!(middle.contains("earlier lines:"), "{middle}");
+}
+
+#[test]
+fn on_empty_is_not_said_for_a_build_that_failed() {
+    let user = user();
+    let (mcp, _) = session(&user);
+
+    let text = ok(mcp.call("run", json!({"line": "cargo build --fail"})));
+
+    assert!(text.contains("exited with code 1"), "{text}");
+    assert!(!text.contains("cargo: ok"), "{text}");
+    assert!(text.contains("(no output left)"), "{text}");
+    assert!(text.contains("lines filtered out"), "{text}");
+}
+
+#[test]
+fn a_running_command_is_not_filtered_until_it_ends() {
+    let user = user();
+    let (mcp, _) = session(&user);
+    let started = ok(mcp.call("run", json!({"line": "cargo build --hang", "timeout": 1})));
+    let id = run_of(&started);
+
+    let live = ok(mcp.call("run_status", json!({"run": id})));
+    let stopped = ok(mcp.call("run_status", json!({"run": id, "action": "stop"})));
+
+    assert!(live.contains("is running"), "{live}");
+    assert!(live.contains("Compiling app v0.3.1"), "{live}");
+    assert!(!live.contains("lines filtered out"), "{live}");
+    assert!(!live.contains("cargo: ok"), "{live}");
+    // Stopped, the run ended without exiting 0: its progress goes, "ok" is never said.
+    assert!(!stopped.contains("cargo: ok"), "{stopped}");
+    assert!(stopped.contains("(no output left)"), "{stopped}");
+}
+
+#[test]
+fn a_command_ended_after_its_call_with_nothing_left_says_so() {
+    let user = user();
+    let (mcp, _) = session(&user);
+    let id = run_of(&ok(
+        mcp.call("run", json!({"line": "cargo build --hang", "timeout": 1}))
+    ));
+
+    user.call("run.stop", json!({"run": id})).unwrap();
+
+    let mut found = None;
+    eventually("the command-ended delivery", || {
+        found = user
+            .received_requests("session/prompt")
+            .iter()
+            .map(|p| {
+                p["params"]["prompt"][0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned()
+            })
+            .find(|p| p.contains("[flottille:command-ended]") && p.contains(&id));
+        found.is_some()
+    });
+    let prompt = found.unwrap();
+    assert!(prompt.contains("(no output left)"), "{prompt}");
+    assert!(!prompt.contains("lines 1-0"), "{prompt}");
+    assert!(!prompt.contains("cargo: ok"), "{prompt}");
 }
