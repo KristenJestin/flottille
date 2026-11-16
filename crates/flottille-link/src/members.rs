@@ -10,7 +10,8 @@
 //!
 //! ```text
 //! "flottille-member-change-v1" 0x00    the domain: nothing else a device key signs starts so
-//! previous   32 bytes                  the hash of the change before it; zeros for the first
+//! previous   32 bytes                  the hash of the change before it; for the first, the
+//!                                      list's id: 32 random bytes made at setup
 //! signer     32 bytes                  the signing member's public key
 //! kind        1 byte                   1 add, 2 remove, 3 rename, 4 machine
 //! key        32 bytes                  the member the change is about
@@ -20,12 +21,24 @@
 //! machine: the machine key (32 bytes)
 //! ```
 //!
+//! The list's id makes every setup a list of its own: a device that sets a hub up again after a
+//! reset, with the same key, the same name and the same machine, signs another first change, so
+//! that no change of the old list follows on the new one.
+//!
 //! A `machine` change is a member's own declaration of the key its machine's daemon holds: the
 //! list holds the devices' keys, while the link and the control session to the hub run on the
-//! machines' keys, and that tie must be one the hub cannot make either.
+//! machines' keys, and that tie must be one the hub cannot make either. The machine signs it too,
+//! so that no member declares a machine whose key it does not hold: its **claim** is the machine
+//! key's signature over
+//!
+//! ```text
+//! "flottille-machine-claim-v1" 0x00
+//! member     32 bytes                  the member that declares it
+//! previous   32 bytes                  the hash of the change before the declaration
+//! ```
 //!
 //! A change's hash, which the next change names, is the SHA-256 of its signed bytes followed by its
-//! 64-byte signature.
+//! 64-byte signature, then, for a `machine` change, its claim's 64 bytes.
 
 use std::fmt;
 
@@ -34,10 +47,17 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest, Sha256};
 
 use crate::serial::{from_hex_text, invisible, to_hex};
-use crate::{DeviceKey, PublicKey};
+use crate::{DeviceKey, KeyError, MachineKey, PublicKey};
 
 /// The start of every change's signed bytes.
 const DOMAIN: &[u8] = b"flottille-member-change-v1\0";
+/// The start of what a machine signs when a member declares it.
+const CLAIM: &[u8] = b"flottille-machine-claim-v1\0";
+
+/// The most changes a list holds: a device refuses a longer one before it checks a change of it,
+/// and the hub refuses a change past it, so that the list always fits the line it travels in
+/// (`control::LINE_LIMIT`, a change being at most some 1.3 KB of JSON).
+pub const MOST_CHANGES: usize = 1000;
 
 /// The longest name a member may have, in characters.
 const NAME_LIMIT: usize = 64;
@@ -139,19 +159,33 @@ pub struct Change {
     pub signer: PublicKey,
     pub action: Action,
     pub signature: Signature,
+    /// For a `machine` change, the machine's own signature (`MachineKey::claim`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim: Option<Signature>,
 }
 
 impl Change {
-    /// `action`, after the change whose hash is `previous`, signed with `key`.
+    /// `action`, after the change whose hash is `previous`, signed with `key`. A `machine` change
+    /// is claimed by its machine after (`claimed_by`).
     pub fn sign(previous: ChangeHash, action: Action, key: &DeviceKey) -> Change {
         let mut change = Change {
             previous,
             signer: key.public(),
             action,
             signature: Signature([0; 64]),
+            claim: None,
         };
         change.signature = Signature(key.0.sign(&change.signed_bytes()).to_bytes());
         change
+    }
+
+    /// A `machine` change, the machine's claim added: the machine's daemon adds it, for its own
+    /// key only. Any other change is left as it is.
+    pub fn claimed_by(mut self, machine: &MachineKey) -> Change {
+        if let Action::Machine { key, .. } = &self.action {
+            self.claim = Some(machine.claim(key, &self.previous));
+        }
+        self
     }
 
     /// What the signature covers: the encoding of the module's documentation.
@@ -197,6 +231,9 @@ impl Change {
         let mut hasher = Sha256::new();
         hasher.update(self.signed_bytes());
         hasher.update(self.signature.0);
+        if let Some(claim) = &self.claim {
+            hasher.update(claim.0);
+        }
         let mut hash = [0u8; 32];
         hash.copy_from_slice(&hasher.finalize());
         ChangeHash(hash)
@@ -211,6 +248,33 @@ impl Change {
             .verify_strict(&self.signed_bytes(), &signature)
             .is_ok()
     }
+
+    /// Whether a `machine` change carries its machine's claim.
+    fn claimed(&self) -> bool {
+        let (Action::Machine { key, machine }, Some(claim)) = (&self.action, &self.claim) else {
+            return false;
+        };
+        let claim = ed25519_dalek::Signature::from_bytes(&claim.0);
+        machine
+            .0
+            .verify_strict(&claim_bytes(key, &self.previous), &claim)
+            .is_ok()
+    }
+}
+
+/// What a machine signs when `member` declares it after the change `previous`.
+fn claim_bytes(member: &PublicKey, previous: &ChangeHash) -> Vec<u8> {
+    let mut bytes = CLAIM.to_vec();
+    bytes.extend_from_slice(member.as_bytes());
+    bytes.extend_from_slice(&previous.0);
+    bytes
+}
+
+impl MachineKey {
+    /// This machine's claim, for `member`'s declaration of it after the change `previous`.
+    pub fn claim(&self, member: &PublicKey, previous: &ChangeHash) -> Signature {
+        Signature(self.0.sign(&claim_bytes(member, previous)).to_bytes())
+    }
 }
 
 /// The member list as the hub keeps and sends it: every change, the root's first. It travels as
@@ -220,14 +284,17 @@ impl Change {
 pub struct MemberList(Vec<Change>);
 
 impl MemberList {
-    /// A new list: the root, the first member, a `runner`, its entry signed by itself.
-    pub fn start(name: &str, root: &DeviceKey) -> MemberList {
+    /// A new list: the root, the first member, a `runner`, its entry signed by itself after a
+    /// new list id.
+    pub fn start(name: &str, root: &DeviceKey) -> Result<MemberList, KeyError> {
+        let mut id = [0u8; 32];
+        getrandom::fill(&mut id).map_err(|error| KeyError(format!("no random bytes: {error}")))?;
         let entry = Action::Add {
             key: root.public(),
             name: name.to_owned(),
             role: Role::Runner,
         };
-        MemberList(vec![Change::sign(ChangeHash::default(), entry, root)])
+        Ok(MemberList(vec![Change::sign(ChangeHash(id), entry, root)]))
     }
 
     pub fn from_changes(changes: Vec<Change>) -> MemberList {
@@ -256,6 +323,17 @@ impl MemberList {
         self.0.last().expect("just pushed")
     }
 
+    /// `member` declares `machine` after the last change, claimed by the machine; appended.
+    pub fn declare(&mut self, member: &DeviceKey, machine: &MachineKey) -> &Change {
+        let action = Action::Machine {
+            key: member.public(),
+            machine: machine.public(),
+        };
+        let change = Change::sign(self.head(), action, member).claimed_by(machine);
+        self.0.push(change);
+        self.0.last().expect("just pushed")
+    }
+
     /// The members, when every change checks back to `root`, the root this device pinned.
     pub fn check(&self, root: &PublicKey) -> Result<Members, ListError> {
         let Some(first) = self.0.first() else {
@@ -265,11 +343,18 @@ impl MemberList {
         if first.action.key() != root {
             return Err(ListError::Reset);
         }
+        if self.0.len() > MOST_CHANGES {
+            return Err(ListError::Refused(format!(
+                "it holds {} changes, more than {MOST_CHANGES} changes, the most a device takes",
+                self.0.len()
+            )));
+        }
         let mut members = Members {
             root: *root,
             members: Vec::new(),
             removed: Vec::new(),
-            head: ChangeHash::default(),
+            // The first change names the list's id, whatever it is.
+            head: first.previous,
         };
         for (at, change) in self.0.iter().enumerate() {
             members
@@ -282,6 +367,12 @@ impl MemberList {
     /// As `check`, for a list sent to a device that has already checked `known`: the new one must
     /// hold every change of it, in order, so that a hub cannot take back a change it sent.
     pub fn check_update(&self, root: &PublicKey, known: &MemberList) -> Result<Members, ListError> {
+        // Another first change: another list, set up again after a reset, by this root or not.
+        if let (Some(ours), Some(theirs)) = (known.0.first(), self.0.first())
+            && ours != theirs
+        {
+            return Err(ListError::Reset);
+        }
         let members = self.check(root)?;
         if !self.0.starts_with(&known.0) {
             return Err(ListError::Refused(
@@ -354,6 +445,11 @@ impl Members {
             if *role != Role::Runner || change.signer != *key {
                 return Err("is not the root's own entry as a runner".to_owned());
             }
+            if change.claim.is_some() {
+                return Err(
+                    "carries a machine's signature, which only a machine change has".to_owned(),
+                );
+            }
             self.add(*key, name, Role::Runner, *key)?;
             self.head = change.hash();
             return Ok(());
@@ -379,6 +475,22 @@ impl Members {
                 signer.role.word(),
                 change.action.verb()
             ));
+        }
+        match &change.action {
+            Action::Machine { .. } if !change.claimed() => {
+                return Err(
+                    "does not carry its machine's signature: a member declares only a \
+                            machine whose key it holds"
+                        .to_owned(),
+                );
+            }
+            Action::Machine { .. } => {}
+            _ if change.claim.is_some() => {
+                return Err(
+                    "carries a machine's signature, which only a machine change has".to_owned(),
+                );
+            }
+            _ => {}
         }
         match &change.action {
             Action::Add { key, name, role } => self.add(*key, name, *role, change.signer)?,

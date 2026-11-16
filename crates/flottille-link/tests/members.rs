@@ -4,7 +4,8 @@
 use std::path::Path;
 
 use flottille_link::{
-    Action, Change, ChangeHash, DeviceKey, Keyring, KeyringError, ListError, MemberList, Role,
+    Action, Change, ChangeHash, DeviceKey, Keyring, KeyringError, ListError, MachineKey,
+    MemberList, Role,
 };
 use zeroize::Zeroizing;
 
@@ -49,7 +50,7 @@ fn remove(key: &DeviceKey) -> Action {
 /// The root `pc`, a controller `pixel` it added, and a viewer `tablet` the controller added.
 fn three() -> (DeviceKey, DeviceKey, DeviceKey, MemberList) {
     let (pc, pixel, tablet) = (key(1), key(2), key(3));
-    let mut list = MemberList::start("pc", &pc);
+    let mut list = MemberList::start("pc", &pc).unwrap();
     list.sign(add(&pixel, "pixel", Role::Controller), &pc);
     list.sign(add(&tablet, "tablet", Role::Viewer), &pixel);
     (pc, pixel, tablet, list)
@@ -220,7 +221,7 @@ fn a_removed_member_cannot_sign() {
 fn a_list_with_another_root_is_refused_saying_it_was_reset() {
     let (pc, _, _, _) = three();
     let other = key(7);
-    let mut reset = MemberList::start("pc", &other);
+    let mut reset = MemberList::start("pc", &other).unwrap();
     reset.sign(add(&pc, "pc", Role::Runner), &other);
 
     let error = reset.check(&pc.public()).unwrap_err();
@@ -447,7 +448,7 @@ fn a_name_is_unique_among_the_members() {
 #[test]
 fn the_signed_bytes_are_the_documented_encoding() {
     let (pc, pixel) = (key(1), key(2));
-    let list = MemberList::start("pc", &pc);
+    let list = MemberList::start("pc", &pc).unwrap();
     let change = Change::sign(list.head(), add(&pixel, "pixel", Role::Controller), &pc);
 
     let mut expected = b"flottille-member-change-v1\0".to_vec();
@@ -468,9 +469,10 @@ fn the_signed_bytes_are_the_documented_encoding() {
     expected.extend_from_slice(pixel.public().as_bytes());
     assert_eq!(removal.signed_bytes(), expected);
 
+    // The first change names the list's id, random, where the others name the change before.
     let genesis = &list.changes()[0];
-    assert_eq!(genesis.previous, ChangeHash::default());
-    assert_eq!(genesis.previous.0, [0; 32]);
+    assert_ne!(genesis.previous, ChangeHash::default());
+    assert_eq!(&genesis.signed_bytes()[27..59], &genesis.previous.0);
 }
 
 #[test]
@@ -501,32 +503,43 @@ fn a_list_travels_as_json_and_still_checks() {
     }
 }
 
+/// A machine's key, made in `dir`.
+fn machine(dir: &tempfile::TempDir, name: &str) -> MachineKey {
+    MachineKey::load_or_make(&dir.path().join(name)).unwrap()
+}
+
+/// `member`'s declaration of `machine`, after the change `previous`, as the member and the
+/// machine sign it.
+fn declared(previous: ChangeHash, member: &DeviceKey, machine: &MachineKey) -> Change {
+    let action = Action::Machine {
+        key: member.public(),
+        machine: machine.public(),
+    };
+    Change::sign(previous, action, member).claimed_by(machine)
+}
+
 #[test]
 fn a_member_declares_its_own_machine_and_no_other() {
+    let dir = tempfile::tempdir().unwrap();
     let (pc, pixel, tablet, mut list) = three();
-    let (machine, other) = (key(10).public(), key(11).public());
-    // The daemon's key of `pc`, declared by pc itself.
-    list.sign(
-        Action::Machine {
-            key: pc.public(),
-            machine,
-        },
-        &pc,
-    );
+    let (desk, other) = (machine(&dir, "desk"), machine(&dir, "other"));
+    // The daemon's key of `pc`, declared by pc itself and claimed by the machine.
+    list.declare(&pc, &desk);
     let members = list.check(&pc.public()).unwrap();
-    assert_eq!(members.get(&pc.public()).unwrap().machine, Some(machine));
-    assert_eq!(members.by_machine(&machine).unwrap().name, "pc");
-    assert!(members.by_machine(&other).is_none());
+    assert_eq!(
+        members.get(&pc.public()).unwrap().machine,
+        Some(desk.public())
+    );
+    assert_eq!(members.by_machine(&desk.public()).unwrap().name, "pc");
+    assert!(members.by_machine(&other.public()).is_none());
 
     // Not for another member, whatever its signer's role.
-    let mut forged = list.clone();
-    forged.sign(
-        Action::Machine {
-            key: tablet.public(),
-            machine: other,
-        },
-        &pixel,
-    );
+    let action = Action::Machine {
+        key: tablet.public(),
+        machine: other.public(),
+    };
+    let change = Change::sign(list.head(), action, &pixel).claimed_by(&other);
+    let forged = MemberList::from_changes([list.changes(), &[change]].concat());
     assert!(
         refused(&forged, &pc).contains("a member declares its own machine only"),
         "{}",
@@ -534,13 +547,7 @@ fn a_member_declares_its_own_machine_and_no_other() {
     );
     // Not a machine another member declared, nor a member's own key.
     let mut taken = list.clone();
-    taken.sign(
-        Action::Machine {
-            key: pixel.public(),
-            machine,
-        },
-        &pixel,
-    );
+    taken.declare(&pixel, &desk);
     assert!(refused(&taken, &pc).contains("a machine another member declared"));
     let mut member = list.clone();
     member.sign(
@@ -550,46 +557,104 @@ fn a_member_declares_its_own_machine_and_no_other() {
         },
         &pixel,
     );
-    assert!(refused(&member, &pc).contains("a member's key"));
+    assert!(refused(&member, &pc).contains("does not carry its machine's signature"));
 
     // A viewer declares its own; a new declaration replaces the old one.
-    list.sign(
-        Action::Machine {
-            key: tablet.public(),
-            machine: other,
-        },
-        &tablet,
-    );
-    let moved = key(12).public();
-    list.sign(
-        Action::Machine {
-            key: pc.public(),
-            machine: moved,
-        },
-        &pc,
-    );
+    list.declare(&tablet, &other);
+    let moved = machine(&dir, "moved");
+    list.declare(&pc, &moved);
     let members = list.check(&pc.public()).unwrap();
-    assert!(members.by_machine(&machine).is_none());
-    assert_eq!(members.by_machine(&moved).unwrap().name, "pc");
-    assert_eq!(members.by_machine(&other).unwrap().name, "tablet");
+    assert!(members.by_machine(&desk.public()).is_none());
+    assert_eq!(members.by_machine(&moved.public()).unwrap().name, "pc");
+    assert_eq!(members.by_machine(&other.public()).unwrap().name, "tablet");
 
     // A member removed takes its machine with it.
     list.sign(remove(&tablet), &pc);
     assert!(
         list.check(&pc.public())
             .unwrap()
-            .by_machine(&other)
+            .by_machine(&other.public())
             .is_none()
     );
 
     // The declaration travels as JSON and is signed as the documented encoding: kind 4, the
-    // member, then the machine.
+    // member, then the machine; the machine's claim beside it, in its hash.
     let json = serde_json::to_value(&list).unwrap();
     assert_eq!(json[3]["action"]["kind"], "machine");
+    assert_eq!(json[3]["claim"].as_str().unwrap().len(), 128);
+    assert!(json[2].get("claim").is_none());
     let change = &list.changes()[3];
     let bytes = change.signed_bytes();
     let tail = &bytes[bytes.len() - 65..];
     assert_eq!(tail[0], 4);
     assert_eq!(&tail[1..33], pc.public().as_bytes());
-    assert_eq!(&tail[33..], machine.as_bytes());
+    assert_eq!(&tail[33..], desk.public().as_bytes());
+    let mut unclaimed = change.clone();
+    unclaimed.claim = None;
+    assert_ne!(unclaimed.hash(), change.hash());
+}
+
+#[test]
+fn two_setups_by_the_same_device_never_make_the_same_list() {
+    let pc = key(1);
+    let (first, second) = (
+        MemberList::start("pc", &pc).unwrap(),
+        MemberList::start("pc", &pc).unwrap(),
+    );
+    assert_ne!(first.changes()[0], second.changes()[0]);
+    assert_ne!(first.head(), second.head());
+    // A change of the first list does not follow on the second.
+    let mut old = first.clone();
+    old.sign(add(&key(2), "phone", Role::Controller), &pc);
+    let mut mixed = second.changes().to_vec();
+    mixed.push(old.changes()[1].clone());
+    assert!(
+        refused(&MemberList::from_changes(mixed), &pc)
+            .contains("change 2 does not follow the change before it")
+    );
+}
+
+#[test]
+fn a_list_longer_than_a_device_takes_is_refused_before_it_is_checked() {
+    let pc = key(1);
+    let root = MemberList::start("pc", &pc).unwrap().changes()[0].clone();
+    let long = MemberList::from_changes(vec![root; 1001]);
+    let said = refused(&long, &pc);
+    assert!(said.contains("more than 1000 changes"), "{said}");
+}
+
+#[test]
+fn a_member_cannot_declare_a_machine_it_does_not_hold() {
+    let dir = tempfile::tempdir().unwrap();
+    let (pc, _, tablet, list) = three();
+    // The machine of pc, not declared yet: a viewer declares it, without holding its key...
+    let desk = machine(&dir, "desk");
+    let mut bare = list.clone();
+    bare.sign(
+        Action::Machine {
+            key: tablet.public(),
+            machine: desk.public(),
+        },
+        &tablet,
+    );
+    let said = refused(&bare, &pc);
+    assert!(
+        said.contains("does not carry its machine's signature"),
+        "{said}"
+    );
+    // ...nor with a claim of another machine, or one the machine made for another member.
+    let mut changes = list.changes().to_vec();
+    let mut lent = declared(list.head(), &tablet, &desk);
+    lent.claim = Some(machine(&dir, "tablet's").claim(&tablet.public(), &list.head()));
+    changes.push(lent);
+    assert!(refused(&MemberList::from_changes(changes), &pc).contains("its machine's signature"));
+    let mut changes = list.changes().to_vec();
+    let mut lent = declared(list.head(), &tablet, &desk);
+    lent.claim = Some(desk.claim(&pc.public(), &list.head()));
+    changes.push(lent);
+    assert!(refused(&MemberList::from_changes(changes), &pc).contains("its machine's signature"));
+    // Held, it is taken.
+    let mut held = list.clone();
+    held.declare(&tablet, &desk);
+    assert!(held.check(&pc.public()).is_ok());
 }
