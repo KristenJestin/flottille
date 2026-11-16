@@ -33,18 +33,20 @@ impl Lent {
     }
 }
 
-/// The agent and the `ssh` that speaks to it, found once, at the daemon's start.
+/// The agent, and the `git` and `ssh` that speak to it, found once, at the daemon's start.
 struct Found {
     /// What `SSH_AUTH_SOCK` named, perhaps a link.
     named: PathBuf,
     socket: Lent,
+    /// The `git` a push lent the agent, and its reads, run.
+    git: PathBuf,
     /// The `ssh` a push lent the agent runs.
     ssh: PathBuf,
 }
 
 static FOUND: OnceLock<Option<Found>> = OnceLock::new();
 
-/// Finds the user's SSH agent and its `ssh`, at the daemon's start, before anything runs.
+/// Finds the user's SSH agent, its `git` and its `ssh`, at the daemon's start, before anything runs.
 pub fn find(paths: &Paths) {
     FOUND.get_or_init(|| match found(paths) {
         Ok(found) => Some(found),
@@ -57,7 +59,8 @@ pub fn find(paths: &Paths) {
     });
 }
 
-/// The agent the daemon's environment names, and an `ssh` for it; why not, when it names one.
+/// The agent the daemon's environment names, and a `git` and an `ssh` for it; why not, when it
+/// names one.
 fn found(paths: &Paths) -> Result<Found, Option<String>> {
     let named = PathBuf::from(std::env::var_os(VARIABLE).ok_or(None)?);
     let unusable = || Some(format!("{VARIABLE} ({}) is no socket", named.display()));
@@ -73,15 +76,22 @@ fn found(paths: &Paths) -> Result<Found, Option<String>> {
             path.display()
         )));
     }
-    let ssh = ssh(paths).ok_or_else(|| {
-        Some("no ssh on PATH outside the user's home and Flottille's folders".to_owned())
-    })?;
+    let outside = |name: &str| {
+        program(paths, name).ok_or_else(|| {
+            Some(format!(
+                "no {name} on PATH outside the user's home and Flottille's folders"
+            ))
+        })
+    };
+    let git = outside("git")?;
+    let ssh = outside("ssh")?;
     Ok(Found {
         named,
         socket: Lent {
             path,
             id: (socket.dev(), socket.ino()),
         },
+        git,
         ssh,
     })
 }
@@ -103,11 +113,11 @@ fn buses() -> Vec<PathBuf> {
         .collect()
 }
 
-/// The first `ssh` of the daemon's `PATH` that is none of the user's own (`~/bin`,
-/// `~/.local/bin`, anything under the home, where an agent's folders and workspaces are) nor in
-/// Flottille's folders, links followed: a program an agent could write is never run with the
-/// agent's socket.
-fn ssh(paths: &Paths) -> Option<PathBuf> {
+/// The first `name` (`git`, `ssh`) of the daemon's `PATH` that is none of the user's own
+/// (`~/bin`, `~/.local/bin`, `~/.cargo/bin`, anything under the home, where an agent's folders and
+/// workspaces are) nor in Flottille's folders, links followed: the run's own `PATH`, which a
+/// project sets, is not read.
+fn program(paths: &Paths, name: &str) -> Option<PathBuf> {
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let theirs: Vec<PathBuf> = home
         .iter()
@@ -116,11 +126,11 @@ fn ssh(paths: &Paths) -> Option<PathBuf> {
         .collect();
     std::env::split_paths(&std::env::var_os("PATH")?)
         .filter(|folder| folder.is_absolute())
-        .filter_map(|folder| folder.join("ssh").canonicalize().ok())
-        .filter(|ssh| !theirs.iter().any(|folder| ssh.starts_with(folder)))
-        .find(|ssh| {
-            std::fs::metadata(ssh)
-                .is_ok_and(|ssh| ssh.is_file() && ssh.permissions().mode() & 0o111 != 0)
+        .filter_map(|folder| folder.join(name).canonicalize().ok())
+        .filter(|found| !theirs.iter().any(|folder| found.starts_with(folder)))
+        .find(|found| {
+            std::fs::metadata(found)
+                .is_ok_and(|found| found.is_file() && found.permissions().mode() & 0o111 != 0)
         })
 }
 
@@ -156,21 +166,30 @@ pub fn withheld(env: &BTreeMap<OsString, OsString>) -> BTreeMap<OsString, OsStri
     env
 }
 
-/// What runs with the agent of a push `words` lent it (`env` names it), pinned: the `ssh` found at
-/// the start (`GIT_SSH_COMMAND` wins over `core.sshCommand` and `GIT_SSH`), SSH the only
-/// transport (no `ext::`, `fd::` or path, which run a program of the machine), and git's own
-/// `git-receive-pack` for every remote. Settings on the line itself are refused before
-/// (`runs::run`): they would beat these.
-pub async fn pin(env: &mut BTreeMap<OsString, OsString>, folder: &Path, words: &[String]) {
+/// What runs with the agent of a push `words` lent it (`env` names it), pinned: the `git` found at
+/// the start in place of the line's, the `ssh` found then (`GIT_SSH_COMMAND` wins over
+/// `core.sshCommand` and `GIT_SSH`), sharing no connection with another ssh and running no
+/// `LocalCommand`, SSH the only transport (no `ext::`, `fd::` or path, which run a program of the
+/// machine), git's own `git-receive-pack` for every remote, and no maintenance left running after
+/// the push. Settings and global options on the line itself are refused before (`runs::run`):
+/// they would beat these.
+pub async fn pin(env: &mut BTreeMap<OsString, OsString>, folder: &Path, words: &mut [String]) {
     let Some(found) = FOUND.get().and_then(Option::as_ref) else {
         return;
     };
     if lent_to(env).is_none() {
         return;
     }
+    words[0] = found.git.to_string_lossy().into_owned();
     let ssh = found.ssh.to_string_lossy().replace('\'', "'\\''");
-    env.insert("GIT_SSH_COMMAND".into(), format!("'{ssh}'").into());
+    // A master another ssh could reuse would outlive the push, the agent's connection with it.
+    env.insert(
+        "GIT_SSH_COMMAND".into(),
+        format!("'{ssh}' -o ControlMaster=no -o ControlPath=none -o PermitLocalCommand=no").into(),
+    );
     env.insert("GIT_ALLOW_PROTOCOL".into(), "ssh".into());
+    // `git maintenance run --auto --detach` would go on after the push, with its environment.
+    crate::runs::configure(env, "maintenance.auto", "false");
     let at_push = crate::gate::git_globals(&words[1..]).0 + 1;
     let mut read: Vec<String> = words[..at_push].to_vec();
     read.extend(

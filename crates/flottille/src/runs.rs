@@ -401,7 +401,7 @@ pub async fn run(
     let Request {
         name,
         line,
-        words,
+        mut words,
         repository,
         serve,
         folder,
@@ -503,7 +503,7 @@ pub async fn run(
         if let Some(refusal) = globals_refused(&words, &folder.path) {
             return Outcome::Refused(refusal);
         }
-        crate::ssh_agent::pin(&mut env, &folder.path, &words).await;
+        crate::ssh_agent::pin(&mut env, &folder.path, &mut words).await;
         if let Err(refusal) = crate::ssh_agent::over_ssh(&folder.path, &words, &env).await {
             return Outcome::Refused(refusal);
         }
