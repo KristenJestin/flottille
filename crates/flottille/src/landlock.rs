@@ -119,38 +119,61 @@ pub fn confined_but<'a>(
 
 /// [`confined_but`], the user's SSH agent `lent` too: the right to connect to its socket, and
 /// nothing else of the folder it is in. A [`crate::ssh_agent::Lent`] and no path, for the same
-/// reason as the display folder. Below the ninth ABI connecting is not governed: the run's
-/// environment alone says where the agent is (`runs::defend`).
+/// reason as the display folder. A command not lent it is kept from connecting to it, wherever it
+/// is. Below the ninth ABI connecting is not governed: the run's environment alone says where the
+/// agent is (`runs::defend`).
 pub fn confined_with<'a>(
     command: &'a mut tokio::process::Command,
     open: Option<&crate::display::Folder>,
     lent: Option<&crate::ssh_agent::Lent>,
 ) -> &'a mut tokio::process::Command {
     let abi = abi();
-    let denied = runtime_folders();
+    let mut denied = runtime_folders();
+    let rights = rights(abi);
+    let connecting = rights & RESOLVE_UNIX != 0;
+    let mut agent = Agent::default();
+    // A socket outside the runtime folders: denied by its own path, and each folder on the way to
+    // it ruled without the right to connect, so that the command still makes its own files there.
+    // One inside them is denied with them.
+    let kept = crate::ssh_agent::socket()
+        .filter(|_| connecting && lent.is_none())
+        .filter(|socket| !denied.iter().any(|folder| socket.starts_with(folder)));
+    if let Some(socket) = kept {
+        agent.ways = socket
+            .ancestors()
+            .skip(1)
+            .filter(|way| !denied.iter().any(|folder| folder.starts_with(way)))
+            .filter_map(|way| CString::new(way.as_os_str().as_bytes()).ok())
+            .collect();
+        denied.push(socket.to_owned());
+    }
     if abi < 2 || denied.is_empty() {
         return command;
     }
-    let rights = rights(abi);
     let mut paths = Vec::new();
     allowed(Path::new("/"), &denied, &mut paths);
     let open = open.and_then(|folder| CString::new(folder.path().as_os_str().as_bytes()).ok());
-    let lent = lent
-        .filter(|_| rights & RESOLVE_UNIX != 0)
-        .and_then(|lent| CString::new(lent.path().as_os_str().as_bytes()).ok());
+    agent.lent = lent.filter(|_| connecting).and_then(|lent| {
+        let path = CString::new(lent.path().as_os_str().as_bytes()).ok()?;
+        Some((path, lent.id()))
+    });
     // SAFETY: the closure allocates nothing and only makes system calls (open, fstat,
     // landlock_*, prctl, close), all async-signal-safe.
-    unsafe { command.pre_exec(move || restrict(rights, &paths, open.as_deref(), lent.as_deref())) }
+    unsafe { command.pre_exec(move || restrict(rights, &paths, open.as_deref(), &agent)) }
 }
 
-/// In the child: every path a rule with every right, `open` one without `REFER`, `lent` (a
-/// socket) one with the right to connect to it alone, then the child bound to them.
-fn restrict(
-    rights: u64,
-    paths: &[CString],
-    open: Option<&CStr>,
-    lent: Option<&CStr>,
-) -> io::Result<()> {
+/// The rules of the user's SSH agent's socket in a command's ruleset.
+#[derive(Default)]
+struct Agent {
+    /// The socket lent, with its device and inode: a rule on it alone, with the right to connect.
+    lent: Option<(CString, (u64, u64))>,
+    /// The folders on the way to a socket kept out: ruled without the right to connect.
+    ways: Vec<CString>,
+}
+
+/// In the child: every path a rule with every right, `open` one without `REFER`, the `agent`'s
+/// rules, then the child bound to them.
+fn restrict(rights: u64, paths: &[CString], open: Option<&CStr>, agent: &Agent) -> io::Result<()> {
     let handled = [rights];
     // SAFETY: the attribute is a `u64` of the size given, which the kernel reads as the first
     // field of its own, the rest zero.
@@ -168,12 +191,23 @@ fn restrict(
     let ruleset = ruleset as libc::c_int;
     let ruled = paths
         .iter()
-        .map(|path| (path.as_c_str(), rights))
-        .chain(open.map(|path| (path, rights & !REFER)))
+        .map(|path| (path.as_c_str(), rights, None))
+        .chain(open.map(|path| (path, rights & !REFER, None)))
+        .chain(
+            agent
+                .ways
+                .iter()
+                .map(|way| (way.as_c_str(), rights & !RESOLVE_UNIX, None)),
+        )
         // A rule on the socket itself: Landlock checks connecting from the socket's own path up,
         // so its folder stays denied.
-        .chain(lent.map(|path| (path, RESOLVE_UNIX)));
-    for (path, granted) in ruled {
+        .chain(
+            agent
+                .lent
+                .iter()
+                .map(|(path, id)| (path.as_c_str(), RESOLVE_UNIX, Some(*id))),
+        );
+    for (path, granted, id) in ruled {
         // SAFETY: a valid C string; O_PATH opens nothing but a handle.
         let fd = unsafe {
             libc::open(
@@ -189,6 +223,12 @@ fn restrict(
         // SAFETY: fd is open and stat is ours.
         let is_dir = unsafe { libc::fstat(fd, &mut stat) } == 0
             && stat.st_mode & libc::S_IFMT == libc::S_IFDIR;
+        // The lent socket, and no other put in its place since it was lent.
+        if id.is_some_and(|id| id != (stat.st_dev, stat.st_ino)) {
+            // SAFETY: fd is ours.
+            unsafe { libc::close(fd) };
+            continue;
+        }
         let mut access = if is_dir {
             granted
         } else {
