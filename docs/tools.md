@@ -2109,7 +2109,11 @@ says who answers a call to judge (`docs/design.md` §7.1).
      `.local/share/opencode` wherever they sit along the path, the agents' folders of the home
      (`~/.claude`, `~/.claude.json`, `~/.codex`), `/etc/shadow`, `/etc/sudoers`, `/etc/sudoers.d`
      (all refused above, read or written), and Flottille's own folders (data, configuration, state, runtime), which are
-     base to read and refused to write. Inside the place only what sits below it counts. A path
+     base to read and refused to write. One file of them is harmless to read: an agent's own
+     pasted text (#848), `<data>/images/<that agent>/<stamp>-text-<n>.txt`, which its message
+     tells it to read, by `fs_read` alone, the path as written and where it leads both right in
+     that folder (no link, no `..` out of it); another agent's, a picture of the folder and any
+     other file of the data folder stay base. Inside the place only what sits below it counts. A path
      outside is checked as written and where it leads (a link anyone made, a configuration
      folder that is a link, a `..` after a link), against Flottille's folders as named and
      resolved;

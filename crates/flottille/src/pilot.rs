@@ -554,6 +554,7 @@ fn agent_start(paths: &Paths, args: Value) -> Done {
         role,
         message,
         images: Vec::new(),
+        texts: Vec::new(),
     };
     let started = ask(paths, "agent.start", &asked)?;
     let agent = &started["agent"];
@@ -584,6 +585,7 @@ fn agent_send(paths: &Paths, args: Value) -> Done {
             agent: asked.agent_id.clone(),
             message: asked.message,
             images: Vec::new(),
+            texts: Vec::new(),
             compact: None,
         },
     )

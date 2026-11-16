@@ -231,6 +231,7 @@ pub fn run(paths: &Paths, action: AgentAction) -> Result<ExitCode> {
                     role,
                     message,
                     images: Vec::new(),
+                    texts: Vec::new(),
                 })?,
             )?;
             if json {
@@ -264,6 +265,7 @@ pub fn run(paths: &Paths, action: AgentAction) -> Result<ExitCode> {
                     agent: agent.clone(),
                     message,
                     images: Vec::new(),
+                    texts: Vec::new(),
                     compact: (compact || no_compact).then_some(compact),
                 })?,
             )?;
@@ -579,6 +581,7 @@ pub fn run(paths: &Paths, action: AgentAction) -> Result<ExitCode> {
                 role: None,
                 message,
                 images: Vec::new(),
+                texts: Vec::new(),
             },
             json,
         ),

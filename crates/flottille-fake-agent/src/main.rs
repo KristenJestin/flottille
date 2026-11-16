@@ -113,6 +113,7 @@
 //! when it is the whole text), and
 //! `{prompt:agent}` by the first agent id of the turn's prompt. Together they let a scripted lead
 //! launch a worker and write to it, or a parent answer the request its child's ask names.
+//! `{prompt:pasted}` is the path the first pasted text's marker of the prompt says to read it at.
 //! | `{"wait": 500}` | waits that many milliseconds; a cancel ends the turn `cancelled` |
 //! | `{"hold": "release"}` | waits until a file of that name exists in the agent's folder (the test creates it), so that a turn lasts exactly as long as the test needs; a cancel ends the turn `cancelled` |
 //! | `{"hang": true}` | goes silent until the turn is cancelled |
@@ -512,6 +513,9 @@ impl Agent {
                 }
                 if let Some(id) = agent_id(prompt) {
                     text = text.replace("{prompt:agent}", &id);
+                }
+                if let Some(path) = pasted_path(prompt) {
+                    text = text.replace("{prompt:pasted}", path);
                 }
                 Value::String(text)
             }
@@ -931,6 +935,13 @@ fn request_number(text: &str) -> Option<String> {
         let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
         (!digits.is_empty()).then_some(digits)
     })
+}
+
+/// The path the first `[Pasted text n: … · read it at PATH]` of the text names.
+fn pasted_path(text: &str) -> Option<&str> {
+    let marker = &text[text.find("[Pasted text ")?..];
+    let path = &marker[marker.find("read it at ")? + "read it at ".len()..];
+    path.find(']').map(|end| &path[..end])
 }
 
 /// The first agent id of the text: a word of 12 lowercase hexadecimal digits.

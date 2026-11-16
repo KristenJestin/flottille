@@ -13,10 +13,11 @@ use std::time::Duration;
 
 use flottille_core::agent::{Agent, AgentState, Choices, GateMode, TurnUsage, Used, new_id};
 use flottille_core::approval;
+use flottille_core::pasted;
 use flottille_core::paths::ensure_private_dir;
 use flottille_core::project::Project;
 use flottille_core::protocol::{
-    AgentAnswer, AgentImage, AgentName, AgentRun, AgentSend, AgentTrees, ImageUpload,
+    AgentAnswer, AgentImage, AgentName, AgentRun, AgentSend, AgentTrees, ImageUpload, TextUpload,
 };
 use flottille_core::secrets::{self, Secrets};
 use flottille_core::store::{AgentChange, Store, now_ms};
@@ -189,6 +190,7 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
             refuse_final(&agent)?;
             // `/<word>` of an active extension is Flottille's to run, never the agent's to read.
             if asked.images.is_empty()
+                && asked.texts.is_empty()
                 && let Some(running) =
                     crate::extensions::typed(daemon, &agent, &asked.message).await
             {
@@ -199,26 +201,37 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
                     "command": done}),
                 );
             }
-            if asked.images.is_empty() {
+            if asked.images.is_empty() && asked.texts.is_empty() {
                 refuse_empty(&asked.message)?;
             }
             let after = daemon.read(Store::last_seq)?;
             // `/name` sends the project's command of that name. Its images are kept only once
             // it can be sent: a command whose file cannot be read leaves none behind.
-            let message = crate::commands::message_for(
+            let mut message = crate::commands::message_for(
                 daemon,
                 &agent.project,
                 agent.workspace.as_deref(),
                 &asked.message,
             )?;
             // Decoding and scaling a big picture takes a good while for a 4K screenshot: it
-            // runs where it holds no thread of the runtime.
-            let images = {
-                let (daemon, agent, uploads) = (daemon.clone(), agent.clone(), asked.images);
-                tokio::task::spawn_blocking(move || keep_images(&daemon, &agent, &uploads))
-                    .await
-                    .map_err(|e| Failure::new("unavailable", format!("images not kept: {e}")))??
+            // runs where it holds no thread of the runtime. The pasted texts are written there too.
+            let (images, written) = {
+                let (daemon, agent) = (daemon.clone(), agent.clone());
+                let (uploads, texts) = (asked.images, asked.texts);
+                tokio::task::spawn_blocking(move || {
+                    let written = keep_texts(&daemon, &agent.id, &texts)?;
+                    match keep_images(&daemon, &agent, &uploads) {
+                        Ok(images) => Ok((images, written)),
+                        Err(failure) => {
+                            discard_texts(&written);
+                            Err(failure)
+                        }
+                    }
+                })
+                .await
+                .map_err(|e| Failure::new("unavailable", format!("images not kept: {e}")))??
             };
+            say_where(&mut message, &written);
             // Before the delivery wakes the agent: the turn it starts takes the choice.
             if let Some(compact) = asked.compact {
                 crate::compaction::choose(daemon, &agent.id, compact);
@@ -234,6 +247,7 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
             )
             .ok_or_else(|| {
                 deliveries::discard_images(&daemon.paths, &agent.id, &images);
+                discard_texts(&written);
                 Failure::new("unavailable", "the message could not be stored")
             })?;
             crate::subscriptions::user_wrote(daemon, &agent.id);
@@ -634,6 +648,77 @@ fn store_images(daemon: &Daemon, agent: &str, checked: Checked) -> Result<Vec<St
     Ok(names)
 }
 
+/// The large pasted texts of a message, checked, masked as every delivered text is, and written
+/// to the agent's folder of images (the pictures' folder, which goes with them): each as
+/// `<stamp>-text-<n>.txt`, the files the message says where to read.
+fn keep_texts(
+    daemon: &Daemon,
+    agent: &str,
+    texts: &[TextUpload],
+) -> Result<Vec<pasted::Written>, Failure> {
+    if texts.is_empty() {
+        return Ok(Vec::new());
+    }
+    if texts.len() > pasted::MAX_TEXTS {
+        return Err(Failure::refused(format!(
+            "a message carries {} pasted texts at most",
+            pasted::MAX_TEXTS
+        )));
+    }
+    if texts
+        .iter()
+        .any(|t| t.text.is_empty() || t.text.len() > pasted::MAX_TEXT_BYTES)
+    {
+        return Err(Failure::refused(format!(
+            "a pasted text is empty or over {} MiB",
+            pasted::MAX_TEXT_BYTES / 1024 / 1024
+        )));
+    }
+    let folder = daemon.paths.images(agent);
+    ensure_private_dir(&folder).map_err(|e| Failure::new("unavailable", e.to_string()))?;
+    let stamp = new_id().map_err(|e| Failure::new("unavailable", format!("no stamp: {e}")))?;
+    let env = std::env::vars_os().collect();
+    let mut written: Vec<pasted::Written> = Vec::new();
+    for (at, upload) in texts.iter().enumerate() {
+        let path = folder.join(format!("{stamp}-text-{}.txt", at + 1));
+        // The same masking a delivered text has: the agent never reads a secret from the file.
+        let text = secrets::mask(&upload.text, &env);
+        if let Err(error) = std::fs::write(&path, &text) {
+            discard_texts(&written);
+            return Err(Failure::new(
+                "unavailable",
+                format!("a pasted text cannot be stored: {error}"),
+            ));
+        }
+        written.push(pasted::Written {
+            // The daemon's name, never the client's: the marker the agent reads is Flottille's.
+            name: pasted::NAME.into(),
+            bytes: text.len(),
+            path: path.to_string_lossy().into_owned(),
+        });
+    }
+    Ok(written)
+}
+
+/// The files of pasted texts go, because the message that named them was not stored.
+fn discard_texts(written: &[pasted::Written]) {
+    for file in written {
+        let _ = std::fs::remove_file(&file.path);
+    }
+}
+
+/// Says in the message, where each marker is, where the file of its pasted text is.
+fn say_where(message: &mut crate::commands::Message, written: &[pasted::Written]) {
+    if written.is_empty() {
+        return;
+    }
+    message.text = pasted::place(&message.text, written);
+    message.typed = message
+        .typed
+        .take()
+        .map(|typed| pasted::place(&typed, written));
+}
+
 fn refuse_empty(message: &str) -> Result<(), Failure> {
     if message.trim().is_empty() {
         return Err(Failure::refused("the message is empty"));
@@ -644,7 +729,7 @@ fn refuse_empty(message: &str) -> Result<(), Failure> {
 async fn start(daemon: &Arc<Daemon>, asked: AgentRun) -> Answer {
     let project = projects::load_project(daemon, &asked.project)?;
     // Pictures alone are a first message, as they are a later one.
-    if asked.images.is_empty() {
+    if asked.images.is_empty() && asked.texts.is_empty() {
         refuse_empty(&asked.message)?;
     }
     // An agent's own permission modes decide which of its calls run unasked: in bare mode every
@@ -699,9 +784,12 @@ async fn start(daemon: &Arc<Daemon>, asked: AgentRun) -> Answer {
     // runtime's threads, like a later message's.
     let id = new_id().map_err(|e| Failure::new("unavailable", e.to_string()))?;
     let images = {
-        let (daemon, id, uploads) = (daemon.clone(), id.clone(), asked.images);
+        let (daemon, id) = (daemon.clone(), id.clone());
+        let (uploads, texts) = (asked.images, asked.texts);
         tokio::task::spawn_blocking(move || {
-            let stored = store_images(&daemon, &id, check_images(&uploads)?);
+            let stored = keep_texts(&daemon, &id, &texts).and_then(|written| {
+                store_images(&daemon, &id, check_images(&uploads)?).map(|images| (images, written))
+            });
             if stored.is_err() {
                 deliveries::forget_images(&daemon.paths, &id);
             }
@@ -710,15 +798,17 @@ async fn start(daemon: &Arc<Daemon>, asked: AgentRun) -> Answer {
         .await
         .map_err(|e| Failure::new("unavailable", format!("images not kept: {e}")))??
     };
+    let (images, written) = images;
     let after = daemon.read(Store::last_seq)?;
     // `/name` starts the session with the project's command of that name.
-    let message = crate::commands::message_for(
+    let mut message = crate::commands::message_for(
         daemon,
         &project.name,
         asked.workspace.as_deref(),
         &asked.message,
     )
     .inspect_err(|_| deliveries::forget_images(&daemon.paths, &id))?;
+    say_where(&mut message, &written);
     let agent = create(
         daemon,
         &project,

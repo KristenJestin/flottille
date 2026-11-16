@@ -66,6 +66,20 @@ impl Picture {
     }
 }
 
+/// A large pasted text and its name, as the daemon takes it: it writes it as a file the message
+/// names (#848).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Pasted {
+    pub name: String,
+    pub text: String,
+}
+
+impl Pasted {
+    fn to_json(&self) -> Value {
+        json!({"name": self.name, "text": self.text})
+    }
+}
+
 /// Where the user ran a task from: the answer goes back there.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RunFrom {
@@ -123,6 +137,8 @@ pub enum Command {
         message: String,
         /// The pictures that go with the first message.
         images: Vec<Picture>,
+        /// The large pasted texts that go with it, as files.
+        texts: Vec<Pasted>,
         /// The mode the session starts in: `ask`, `auto` or `full`.
         mode: String,
     },
@@ -490,6 +506,8 @@ pub enum Command {
         message: String,
         /// Pasted or dropped pictures that go with it, as the clipboard gave them.
         images: Vec<Picture>,
+        /// The large pasted texts that go with it, as files.
+        texts: Vec<Pasted>,
         /// The composer's Compact before sending, while it shows: the agent's cache expired.
         compact: Option<bool>,
     },
@@ -1467,6 +1485,7 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
             pick,
             message,
             images,
+            texts,
             mode,
         } => {
             let workspace = match target {
@@ -1481,7 +1500,7 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
                     workspace.as_deref(),
                     &pick,
                     &message,
-                    &images,
+                    (&images, &texts),
                     &mode,
                 ),
                 bounds.quick,
@@ -2428,10 +2447,14 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
             key,
             message,
             images,
+            texts,
             compact,
         } => {
             let mut params = json!({"agent": session, "message": message,
                 "images": images.iter().map(Picture::to_json).collect::<Vec<_>>()});
+            if !texts.is_empty() {
+                params["texts"] = texts.iter().map(Pasted::to_json).collect();
+            }
             if let Some(compact) = compact {
                 params["compact"] = json!(compact);
             }
@@ -2843,11 +2866,11 @@ fn start_params(
     workspace: Option<&str>,
     pick: &Pick,
     message: &str,
-    images: &[Picture],
+    (images, texts): (&[Picture], &[Pasted]),
     mode: &str,
 ) -> Value {
     // What is left out is sent as a null, which the daemon reads as absent: its to choose.
-    json!({
+    let mut params = json!({
         "project": project,
         "workspace": workspace,
         "provider": pick.provider,
@@ -2856,7 +2879,11 @@ fn start_params(
         "gate_mode": mode,
         "message": message,
         "images": images.iter().map(Picture::to_json).collect::<Vec<_>>(),
-    })
+    });
+    if !texts.is_empty() {
+        params["texts"] = texts.iter().map(Pasted::to_json).collect();
+    }
+    params
 }
 
 fn started_outcome(project: &str, started: &Value) -> Outcome {
@@ -3111,6 +3138,7 @@ mod tests {
             pick: Pick::default(),
             message: "Fix the timeout".into(),
             images: Vec::new(),
+            texts: Vec::new(),
             mode: "auto".into(),
         }
     }
