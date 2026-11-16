@@ -121,6 +121,11 @@
 //! delete --id N --yes` ends with 0 for a link that is there, 1 otherwise, and keeps the ids
 //! deleted in `unlinked.json`.
 //!
+//! `comment create` takes no `--visibility-role` nor `--visibility-group` (acli's reference gives
+//! them to `comment update` only) and ends with 1 on an unknown flag; its `--body-file` may hold a
+//! document, a mention in it kept as it is, and ends with 1 for a document Jira refuses (a
+//! `blockquote` that holds a `blockquote`, a `heading`, a `rule` or a `table`, for one).
+//!
 //! `comment update --key K --id I (--body | --body-file | --body-adf)` (the first two plain text,
 //! the last a document, refused when it is none) and `comment delete --key K --id I`
 //! change the comments a `comment create` added, which are numbered from 10100 (`id`, in the
@@ -717,6 +722,18 @@ fn answer(dir: &Path, script: &Value, args: &[String]) -> i32 {
             }
             done
         }
+        // As its reference lists them (#934): `comment create` has no visibility flag, only
+        // `comment update` does, so a comment is created with the project's default visibility.
+        ["jira", "workitem", "comment", "create", rest @ ..]
+            if rest.iter().any(|word| word.starts_with("--visibility-")) =>
+        {
+            let flag = rest
+                .iter()
+                .find(|w| w.starts_with("--visibility-"))
+                .unwrap();
+            eprintln!("Error: unknown flag: {flag}");
+            1
+        }
         ["jira", "workitem", "comment", "create", rest @ ..]
             if rest.contains(&"--body") || rest.contains(&"--body-file") =>
         {
@@ -725,6 +742,14 @@ fn answer(dir: &Path, script: &Value, args: &[String]) -> i32 {
                 Some(text) => Some(Value::from(text)),
                 None => value(rest, "--body-file").and_then(file_text),
             };
+            // A document is refused as Jira refuses it: a quote that holds a quote, a heading, a
+            // rule or a table (#934), among the rest.
+            if let Some(doc) = body.as_ref().filter(|body| body.is_object())
+                && let Err(why) = check(doc)
+            {
+                eprintln!("✗ Error: --body-file holds no Atlassian Document Format: {why}");
+                return 1;
+            }
             if let (0, Some(key), Some(body)) = (done, value(rest, "--key"), body) {
                 post(dir, key, body);
             }

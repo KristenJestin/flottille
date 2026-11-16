@@ -341,6 +341,16 @@ pub async fn prepared(
             return Err(Outcome::Refused(why));
         }
         let mut says = posted_says(args);
+        // A reply is shown as it goes out, its quote too, instead of its body alone; a comment
+        // that cannot be answered is refused here. (`forge reply` keeps its body.)
+        if args["action"] == "reply" {
+            says.retain(|said| !said.starts_with("Its body: "));
+        }
+        says.extend(
+            crate::tickets::reply_says(daemon, &project, args)
+                .await
+                .map_err(Outcome::Refused)?,
+        );
         // The time a worklog logs, and on which ticket; a vault entry that is not there is
         // refused here, before the user is asked.
         says.extend(
