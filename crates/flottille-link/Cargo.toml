@@ -1,6 +1,6 @@
 [package]
 name = "flottille-link"
-description = "Flottille's link between the user's devices: identity and keys"
+description = "Flottille's link between the user's devices: identity, keys and the transport"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -13,13 +13,20 @@ ed25519-dalek = "2.2.0"
 flottille-protocol = { version = "0.1.0", path = "../flottille-protocol" }
 # The operating system's random generator, which makes every private key.
 getrandom = "0.3.4"
+# The transport (`docs/remote.md`, "The transport"), named in `src/transport.rs` only: QUIC, its
+# TLS on the machines' Ed25519 keys as raw public keys (RFC 7250). Both were in the lock already;
+# no relay, no NAT traversal and no discovery come with them.
+quinn = { version = "0.11.12", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+rustls = { version = "0.23.46", default-features = false, features = ["std", "ring"] }
 libc = "0.2.191"
 # The member list and the invitation, as the hub and the daemon will send them.
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 # Already built under ed25519-dalek: a public key's fingerprint.
 sha2 = "0.10.9"
+tokio = { version = "1.54.1", features = ["rt", "net", "sync", "time", "macros"] }
 zeroize = "1.9.1"
 
 [dev-dependencies]
 tempfile = "3.27.0"
+tokio = { version = "1.54.1", features = ["rt", "macros"] }

@@ -347,7 +347,7 @@ pub struct PullRequest {
     pub number: u64,
     /// `open`, `draft`, `merged` or `closed`.
     pub state: String,
-    /// Its checks as one mark: `passing`, `failing` or `pending`; none without checks.
+    /// Its checks as one mark: `passing`, `failing`, `pending` or `stopped`; none without checks.
     pub mark: Option<String>,
     pub url: String,
 }

@@ -83,8 +83,7 @@ pub fn run(paths: &Paths) -> Result<()> {
     crate::display::clean(paths);
     // Before anything runs: what the SSH agent is, never what a link leads to later.
     crate::ssh_agent::find(paths);
-    // Nothing signs with it yet: the link comes with the transport (#839).
-    let _machine_key = crate::remote::machine_key(paths)?;
+    let machine_key = crate::remote::machine_key(paths)?;
     children::say_sessions_in(paths.sessions())?;
     let _store_lock = hold_store(paths)?;
     extensions::check_tools(extensions::ALL)?;
@@ -97,7 +96,7 @@ pub fn run(paths: &Paths) -> Result<()> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
-    runtime.block_on(serve(paths, store, projects))
+    runtime.block_on(serve(paths, store, projects, machine_key))
 }
 
 /// The lock is held for the daemon's whole life: the kernel lets go of it when the process ends,
@@ -215,6 +214,9 @@ pub struct Daemon {
     pub extensions: extensions::Live,
     /// What the watchdog reads: the requests that wait, and whether the runtime runs.
     pub watch: Arc<watchdog::Watch>,
+    /// The link to the user's other machines, with remote on: unset with remote off, the reason
+    /// when it could not start.
+    pub remote: std::sync::OnceLock<std::result::Result<Arc<crate::link::Remote>, String>>,
     /// Becomes true when the daemon stops.
     stopping: watch::Sender<bool>,
 }
@@ -279,6 +281,7 @@ impl Daemon {
             vault: crate::vault::Keyring::open(paths),
             extensions: extensions::Live::default(),
             watch: Arc::default(),
+            remote: std::sync::OnceLock::new(),
             stopping: watch::Sender::new(false),
         }
     }
@@ -491,7 +494,12 @@ fn judge(seen: std::io::Result<(u64, u64)>, ours: (u64, u64)) -> Socket {
     }
 }
 
-async fn serve(paths: &Paths, store: Store, projects: Projects) -> Result<()> {
+async fn serve(
+    paths: &Paths,
+    store: Store,
+    projects: Projects,
+    machine_key: Option<flottille_link::MachineKey>,
+) -> Result<()> {
     let socket = paths.socket();
     // Holding the lock, a socket already there is one a dead daemon left.
     match std::fs::remove_file(&socket) {
@@ -512,6 +520,13 @@ async fn serve(paths: &Paths, store: Store, projects: Projects) -> Result<()> {
         Some(bus),
     ));
     watchdog::start(&daemon.watch)?;
+    if let Some(key) = machine_key {
+        let link = crate::link::start(paths, key, daemon.stopping.subscribe());
+        if let Err(why) = &link {
+            eprintln!("flottille daemon: the link is not up: {why}");
+        }
+        let _ = daemon.remote.set(link);
+    }
     let mut terminate = signal(SignalKind::terminate())?;
     let mut interrupt = signal(SignalKind::interrupt())?;
     let mut child_ended = signal(SignalKind::child())?;
@@ -590,6 +605,9 @@ async fn serve(paths: &Paths, store: Store, projects: Projects) -> Result<()> {
     // Not the socket of another daemon that took the path since.
     if judge(socket_identity(&socket), ours) == Socket::Ours {
         std::fs::remove_file(&socket)?;
+    }
+    if let Some(Ok(remote)) = daemon.remote.get() {
+        remote.close().await;
     }
     agents::stop_all(&daemon).await;
     runs::stop_all(&daemon).await;
@@ -725,6 +743,7 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
             "service.",
             "items.",
             "vault.",
+            "remote.",
         ]
         .iter()
         .any(|prefix| request.method.starts_with(prefix))
@@ -759,6 +778,8 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
                     crate::services::call(daemon, &request.method, request.params).await
                 } else if request.method.starts_with("vault.") {
                     crate::vault::call(daemon, &request.method, request.params).await
+                } else if request.method.starts_with("remote.") {
+                    crate::link::call(daemon, &request.method, request.params).await
                 } else if request.method.starts_with("items.") {
                     items::call(daemon, &request.method, request.params).await
                 } else if request.method.starts_with("provider.") {
