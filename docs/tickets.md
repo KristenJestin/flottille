@@ -467,8 +467,12 @@ ticket itself.
     text, so a quote, a heading, a rule or a table in the comment (a reply to a reply) is written
     as paragraphs there, which Jira takes in a quote and refuses otherwise.
   - **The card shows what is posted**: the comment quoted first and the reply, as they go out
-    (on GitHub the Markdown, on Jira the document as Markdown), and on Jira "it mentions <name>,
-    who is notified" when the mention is made.
+    (on GitHub the Markdown, on Jira the document as Markdown), and "it mentions <name>, who is
+    notified" when the author is mentioned: on Jira when the read gave their account id, on
+    GitHub (`> @alice wrote:`) when it gave their login (a deleted user has none: `> A deleted
+    user wrote:`, no mention). The card is rebuilt when the user allows the call, and a comment
+    edited since is not posted: it is refused as what the call does having changed. A comment
+    that cannot be read when the card is built gets no card, it is refused.
   - **A comment not for everyone is not quoted**: acli's reference gives `--visibility-role` and
     `--visibility-group` to `comment update` only; `comment create` uses *the project's default
     visibility*, so a reply cannot be posted in the visibility of the comment it answers. A Jira

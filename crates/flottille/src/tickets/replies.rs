@@ -103,11 +103,12 @@ fn quoted(comment: &Comment) -> String {
 
 /// A GitHub reply: the quote, then the answer.
 fn markdown(comment: &Comment, body: &str) -> String {
-    format!(
-        "> @{} wrote:\n{}\n\n{body}",
-        comment.author,
-        quoted(comment)
-    )
+    // A deleted user has no login: no `@` that would mention a stranger.
+    let who = match comment.author.is_empty() {
+        true => "A deleted user".to_owned(),
+        false => format!("@{}", comment.author),
+    };
+    format!("> {who} wrote:\n{}\n\n{body}", quoted(comment))
 }
 
 /// A Jira reply as a document: the author mentioned when Jira gave their account, the comment
@@ -131,8 +132,8 @@ fn document(comment: &Comment, body: &str) -> Value {
     json!({"type": "doc", "version": 1, "content": content})
 }
 
-/// What the card says of a reply: the comment as it goes out, quote and answer, and on Jira whom
-/// it mentions, who is notified. Refused, with why, when the comment cannot be answered.
+/// What the card says of a reply: the comment as it goes out, quote and answer, and whom it
+/// mentions, who is notified. Refused, with why, when the comment cannot be answered.
 pub async fn says(daemon: &Daemon, project: &Project, args: &Value) -> Result<Vec<String>, String> {
     if args["action"] != "reply" {
         return Ok(Vec::new());
@@ -153,7 +154,11 @@ pub async fn says(daemon: &Daemon, project: &Project, args: &Value) -> Result<Ve
     let (_, comment) = match answerable(daemon, project, &key, named).await {
         Ok(found) => found,
         Err(Outcome::Refused(why)) => return Err(why),
-        Err(_) => return Ok(Vec::new()),
+        // A card without its quote would say less than what is posted.
+        Err(Outcome::Failed(why) | Outcome::Invalid(why) | Outcome::Held(why)) => {
+            return Err(format!("refused: {why}; nothing was written"));
+        }
+        Err(Outcome::Done(_)) => return Ok(Vec::new()),
     };
     let jira = matches!(key, Key::Jira(_));
     let mut says = vec![format!(
@@ -163,7 +168,8 @@ pub async fn says(daemon: &Daemon, project: &Project, args: &Value) -> Result<Ve
             false => markdown(&comment, body),
         }
     )];
-    if jira && comment.account.is_some() {
+    // On GitHub the quote's `@login` notifies its author; a deleted user has none.
+    if (jira && comment.account.is_some()) || (!jira && !comment.author.is_empty()) {
         says.push(format!("It mentions {}, who is notified", comment.author));
     }
     Ok(says)
