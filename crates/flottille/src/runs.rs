@@ -497,6 +497,9 @@ pub async fn run(
     // it makes, before it goes: however the commits were made, through a command the checks at
     // commit time read or not.
     if lift {
+        if let Err(refusal) = crate::ssh_agent::over_ssh(&folder.path, &words, &env).await {
+            return Outcome::Refused(refusal);
+        }
         tokio::select! {
             checked = crate::message_checks::push(&at, &words, &env) => {
                 if let Err(refusal) = checked {
@@ -792,9 +795,10 @@ pub fn groups_of(daemon: &Daemon, agent: &str) -> Vec<u32> {
 /// No forge token, the forge command lines' configuration in `empty` (`forge` is the way to
 /// the forge), and no hook: the hooks are files the agent writes, and a commit or a push the gate
 /// let through would run them where it does not look. Every push URL is rewritten to a path that
-/// is no remote (`url.<nowhere>.pushInsteadOf` of every URL), unless `lift`: the run is itself a
-/// `git push` the user or the judge let through. A harmless command cannot push from a script
-/// the gate never read (`docs/design.md` §7).
+/// is no remote (`url.<nowhere>.pushInsteadOf` of every URL), and the user's SSH agent is not
+/// named, unless `lift`: the run is itself a `git push` the user or the judge let through, lent
+/// the agent the daemon's own environment names (`ssh_agent`). A harmless command cannot push
+/// from a script the gate never read (`docs/design.md` §7).
 fn defend(env: &mut BTreeMap<OsString, OsString>, empty: &Path, lift: bool) {
     for name in FORGE_TOKENS {
         env.insert(name.into(), OsString::new());
@@ -806,6 +810,10 @@ fn defend(env: &mut BTreeMap<OsString, OsString>, empty: &Path, lift: bool) {
     // The session bus leads to the keyring, where the vault is. The system bus's address is
     // kept: it holds no secret of the user's, and its socket is at a fixed path anyway.
     env.remove(&OsString::from("DBUS_SESSION_BUS_ADDRESS"));
+    env.remove(&OsString::from(crate::ssh_agent::VARIABLE));
+    if lift && let Some(lent) = crate::ssh_agent::lend() {
+        env.insert(crate::ssh_agent::VARIABLE.into(), lent.path().into());
+    }
     if !lift {
         configure(
             env,
@@ -817,7 +825,7 @@ fn defend(env: &mut BTreeMap<OsString, OsString>, empty: &Path, lift: bool) {
 
 /// One more git setting through the environment, after those it already has: it wins over the
 /// repository's own.
-fn configure(env: &mut BTreeMap<OsString, OsString>, key: &str, value: &str) {
+pub(crate) fn configure(env: &mut BTreeMap<OsString, OsString>, key: &str, value: &str) {
     let count: usize = env
         .get(&OsString::from("GIT_CONFIG_COUNT"))
         .and_then(|count| count.to_str()?.parse().ok())
@@ -884,8 +892,11 @@ fn start(
         )
         .stderr(writer)
         .kill_on_drop(true);
-    let spawned = crate::children::spawn(crate::landlock::confined(
+    let lent = crate::ssh_agent::lent_to(&env);
+    let spawned = crate::children::spawn(crate::landlock::confined_with(
         crate::children::in_own_session(&mut command),
+        None,
+        lent.as_ref(),
     ));
     // The command holds the pipe's writing end: dropped, only the processes hold it.
     drop(command);

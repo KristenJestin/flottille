@@ -75,6 +75,7 @@ mod setup;
 mod show;
 mod skill_command;
 mod skills;
+mod ssh_agent;
 mod subscriptions;
 mod sweep;
 mod tasks;

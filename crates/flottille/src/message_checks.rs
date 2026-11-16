@@ -283,7 +283,7 @@ type Pushed = (String, String, String);
 
 /// What the push would do, as git says it without doing it (`--dry-run --porcelain`): for each URL
 /// it goes to, each ref with its flag (`*` a new one), its source and its destination.
-async fn dry_run(
+pub(crate) async fn dry_run(
     git: &[String],
     rest: &[String],
     end: usize,

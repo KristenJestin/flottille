@@ -114,6 +114,18 @@ pub fn confined_but<'a>(
     command: &'a mut tokio::process::Command,
     open: Option<&crate::display::Folder>,
 ) -> &'a mut tokio::process::Command {
+    confined_with(command, open, None)
+}
+
+/// [`confined_but`], the user's SSH agent `lent` too: the right to connect to its socket, and
+/// nothing else of the folder it is in. A [`crate::ssh_agent::Lent`] and no path, for the same
+/// reason as the display folder. Below the ninth ABI connecting is not governed: the run's
+/// environment alone says where the agent is (`runs::defend`).
+pub fn confined_with<'a>(
+    command: &'a mut tokio::process::Command,
+    open: Option<&crate::display::Folder>,
+    lent: Option<&crate::ssh_agent::Lent>,
+) -> &'a mut tokio::process::Command {
     let abi = abi();
     let denied = runtime_folders();
     if abi < 2 || denied.is_empty() {
@@ -123,14 +135,22 @@ pub fn confined_but<'a>(
     let mut paths = Vec::new();
     allowed(Path::new("/"), &denied, &mut paths);
     let open = open.and_then(|folder| CString::new(folder.path().as_os_str().as_bytes()).ok());
+    let lent = lent
+        .filter(|_| rights & RESOLVE_UNIX != 0)
+        .and_then(|lent| CString::new(lent.path().as_os_str().as_bytes()).ok());
     // SAFETY: the closure allocates nothing and only makes system calls (open, fstat,
     // landlock_*, prctl, close), all async-signal-safe.
-    unsafe { command.pre_exec(move || restrict(rights, &paths, open.as_deref())) }
+    unsafe { command.pre_exec(move || restrict(rights, &paths, open.as_deref(), lent.as_deref())) }
 }
 
-/// In the child: every path a rule with every right, `open` one without `REFER`, then the child
-/// bound to them.
-fn restrict(rights: u64, paths: &[CString], open: Option<&CStr>) -> io::Result<()> {
+/// In the child: every path a rule with every right, `open` one without `REFER`, `lent` (a
+/// socket) one with the right to connect to it alone, then the child bound to them.
+fn restrict(
+    rights: u64,
+    paths: &[CString],
+    open: Option<&CStr>,
+    lent: Option<&CStr>,
+) -> io::Result<()> {
     let handled = [rights];
     // SAFETY: the attribute is a `u64` of the size given, which the kernel reads as the first
     // field of its own, the rest zero.
@@ -149,7 +169,10 @@ fn restrict(rights: u64, paths: &[CString], open: Option<&CStr>) -> io::Result<(
     let ruled = paths
         .iter()
         .map(|path| (path.as_c_str(), rights))
-        .chain(open.map(|path| (path, rights & !REFER)));
+        .chain(open.map(|path| (path, rights & !REFER)))
+        // A rule on the socket itself: Landlock checks connecting from the socket's own path up,
+        // so its folder stays denied.
+        .chain(lent.map(|path| (path, RESOLVE_UNIX)));
     for (path, granted) in ruled {
         // SAFETY: a valid C string; O_PATH opens nothing but a handle.
         let fd = unsafe {

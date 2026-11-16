@@ -87,8 +87,9 @@ pub async fn run_in<S: AsRef<OsStr>>(
         .process_group(0)
         .kill_on_drop(true);
     // It runs the line's own options and its transport (a remote's helper, its ssh command), as
-    // the run would: kept from what a run is kept from.
-    crate::landlock::confined(&mut command);
+    // the run would: kept from what a run is kept from, and lent the SSH agent when the run is.
+    let lent = crate::ssh_agent::lent_to(env);
+    crate::landlock::confined_with(&mut command, None, lent.as_ref());
     let limit = Class::Read.limit();
     bounded(command, dir, &words[1..], limit, OUTPUT_LIMIT, input).await
 }
