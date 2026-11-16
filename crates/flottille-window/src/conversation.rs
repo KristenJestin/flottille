@@ -1455,12 +1455,18 @@ impl Conversation {
             let Block::Command(card) = block else {
                 continue;
             };
-            if card.ending != Ending::Running {
-                continue;
-            }
             let Some(row) = rows.iter().find(|r| r.run == card.run) else {
                 continue;
             };
+            if card.ending != Ending::Running {
+                // What the agent read of its output is filtered; the card shows the lines as the
+                // program wrote them, which the daemon's list keeps for a run that ended too.
+                if row.ending() == card.ending && !row.tail.is_empty() && row.tail != card.lines {
+                    card.lines = row.tail.clone();
+                    changes.push(Change::Changed(at));
+                }
+                continue;
+            }
             let before = card.clone();
             card.ending = row.ending();
             card.seconds = Some(row.elapsed_ms(now) as f64 / 1000.0);
@@ -1714,18 +1720,25 @@ pub fn command_card(text: &str) -> Option<CommandCard> {
     {
         lines.next();
     }
-    if lines
-        .peek()
-        .is_some_and(|l| l.starts_with("(lines ") || *l == "(no output)")
-    {
+    if lines.peek().is_some_and(|l| {
+        l.starts_with("(lines ") || *l == "(no output)" || *l == "(no output left)"
+    }) {
         lines.next();
+    }
+    let mut lines: Vec<&str> = lines.collect();
+    // The line that says how many lines a filter took out is the agent's, not the output's.
+    if lines
+        .last()
+        .is_some_and(|l| l.starts_with('[') && l.contains(" filtered out: read the whole output"))
+    {
+        lines.pop();
     }
     Some(CommandCard {
         run: run.to_owned(),
         line: line.to_owned(),
         ending,
         seconds,
-        lines: lines.map(str::to_owned).collect(),
+        lines: lines.into_iter().map(str::to_owned).collect(),
         allowed_by: None,
     })
 }
@@ -3851,6 +3864,27 @@ mod tests {
                 .is_empty(),
             "an ended card is not drawn again"
         );
+    }
+
+    #[test]
+    fn an_ended_card_shows_the_lines_as_the_program_wrote_them_not_as_the_agent_read_them() {
+        let mut c = root();
+        let text = "run r1: `./fails.sh` exited with code 1 after 3.5 s\n(lines 1-1 of 1)\nred failed\n\
+                    [1 line filtered out: read the whole output with run_status {\"run\": \"r1\", \"start\": 1, \"raw\": true}]";
+        let card = command_card(text).unwrap();
+        assert_eq!(card.lines, ["red failed"], "the agent's note is not output");
+        c.push(Block::Command(CommandCard {
+            run: "r1".into(),
+            ..card
+        }));
+
+        let changes = c.update_commands(
+            &[row("exited", Some(1), &["\u{1b}[31mred\u{1b}[0m failed"])],
+            9_000,
+        );
+
+        assert_eq!(changes, [Change::Changed(0)]);
+        assert_eq!(cards(&c)[0].lines, ["\u{1b}[31mred\u{1b}[0m failed"]);
     }
 
     #[test]

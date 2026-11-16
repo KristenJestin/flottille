@@ -515,6 +515,12 @@ fn a_run_in_the_conversation_is_one_compact_line_and_its_output_is_in_the_panel_
     until(&shell, cx, "the line is in the conversation", |cx| {
         card_of(&page, cx).is_some()
     });
+    // What the agent read of the output is filtered: the card takes the program's lines from the
+    // daemon's list, which arrives a moment after the call's end.
+    until(&shell, cx, "the card holds the program's lines", |cx| {
+        matches!(card_of(&page, cx), Some((_, Block::Command(card))) if !card.lines.is_empty()
+            && card.lines.iter().any(|line| line.contains('\u{1b}')))
+    });
     settle(cx);
 
     let (at, Block::Command(card)) = card_of(&page, cx).unwrap() else {
