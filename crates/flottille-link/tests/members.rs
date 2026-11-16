@@ -500,3 +500,96 @@ fn a_list_travels_as_json_and_still_checks() {
         assert!(serde_json::from_value::<MemberList>(broken).is_err());
     }
 }
+
+#[test]
+fn a_member_declares_its_own_machine_and_no_other() {
+    let (pc, pixel, tablet, mut list) = three();
+    let (machine, other) = (key(10).public(), key(11).public());
+    // The daemon's key of `pc`, declared by pc itself.
+    list.sign(
+        Action::Machine {
+            key: pc.public(),
+            machine,
+        },
+        &pc,
+    );
+    let members = list.check(&pc.public()).unwrap();
+    assert_eq!(members.get(&pc.public()).unwrap().machine, Some(machine));
+    assert_eq!(members.by_machine(&machine).unwrap().name, "pc");
+    assert!(members.by_machine(&other).is_none());
+
+    // Not for another member, whatever its signer's role.
+    let mut forged = list.clone();
+    forged.sign(
+        Action::Machine {
+            key: tablet.public(),
+            machine: other,
+        },
+        &pixel,
+    );
+    assert!(
+        refused(&forged, &pc).contains("a member declares its own machine only"),
+        "{}",
+        refused(&forged, &pc)
+    );
+    // Not a machine another member declared, nor a member's own key.
+    let mut taken = list.clone();
+    taken.sign(
+        Action::Machine {
+            key: pixel.public(),
+            machine,
+        },
+        &pixel,
+    );
+    assert!(refused(&taken, &pc).contains("a machine another member declared"));
+    let mut member = list.clone();
+    member.sign(
+        Action::Machine {
+            key: pixel.public(),
+            machine: tablet.public(),
+        },
+        &pixel,
+    );
+    assert!(refused(&member, &pc).contains("a member's key"));
+
+    // A viewer declares its own; a new declaration replaces the old one.
+    list.sign(
+        Action::Machine {
+            key: tablet.public(),
+            machine: other,
+        },
+        &tablet,
+    );
+    let moved = key(12).public();
+    list.sign(
+        Action::Machine {
+            key: pc.public(),
+            machine: moved,
+        },
+        &pc,
+    );
+    let members = list.check(&pc.public()).unwrap();
+    assert!(members.by_machine(&machine).is_none());
+    assert_eq!(members.by_machine(&moved).unwrap().name, "pc");
+    assert_eq!(members.by_machine(&other).unwrap().name, "tablet");
+
+    // A member removed takes its machine with it.
+    list.sign(remove(&tablet), &pc);
+    assert!(
+        list.check(&pc.public())
+            .unwrap()
+            .by_machine(&other)
+            .is_none()
+    );
+
+    // The declaration travels as JSON and is signed as the documented encoding: kind 4, the
+    // member, then the machine.
+    let json = serde_json::to_value(&list).unwrap();
+    assert_eq!(json[3]["action"]["kind"], "machine");
+    let change = &list.changes()[3];
+    let bytes = change.signed_bytes();
+    let tail = &bytes[bytes.len() - 65..];
+    assert_eq!(tail[0], 4);
+    assert_eq!(&tail[1..33], pc.public().as_bytes());
+    assert_eq!(&tail[33..], machine.as_bytes());
+}

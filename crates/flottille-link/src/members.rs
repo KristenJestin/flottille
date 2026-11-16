@@ -12,12 +12,17 @@
 //! "flottille-member-change-v1" 0x00    the domain: nothing else a device key signs starts so
 //! previous   32 bytes                  the hash of the change before it; zeros for the first
 //! signer     32 bytes                  the signing member's public key
-//! kind        1 byte                   1 add, 2 remove, 3 rename
+//! kind        1 byte                   1 add, 2 remove, 3 rename, 4 machine
 //! key        32 bytes                  the member the change is about
-//! add:    name length (4 bytes, big-endian), name (UTF-8), role (1 runner, 2 controller, 3 viewer)
-//! remove: nothing more
-//! rename: name length (4 bytes, big-endian), name (UTF-8)
+//! add:     name length (4 bytes, big-endian), name (UTF-8), role (1 runner, 2 controller, 3 viewer)
+//! remove:  nothing more
+//! rename:  name length (4 bytes, big-endian), name (UTF-8)
+//! machine: the machine key (32 bytes)
 //! ```
+//!
+//! A `machine` change is a member's own declaration of the key its machine's daemon holds: the
+//! list holds the devices' keys, while the link and the control session to the hub run on the
+//! machines' keys, and that tie must be one the hub cannot make either.
 //!
 //! A change's hash, which the next change names, is the SHA-256 of its signed bytes followed by its
 //! 64-byte signature.
@@ -86,12 +91,20 @@ pub enum Action {
         key: PublicKey,
         name: String,
     },
+    /// The member `key` says its machine's daemon holds `machine`: signed by that member only.
+    Machine {
+        key: PublicKey,
+        machine: PublicKey,
+    },
 }
 
 impl Action {
     fn key(&self) -> &PublicKey {
         match self {
-            Action::Add { key, .. } | Action::Remove { key } | Action::Rename { key, .. } => key,
+            Action::Add { key, .. }
+            | Action::Remove { key }
+            | Action::Rename { key, .. }
+            | Action::Machine { key, .. } => key,
         }
     }
 
@@ -100,6 +113,7 @@ impl Action {
             Action::Add { .. } => "add",
             Action::Remove { .. } => "remove",
             Action::Rename { .. } => "rename",
+            Action::Machine { .. } => "declare the machine of",
         }
     }
 }
@@ -169,6 +183,11 @@ impl Change {
                 bytes.push(3);
                 bytes.extend_from_slice(key.as_bytes());
                 name(&mut bytes, new);
+            }
+            Action::Machine { key, machine } => {
+                bytes.push(4);
+                bytes.extend_from_slice(key.as_bytes());
+                bytes.extend_from_slice(machine.as_bytes());
             }
         }
         bytes
@@ -281,6 +300,8 @@ pub struct Member {
     pub role: Role,
     /// The member whose signature added it; the root's own key for the root.
     pub added_by: PublicKey,
+    /// The key its machine's daemon holds, as the member itself declared it.
+    pub machine: Option<PublicKey>,
 }
 
 /// The members a checked list leaves, in the order they were added.
@@ -311,6 +332,13 @@ impl Members {
         self.members.iter().find(|member| member.key == *key)
     }
 
+    /// The member whose machine holds `machine`.
+    pub fn by_machine(&self, machine: &PublicKey) -> Option<&Member> {
+        self.members
+            .iter()
+            .find(|member| member.machine.as_ref() == Some(machine))
+    }
+
     /// Applies one change, or says why it is refused, after its number.
     fn apply(&mut self, change: &Change, first: bool) -> Result<(), String> {
         if change.previous != self.head {
@@ -333,8 +361,18 @@ impl Members {
         let Some(signer) = self.get(&change.signer) else {
             return Err("is signed by a key that is not a member".to_owned());
         };
-        let leaving = matches!(&change.action, Action::Remove { key } if *key == signer.key);
-        if !signer.role.manages() && !leaving {
+        let own = match &change.action {
+            Action::Remove { key } | Action::Machine { key, .. } => *key == signer.key,
+            Action::Add { .. } | Action::Rename { .. } => false,
+        };
+        if matches!(change.action, Action::Machine { .. }) && !own {
+            return Err(
+                "declares another member's machine: a member declares its own machine \
+                        only"
+                    .to_owned(),
+            );
+        }
+        if !signer.role.manages() && !own {
             return Err(format!(
                 "is signed by {}, a {}: a controller or a runner may {} a member",
                 signer.name,
@@ -353,6 +391,21 @@ impl Members {
                 let at = self.position(key)?;
                 self.free(name, Some(key))?;
                 self.members[at].name = name.clone();
+            }
+            Action::Machine { key, machine } => {
+                if self.members.iter().any(|member| member.key == *machine)
+                    || self.removed.contains(machine)
+                {
+                    return Err("declares a member's key as a machine".to_owned());
+                }
+                if self
+                    .by_machine(machine)
+                    .is_some_and(|member| member.key != *key)
+                {
+                    return Err("declares a machine another member declared".to_owned());
+                }
+                let at = self.position(key)?;
+                self.members[at].machine = Some(*machine);
             }
         }
         self.head = change.hash();
@@ -373,11 +426,15 @@ impl Members {
             return Err("adds a key that is a member already".to_owned());
         }
         self.free(name, None)?;
+        if self.by_machine(&key).is_some() {
+            return Err("adds a key that is a member's machine".to_owned());
+        }
         self.members.push(Member {
             key,
             name: name.to_owned(),
             role,
             added_by,
+            machine: None,
         });
         Ok(())
     }
