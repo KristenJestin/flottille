@@ -1984,7 +1984,11 @@ fn a_stopped_build_with_a_failed_step_refuses_the_merge_after_a_green_one() {
     );
 
     assert!(answer.error, "{}", answer.text);
-    assert!(answer.text.contains("its checks fail (test"), "{}", answer.text);
+    assert!(
+        answer.text.contains("its checks fail (test"),
+        "{}",
+        answer.text
+    );
     assert_eq!(bkt_calls_starting(&user, "pr merge"), 0);
 }
 
