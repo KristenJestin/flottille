@@ -685,6 +685,28 @@ has no workspace, so its templates fill only `{url}`, in `ready`'s `url` and `li
   agent the user allowed; when the daemon stops, its services stop with it, their process groups
   as a run's are. Stopping a service does not stop what it needs nor what needs it: the state of
   those that need it says what they need is not running.
+- **What runs and needs it is followed.** While a run of a task goes on, each service its `needs`
+  reaches (through the needs of a service too) is followed, Flottille's or `outside`: the end of
+  one Flottille runs is known at once, one that runs outside Flottille is tried every 15 s at its
+  `ready` address (a connection, 5 s at most; a `ready` command is never run for this, no gate
+  judged it), and nothing is followed once no run needs it. When one stops, the run's state says
+  it (`needs auth, stopped`, in `run_status`, `run.list` and the run's row in the window), and the
+  agent that started the run is told once, a delivery `service-stopped`: `auth, which dev-api
+  needs, stopped` (`was stopped by the user` when the user stopped it). It says so again if it
+  runs, then stops, again; the daemon's own stop tells nobody.
+- **Stopping what something running needs asks first.** A service that a run of a task needs, or
+  another service that runs and needs it, directly or through another, is not stopped in one
+  click: the window's Stop opens the confirmation `Stop auth?`, `app's dev-api needs it and is
+  running: it goes on without it.`, with Stop and Cancel; `flottille service stop` refuses with the
+  same sentence unless `--force`; an agent's `services stop`, held for the user every time,
+  says it in its request. Nothing running needs it: it stops at once, as before. The services
+  page marks, in a service's "Needed by", the tasks that run now.
+- **What a daemon that died left** is ended when the next one starts, before it resumes a
+  workspace's setup or starts anything: each recorded run's session and process group, whether
+  its first process still runs or only something it started does (a package manager's server,
+  still holding its port). Otherwise that leftover would answer the next start of the service,
+  which would take it for one started outside Flottille, and stop answering later, unseen. A
+  process whose pid was taken by another program since is never touched.
 - **Its run** is a run of the daemon's, of no agent and no project (`project` is empty): its
   output is kept, masked and read as a run's is (`docs/tools.md`, "Tasks and runs"), in the
   environment of a run with no place's variables, its folder's `.env` files masked. Its state is

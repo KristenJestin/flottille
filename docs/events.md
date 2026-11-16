@@ -1087,6 +1087,16 @@ ended.
 A restart (`run.restart`) is a `run.ended` with state `stopped` for the first run, if it ran, then a
 `run.started` for the new one, of the same `agent`, `project` and `name`.
 
+#### `run.needs`
+
+A service the run's task needs (`docs/projects.md`, "Services") stopped while it runs, or runs
+again: the agent that started it is told of a stop once (`service-stopped`, `docs/tools.md`).
+
+| Field | |
+|---|---|
+| `agent`, `project`, `run` | |
+| `needs_stopped` | The services it needs that do not run now, in the order they stopped. |
+
 #### `run.agent_folders_unchecked`
 
 An agent's run ended and the daemon could not check all the agent folders of its place after it
@@ -1165,6 +1175,12 @@ user allowed, or the daemon stopping) or `failed`, `why` the line that says why.
 
 `{"service", "change"}`: `added`, `edited` or `removed` in `services.toml` through Flottille, or
 `outside`: it answered before it was started, and Flottille started nothing.
+
+#### `service.needed`
+
+`{"run", "project", "name", "services", "running"}`: a run of the task `name`, which needs the
+`services` (those they need included), started (`running` true) or ended: what runs and needs
+them changed.
 
 ### The events of a subscription
 

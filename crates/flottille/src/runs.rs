@@ -138,6 +138,11 @@ struct Going {
     readied: Notify,
     /// The agent folders of an agent's place as they were before it, put back once it ends.
     guarded: Mutex<Option<Guard>>,
+    /// The services its task needs, those they need included, followed while it runs
+    /// (`services::follow_needs`).
+    needs: Vec<String>,
+    /// Those of them that stopped while it runs, in the order they stopped.
+    needs_stopped: Mutex<Vec<String>>,
 }
 
 /// How a run is told ready: its probe, and whether its agent asked to be told.
@@ -565,6 +570,7 @@ pub async fn run(
         Phase::Waited,
         Readying { probe, notify },
         guarded,
+        &needs,
     ) {
         return Outcome::Failed(why);
     }
@@ -673,6 +679,7 @@ pub async fn run_for_user(
             notify: false,
         },
         None,
+        &task.needs,
     )?;
     Ok(id)
 }
@@ -867,6 +874,7 @@ fn start(
     phase: Phase,
     readying: Readying,
     guarded: Option<Guard>,
+    needs: &[String],
 ) -> Result<(), String> {
     crate::projects::refuse_removing(daemon, &run.project).map_err(|refused| refused.message)?;
     let (reader, writer) = std::io::pipe().map_err(|e| format!("cannot run it: {e}"))?;
@@ -931,6 +939,8 @@ fn start(
         notify: AtomicBool::new(readying.notify),
         readied: Notify::new(),
         guarded: Mutex::new(guarded),
+        needs: crate::services::reached(daemon, needs),
+        needs_stopped: Mutex::default(),
     });
     daemon
         .mcp
@@ -939,6 +949,10 @@ fn start(
         .lock()
         .unwrap()
         .insert(going.run.id.clone(), going.clone());
+    if !going.needs.is_empty() {
+        needed(daemon, &going, true);
+        crate::services::follow_needs(daemon, &going.needs);
+    }
     if let Some(probe @ (Probe::Url(_) | Probe::Command(_))) = readying.probe {
         tokio::spawn(probing(daemon.clone(), going.clone(), probe));
     }
@@ -1248,6 +1262,9 @@ async fn follow(
         eprintln!("flottille daemon: run {}: {error}", run.id);
     }
     daemon.mcp.runs.runs.lock().unwrap().remove(&run.id);
+    if !going.needs.is_empty() {
+        needed(&daemon, &going, false);
+    }
     let detached =
         std::mem::replace(&mut *going.phase.lock().unwrap(), Phase::Over) == Phase::Detached;
     let by_user = going.stopped_by_user.load(Ordering::SeqCst);
@@ -1604,6 +1621,7 @@ pub async fn restart_by_user(
             phase,
             readying,
             guarded,
+            &needs,
         )
     }) {
         // The stop was the user's and its end was not told: the agent hears of both.
@@ -1800,6 +1818,9 @@ fn list(daemon: &Daemon, agent: &str) -> Outcome {
             state_text(end, false),
             crate::tree::ago(now.saturating_sub(run.started_at)),
         ));
+        if let Some(said) = needs_said(&needs_stopped(daemon, &run.id)) {
+            text.push_str(&format!(", {said}"));
+        }
         if run.agent.as_deref() != Some(agent)
             && let Some(starter) = run.agent.as_deref()
         {
@@ -1869,6 +1890,12 @@ fn describe(
         .as_ref()
         .is_some_and(|going| going.notify.load(Ordering::SeqCst));
     text.push_str(&readiness_text(&run, end.is_none(), told));
+    if end.is_none()
+        && let Some(going) = &going
+        && let Some(said) = needs_said(&going.needs_stopped.lock().unwrap())
+    {
+        text.push_str(&format!("\n{said}"));
+    }
     if end.is_none() && answer_of_run {
         text.push_str(&format!(
             "\nit keeps going: read it with run_status {{\"run\": \"{id}\"}}, stop it with \
@@ -2150,8 +2177,106 @@ pub(crate) fn start_service(
             notify: false,
         },
         None,
+        &[],
     )?;
     Ok(id)
+}
+
+// What a running task needs (`services::follow_needs`).
+
+/// A run that needs services started or ended: the services page says what running needs them.
+fn needed(daemon: &Daemon, going: &Going, running: bool) {
+    let _ = daemon.emit(
+        "service.needed",
+        json!({"run": going.run.id, "project": going.run.project, "name": going.run.name,
+            "services": going.needs, "running": running}),
+    );
+}
+
+/// A run going on that needs a service.
+pub(crate) struct Needing {
+    pub id: String,
+    pub project: String,
+    /// Its task.
+    pub name: String,
+    pub agent: Option<String>,
+}
+
+/// The runs going on that need the service, through what another service needs included.
+pub(crate) fn needing(daemon: &Daemon, service: &str) -> Vec<Needing> {
+    let mut found: Vec<Needing> = daemon
+        .mcp
+        .runs
+        .runs
+        .lock()
+        .unwrap()
+        .values()
+        .filter(|going| going.end.borrow().is_none() && going.needs.iter().any(|n| n == service))
+        .map(|going| Needing {
+            id: going.run.id.clone(),
+            project: going.run.project.clone(),
+            name: going.run.name.clone().unwrap_or_default(),
+            agent: going.run.agent.clone(),
+        })
+        .collect();
+    found.sort_by(|a, b| (&a.project, &a.name, &a.id).cmp(&(&b.project, &b.name, &b.id)));
+    found
+}
+
+/// The services a run needs that stopped while it runs.
+pub(crate) fn needs_stopped(daemon: &Daemon, id: &str) -> Vec<String> {
+    let going = daemon.mcp.runs.runs.lock().unwrap().get(id).cloned();
+    going.map_or_else(Vec::new, |going| {
+        going.needs_stopped.lock().unwrap().clone()
+    })
+}
+
+/// A service the run needs stopped (`how`, as the agent is told it: `stopped`, `was stopped by
+/// the user`), or runs again (`None`): its state says it, and the agent that started it is told
+/// of the stop, once.
+pub(crate) fn need_changed(daemon: &Arc<Daemon>, id: &str, service: &str, how: Option<&str>) {
+    let going = daemon.mcp.runs.runs.lock().unwrap().get(id).cloned();
+    let Some(going) = going else { return };
+    let changed = {
+        let mut stopped = going.needs_stopped.lock().unwrap();
+        let had = stopped.iter().any(|s| s == service);
+        match how {
+            Some(_) if !had => stopped.push(service.to_owned()),
+            None if had => stopped.retain(|s| s != service),
+            _ => {}
+        }
+        had != how.is_some()
+    };
+    if !changed {
+        return;
+    }
+    let run = &going.run;
+    let _ = daemon.emit(
+        "run.needs",
+        json!({"agent": run.agent, "project": run.project, "run": run.id,
+            "needs_stopped": going.needs_stopped.lock().unwrap().clone()}),
+    );
+    if let (Some(how), Some(agent)) = (how, &run.agent) {
+        let task = run.name.as_deref().unwrap_or_default();
+        let body = format!(
+            "{service}, which {task} needs, {how}. Your run {} of {task} goes on without it: \
+             services {{\"action\": \"start\", \"name\": \"{service}\"}} starts it again.",
+            run.id
+        );
+        deliveries::deliver(
+            daemon,
+            agent,
+            "service-stopped",
+            None,
+            &body,
+            approval::URGENT,
+        );
+    }
+}
+
+/// What a run's state says of the services it needs that stopped: `needs auth, stopped`.
+fn needs_said(stopped: &[String]) -> Option<String> {
+    (!stopped.is_empty()).then(|| format!("needs {}, stopped", stopped.join(", ")))
 }
 
 /// Whether the run is going on.

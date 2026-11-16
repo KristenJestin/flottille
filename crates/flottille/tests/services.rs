@@ -368,7 +368,8 @@ fn a_service_says_the_projects_tasks_that_need_it() {
             .clone()
     };
 
-    let app = json!([{"project": "app", "tasks": ["api"]}]);
+    // None of them runs now.
+    let app = json!([{"project": "app", "tasks": ["api"], "running": []}]);
     assert_eq!(needed("auth"), app);
     // Through what auth needs, the task needs mongo too.
     assert_eq!(needed("mongo"), app);
