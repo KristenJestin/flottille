@@ -238,15 +238,30 @@ What runs with the agent is pinned. The push runs the `git` the daemon found on 
 its start, whatever the line's `git` and the run's `PATH` lead to, and its `GIT_SSH_COMMAND` is the
 `ssh` found then: for each, the first one outside the user's home (`~/bin`, `~/.local/bin`,
 `~/.cargo/bin`, the projects, the agents' folders) and Flottille's folders, links followed, so
-neither is a program the run's `PATH` or a folder of the home puts first. `GIT_SSH_COMMAND` wins
+neither is a program the run's `PATH` or a folder of the home puts first. It must also be a file
+the daemon's user cannot write, in folders it cannot write either, up to `/` (a Homebrew or a
+`/usr/local` of the user's is not): otherwise a run could replace it, and no agent is lent.
+What `ssh` runs from its configuration (`ProxyCommand`, `Match exec`, `KnownHostsCommand`) goes
+through `$SHELL -c` with the push's `PATH`: the push's `SHELL` is `/bin/sh` (zsh would read
+`~/.zshenv`, fish its `config.fish`) and its `PATH` the folders of the daemon's own `PATH` that
+the same rule takes (none of the home's, none the user can write). `GIT_SSH_COMMAND` wins
 over `core.sshCommand` and `GIT_SSH`, which the gate refuses on the line anyway, and it shares no
 connection (`-o ControlMaster=no -o ControlPath=none`: no master outlives the push for another ssh
 to reuse) and runs no `LocalCommand` (`-o PermitLocalCommand=no`). No such `git` or `ssh`, no agent
 is lent, and the daemon says why at its start. `GIT_ALLOW_PROTOCOL=ssh` takes away every other
 transport (`ext::` and `fd::` run a program, a path runs `git-receive-pack` here), each remote's
-`receivepack` is set back to `git-receive-pack`, and `maintenance.auto` is `false` (no
-`git maintenance run --auto --detach` goes on after the push with its environment), all through
-the environment, which wins over the repository's settings. The push's own line takes no global
+`receivepack` is set back to `git-receive-pack` and its `mirror` to `false`, `maintenance.auto` is
+`false` (no `git maintenance run --auto --detach` goes on after the push with its environment),
+and no setting of the repository runs a program: `core.fsmonitor` is `false` (git reads the
+index for the submodules), `push.recurseSubmodules` is `no`, `submodule.recurse` is `false` and
+`push.gpgSign` is `false` (the signing program), all through the environment, which wins over the
+repository's settings. Its line takes no `--signed` nor `--recurse-submodules` (refused, in every
+mode). Before it runs, git's dry run of the push itself, lent the agent, says where it goes and
+what it does: it is refused when a URL is not one the push was checked against (the workspace's
+remote as it was when the workspace was created; in the project folder, the URLs of the
+repository's remote), or when it forces or deletes a ref its line does not ask for (`+`, `--force`,
+`--delete`, `:<ref>`, `--mirror`), such as a `remote.<name>.push` of the repository's settings. A
+remote the line names is checked before the dry run, so its URLs are not reached either. The push's own line takes no global
 option but `-C` into its repository's own folder (no other repository on the way), `--no-pager`,
 `-P`, `--no-advice` and `--no-optional-locks`: a setting (`git -c …`, `--config-env`) would win
 over the pins and the hooks' wall, `--exec-path` would run git's programs from another folder, and
@@ -296,9 +311,15 @@ The gaps, where the platform does not allow more:
   added to `~/.ssh/config` by code an agent wrote runs at the next push the gate lets through,
   with the agent's socket. So from the ninth ABI the guarantee is this: code an agent wrote
   reaches the SSH agent only through the files the user's `ssh` reads from the home; a `git` or
-  an `ssh` earlier on `PATH` is not run (above). Connection sharing is off for the push itself,
+  an `ssh` earlier on `PATH`, or one the user can write, is not run, and what `ssh` runs gets
+  `/bin/sh` and the system's `PATH` (above). Connection sharing is off for the push itself,
   but a master another program of the user's started (`ControlMaster` in `~/.ssh/config`) is
   not Flottille's to close;
+- a lent push is the one git's dry run showed, not more: in the project folder no record says
+  where the repository's remote led, so a push URL an agent's script gives that remote itself
+  is followed (a workspace's is refused); a run going on beside the push can still change the
+  repository's settings between the dry run and the push; and a push whose line names no remote
+  (`git push`, a URL) reaches its URL in the dry run, the agent lent, before it is refused;
 - from the ninth ABI, a socket made after a command started directly in a folder on the way to a
   kept-out agent socket (`/tmp` for `/tmp/ssh-…/agent.…`) cannot be connected to by that command;
 - without Landlock (a kernel before 5.19, or one built without it), the process runs as before,

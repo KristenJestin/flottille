@@ -522,7 +522,9 @@ pending requests.
     remote an SSH push URL (`git remote set-url --push`) or to push by hand: nothing else signs it
     in. Such a push with a global option on its line but `-C` into its own repository's folder,
     `--no-pager`, `-P`, `--no-advice` and `--no-optional-locks` (a setting, `--exec-path`,
-    `--git-dir`, `--work-tree`…) is refused in every mode;
+    `--git-dir`, `--work-tree`…) is refused in every mode, as is one with `--signed` or
+    `--recurse-submodules`, and one whose dry run goes to a URL its remote was not checked to
+    lead to or forces or deletes a ref its line does not say;
   - no push: `url./dev/null/flottille-refused-push/.pushInsteadOf` set the same way, which
     rewrites every push URL to a path that is no remote, unless the run is itself a `git push`
     (its own line, no wrapper) the user or the judge let through;
