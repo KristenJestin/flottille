@@ -54,6 +54,11 @@ pub fn family_says(daemon: &Daemon, root: bool, args: &Value) -> Result<Vec<Stri
     connections::requests::says(daemon, root, args)
 }
 
+/// Why the user's Accept of a held `connections` call waits: an entry it names is still missing.
+pub fn family_waits(daemon: &Daemon, args: &Value) -> Option<String> {
+    connections::requests::waits(daemon, args)
+}
+
 /// A `connections` call performed: a read, or a write the user accepted, `approved` being the
 /// words the user read on its card, masked for `place`.
 pub async fn family_call(
@@ -333,6 +338,13 @@ struct Values {
 
 /// Held while `extensions.toml` is read and written again.
 static WRITING: Mutex<()> = Mutex::new(());
+
+/// `change`, never between a write's checks of what the file is to name and the write
+/// (`rewrite`): a vault entry removed while an accepted connection is written.
+pub fn between_writes<T>(change: impl FnOnce() -> T) -> T {
+    let _writing = WRITING.lock().unwrap();
+    change()
+}
 
 /// Refuses extensions whose tools could not be told apart from another tool: one named as a tool
 /// of the core, which it would shadow, or as another extension's. Checked at the daemon's start.

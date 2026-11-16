@@ -149,8 +149,9 @@ pub struct Declaration {
     pub reach: Reach,
     /// Variable → vault entry.
     pub env: BTreeMap<String, String>,
-    /// Header → vault entry, for a URL.
-    pub headers: BTreeMap<String, String>,
+    /// Where each vault entry goes in the requests, for a URL: `secrets`, and the old `headers`
+    /// read as header lines.
+    pub secrets: Vec<Secret>,
     /// Argument → the values it may take.
     pub only: BTreeMap<String, Vec<String>>,
     /// The projects whose agents do not get it.
@@ -160,6 +161,324 @@ pub struct Declaration {
     /// Hosts the user adds to the sites an adapter keeps the browser to, beside those of the
     /// vault entries: a single sign-on's, which a sign-in goes through.
     pub sites: Vec<String>,
+    /// Whether an adapter's browser is shown: its server also gets the daemon's display
+    /// variables, and the adapter writes `headed` in the configuration it writes.
+    pub headed: bool,
+}
+
+/// A vault entry a URL connection's requests carry, and where.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Secret {
+    pub place: Carried,
+    /// The header's, the query parameter's or the cookie's name; empty for basic authentication.
+    pub name: String,
+    /// Written before the secret in a header (`Bearer `).
+    pub prefix: String,
+    pub entry: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Carried {
+    Header,
+    Query,
+    Cookie,
+    /// `Authorization: Basic`, of the entry's username and its secret.
+    Basic,
+}
+
+impl Carried {
+    const WORDS: [&str; 4] = ["header", "query", "cookie", "basic"];
+
+    pub fn word(self) -> &'static str {
+        match self {
+            Carried::Header => "header",
+            Carried::Query => "query",
+            Carried::Cookie => "cookie",
+            Carried::Basic => "basic",
+        }
+    }
+
+    fn of(word: &str) -> Option<Carried> {
+        [
+            Carried::Header,
+            Carried::Query,
+            Carried::Cookie,
+            Carried::Basic,
+        ]
+        .into_iter()
+        .find(|place| place.word() == word)
+    }
+}
+
+impl Secret {
+    /// A line of the old `headers`, which `json` writes back there.
+    fn plain_header(&self) -> bool {
+        self.place == Carried::Header && self.prefix.is_empty()
+    }
+
+    fn json(&self) -> Value {
+        let mut line = json!({"in": self.place.word()});
+        if self.place != Carried::Basic {
+            line["name"] = json!(self.name);
+        }
+        if !self.prefix.is_empty() {
+            line["prefix"] = json!(self.prefix);
+        }
+        line["entry"] = json!(self.entry);
+        line
+    }
+
+    /// What the review and the card say of it.
+    pub fn said(&self) -> String {
+        match self.place {
+            Carried::Header => format!("the header {}", self.name),
+            Carried::Query => format!("the query parameter {}", self.name),
+            Carried::Cookie => format!("the cookie {}", self.name),
+            Carried::Basic => "basic authentication".to_owned(),
+        }
+    }
+}
+
+/// The names of a query parameter whose value is a secret, in words (`userToken`, `user_token`
+/// and `UserToken` are `["user", "token"]`), or run together (`usertoken`), whole. Beside those
+/// that end with one of `SECRET_ENDS`.
+const SECRET_PARAMETERS: [&[&str]; 5] = [
+    &["session", "id"],
+    &["auth"],
+    &["authorization"],
+    &["bearer"],
+    &["sid"],
+];
+
+/// The last words of a name that say its value is a secret, whatever comes before
+/// (`x_user_token`, `subscription-key`, `client_secret`), unless it is a token or a key whose
+/// words before are of `HARMLESS_TOKENS` or `HARMLESS_KEYS`. A plural is the same word
+/// (`access_tokens`, `apiKeys`).
+const SECRET_ENDS: [&str; 10] = [
+    "token",
+    "key",
+    "sig",
+    "jwt",
+    "secret",
+    "password",
+    "passwd",
+    "pwd",
+    "passphrase",
+    "signature",
+];
+
+/// The ends that also count at the end of a word run together (`clientsecret`, `xaccesstoken`,
+/// `secretkey`): not `key` nor the short ones alone, which end ordinary words (`monkey`).
+const RUN_TOGETHER_ENDS: [&str; 10] = [
+    "token",
+    "secret",
+    "password",
+    "passwd",
+    "passphrase",
+    "signature",
+    "apikey",
+    "accesskey",
+    "secretkey",
+    "privatekey",
+];
+
+/// The words before `token`, run together, that make it none: a page's or a cursor's position
+/// (`pageToken`, `next_page_token`, `pagination_token`, `resume_token`), a sync's state, a
+/// limit of an LLM's reply (`max_tokens`).
+const HARMLESS_TOKENS: [&str; 9] = [
+    "max",
+    "page",
+    "next",
+    "nextpage",
+    "continuation",
+    "cursor",
+    "sync",
+    "pagination",
+    "resume",
+];
+
+/// The words before `key`, run together, that make it none: where a record is (`issueKey`,
+/// `partition_key`, `sort_key`, `object_key`, `last_evaluated_key`), a cache's, a project's or an
+/// idempotency key, and a key that is public (`public_key`, `publishable_key`, `site_key`).
+const HARMLESS_KEYS: [&str; 15] = [
+    "cursor",
+    "project",
+    "idempotency",
+    "issue",
+    "space",
+    "partition",
+    "cache",
+    "object",
+    "public",
+    "publishable",
+    "site",
+    "sort",
+    "lastevaluated",
+    "page",
+    "next",
+];
+
+/// A parameter's name in lowercase words: split at `_`, `-`, `.` and where a capital follows a
+/// small letter or a digit; a number at a word's end is left out (`token2` is `token`).
+fn words_of(name: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut small = false;
+    for c in name.chars() {
+        if !c.is_alphanumeric() {
+            words.extend((!word.is_empty()).then(|| std::mem::take(&mut word)));
+            small = false;
+            continue;
+        }
+        if c.is_uppercase() && small {
+            words.push(std::mem::take(&mut word));
+        }
+        small = c.is_lowercase() || c.is_numeric();
+        word.extend(c.to_lowercase());
+    }
+    words.extend((!word.is_empty()).then_some(word));
+    words
+        .into_iter()
+        .map(|word| word.trim_end_matches(|c: char| c.is_numeric()).to_owned())
+        .filter(|word| !word.is_empty())
+        .collect()
+}
+
+/// Whether a parameter named `name` would carry a secret: it ends with a secret's word, singular
+/// or plural, and it is no token or key of harmless words; or it is one of `SECRET_PARAMETERS`.
+fn secret_parameter(name: &str) -> bool {
+    let words = words_of(name);
+    let Some((last, before)) = words.split_last() else {
+        return false;
+    };
+    let before = before.concat();
+    let ends_secret = |end: &str| {
+        [last.as_str()]
+            .into_iter()
+            .chain(last.strip_suffix('s'))
+            .any(|last| {
+                let rest = match last == end {
+                    true => Some(""),
+                    false if RUN_TOGETHER_ENDS.contains(&end) => last.strip_suffix(end),
+                    false => None,
+                };
+                let harmless: &[&str] = match end {
+                    "token" => &HARMLESS_TOKENS,
+                    "key" => &HARMLESS_KEYS,
+                    _ => &[],
+                };
+                rest.is_some_and(|rest| !harmless.contains(&format!("{before}{rest}").as_str()))
+            })
+    };
+    SECRET_PARAMETERS
+        .iter()
+        .any(|whole| words == *whole || (words.len() == 1 && *last == whole.concat()))
+        || SECRET_ENDS
+            .iter()
+            .chain(RUN_TOGETHER_ENDS.iter())
+            .any(|end| ends_secret(end))
+}
+
+/// The names of the pairs of a query or a fragment, read as a form whose pairs are split at `&`
+/// and at `;`, which some servers read as `&`.
+fn pair_names(text: &str) -> Vec<String> {
+    text.split(['&', ';'])
+        .flat_map(|pair| {
+            url::form_urlencoded::parse(pair.as_bytes())
+                .map(|(name, _)| name.into_owned())
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+/// Why a URL may not be reached as it is: a parameter of its query, or of its fragment
+/// (`#access_token=…`, as some sign-ins hand it), named like a secret, whose value may be one.
+/// Its name only is said. Checked when a connection is added or edited; one already declared that
+/// has one fails, alone, with this reason. Its path is not looked at.
+fn query_secret(text: &str) -> Option<String> {
+    let url = url::Url::parse(text).ok()?;
+    let (name, place) = pair_names(url.query().unwrap_or_default())
+        .into_iter()
+        .map(|name| (name, "query"))
+        .chain(
+            pair_names(url.fragment().unwrap_or_default())
+                .into_iter()
+                .map(|name| (name, "fragment")),
+        )
+        .find(|(name, _)| secret_parameter(name))?;
+    Some(format!(
+        "url: its {place} holds {name}, which looks like a secret: move it to \"Secrets of its \
+         requests\", a query parameter from a vault entry (secrets, in = \"query\")"
+    ))
+}
+
+/// `secrets = [{in, name, prefix, entry}]`, checked line by line.
+fn secrets_of(value: &Value, at: &str) -> std::result::Result<Vec<Secret>, String> {
+    let lines = value
+        .as_array()
+        .ok_or_else(|| format!("{at}.secrets: must be a list of tables, not {value}"))?;
+    let mut secrets = Vec::new();
+    for (n, line) in lines.iter().enumerate() {
+        let at = format!("{at}.secrets[{n}]");
+        let line = line
+            .as_object()
+            .ok_or_else(|| format!("{at}: must be a table, {{in, name, prefix, entry}}"))?;
+        if let Some(key) = line
+            .keys()
+            .find(|key| !["in", "name", "prefix", "entry"].contains(&key.as_str()))
+        {
+            return Err(format!(
+                "{at}.{key}: unknown key: the keys are in, name, prefix, entry"
+            ));
+        }
+        let text = |key: &str| match line.get(key) {
+            None => Ok(None),
+            Some(Value::String(text)) => Ok(Some(text.clone())),
+            Some(_) => Err(format!("{at}.{key}: must be a text")),
+        };
+        let place = text("in")?
+            .as_deref()
+            .and_then(Carried::of)
+            .ok_or_else(|| format!("{at}.in: must be one of {}", Carried::WORDS.join(", ")))?;
+        let entry = text("entry")?
+            .filter(|entry| !entry.is_empty())
+            .ok_or_else(|| {
+                format!("{at}.entry: must name a vault entry: a secret is never written here")
+            })?;
+        let name = text("name")?.unwrap_or_default();
+        let named_ok = match place {
+            Carried::Basic => name.is_empty(),
+            Carried::Header => http::HeaderName::from_bytes(name.as_bytes()).is_ok(),
+            Carried::Query => !name.is_empty() && !name.chars().any(char::is_control),
+            Carried::Cookie => {
+                !name.is_empty()
+                    && name
+                        .chars()
+                        .all(|c| c.is_ascii_graphic() && !"()<>@,;:\\\"/[]?={}".contains(c))
+            }
+        };
+        if !named_ok {
+            return Err(match place {
+                Carried::Basic => format!("{at}.name: basic authentication takes no name"),
+                _ => format!("{at}.name: not a {}'s name: {name:?}", place.word()),
+            });
+        }
+        let prefix = text("prefix")?.unwrap_or_default();
+        if !prefix.is_empty()
+            && (place != Carried::Header || prefix.chars().any(|c| c.is_control() || !c.is_ascii()))
+        {
+            return Err(format!(
+                "{at}.prefix: only a header takes a prefix, on one line, as \"Bearer \""
+            ));
+        }
+        secrets.push(Secret {
+            place,
+            name,
+            prefix,
+            entry,
+        });
+    }
+    Ok(secrets)
 }
 
 /// How the daemon reaches the server.
@@ -179,10 +498,12 @@ const KEYS: &[&str] = &[
     "url",
     "env",
     "headers",
+    "secrets",
     "only",
     "except",
     "client_id",
     "sites",
+    "headed",
 ];
 
 impl Declaration {
@@ -239,9 +560,8 @@ impl Declaration {
                     })?;
                 Reach::Command(words)
             }
-            (None, Some(url)) => {
-                Reach::Url(checked_url(&url).map_err(|why| format!("{at}.url: {why}"))?)
-            }
+            // Checked when it is added or edited (`url_fault`): one declared by hand fails alone.
+            (None, Some(url)) => Reach::Url(url),
             _ => return Err(format!("{at}: needs a command or a url, one of them")),
         };
         let entries = |key: &str| -> std::result::Result<BTreeMap<String, String>, String> {
@@ -283,9 +603,47 @@ impl Declaration {
         {
             return Err(format!("{at}.headers.{name}: not a header's name"));
         }
+        let mut secrets: Vec<Secret> = headers
+            .into_iter()
+            .map(|(name, entry)| Secret {
+                place: Carried::Header,
+                name,
+                prefix: String::new(),
+                entry,
+            })
+            .collect();
+        if let Some(value) = table.get("secrets") {
+            let lines = secrets_of(value, at)?;
+            if !lines.is_empty() && matches!(reach, Reach::Command(_)) {
+                return Err(format!(
+                    "{at}.secrets: only a url takes secrets; a command takes env"
+                ));
+            }
+            secrets.extend(lines);
+        }
+        for (n, secret) in secrets.iter().enumerate() {
+            let same = |other: &Secret| {
+                other.place == secret.place && other.name.eq_ignore_ascii_case(&secret.name)
+            };
+            let header = |name: &'static str| {
+                move |other: &Secret| {
+                    other.place == Carried::Header && other.name.eq_ignore_ascii_case(name)
+                }
+            };
+            if secrets[..n].iter().any(same)
+                || (secret.place == Carried::Basic && secrets.iter().any(header("authorization")))
+                || (secret.place == Carried::Cookie && secrets.iter().any(header("cookie")))
+            {
+                return Err(format!(
+                    "{at}.secrets: {} is given twice (basic authentication is the Authorization \
+                     header, the cookies are the Cookie header)",
+                    secret.said()
+                ));
+            }
+        }
         if !env.is_empty() && matches!(reach, Reach::Url(_)) {
             return Err(format!(
-                "{at}.env: only a command takes env; a url takes headers"
+                "{at}.env: only a command takes env; a url takes secrets"
             ));
         }
         let mut only = BTreeMap::new();
@@ -350,17 +708,24 @@ impl Declaration {
                  in lower case, with no scheme, port, path, comma, wildcard or space"
             ));
         }
+        let headed = match table.get("headed") {
+            None => false,
+            Some(value) => value
+                .as_bool()
+                .ok_or_else(|| format!("{at}.headed: must be true or false"))?,
+        };
         Ok(Declaration {
             name,
             about,
             enabled,
             reach,
             env,
-            headers,
+            secrets,
             only,
             except,
             client_id,
             sites,
+            headed,
         })
     }
 
@@ -381,8 +746,23 @@ impl Declaration {
         if !self.env.is_empty() {
             table["env"] = vault(&self.env);
         }
-        if !self.headers.is_empty() {
-            table["headers"] = vault(&self.headers);
+        let headers: BTreeMap<String, String> = self
+            .secrets
+            .iter()
+            .filter(|secret| secret.plain_header())
+            .map(|secret| (secret.name.clone(), secret.entry.clone()))
+            .collect();
+        if !headers.is_empty() {
+            table["headers"] = vault(&headers);
+        }
+        let others: Vec<Value> = self
+            .secrets
+            .iter()
+            .filter(|secret| !secret.plain_header())
+            .map(Secret::json)
+            .collect();
+        if !others.is_empty() {
+            table["secrets"] = json!(others);
         }
         if !self.only.is_empty() {
             table["only"] = json!(self.only);
@@ -396,23 +776,42 @@ impl Declaration {
         if !self.sites.is_empty() {
             table["sites"] = json!(self.sites);
         }
+        if self.headed {
+            table["headed"] = json!(true);
+        }
         table
     }
 
     /// What trust is given to: how the server is reached, what it is given, the limits, and the
-    /// hosts an adapter adds to the browser's sites. An edit of any of them is another server as
+    /// hosts an adapter adds to the browser's sites, and whether it is shown. An edit of any of them is another server as
     /// far as trust goes; the sentence, the switch and the projects left out are not.
     fn digest(&self) -> String {
         let reach = match &self.reach {
             Reach::Command(words) => json!({"command": words}),
             Reach::Url(url) => json!({"url": url}),
         };
-        let mut trusted = json!({"reach": reach, "env": self.env, "headers": self.headers,
+        // The plain headers as `headers` always were: a connection pinned before the other places
+        // existed keeps its digest.
+        let json = self.json();
+        let headers: BTreeMap<&String, &String> = self
+            .secrets
+            .iter()
+            .filter(|secret| secret.plain_header())
+            .map(|secret| (&secret.name, &secret.entry))
+            .collect();
+        let mut trusted = json!({"reach": reach, "env": self.env, "headers": headers,
             "only": self.only});
+        if let Some(others) = json.get("secrets") {
+            trusted["secrets"] = others.clone();
+        }
         // Only when there are some: the digest of a connection without sites, pinned before
         // they existed, stays the one it was pinned for.
         if !self.sites.is_empty() {
             trusted["sites"] = json!(self.sites);
+        }
+        // As the sites: a connection that is not shown keeps the digest it was pinned for.
+        if self.headed {
+            trusted["headed"] = json!(true);
         }
         crate::files::sha256(trusted.to_string().as_bytes())
     }
@@ -421,9 +820,67 @@ impl Declaration {
         format!("{PREFIX}{}", self.name)
     }
 
+    /// Why its URL is not reached: it is none the daemon may reach (`checked_url`), or it holds
+    /// a secret (`query_secret`). Refused when it is added or edited; a connection declared with
+    /// one fails alone: it does not start, nor sign in.
+    pub(super) fn url_fault(&self) -> Option<String> {
+        match &self.reach {
+            Reach::Url(url) => checked_url(url)
+                .err()
+                .map(|why| format!("url: {why}"))
+                .or_else(|| query_secret(url)),
+            Reach::Command(_) => None,
+        }
+    }
+
+    /// Its URL as it is served (listed, shown, proposed): as written, or, when it is not reached
+    /// for a fault (`url_fault`), as an error says it, without what may be a secret.
+    pub(super) fn served_url(&self) -> Option<String> {
+        match &self.reach {
+            Reach::Url(url) if self.url_fault().is_some() => Some(said_text(url)),
+            Reach::Url(url) => Some(url.clone()),
+            Reach::Command(_) => None,
+        }
+    }
+
+    /// Its URL as a card or a show says it: as it is served, marked when it is served cleaned, so
+    /// that an edit of it is never taken for one that keeps what was dropped.
+    pub(super) fn marked_url(&self) -> Option<String> {
+        let served = self.served_url()?;
+        let Reach::Url(url) = &self.reach else {
+            return Some(served);
+        };
+        Some(match self.url_fault().and_then(|_| cleaned(url)) {
+            Some(note) if served.is_empty() => format!("({note})"),
+            Some(note) => format!("{served} ({note})"),
+            None => served,
+        })
+    }
+
+    /// `json`, its URL as a card says it (`marked_url`): for a proposal's dialog, which shows the
+    /// old value beside the new one.
+    pub(super) fn served_marked(&self) -> Value {
+        let mut json = self.json();
+        if let Some(url) = self.marked_url() {
+            json["url"] = json!(url);
+        }
+        json
+    }
+
+    /// `json`, its URL as it is served.
+    pub(super) fn served(&self) -> Value {
+        let mut json = self.json();
+        if let Some(url) = self.served_url() {
+            json["url"] = json!(url);
+        }
+        json
+    }
+
     /// The vault entries it names.
     fn entries(&self) -> impl Iterator<Item = &String> {
-        self.env.values().chain(self.headers.values())
+        self.env
+            .values()
+            .chain(self.secrets.iter().map(|secret| &secret.entry))
     }
 }
 
@@ -452,17 +909,38 @@ fn action_ok(name: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
 }
 
-/// A URL the daemon may reach: `https://` anywhere, `http://` on this machine alone.
+/// A URL the daemon may reach: `https://` anywhere, `http://` on this machine alone. An error
+/// says the URL without its login, query and fragment, where a secret may be.
 fn checked_url(text: &str) -> std::result::Result<String, String> {
-    let url = url::Url::parse(text).map_err(|error| format!("{text:?}: {error}"))?;
+    let url = url::Url::parse(text).map_err(|error| format!("is no URL: {error}"))?;
+    // Another scheme says its name alone, and only a known one: what is read as the scheme may be
+    // a token pasted as a login without `https://` (`xoxb-…:x@host`).
+    match url.scheme() {
+        "http" | "https" => {}
+        scheme if KNOWN_SCHEMES.contains(&scheme) => {
+            return Err(format!(
+                "its scheme {scheme:?} is none Flottille reaches: must be an https:// URL, or \
+                 http:// on this machine"
+            ));
+        }
+        _ => {
+            return Err(
+                "is no http(s) URL: must be an https:// URL, or http:// on this machine".into(),
+            );
+        }
+    }
+    let said = said_url(&url);
     if !url.username().is_empty() || url.password().is_some() {
         return Err(format!(
-            "{text:?}: holds a login: name a vault entry in headers instead"
+            "{said:?}: holds a login: name a vault entry in secrets instead"
         ));
     }
     match url.scheme() {
         "https" if url.host().is_some() => Ok(text.to_owned()),
-        "http" => {
+        "https" => Err(format!(
+            "{said:?}: must be an https:// URL, or http:// on this machine"
+        )),
+        _ => {
             let local = match url.host() {
                 Some(url::Host::Domain(domain)) => domain == "localhost",
                 Some(url::Host::Ipv4(address)) => address.is_loopback(),
@@ -473,15 +951,62 @@ fn checked_url(text: &str) -> std::result::Result<String, String> {
                 Ok(text.to_owned())
             } else {
                 Err(format!(
-                    "{text:?}: a plain http:// URL must be this machine's (127.0.0.1, localhost or \
+                    "{said:?}: a plain http:// URL must be this machine's (127.0.0.1, localhost or \
                      [::1]); another server is reached over https://"
                 ))
             }
         }
-        _ => Err(format!(
-            "{text:?}: must be an https:// URL, or http:// on this machine"
+    }
+}
+
+/// The schemes other than http(s) an error may name: any other may be a secret (`checked_url`).
+const KNOWN_SCHEMES: [&str; 4] = ["ws", "wss", "ftp", "file"];
+
+/// `text` as Flottille says a URL it does not reach: as an error says it (`said_url`); its scheme
+/// alone when it is another known one (`KNOWN_SCHEMES`); nothing otherwise.
+fn said_text(text: &str) -> String {
+    match url::Url::parse(text) {
+        Ok(url) if matches!(url.scheme(), "http" | "https") => said_url(&url),
+        Ok(url) if KNOWN_SCHEMES.contains(&url.scheme()) => format!("{}:", url.scheme()),
+        _ => String::new(),
+    }
+}
+
+/// What `said_text` leaves out of `text`, in words: `None` when nothing.
+fn cleaned(text: &str) -> Option<String> {
+    let url = match url::Url::parse(text) {
+        Ok(url) if matches!(url.scheme(), "http" | "https") => url,
+        Ok(url) if KNOWN_SCHEMES.contains(&url.scheme()) => {
+            return Some("cleaned: only its scheme is shown".into());
+        }
+        _ => return Some("cleaned: it is not shown".into()),
+    };
+    let parts: Vec<&str> = [
+        (!url.username().is_empty() || url.password().is_some()).then_some("login"),
+        url.query().map(|_| "query"),
+        url.fragment().map(|_| "fragment"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    match parts.as_slice() {
+        [] => None,
+        [one] => Some(format!("cleaned: its {one} is dropped")),
+        [first @ .., last] => Some(format!(
+            "cleaned: its {} and {last} are dropped",
+            first.join(", ")
         )),
     }
+}
+
+/// `url` as an error may say it: no login, query or fragment.
+fn said_url(url: &url::Url) -> String {
+    let mut said = url.clone();
+    let _ = said.set_username("");
+    let _ = said.set_password(None);
+    said.set_query(None);
+    said.set_fragment(None);
+    said.to_string()
 }
 
 /// `[[connections.server]]` checked, each table and their names.
@@ -1483,6 +2008,10 @@ async fn signed_in(daemon: &Arc<Daemon>, name: &str, ended: std::result::Result<
 async fn login(daemon: &Arc<Daemon>, params: Value) -> std::result::Result<Value, Failure> {
     let name = named(&params)?;
     let declaration = declaration(&daemon.paths, &name)?;
+    // Its URL is not reached, the sign-in's requests no more than the server's.
+    if let Some(why) = declaration.url_fault() {
+        return Err(Failure::refused(format!("connection.{why}")));
+    }
     let url = oauth::begin(daemon, &declaration).await.map_err(|why| {
         Failure::new(
             "unavailable",
@@ -1540,7 +2069,7 @@ fn named(params: &Value) -> std::result::Result<String, Failure> {
 fn connection_json(daemon: &Daemon, declaration: &Declaration, on: bool) -> Value {
     let row = row(daemon, &declaration.name);
     let state = state_of(on, declaration, &row);
-    let mut entry = declaration.json();
+    let mut entry = declaration.served();
     entry["tool"] = json!(declaration.tool());
     entry["state"] = json!(state.word());
     entry["review_due"] = json!(
@@ -1553,7 +2082,10 @@ fn connection_json(daemon: &Daemon, declaration: &Declaration, on: bool) -> Valu
     entry["cut_off"] = json!(row.cut_off);
     entry["signed_out"] = json!(row.signed_out);
     entry["running"] = json!(client::running(daemon, &declaration.name));
-    entry["failing"] = json!(client::failing(daemon, &declaration.name));
+    entry["failing"] = json!(failing(daemon, declaration));
+    // Apart from `failing`: a form leaves a faulty URL to be typed again, never saves it cleaned.
+    entry["url_fault"] = json!(declaration.url_fault());
+    entry["headless"] = json!(client::headless(daemon, &declaration.name));
     entry["server"] = row
         .pin
         .as_ref()
@@ -1568,6 +2100,13 @@ fn connection_json(daemon: &Daemon, declaration: &Declaration, on: bool) -> Valu
         )
     });
     entry
+}
+
+/// Why its server does not start: its URL, or what the last start said.
+fn failing(daemon: &Daemon, declaration: &Declaration) -> Option<String> {
+    declaration
+        .url_fault()
+        .or_else(|| client::failing(daemon, &declaration.name))
 }
 
 fn list(daemon: &Daemon) -> std::result::Result<Value, Failure> {
@@ -1672,6 +2211,9 @@ async fn add_if(
         .as_object()
         .ok_or_else(|| Failure::refused("connection.add takes an object"))?;
     let declaration = Declaration::of(table, "connection").map_err(Failure::refused)?;
+    if let Some(why) = declaration.url_fault() {
+        return Err(Failure::refused(format!("connection.{why}")));
+    }
     entries_checked(daemon, &declaration)?;
     let name = declaration.name.clone();
     if declaration_exists(daemon, &name) {
@@ -1869,7 +2411,16 @@ fn edited(old: &Declaration, params: &Value) -> std::result::Result<Declaration,
             }
         }
     }
-    Declaration::of(&table, "connection").map_err(Failure::refused)
+    // `secrets` given are all the lines of its requests: the plain header lines it read from
+    // `headers` among them, unless `headers` is given too.
+    if params.get("secrets").is_some() && params.get("headers").is_none() {
+        table.remove("headers");
+    }
+    let new = Declaration::of(&table, "connection").map_err(Failure::refused)?;
+    if let Some(why) = new.url_fault() {
+        return Err(Failure::refused(format!("connection.{why}")));
+    }
+    Ok(new)
 }
 
 async fn remove(daemon: &Arc<Daemon>, params: Value) -> std::result::Result<Value, Failure> {
@@ -2048,7 +2599,7 @@ fn adapter_said(
             }
             json!({"name": adapter.server, "range": adapter.range, "applies": true,
                 "actions": adapter.actions.iter().map(|own| own.name).collect::<Vec<_>>(),
-                "changed": adapter.changed(config, sites), "said": said})
+                "changed": adapter.changed(config, sites, declaration.headed), "said": said})
         }
         adapters::Found::OtherVersion(adapter) => json!({"name": adapter.server,
         "range": adapter.range, "applies": false,
@@ -2302,11 +2853,74 @@ mod tests {
                 json!({"name": "a", "about": "a", "command": "x mcp"}),
                 "command",
             ),
+            (
+                json!({"name": "a", "about": "a", "command": ["x"],
+                    "secrets": [{"in": "query", "name": "t", "entry": "e"}]}),
+                "only a url takes secrets",
+            ),
+            (
+                json!({"name": "a", "about": "a", "url": "https://x.example",
+                    "secrets": [{"in": "body", "name": "t", "entry": "e"}]}),
+                "secrets[0].in",
+            ),
+            (
+                json!({"name": "a", "about": "a", "url": "https://x.example",
+                    "secrets": [{"in": "basic", "name": "t", "entry": "e"}]}),
+                "basic authentication takes no name",
+            ),
+            (
+                json!({"name": "a", "about": "a", "url": "https://x.example",
+                    "secrets": [{"in": "query", "name": "t", "prefix": "Bearer ", "entry": "e"}]}),
+                "only a header takes a prefix",
+            ),
+            (
+                json!({"name": "a", "about": "a", "url": "https://x.example",
+                    "secrets": [{"in": "cookie", "name": "t", "secret": "s3cret"}]}),
+                "unknown key",
+            ),
+            (
+                json!({"name": "a", "about": "a", "url": "https://x.example",
+                    "headers": {"Authorization": {"vault": "e"}},
+                    "secrets": [{"in": "basic", "entry": "f"}]}),
+                "given twice",
+            ),
         ] {
             let refused = parse(table).unwrap_err();
             assert!(refused.contains(says), "{refused}");
             assert!(refused.starts_with("connections.server[0]"), "{refused}");
         }
+    }
+
+    #[test]
+    fn secret_lines_are_written_back_where_they_were_read() {
+        let declared = parse(
+            json!({"name": "a", "about": "a", "url": "https://x.example",
+            "headers": {"X-Key": {"vault": "k"}},
+            "secrets": [{"in": "header", "name": "X-Token", "prefix": "Bearer ",
+                "entry": "t"}, {"in": "basic", "entry": "b"}]}),
+        )
+        .unwrap();
+        assert_eq!(declared.secrets.len(), 3);
+        let json = declared.json();
+        assert_eq!(json["headers"], json!({"X-Key": {"vault": "k"}}));
+        assert_eq!(
+            json["secrets"],
+            json!([{"in": "header", "name": "X-Token", "prefix": "Bearer ", "entry": "t"},
+                {"in": "basic", "entry": "b"}])
+        );
+        assert_eq!(parse(json).unwrap(), declared);
+        // A declaration of headers alone keeps the digest it was pinned for.
+        let old = parse(
+            json!({"name": "a", "about": "a", "url": "https://x.example",
+            "headers": {"X-Key": {"vault": "k"}}}),
+        )
+        .unwrap();
+        let trusted = json!({"reach": {"url": "https://x.example"}, "env": {},
+            "headers": {"X-Key": "k"}, "only": {}});
+        assert_eq!(
+            old.digest(),
+            crate::files::sha256(trusted.to_string().as_bytes())
+        );
     }
 
     #[test]

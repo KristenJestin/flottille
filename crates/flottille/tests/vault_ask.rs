@@ -514,6 +514,37 @@ fn a_look_alike_host_is_shown_in_ascii() {
 }
 
 #[test]
+fn an_ask_with_userinfo_shows_the_host_after_the_at() {
+    let user = User::with_fake_agent().with_fake_acli();
+    project(&user, "jira-time");
+    let (mcp, _) = root_in(&user);
+
+    // What stands before the "@" is a username: the secret goes to the host after it.
+    let answer = mcp.call(
+        "vault",
+        json!({"action": "ask", "name": "bank-login", "why": "to sign in to the bank",
+            "url": "https://bank.example@evil.example/login"}),
+    );
+    assert!(!answer.error, "{}", answer.text);
+    assert_eq!(asks(&user)[0]["host"], "evil.example");
+}
+
+#[test]
+fn an_ask_with_an_ipv6_url_shows_it_in_brackets() {
+    let user = User::with_fake_agent().with_fake_acli();
+    project(&user, "jira-time");
+    let (mcp, _) = root_in(&user);
+
+    let answer = mcp.call(
+        "vault",
+        json!({"action": "ask", "name": "lab-login", "why": "to sign in to the lab",
+            "url": "https://[2001:db8::1]:8443/login"}),
+    );
+    assert!(!answer.error, "{}", answer.text);
+    assert_eq!(asks(&user)[0]["host"], "[2001:db8::1]");
+}
+
+#[test]
 fn an_ask_for_a_url_login_would_refuse_is_refused() {
     let user = User::with_fake_agent().with_fake_acli();
     project(&user, "jira-time");
@@ -625,6 +656,63 @@ fn a_connection_entry_on_plain_http_to_another_machine_is_refused_at_save() {
         "vault.set",
         json!({"name": "plain-test", "secret": TYPED,
             "url": "http://intranet.example.test/login"}),
+    )
+    .unwrap();
+}
+
+#[test]
+fn a_connection_entry_whose_url_login_cannot_read_is_refused_at_save() {
+    let user = User::with_fake_agent().with_fake_acli();
+    project(&user, "jira-time");
+    const TYPED: &str = "s3cret-of-the-bank";
+
+    // The same words as the ask's refusal, before anything is stored.
+    for url in [
+        "bank.example",
+        "https://*.example.com/login",
+        "ftp://files.example.com/",
+    ] {
+        let (_, refused) = user
+            .call(
+                "vault.set",
+                json!({"name": "bank-test", "secret": TYPED, "url": url,
+                    "for": "connection:browser"}),
+            )
+            .unwrap_err();
+        let says =
+            format!("{url} is no web address a secret may go to: https, or http on this machine");
+        assert!(refused.contains(&says), "{url}: {refused}");
+        assert!(!refused.contains(TYPED), "{refused}");
+    }
+    assert!(
+        user.call("vault.list", json!({})).unwrap()["entries"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+
+    // A URL edited to something login cannot read does not replace the one it could.
+    user.call(
+        "vault.set",
+        json!({"name": "bank-test", "secret": TYPED, "url": "https://bank.example/login",
+            "for": "connection:browser"}),
+    )
+    .unwrap();
+    let (_, refused) = user
+        .call(
+            "vault.set",
+            json!({"name": "bank-test", "secret": TYPED, "url": "bank.example"}),
+        )
+        .unwrap_err();
+    assert!(refused.contains("no web address"), "{refused}");
+    assert_eq!(
+        entry_of(&user, "bank-test")["url"],
+        "https://bank.example/login"
+    );
+    // An entry bound to no connection keeps any URL: no login reads it.
+    user.call(
+        "vault.set",
+        json!({"name": "note-test", "secret": TYPED, "url": "bank.example"}),
     )
     .unwrap();
 }

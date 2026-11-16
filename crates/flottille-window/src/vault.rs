@@ -128,6 +128,24 @@ pub struct VaultSection {
     _subscriptions: Vec<Subscription>,
 }
 
+/// One `label: value` line of the form's facts, said to the screen reader as one.
+fn line(
+    id: &'static str,
+    label: &'static str,
+    value: SharedString,
+    mute: gpui_kit::Hsla,
+) -> gpui_kit::AnyElement {
+    div()
+        .id(id)
+        .flex()
+        .gap(space::SM)
+        .aria_label(SharedString::from(format!("{label}: {value}")))
+        .child(div().text_color(mute).child(label))
+        .child(div().min_w_0().child(value))
+        .test_support()
+        .into_any_element()
+}
+
 /// An entry's row, as Settings' Vault and a project's Vault tab draw it: its name, its project
 /// (or every project's), and one line of what it is for, never a value.
 pub fn entry_row(id: ElementId, entry: &VaultEntry, cx: &App) -> ListRow {
@@ -653,8 +671,8 @@ impl VaultSection {
             })
     }
 
-    /// What a new entry is bound to, and where its secret goes, said in the dialog, with the way
-    /// to bind it to no use; it folds away once the binding is removed.
+    /// What a new entry is bound to, said in the dialog, with the way to bind it to no use; it
+    /// folds away once the binding is removed.
     fn binding(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let mute = palette(cx).mute;
         let used = self
@@ -662,40 +680,14 @@ impl VaultSection {
             .as_deref()
             .map(|bound| flottille_core::vault::use_said(bound).unwrap_or_else(|| bound.to_owned()))
             .map(SharedString::from);
-        let url = self
-            .fields
-            .as_ref()
-            .map(|fields| fields.url.read(cx).value().trim().to_owned());
-        let host = self
-            .host
-            .clone()
-            .filter(|(_, asked)| url.as_deref() == Some(asked.trim()))
-            .map(|(host, _)| SharedString::from(host));
         let this = cx.entity().downgrade();
         let saving = self.saving;
-        let line = move |id: &'static str, label: &'static str, value: SharedString| {
-            div()
-                .id(id)
-                .flex()
-                .gap(space::SM)
-                .aria_label(SharedString::from(format!("{label}: {value}")))
-                .child(div().text_color(mute).child(label))
-                .child(div().min_w_0().child(value))
-                .test_support()
-                .into_any_element()
-        };
         presence_of("vault-binding-block", used, move |used| {
             div()
                 .id("vault-binding")
                 .flex()
                 .flex_col()
-                .child(line("vault-binding-for", "For", used))
-                .child(
-                    presence_of("vault-binding-host-block", host, move |host| {
-                        line("vault-binding-host", "Goes to", host)
-                    })
-                    .space(space::XS),
-                )
+                .child(line("vault-binding-for", "For", used, mute))
                 .child(spaced(
                     space::SM,
                     Button::quiet("vault-binding-remove", "Remove the binding")
@@ -713,6 +705,26 @@ impl VaultSection {
         .space(space::LG)
     }
 
+    /// Where the secret goes, as the daemon read the URL asked (what a connection's login would
+    /// use), under the URL's field whether the entry is bound or not: the URL's text can read
+    /// like another host. It folds away once the URL is no longer the one asked.
+    fn goes_to(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let mute = palette(cx).mute;
+        let url = self
+            .fields
+            .as_ref()
+            .map(|fields| fields.url.read(cx).value().trim().to_owned());
+        let host = self
+            .host
+            .clone()
+            .filter(|(_, asked)| url.as_deref() == Some(asked.trim()))
+            .map(|(host, _)| SharedString::from(host));
+        presence_of("vault-goes-to-block", host, move |host| {
+            line("vault-goes-to", "Goes to", host, mute)
+        })
+        .space(space::XS)
+    }
+
     fn modal(&mut self, window: &Window, cx: &mut Context<Self>) -> Modal {
         let p = palette(cx);
         let this = cx.entity().downgrade();
@@ -728,6 +740,7 @@ impl VaultSection {
         };
         let select = self.project_select(cx);
         let binding = self.binding(cx);
+        let goes_to = self.goes_to(cx);
         let error = problem_line("vault-error", self.form_error.clone(), space::LG, cx);
         let fields = self.fields.as_ref().expect("made when the form opens");
         let description = Field::new(
@@ -775,12 +788,18 @@ impl VaultSection {
             .child(spaced(space::LG, description))
             .child(spaced(
                 space::LG,
-                Field::new(
-                    "vault-url-field",
-                    "URL",
-                    boxed("vault-url", Input::new(&fields.url), cx),
-                )
-                .optional(),
+                div()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        Field::new(
+                            "vault-url-field",
+                            "URL",
+                            boxed("vault-url", Input::new(&fields.url), cx),
+                        )
+                        .optional(),
+                    )
+                    .child(goes_to),
             ))
             .child(spaced(
                 space::LG,

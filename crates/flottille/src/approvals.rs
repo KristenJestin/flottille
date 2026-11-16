@@ -272,6 +272,13 @@ fn decide(daemon: &Arc<Daemon>, number: u64, decision: Decision, discard: bool) 
     if request.state != RequestState::Pending {
         return Err(already(&request));
     }
+    // Accept waits, the request held, until the vault entries it names exist.
+    if decision != Decision::Deny
+        && request.tool == "connections"
+        && let Some(why) = crate::extensions::family_waits(daemon, &request.arguments)
+    {
+        return Err(Failure::refused(why));
+    }
     if discard && !removes_a_workspace(&request) {
         return Err(Failure::refused(format!(
             "discard answers only a request that removes a workspace, and request #{number} \

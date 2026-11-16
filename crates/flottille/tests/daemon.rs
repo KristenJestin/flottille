@@ -689,3 +689,20 @@ fn daemon_stop_waits_for_a_daemon_that_is_stopping() {
     assert!(gone(pid));
     within(5, "its agent's process is gone", || gone(agent));
 }
+
+#[test]
+fn display_folders_are_cleaned_when_the_daemon_starts() {
+    // What a daemon that died left: the folders of the browsers it showed.
+    let user = User::new();
+    let stale = user.path("runtime/flottille/display/browser");
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&stale)
+        .unwrap();
+    std::fs::write(stale.join("wayland-0"), "").unwrap();
+
+    user.status();
+
+    assert!(!user.path("runtime/flottille/display").exists());
+}
