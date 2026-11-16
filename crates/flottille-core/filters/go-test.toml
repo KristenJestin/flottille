@@ -4,7 +4,7 @@ name = "go-test"
 program = "go"
 args = ["test"]
 drop = [
-  '^=== (RUN|PAUSE|CONT|NAME)\b',
+  '^=== (RUN|PAUSE)\b',
   '^\s*--- PASS: ',
   '^PASS$',
   '^\?\s+\S+\s+\[no test files\]$',
@@ -31,4 +31,23 @@ FAIL
 FAIL	example.com/app/total	0.004s
 ok  	example.com/app/parse	0.003s
 FAIL"""
+removed = 4
+
+[[tests]]
+name = "the lines that tie a streamed log to its test stay"
+input = """
+=== RUN   TestSlow
+=== PAUSE TestSlow
+=== CONT  TestSlow
+=== NAME  TestSlow
+    slow_test.go:9: waiting for the lock
+--- PASS: TestSlow (0.10s)
+PASS
+ok  	example.com/app/slow	0.101s
+"""
+expected = """
+=== CONT  TestSlow
+=== NAME  TestSlow
+    slow_test.go:9: waiting for the lock
+ok  	example.com/app/slow	0.101s"""
 removed = 4

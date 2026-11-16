@@ -40,6 +40,7 @@ FAILED tests/test_total.py::test_adds_two_numbers - assert 4 == 5
 ========================= 1 failed, 5 passed in 0.12s ==========================
 """
 expected = """
+
 tests/test_total.py .F.                                                  [100%]
 
 =================================== FAILURES ===================================
@@ -54,7 +55,7 @@ tests/test_total.py:9: AssertionError
 =========================== short test summary info ============================
 FAILED tests/test_total.py::test_adds_two_numbers - assert 4 == 5
 ========================= 1 failed, 5 passed in 0.12s =========================="""
-removed = 8
+removed = 7
 
 [[tests]]
 name = "a green run keeps its last line"
@@ -69,5 +70,7 @@ tests/test_parse.py ...                                                  [100%]
 ============================== 3 passed in 0.03s ===============================
 """
 expected = """
+
+
 ============================== 3 passed in 0.03s ==============================="""
-removed = 7
+removed = 5

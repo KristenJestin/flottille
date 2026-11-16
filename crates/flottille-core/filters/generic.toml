@@ -9,7 +9,7 @@ expected = """
 green text
 Downloading 100%
 done"""
-removed = 0
+removed = 2
 
 [[tests]]
 name = "a run of identical lines"
@@ -37,3 +37,12 @@ expected = """
 warning: the cache is cold (×3)
 ready"""
 removed = 2
+
+[[tests]]
+name = "a redrawn line that said an error keeps it"
+input = "error: disk full\r 42%\nready\n"
+expected = """
+error: disk full
+ 42%
+ready"""
+removed = 0

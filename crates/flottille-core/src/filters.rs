@@ -65,6 +65,31 @@ fn protected(line: &str) -> bool {
     PROTECTED.is_match(line)
 }
 
+/// Each line as the terminal ends up showing it (what follows its last `\r`), as `ansi::strip`
+/// does, except that a state that says an error stays on a line of its own: `error: disk full\r
+/// 42%` is both. The states dropped are counted as removed lines.
+fn redraw(output: &str) -> (String, usize) {
+    let mut removed = 0;
+    let mut lines: Vec<&str> = Vec::new();
+    let text = output.replace("\r\n", "\n");
+    for line in text.split('\n') {
+        let states: Vec<&str> = line.split('\r').filter(|state| !state.is_empty()).collect();
+        let Some((last, earlier)) = states.split_last() else {
+            lines.push("");
+            continue;
+        };
+        for state in earlier {
+            if protected(state) {
+                lines.push(state);
+            } else {
+                removed += 1;
+            }
+        }
+        lines.push(last);
+    }
+    (lines.join("\n"), removed)
+}
+
 struct Filter {
     program: Option<String>,
     args: Vec<String>,
@@ -94,9 +119,11 @@ impl Filter {
             && (self.args.is_empty() || first.is_some_and(|arg| self.args.iter().any(|a| a == arg)))
     }
 
-    fn run(&self, output: &str) -> Filtered {
-        let text = ansi::strip(output);
-        let mut removed = 0;
+    /// `exit_code` is the code the command exited with: `None` for one that still runs or was
+    /// killed by a signal, for which "ok" is never said.
+    fn run(&self, output: &str, exit_code: Option<i32>) -> Filtered {
+        let (redrawn, mut removed) = redraw(output);
+        let text = ansi::strip(&redrawn);
         let mut lines: Vec<&str> = if text.trim().is_empty() {
             Vec::new()
         } else {
@@ -106,35 +133,29 @@ impl Filter {
         let before = lines.len();
         lines.retain(|line| protected(line) || !self.drop.iter().any(|d| d.is_match(line)));
         removed += before - lines.len();
-        // Blank lines: none at the start, one at most in a row.
-        let mut kept: Vec<String> = Vec::new();
-        let mut blank = true;
-        for line in lines {
-            if line.trim().is_empty() {
-                if blank {
-                    removed += 1;
-                    continue;
-                }
-                blank = true;
-            } else {
-                blank = false;
-            }
-            kept.push(line.to_owned());
-        }
-        // A run of three identical lines or more is one line and its count.
+        // A run of three identical lines or more is one line and its count, except in a diff,
+        // whose lines are the file's: a repeated one is the file's too.
+        let diff = lines
+            .iter()
+            .any(|line| line.starts_with("@@ ") || line.starts_with("diff --git "));
+        let kept = lines;
         let mut lines: Vec<String> = Vec::new();
         let mut at = 0;
         while at < kept.len() {
-            let run = kept[at..]
-                .iter()
-                .take_while(|line| **line == kept[at] && !line.trim().is_empty())
-                .count();
+            let run = if diff {
+                1
+            } else {
+                kept[at..]
+                    .iter()
+                    .take_while(|line| **line == kept[at] && !line.trim().is_empty())
+                    .count()
+            };
             if run >= 3 {
                 lines.push(format!("{} (×{run})", kept[at]));
                 removed += run - 1;
                 at += run;
             } else {
-                lines.push(kept[at].clone());
+                lines.push(kept[at].to_owned());
                 at += 1;
             }
         }
@@ -162,6 +183,7 @@ impl Filter {
         if lines.iter().all(|line| line.trim().is_empty()) {
             lines.clear();
             if removed > 0
+                && exit_code == Some(0)
                 && let Some(said) = &self.on_empty
             {
                 lines.push(said.clone());
@@ -183,7 +205,7 @@ static FILTERS: LazyLock<Vec<Filter>> = LazyLock::new(|| {
 
 /// The output of the command `words` (its program, then its arguments, never a shell line),
 /// filtered by the filter of that program and its first argument, or by the generic one.
-pub fn apply(words: &[String], output: &str) -> Filtered {
+pub fn apply(words: &[String], output: &str, exit_code: Option<i32>) -> Filtered {
     let program = words
         .first()
         .map(|word| word.rsplit('/').next().unwrap_or(word));
@@ -194,9 +216,20 @@ pub fn apply(words: &[String], output: &str) -> Filtered {
             .iter()
             .find(|filter| filter.matches(program, first.map(String::as_str)))
     });
+    // A diff is read byte for byte: a blank context line is a single space.
+    if program == Some("git")
+        && words
+            .iter()
+            .any(|word| matches!(word.as_str(), "diff" | "show" | "log"))
+    {
+        return Filtered {
+            text: output.to_owned(),
+            removed: 0,
+        };
+    }
     let filter = own.or_else(|| FILTERS.iter().find(|filter| filter.program.is_none()));
     match filter {
-        Some(filter) => filter.run(output),
+        Some(filter) => filter.run(output, exit_code),
         None => Filtered {
             text: output.to_owned(),
             removed: 0,
@@ -227,7 +260,7 @@ mod tests {
             (None, _) => "some-program".to_owned(),
         };
         for case in &spec.tests {
-            let found = apply(&words(&line), &case.input);
+            let found = apply(&words(&line), &case.input, Some(0));
             assert_eq!(
                 found.text.trim_end_matches('\n'),
                 case.expected,
@@ -285,7 +318,7 @@ mod tests {
                         let wanted = format!("{line}{said}");
                         let mut changed = lines.clone();
                         changed[at] = &wanted;
-                        let found = filter.run(&changed.join("\n")).text;
+                        let found = filter.run(&changed.join("\n"), Some(1)).text;
                         assert!(
                             found.contains(&wanted),
                             "{file}.toml ({}): {wanted:?} was filtered out of {found}",
@@ -300,7 +333,7 @@ mod tests {
     #[test]
     fn a_cargo_test_run_keeps_its_failures_and_summary() {
         let spec = spec("cargo-test");
-        let found = apply(&words("cargo test -p app"), &spec.tests[0].input).text;
+        let found = apply(&words("cargo test -p app"), &spec.tests[0].input, Some(1)).text;
 
         for kept in [
             "test total::adds_two_numbers ... FAILED",
@@ -319,7 +352,7 @@ mod tests {
     #[test]
     fn a_command_is_matched_by_its_program_and_its_first_argument() {
         let noise = "   Compiling app v1\nready\n";
-        let said = |line: &str| apply(&words(line), noise).text;
+        let said = |line: &str| apply(&words(line), noise, Some(0)).text;
 
         assert_eq!(said("cargo build"), "ready");
         assert_eq!(said("/usr/bin/cargo build --release"), "ready");
@@ -327,7 +360,7 @@ mod tests {
         // Another subcommand, another program and no word at all: the generic filter's.
         assert_eq!(said("cargo run"), noise.trim_end());
         assert_eq!(said("make build"), noise.trim_end());
-        assert_eq!(apply(&[], noise).text, noise.trim_end());
+        assert_eq!(apply(&[], noise, Some(0)).text, noise.trim_end());
     }
 
     #[test]
@@ -335,7 +368,7 @@ mod tests {
         let output = "one\ntwo\ntwo\nthree\n";
 
         assert_eq!(
-            apply(&words("make"), output),
+            apply(&words("make"), output, Some(0)),
             Filtered {
                 text: "one\ntwo\ntwo\nthree".into(),
                 removed: 0
@@ -350,7 +383,7 @@ mod tests {
         let mut lines: Vec<String> = (1..=20).map(|n| format!("line {n}")).collect();
         lines[9] = "src/main.rs:10: where it broke".into();
 
-        let found = filter.run(&lines.join("\n"));
+        let found = filter.run(&lines.join("\n"), Some(0));
 
         assert_eq!(
             found.text,
@@ -362,7 +395,7 @@ mod tests {
 
     #[test]
     fn an_output_left_empty_says_what_the_filter_says_and_one_that_was_empty_says_nothing() {
-        let said = |line: &str, output: &str| apply(&words(line), output);
+        let said = |line: &str, output: &str| apply(&words(line), output, Some(0));
 
         assert_eq!(said("cargo build", "   Compiling a v1\n").text, "cargo: ok");
         assert_eq!(
@@ -376,16 +409,55 @@ mod tests {
     }
 
     #[test]
-    fn a_run_of_blank_lines_is_one_and_the_start_has_none() {
-        let found = apply(&words("make"), "\n\na\n\n\n\nb\n");
+    fn on_empty_is_said_only_for_a_run_that_exited_0() {
+        let said = |exit: Option<i32>| apply(&words("cargo build"), "   Compiling a v1\n", exit);
+
+        assert_eq!(said(Some(0)).text, "cargo: ok");
+        // A run that failed, was killed by a signal or still runs is not "ok".
+        assert_eq!(said(Some(101)).text, "");
+        assert_eq!(said(Some(101)).removed, 1);
+        assert_eq!(said(None).text, "");
+    }
+
+    #[test]
+    fn blank_lines_are_left_as_they_are() {
+        let found = apply(&words("make"), "\n\na\n\n\n\nb\n", Some(0));
 
         assert_eq!(
             found,
             Filtered {
-                text: "a\n\nb".into(),
-                removed: 4
+                text: "\n\na\n\n\n\nb".into(),
+                removed: 0
             }
         );
+    }
+
+    #[test]
+    fn a_git_diff_is_returned_byte_for_byte() {
+        // A blank context line is a single space; identical added lines are a diff's, not a run.
+        let diff = "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1,6 +1,6 @@\n one\n \n \n-two\n+\n+\n+\n+\n \n three\n";
+        for line in ["git diff", "git show", "git log -p", "git -C repo diff --stat"] {
+            let found = apply(&words(line), diff, Some(0));
+            assert_eq!(found.text, diff, "{line}");
+            assert_eq!(found.removed, 0, "{line}");
+        }
+        // Whatever the command, the lines of a diff are never collapsed.
+        let same = "@@ -1,3 +1,3 @@\n+x\n+x\n+x\n+x\n";
+        let found = apply(&words("jj diff"), same, Some(0));
+        assert_eq!(found.text, same.trim_end());
+        assert_eq!(found.removed, 0);
+    }
+
+    #[test]
+    fn a_redrawn_line_is_counted_and_keeps_what_says_an_error() {
+        let found = apply(
+            &words("make"),
+            "10%\r55%\r100%\nerror: disk full\r 42%\nok\n",
+            Some(0),
+        );
+
+        assert_eq!(found.text, "100%\nerror: disk full\n 42%\nok");
+        assert_eq!(found.removed, 2);
     }
 
     macro_rules! file_test {
