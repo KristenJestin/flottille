@@ -306,15 +306,8 @@ fn a_run_without_windows_cannot_reach_x11() {
             windows(&user, state);
         }
         let reached = reached(&mcp, &place, &socket, &name);
-        // Connecting by a path is Landlock's from its ninth ABI, its abstract scope from the sixth.
-        match landlock_abi() {
-            abi if abi >= 9 => {
-                assert_eq!(reached["path"], "PermissionError", "{state:?}: {reached}");
-            }
-            abi => {
-                eprintln!("skipped: this kernel's Landlock (ABI {abi}) cannot deny a socket's path")
-            }
-        }
+        // By its abstract name, from Landlock's sixth ABI. By its path it is still reached: the
+        // gap the private mount namespace (#976) closes.
         match landlock_abi() {
             abi if abi >= 6 => {
                 assert_eq!(
