@@ -215,7 +215,9 @@ pub async fn over_ssh(
     words: &[String],
     env: &BTreeMap<OsString, OsString>,
 ) -> Result<(), String> {
-    let mut probe = env.clone();
+    // A path is allowed here, so a repository of the agent's may answer, running its own config's
+    // commands (`core.alternateRefsCommand`): the dry run needs no agent and is lent none.
+    let mut probe = withheld(env);
     for scheme in ["https://", "http://"] {
         crate::runs::configure(
             &mut probe,

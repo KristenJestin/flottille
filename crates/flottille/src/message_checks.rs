@@ -142,7 +142,7 @@ pub(crate) async fn unaliased(
             .map_err(unread)?;
         // Where the run looks for a `git-<command>`: the `PATH` of its environment.
         let listed = ["git", "--list-cmds=builtins,main,others"];
-        let commands = crate::git::run_in(folder, &listed, env, None)
+        let commands = crate::git::run_in(folder, &listed, &crate::ssh_agent::withheld(env), None)
             .await
             .map_err(unread)?;
         if !commands.success {
@@ -217,8 +217,10 @@ pub async fn push(at: &Where<'_>, words: &[String], env: &Env) -> Result<(), Str
     // Read before any dry run: an option given `--dry-run` as its value would make it the push.
     let said = read(&rest[..end], &PUSH)
         .map_err(|why| unknown(format!("its options cannot be read: {why}")))?;
+    // Only the dry run reaches the remote: what is read besides it is not lent the SSH agent.
+    let reads = crate::ssh_agent::withheld(env);
     if !checks.is_empty() {
-        recursion(git, said.submodules, at.folder, env)
+        recursion(git, said.submodules, at.folder, &reads)
             .await
             .map_err(unknown)?;
     }
@@ -229,8 +231,11 @@ pub async fn push(at: &Where<'_>, words: &[String], env: &Env) -> Result<(), Str
     if checks.is_empty() {
         return Ok(());
     }
-    for sha in sent(git, &tried, at.folder, env).await.map_err(unknown)? {
-        let object = read_git(git, &["cat-file", "commit", &sha], at.folder, env, None)
+    for sha in sent(git, &tried, at.folder, &reads)
+        .await
+        .map_err(unknown)?
+    {
+        let object = read_git(git, &["cat-file", "commit", &sha], at.folder, &reads, None)
             .await
             .map_err(unknown)?;
         let message = object.split_once("\n\n").map_or("", |(_, message)| message);
