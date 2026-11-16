@@ -1,5 +1,5 @@
 //! The hub's state and its rules (`docs/remote.md`, "The hub", "The first member", "Pairing"), as
-//! a library the server part will call: its key, the setup code, the member list it stores, the
+//! a library its server (`server.rs`) calls: its key, the setup code, the member list it stores, the
 //! invitations and their join requests, and the presence and addresses the members tell it.
 //!
 //! The hub signs nothing and cannot add, remove or rename a member: every change it stores is a
@@ -27,7 +27,11 @@ use std::path::{Path, PathBuf};
 use flottille_link::{
     Action, Change, HubKey, InvitationAsk, ListError, MemberList, Members, PublicKey, Role, Token,
 };
+
+mod server;
+
 use serde::{Deserialize, Serialize};
+pub use server::{LISTEN, Served, serve, tls_server};
 use subtle::ConstantTimeEq;
 
 /// How long an invitation lasts, and how far an ask's time may be from the hub's.
@@ -113,7 +117,8 @@ pub struct Hub<C: Clock = SystemClock> {
     /// Held for the hub's life: no other process writes its state meanwhile.
     _lock: File,
     file: PathBuf,
-    key: HubKey,
+    /// Shared with the sessions' handshakes, which sign with it while the hub is not locked.
+    key: std::sync::Arc<HubKey>,
     clock: C,
     stored: Stored,
     /// The stored list, checked; `None` while it is empty.
@@ -164,7 +169,7 @@ impl<C: Clock> Hub<C> {
         Ok(Hub {
             _lock: lock,
             file,
-            key,
+            key: std::sync::Arc::new(key),
             clock,
             stored,
             checked,
@@ -231,6 +236,30 @@ impl<C: Clock> Hub<C> {
     /// The member list, as the members signed it.
     pub fn list(&self) -> &MemberList {
         &self.stored.members
+    }
+
+    /// The members of the stored list, checked; `None` while it is empty.
+    pub fn members(&self) -> Option<&Members> {
+        self.checked.as_ref()
+    }
+
+    /// Whether a device that proved `key` may keep a session: any while the list is empty (it
+    /// comes to set the hub up), then a member's device or the machine a member declared. A
+    /// refusal says why, and the list's root.
+    pub fn welcome(&self, key: &PublicKey) -> Result<(), Box<(String, Option<PublicKey>)>> {
+        let Some(members) = &self.checked else {
+            return Ok(());
+        };
+        if members.get(key).is_some() || members.by_machine(key).is_some() {
+            return Ok(());
+        }
+        Err(Box::new((
+            format!(
+                "{} is not one of this hub's members, nor a member's machine",
+                key.fingerprint()
+            ),
+            Some(members.root()),
+        )))
     }
 
     /// The token of a new invitation, for a member's signed ask: valid 5 minutes, once.
@@ -345,7 +374,7 @@ impl<C: Clock> Hub<C> {
                     })?;
                 Some(open.token)
             }
-            Action::Remove { .. } | Action::Rename { .. } => None,
+            Action::Remove { .. } | Action::Rename { .. } | Action::Machine { .. } => None,
         };
         let mut changes = self.stored.members.changes().to_vec();
         changes.push(change);
@@ -403,8 +432,10 @@ impl<C: Clock> Hub<C> {
     /// Writes `stored`, then holds it: a state that could not be written is not taken.
     fn store(&mut self, stored: Stored, checked: Members) -> Result<(), HubError> {
         write(&self.file, &stored)?;
-        // A member removed takes its presence and addresses with it.
-        let member = |key: &PublicKey| checked.get(key).is_some();
+        // A member removed takes its presence and addresses with it, and so does a machine no
+        // member declares any more.
+        let member =
+            |key: &PublicKey| checked.get(key).is_some() || checked.by_machine(key).is_some();
         self.presence.retain(|(key, _)| member(key));
         self.addresses.retain(|(key, _)| member(key));
         self.stored = stored;
@@ -412,10 +443,11 @@ impl<C: Clock> Hub<C> {
         Ok(())
     }
 
+    /// The member of `key`, a member's device key or the machine it declared.
     fn member(&self, key: &PublicKey) -> Result<&flottille_link::Member, HubError> {
         self.checked
             .as_ref()
-            .and_then(|members| members.get(key))
+            .and_then(|members| members.get(key).or_else(|| members.by_machine(key)))
             .ok_or_else(|| refused(format!("{} is not a member", key.fingerprint())))
     }
 
@@ -433,6 +465,25 @@ impl<C: Clock> Hub<C> {
         self.open.retain(|open| now < open.made + FIVE_MINUTES);
         self.asks.retain(|(_, _, at)| now < at + FIVE_MINUTES);
         now
+    }
+}
+
+/// `flottille-hub setup-code`: the setup code of the state `folder`, while no member exists. It
+/// reads a state that is there without taking the folder's lock, so that it serves while the hub runs: the
+/// state is written whole and renamed into place, never seen half written.
+pub fn setup_code(folder: &Path) -> Result<String, HubError> {
+    let file = folder.join(STATE_FILE);
+    match read(&file)? {
+        Some(Stored {
+            setup_code: Some(code),
+            members,
+            ..
+        }) if members.changes().is_empty() => Ok(code),
+        Some(_) => Err(has_members()),
+        // No state yet: made as a start makes it, and its code said.
+        None => Hub::open(folder, SystemClock)?
+            .setup_code()
+            .map(str::to_owned),
     }
 }
 

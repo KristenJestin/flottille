@@ -1,8 +1,10 @@
 //! The `flottille-hub` binary: its state folder, its log at a start, and `setup-code`, with a
-//! temporary `HOME` and XDG folders.
+//! temporary `HOME` and XDG folders. A start serves on 127.0.0.1, on a port the system chooses,
+//! and is stopped once it says where it listens.
 
+use std::io::{BufRead, BufReader};
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 
 use flottille_hub::{Hub, SystemClock};
 use flottille_link::{DeviceKey, Keyring, KeyringError, MemberList};
@@ -46,6 +48,43 @@ fn hub(home: &Path, xdg: bool, args: &[&str]) -> Output {
     output
 }
 
+/// The binary started in a temporary home, as `hub` runs it, then stopped once it listens: its
+/// log until then.
+fn served(home: &Path, xdg: bool, args: &[&str]) -> String {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_flottille-hub"));
+    command
+        .args(args)
+        .args(["--listen", "127.0.0.1:0"])
+        .env("HOME", home.join("home"))
+        .stderr(Stdio::piped());
+    if xdg {
+        command.env("XDG_STATE_HOME", home.join("state"));
+    } else {
+        command.env_remove("XDG_STATE_HOME");
+    }
+    let mut child = command.spawn().unwrap();
+    let mut log = String::new();
+    let mut lines = BufReader::new(child.stderr.take().unwrap()).lines();
+    for line in lines.by_ref() {
+        let line = line.unwrap();
+        log.push_str(&line);
+        log.push('\n');
+        if line.starts_with("flottille-hub: listening on ") {
+            break;
+        }
+    }
+    // SAFETY: kill has no precondition; the child is ours and not reaped yet.
+    unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
+    // Read to its end: the hub says it stops, on a log still open.
+    for line in lines {
+        log.push_str(&line.unwrap());
+        log.push('\n');
+    }
+    let status = child.wait().unwrap();
+    assert!(status.success(), "{log}");
+    log
+}
+
 fn text(bytes: &[u8]) -> String {
     String::from_utf8(bytes.to_vec()).unwrap()
 }
@@ -56,9 +95,7 @@ fn the_binary_prints_the_setup_code_once_then_on_demand() {
     let state = dir.path().join("hub");
     let state = state.to_str().unwrap();
 
-    let first = hub(dir.path(), true, &["--state", state]);
-    assert!(first.status.success(), "{}", text(&first.stderr));
-    let log = text(&first.stderr);
+    let log = served(dir.path(), true, &["--state", state]);
     let lines: Vec<&str> = log
         .lines()
         .filter(|line| line.contains("setup code:"))
@@ -70,13 +107,8 @@ fn the_binary_prints_the_setup_code_once_then_on_demand() {
         .unwrap_or_else(|| panic!("{log}"))
         .to_owned();
 
-    let second = hub(dir.path(), true, &["--state", state]);
-    assert!(second.status.success());
-    assert!(
-        !text(&second.stderr).contains("setup code"),
-        "{}",
-        text(&second.stderr)
-    );
+    let second = served(dir.path(), true, &["--state", state]);
+    assert!(!second.contains("setup code"), "{second}");
 
     let again = hub(dir.path(), true, &["setup-code", "--state", state]);
     assert!(again.status.success(), "{}", text(&again.stderr));
@@ -123,13 +155,13 @@ fn the_binary_refuses_to_print_the_code_once_a_member_exists() {
 #[test]
 fn the_state_folder_is_under_xdg_state_home_by_default() {
     let dir = tempfile::tempdir().unwrap();
-    assert!(hub(dir.path(), true, &[]).status.success());
+    served(dir.path(), true, &[]);
     assert!(dir.path().join("state/flottille-hub/hub.key").is_file());
     assert!(dir.path().join("state/flottille-hub/hub.json").is_file());
 
     // Without XDG_STATE_HOME, the specification's fallback in the home.
     let other = tempfile::tempdir().unwrap();
-    assert!(hub(other.path(), false, &[]).status.success());
+    served(other.path(), false, &[]);
     assert!(
         other
             .path()
@@ -147,8 +179,7 @@ fn the_binary_refuses_its_state_folder_while_a_hub_uses_it() {
 
     let state_arg = state.to_str().unwrap();
     for args in [
-        &["--state", state_arg][..],
-        &["--state", state_arg, "setup-code"],
+        &["--state", state_arg, "--listen", "127.0.0.1:0"][..],
         &["--state", state_arg, "setup-code", "--reset"],
     ] {
         let refused = hub(dir.path(), true, args);
@@ -163,6 +194,9 @@ fn the_binary_refuses_its_state_folder_while_a_hub_uses_it() {
         );
     }
     assert_eq!(running.setup_code().unwrap(), code);
+    // Printing the code takes no lock: it serves while the hub runs, whose log may be long gone.
+    let printed = hub(dir.path(), true, &["--state", state_arg, "setup-code"]);
+    assert_eq!(text(&printed.stdout), format!("{code}\n"));
 
     drop(running);
     let after = hub(dir.path(), true, &["--state", state_arg, "setup-code"]);
