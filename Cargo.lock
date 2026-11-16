@@ -2957,7 +2957,7 @@ dependencies = [
 [[package]]
 name = "gpui-design-system"
 version = "0.1.0"
-source = "git+https://github.com/KristenJestin/gpui-design-system?tag=v0.2.0-alpha.feat-fitting-modal.19#7130d0b42f10aa22bfc3cf7d290aff72c986bd89"
+source = "git+https://github.com/KristenJestin/gpui-design-system?tag=v0.2.0-beta.18#198d6402308490085579e68a666f57c4f0b629b5"
 dependencies = [
  "gpui-kit",
  "toml 1.1.8+spec-1.1.0",
