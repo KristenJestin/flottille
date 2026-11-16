@@ -11,7 +11,7 @@
 //! (#820); until then a test writes it. The addresses declared by hand are in
 //! `remote/addresses.json`. Both are in the key folder, which no agent reaches (`gate::keys`).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -45,6 +45,9 @@ const NOT_TRUSTED: &str = "refused: this machine's key is not one of the user's"
 const LINKED_ALREADY: &str = "linked already";
 /// How long a key refused is not said again in the log.
 const SAID_AGAIN: Duration = Duration::from_secs(60);
+/// The most keys refused said in the log within `SAID_AGAIN`: a key costs a stranger nothing, so
+/// each of its dials may bring a new one. The others are counted, and the count said.
+const MOST_SAID: usize = 16;
 /// What a client's request over a link is answered, until they are served (#813).
 const NOT_SERVED: &str = "requests from another machine's clients are not served yet";
 
@@ -87,6 +90,25 @@ struct Kept {
     said: bool,
     /// What the file was when it was last read, whole or not.
     read: Option<Stamp>,
+}
+
+/// The keys refused since `since`, as the log said them.
+struct Refused {
+    since: Instant,
+    /// The keys said, each once: `MOST_SAID` at most.
+    said: HashSet<[u8; 32]>,
+    /// The links refused whose key was not said.
+    others: usize,
+}
+
+impl Refused {
+    fn new(since: Instant) -> Refused {
+        Refused {
+            since,
+            said: HashSet::new(),
+            others: 0,
+        }
+    }
 }
 
 /// What `remote/addresses.json` holds.
@@ -141,8 +163,8 @@ pub struct Remote {
     /// The addresses last told to the other machines.
     told: Mutex<Vec<String>>,
     links: std::sync::atomic::AtomicU64,
-    /// The keys refused lately, and when each was last said in the log.
-    refused: Mutex<HashMap<[u8; 32], Instant>>,
+    /// The keys refused lately, as the log said them.
+    refused: Mutex<Refused>,
 }
 
 /// Starts the link: the endpoint, the loop that accepts and the one that dials. A link that
@@ -201,7 +223,7 @@ impl Remote {
             seen: Mutex::new(HashMap::new()),
             told: Mutex::new(Vec::new()),
             links: Default::default(),
-            refused: Mutex::new(HashMap::new()),
+            refused: Mutex::new(Refused::new(Instant::now())),
         }
     }
 
@@ -320,17 +342,48 @@ impl Remote {
 
     /// A key refused: said in the log, unless it was lately.
     fn say_refused(&self, key: &PublicKey) {
-        let now = Instant::now();
-        let mut refused = self.refused.lock().unwrap();
-        refused.retain(|_, said| now.duration_since(*said) < SAID_AGAIN);
-        if refused.contains_key(key.as_bytes()) {
-            return;
+        for line in self.refused_lines(Some(key), Instant::now()) {
+            eprintln!("flottille daemon: {line}");
         }
-        refused.insert(*key.as_bytes(), now);
-        eprintln!(
-            "flottille daemon: refused a link from {}: not a machine this one trusts",
-            key.fingerprint()
-        );
+    }
+
+    /// What the log says of `key` refused at `now`: the key, the first time within `SAID_AGAIN`
+    /// and while fewer than `MOST_SAID` were; then, once, that the others are counted. When
+    /// `SAID_AGAIN` has passed, with a key or none, how many were counted, and all starts again.
+    fn refused_lines(&self, key: Option<&PublicKey>, now: Instant) -> Vec<String> {
+        let mut refused = self.refused.lock().unwrap();
+        let mut lines = Vec::new();
+        if now.duration_since(refused.since) >= SAID_AGAIN {
+            if refused.others > 0 {
+                lines.push(format!(
+                    "{} other links were refused in the last minute, from keys not said",
+                    refused.others
+                ));
+            }
+            *refused = Refused::new(now);
+        }
+        let Some(key) = key else {
+            return lines;
+        };
+        if refused.said.contains(key.as_bytes()) {
+            return lines;
+        }
+        if refused.said.len() < MOST_SAID {
+            refused.said.insert(*key.as_bytes());
+            lines.push(format!(
+                "refused a link from {}: not a machine this one trusts",
+                key.fingerprint()
+            ));
+        } else {
+            if refused.others == 0 {
+                lines.push(format!(
+                    "more than {MOST_SAID} keys were refused within a minute; the others are \
+                     counted, not said"
+                ));
+            }
+            refused.others += 1;
+        }
+        lines
     }
 
     /// A link made, `dialled` by this machine or by the other: kept, told this machine's
@@ -553,6 +606,9 @@ async fn dial(remote: Arc<Remote>, mut stopping: tokio::sync::watch::Receiver<bo
             _ = stopping.wait_for(|stopping| *stopping) => return,
         }
         remote.tell_if_changed();
+        for line in remote.refused_lines(None, Instant::now()) {
+            eprintln!("flottille daemon: {line}");
+        }
         let peers = remote.peers().machines;
         let mut due = Vec::new();
         {
@@ -852,5 +908,42 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[tokio::test]
+    async fn a_flood_of_fresh_keys_is_said_within_a_budget_and_counted() {
+        let dir = tempfile::tempdir().unwrap();
+        let (remote, _) = remote_in(dir.path(), 0);
+        let keys: Vec<PublicKey> = (0..40)
+            .map(|at| {
+                MachineKey::load_or_make(&dir.path().join(format!("stranger-{at}")))
+                    .unwrap()
+                    .public()
+            })
+            .collect();
+        let start = Instant::now();
+        let mut said = Vec::new();
+        for _ in 0..3 {
+            for key in &keys {
+                said.extend(remote.refused_lines(Some(key), start));
+                assert!(remote.refused.lock().unwrap().said.len() <= MOST_SAID);
+            }
+        }
+        let refusals = said
+            .iter()
+            .filter(|line| line.starts_with("refused a link"))
+            .count();
+        assert_eq!(refusals, MOST_SAID, "{said:#?}");
+        assert_eq!(said.len(), MOST_SAID + 1, "{said:#?}");
+        assert!(said[MOST_SAID].contains("counted, not said"), "{said:#?}");
+
+        // A minute on, the count is said, and the keys may be said again.
+        let later = start + SAID_AGAIN;
+        assert_eq!(
+            remote.refused_lines(None, later),
+            ["24 other links were refused in the last minute, from keys not said"]
+        );
+        assert!(remote.refused_lines(None, later).is_empty());
+        assert_eq!(remote.refused_lines(Some(&keys[0]), later).len(), 1);
     }
 }

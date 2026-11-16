@@ -313,6 +313,53 @@ fn an_untrusted_key_that_dials_again_is_said_once() {
 }
 
 #[test]
+fn a_flood_of_fresh_keys_is_said_within_a_budget() {
+    use flottille_link::{Endpoint, Hello, MachineKey, PublicKey, Traffic};
+    let server = Machine::new();
+    let addresses: Vec<std::net::SocketAddr> = server
+        .addresses("found")
+        .iter()
+        .map(|address| address.parse().unwrap())
+        .collect();
+    let server_key: PublicKey = serde_json::from_value(json!(server.key())).unwrap();
+    let folder = tempfile::tempdir().unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    // Each dial with a key of its own, as a key costs a stranger nothing.
+    const DIALS: usize = 60;
+    runtime.block_on(async {
+        for at in 0..DIALS {
+            let key = MachineKey::load_or_make(&folder.path().join(format!("{at}"))).unwrap();
+            let stranger = Endpoint::dialler(&key).unwrap();
+            let refused = tokio::time::timeout(
+                WAIT,
+                stranger.connect(
+                    server_key,
+                    &addresses,
+                    Traffic::Machine,
+                    &Hello::ours("0.4.1"),
+                    "server",
+                ),
+            )
+            .await
+            .unwrap();
+            assert!(refused.is_err());
+        }
+    });
+    let deadline = Instant::now() + WAIT;
+    while !server.log().contains("are counted, not said") {
+        assert!(Instant::now() < deadline, "{}", server.log());
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let log = server.log();
+    let said = log.matches("refused a link from ").count();
+    assert!(said <= 16, "{said} refusals said:\n{log}");
+    assert_eq!(log.matches("are counted, not said").count(), 1, "{log}");
+}
+
+#[test]
 fn an_address_declared_by_hand_is_used_to_link() {
     let (laptop, server) = (Machine::new(), Machine::new());
     let port = server.addresses("found")[0]
