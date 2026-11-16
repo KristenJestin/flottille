@@ -1612,3 +1612,63 @@ fn the_window_draws_no_frame_at_rest_on_a_project_s_progress_with_a_milestone_un
         "(frames drawn, frames asked)"
     );
 }
+
+#[gpui_kit::test]
+fn the_window_draws_no_frame_at_rest_on_a_project_page_s_progress_tab(cx: &mut TestAppContext) {
+    let user = User::with_fake_agent().with_fake_gh();
+    idle_session(&user);
+    let folder = user.path("work/app");
+    user.git(
+        &folder,
+        &["remote", "add", "origin", "git@github.com:acme/app.git"],
+    );
+    user.call(
+        "project.set_settings",
+        json!({"name": "app",
+            "repositories": [{"path": ".", "forge": {"kind": "github", "repository": "acme/app"}}],
+            "tracker": {"kind": "github", "repository": "."}}),
+    )
+    .unwrap();
+    let issue = |number: u64, state: &str| {
+        json!({"number": number, "title": format!("Ticket {number}"), "state": state,
+            "body": "", "url": format!("https://github.com/acme/app/issues/{number}"),
+            "author": {"login": "someone"}, "assignees": [], "labels": [],
+            "milestone": {"number": 1, "title": "v0.1"},
+            "updatedAt": "2020-01-01T00:00:00Z", "comments": []})
+    };
+    user.gh_script(json!({
+        "milestones": {"acme/app": [{"number": 1, "title": "v0.1", "state": "open",
+            "due_on": null, "open_issues": 1, "closed_issues": 1,
+            "html_url": "https://github.com/acme/app/milestone/1"}]},
+        "issues": {"acme/app": {"1": issue(1, "OPEN"), "2": issue(2, "CLOSED")}},
+    }));
+    user.call("items.refresh", json!({"project": "app"}))
+        .unwrap();
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the project is known", |cx| {
+        shell.read_with(cx, |s, _| !s.snapshot().projects.is_empty())
+    });
+    shell.update_in(cx, |s, window, cx| {
+        s.open(Selection::Project("app".into()), window, cx)
+    });
+    until(&shell, cx, "the Progress tab shows", |cx| {
+        cx.update(|window, _| window.try_find("project-tabs-progress").is_some())
+    });
+    cx.update(|window, cx| window.click("project-tabs-progress", cx));
+    until(&shell, cx, "the milestones show", |cx| {
+        cx.update(|window, _| window.try_find("progress-milestone-github-1").is_some())
+    });
+    settle(&shell, cx);
+    cx.update(|window, cx| window.click("progress-milestone-github-1", cx));
+    until(&shell, cx, "its tickets show", |cx| {
+        cx.update(|window, _| window.try_find("progress-github-1-0-1").is_some())
+    });
+    cx.update(|window, cx| window.blur(cx));
+    settle(&shell, cx);
+
+    assert_eq!(
+        frames_at_rest(&shell, cx),
+        (0, 0),
+        "(frames drawn, frames asked)"
+    );
+}

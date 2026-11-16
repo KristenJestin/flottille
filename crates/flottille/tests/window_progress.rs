@@ -923,3 +923,161 @@ fn the_project_s_row_opens_its_page_from_its_progress(cx: &mut TestAppContext) {
         Some(true)
     );
 }
+
+/// The window on `app`'s page, from its row in the sidebar, once the page shows its tabs.
+fn open_page<'a>(
+    user: &User,
+    cx: &'a mut TestAppContext,
+) -> (Entity<Shell>, &'a mut VisualTestContext) {
+    let (shell, cx) = window(user, cx);
+    until(&shell, cx, "the project's row shows", |cx| {
+        present(cx, "project-app")
+    });
+    cx.update(|window, cx| window.click("project-app", cx));
+    until(&shell, cx, "the page shows its tabs", |cx| {
+        present(cx, "project-tabs-work")
+    });
+    (shell, cx)
+}
+
+#[gpui_kit::test]
+fn a_project_with_a_tracker_has_a_progress_tab(cx: &mut TestAppContext) {
+    let user = user();
+    on_github(&user);
+    let (shell, cx) = open_page(&user, cx);
+    until(&shell, cx, "the Progress tab shows", |cx| {
+        present(cx, "project-tabs-progress")
+    });
+    assert_eq!(
+        label(cx, "project-tabs-progress").as_deref(),
+        Some("Progress")
+    );
+}
+
+#[gpui_kit::test]
+fn a_project_without_a_tracker_has_no_progress_tab(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, Value::Null);
+    let (shell, cx) = open_page(&user, cx);
+    until(&shell, cx, "the Pull requests tab shows", |cx| {
+        present(cx, "project-tabs-pulls")
+    });
+    settle(cx);
+    assert!(!present(cx, "project-tabs-progress"));
+}
+
+#[gpui_kit::test]
+fn the_progress_tab_shows_the_milestones_and_their_tickets(cx: &mut TestAppContext) {
+    let user = user();
+    on_github(&user);
+    user.gh_script(github_script(review_pull()));
+    refresh(&user);
+    let (shell, cx) = open_page(&user, cx);
+    until(&shell, cx, "the Progress tab shows", |cx| {
+        present(cx, "project-tabs-progress")
+    });
+    cx.update(|window, cx| window.click("project-tabs-progress", cx));
+    until(&shell, cx, "the milestones show", |cx| {
+        present(cx, "progress-milestone-github-1")
+    });
+    settle(cx);
+    unfold(cx, "github-1");
+    assert!(present(cx, "progress-github-1-0-1"));
+    // The tab's page is the project's: its header and its tabs are still there.
+    assert!(present(cx, "project-header"));
+    assert!(present(cx, "project-tabs-work"));
+}
+
+#[gpui_kit::test]
+fn the_sidebar_has_no_progress_row(cx: &mut TestAppContext) {
+    let user = user();
+    on_github(&user);
+    let (shell, cx) = open_page(&user, cx);
+    until(&shell, cx, "the Progress tab shows", |cx| {
+        present(cx, "project-tabs-progress")
+    });
+    settle(cx);
+    assert!(!present(cx, "tree-progress-app"));
+}
+
+#[gpui_kit::test]
+fn back_and_forward_return_to_the_progress_tab(cx: &mut TestAppContext) {
+    use flottille_window::history::Way;
+    let user = user();
+    on_github(&user);
+    user.gh_script(github_script(review_pull()));
+    refresh(&user);
+    let (shell, cx) = open_page(&user, cx);
+    until(&shell, cx, "the Progress tab shows", |cx| {
+        present(cx, "project-tabs-progress")
+    });
+    cx.update(|window, cx| window.click("project-tabs-progress", cx));
+    until(&shell, cx, "the milestones show", |cx| {
+        present(cx, "progress-milestone-github-1")
+    });
+
+    shell.update_in(cx, |s, window, cx| s.open(Selection::Settings, window, cx));
+    settle(cx);
+    assert!(!present(cx, "progress-milestone-github-1"));
+
+    shell.update_in(cx, |s, window, cx| s.go(Way::Back, window, cx));
+    until(&shell, cx, "the Progress tab is back", |cx| {
+        present(cx, "progress-milestone-github-1")
+    });
+    assert_eq!(
+        shell.read_with(cx, |s, _| s.selected().cloned()),
+        Some(Selection::Project("app".to_owned()))
+    );
+
+    // Back again is the page on its first tab, as it was opened; forward is the Progress tab.
+    shell.update_in(cx, |s, window, cx| s.go(Way::Back, window, cx));
+    settle(cx);
+    assert!(!present(cx, "progress-milestone-github-1"));
+    shell.update_in(cx, |s, window, cx| s.go(Way::Forward, window, cx));
+    until(&shell, cx, "the Progress tab is back", |cx| {
+        present(cx, "progress-milestone-github-1")
+    });
+}
+
+#[gpui_kit::test]
+fn the_project_s_row_on_its_progress_tab_opens_its_page_without_a_panic(cx: &mut TestAppContext) {
+    let user = user();
+    on_github(&user);
+    user.gh_script(github_script(review_pull()));
+    refresh(&user);
+    let (shell, cx) = open_page(&user, cx);
+    until(&shell, cx, "the Progress tab shows", |cx| {
+        present(cx, "project-tabs-progress")
+    });
+    cx.update(|window, cx| window.click("project-tabs-progress", cx));
+    until(&shell, cx, "the milestones show", |cx| {
+        present(cx, "progress-milestone-github-1")
+    });
+
+    // The row's click runs in the project's own node: it must not update it twice (#993).
+    cx.update(|window, cx| window.click("project-app", cx));
+    settle(cx);
+    assert_eq!(
+        shell.read_with(cx, |s, _| s.selected().cloned()),
+        Some(Selection::Project("app".to_owned()))
+    );
+}
+
+#[gpui_kit::test]
+fn leaving_the_progress_tab_drops_what_it_held(cx: &mut TestAppContext) {
+    let user = user();
+    on_github(&user);
+    user.gh_script(github_script(review_pull()));
+    refresh(&user);
+    let (shell, cx) = open_page(&user, cx);
+    until(&shell, cx, "the Progress tab shows", |cx| {
+        present(cx, "project-tabs-progress")
+    });
+    cx.update(|window, cx| window.click("project-tabs-progress", cx));
+    until(&shell, cx, "the milestones show", |cx| {
+        present(cx, "progress-milestone-github-1")
+    });
+    cx.update(|window, cx| window.click("project-tabs-work", cx));
+    settle(cx);
+    assert!(!present(cx, "progress-milestone-github-1"));
+}
