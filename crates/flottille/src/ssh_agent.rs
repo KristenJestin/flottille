@@ -5,6 +5,7 @@
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -42,6 +43,8 @@ struct Found {
     git: PathBuf,
     /// The `ssh` a push lent the agent runs.
     ssh: PathBuf,
+    /// The `PATH` it runs with: the daemon's folders `program` would take a program from.
+    search: OsString,
 }
 
 static FOUND: OnceLock<Option<Found>> = OnceLock::new();
@@ -77,15 +80,9 @@ fn found(paths: &Paths) -> Result<Found, Option<String>> {
             path.display()
         )));
     }
-    let outside = |name: &str| {
-        program(paths, name).ok_or_else(|| {
-            Some(format!(
-                "no {name} on PATH outside the user's home and Flottille's folders"
-            ))
-        })
-    };
-    let git = outside("git")?;
-    let ssh = outside("ssh")?;
+    let git = program(paths, "git").map_err(Some)?;
+    let ssh = program(paths, "ssh").map_err(Some)?;
+    let search = std::env::join_paths(system_folders(paths)).unwrap_or_default();
     Ok(Found {
         named,
         socket: Lent {
@@ -94,6 +91,7 @@ fn found(paths: &Paths) -> Result<Found, Option<String>> {
         },
         git,
         ssh,
+        search,
     })
 }
 
@@ -114,18 +112,36 @@ fn buses() -> Vec<PathBuf> {
         .collect()
 }
 
-/// The first `name` (`git`, `ssh`) of the daemon's `PATH` that is none of the user's own
-/// (`~/bin`, `~/.local/bin`, `~/.cargo/bin`, anything under the home, where an agent's folders and
-/// workspaces are) nor in Flottille's folders, links followed: the run's own `PATH`, which a
-/// project sets, is not read.
-fn program(paths: &Paths, name: &str) -> Option<PathBuf> {
+/// The user's own folders (the home, where an agent's folders and workspaces are) and
+/// Flottille's, resolved.
+fn theirs(paths: &Paths) -> Vec<PathBuf> {
     let home = std::env::var_os("HOME").map(PathBuf::from);
-    let theirs: Vec<PathBuf> = home
-        .iter()
+    home.iter()
         .chain([&paths.data, &paths.state, &paths.config, &paths.runtime])
         .map(|folder| folder.canonicalize().unwrap_or_else(|_| folder.clone()))
-        .collect();
-    std::env::split_paths(&std::env::var_os("PATH")?)
+        .collect()
+}
+
+/// The folders of the daemon's `PATH`, resolved, that are none of `theirs` (`~/bin`,
+/// `~/.local/bin`, `~/.cargo/bin`…) and that the daemon's user cannot write, nor any folder above
+/// them: a run could put a program of its own there. The run's own `PATH`, which a project sets,
+/// is not read.
+fn system_folders(paths: &Paths) -> Vec<PathBuf> {
+    let theirs = theirs(paths);
+    std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+        .filter(|folder| folder.is_absolute())
+        .filter_map(|folder| folder.canonicalize().ok())
+        .filter(|folder| !theirs.iter().any(|their| folder.starts_with(their)))
+        .filter(|folder| writable(folder).is_none())
+        .collect()
+}
+
+/// The first `name` (`git`, `ssh`) of the daemon's `PATH` that is none of the user's own nor in
+/// Flottille's folders (`theirs`), links followed; refused when the daemon's user can write it or
+/// a folder above it (a Homebrew or a `/usr/local` of the user's), where a run could replace it.
+fn program(paths: &Paths, name: &str) -> Result<PathBuf, String> {
+    let theirs = theirs(paths);
+    let found = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
         .filter(|folder| folder.is_absolute())
         .filter_map(|folder| folder.join(name).canonicalize().ok())
         .filter(|found| !theirs.iter().any(|folder| found.starts_with(folder)))
@@ -133,6 +149,42 @@ fn program(paths: &Paths, name: &str) -> Option<PathBuf> {
             std::fs::metadata(found)
                 .is_ok_and(|found| found.is_file() && found.permissions().mode() & 0o111 != 0)
         })
+        .ok_or_else(|| {
+            format!("no {name} on PATH outside the user's home and Flottille's folders")
+        })?;
+    match writable(&found) {
+        None => Ok(found),
+        Some(writable) => Err(format!(
+            "the {name} found on PATH ({}) could be replaced: the user can write {}",
+            found.display(),
+            writable.display()
+        )),
+    }
+}
+
+/// The first of `path` (resolved) and the folders above it that the daemon's user can write;
+/// none when it is none of them. A test build takes the folder `FLOTTILLE_TEST_TRUSTED_PROGRAMS`
+/// names as one it cannot: its fakes live in temporary folders.
+fn writable(path: &Path) -> Option<PathBuf> {
+    if cfg!(debug_assertions)
+        && let Some(trusted) = std::env::var_os("FLOTTILLE_TEST_TRUSTED_PROGRAMS")
+        && let Ok(trusted) = Path::new(&trusted).canonicalize()
+        && path.starts_with(&trusted)
+    {
+        return None;
+    }
+    path.ancestors()
+        .find(|step| {
+            let Ok(step) = std::ffi::CString::new(step.as_os_str().as_bytes()) else {
+                return true;
+            };
+            // SAFETY: a valid C string; faccessat only reads it.
+            let access = unsafe {
+                libc::faccessat(libc::AT_FDCWD, step.as_ptr(), libc::W_OK, libc::AT_EACCESS)
+            };
+            access == 0
+        })
+        .map(Path::to_path_buf)
 }
 
 /// The socket found at the start, which every command but a push lent it is kept from.
@@ -172,8 +224,10 @@ pub fn withheld(env: &BTreeMap<OsString, OsString>) -> BTreeMap<OsString, OsStri
 /// `core.sshCommand` and `GIT_SSH`), sharing no connection with another ssh and running no
 /// `LocalCommand`, SSH the only transport (no `ext::`, `fd::` or path, which run a program of the
 /// machine), git's own `git-receive-pack` for every remote, and no maintenance left running after
-/// the push. Settings and global options on the line itself are refused before (`runs::run`):
-/// they would beat these.
+/// the push. What `ssh` runs from its
+/// configuration (`ProxyCommand`, `Match exec`, `KnownHostsCommand`) goes through `$SHELL -c`
+/// and finds its programs on `PATH`: `/bin/sh`, and the system's folders alone. Settings and
+/// global options on the line itself are refused before (`runs::run`): they would beat these.
 pub async fn pin(env: &mut BTreeMap<OsString, OsString>, folder: &Path, words: &mut [String]) {
     let Some(found) = FOUND.get().and_then(Option::as_ref) else {
         return;
@@ -189,6 +243,9 @@ pub async fn pin(env: &mut BTreeMap<OsString, OsString>, folder: &Path, words: &
         format!("'{ssh}' -o ControlMaster=no -o ControlPath=none -o PermitLocalCommand=no").into(),
     );
     env.insert("GIT_ALLOW_PROTOCOL".into(), "ssh".into());
+    // zsh reads `~/.zshenv` at every `-c`, and a run may write the home.
+    env.insert("SHELL".into(), "/bin/sh".into());
+    env.insert("PATH".into(), found.search.clone());
     // `git maintenance run --auto --detach` would go on after the push, with its environment.
     crate::runs::configure(env, "maintenance.auto", "false");
     let at_push = crate::gate::git_globals(&words[1..]).0 + 1;
