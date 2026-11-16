@@ -1678,6 +1678,7 @@ fn pull_said(pull: &PullRequest) -> String {
     let checks = match pull.mark.as_deref() {
         Some("passing") => ", checks passing",
         Some("failing") => ", checks failing",
+        Some("stopped") => ", checks stopped",
         Some(_) => ", checks pending",
         None => "",
     };
@@ -1693,6 +1694,7 @@ fn pull_mark(
     match pull.mark.as_deref() {
         Some("passing") => (Some(Icon::Check), p.ok),
         Some("failing") => (Some(Icon::Close), p.fail),
+        Some("stopped") => (Some(Icon::Stopped), p.faint),
         Some(_) => (Some(Icon::Running), p.run),
         None => (None, p.faint),
     }

@@ -823,6 +823,7 @@ impl ProgressPage {
                 let (glyph, said) = match ci.as_str() {
                     "failing" => (Icon::Warning, "checks failed"),
                     "pending" => (Icon::Running, "checks running"),
+                    "stopped" => (Icon::Stopped, "checks stopped"),
                     _ => (Icon::Check, "checks passed"),
                 };
                 let (shell, url) = (self.shell.clone(), pull.url.clone());

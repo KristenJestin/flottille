@@ -589,7 +589,7 @@ async fn detailed_with(
     let (reviewers, comments, closing, threads) = people?;
     let jobs = checks_of_statuses(&statuses)
         .iter()
-        .filter(|check| check.state == "failing")
+        .filter(|check| matches!(check.state.as_str(), "failing" | "stopped"))
         .map(super::Job::of)
         .collect();
     let pull = Pull {
@@ -892,7 +892,7 @@ fn checks_of_statuses(statuses: &[Value]) -> Vec<flottille_core::item::Check> {
                     .as_str()
                     .filter(|link| !link.is_empty())
                     .map(masked),
-                outcome: (state == "failing")
+                outcome: matches!(state, "failing" | "stopped")
                     .then(|| status["state"].as_str().map(str::to_ascii_lowercase))
                     .flatten(),
             }
@@ -967,6 +967,25 @@ struct Pipeline {
     pattern: String,
 }
 
+/// How a pipeline ended, in the word of a commit status, when it ended or stopped: its result when
+/// `COMPLETED`, `STOPPED` while it is `IN_PROGRESS` in the stage `HALTED` or `STOPPING`. None for
+/// one that runs (a `PAUSED` stage waits on a manual step: it is not over) and for a result no
+/// status word says (`EXPIRED`).
+fn ended_of(pipeline: &Value) -> Option<&'static str> {
+    let state = &pipeline["state"];
+    match (state["name"].as_str(), state["stage"]["name"].as_str()) {
+        (Some("COMPLETED"), _) => match state["result"]["name"].as_str() {
+            Some("SUCCESSFUL") => Some("SUCCESSFUL"),
+            Some("FAILED") => Some("FAILED"),
+            Some("ERROR") => Some("ERROR"),
+            Some("STOPPED") => Some("STOPPED"),
+            _ => None,
+        },
+        (Some("IN_PROGRESS"), Some("HALTED" | "STOPPING")) => Some("STOPPED"),
+        _ => None,
+    }
+}
+
 fn pipeline_of(pipeline: &Value) -> Pipeline {
     let target = &pipeline["target"];
     let text = |value: &Value| value.as_str().unwrap_or_default().to_owned();
@@ -1002,48 +1021,72 @@ fn pipeline_of(pipeline: &Value) -> Pipeline {
 /// pattern, and with two (two destinations) it is not known which it ran for, so it replaces
 /// none and the failed one still counts.
 fn counted(forge: &Forge, statuses: Vec<Value>, pipelines: &[Value]) -> Vec<Value> {
-    let known: Vec<Option<(u64, Pipeline)>> = statuses
+    let known: Vec<Option<(u64, Pipeline, Option<&'static str>)>> = statuses
         .iter()
         .map(|status| {
             let build = build_of(forge, status["url"].as_str())?;
             let found = pipelines
                 .iter()
                 .find(|p| p["build_number"].as_u64() == Some(build))?;
-            Some((build, pipeline_of(found)))
+            Some((build, pipeline_of(found), ended_of(found)))
         })
         .collect();
     let own = |pattern: &str| {
         let destinations: std::collections::HashSet<&str> = known
             .iter()
             .flatten()
-            .filter(|(_, p)| p.target == "pull request" && p.pattern == pattern)
-            .map(|(_, p)| p.destination.as_str())
+            .filter(|(_, p, _)| p.target == "pull request" && p.pattern == pattern)
+            .map(|(_, p, _)| p.destination.as_str())
             .collect();
         (destinations.len() == 1).then(|| destinations.into_iter().next().unwrap().to_owned())
     };
-    let keyed: Vec<Option<(u64, Pipeline)>> = known
+    let keyed: Vec<Option<(u64, Pipeline, Option<&'static str>)>> = known
         .iter()
         .map(|known| {
-            let (build, mut pipeline) = known.clone()?;
+            let (build, mut pipeline, ended) = known.clone()?;
             if pipeline.target == "pull request rerun"
                 && let Some(destination) = own(&pipeline.pattern)
             {
                 pipeline.target = "pull request".to_owned();
                 pipeline.destination = destination;
             }
-            Some((build, pipeline))
+            Some((build, pipeline, ended))
         })
         .collect();
+    // A stop is not a verdict: a build the user stopped does not take the place of the latest
+    // build of its pipeline while another one, which ran to its end or still runs, has statuses
+    // on the head. A stopped build counts as the latest only when it is the only one.
     let mut latest: std::collections::HashMap<&Pipeline, u64> = Default::default();
-    for (build, pipeline) in keyed.iter().flatten() {
-        let newest = latest.entry(pipeline).or_default();
+    let mut stopped: std::collections::HashMap<&Pipeline, u64> = Default::default();
+    for (build, pipeline, ended) in keyed.iter().flatten() {
+        let map = if *ended == Some("STOPPED") {
+            &mut stopped
+        } else {
+            &mut latest
+        };
+        let newest = map.entry(pipeline).or_default();
         *newest = (*newest).max(*build);
     }
     statuses
-        .iter()
+        .into_iter()
         .zip(&keyed)
-        .filter(|(_, keyed)| keyed.as_ref().is_none_or(|(build, p)| latest[p] == *build))
-        .map(|(status, _)| status.clone())
+        .filter_map(|(mut status, keyed)| {
+            let Some((build, pipeline, ended)) = keyed else {
+                return Some(status);
+            };
+            let counted = latest.get(pipeline).or(stopped.get(pipeline));
+            if counted != Some(build) {
+                return None;
+            }
+            // A status left at `INPROGRESS` by a build that ended or stopped: the pipeline's word
+            // is the truth (Bitbucket does not always settle its steps' statuses).
+            if let Some(word) = ended
+                && check_of(&status).1 == "pending"
+            {
+                status["state"] = json!(word);
+            }
+            Some(status)
+        })
         .collect()
 }
 
@@ -1313,7 +1356,7 @@ fn decision(reviewers: &[Reviewer]) -> Option<&'static str> {
 }
 
 /// A commit status of `bkt pr checks --json` (`statuses`): `SUCCESSFUL`, `FAILED`, `INPROGRESS`
-/// or `STOPPED`.
+/// or `STOPPED`, which is `stopped`: a stop is neither a failure nor a check that runs.
 fn check_of(status: &Value) -> (String, &'static str) {
     let name = status["name"]
         .as_str()
@@ -1326,7 +1369,8 @@ fn check_of(status: &Value) -> (String, &'static str) {
         .as_deref()
     {
         Some("SUCCESSFUL" | "SUCCESS") => "passing",
-        Some("FAILED" | "FAILURE" | "ERROR" | "STOPPED" | "CANCELLED") => "failing",
+        Some("STOPPED") => "stopped",
+        Some("FAILED" | "FAILURE" | "ERROR" | "CANCELLED") => "failing",
         _ => "pending",
     };
     (masked(name), state)
@@ -1764,15 +1808,18 @@ pub(super) async fn write(
                 ));
             };
             let number = last["build_number"].as_u64().unwrap_or(0);
-            if !matches!(
-                last["state"]["result"]["name"].as_str(),
-                Some("FAILED" | "ERROR")
-            ) {
-                return Outcome::Refused(format!(
-                    "refused: the last pipeline of {branch} in {slug} (#{number}) did not fail: \
-                     there is nothing to re-run"
-                ));
-            }
+            // A stopped pipeline is run again too: nothing of it counts, and a lone one is what
+            // refuses the merge.
+            let ended = match last["state"]["result"]["name"].as_str() {
+                Some("FAILED" | "ERROR") => "failed",
+                Some("STOPPED") => "was stopped",
+                _ => {
+                    return Outcome::Refused(format!(
+                        "refused: the last pipeline of {branch} in {slug} (#{number}) neither \
+                         failed nor was stopped: there is nothing to re-run"
+                    ));
+                }
+            };
             // A pull request's pipeline is started again by its own selector.
             let pattern = last["target"]["selector"]["pattern"]
                 .as_str()
@@ -1789,7 +1836,7 @@ pub(super) async fn write(
             match text(&command(forge, context, &["pipeline", "run"], &flags)).await {
                 Ok(_) => Outcome::Done(format!(
                     "The pipeline of {branch} was started again in {slug}, after #{number} \
-                     failed."
+                     {ended}."
                 )),
                 Err(why) => Outcome::Failed(why),
             }

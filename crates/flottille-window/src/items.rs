@@ -225,6 +225,7 @@ fn ci_of(checks: &Value) -> Option<String> {
         _ if states.is_empty() => None,
         _ if any("failing") => Some("failing".into()),
         _ if any("pending") => Some("pending".into()),
+        _ if any("stopped") => Some("stopped".into()),
         _ => Some("passing".into()),
     }
 }
@@ -242,6 +243,7 @@ fn ci_state(ci: &str) -> AgentState {
     match ci {
         "failing" => AgentState::Failed,
         "pending" => AgentState::Running,
+        "stopped" => AgentState::Stopped,
         _ => AgentState::Completed,
     }
 }
