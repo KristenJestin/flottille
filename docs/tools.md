@@ -524,7 +524,9 @@ pending requests.
   still keeps the real runtime folder out of reach. X11's `DISPLAY` (with `XAUTHORITY`) is given
   only when the session has no Wayland, which the setting's help says: an X11 client can read the
   keys typed in other windows and type into them; Landlock then leaves X11's sockets within the
-  run's reach, which it keeps from every other run where the kernel allows it (above). When the folder cannot be made (the socket cannot be
+  run's reach, which it keeps from every other run where the kernel allows it (above). On a wlroots
+  compositor (Hyprland, Sway…) a Wayland client may also get the virtual keyboard and pointer
+  protocols, and so type into other windows. When the folder cannot be made (the socket cannot be
   linked), the run has no display, never the real folder, and the daemon's log says why. The gate
   judges the run as before: the setting only adds the display. It is the same folder a connection's
   *Show the browser* uses (`docs/extensions.md`), one per owner.
