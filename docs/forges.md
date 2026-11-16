@@ -380,12 +380,12 @@ server (nothing here calls Bitbucket). Files are the repository's, lines those o
   build at `INPROGRESS`, which would be `pending` for ever. A status that still says it runs
   takes the word of its pipeline when that ended (`state.name` `COMPLETED`: its
   `state.result.name`, `SUCCESSFUL`, `FAILED`, `ERROR` or `STOPPED`) or stopped (`IN_PROGRESS`
-  with `state.stage.name` `HALTED` or `STOPPING`: `STOPPED`); a status that already says how it
-  ended is kept. A `PAUSED` stage (a manual step waits) is not a stop and stays `pending`.
-  **Assumed**: `HALTED` and `STOPPING` are not in Bitbucket's published API schema (its stages
-  are `RUNNING` and `PAUSED`; its pipeline `status` filter lists `HALTED` beside `PAUSED`, and the
-  scope `pipeline:write` says it can "resume halted pipelines"): a halted pipeline is taken to have
-  ended the run (a resumable one has not). A build with a failed step is never put aside as
+  with `state.stage.name` `STOPPING`: `STOPPED`); a status that already says how it
+  ended is kept. A `PAUSED` stage (a manual step waits) and a `HALTED` one are not a stop and stay
+  `pending`: Bitbucket's API says a halted pipeline can be resumed (the scope `pipeline:write`
+  "resumes halted pipelines"; its pipeline `status` filter lists `HALTED` beside `PAUSED`).
+  **Assumed**: a `STOPPING` pipeline ends `STOPPED`; the stage is not in Bitbucket's published API
+  schema (its stages are `RUNNING` and `PAUSED`). A build with a failed step is never put aside as
   stopped, whatever its pipeline says.
   **A stop is not a verdict**: a stopped build does not take the place of the latest build of its
   pipeline on the head while another build of it has statuses there, so a green #603 stands when

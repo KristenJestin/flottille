@@ -968,14 +968,14 @@ struct Pipeline {
 }
 
 /// How a pipeline ended, in the word of a commit status, when it ended or stopped: its result when
-/// `COMPLETED`, `STOPPED` while it is `IN_PROGRESS` in the stage `HALTED` or `STOPPING`. None for
-/// one that runs (a `PAUSED` stage waits on a manual step: it is not over) and for a result no
-/// status word says (`EXPIRED`).
+/// `COMPLETED`, `STOPPED` while it is `IN_PROGRESS` in the stage `STOPPING`. None for one that
+/// runs (a `PAUSED` or `HALTED` stage waits: it is not over) and for a result no status word says
+/// (`EXPIRED`).
 ///
-/// `HALTED` and `STOPPING` are the issue's (#1004) words, not found in Bitbucket's published API
-/// schema: it lists only the stages `RUNNING` and `PAUSED`; its pipeline `status` filter has
-/// `HALTED` beside `PAUSED`, and the scope `pipeline:write` is said to "resume halted pipelines".
-/// A halted pipeline is assumed to have ended the run; if it can be resumed, it is not over.
+/// `HALTED` is resumable (Bitbucket's API: the `pipeline:write` scope can "resume halted
+/// pipelines"; its pipeline `status` filter lists it beside `PAUSED`), so it stays pending and
+/// blocks. `STOPPING` is assumed to end `STOPPED`: it is not in Bitbucket's published API schema,
+/// which lists the stages `RUNNING` and `PAUSED` only.
 fn ended_of(pipeline: &Value) -> Option<&'static str> {
     let state = &pipeline["state"];
     match (state["name"].as_str(), state["stage"]["name"].as_str()) {
@@ -986,7 +986,7 @@ fn ended_of(pipeline: &Value) -> Option<&'static str> {
             Some("STOPPED") => Some("STOPPED"),
             _ => None,
         },
-        (Some("IN_PROGRESS"), Some("HALTED" | "STOPPING")) => Some("STOPPED"),
+        (Some("IN_PROGRESS"), Some("STOPPING")) => Some("STOPPED"),
         _ => None,
     }
 }
