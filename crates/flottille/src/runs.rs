@@ -2209,28 +2209,37 @@ pub fn tell_guarded_at_start(daemon: &Daemon) {
     }
 }
 
-/// At daemon start: kills the run process groups a previous daemon left running, each only when
-/// its leader is still the process it started, and marks their runs interrupted.
+/// At daemon start, before anything starts a run or tries a service: ends what the runs of a
+/// previous daemon left running, and marks them interrupted. Each recorded run's session and
+/// process group is ended while it lives, its leader still the process it started or gone with
+/// something still in it (a server's child holding a port): Linux gives the pid of neither to
+/// another process meanwhile. A leader's pid taken by another process since says nothing of ours
+/// is left, and nothing is signalled.
 pub async fn settle_at_start(daemon: &Daemon) {
-    let mut left = Vec::new();
-    let result = daemon.read(|store| {
-        for (pid, started) in store.run_processes()? {
-            if start_time(pid) == Some(started) {
-                signal_group(pid, libc::SIGKILL);
-                left.push(pid);
-                eprintln!("flottille daemon: killed the run process {pid} that was left running");
-            }
-            store.remove_run_process(pid)?;
+    let recorded = daemon.read(|store| {
+        let recorded = store.run_processes()?;
+        for (pid, _) in &recorded {
+            store.remove_run_process(*pid)?;
         }
-        Ok(())
+        Ok(recorded)
     });
-    if let Err(error) = result {
+    let recorded = recorded.unwrap_or_else(|error| {
         eprintln!("flottille daemon: reading the runs' processes: {error}");
-    }
-    // Outside the store: ending a session reads all of `/proc`, more than once.
-    for pid in left {
-        crate::children::end_session(pid).await;
-    }
+        Vec::new()
+    });
+    // Outside the store: whether a session lives, and ending it, read all of `/proc`.
+    let _ = tokio::task::spawn_blocking(move || {
+        for (pid, started) in recorded {
+            if crate::children::session_lives(pid, started) {
+                signal_group(pid, libc::SIGKILL);
+                crate::children::end_session_now(pid);
+                eprintln!(
+                    "flottille daemon: ended the run process {pid} left running, and its session"
+                );
+            }
+        }
+    })
+    .await;
     let runs = daemon.read(Store::running_runs).unwrap_or_default();
     for run in runs {
         let _ = daemon.write(|store| {
