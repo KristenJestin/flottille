@@ -602,12 +602,15 @@ and that an aggressive rewriting cost more than it saved.
   not an argument; no `args` is every argument): words, never a shell line. The first filter that
   matches is the command's; a command with none is given the generic filter.
 - **What a filter may do**: remove the lines that match a pattern (`drop`); remove the escapes and
-  keep only the last state of a line redrawn with `\r` (`flottille_core::ansi::strip`); leave no
-  blank line at the start and one at most in a row; replace a run of three identical lines or more
+  keep only the last state of a line redrawn with `\r` (a state that says an error stays on its
+  own line, the others count as removed lines); replace a run of three identical lines or more
   with the line and `(×N)`; keep the head and the tail of an output beyond `max_lines`, with a
   line `[… N lines left out …]` where the middle was; and replace an output left empty with
-  `on_empty` (`cargo: ok`). The generic filter does the escapes, the redrawn lines, the blank lines
-  and the runs, nothing else.
+  `on_empty` (`cargo: ok`), **only for a command that exited with code 0**: one that failed, was
+  stopped or was killed by a signal says `(no output left)` and the line below. The generic filter
+  does the escapes, the redrawn lines and the runs, nothing else: **blank lines are left as they
+  are**, and the lines of a diff are never collapsed. The output of `git diff`, `git show` and
+  `git log` is never filtered at all: a blank context line of a diff is a single space.
 - **A line that says error, warning, failed or panicked (in any case) or holds a place
   (`path.ext:line`) is never removed**, whatever a filter says: no pattern, no `max_lines`, no empty
   output takes it. A run of identical such lines is the one line and its count, which loses none of
@@ -618,10 +621,14 @@ and that an aggressive rewriting cost more than it saved.
   progress line and no `test … ok` line, every failure, its output and the summary of each binary
   kept), `npm install`, `pnpm install`, `yarn install`, `pytest`, `go test`, and the progress of
   `git fetch`, `clone`, `pull` and `push` (the refs they moved stay).
+- **Only once the command ended.** A command that still runs is read as it writes it, unfiltered:
+  the lines of a page would otherwise shift as it goes on. The filter is applied to its output from
+  the moment it ended, with the code it exited with.
 - **Nothing is lost.** When a filter removed lines, the answer ends with one line: `[N lines
   filtered out: read the whole output with run_status {"run": "<id>", "start": 1, "raw": true}]`.
   `raw: true` reads the run's lines as the command wrote them, up to the 64 KiB kept. The line
-  numbers of an answer without `raw` are those of the filtered lines.
+  numbers of an answer without `raw` are those of the filtered lines, and the hints to read the
+  earlier and the later lines of a `raw` read carry `"raw": true`.
 - **The switch** is `filters` in `tool-results.toml` (`docs/protocol.md`, "The tool results
   methods"), **on unless it says `false`**; Settings → Agents → Long tool results has it as "Filter
   command output". It is read at every call: a change applies to the next answer of every session,
