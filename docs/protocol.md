@@ -1382,7 +1382,8 @@ a result:
   "run": "5d2c0f1a9b3e",
   "address": "http://localhost:3001",
   "needs_stopped": [],
-  "needed_by": [{"project": "app", "tasks": ["api"]}]
+  "needed_by": [{"project": "app", "tasks": ["api", "web"], "running": ["api"]}],
+  "needed_now": ["app's api"]
 }
 ```
 
@@ -1393,7 +1394,9 @@ as the file says them. `state` is `stopped`, `starting`, `ready`, `running` (it 
 service's run has an empty `project` and is not listed by `run.list`. `address` is its run's
 address, or the file's. `needs_stopped` lists what it needs that does not run. `needed_by` lists
 the projects whose tasks need it, directly or through another service's `needs`, each with those
-tasks. `not-found` for a
+tasks and, in `running`, those of them that run now. `needed_now` says what runs now and needs it:
+each running task's (`app's api`) and each other service that runs and needs it, directly or not
+(`the service file`). `not-found` for a
 service the file does not hold, `invalid-config` when the file cannot be used, `refused` for a
 write the file would refuse (nothing is written).
 
@@ -1431,9 +1434,12 @@ started again (`started` is empty), nor one that answers already (its state is t
 
 #### `service.stop`
 
-`{"name"}`: `{"service": {...}}`, once it ended: its whole process group, as `run.stop` does.
-What it needs and what needs it go on. `refused` when it is not running, or runs outside
-Flottille, which does not stop it.
+`{"name", "force"?}`: `{"service": {...}}`, once it ended: its whole process group, as `run.stop`
+does. What it needs and what needs it go on. `needed` while something running needs it (its
+`needed_now`) and `force` is not `true`, with the sentence that says what goes on without it
+(`Stop auth? app's api needs it and is running: it goes on without it.`): nothing is stopped.
+`refused` when it is not running, or runs outside Flottille, which does not stop it. The agent of
+each run that needs it is told it was stopped (`docs/tools.md`, "Tasks and runs").
 
 #### `service.output`
 
@@ -1885,7 +1891,8 @@ user ran, the one it runs in (`null` in the project folder). `state` is `running
 it was ready); `url` its address, `url_error` why it has none when its task's line for it failed
 (`docs/projects.md`, "Tasks"). `last_line` is the
 last line of its output with something on it, masked of secrets and as the program wrote it
-(colours included), cut at 300 characters. `tail` is the last 20 lines
+(colours included), cut at 300 characters. `needs_stopped` lists the services its task needs that
+stopped while it runs (`run.needs`). `tail` is the last 20 lines
 of its output (a list of texts, masked and as written, each cut at 300 characters), which a result
 card in the conversation shows folded, a running command's as well as one that ended.
 

@@ -702,3 +702,127 @@ fn a_task_s_needs_say_why_the_services_cannot_be_read(cx: &mut TestAppContext) {
     settle(cx);
     assert_eq!(pending_frames(cx), 0);
 }
+
+/// The task `api` keeps running (a server) and needs `needs`; the user runs it.
+fn running_api(user: &User, needs: &[&str]) {
+    user.call(
+        "task.edit",
+        json!({"project": "app", "name": "api",
+            "line": format!("{} --listen 0", server_program(user).display()),
+            "serve": true, "needs": needs}),
+    )
+    .unwrap();
+    user.call("task.run", json!({"project": "app", "name": "api"}))
+        .unwrap();
+}
+
+#[gpui_kit::test]
+fn stopping_a_service_a_running_task_needs_asks_first(cx: &mut TestAppContext) {
+    let user = user();
+    services_file(&user, &listening(&user, "db", 0, &[]));
+    project(&user, &["db"]);
+    running_api(&user, &["db"]);
+    let (shell, cx) = window(&user, cx);
+    open_services(&shell, cx);
+    until(&shell, cx, "db is ready, needed by the running api", |cx| {
+        state_of("db", cx).as_deref() == Some("ready")
+            && label_of("service-needed-db", cx).as_deref() == Some("Needed by app (api running)")
+    });
+    settle(cx);
+    // The running mark beside the task.
+    assert!(has("service-running-db-app-api", cx));
+
+    click("service-stop-db", cx);
+    settle(cx);
+    assert!(has("service-stopping", cx));
+    assert_eq!(
+        label_of("service-stopping-needed", cx).as_deref(),
+        Some("app's api needs it and is running: it goes on without it.")
+    );
+    click("service-stopping-cancel", cx);
+    settle(cx);
+    assert!(!has("service-stopping", cx));
+    assert_eq!(state_of("db", cx).as_deref(), Some("ready"));
+
+    click("service-stop-db", cx);
+    settle(cx);
+    click("service-stopping-action", cx);
+    until(&shell, cx, "the row says it stopped", |cx| {
+        state_of("db", cx).as_deref() == Some("stopped")
+    });
+    settle(cx);
+    assert!(!has("service-stopping", cx));
+    assert_eq!(pending_frames(cx), 0);
+}
+
+#[gpui_kit::test]
+fn a_stop_refused_for_a_task_started_since_the_list_asks_first(cx: &mut TestAppContext) {
+    let user = user();
+    services_file(&user, &listening(&user, "db", 0, &[]));
+    project(&user, &["db"]);
+    user.call("service.start", json!({"name": "db"})).unwrap();
+    let (shell, cx) = window(&user, cx);
+    open_services(&shell, cx);
+    until(&shell, cx, "db is ready, nothing running needs it", |cx| {
+        state_of("db", cx).as_deref() == Some("ready")
+    });
+    settle(cx);
+    assert!(!has("service-running-db-app-api", cx));
+
+    // The task starts after the list was read, and the window has not read it again: the
+    // daemon refuses the stop, which is asked in the confirmation instead.
+    running_api(&user, &["db"]);
+    // Waited for on the daemon's side only: the window is not polled meanwhile.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while user.call("service.show", json!({"name": "db"})).unwrap()["needed_now"]
+        .as_array()
+        .is_none_or(Vec::is_empty)
+    {
+        assert!(Instant::now() < deadline, "the api never needed db");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    click("service-stop-db", cx);
+    // Found as soon as it opens; seen once its motion ended.
+    until(&shell, cx, "the confirmation opens", |cx| {
+        label_of("service-stopping-needed", cx).is_some()
+    });
+    settle(cx);
+    assert!(has("service-stopping", cx));
+    assert_eq!(
+        label_of("service-stopping-needed", cx).as_deref(),
+        Some("app's api needs it and is running: it goes on without it.")
+    );
+    assert_eq!(state_of("db", cx).as_deref(), Some("ready"));
+
+    click("service-stopping-action", cx);
+    until(&shell, cx, "the row says it stopped", |cx| {
+        state_of("db", cx).as_deref() == Some("stopped")
+    });
+    settle(cx);
+    assert!(!has("service-stopping", cx));
+    assert_eq!(pending_frames(cx), 0);
+}
+
+#[gpui_kit::test]
+fn stopping_a_service_nothing_running_needs_asks_nothing(cx: &mut TestAppContext) {
+    let user = user();
+    services_file(&user, &listening(&user, "db", 0, &[]));
+    // A task needs it, but does not run.
+    project(&user, &["db"]);
+    user.call("service.start", json!({"name": "db"})).unwrap();
+    let (shell, cx) = window(&user, cx);
+    open_services(&shell, cx);
+    until(&shell, cx, "db is ready", |cx| {
+        state_of("db", cx).as_deref() == Some("ready")
+    });
+    settle(cx);
+    assert!(!has("service-running-db-app-api", cx));
+
+    click("service-stop-db", cx);
+    until(&shell, cx, "the row says it stopped", |cx| {
+        state_of("db", cx).as_deref() == Some("stopped")
+    });
+    settle(cx);
+    assert!(!has("service-stopping", cx));
+    assert_eq!(pending_frames(cx), 0);
+}
