@@ -1,0 +1,30 @@
+name: try
+
+# A worker's cargo command, run on a GitHub runner instead of the maintainer's machine.
+# gh-slot.sh pushes a throwaway snapshot of a worktree to try/<task>-<stamp>, with this file and
+# the command in .try-command; the branch is deleted once the run is read.
+on:
+  push:
+    branches: ["try/**"]
+
+jobs:
+  # Same job name and environment as ci.yml's verify, so the dependencies cached on dev are reused.
+  verify:
+    runs-on: ubuntu-latest
+    env:
+      CARGO_INCREMENTAL: 0
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup component add rustfmt clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v1-rust
+          save-if: false
+      - name: Have the window's system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libfontconfig-dev libfreetype-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libxcb1-dev libvulkan-dev
+      - name: Build the fakes
+        run: cargo build --workspace --bins --locked
+      - name: Run the command
+        run: bash .try-command
