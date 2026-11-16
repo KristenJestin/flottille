@@ -62,6 +62,11 @@ impl TextViewer {
             while !line.is_char_boundary(end) {
                 end -= 1;
             }
+            // No whole character fits: the cut is reached, and the rest is not drawn as empty rows.
+            if end == 0 && !line.is_empty() {
+                self.cut = true;
+                break;
+            }
             self.cut |= end < line.len();
             room -= end;
             let line = &line[..end];
