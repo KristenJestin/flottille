@@ -1519,6 +1519,47 @@ way in:
   options and variables are not judged** (`AGENT_BROWSER_SESSION`, `AGENT_BROWSER_NAMESPACE`,
   `--headers`, `--engine`…): they are the user's, passed as written. What is not covered: the
   variables of the daemon's own environment, which a run inherits.
+- **The shown browser takes neither the focus nor the pointer, when the desktop is told not to
+  give them.** An agent drives a browser for the user, who works in another window: a window that
+  comes to the front takes the keyboard and, on a compositor that moves the pointer to the focused
+  window (Hyprland with `misc:focus_on_activate` and cursor warps), the mouse. Flottille never
+  writes the user's desktop configuration, so it does two things and says the third:
+  - **The browser has a window identity of its own.** The configuration the adapter writes gives
+    the shown browser the launch argument `--class=flottille-browser` (`args`; a browser nobody
+    sees has no window to name). Read in Chromium's source: `--class` is the switch `class`, which
+    sets the window's `WM_CLASS` class on X11 and, for a browser window (not an app window), the
+    `app_id` Chrome gives `xdg_toplevel` on Wayland, so `--class` is the one flag, and the desktop
+    tells this browser from the user's own by that class or app id. It was not run on a real
+    compositor by Flottille's tests, which never open a window.
+  - **No action of agent-browser 0.43.x exists only to raise the window**: its tools (read from
+    the server's own list) have no `bring_to_front`, so there is none to keep off. Three actions
+    can ask Chrome to activate a window as a side effect (the binary holds the CDP calls
+    `Target.activateTarget` and `Page.bringToFront`, and the actions that reach them are `tab_new`,
+    `tab_switch`, `tab_close` and `window_new`, by their descriptions: not run to tell which does).
+    They stay as they are, since an agent that works in several tabs needs them, and **no Chrome
+    flag nor agent-browser option was found that stops the activation request**: what Chrome still
+    asks, the desktop's own rule below answers.
+  - **The user's own rule, which Flottille never writes** (the user's configuration, put where
+    they keep their window rules), matches the class `flottille-browser`:
+    - Hyprland 0.55 and later (Lua): `hl.window_rule({ match = { class = "^flottille-browser$" },
+      suppress_event = "activate activatefocus", no_initial_focus = true })`. Hyprland 0.53 and
+      0.54 (hyprlang): `windowrule = match:class ^(flottille-browser)$, suppress_event activate
+      activatefocus` and `windowrule = match:class ^(flottille-browser)$, no_initial_focus on`.
+      Before 0.53: `windowrule = suppressevent activate activatefocus, class:^(flottille-browser)$`
+      and `windowrule = noinitialfocus, class:^(flottille-browser)$`. `suppress_event` answers the
+      requests to activate the window (a tab switch, the page's own), and `no_initial_focus` the
+      first window's opening.
+    - Sway: `no_focus [app_id="flottille-browser"]`, which keeps a new window from being focused
+      (it has no effect on the first window of a workspace). `focus_on_window_activation` is a
+      global setting, which criteria do not scope: `none` would turn the activation off for every
+      window, so the docs do not advise it; without it, a window that asks to be activated is
+      marked urgent or focused by the compositor's own `focus_on_window_activation` default
+      (`urgent`).
+    - X11, and the other desktops: the class `flottille-browser` is the `WM_CLASS` class, for the
+      window manager's own rules.
+    The Hyprland lines are the wiki's forms for each version (the Lua one is the form of the
+    default `hyprland.lua` of 0.56), not run by Flottille's tests either. The window's switch *Show
+    the browser* says it, in a sentence that names this section.
 - **Its start** gains `--config $XDG_STATE_HOME/flottille/connections/<name>/agent-browser.json`,
   written by Flottille: one plugin, `flottille`, of capability `credential.read`, run as
   `flottille vault provide <socket>`. An explicit config replaces agent-browser's discovery of the

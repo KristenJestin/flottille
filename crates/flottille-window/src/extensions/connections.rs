@@ -60,7 +60,9 @@ pub const LIMITS_HINT: &str = "An argument of that name may take only these valu
 pub const HEADED_HINT: &str = "Shows the browser an agent drives on your screen. A change stops \
      the server that runs, and the next start applies it. With X11 the browser can read the keys \
      you type in other windows and type into them, a terminal's included; on some Wayland \
-     compositors a client can capture the screen and the clipboard.";
+     compositors a client can capture the screen and the clipboard. Your desktop can keep the \
+     browser from taking your focus, by the window class flottille-browser: docs/extensions.md \
+     (Show the browser) gives the rule.";
 
 /// What the sites' field says: what a sign-in's extra hosts are for.
 pub const SITES_HINT: &str = "Hosts a sign-in goes through besides the sites of its entries, such \
