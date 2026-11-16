@@ -672,6 +672,18 @@ fn the_form_opened_from_a_request_says_it_answers_it_and_cancel_leaves_it_waitin
     });
     let own = label(cx, "connection-modal-title").unwrap_or_default();
     assert!(!own.contains('#'), "{own}");
+    click(cx, "connection-modal-cancel");
+    until(&shell, cx, "the form closes", |cx| {
+        !visible(cx, "connection-modal")
+    });
+
+    // Back on the session, the request still waits under "Waiting for you", to be opened again.
+    open_card(&shell, cx, &lead, number);
+    assert_eq!(
+        label(cx, "rail-waiting-title").as_deref(),
+        Some("Waiting for you")
+    );
+    assert!(visible(cx, &format!("open-request-{number}")));
 }
 
 #[gpui_kit::test]
