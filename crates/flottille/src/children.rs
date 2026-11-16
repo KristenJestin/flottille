@@ -221,8 +221,8 @@ fn pidfd(pid: u32) -> Option<libc::c_int> {
         if error.raw_os_error() != Some(libc::ESRCH) {
             PIDFD_FAILED.call_once(|| {
                 eprintln!(
-                    "flottille daemon: cannot open a pidfd ({error}): what a run leaves outside \
-                     its process group is not ended with it"
+                    "flottille daemon: cannot open a pidfd ({error}): no process is signalled by \
+                     its bare pid, so the whole run is left running when it ends"
                 );
             });
         }
