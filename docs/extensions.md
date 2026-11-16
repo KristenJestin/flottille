@@ -1262,7 +1262,10 @@ once, as the rail's Deny: it writes nothing, so nothing is confirmed). **Edit** 
 form with the agent's values, the secrets of its requests among them, and says it answers the
 request `#N`: its Save writes the user's values and answers the request, its Cancel leaves it
 waiting (`connection.add`/`.edit` with `request`), which it decides under the file's lock before it
-writes: a request accepted meanwhile is refused to the Save, and only one of them writes. A request whose declaration changed since it was asked says so, and Accept is not
+writes: a request accepted meanwhile is refused to the Save, and only one of them writes. That Save
+is held to Accept's rules for secrets: it waits, as Accept does, for a vault entry the request names
+that is not made yet, and a secret line new to the connection goes only to its entry's own host
+(the user's own form, answering no request, binds freely). A request whose declaration changed since it was asked says so, and Accept is not
 offered. When Accept answers that the request names a vault entry that is not made yet, the dialog
 shows a **New entry…** button per missing entry beside the answer: it opens the vault's own entry
 dialog on the entry's name and, as its address, the host the request sends it to, the secret left

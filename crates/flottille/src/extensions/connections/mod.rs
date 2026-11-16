@@ -2222,7 +2222,7 @@ async fn add_if(
         )));
     }
     if let Some(number) = request {
-        requests::answerable(daemon, number, "add", &name)?;
+        requests::answerable(daemon, number, "add", None, &declaration)?;
     }
     let new = table_of(&declaration)?;
     let mut claimed = None;
@@ -2338,10 +2338,10 @@ async fn edit_if(
     let (params, request) = requests::taken(params)?;
     let name = named(&params)?;
     let old = declaration(&daemon.paths, &name)?;
-    if let Some(number) = request {
-        requests::answerable(daemon, number, "edit", &name)?;
-    }
     let new = edited(&old, &params)?;
+    if let Some(number) = request {
+        requests::answerable(daemon, number, "edit", Some(&old), &new)?;
+    }
     entries_checked(daemon, &new)?;
     let written = table_of(&new)?;
     let mut claimed = None;
