@@ -281,9 +281,10 @@ const SERVED: [Definition; 33] = [
             started, by the run id run gave. action output (the default): its state and lines \
             of its output, the last tail lines (40 by default, 1000 at most) or those from \
             start; the answer says how to read the lines before or after; only the last 64 KiB \
-            of an output are kept. Progress noise is filtered out and counted: raw true reads \
-            the lines as written. action stop: ends it with everything it started, asked to \
-            end, then killed 5 seconds later, and answers once it ended. {\"run\": \"a1b2c3\", \"action\": \"stop\"} action notify \
+            of an output are kept. Noise is filtered out and counted: raw true reads it as \
+            written. action stop: ends it with everything it started, asked to \
+            end, then killed 5 seconds later, and answers once it ended; a run that already \
+            ended is left as it is. {\"run\": \"a1b2c3\", \"action\": \"stop\"} action notify \
             with when ready: you are told when a run of a task that says when it is ready is: \
             {\"run\": \"a1b2c3\", \"action\": \"notify\", \"when\": \"ready\"}. The same \
             call reads a cut result (res_...) a page at a time, from start; stop does not \

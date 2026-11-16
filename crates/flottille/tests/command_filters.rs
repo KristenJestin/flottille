@@ -103,7 +103,10 @@ fn a_filtered_result_says_how_to_read_it_whole() {
     );
     // Read back later, the filtered view says the same.
     let again = ok(mcp.call("run_status", json!({"run": id})));
-    assert!(again.lines().last().unwrap().contains("\"raw\": true"), "{again}");
+    assert!(
+        again.lines().last().unwrap().contains("\"raw\": true"),
+        "{again}"
+    );
 }
 
 #[test]
@@ -114,7 +117,7 @@ fn a_result_that_lost_nothing_has_no_such_line() {
     let text = ok(mcp.call("run", json!({"line": "cargo publish"})));
 
     assert!(text.contains("error: no such subcommand"), "{text}");
-    assert!(!text.contains("filtered out"), "{text}");
+    assert!(!text.contains("lines filtered out"), "{text}");
 }
 
 #[test]
@@ -127,10 +130,16 @@ fn run_status_raw_reads_the_unfiltered_lines() {
 
     assert!(raw.contains("Compiling serde v1.0.219"), "{raw}");
     assert!(raw.contains("test parse::reads_a_number ... ok"), "{raw}");
-    assert!(raw.contains("test total::adds_two_numbers ... FAILED"), "{raw}");
-    assert!(!raw.contains("filtered out"), "{raw}");
+    assert!(
+        raw.contains("test total::adds_two_numbers ... FAILED"),
+        "{raw}"
+    );
+    assert!(!raw.contains("lines filtered out"), "{raw}");
     // `raw` goes with reading a run's output, nothing else.
-    let stop = mcp.call("run_status", json!({"run": id, "action": "stop", "raw": true}));
+    let stop = mcp.call(
+        "run_status",
+        json!({"run": id, "action": "stop", "raw": true}),
+    );
     assert!(stop.text.starts_with("refused:"), "{}", stop.text);
     let listing = mcp.call("run_status", json!({"raw": true}));
     assert!(listing.text.starts_with("refused:"), "{}", listing.text);
@@ -161,7 +170,7 @@ fn filters_off_returns_the_output_as_it_was() {
 
     assert!(text.contains("Compiling serde v1.0.219"), "{text}");
     assert!(text.contains("test parse::reads_a_number ... ok"), "{text}");
-    assert!(!text.contains("filtered out"), "{text}");
+    assert!(!text.contains("lines filtered out"), "{text}");
 }
 
 #[test]
@@ -171,7 +180,10 @@ fn a_build_that_works_is_said_in_a_few_words() {
 
     let text = ok(mcp.call("run", json!({"line": "cargo build"})));
 
-    assert!(text.contains("\ncargo: ok\n[5 lines filtered out"), "{text}");
+    assert!(
+        text.contains("\ncargo: ok\n[5 lines filtered out"),
+        "{text}"
+    );
 }
 
 #[test]
