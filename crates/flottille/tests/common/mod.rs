@@ -167,8 +167,6 @@ pub struct User {
     /// folder nothing writes into (`/run/user`), and what the daemon runs may create nothing
     /// there (`docs/vault.md`, "The runtime folder"): `dir` is where the tests' programs write.
     _runtime: TempDir,
-    /// The home, `home` in `dir` by a symbolic link, for the same reason (`landlock::ssh_folders`).
-    _home: TempDir,
     /// More variables for every command, and so for the daemon the first one starts.
     env: Vec<(String, String)>,
     /// True once the user is dropped, its daemon stopped and its folder about to go: a client the
@@ -187,7 +185,7 @@ impl User {
             .prefix("flottille-test")
             .tempdir()
             .unwrap();
-        for sub in ["state", "config", "data"] {
+        for sub in ["home", "state", "config", "data"] {
             std::fs::DirBuilder::new()
                 .mode(0o700)
                 .create(dir.path().join(sub))
@@ -198,19 +196,9 @@ impl User {
             .tempdir()
             .unwrap();
         std::os::unix::fs::symlink(runtime.path(), dir.path().join("runtime")).unwrap();
-        // Outside the test's folder too: the folders on the way to `~/.ssh` lose the right to
-        // make or remove an entry directly in them (`landlock::ssh_folders`), and the test's
-        // fakes write their records directly in its folder.
-        let home = tempfile::Builder::new()
-            .prefix("flottille-home")
-            .permissions(std::fs::Permissions::from_mode(0o700))
-            .tempdir()
-            .unwrap();
-        std::os::unix::fs::symlink(home.path(), dir.path().join("home")).unwrap();
         let mut user = User {
             dir,
             _runtime: runtime,
-            _home: home,
             env: Vec::new(),
             closed: Arc::new(Mutex::new(false)),
             reaper: None,

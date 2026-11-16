@@ -5,9 +5,6 @@
 //! one of them, but that way itself. Applied in the child before it runs its program, never to
 //! the daemon.
 //!
-//! The user's `~/.ssh` is left out the same way, and the home ruled for reading alone: what the
-//! user's `ssh` reads there runs programs with the SSH agent at a push lent it.
-//!
 //! X11's display is kept out by its abstract name, unless the program is given it (a
 //! [`crate::display::Folder`] made for X11): an X11 client reads the keys typed in other windows.
 //! The sixth ABI's scope keeps out every abstract socket made outside the program. Its sockets by
@@ -25,7 +22,6 @@ const RULE_PATH_BENEATH: libc::c_uint = 1;
 const EXECUTE: u64 = 1 << 0;
 const WRITE_FILE: u64 = 1 << 1;
 const READ_FILE: u64 = 1 << 2;
-const READ_DIR: u64 = 1 << 3;
 const REFER: u64 = 1 << 13;
 const TRUNCATE: u64 = 1 << 14;
 const IOCTL_DEV: u64 = 1 << 15;
@@ -90,28 +86,6 @@ fn runtime_folders() -> Vec<PathBuf> {
     folders
 }
 
-/// The user's `~/.ssh` (and where it leads, when it is a link): what the user's `ssh` reads its
-/// configuration from, which can run programs (`Match exec`, `ProxyCommand`) at the next push lent
-/// the SSH agent. Kept out of every command's reach but for reading (`home_read`).
-fn ssh_folders() -> Vec<PathBuf> {
-    let Some(home) = home() else {
-        return Vec::new();
-    };
-    let named = home.join(".ssh");
-    let mut folders = vec![named.clone()];
-    folders.extend(named.canonicalize().ok().filter(|real| *real != named));
-    folders
-}
-
-/// The daemon's home, resolved, unless it is `/`.
-fn home() -> Option<PathBuf> {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .filter(|home| home.is_absolute())
-        .and_then(|home| home.canonicalize().ok())
-        .filter(|home| home != Path::new("/"))
-}
-
 /// X11's socket folder: `/tmp/.X11-unix`, or the tests' own (`FLOTTILLE_X11_SOCKETS`). The one
 /// place it is named, for the private mount namespace (#976) to mask.
 #[allow(dead_code)]
@@ -174,17 +148,6 @@ pub fn confined_with<'a>(
 ) -> &'a mut tokio::process::Command {
     let abi = abi();
     let mut denied = runtime_folders();
-    // A rule on a folder holds for all beneath it: `~/.ssh` left out, the home and the folders on
-    // the way to it are ways, ruled for reading only (`home_read`), their entries with every right.
-    let runtime = denied.len();
-    denied.extend(ssh_folders());
-    let home_read = home()
-        .filter(|home| {
-            !denied[..runtime]
-                .iter()
-                .any(|folder| folder.starts_with(home))
-        })
-        .and_then(|home| CString::new(home.as_os_str().as_bytes()).ok());
     let rights = rights(abi);
     let connecting = rights & RESOLVE_UNIX != 0;
     let mut agent = Agent::default();
@@ -221,18 +184,7 @@ pub fn confined_with<'a>(
     });
     // SAFETY: the closure allocates nothing and only makes system calls (open, fstat,
     // landlock_*, prctl, close), all async-signal-safe.
-    unsafe {
-        command.pre_exec(move || {
-            restrict(
-                rights,
-                &paths,
-                open.as_deref(),
-                home_read.as_deref(),
-                scoped,
-                &agent,
-            )
-        })
-    }
+    unsafe { command.pre_exec(move || restrict(rights, &paths, open.as_deref(), scoped, &agent)) }
 }
 
 /// The rules of the user's SSH agent's socket in a command's ruleset.
@@ -244,13 +196,12 @@ struct Agent {
     ways: Vec<CString>,
 }
 
-/// In the child: every path a rule with every right, `open` one without `REFER`, `home` one for
-/// reading alone, the `agent`'s rules, then the child bound to them and to the `scoped` scopes.
+/// In the child: every path a rule with every right, `open` one without `REFER`, the `agent`'s
+/// rules, then the child bound to them and to the `scoped` scopes.
 fn restrict(
     rights: u64,
     paths: &[CString],
     open: Option<&CStr>,
-    home: Option<&CStr>,
     scoped: u64,
     agent: &Agent,
 ) -> io::Result<()> {
@@ -273,7 +224,6 @@ fn restrict(
         .iter()
         .map(|path| (path.as_c_str(), rights, None))
         .chain(open.map(|path| (path, rights & !REFER, None)))
-        .chain(home.map(|path| (path, EXECUTE | READ_FILE | READ_DIR, None)))
         .chain(
             agent
                 .ways
