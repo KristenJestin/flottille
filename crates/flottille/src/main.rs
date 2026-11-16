@@ -41,6 +41,7 @@ mod items;
 mod judge;
 mod landlock;
 mod leaves;
+mod link;
 mod locks;
 mod mcp;
 mod message_checks;
@@ -61,6 +62,7 @@ mod read_commands;
 mod reads;
 mod ready;
 mod remote;
+mod remote_command;
 mod results;
 mod roles;
 mod rules;
@@ -103,6 +105,7 @@ use crate::agent_command::AgentAction;
 use crate::client::Client;
 use crate::command_command::CommandAction;
 use crate::project_command::ProjectAction;
+use crate::remote_command::RemoteAction;
 use crate::runs_command::RunsAction;
 use crate::service_command::ServiceAction;
 use crate::skill_command::SkillAction;
@@ -146,6 +149,11 @@ enum Command {
     Vault {
         #[command(subcommand)]
         action: VaultAction,
+    },
+    /// Flottille on the user's other machines: this machine's addresses
+    Remote {
+        #[command(subcommand)]
+        action: RemoteAction,
     },
     /// Make, follow and remove the workspaces of a project
     Workspace {
@@ -371,6 +379,7 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         Command::Project { action } => return project_command::run(&paths, action),
         Command::Skill { action } => return skill_command::run(&paths, action),
         Command::Vault { action } => return vault_command::run(&paths, action),
+        Command::Remote { action } => return remote_command::run(&paths, action),
         Command::Workspace { action } => return workspace_command::run(&paths, action),
         Command::Agent { action } => return agent_command::run(&paths, action),
         Command::Named { action } => return command_command::run(&paths, action),
