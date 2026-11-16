@@ -33,6 +33,19 @@ const TAIL_LINES_MAX: usize = 1000;
 /// Flottille; one Flottille runs is known to end at once.
 const FOLLOW_EVERY: Duration = Duration::from_secs(15);
 
+/// [`FOLLOW_EVERY`], or, in a test build, `FLOTTILLE_TEST_FOLLOW_MS`: a test sees the follower
+/// turn many times without waiting minutes for it.
+fn follow_every() -> Duration {
+    if cfg!(debug_assertions)
+        && let Some(ms) = std::env::var("FLOTTILLE_TEST_FOLLOW_MS")
+            .ok()
+            .and_then(|ms| ms.parse().ok())
+    {
+        return Duration::from_millis(ms);
+    }
+    FOLLOW_EVERY
+}
+
 /// What the daemon knows of its services besides their file.
 #[derive(Default)]
 pub struct Live {
@@ -741,11 +754,11 @@ async fn follow_need(daemon: Arc<Daemon>, name: String) {
             Some(id) => {
                 tokio::select! {
                     () = runs::wait_for_end(&daemon, &id) => {}
-                    () = tokio::time::sleep(FOLLOW_EVERY) => {}
+                    () = tokio::time::sleep(follow_every()) => {}
                 }
             }
             None => {
-                tokio::time::sleep(FOLLOW_EVERY).await;
+                tokio::time::sleep(follow_every()).await;
                 if let Ok(services) = load(&daemon)
                     && let Some(service) = services.get(&name)
                 {
