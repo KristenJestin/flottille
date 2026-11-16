@@ -92,6 +92,8 @@ struct Turn<'a> {
     workspace: Option<&'a str>,
     model: &'a str,
     tuning: &'a str,
+    /// How long before now it started, in milliseconds.
+    ago: u64,
     /// Input, cache write, cache read, output.
     counts: (Option<u64>, Option<u64>, Option<u64>, Option<u64>),
 }
@@ -104,6 +106,7 @@ impl Default for Turn<'_> {
             workspace: None,
             model: "model-a",
             tuning: "",
+            ago: 0,
             counts: (Some(0), Some(0), Some(0), Some(0)),
         }
     }
@@ -127,8 +130,8 @@ fn record(user: &User, turns: &[Turn]) {
             workspace: turn.workspace.map(Into::into),
             provider: "claude".into(),
             role: "lead".into(),
-            started_at: now,
-            ended_at: now,
+            started_at: now - turn.ago,
+            ended_at: now - turn.ago,
             stop_reason: "end_turn".into(),
             tuning: turn.tuning.into(),
             used: Used {
@@ -163,6 +166,40 @@ fn tasks(user: &User) -> Value {
     stats(user, "model")["total"]["tasks"].clone()
 }
 
+const HOUR: u64 = 3_600_000;
+const DAY: u64 = 24 * HOUR;
+
+/// `usage.stats` of every project over today alone, by `by`.
+fn today(user: &User, by: &str) -> Value {
+    let today = jiff::Zoned::now().date().to_string();
+    user.call(
+        "usage.stats",
+        json!({"since": today, "until": today, "by": by}),
+    )
+    .unwrap()
+}
+
+/// Moves the last event `name` of the workspace `workspace` to `ago` milliseconds before now: what
+/// the daemon would have written then.
+fn backdate(user: &User, name: &str, workspace: &str, ago: u64) {
+    let store = rusqlite::Connection::open(user.path("state/flottille/flottille.db")).unwrap();
+    let changed = store
+        .execute(
+            "UPDATE events SET at = ?1 WHERE seq = (SELECT max(seq) FROM events WHERE name = ?2 \
+             AND json_extract(data, '$.workspace') = ?3)",
+            rusqlite::params![now_ms() - ago, name, workspace],
+        )
+        .unwrap();
+    assert_eq!(changed, 1, "no {name} of {workspace}");
+}
+
+/// The pull request, opened `ago` milliseconds before now.
+fn opened(mut pull: Value, ago: u64) -> Value {
+    let at = jiff::Timestamp::from_millisecond((now_ms() - ago) as i64).unwrap();
+    pull["createdAt"] = json!(at.to_string());
+    pull
+}
+
 #[test]
 fn a_turn_s_weighted_tokens_follow_the_written_weights() {
     let user = User::new();
@@ -190,10 +227,14 @@ fn a_turn_s_weighted_tokens_follow_the_written_weights() {
     assert_eq!(total["cache_write"], 200, "{total}");
     assert_eq!(total["cache_read"], 10_100, "{total}");
     assert_eq!(total["output"], 300, "{total}");
-    assert_eq!(total["turns"], 2, "{total}");
+    assert_eq!(total["rows"], 2, "{total}");
     assert_eq!(total["missing"], 1, "{total}");
-    // What cache reads weigh, of the whole.
-    assert_eq!(total["cache_read_share"], 1010.0 / 3800.0, "{total}");
+    // The share of the input tokens, raw, that were read from the cache.
+    assert_eq!(
+        total["cache_read_share"],
+        10_100.0 / (1040.0 + 10_100.0 + 200.0),
+        "{total}"
+    );
 }
 
 #[test]
@@ -411,7 +452,7 @@ fn usage_stats_splits_by_tuning() {
         &[pull(1, &with, "MERGED"), pull(2, &without, "MERGED")],
     );
 
-    let groups = stats(&user, "tuning")["groups"].clone();
+    let groups = stats(&user, "tuning")["groups"]["tuning"].clone();
 
     let keys: Vec<&Value> = groups
         .as_array()
@@ -425,7 +466,6 @@ fn usage_stats_splits_by_tuning() {
     assert_eq!(off["tasks"]["cost_per_merged_task"], 900.0, "{groups}");
     assert_eq!(on["weighted"], 405.0, "{groups}");
     assert_eq!(on["tasks"]["cost_per_merged_task"], 400.0, "{groups}");
-    assert_eq!(on["tasks"]["main"], 5.0, "{groups}");
 }
 
 #[test]
@@ -440,7 +480,7 @@ fn usage_by_day_gives_every_day_of_the_period() {
         }],
     );
 
-    let groups = stats(&user, "day")["groups"].clone();
+    let groups = stats(&user, "day")["groups"]["day"].clone();
 
     let today = jiff::Zoned::now().date();
     let days: Vec<(Value, Value)> = groups
@@ -479,7 +519,318 @@ fn flottille_usage_json_says_the_tasks_of_the_last_days() {
         String::from_utf8_lossy(&output.stderr)
     );
     let said: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(said["by"], "day", "{said}");
-    assert_eq!(said["groups"].as_array().unwrap().len(), 7, "{said}");
+    assert_eq!(said["by"], json!(["day"]), "{said}");
+    assert_eq!(said["groups"]["day"].as_array().unwrap().len(), 7, "{said}");
     assert_eq!(said["total"]["tasks"]["main"], 12.0, "{said}");
+}
+
+#[test]
+fn a_reused_workspace_name_gives_the_merge_to_the_later_task_only() {
+    let user = user();
+    project(&user, true);
+    workspace(&user, "fix-login");
+    backdate(&user, "workspace.created", "fix-login", 3 * DAY);
+    remove(&user, "fix-login");
+    backdate(&user, "workspace.removed", "fix-login", 2 * DAY);
+    let branch = workspace(&user, "fix-login");
+    backdate(&user, "workspace.created", "fix-login", DAY);
+    record(
+        &user,
+        &[
+            Turn {
+                workspace: Some("fix-login"),
+                ago: 3 * DAY - HOUR,
+                counts: weighing(400_000),
+                ..Turn::default()
+            },
+            Turn {
+                workspace: Some("fix-login"),
+                ago: DAY - HOUR,
+                counts: weighing(600_000),
+                ..Turn::default()
+            },
+        ],
+    );
+    // Opened by the second task: the first one, removed before, merged nothing.
+    pulls(&user, &[opened(pull(1, &branch, "MERGED"), HOUR)]);
+
+    let tasks = stats(&user, "model")["total"]["tasks"].clone();
+    let week = {
+        let today = jiff::Zoned::now().date();
+        user.call(
+            "usage.stats",
+            json!({"since": today.checked_sub(jiff::Span::new().days(6)).unwrap().to_string(),
+                "until": today.to_string(), "by": "model"}),
+        )
+        .unwrap()["total"]["tasks"]
+            .clone()
+    };
+
+    // Over the last days: the merged task brings its 600k, the failed one its 400k against it.
+    assert_eq!(
+        week["merged"],
+        json!({"count": 1, "weighted": 600_000.0}),
+        "{week}"
+    );
+    assert_eq!(
+        week["failed"],
+        json!({"count": 1, "weighted": 400_000.0}),
+        "{week}"
+    );
+    assert_eq!(week["cost_per_merged_task"], 1_000_000.0, "{week}");
+    // Since yesterday: the failure ended before, the merge in it.
+    assert_eq!(tasks["failed"]["count"], 0, "{tasks}");
+    assert_eq!(tasks["cost_per_merged_task"], 600_000.0, "{tasks}");
+}
+
+#[test]
+fn a_merge_of_the_earlier_task_is_not_the_later_task_s() {
+    let user = user();
+    project(&user, true);
+    let branch = workspace(&user, "fix-login");
+    backdate(&user, "workspace.created", "fix-login", 3 * DAY);
+    record(
+        &user,
+        &[Turn {
+            workspace: Some("fix-login"),
+            ago: 3 * DAY - HOUR,
+            counts: weighing(400_000),
+            ..Turn::default()
+        }],
+    );
+    // Opened by the first task, before the name was made again.
+    pulls(&user, &[opened(pull(1, &branch, "MERGED"), 2 * DAY)]);
+    remove(&user, "fix-login");
+    workspace(&user, "fix-login");
+    record(
+        &user,
+        &[Turn {
+            workspace: Some("fix-login"),
+            counts: weighing(600_000),
+            ..Turn::default()
+        }],
+    );
+    pulls(&user, &[opened(pull(1, &branch, "MERGED"), 2 * DAY)]);
+
+    let tasks = tasks(&user);
+
+    assert_eq!(
+        tasks["merged"],
+        json!({"count": 1, "weighted": 400_000.0}),
+        "{tasks}"
+    );
+    assert_eq!(
+        tasks["in_progress"],
+        json!({"count": 1, "weighted": 600_000.0}),
+        "{tasks}"
+    );
+    assert_eq!(tasks["cost_per_merged_task"], 400_000.0, "{tasks}");
+}
+
+#[test]
+fn a_task_that_started_before_the_period_brings_its_whole_cost() {
+    let user = user();
+    project(&user, true);
+    let branch = workspace(&user, "login");
+    backdate(&user, "workspace.created", "login", 3 * DAY);
+    record(
+        &user,
+        &[
+            Turn {
+                workspace: Some("login"),
+                ago: 3 * DAY - HOUR,
+                counts: weighing(1000),
+                ..Turn::default()
+            },
+            Turn {
+                workspace: Some("login"),
+                counts: weighing(200),
+                ..Turn::default()
+            },
+        ],
+    );
+    pulls(&user, &[opened(pull(1, &branch, "MERGED"), 2 * DAY)]);
+
+    let today = today(&user, "model");
+
+    // The totals are the period's turns; the task merged in it, all of its own.
+    assert_eq!(today["total"]["weighted"], 200.0, "{today}");
+    let tasks = &today["total"]["tasks"];
+    assert_eq!(
+        tasks["merged"],
+        json!({"count": 1, "weighted": 1200.0}),
+        "{tasks}"
+    );
+    assert_eq!(tasks["cost_per_merged_task"], 1200.0, "{tasks}");
+}
+
+#[test]
+fn a_task_is_in_one_tuning_group() {
+    let user = user();
+    project(&user, true);
+    let mixed = workspace(&user, "mixed");
+    let alone = workspace(&user, "alone");
+    record(
+        &user,
+        &[
+            Turn {
+                workspace: Some("mixed"),
+                counts: weighing(100),
+                ..Turn::default()
+            },
+            Turn {
+                workspace: Some("mixed"),
+                tuning: "unchanged",
+                counts: weighing(300),
+                ..Turn::default()
+            },
+            Turn {
+                workspace: Some("alone"),
+                tuning: "unchanged",
+                counts: weighing(50),
+                ..Turn::default()
+            },
+        ],
+    );
+    pulls(
+        &user,
+        &[pull(1, &mixed, "MERGED"), pull(2, &alone, "MERGED")],
+    );
+
+    let stats = user
+        .call(
+            "usage.stats",
+            json!({"since": jiff::Zoned::now().date().to_string(),
+                "until": jiff::Zoned::now().date().to_string(), "by": ["tuning", "model"]}),
+        )
+        .unwrap();
+
+    let groups: Vec<(Value, Value, Value)> = stats["groups"]["tuning"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|g| (g["key"].clone(), g["weighted"].clone(), g["tasks"].clone()))
+        .collect();
+    let merged = |count: u64, weighted: f64| {
+        json!({"merged": {"count": count, "weighted": weighted},
+            "failed": {"count": 0, "weighted": 0.0},
+            "cost_per_merged_task": if count == 0 { Value::Null } else { json!(weighted / count as f64) }})
+    };
+    // The tokens by what was on during each turn; each task once, in its own group.
+    assert_eq!(
+        groups,
+        [
+            (json!("unchanged"), json!(350.0), merged(1, 50.0)),
+            (json!(""), json!(100.0), merged(0, 0.0)),
+            (json!("mixed"), json!(0.0), merged(1, 400.0)),
+        ],
+        "{stats}"
+    );
+    // By model, the tokens alone: the ratio is the whole period's.
+    assert_eq!(stats["groups"]["model"][0]["tasks"], Value::Null, "{stats}");
+    assert_eq!(
+        stats["total"]["tasks"]["cost_per_merged_task"], 225.0,
+        "{stats}"
+    );
+}
+
+/// A project `app` of two repositories: `api`, whose forge is declared, and `web`, without one.
+fn two_repositories(user: &User) {
+    for name in ["api", "web"] {
+        let dir = user.path(&format!("work/app/{name}"));
+        user.git_init(&dir);
+        std::fs::write(dir.join("README.md"), format!("{name}\n")).unwrap();
+        user.git(&dir, &["add", "."]);
+        user.git(&dir, &["commit", "--quiet", "-m", "start"]);
+    }
+    user.git(
+        &user.path("work/app/api"),
+        &["remote", "add", "origin", "git@github.com:acme/api.git"],
+    );
+    user.call(
+        "project.add",
+        json!({"folder": user.path("work/app"), "name": "app"}),
+    )
+    .unwrap();
+    forge(user, true);
+}
+
+/// Declares the forge of `api`, or takes it away.
+fn forge(user: &User, declared: bool) {
+    let api = match declared {
+        true => json!({"path": "api", "forge": {"kind": "github", "repository": "acme/api"}}),
+        false => json!({"path": "api"}),
+    };
+    user.call(
+        "project.set_settings",
+        json!({"name": "app", "repositories": [api, {"path": "web"}]}),
+    )
+    .unwrap();
+}
+
+/// Makes the workspace `name` of `app` on `repositories` alone.
+fn workspace_on(user: &User, name: &str, repositories: &[&str]) -> String {
+    let made = user
+        .call(
+            "workspace.create",
+            json!({"project": "app", "name": name, "offline": true,
+                "repositories": repositories}),
+        )
+        .unwrap();
+    made["branch"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{made}"))
+        .to_owned()
+}
+
+#[test]
+fn a_task_in_a_repository_without_a_forge_is_left_out_of_the_ratio_in_a_mixed_project() {
+    let user = user();
+    two_repositories(&user);
+    let api = workspace_on(&user, "api-work", &["api"]);
+    workspace_on(&user, "web-work", &["web"]);
+    workspace_on(&user, "api-lost", &["api"]);
+    record(
+        &user,
+        &[
+            Turn {
+                workspace: Some("api-work"),
+                counts: weighing(1000),
+                ..Turn::default()
+            },
+            Turn {
+                workspace: Some("web-work"),
+                counts: weighing(70),
+                ..Turn::default()
+            },
+            Turn {
+                workspace: Some("api-lost"),
+                counts: weighing(500),
+                ..Turn::default()
+            },
+        ],
+    );
+    remove(&user, "web-work");
+    remove(&user, "api-lost");
+    pulls(&user, &[pull(1, &api, "MERGED")]);
+
+    let tasks = tasks(&user);
+
+    // Removed in a repository no forge says anything of: no failure, its cost alone.
+    assert_eq!(
+        tasks["no_forge"],
+        json!({"count": 1, "weighted": 70.0}),
+        "{tasks}"
+    );
+    assert_eq!(
+        tasks["failed"],
+        json!({"count": 1, "weighted": 500.0}),
+        "{tasks}"
+    );
+    assert_eq!(tasks["cost_per_merged_task"], 1500.0, "{tasks}");
+
+    // The forge taken away later, its items forgotten: what was known stays.
+    forge(&user, false);
+    let after = self::tasks(&user);
+    assert_eq!(after, tasks);
 }
