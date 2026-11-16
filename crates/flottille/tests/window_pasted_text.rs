@@ -635,7 +635,7 @@ fn the_daemon_names_a_pasted_text_itself_whatever_the_client_says() {
     let prompt = send_texts(
         &user,
         &lead,
-        &format!("see [Pasted text 1: {crafted}]"),
+        "see [Pasted text 1: pasted-text.txt]",
         json!([{"name": crafted, "text": "the log"}]),
     );
 

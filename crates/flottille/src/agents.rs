@@ -691,7 +691,8 @@ fn keep_texts(
             ));
         }
         written.push(pasted::Written {
-            name: upload.name.clone(),
+            // The daemon's name, never the client's: the marker the agent reads is Flottille's.
+            name: pasted::NAME.into(),
             bytes: text.len(),
             path: path.to_string_lossy().into_owned(),
         });

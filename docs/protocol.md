@@ -1604,8 +1604,9 @@ message marks each one by `[Pasted text N: <name>]`, `N` counted from 1 in the m
 text takes the first marker numbered k; a text without one is marked after the text). The daemon
 masks the text as it masks every delivered text, writes it whole, never cut, as
 `<stamp>-text-<n>.txt` in the agent's folder beside its images, and says in the message, in the
-marker's place, where the agent reads it with its own read tool: `[Pasted text N: <name> · <bytes>
-bytes · read it at <path>]` (the `delivery` and the `agent.prompted` event keep the message so).
+marker's place, where the agent reads it with its own read tool: `[Pasted text N: pasted-text.txt
+· <bytes> bytes · read it at <path>]` (the `delivery` and the `agent.prompted` event keep the
+message so). The name it says is always the daemon's, `pasted-text.txt`, whatever `name` holds.
 A message carries 20 texts at most, 5 MiB each (`refused` for more, an empty text, or one too
 big); a text with no marker is marked after the message; with texts, the message may be empty. The
 files go with the images of the agent. `agent.start` takes `texts` as it takes `images`.
