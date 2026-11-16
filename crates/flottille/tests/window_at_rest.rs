@@ -1551,6 +1551,101 @@ fn the_window_draws_no_frame_at_rest_with_chips_in_the_composer_and_a_message(
     );
 }
 
+/// #1000: a message's pictures opened in the viewer, zoomed and back, at rest each time.
+#[gpui_kit::test]
+fn the_window_draws_no_frame_at_rest_on_the_picture_viewer_open_zoomed_and_back(
+    cx: &mut TestAppContext,
+) {
+    let user = User::with_fake_agent();
+    user.fake_script(json!({"images": true}));
+    let id = idle_session(&user);
+    let pictures: Vec<_> = [(900, 600), (300, 200)]
+        .into_iter()
+        .map(|(w, h)| {
+            let mut out = std::io::Cursor::new(Vec::new());
+            image::RgbImage::from_pixel(w, h, image::Rgb([200, 80, 40]))
+                .write_to(&mut out, image::ImageFormat::Png)
+                .unwrap();
+            use base64::Engine as _;
+            let data = base64::engine::general_purpose::STANDARD.encode(out.into_inner());
+            json!({"mime": "image/png", "data": data})
+        })
+        .collect();
+    user.call(
+        "agent.send",
+        json!({"agent": id, "message": "look at these", "images": pictures}),
+    )
+    .unwrap();
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the session is in the tree", |cx| {
+        cx.update(|window, _| window.try_find(session_id(&id)).is_some())
+    });
+    settle(&shell, cx);
+    cx.update(|window, cx| window.click(session_id(&id), cx));
+    let message = |shell: &Entity<Shell>, cx: &mut VisualTestContext| {
+        shell.read_with(cx, |s, cx| {
+            s.main().read(cx).session_page().and_then(|page| {
+                page.read(cx)
+                    .conversation()
+                    .read(cx)
+                    .blocks()
+                    .iter()
+                    .position(|b| {
+                        matches!(b, flottille_window::conversation::Block::Message { images, .. }
+                        if images.len() == 2)
+                    })
+            })
+        })
+    };
+    until(&shell, cx, "the message shows with its pictures", |cx| {
+        message(&shell, cx).is_some()
+    });
+    settle(&shell, cx);
+    let at = message(&shell, cx).unwrap();
+    cx.update(|window, cx| window.blur(cx));
+    cx.update(|window, cx| window.click(format!("row-{at}-image-0"), cx));
+    settle(&shell, cx);
+    assert!(cx.update(|window, _| window.try_find("picture-modal").is_some()));
+    assert_eq!(
+        frames_at_rest(&shell, cx),
+        (0, 0),
+        "open: (frames drawn, frames asked)"
+    );
+
+    cx.simulate_keystrokes("+ +");
+    settle(&shell, cx);
+    assert_eq!(
+        frames_at_rest(&shell, cx),
+        (0, 0),
+        "zoomed: (frames drawn, frames asked)"
+    );
+
+    cx.simulate_keystrokes("right");
+    settle(&shell, cx);
+    assert_eq!(
+        frames_at_rest(&shell, cx),
+        (0, 0),
+        "on the next picture: (frames drawn, frames asked)"
+    );
+
+    cx.simulate_keystrokes("0");
+    settle(&shell, cx);
+    assert_eq!(
+        frames_at_rest(&shell, cx),
+        (0, 0),
+        "back to fit: (frames drawn, frames asked)"
+    );
+
+    cx.simulate_keystrokes("escape");
+    settle(&shell, cx);
+    assert!(cx.update(|window, _| window.try_find("picture-modal").is_none()));
+    assert_eq!(
+        frames_at_rest(&shell, cx),
+        (0, 0),
+        "closed: (frames drawn, frames asked)"
+    );
+}
+
 #[gpui_kit::test]
 fn the_window_draws_no_frame_at_rest_on_a_project_s_progress_with_a_milestone_unfolded(
     cx: &mut TestAppContext,
