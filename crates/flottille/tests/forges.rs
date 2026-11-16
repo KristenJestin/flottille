@@ -1198,7 +1198,11 @@ fn a_rerun_replaces_the_failed_run_in_the_count() {
         &now_text(),
         json!(statuses),
         json!([
-            cloud_pipeline(44, "rerun", HEAD, "SUCCESSFUL"),
+            // Still running, as its `INPROGRESS` status says (a finished one would settle it).
+            in_state(
+                cloud_pipeline(44, "rerun", HEAD, "SUCCESSFUL"),
+                json!({"name": "IN_PROGRESS", "stage": {"name": "RUNNING"}})
+            ),
             cloud_pipeline(41, "pull request", HEAD, "FAILED")
         ]),
     );
