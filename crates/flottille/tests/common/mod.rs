@@ -961,7 +961,9 @@ fn command_for(program: &Path, dir: &Path, env: &[(String, String)], args: &[&st
         )
         // No round of the items unless a test asks for it (`with_fetcher`).
         .env("FLOTTILLE_TEST_NO_FETCH", "1")
-        .env_remove("TMUX");
+        .env_remove("TMUX")
+        // Never the machine's SSH agent: a test that lends one sets its own (`with_env`).
+        .env_remove("SSH_AUTH_SOCK");
     // No sign-in of the machine: a provider is signed in only where a test says so, and the
     // daemon picks no Auto judge on the strength of the developer's own.
     for name in SIGN_INS {
