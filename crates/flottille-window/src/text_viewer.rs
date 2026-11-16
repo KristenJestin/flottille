@@ -166,6 +166,23 @@ mod tests {
     }
 
     #[test]
+    fn a_cut_one_to_three_bytes_before_a_multi_byte_character_draws_no_empty_row() {
+        for character in ["é", "€", "🙂"] {
+            for room in 1..character.len() {
+                let mut viewer = TextViewer::new();
+                let text = format!("{}\n{character}b\nz\nz\n", "a".repeat(MAX_BYTES - room));
+                viewer.read("pasted-text.txt", &text);
+                assert_eq!(
+                    viewer.lines.len(),
+                    1,
+                    "{room} byte(s) left before {character:?}: the rows drawn"
+                );
+                assert!(viewer.cut);
+            }
+        }
+    }
+
+    #[test]
     fn a_text_drawn_whole_says_its_size_only() {
         let mut viewer = TextViewer::new();
         viewer.read("pasted-text.txt", "one\ntwo\n");
