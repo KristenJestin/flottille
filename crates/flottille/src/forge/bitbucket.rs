@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 use super::ending::{Ending, Rerun};
 use super::{
     Branch, Comment, Deletion, Forge, ForgeCall, Gh, MERGE_METHODS, Pull, Reviewer, Seen, after,
-    blocks, commit_hash, masked, method_refused, run,
+    blocks, commit_hash, gh_time, masked, method_refused, run, run_within,
 };
 use crate::daemon::Daemon;
 use crate::mcp::Outcome;
@@ -34,15 +34,52 @@ const DIFFSTAT: usize = 500;
 
 /// `bkt <args>`: whether it succeeded, its output and its errors.
 async fn bkt(args: &[&str]) -> Result<(bool, String, String), Gh> {
-    run(
-        "bkt",
-        &[("NO_COLOR", "1")],
-        // It would print its requests, headers included.
-        &["BKT_HTTP_DEBUG"],
-        args,
-    )
-    .await
+    run("bkt", BKT_SET, BKT_REMOVE, args).await
 }
+
+/// What `bkt` is run with: no colour in what it prints.
+const BKT_SET: &[(&str, &str)] = &[("NO_COLOR", "1")];
+/// What `bkt` is run without: it would print its requests, headers included.
+const BKT_REMOVE: &[&str] = &["BKT_HTTP_DEBUG"];
+
+/// What `bkt pr merge` came to.
+enum Merging {
+    Merged,
+    /// It answered an error: what it said, masked.
+    Refused(String),
+    /// It did not answer in time, which says nothing of what the server did.
+    Slow,
+    /// It could not run.
+    Failed(String),
+}
+
+/// `bkt pr merge`, with a call that outlasts the time of the forge's calls told from one the
+/// server refused.
+async fn merging(args: &[&str]) -> Merging {
+    match run_within("bkt", gh_time(), BKT_SET, BKT_REMOVE, args).await {
+        Ok(Some((true, ..))) => Merging::Merged,
+        Ok(Some((false, stdout, stderr))) => {
+            // The whole message, as the server's reason may take several lines, and what it says
+            // on its output when it says nothing on its errors.
+            let said = if stderr.trim().is_empty() {
+                &stdout
+            } else {
+                &stderr
+            };
+            let said = masked(said.trim())
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            Merging::Refused(said.chars().take(MERGE_SAID).collect())
+        }
+        Ok(None) => Merging::Slow,
+        Err(Gh::Missing) => Merging::Failed(missing()),
+        Err(Gh::Failed(why)) => Merging::Failed(format!("bkt pr merge: {why}")),
+    }
+}
+
+/// How much of what a refused `bkt pr merge` said is kept.
+const MERGE_SAID: usize = 600;
 
 /// `bkt <args>`'s output, or a sentence saying why there is none, masked.
 pub(super) async fn text(args: &[&str]) -> Result<String, String> {
@@ -1154,12 +1191,13 @@ fn strategy(forge: &Forge, method: &str) -> Option<&'static str> {
 /// The methods the repository allows its pull request `id` to be merged by: Cloud says them on
 /// the pull request's destination branch, Data Center in the repository's pull request settings.
 /// Then the strategies it allows that no method reaches (`ff`, `squash-ff-only`, `fast_forward`…),
-/// as it names them.
+/// as it names them. None when the repository does not say its strategies (the field is absent or
+/// empty, and a shape that is assumed is not taken for "none allowed").
 async fn allowed(
     forge: &Forge,
     context: &str,
     id: &str,
-) -> Result<(Vec<&'static str>, Vec<String>), String> {
+) -> Result<Option<(Vec<&'static str>, Vec<String>)>, String> {
     let Forge::Bitbucket { owner, name, .. } = forge else {
         unreachable!()
     };
@@ -1182,6 +1220,9 @@ async fn allowed(
             .filter_map(|s| s["id"].as_str().map(str::to_owned))
             .collect()
     };
+    if strategies.is_empty() {
+        return Ok(None);
+    }
     let reached = |strategy: &String| {
         MERGE_METHODS
             .into_iter()
@@ -1192,7 +1233,7 @@ async fn allowed(
         .into_iter()
         .filter(|method| strategy(forge, method).is_some_and(|s| strategies.iter().any(|t| t == s)))
         .collect();
-    Ok((methods, others))
+    Ok(Some((methods, others)))
 }
 
 /// The path of a Cloud repository, for `bkt api`.
@@ -1778,20 +1819,49 @@ pub(super) async fn write(
                 flags.extend(["--message", message.as_str()]);
             }
             let args = command(forge, context, &["pr", "merge", &number], &flags);
-            match text(&args).await {
-                Ok(_) => Outcome::Done(format!(
+            match merging(&args).await {
+                Merging::Merged => Outcome::Done(format!(
                     "The pull request #{number} of {branch} was merged by {method} into {base} \
                      in {slug}{}.",
                     kept.said(branch)
                 )),
-                // Refused by the server: when the repository forbids the method, say which ones
-                // it allows.
-                Err(why) => match allowed(forge, context, &number).await {
-                    Ok((allowed, others)) if !allowed.contains(&method) => {
-                        method_refused(&slug, method, &allowed, &others)
+                Merging::Failed(why) => Outcome::Failed(why),
+                // It may have gone through: the page of the pull request tells before anything
+                // else is said.
+                Merging::Slow => {
+                    let slow = format!("the merge did not answer within {} s", gh_time().as_secs());
+                    let check = "it may have happened; check the pull request";
+                    match page_now(forge, pull.id).await {
+                        Ok(("merged", _)) => Outcome::Done(format!(
+                            "The pull request #{number} of {branch} was merged into {base} in \
+                             {slug}: {slow}, and its page, read back, says merged."
+                        )),
+                        Ok((state, _)) => Outcome::Failed(format!(
+                            "{slow}: {check}; its page, read back, says the pull request \
+                             #{number} is still {state}, so it was not merged (yet)"
+                        )),
+                        Err(why) => Outcome::Failed(format!(
+                            "{slow}: {check}; the pull request #{number} could not be read \
+                             back to tell whether it merged ({why})"
+                        )),
                     }
-                    _ => Outcome::Failed(why),
-                },
+                }
+                // Refused by the server: what it said comes first, then Flottille's reading of
+                // it, from the methods the repository allows.
+                Merging::Refused(said) => {
+                    let said = format!("bkt pr merge failed: {said}");
+                    match allowed(forge, context, &number).await {
+                        Ok(Some((allowed, others))) if !allowed.contains(&method) => {
+                            let reading = method_refused(&slug, method, &allowed, &others);
+                            Outcome::Refused(format!("refused: {said}; {reading}"))
+                        }
+                        Ok(Some(_)) => Outcome::Failed(said),
+                        _ => Outcome::Failed(format!(
+                            "{said}; which merge methods the repository allows could not be \
+                             read"
+                        )),
+                    }
+                }
             }
         }
         "checks" => {
