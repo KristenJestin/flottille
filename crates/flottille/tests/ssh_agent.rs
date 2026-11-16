@@ -48,7 +48,8 @@ fn socket_at(user: &User, agent: &str) -> PathBuf {
 /// A fake `ssh` first in the user's `PATH`: each call adds to `ssh-said` whether it reached the
 /// socket its `SSH_AUTH_SOCK` names (`reached <path>`, `refused <path>`, `no agent`), then whether
 /// it reached the session bus (`bus reached`, `bus refused`) and could list the runtime folder
-/// (`listed`, `not listed`), and serves git's own call from `remotes/<name>`, whatever the host.
+/// (`listed`, `not listed`), its arguments (`args …`) and the `maintenance.auto` git reads in its
+/// environment, and serves git's own call from `remotes/<name>`, whatever the host.
 fn fake_ssh(user: User) -> User {
     std::fs::create_dir(user.path("ssh-bin")).unwrap();
     let said = user.path("ssh-said");
@@ -63,6 +64,8 @@ fn fake_ssh(user: User) -> User {
          else echo 'bus refused' >> '{said}'; fi\n\
          if ls '{runtime}' >/dev/null 2>&1; then echo listed >> '{said}'\n\
          else echo 'not listed' >> '{said}'; fi\n\
+         echo \"args $*\" >> '{said}'\n\
+         echo \"maintenance.auto=$(git config --get maintenance.auto)\" >> '{said}'\n\
          for last; do :; done\n\
          service=${{last%% *}}\n\
          repository=$(basename \"$(echo \"${{last#* }}\" | tr -d \"'\")\")\n\
@@ -533,4 +536,232 @@ fn a_push_whose_options_do_not_read_is_not_probed() {
         answer.text
     );
     assert!(!remote_has(&user, "optioned"), "{}", answer.text);
+}
+
+#[test]
+fn a_push_to_a_local_repository_never_reaches_the_ssh_agent() {
+    let (user, _agent, _bus) = user();
+    let mcp = session(&user, SSH_REMOTE);
+    // A bare repository of the agent's, whose receive-pack runs a command of its config with
+    // the environment of the push that reaches it.
+    let scratch = user.path("work/app/scratch.git");
+    user.git(
+        &user.path(""),
+        &["init", "--quiet", "--bare", scratch.to_str().unwrap()],
+    );
+    std::fs::write(
+        scratch.join("objects/info/alternates"),
+        format!("{}\n", user.path("remotes/app.git/objects").display()),
+    )
+    .unwrap();
+    let recorded = user.path("alternate-refs");
+    script(
+        &user.path("work/app/alternate.sh"),
+        &format!(
+            "echo \"agent=$SSH_AUTH_SOCK\" >> '{}'\n",
+            recorded.display()
+        ),
+    );
+    user.git(
+        &scratch,
+        &[
+            "config",
+            "core.alternateRefsCommand",
+            user.path("work/app/alternate.sh").to_str().unwrap(),
+        ],
+    );
+
+    let answer = line(
+        &user,
+        &mcp,
+        "git push ./scratch.git HEAD:refs/heads/scratched",
+    );
+
+    let said = std::fs::read_to_string(&recorded).unwrap_or_default();
+    assert!(
+        !said.contains(socket(&user).to_str().unwrap()),
+        "{said:?}: {}",
+        answer.text
+    );
+}
+
+#[test]
+fn a_push_with_exec_path_is_refused() {
+    let (user, _agent, _bus) = user();
+    let mcp = session(&user, SSH_REMOTE);
+    let planted = user.path("planted");
+    let git = String::from_utf8(
+        std::process::Command::new("sh")
+            .args(["-c", "command -v git"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    script(
+        &user.path("work/app/bin/git"),
+        &format!(
+            "echo \"$* agent=$SSH_AUTH_SOCK\" >> '{}'\nexec {} \"$@\"\n",
+            planted.display(),
+            git.trim()
+        ),
+    );
+
+    for push in [
+        format!(
+            "git --exec-path={} push origin HEAD:refs/heads/exec",
+            user.path("work/app/bin").display()
+        ),
+        format!(
+            "git --exec-path {} push origin HEAD:refs/heads/exec",
+            user.path("work/app/bin").display()
+        ),
+    ] {
+        let answer = line(&user, &mcp, &push);
+
+        assert!(answer.error, "{push}: {}", answer.text);
+        assert!(
+            answer.text.contains("--exec-path"),
+            "{push}: {}",
+            answer.text
+        );
+        assert!(
+            answer.text.contains("nothing was pushed"),
+            "{push}: {}",
+            answer.text
+        );
+    }
+    assert!(!remote_has(&user, "exec"));
+    let said = std::fs::read_to_string(&planted).unwrap_or_default();
+    assert!(!said.contains(socket(&user).to_str().unwrap()), "{said:?}");
+}
+
+#[test]
+fn a_push_from_another_repository_is_refused() {
+    let (user, _agent, _bus) = user();
+    let mcp = session(&user, SSH_REMOTE);
+    // A repository of the agent's inside the project, whose remote no one checked.
+    let other = user.path("work/app/vendor/other");
+    user.git_init(&other);
+    std::fs::write(other.join("README.md"), "other\n").unwrap();
+    user.git(&other, &["add", "README.md"]);
+    user.git(&other, &["commit", "--quiet", "-m", "other"]);
+    user.git(&other, &["remote", "add", "origin", SSH_REMOTE]);
+
+    for push in [
+        format!(
+            "git --git-dir={} push origin HEAD:refs/heads/other",
+            other.join(".git").display()
+        ),
+        format!(
+            "git --git-dir {} push origin HEAD:refs/heads/other",
+            other.join(".git").display()
+        ),
+        format!(
+            "git --work-tree={} push origin HEAD:refs/heads/other",
+            other.display()
+        ),
+        "git -C vendor/other push origin HEAD:refs/heads/other".to_owned(),
+        "git -C .. push origin HEAD:refs/heads/other".to_owned(),
+    ] {
+        let answer = line(&user, &mcp, &push);
+
+        assert!(answer.error, "{push}: {}", answer.text);
+        assert!(
+            answer.text.contains("nothing was pushed"),
+            "{push}: {}",
+            answer.text
+        );
+        assert!(!remote_has(&user, "other"), "{push}");
+    }
+}
+
+#[test]
+fn a_push_with_c_inside_its_repository_goes() {
+    let (user, _agent, _bus) = user();
+    let mcp = session(&user, SSH_REMOTE);
+    std::fs::create_dir_all(user.path("work/app/src")).unwrap();
+
+    let pushed = done(line(
+        &user,
+        &mcp,
+        "git -C src --no-pager push origin HEAD:refs/heads/inside",
+    ));
+
+    assert!(pushed.contains("exited with code 0"), "{pushed}");
+    assert!(remote_has(&user, "inside"));
+}
+
+#[test]
+fn a_push_runs_the_git_found_at_the_start() {
+    let (user, _agent, _bus) = user();
+    let planted = user.path("planted");
+    let git = String::from_utf8(
+        std::process::Command::new("sh")
+            .args(["-c", "command -v git"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    // A `git` of the user's own `~/.local/bin`, which an agent could write, earlier on `PATH`:
+    // it does what git does, and says when it pushes.
+    script(
+        &user.path("home/.local/bin/git"),
+        &format!(
+            "if [ \"$1\" = push ]; then echo \"agent=$SSH_AUTH_SOCK\" >> '{}'; fi\n\
+             exec {} \"$@\"\n",
+            planted.display(),
+            git.trim()
+        ),
+    );
+    let path = format!(
+        "{}:{}:{}",
+        user.path("home/.local/bin").display(),
+        user.path("ssh-bin").display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let user = user.with_env("PATH", &path);
+    let mcp = session(&user, SSH_REMOTE);
+
+    let pushed = done(mcp.call(
+        "run",
+        json!({"line": "git push origin HEAD:refs/heads/allowed"}),
+    ));
+
+    assert!(pushed.contains("exited with code 0"), "{pushed}");
+    assert!(remote_has(&user, "allowed"));
+    let said = std::fs::read_to_string(&planted).unwrap_or_default();
+    assert!(!said.contains(socket(&user).to_str().unwrap()), "{said:?}");
+    let reached = format!("reached {}", socket(&user).display());
+    assert!(ssh_said(&user).contains(&reached), "{:?}", ssh_said(&user));
+}
+
+#[test]
+fn a_lent_push_shares_no_ssh_connection_and_runs_no_maintenance() {
+    let (user, _agent, _bus) = user();
+    let mcp = session(&user, SSH_REMOTE);
+
+    let pushed = done(mcp.call(
+        "run",
+        json!({"line": "git push origin HEAD:refs/heads/allowed"}),
+    ));
+
+    assert!(pushed.contains("exited with code 0"), "{pushed}");
+    let said = ssh_said(&user);
+    let args = said
+        .iter()
+        .find(|said| said.starts_with("args "))
+        .unwrap_or_else(|| panic!("{said:?}"));
+    for option in [
+        "-o ControlMaster=no",
+        "-o ControlPath=none",
+        "-o PermitLocalCommand=no",
+    ] {
+        assert!(args.contains(option), "{option}: {args}");
+    }
+    assert!(
+        said.contains(&"maintenance.auto=false".to_owned()),
+        "{said:?}"
+    );
 }
