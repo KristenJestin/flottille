@@ -1120,7 +1120,12 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
                 && flottille_runs(&daemon, &name)
                 && let Some(said) = needed_now_said(&daemon, &name)
             {
-                return Err(Failure::new("needed", format!("Stop {name}? {said}")));
+                let needed_by: Vec<String> = needed_now(&daemon, &name)
+                    .into_iter()
+                    .map(|(said, _)| said)
+                    .collect();
+                return Err(Failure::new("needed", format!("Stop {name}? {said}"))
+                    .with_data(json!({ "needed_by": needed_by })));
             }
             stop(&daemon, &name).await?;
             let services = load(&daemon)?;

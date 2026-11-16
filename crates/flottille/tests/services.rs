@@ -1716,6 +1716,17 @@ impl Drop for Ended {
     }
 }
 
+/// The error the daemon answers `method` with, whole.
+fn error_of(user: &User, method: &str, params: Value) -> Value {
+    let mut stream =
+        std::os::unix::net::UnixStream::connect(user.path("runtime/flottille/daemon.sock"))
+            .unwrap();
+    let request = json!({"id": "1", "method": method, "params": params});
+    std::io::Write::write_all(&mut stream, format!("{request}\n").as_bytes()).unwrap();
+    let answer: Value = serde_json::from_str(&common::read_line_patiently(stream)).unwrap();
+    answer["error"].clone()
+}
+
 #[test]
 fn a_need_through_another_service_counts() {
     let user = User::new();
@@ -1739,6 +1750,13 @@ fn a_need_through_another_service_counts() {
     assert_eq!(code, "needed", "{why}");
     assert!(why.contains("app's api"), "{why}");
     assert!(why.contains("the service file"), "{why}");
+    // What needs it, as data too: a client draws it without reading the sentence.
+    let error = error_of(&user, "service.stop", json!({"name": "mongo"}));
+    assert_eq!(
+        error["data"]["needed_by"],
+        json!(["app's api", "the service file"]),
+        "{error}"
+    );
     assert_eq!(show(&user, "mongo")["state"], "ready");
     let now = show(&user, "mongo")["needed_now"].to_string();
     assert!(now.contains("app's api"), "{now}");
