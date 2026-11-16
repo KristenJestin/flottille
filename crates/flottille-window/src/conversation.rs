@@ -147,6 +147,8 @@ pub struct VaultAsk {
     pub username: Option<String>,
     /// The one use it is for.
     pub bound: Option<String>,
+    /// The connection it is for: the entry is every project's.
+    pub connection: Option<String>,
     pub why: String,
     pub open: bool,
 }
@@ -1043,6 +1045,7 @@ impl Conversation {
                     host: data["host"].as_str().map(str::to_owned),
                     username: data["username"].as_str().map(str::to_owned),
                     bound: data["for"].as_str().map(str::to_owned),
+                    connection: data["connection"].as_str().map(str::to_owned),
                     why: text("why"),
                     open: true,
                 })));
