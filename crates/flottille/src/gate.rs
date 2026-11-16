@@ -487,7 +487,9 @@ fn own_pasted_text(call: &Call, path: &Resolved) -> bool {
     let Ok(real) = place::real_path(&folder) else {
         return false;
     };
-    let named = |file: &Path| file.file_name().and_then(|name| name.to_str());
+    fn named(file: &Path) -> Option<&str> {
+        file.file_name().and_then(|name| name.to_str())
+    }
     let name = named(&path.path);
     name.is_some_and(flottille_core::pasted::is_file_name)
         && named(&path.written) == name
