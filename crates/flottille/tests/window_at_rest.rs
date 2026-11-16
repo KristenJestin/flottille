@@ -1463,6 +1463,65 @@ fn the_window_draws_no_frame_at_rest_on_connections_page_and_its_review(cx: &mut
     assert_eq!(frames_at_rest(&shell, cx), (0, 0), "the review");
 }
 
+/// #1015: the form of a URL connection with a plain header and a secret of each place, open.
+#[gpui_kit::test]
+fn the_window_draws_no_frame_at_rest_on_the_connection_form_with_secrets(
+    cx: &mut TestAppContext,
+) {
+    let user = User::with_fake_agent();
+    std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
+    user.call(
+        "extension.set",
+        json!({"name": "connections", "enabled": true}),
+    )
+    .unwrap();
+    for name in ["notes-plain", "notes-key", "notes-query"] {
+        user.call("vault.set", json!({"name": name, "secret": "s3cret-at-rest"}))
+            .unwrap();
+    }
+    user.call(
+        "connection.add",
+        json!({"name": "remote", "about": "A notes server elsewhere.",
+            "url": "https://notes.example.com/mcp",
+            "headers": {"X-Plain": {"vault": "notes-plain"}},
+            "secrets": [
+                {"in": "header", "name": "Authorization", "prefix": "Bearer ", "entry": "notes-key"},
+                {"in": "query", "name": "workspace", "entry": "notes-query"},
+            ]}),
+    )
+    .unwrap();
+    let (shell, cx) = window(&user, cx);
+    cx.update(|window, cx| window.click("settings", cx));
+    until(&shell, cx, "the settings page is shown", |cx| {
+        cx.update(|window, _| window.try_find("settings-tabs-features").is_some())
+    });
+    cx.update(|window, cx| window.click("settings-tabs-features", cx));
+    until(&shell, cx, "Connections is a row", |cx| {
+        cx.update(|window, _| window.try_find("features-connections").is_some())
+    });
+    settle(&shell, cx);
+    cx.update(|window, cx| window.click("features-connections", cx));
+    until(&shell, cx, "the server is listed", |cx| {
+        cx.update(|window, _| window.try_find("connection-remote").is_some())
+    });
+    settle(&shell, cx);
+    cx.update(|window, cx| window.click("connection-more-remote", cx));
+    settle(&shell, cx);
+    cx.update(|window, cx| window.click("edit-connection-remote", cx));
+    until(&shell, cx, "its secrets are in the form", |cx| {
+        cx.update(|window, _| window.try_find("connection-secret-2").is_some())
+    });
+    settle(&shell, cx);
+    // The caret blinks in a field that has the focus: the form at rest has none.
+    cx.update(|window, cx| window.blur(cx));
+    settle(&shell, cx);
+    assert_eq!(
+        frames_at_rest(&shell, cx),
+        (0, 0),
+        "(frames drawn, frames asked)"
+    );
+}
+
 /// #773 and #846: the composer holding a picture's chip and a command's, and a message that shows
 /// its chips in the conversation, at rest.
 #[gpui_kit::test]

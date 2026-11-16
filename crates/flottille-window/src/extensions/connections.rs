@@ -916,6 +916,11 @@ impl ConnectionsSection {
         self.variables.get(at).map(|v| v.name.clone())
     }
 
+    /// The name and prefix fields of the secret's line at `at` of the form.
+    pub fn secret_fields(&self, _at: usize) -> Option<(Entity<InputState>, Entity<InputState>)> {
+        None
+    }
+
     /// The argument and values fields of the limit at `at` of the form.
     pub fn limit_fields(&self, at: usize) -> Option<(Entity<InputState>, Entity<InputState>)> {
         self.limits
