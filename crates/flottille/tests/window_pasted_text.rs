@@ -562,10 +562,7 @@ fn a_hand_typed_marker_stays_text(cx: &mut TestAppContext) {
         .rposition(|b| matches!(b, Block::Message { text, .. } if text.contains("notes.txt")))
         .unwrap();
     assert!(
-        !has(
-            gpui_kit::ElementId::Name(format!("row-{at}-message-tokens").into()),
-            cx
-        ),
+        !has(chip(&format!("row-{at}-message-tokens"), 0), cx),
         "a marker with no pasted file of the message is text, not a chip"
     );
 }
