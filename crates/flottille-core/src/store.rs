@@ -747,6 +747,23 @@ const MIGRATIONS: &[&str] = &[
     -- recorded before reads as none: it is never rewritten.
     ALTER TABLE turn_usage ADD COLUMN tuning TEXT NOT NULL DEFAULT '';
 ",
+    "
+    -- Every pull request seen merged, kept when its item is forgotten (a repository removed, a
+    -- forge taken away): what makes a task a success (`docs/usage.md`). `opened_at` when its
+    -- forge said it, `merged_at` when Flottille first saw it merged.
+    CREATE TABLE merged_pulls (
+        project    TEXT NOT NULL,
+        repository TEXT NOT NULL,
+        key        TEXT NOT NULL,
+        branch     TEXT NOT NULL,
+        opened_at  INTEGER,
+        merged_at  INTEGER NOT NULL,
+        PRIMARY KEY (project, repository, key)
+    ) STRICT;
+    -- A task's turns, whatever the day (`docs/usage.md`), and the workspaces' events alone.
+    CREATE INDEX turn_usage_by_workspace ON turn_usage (project, workspace, started_at);
+    CREATE INDEX events_by_name ON events (name, seq);
+",
 ];
 
 /// How many of each extension's own migrations were applied (`docs/extensions.md`, "Data"): its
@@ -2815,6 +2832,24 @@ impl Store {
                     serde_json::to_string(&item.details)?
                 ],
             )?;
+            if item.kind == "pull"
+                && item.state == "merged"
+                && item.details["cross"] != true
+                && let Some(branch) = item.details["head"].as_str()
+            {
+                transaction.execute(
+                    "INSERT OR IGNORE INTO merged_pulls (project, repository, key, branch, \
+                     opened_at, merged_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![
+                        item.project,
+                        item.repository,
+                        item.key,
+                        branch,
+                        item.details["opened_at"].as_u64(),
+                        now_ms()
+                    ],
+                )?;
+            }
             for (position, check) in item.checks.iter().enumerate() {
                 transaction.execute(
                     "INSERT INTO item_checks (project, kind, repository, key, position, name, \
@@ -3154,18 +3189,53 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// The merged pull requests the items keep, of every project or of `project`: each one's
-    /// project, repository and head branch.
-    pub fn merged_pulls(&self, project: Option<&str>) -> Result<Vec<(String, String, String)>> {
+    /// The rows of the turns in the workspace `workspace` of `project` that started from `from`
+    /// until before `to`: one task's, whatever the period (`docs/usage.md`).
+    pub fn turn_usage_of_workspace(
+        &self,
+        project: &str,
+        workspace: &str,
+        from: u64,
+        to: u64,
+    ) -> Result<Vec<TurnUsage>> {
+        let mut statement = self.connection.prepare_cached(&format!(
+            "SELECT {TURN_USAGE_COLUMNS} FROM turn_usage \
+             WHERE project = ?1 AND workspace = ?2 AND started_at >= ?3 AND started_at < ?4 \
+             ORDER BY id"
+        ))?;
+        let rows = statement.query_map(params![project, workspace, from, to], turn_usage_row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Every pull request seen merged, of every project or of `project`, kept when its item is
+    /// forgotten.
+    pub fn merged_pulls(&self, project: Option<&str>) -> Result<Vec<MergedPull>> {
         let mut statement = self.connection.prepare_cached(
-            "SELECT project, repository, json_extract(details, '$.head') FROM items \
-             WHERE kind = 'pull' AND state = 'merged' AND (?1 IS NULL OR project = ?1) \
-             AND json_extract(details, '$.head') IS NOT NULL",
+            "SELECT project, repository, branch, opened_at, merged_at FROM merged_pulls \
+             WHERE ?1 IS NULL OR project = ?1",
         )?;
         let rows = statement.query_map(params![project], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            Ok(MergedPull {
+                project: row.get(0)?,
+                repository: row.get(1)?,
+                branch: row.get(2)?,
+                opened_at: row.get(3)?,
+                merged_at: row.get(4)?,
+            })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// The workspaces' events (`workspace.created`, `workspace.changed`, `workspace.removed`), of
+    /// every project or of `project`, in order.
+    pub fn workspace_history(&self, project: Option<&str>) -> Result<Vec<Event>> {
+        let mut statement = self.connection.prepare_cached(
+            "SELECT seq, at, name, data FROM events WHERE name IN ('workspace.created', \
+             'workspace.changed', 'workspace.removed') \
+             AND (?1 IS NULL OR json_extract(data, '$.project') = ?1) ORDER BY seq",
+        )?;
+        let rows = statement.query_map(params![project], event_row)?;
+        rows.map(|row| row?).collect()
     }
 
     /// The turns of a session, each once whatever the models it used: its agent and its start and
@@ -3774,6 +3844,19 @@ fn append_agent_event(
         )?;
     }
     Ok(event)
+}
+
+/// A pull request seen merged (`Store::merged_pulls`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MergedPull {
+    pub project: String,
+    pub repository: String,
+    /// Its head.
+    pub branch: String,
+    /// When it was opened, as its forge said it; none when it did not.
+    pub opened_at: Option<u64>,
+    /// When Flottille first saw it merged.
+    pub merged_at: u64,
 }
 
 const TURN_USAGE_COLUMNS: &str = "agent, title, session, project, workspace, provider, role, \

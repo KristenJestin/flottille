@@ -596,6 +596,22 @@ fn keep_details(old: &Item, new: &mut Item) {
     new.checks = old.checks.clone();
 }
 
+/// When a pull request was opened, as its forge said it once: kept in its details, since a read
+/// of it alone does not say it, for the merge to be given to the task that opened it
+/// (`docs/usage.md`).
+fn keep_opened(old: Option<&Item>, fetched: &mut Fetched) {
+    if fetched.item.kind != "pull" {
+        return;
+    }
+    let opened = fetched
+        .created_at
+        .map(Value::from)
+        .or_else(|| old.and_then(|old| old.details.get("opened_at").cloned()));
+    if let Some(opened) = opened {
+        fetched.item.details["opened_at"] = opened;
+    }
+}
+
 /// The cursor after a round that failed, its reading or its writing: it waits twice as long,
 /// saying why.
 fn failed(cursor: &mut Cursor, problem: String) {
@@ -714,6 +730,8 @@ pub fn unseen(
 /// made before that first round.
 pub fn put_live(daemon: &Arc<Daemon>, mut fetched: Fetched) {
     know_posts(daemon, &fetched.item.project.clone(), &mut fetched);
+    // One stored keeps its opening time with the rest of its details.
+    keep_opened(None, &mut fetched);
     let item = &mut fetched.item;
     // Cut as a round cuts it, so that the next round finds no change of it.
     if let Some(description) = item.details["description"].as_str() {
@@ -1004,6 +1022,7 @@ async fn read_round(
                     .filter(|(name, _)| !(*name == "item.opened" && made_before)),
             );
         }
+        keep_opened(old, &mut fetched);
         items.push(fetched.item);
         if items.len() >= BATCH && !flush(daemon, &project.name, &mut items, &mut events)? {
             return Ok(None);
