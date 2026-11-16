@@ -120,8 +120,9 @@ What each bridge gives:
 - **Codex**: what `thread/tokenUsage/updated`'s `total` grew by over the turn (`last` is the last
   request alone, not the turn), with the turn's model: `inputTokens` without the
   `cachedInputTokens` it counts, which are `cachedReadTokens`; `reasoningOutputTokens` as
-  `thoughtTokens` (counted in the output too, as Codex does); `cacheWriteInputTokens` when Codex
-  gives it. No cost.
+  `thoughtTokens` (counted in the output too, as Codex does); `cachedWriteTokens` 0, as
+  OpenAI charges no cache write and Codex counts none (`cacheWriteInputTokens` when it gives it).
+  No cost.
 
 ## Codex
 
