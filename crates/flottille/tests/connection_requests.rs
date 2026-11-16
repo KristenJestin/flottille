@@ -528,6 +528,15 @@ fn entry(user: &User, name: &str, url: Option<&str>) {
     user.call("vault.set", params).unwrap();
 }
 
+/// Whether the user's Accept of `number` waits, and why: the request stays held.
+fn waits(user: &User, number: u64) -> String {
+    let (_, why) = user
+        .call("approval.approve", json!({"number": number}))
+        .unwrap_err();
+    request(user, number);
+    why
+}
+
 #[test]
 fn an_agent_cannot_send_an_entry_to_another_host() {
     let user = user();
@@ -536,35 +545,56 @@ fn an_agent_cannot_send_an_entry_to_another_host() {
     entry(&user, "github-token", Some("https://api.github.com"));
     let (_, mcp) = root(&user);
 
-    let sent = refused(mcp.call(
+    // Held for the user, who alone may bind the entry elsewhere: Accept waits until then.
+    let sent = held(&mcp.call(
         "connections",
         json!({"action": "add", "name": "notes", "about": "Notes.",
             "url": "https://notes.example.com/mcp",
             "headers": {"Authorization": "github-token"}}),
     ));
+    let why = waits(&user, sent);
     assert!(
-        sent.contains("api.github.com") && sent.contains("notes.example.com"),
-        "both hosts: {sent}"
+        why.contains("api.github.com") && why.contains("notes.example.com"),
+        "both hosts: {why}"
     );
-    assert!(sent.contains("their own form"), "{sent}");
+    assert!(connection(&user, "notes").is_none());
 
     // Nor by moving a connection the user bound it to: the entry would follow the URL.
     entry(&user, "notes-token", Some("https://notes.example.com"));
+    user.call("approval.deny", json!({"number": sent})).unwrap();
     user.call(
         "connection.add",
         json!({"name": "notes", "about": "Notes.", "url": "https://notes.example.com/mcp",
             "headers": {"Authorization": {"vault": "notes-token"}}}),
     )
     .unwrap();
-    let moved = refused(mcp.call(
+    let moved = held(&mcp.call(
         "connections",
         json!({"action": "edit", "name": "notes", "url": "https://elsewhere.example.com/mcp"}),
     ));
+    let why = waits(&user, moved);
     assert!(
-        moved.contains("notes.example.com") && moved.contains("elsewhere.example.com"),
-        "{moved}"
+        why.contains("notes.example.com") && why.contains("elsewhere.example.com"),
+        "{why}"
     );
-    assert_eq!(pending(&user), 0);
+    assert_eq!(
+        connection(&user, "notes").unwrap()["url"],
+        "https://notes.example.com/mcp"
+    );
+    // The entries are as the user left them.
+    let listed = user.call("vault.list", json!({})).unwrap();
+    for (name, url) in [
+        ("github-token", "https://api.github.com"),
+        ("notes-token", "https://notes.example.com"),
+    ] {
+        let entry = listed["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["name"] == name)
+            .unwrap();
+        assert_eq!(entry["url"], url, "{entry}");
+    }
 }
 
 #[test]
@@ -575,18 +605,22 @@ fn an_agent_cannot_bind_an_entry_without_an_address_to_a_header() {
     entry(&user, "github-token", None);
     let (_, mcp) = root(&user);
 
-    let sent = refused(mcp.call(
+    let sent = held(&mcp.call(
         "connections",
         json!({"action": "add", "name": "notes", "about": "Notes.",
             "url": "https://notes.example.com/mcp",
             "headers": {"Authorization": "github-token"}}),
     ));
+    let why = waits(&user, sent);
     assert!(
-        sent.contains("no address") && sent.contains("notes.example.com"),
-        "{sent}"
+        why.contains("no address") && why.contains("notes.example.com"),
+        "{why}"
     );
-    assert!(sent.contains("their own form"), "{sent}");
-    assert_eq!(pending(&user), 0);
+    assert!(connection(&user, "notes").is_none());
+    assert_eq!(
+        user.call("vault.list", json!({})).unwrap()["entries"][0]["url"],
+        Value::Null
+    );
 }
 
 #[test]
@@ -611,7 +645,8 @@ fn an_agent_binds_an_entry_of_the_same_host() {
         proposed["secrets"],
         json!([{"key": "headers", "name": "Authorization", "entry": "notes-token",
             "entry_host": "notes.example.com", "host": "notes.example.com", "differs": false,
-            "missing": false}]),
+            "missing": false, "project": null, "to_bind": false,
+            "origin": "https://notes.example.com"}]),
         "{proposed}"
     );
 
@@ -628,7 +663,8 @@ fn an_agent_binds_an_entry_of_the_same_host() {
     assert_eq!(
         proposed["secrets"],
         json!([{"key": "env", "name": "GITHUB_TOKEN", "entry": "github-token",
-            "entry_host": null, "host": null, "differs": true, "missing": false}]),
+            "entry_host": null, "host": null, "differs": true, "missing": false,
+            "project": null, "to_bind": false, "origin": null}]),
         "{proposed}"
     );
 }
@@ -861,28 +897,31 @@ fn accept_waits_for_the_missing_entry_then_takes_it() {
 }
 
 #[test]
-fn query_cookie_and_basic_lines_bound_to_another_host_are_refused() {
+fn query_cookie_and_basic_lines_bound_to_another_host_wait_for_the_user() {
     let user = user();
     project(&user, "app");
     turn_on(&user);
     entry(&user, "github-token", Some("https://api.github.com"));
     let (_, mcp) = root(&user);
-    for line in [
+    for (n, line) in [
         json!({"in": "query", "name": "userToken", "entry": "github-token"}),
         json!({"in": "cookie", "name": "session", "entry": "github-token"}),
         json!({"in": "basic", "entry": "github-token"}),
-    ] {
-        let sent = refused(mcp.call(
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let number = held(&mcp.call(
             "connections",
-            json!({"action": "add", "name": "notes", "about": "Notes.",
+            json!({"action": "add", "name": format!("notes{n}"), "about": "Notes.",
                 "url": "https://notes.example.com/mcp", "secrets": [line]}),
         ));
+        let why = waits(&user, number);
         assert!(
-            sent.contains("api.github.com") && sent.contains("notes.example.com"),
-            "{line}: {sent}"
+            why.contains("api.github.com") && why.contains("notes.example.com"),
+            "{line}: {why}"
         );
     }
-    assert_eq!(pending(&user), 0);
 }
 
 /// Accept of `number` once its missing entry exists: what the agent is told, or why the Accept
@@ -983,4 +1022,266 @@ fn an_agent_s_request_cannot_show_the_browser() {
     assert!(edited.contains("not a key an agent sets"), "{edited}");
     assert_eq!(pending(&user), 0);
     assert_eq!(connection(&user, "almanac").unwrap()["headed"], Value::Null);
+}
+
+/// The URL connection `hippocampe` an agent proposes, a server on this machine over plain http,
+/// its bearer key the vault entry `hippocampe-key`: the request's number.
+fn propose_hippocampe(mcp: &Mcp) -> u64 {
+    held(&mcp.call(
+        "connections",
+        json!({"action": "add", "name": "hippocampe", "about": "The user's memory.",
+            "url": "http://127.0.0.1:7468/mcp",
+            "secrets": [{"in": "header", "name": "Authorization", "prefix": "Bearer ",
+                "entry": "hippocampe-key"}]}),
+    ))
+}
+
+fn proposed(user: &User, number: u64) -> Value {
+    user.call("connection.proposed", json!({"number": number}))
+        .unwrap()
+}
+
+fn vault_entry(user: &User, name: &str) -> Value {
+    user.call("vault.list", json!({})).unwrap()["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["name"] == name)
+        .cloned()
+        .unwrap_or_else(|| panic!("no entry {name}"))
+}
+
+#[test]
+fn an_entry_problem_does_not_make_the_request_stale() {
+    let user = user();
+    project(&user, "app");
+    turn_on(&user);
+    let (_, mcp) = root(&user);
+    let number = propose_hippocampe(&mcp);
+
+    // Saved for the project the session runs in: one setting away from going through.
+    user.call(
+        "vault.set",
+        json!({"name": "hippocampe-key", "secret": SECRET, "project": "app",
+            "url": "http://127.0.0.1:7468"}),
+    )
+    .unwrap();
+    let card = proposed(&user, number);
+    assert_eq!(card["current"], true, "{card}");
+    assert!(card["why"].is_null(), "{card}");
+    assert_eq!(card["secrets"][0]["project"], "app", "{card}");
+    assert!(
+        card["waits"]
+            .as_str()
+            .is_some_and(|why| why.contains("the vault entry hippocampe-key is app's alone")),
+        "{card}"
+    );
+    assert!(waits(&user, number).contains("app's alone"));
+
+    // Every project's but bound to no address: the same request, waiting for its binding.
+    user.call(
+        "vault.set",
+        json!({"name": "hippocampe-key", "project": null, "url": null}),
+    )
+    .unwrap();
+    let card = proposed(&user, number);
+    assert_eq!(card["current"], true, "{card}");
+    assert!(card["why"].is_null(), "{card}");
+    assert_eq!(card["secrets"][0]["project"], Value::Null, "{card}");
+    assert_eq!(card["secrets"][0]["to_bind"], true, "{card}");
+    assert_eq!(
+        card["secrets"][0]["origin"], "http://127.0.0.1:7468",
+        "{card}"
+    );
+    assert!(waits(&user, number).contains("no address"));
+
+    // Bound to the connection's address: Accept goes through, the agent asking nothing again.
+    user.call(
+        "vault.set",
+        json!({"name": "hippocampe-key", "url": "http://127.0.0.1:7468"}),
+    )
+    .unwrap();
+    let card = proposed(&user, number);
+    assert!(card["waits"].is_null(), "{card}");
+    assert_eq!(card["secrets"][0]["to_bind"], false, "{card}");
+    let answer = approve(&user, number);
+    assert!(answer.contains("and Flottille has now done it"), "{answer}");
+    assert!(connection(&user, "hippocampe").is_some());
+}
+
+#[test]
+fn the_refusal_says_http_on_this_machine_is_an_address() {
+    let user = user();
+    project(&user, "app");
+    turn_on(&user);
+    entry(&user, "hippocampe-key", None);
+    let (_, mcp) = root(&user);
+    let number = propose_hippocampe(&mcp);
+
+    let why = waits(&user, number);
+    assert!(
+        why.contains("its url: https://…, or http:// on this machine"),
+        "{why}"
+    );
+    assert!(why.contains("127.0.0.1"), "{why}");
+    assert!(!why.contains("(its url, https://)"), "{why}");
+}
+
+#[test]
+fn the_connections_tool_says_its_entries_are_every_project_s() {
+    let user = user();
+    project(&user, "app");
+    turn_on(&user);
+    let (_, mcp) = root(&user);
+
+    let tools = mcp.tools();
+    let description = tools
+        .iter()
+        .find(|tool| tool["name"] == "connections")
+        .and_then(|tool| tool["description"].as_str())
+        .unwrap()
+        .to_owned();
+    assert!(description.contains("every project's"), "{description}");
+    assert!(
+        description.contains("vault {action: \"ask\"") && description.contains("connection"),
+        "{description}"
+    );
+    // The tool to ask with is there, though the project sees no entry yet.
+    let vault = tools
+        .iter()
+        .find(|tool| tool["name"] == "vault")
+        .unwrap_or_else(|| panic!("no vault tool: {:?}", mcp.names()));
+    assert!(
+        vault["inputSchema"]["properties"]["connection"].is_object(),
+        "{vault}"
+    );
+
+    // The answer to an add naming an entry says it too.
+    let answer = mcp.call(
+        "connections",
+        json!({"action": "add", "name": "hippocampe", "about": "The user's memory.",
+            "url": "http://127.0.0.1:7468/mcp",
+            "secrets": [{"in": "header", "name": "Authorization", "prefix": "Bearer ",
+                "entry": "hippocampe-key"}]}),
+    );
+    held(&answer);
+    assert!(answer.text.contains("every project's"), "{}", answer.text);
+    assert!(
+        answer.text.contains("\"connection\": \"hippocampe\""),
+        "{}",
+        answer.text
+    );
+    // One naming none is not told.
+    let line = line_of(&user, "almanac");
+    let answer = mcp.call(
+        "connections",
+        json!({"action": "add", "name": "almanac", "about": "Notes.", "command": line}),
+    );
+    held(&answer);
+    assert!(!answer.text.contains("every project's"), "{}", answer.text);
+}
+
+#[test]
+fn an_agent_alone_cannot_share_or_bind_an_entry() {
+    let user = user();
+    project(&user, "app");
+    turn_on(&user);
+    user.call(
+        "vault.set",
+        json!({"name": "hippocampe-key", "secret": SECRET, "project": "app"}),
+    )
+    .unwrap();
+    let (_, mcp) = root(&user);
+
+    // Held, not refused: the user decides, and Accept waits for what only the user does.
+    let number = propose_hippocampe(&mcp);
+    let why = waits(&user, number);
+    assert!(
+        why.contains("app's alone") && why.contains("no address"),
+        "{why}"
+    );
+    // None of the agent's own calls changes the entry.
+    for args in [
+        json!({"action": "ask", "name": "hippocampe-key", "why": "the memory's key",
+            "connection": "hippocampe"}),
+        json!({"action": "ask", "name": "hippocampe-key", "why": "the memory's key",
+            "project": "every", "url": "http://127.0.0.1:7468"}),
+        json!({"action": "set", "name": "hippocampe-key", "project": "every"}),
+    ] {
+        let answer = mcp.call("vault", args.clone());
+        assert!(answer.error, "{args}: {}", answer.text);
+    }
+    let edit = mcp.call(
+        "connections",
+        json!({"action": "edit", "name": "hippocampe", "about": "Another."}),
+    );
+    assert!(edit.error, "{}", edit.text);
+    let entry = vault_entry(&user, "hippocampe-key");
+    assert_eq!(entry["project"], "app", "{entry}");
+    assert_eq!(entry["url"], Value::Null, "{entry}");
+    assert!(connection(&user, "hippocampe").is_none());
+    request(&user, number);
+}
+
+#[test]
+fn the_user_shares_or_binds_only_what_a_pending_request_names() {
+    let user = user();
+    project(&user, "app");
+    turn_on(&user);
+    user.call(
+        "vault.set",
+        json!({"name": "hippocampe-key", "secret": SECRET, "project": "app",
+            "description": "The memory's key"}),
+    )
+    .unwrap();
+    entry(&user, "github-token", Some("https://api.github.com"));
+    let (_, mcp) = root(&user);
+    let number = propose_hippocampe(&mcp);
+
+    // Only an entry the request names, and only to where it would send it.
+    for method in ["connection.share_entry", "connection.bind_entry"] {
+        let (_, why) = user
+            .call(method, json!({"number": number, "entry": "github-token"}))
+            .unwrap_err();
+        assert!(why.contains("github-token"), "{method}: {why}");
+        let (_, why) = user
+            .call(
+                method,
+                json!({"number": number + 100, "entry": "hippocampe-key"}),
+            )
+            .unwrap_err();
+        assert!(why.contains("request"), "{method}: {why}");
+    }
+    assert_eq!(
+        vault_entry(&user, "github-token")["url"],
+        "https://api.github.com"
+    );
+
+    user.call(
+        "connection.share_entry",
+        json!({"number": number, "entry": "hippocampe-key"}),
+    )
+    .unwrap();
+    user.call(
+        "connection.bind_entry",
+        json!({"number": number, "entry": "hippocampe-key"}),
+    )
+    .unwrap();
+    // What else it says is kept.
+    let entry = vault_entry(&user, "hippocampe-key");
+    assert_eq!(entry["project"], Value::Null, "{entry}");
+    assert_eq!(entry["url"], "http://127.0.0.1:7468", "{entry}");
+    assert_eq!(entry["description"], "The memory's key", "{entry}");
+    assert!(proposed(&user, number)["waits"].is_null());
+
+    // A request decided is no longer a reason to widen anything.
+    user.call("approval.deny", json!({"number": number}))
+        .unwrap();
+    let (_, why) = user
+        .call(
+            "connection.share_entry",
+            json!({"number": number, "entry": "hippocampe-key"}),
+        )
+        .unwrap_err();
+    assert!(why.contains("decided"), "{why}");
 }

@@ -1612,3 +1612,84 @@ fn the_window_draws_no_frame_at_rest_on_a_project_s_progress_with_a_milestone_un
         "(frames drawn, frames asked)"
     );
 }
+
+/// #1019: an agent's request for a connection whose entry is one project's and has no address,
+/// its dialog open on the lines that offer to share and to bind it, at rest. Ignored until a
+/// session with a request pending rests: on dev already, such a session draws a frame about
+/// every other step of the window with no dialog open (seen with a plain `add` request), which
+/// this scenario cannot tell from the dialog's own.
+#[gpui_kit::test]
+#[ignore = "a session with a pending request redraws at rest on dev already, dialog or not"]
+fn the_window_draws_no_frame_at_rest_on_a_connection_request_with_entries_to_widen(
+    cx: &mut TestAppContext,
+) {
+    let user = User::with_fake_agent();
+    user.fake_script(json!({"turns": [{"when": "", "do": [{"say": "ready"}]}]}));
+    std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
+    user.call(
+        "extension.set",
+        json!({"name": "connections", "enabled": true}),
+    )
+    .unwrap();
+    let folder = user.path("work/app");
+    user.git_init(&folder);
+    std::fs::write(folder.join("README.md"), "app\n").unwrap();
+    user.git(&folder, &["add", "README.md"]);
+    user.git(&folder, &["commit", "--quiet", "-m", "start"]);
+    user.call("project.add", json!({"folder": folder, "name": "app"}))
+        .unwrap();
+    user.call(
+        "vault.set",
+        json!({"name": "hippocampe-key", "secret": "hippocampe-k3y-at-rest", "project": "app"}),
+    )
+    .unwrap();
+    let opened = user.received_requests("session/new").len();
+    let lead = user
+        .call("agent.run", json!({"project": "app", "message": "start"}))
+        .unwrap()["agent"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (url, authorization) = common::mcp::server_of(&user, opened);
+    let mcp = common::mcp::Mcp::initialize(&url, &authorization);
+    // Its turn ended, as in every scenario at rest: a session at work moves.
+    eventually("the first turn ends", || {
+        user.call("agent.show", json!({"agent": lead})).unwrap()["agent"]["state"] == "idle"
+    });
+    let answer = mcp.call(
+        "connections",
+        json!({"action": "add", "name": "hippocampe", "about": "The user's memory.",
+            "url": "http://127.0.0.1:7468/mcp",
+            "secrets": [{"in": "header", "name": "Authorization", "prefix": "Bearer ",
+                "entry": "hippocampe-key"}]}),
+    );
+    let number: u64 = answer
+        .text
+        .strip_prefix("Waiting for the user's approval, request #")
+        .and_then(|rest| rest.split_once('.'))
+        .map(|(number, _)| number.parse().unwrap())
+        .unwrap_or_else(|| panic!("not held: {}", answer.text));
+
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the session is in the tree", |cx| {
+        cx.update(|window, _| window.try_find(session_id(&lead)).is_some())
+    });
+    cx.update(|window, cx| window.click(session_id(&lead), cx));
+    until(&shell, cx, "the request's card", |cx| {
+        cx.update(|window, _| window.try_find(format!("open-request-{number}")).is_some())
+    });
+    settle(&shell, cx);
+    cx.update(|window, cx| window.click(format!("open-request-{number}"), cx));
+    until(&shell, cx, "the lines to share and bind", |cx| {
+        cx.update(|window, _| {
+            window
+                .try_find("connection-request-share-hippocampe-key-action")
+                .is_some()
+                && window
+                    .try_find("connection-request-bind-hippocampe-key-action")
+                    .is_some()
+        })
+    });
+    settle(&shell, cx);
+    assert_eq!(frames_at_rest(&shell, cx), (0, 0), "the dialog");
+}
