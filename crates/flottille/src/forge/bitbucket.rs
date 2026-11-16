@@ -971,6 +971,11 @@ struct Pipeline {
 /// `COMPLETED`, `STOPPED` while it is `IN_PROGRESS` in the stage `HALTED` or `STOPPING`. None for
 /// one that runs (a `PAUSED` stage waits on a manual step: it is not over) and for a result no
 /// status word says (`EXPIRED`).
+///
+/// `HALTED` and `STOPPING` are the issue's (#1004) words, not found in Bitbucket's published API
+/// schema: it lists only the stages `RUNNING` and `PAUSED`; its pipeline `status` filter has
+/// `HALTED` beside `PAUSED`, and the scope `pipeline:write` is said to "resume halted pipelines".
+/// A halted pipeline is assumed to have ended the run; if it can be resumed, it is not over.
 fn ended_of(pipeline: &Value) -> Option<&'static str> {
     let state = &pipeline["state"];
     match (state["name"].as_str(), state["stage"]["name"].as_str()) {
@@ -1053,13 +1058,20 @@ fn counted(forge: &Forge, statuses: Vec<Value>, pipelines: &[Value]) -> Vec<Valu
             Some((build, pipeline, ended))
         })
         .collect();
-    // A stop is not a verdict: a build the user stopped does not take the place of the latest
-    // build of its pipeline while another one, which ran to its end or still runs, has statuses
-    // on the head. A stopped build counts as the latest only when it is the only one.
+    // A stop is not a verdict, but a failed step of a stopped build is: a build the user stopped,
+    // none of whose statuses failed, does not take the place of the latest build of its pipeline
+    // while another one, which ran to its end or still runs, has statuses on the head. A stopped
+    // build counts as the latest when it is the only one, or when one of its steps failed.
+    let failed: std::collections::HashSet<u64> = statuses
+        .iter()
+        .zip(&keyed)
+        .filter(|(status, _)| check_of(status).1 == "failing")
+        .filter_map(|(_, keyed)| keyed.as_ref().map(|(build, _, _)| *build))
+        .collect();
     let mut latest: std::collections::HashMap<&Pipeline, u64> = Default::default();
     let mut stopped: std::collections::HashMap<&Pipeline, u64> = Default::default();
     for (build, pipeline, ended) in keyed.iter().flatten() {
-        let map = if *ended == Some("STOPPED") {
+        let map = if *ended == Some("STOPPED") && !failed.contains(build) {
             &mut stopped
         } else {
             &mut latest
@@ -1810,7 +1822,8 @@ pub(super) async fn write(
             let number = last["build_number"].as_u64().unwrap_or(0);
             // A stopped pipeline is run again too: nothing of it counts, and a lone one is what
             // refuses the merge.
-            let ended = match last["state"]["result"]["name"].as_str() {
+            // As `counted` reads it, so that what the merge refusal calls stopped can be run again.
+            let ended = match ended_of(last) {
                 Some("FAILED" | "ERROR") => "failed",
                 Some("STOPPED") => "was stopped",
                 _ => {
