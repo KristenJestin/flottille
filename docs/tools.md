@@ -501,12 +501,36 @@ pending requests.
     `GIT_CONFIG_VALUE_<n>=/dev/null`, since the hooks are files the agent can write, and would
     run outside the gate's sight;
   - no `XDG_RUNTIME_DIR`, which says where the daemon's socket is (a client a run starts is
-    refused anyway);
+    refused anyway), and no display (`WAYLAND_DISPLAY`, `DISPLAY`, X11's key `XAUTHORITY`),
+    unless the project lets its runs open windows (below); Landlock keeps X11's abstract
+    sockets out of reach too from its sixth ABI, but not its sockets by their path, which a run
+    that names them itself may still reach until #976 (`docs/vault.md`, "The runtime folder" and
+    "The gaps");
   - no `DBUS_SESSION_BUS_ADDRESS`: the session bus leads to the keyring (`docs/vault.md`, "The
     runtime folder", which also says how the runtime folder itself is denied);
   - no push: `url./dev/null/flottille-refused-push/.pushInsteadOf` set the same way, which
     rewrites every push URL to a path that is no remote, unless the run is itself a `git push`
     (its own line, no wrapper) the user or the judge let through.
+- **A run may open windows on the user's screen** when its project says so: the setting *Agents may
+  open windows on my screen* (the key `windows` of the project's file, off by default; the project's
+  Settings, Tasks tab; `flottille project edit <name> --windows on|off`) is the user's alone: no
+  tool of an agent writes it, nor the project's file (Flottille's own folders), though a program run
+  in Full may still write the user's files, `~/.config` included, as for every key of the project's
+  file (the modes are not a sandbox, `docs/design.md` §7.1). Each run of such a project (an agent's,
+  or a task the user runs) gets a runtime folder of its own,
+  `$XDG_RUNTIME_DIR/flottille/display/run-<id>` (mode 0700), holding only a hard link of the
+  session's Wayland socket, removed when the run ends; its `XDG_RUNTIME_DIR` is that folder and
+  `WAYLAND_DISPLAY` names the socket: no session bus, no keyring, no other socket, and Landlock
+  still keeps the real runtime folder out of reach. X11's `DISPLAY` (with `XAUTHORITY`) is given
+  only when the session has no Wayland, which the setting's help says: an X11 client can read the
+  keys typed in other windows and type into them; Landlock then leaves every abstract socket of
+  the session within the run's reach, X11's and a session bus `dbus-launch` put on one alike,
+  which it keeps from every other run where the kernel allows it (above). On a wlroots
+  compositor (Hyprland, Sway…) a Wayland client may also get the virtual keyboard and pointer
+  protocols, and so type into other windows. When the folder cannot be made (the socket cannot be
+  linked), the run has no display, never the real folder, and the daemon's log says why. The gate
+  judges the run as before: the setting only adds the display. It is the same folder a connection's
+  *Show the browser* uses (`docs/extensions.md`), one per owner.
 - **A commit's message is checked as the project declares**: with `message_checks` in the
   project's file (`docs/projects.md`, "Message checks"), each `git commit` the line runs, at any of
   its layers, has its message (its `-m`, or its `-F` file) given to each check before the run

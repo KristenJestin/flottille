@@ -80,6 +80,17 @@ pub enum ProjectAction {
         #[arg(long)]
         json: bool,
     },
+    /// Change one of the project's settings
+    Edit {
+        name: String,
+        /// Whether its agents' runs may open windows on your screen: each run gets the session's
+        /// Wayland socket alone (X11 only without Wayland, where a client can read what is typed
+        /// in other windows and type into them)
+        #[arg(long, value_parser = ["on", "off"], required = true)]
+        windows: String,
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// Fails (without a message of its own) when `list` found a file it cannot use, or `check` a
@@ -259,6 +270,37 @@ pub fn run(paths: &Paths, action: ProjectAction) -> Result<ExitCode> {
             match json {
                 true => println!("{checks}"),
                 false => print!("{}", commit_checks_text(&checks)),
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        ProjectAction::Edit {
+            name,
+            windows,
+            json,
+        } => {
+            // The tracker is given as it stands: `project.set_settings` removes one left out.
+            let current = ask(
+                "project.settings",
+                serde_json::to_value(ProjectName { name: name.clone() })?,
+            )?;
+            let on = windows == "on";
+            let saved = ask(
+                "project.set_settings",
+                serde_json::json!({"name": name, "tracker": current["tracker"], "windows": on}),
+            )?;
+            match json {
+                true => println!("{saved}"),
+                false => println!(
+                    "{}",
+                    match saved["windows"] == true {
+                        true => format!(
+                            "Project {name}: its agents' runs may open windows on your screen."
+                        ),
+                        false => format!(
+                            "Project {name}: its agents' runs open no window on your screen."
+                        ),
+                    }
+                ),
             }
             Ok(ExitCode::SUCCESS)
         }

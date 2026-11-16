@@ -670,14 +670,16 @@ impl Render for ProjectNode {
                 cx,
             ))
             .on_toggle(cx.listener(|this, _, _, cx| this.toggle(cx)))
-            .on_click(cx.listener(move |_, _, window, cx| {
+            // Not a `cx.listener`: that runs inside this node's update, and opening a project's
+            // page from its own Progress page updates this node again (its Progress mark).
+            .on_click(move |_, window, cx| {
                 let project = name.clone();
                 shell
                     .update(cx, |shell, cx| {
                         shell.open(Selection::Project(project), window, cx)
                     })
                     .ok();
-            }));
+            });
         // Its Progress page, above its sessions: it folds away with them, and comes and goes
         // with its tracker.
         let (shell, name) = (self.shell.clone(), self.name.clone());

@@ -558,6 +558,18 @@ api
     npx --no -- commitlint --edit {message_file}
 ```
 
+### `flottille project edit <name> --windows on|off`
+
+Whether the project's runs may open windows on your screen (`docs/tools.md`, "A run may open
+windows on the user's screen"): each run then gets a runtime folder of its own holding your
+session's Wayland socket alone. Off by default; only you set it, never an agent. Prints what it
+is now; `--json`, `project.set_settings`'s answer.
+
+```
+$ flottille project edit shop --windows on
+Project shop: its agents' runs may open windows on your screen.
+```
+
 ### `flottille project remove <name> [--discard [--yes]]`
 
 Stops the project's agents and command runs, removes its workspaces and forgets its configuration,
