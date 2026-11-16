@@ -920,15 +920,32 @@ fn every_control_of_the_form_has_a_visible_label(cx: &mut TestAppContext) {
         );
         assert!(visible(cx, &format!("{field}-label")), "{field}-label");
     }
-    // A URL's requests carry headers, and say so.
+    // A URL's requests carry secrets, and say so.
     click(cx, "connection-reach-url");
     until(&shell, cx, "the URL's field unfolds", |cx| {
         visible(cx, "connection-url")
     });
+    click(cx, "connection-new-secret");
+    until(&shell, cx, "a secret's line unfolds", |cx| {
+        visible(cx, "connection-secret-0-name")
+    });
+    settle(cx);
     assert_eq!(
-        label(cx, "connection-variable-0-name-field-label").as_deref(),
-        Some("Header")
+        label(cx, "connection-secrets-field-label").as_deref(),
+        Some("Secrets of its requests")
     );
+    for (control, said) in [
+        ("place", "Place"),
+        ("name", "Name"),
+        ("prefix", "Prefix"),
+        ("entry", "Vault entry"),
+    ] {
+        assert!(visible(cx, &format!("connection-secret-0-{control}")));
+        assert_eq!(
+            label(cx, &format!("connection-secret-0-{control}-field-label")).as_deref(),
+            Some(said)
+        );
+    }
     assert_eq!(
         label(cx, "connection-url-field-label").as_deref(),
         Some("URL")
@@ -1243,7 +1260,7 @@ fn removing_the_last_header_of_a_url_clears_it_on_the_daemon(cx: &mut TestAppCon
     assert!(connection(&user, "remote").unwrap()["headers"].is_object());
     let (shell, cx) = window(&user, cx);
     open_page(&shell, cx);
-    save_without(&shell, cx, "remote", "connection-variable-0-remove");
+    save_without(&shell, cx, "remote", "connection-secret-0-remove");
     assert!(
         connection(&user, "remote")
             .unwrap()
@@ -4011,14 +4028,14 @@ fn remote_with_every_secret(user: &User) -> Value {
     user.call(
         "connection.add",
         json!({"name": "remote", "about": "A notes server elsewhere.",
-            "url": "https://notes.example.com/mcp",
-            "headers": {"X-Plain": {"vault": "notes-plain"}},
-            "secrets": [
-                {"in": "header", "name": "Authorization", "prefix": "Bearer ", "entry": "notes-key"},
-                {"in": "query", "name": "workspace", "entry": "notes-query"},
-                {"in": "cookie", "name": "visit", "entry": "notes-cookie"},
-                {"in": "basic", "entry": "notes-basic"},
-            ]}),
+        "url": "https://notes.example.com/mcp",
+        "headers": {"X-Plain": {"vault": "notes-plain"}},
+        "secrets": [
+            {"in": "header", "name": "X-Api-Auth", "prefix": "Bearer ", "entry": "notes-key"},
+            {"in": "query", "name": "workspace", "entry": "notes-query"},
+            {"in": "cookie", "name": "visit", "entry": "notes-cookie"},
+            {"in": "basic", "entry": "notes-basic"},
+        ]}),
     )
     .unwrap();
     connection(user, "remote").unwrap()
@@ -4030,7 +4047,7 @@ fn edit_remote(shell: &Entity<Shell>, cx: &mut VisualTestContext, lines: usize) 
     click(cx, "connection-more-remote");
     click(cx, "edit-connection-remote");
     until(shell, cx, "its secrets are in the form", |cx| {
-        (0..lines).all(|at| visible(cx, &format!("connection-secret-{at}")))
+        (0..lines).all(|at| visible(cx, &format!("connection-secret-{at}-name")))
     });
     settle(cx);
 }
@@ -4058,19 +4075,37 @@ fn a_connection_s_secrets_are_shown_and_kept_by_an_edit(cx: &mut TestAppContext)
         .collect();
     assert_eq!(
         places,
-        ["Header", "Header", "Query parameter", "Cookie", "Basic authentication"]
+        [
+            "Header",
+            "Header",
+            "Query parameter",
+            "Cookie",
+            "Basic authentication"
+        ]
     );
     let entries: Vec<_> = (0..5)
         .map(|at| label(cx, &format!("connection-secret-{at}-entry")).unwrap_or_default())
         .collect();
     assert_eq!(
         entries,
-        ["notes-plain", "notes-key", "notes-query", "notes-cookie", "notes-basic"]
+        [
+            "notes-plain",
+            "notes-key",
+            "notes-query",
+            "notes-cookie",
+            "notes-basic"
+        ]
     );
     let section = section(&shell, cx);
     let (name, prefix) = section.read_with(cx, |s, _| s.secret_fields(1).unwrap());
-    assert_eq!(name.read_with(cx, |f, _| f.value().to_string()), "Authorization");
-    assert_eq!(prefix.read_with(cx, |f, _| f.value().to_string()), "Bearer ");
+    assert_eq!(
+        name.read_with(cx, |f, _| f.value().to_string()),
+        "X-Api-Auth"
+    );
+    assert_eq!(
+        prefix.read_with(cx, |f, _| f.value().to_string()),
+        "Bearer "
+    );
     assert!(!everything_said(cx).contains(SECRET));
 
     // A save that changes nothing leaves the declaration, and so its digest, as it was.
@@ -4103,7 +4138,10 @@ fn old_header_lines_are_written_back_as_they_were(cx: &mut TestAppContext) {
     save_and_close(&shell, cx);
     let after = connection(&user, "remote").unwrap();
     // Still `headers`, and no `secrets` of its own: what a pin's digest is made of.
-    assert_eq!(after["headers"], json!({"X-Notes-Key": {"vault": "notes-key"}}));
+    assert_eq!(
+        after["headers"],
+        json!({"X-Notes-Key": {"vault": "notes-key"}})
+    );
     assert!(after.get("secrets").is_none(), "{after}");
     assert_eq!(after, before);
 }
@@ -4156,7 +4194,7 @@ fn a_secret_can_be_added_and_removed_in_the_form(cx: &mut TestAppContext) {
     // A line removed folds away, and is not written.
     click(cx, "connection-secret-1-remove");
     until(&shell, cx, "the line is gone", |cx| {
-        !present(cx, "connection-secret-5")
+        !present(cx, "connection-secret-5-name")
     });
     save_and_close(&shell, cx);
     let after = connection(&user, "remote").unwrap();
@@ -4170,5 +4208,8 @@ fn a_secret_can_be_added_and_removed_in_the_form(cx: &mut TestAppContext) {
         ]),
         "{after}"
     );
-    assert_eq!(after["headers"], json!({"X-Plain": {"vault": "notes-plain"}}));
+    assert_eq!(
+        after["headers"],
+        json!({"X-Plain": {"vault": "notes-plain"}})
+    );
 }

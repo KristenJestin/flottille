@@ -16,7 +16,7 @@ use common::mcp::{Mcp, server_of};
 use flottille_window::Shell;
 use gpui_design_system::motion::PANEL;
 use gpui_design_system::omarchy::Environment;
-use gpui_kit::test::TestWindowExt;
+use gpui_kit::test::{TestQueryExt as _, TestWindowExt};
 use gpui_kit::{Entity, TestAppContext, VisualTestContext, px, size};
 use serde_json::{Value, json};
 
@@ -592,7 +592,7 @@ fn editing_an_agent_s_request_keeps_its_secrets(cx: &mut TestAppContext) {
     open_dialog(&shell, cx, number);
     click(cx, "connection-request-edit");
     until(&shell, cx, "the form opens with its secret", |cx| {
-        visible(cx, "connection-modal") && visible(cx, "connection-secret-0")
+        visible(cx, "connection-modal") && visible(cx, "connection-secret-0-name")
     });
     settle(cx);
     assert_eq!(
@@ -605,8 +605,14 @@ fn editing_an_agent_s_request_keeps_its_secrets(cx: &mut TestAppContext) {
     );
     let section = connections_section(&shell, cx);
     let (name, prefix) = section.read_with(cx, |s, _| s.secret_fields(0).unwrap());
-    assert_eq!(name.read_with(cx, |f, _| f.value().to_string()), "Authorization");
-    assert_eq!(prefix.read_with(cx, |f, _| f.value().to_string()), "Bearer ");
+    assert_eq!(
+        name.read_with(cx, |f, _| f.value().to_string()),
+        "Authorization"
+    );
+    assert_eq!(
+        prefix.read_with(cx, |f, _| f.value().to_string()),
+        "Bearer "
+    );
 
     click(cx, "save-connection");
     until(&shell, cx, "the form closes", |cx| {
@@ -678,15 +684,17 @@ fn an_entry_without_an_address_is_not_said_to_go_to_another_host(cx: &mut TestAp
     let (shell, cx) = window(&user, cx);
     open_card(&shell, cx, &lead, number);
     open_dialog(&shell, cx, number);
-    let line =
-        label(cx, "connection-request-secret-headers-Authorization").unwrap_or_default();
+    let line = label(cx, "connection-request-secret-headers-Authorization").unwrap_or_default();
     assert_eq!(
         line,
         "Authorization: the vault entry notes-key (bound to no address) will be sent to \
          notes.example.com"
     );
     assert!(
-        !present(cx, "connection-request-secret-headers-Authorization-elsewhere"),
+        !present(
+            cx,
+            "connection-request-secret-headers-Authorization-elsewhere"
+        ),
         "not another host"
     );
     assert!(visible(
@@ -712,25 +720,36 @@ fn a_missing_entry_is_made_from_the_request_s_dialog_then_accept_goes_through(
     assert!(!present(cx, "connection-request-new-entry-notes-key"));
     click(cx, "connection-request-accept");
     until(&shell, cx, "Accept says it waits for the entry", |cx| {
-        label(cx, "connection-request-error")
-            .is_some_and(|said| said.contains("Accept waits for the vault entry notes-key"))
+        shell.read_with(cx, |s, cx| {
+            s.connection_request()
+                .read(cx)
+                .error()
+                .is_some_and(|said| said.contains("Accept waits for the vault entry notes-key"))
+        })
     });
     assert_eq!(pending(&user), 1, "nothing was answered");
     until(&shell, cx, "the button for the entry", |cx| {
         visible(cx, "connection-request-new-entry-notes-key")
     });
+    settle(cx);
 
     // The vault's own dialog, on the entry's name and the host the request sends it to.
     click(cx, "connection-request-new-entry-notes-key");
-    until(&shell, cx, "the vault's dialog opens", |cx| {
-        visible(cx, "vault-modal")
+    until(&shell, cx, "Settings is shown", |cx| {
+        shell.read_with(cx, |s, cx| s.main().read(cx).settings_page().is_some())
     });
-    settle(cx);
-    assert!(!visible(cx, "connection-request"), "no dialog over a dialog");
     let vault = shell.read_with(cx, |s, cx| {
         let page = s.main().read(cx).settings_page().cloned().unwrap();
         page.read(cx).vault().clone()
     });
+    until(&shell, cx, "the vault's dialog opens", |cx| {
+        vault.read_with(cx, |v, _| v.is_open())
+    });
+    settle(cx);
+    assert!(
+        !visible(cx, "connection-request"),
+        "no dialog over a dialog"
+    );
     let (name, url, secret) = vault.read_with(cx, |v, _| {
         (
             v.name_field().unwrap().clone(),
@@ -738,7 +757,10 @@ fn a_missing_entry_is_made_from_the_request_s_dialog_then_accept_goes_through(
             v.secret_field().unwrap().clone(),
         )
     });
-    assert_eq!(name.read_with(cx, |f, _| f.value().to_string()), "notes-key");
+    assert_eq!(
+        name.read_with(cx, |f, _| f.value().to_string()),
+        "notes-key"
+    );
     assert_eq!(
         url.read_with(cx, |f, _| f.value().to_string()),
         "notes.example.com"
@@ -751,7 +773,7 @@ fn a_missing_entry_is_made_from_the_request_s_dialog_then_accept_goes_through(
     cx.update(|window, cx| secret.update(cx, |f, cx| f.set_value(SECRET, window, cx)));
     click(cx, "save-vault-entry");
     until(&shell, cx, "the request's dialog is back", |cx| {
-        visible(cx, "connection-request") && !visible(cx, "vault-modal")
+        visible(cx, "connection-request") && !vault.read_with(cx, |v, _| v.is_open())
     });
     until(&shell, cx, "the declaration is read again", |cx| {
         visible(cx, "connection-request-accept")

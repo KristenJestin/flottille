@@ -1465,9 +1465,7 @@ fn the_window_draws_no_frame_at_rest_on_connections_page_and_its_review(cx: &mut
 
 /// #1015: the form of a URL connection with a plain header and a secret of each place, open.
 #[gpui_kit::test]
-fn the_window_draws_no_frame_at_rest_on_the_connection_form_with_secrets(
-    cx: &mut TestAppContext,
-) {
+fn the_window_draws_no_frame_at_rest_on_the_connection_form_with_secrets(cx: &mut TestAppContext) {
     let user = User::with_fake_agent();
     std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
     user.call(
@@ -1476,18 +1474,21 @@ fn the_window_draws_no_frame_at_rest_on_the_connection_form_with_secrets(
     )
     .unwrap();
     for name in ["notes-plain", "notes-key", "notes-query"] {
-        user.call("vault.set", json!({"name": name, "secret": "s3cret-at-rest"}))
-            .unwrap();
+        user.call(
+            "vault.set",
+            json!({"name": name, "secret": "s3cret-at-rest"}),
+        )
+        .unwrap();
     }
     user.call(
         "connection.add",
         json!({"name": "remote", "about": "A notes server elsewhere.",
-            "url": "https://notes.example.com/mcp",
-            "headers": {"X-Plain": {"vault": "notes-plain"}},
-            "secrets": [
-                {"in": "header", "name": "Authorization", "prefix": "Bearer ", "entry": "notes-key"},
-                {"in": "query", "name": "workspace", "entry": "notes-query"},
-            ]}),
+        "url": "https://notes.example.com/mcp",
+        "headers": {"X-Plain": {"vault": "notes-plain"}},
+        "secrets": [
+            {"in": "header", "name": "Authorization", "prefix": "Bearer ", "entry": "notes-key"},
+            {"in": "query", "name": "workspace", "entry": "notes-query"},
+        ]}),
     )
     .unwrap();
     let (shell, cx) = window(&user, cx);
@@ -1509,7 +1510,7 @@ fn the_window_draws_no_frame_at_rest_on_the_connection_form_with_secrets(
     settle(&shell, cx);
     cx.update(|window, cx| window.click("edit-connection-remote", cx));
     until(&shell, cx, "its secrets are in the form", |cx| {
-        cx.update(|window, _| window.try_find("connection-secret-2").is_some())
+        cx.update(|window, _| window.try_find("connection-secret-2-name").is_some())
     });
     settle(&shell, cx);
     // The caret blinks in a field that has the focus: the form at rest has none.

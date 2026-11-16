@@ -121,6 +121,9 @@ pub struct VaultSection {
     /// The project page the dialog was opened from (its Tracker, or its Vault tab): once it is
     /// closed, the window goes back there.
     come_back: Option<(String, ProjectReveal)>,
+    /// The agent's request to write a connection the dialog was opened from, its missing entry:
+    /// once it is saved or closed, the request's dialog is back.
+    request_back: Option<u64>,
     /// The entry opened from a project's Vault tab is every project's: the form says so.
     every_project: bool,
     /// The entry the confirmation names, kept while it fades away.
@@ -198,6 +201,7 @@ impl VaultSection {
             form_error: None,
             confirming: None,
             come_back: None,
+            request_back: None,
             every_project: false,
             asked: String::new(),
             _subscriptions: Vec::new(),
@@ -370,6 +374,34 @@ impl VaultSection {
         self.host = host.zip(entry.url.clone());
     }
 
+    /// "New entry…" on an agent's request to write a connection that names `entry`, not made yet:
+    /// its name and, as its address, the `host` the request sends it to; the secret is typed here.
+    pub fn add_for_request(
+        &mut self,
+        number: u64,
+        entry: &str,
+        host: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let prefill = VaultEntry {
+            name: entry.to_owned(),
+            url: host.clone(),
+            ..VaultEntry::default()
+        };
+        self.add_prefilled(&prefill, None, None, window, cx);
+        self.host = host.zip(prefill.url);
+        self.request_back = Some(number);
+    }
+
+    /// The request whose dialog to open again, once the entry made for it is saved.
+    pub fn take_request_return(&mut self) -> Option<u64> {
+        match self.form {
+            Form::Closed => self.request_back.take(),
+            Form::Editing(_) => None,
+        }
+    }
+
     /// The project page to go back to, once the dialog it was opened for is closed (an entry set).
     pub fn take_return(&mut self) -> Option<(String, ProjectReveal)> {
         match self.form {
@@ -393,6 +425,7 @@ impl VaultSection {
 
     fn fill(&mut self, entry: Option<&VaultEntry>, window: &mut Window, cx: &mut Context<Self>) {
         self.come_back = None;
+        self.request_back = None;
         self.every_project = false;
         self.bound = None;
         self.why = None;
@@ -441,6 +474,11 @@ impl VaultSection {
                 .update(cx, |shell, cx| {
                     shell.open_project_settings_at(&project, at, window, cx)
                 })
+                .ok();
+        }
+        if let Some(number) = self.request_back.take() {
+            self.shell
+                .update(cx, |shell, cx| shell.open_connection_request(number, cx))
                 .ok();
         }
     }
