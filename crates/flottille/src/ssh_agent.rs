@@ -219,6 +219,9 @@ pub fn withheld(env: &BTreeMap<OsString, OsString>) -> BTreeMap<OsString, OsStri
     env
 }
 
+/// What of the daemon's environment a lent push keeps (`pin`), besides the `LC_` variables.
+const KEPT: [&str; 6] = ["HOME", "USER", "LOGNAME", "LANG", "TERM", "TMPDIR"];
+
 /// What runs with the agent of a push `words` lent it (`env` names it), pinned: the `git` found at
 /// the start in place of the line's, the `ssh` found then (`GIT_SSH_COMMAND` wins over
 /// `core.sshCommand` and `GIT_SSH`), sharing no connection with another ssh and running no
@@ -229,13 +232,23 @@ pub fn withheld(env: &BTreeMap<OsString, OsString>) -> BTreeMap<OsString, OsStri
 /// configuration (`ProxyCommand`, `Match exec`, `KnownHostsCommand`) goes through `$SHELL -c`
 /// and finds its programs on `PATH`: `/bin/sh`, and the system's folders alone. Settings and
 /// global options on the line itself are refused before (`runs::run`): they would beat these.
+/// Nothing else of the environment is kept but `KEPT` of the daemon's own: the project's and the
+/// workspace's variables are a file a run may write, and one of them would change what git or
+/// the loader runs (`GIT_CONFIG_PARAMETERS`, `GIT_EXEC_PATH`, `LD_PRELOAD`, `SSH_ASKPASS`).
 pub async fn pin(env: &mut BTreeMap<OsString, OsString>, folder: &Path, words: &mut [String]) {
     let Some(found) = FOUND.get().and_then(Option::as_ref) else {
         return;
     };
-    if lent_to(env).is_none() {
+    let Some(lent) = lent_to(env) else {
         return;
-    }
+    };
+    env.clear();
+    env.extend(std::env::vars_os().filter(|(name, _)| {
+        name.to_str()
+            .is_some_and(|name| KEPT.contains(&name) || name.starts_with("LC_"))
+    }));
+    env.insert(VARIABLE.into(), lent.path().into());
+    crate::runs::configure(env, "core.hooksPath", "/dev/null");
     words[0] = found.git.to_string_lossy().into_owned();
     let ssh = found.ssh.to_string_lossy().replace('\'', "'\\''");
     // A master another ssh could reuse would outlive the push, the agent's connection with it.
