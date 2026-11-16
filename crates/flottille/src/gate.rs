@@ -542,6 +542,12 @@ pub fn creates_in_a_milestone(tool: &str, args: &Value) -> bool {
             .is_some_and(|named| !named.trim().is_empty())
 }
 
+/// Whether a call of `tickets` replies to a comment: its card quotes the comment as it stood, and
+/// a comment edited before the user allows it is not posted with words they never read.
+pub fn replies_to_a_comment(tool: &str, args: &Value) -> bool {
+    tool == "tickets" && args["action"] == "reply"
+}
+
 /// Whether a call of `forge` approves a pull request or requests changes on it.
 pub fn decides_a_review(tool: &str, args: &Value) -> bool {
     tool == "forge"

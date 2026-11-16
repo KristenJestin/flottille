@@ -409,10 +409,12 @@ async fn performed(
     // command was edited, its skill removed) is not done.
     // A verdict on a pull request is read as it stood: its card says the head it was given on.
     // A ticket created in a milestone goes in the one its card named, not one merely named so now.
+    // A reply goes out with the quote its card showed, not with the comment as edited since.
     let review = gate::decides_a_review(tool, &request.arguments);
     if request.kind == Kind::Action
         || review
         || gate::creates_in_a_milestone(tool, &request.arguments)
+        || gate::replies_to_a_comment(tool, &request.arguments)
     {
         match actions::prepared(daemon, &grant, tool, &request.arguments).await {
             Err(
