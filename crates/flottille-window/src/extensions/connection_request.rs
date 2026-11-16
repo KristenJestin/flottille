@@ -39,8 +39,17 @@ pub enum Then {
 /// entry every project's, or bound to the host the connection sends it to.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Widen {
-    Share { entry: String, project: String },
-    Bind { entry: String, host: String },
+    Share {
+        entry: String,
+        project: String,
+    },
+    /// `was` is the entry's address before, `origin` the one it gets.
+    Bind {
+        entry: String,
+        host: String,
+        was: Option<String>,
+        origin: String,
+    },
 }
 
 /// What a request would write, as `connection.proposed` says it.
@@ -77,8 +86,14 @@ pub struct Secret {
     pub differs: bool,
     /// The one project the entry is alone to, when it is: a connection needs it for every project.
     pub project: Option<String>,
+    /// The user may share it from the request: the asking agent's own project's alone.
+    pub share: bool,
     /// Accept waits for the user to bind the entry to the connection's host.
     pub to_bind: bool,
+    /// The entry's address as it is.
+    pub entry_url: Option<String>,
+    /// The connection's origin, the address a Bind gives the entry.
+    pub origin: Option<String>,
 }
 
 impl Secret {
@@ -92,7 +107,10 @@ impl Secret {
             host: value["host"].as_str().map(str::to_owned),
             differs: value["differs"] != false,
             project: value["project"].as_str().map(str::to_owned),
+            share: value["share"] == true,
             to_bind: value["to_bind"] == true,
+            entry_url: value["entry_url"].as_str().map(str::to_owned),
+            origin: value["origin"].as_str().map(str::to_owned),
         }
     }
 
@@ -256,12 +274,25 @@ impl ConnectionRequest {
             Then::Proposed { number } => {
                 if self.number == Some(number) {
                     let proposal = answer.map(|value| Proposal::of(&value));
-                    if let Ok(proposal) = &proposal {
-                        for line in Self::widenings_of(proposal) {
-                            if !self.lines.iter().any(|(id, ..)| *id == line.0) {
-                                self.lines.push(line);
-                            }
+                    let now = proposal
+                        .as_ref()
+                        .map_or_else(|_| Vec::new(), Self::widenings_of);
+                    // Each line acts as the latest reading says; one gone keeps its last words
+                    // while it folds away.
+                    for line in &now {
+                        match self.lines.iter_mut().find(|(id, ..)| *id == line.0) {
+                            Some(known) => *known = line.clone(),
+                            None => self.lines.push(line.clone()),
                         }
+                    }
+                    // A confirmation of what the request no longer asks closes: confirmed, it
+                    // would give what the user did not read.
+                    if self
+                        .confirming
+                        .as_ref()
+                        .is_some_and(|widen| !now.iter().any(|(.., is)| is == widen))
+                    {
+                        self.confirming = None;
                     }
                     self.proposal = Some(proposal);
                 }
@@ -386,18 +417,21 @@ impl ConnectionRequest {
         let (Some(number), Some(widen)) = (self.number, self.confirming.take()) else {
             return;
         };
-        let (method, entry) = match &widen {
-            Widen::Share { entry, .. } => ("connection.share_entry", entry),
-            Widen::Bind { entry, .. } => ("connection.bind_entry", entry),
+        // A Bind names the host the confirmation showed: the daemon binds nothing if it reads
+        // another one.
+        let (method, params) = match &widen {
+            Widen::Share { entry, .. } => (
+                "connection.share_entry",
+                json!({"number": number, "entry": entry}),
+            ),
+            Widen::Bind { entry, host, .. } => (
+                "connection.bind_entry",
+                json!({"number": number, "entry": entry, "host": host}),
+            ),
         };
         self.widening = true;
         self.error = None;
-        self.ask(
-            method,
-            json!({"number": number, "entry": entry}),
-            Then::Widened { number },
-            cx,
-        );
+        self.ask(method, params, Then::Widened { number }, cx);
         cx.notify();
     }
 
@@ -406,25 +440,31 @@ impl ConnectionRequest {
             return;
         }
         self.widening = false;
-        match answer {
-            Ok(_) => self.ask(
-                "connection.proposed",
-                json!({"number": number}),
-                Then::Proposed { number },
-                cx,
-            ),
-            Err(why) => self.error = Some(why.into()),
+        // Done or refused, the request is read again: a refusal is often that it changed.
+        if let Err(why) = answer {
+            self.error = Some(why.into());
         }
+        self.ask(
+            "connection.proposed",
+            json!({"number": number}),
+            Then::Proposed { number },
+            cx,
+        );
     }
 
     /// The lines a proposal asks of the user, each `(id, sentence, action, what it gives)`: an
-    /// entry one project's alone (Share), one bound to no address or another host (Bind).
+    /// entry the asking agent's project's alone (Share), one bound to no address or another host
+    /// (Bind). None for a request that would no longer be done.
     fn widenings_of(proposal: &Proposal) -> Vec<(String, String, SharedString, Widen)> {
         let mut lines: Vec<(String, String, SharedString, Widen)> = Vec::new();
+        if !proposal.current {
+            return lines;
+        }
         for secret in &proposal.secrets {
             let entry = &secret.entry;
             let id = format!("connection-request-share-{entry}");
-            if let Some(project) = &secret.project
+            if secret.share
+                && let Some(project) = &secret.project
                 && !lines.iter().any(|(known, ..)| *known == id)
             {
                 lines.push((
@@ -443,6 +483,7 @@ impl ConnectionRequest {
             let id = format!("connection-request-bind-{entry}");
             if secret.to_bind
                 && let Some(host) = &secret.host
+                && let Some(origin) = &secret.origin
                 && !lines.iter().any(|(known, ..)| *known == id)
             {
                 let said = match &secret.entry_host {
@@ -462,6 +503,8 @@ impl ConnectionRequest {
                     Widen::Bind {
                         entry: entry.clone(),
                         host: host.clone(),
+                        was: secret.entry_url.clone(),
+                        origin: origin.clone(),
                     },
                 ));
             }
@@ -548,15 +591,24 @@ impl ConnectionRequest {
                     "Every project's agents will see its name, what it is for, its URL and its \
                      username, and every feature of every project may use it, the connection \
                      {connection} among them; it will no longer be {project}'s alone. Its \
-                     secret stays in your keyring."
+                     secret stays in your keyring. This stays so even if you then refuse the \
+                     request."
                 ),
                 "Share with every project".to_owned(),
             ),
-            Some(Widen::Bind { entry, host }) => (
+            Some(Widen::Bind {
+                entry,
+                host,
+                was,
+                origin,
+            }) => (
                 format!("Bind the entry {entry} to {host}?"),
                 format!(
-                    "Its address becomes the one of the connection {connection}, and its secret \
-                     will be sent to {host} in that connection's requests, as an agent asked."
+                    "Its address, now {}, becomes {origin}, the one of the connection \
+                     {connection}, and its secret will be sent to {host} in that connection's \
+                     requests, as an agent asked. This stays so even if you then refuse the \
+                     request.",
+                    was.as_deref().unwrap_or("no address")
                 ),
                 format!("Bind it to {host}"),
             ),
