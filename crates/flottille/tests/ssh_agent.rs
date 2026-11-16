@@ -779,3 +779,44 @@ fn a_lent_push_shares_no_ssh_connection_and_runs_no_maintenance() {
         "{said:?}"
     );
 }
+
+#[test]
+fn a_run_cannot_write_in_the_ssh_folder() {
+    if landlock_abi() < 2 {
+        eprintln!(
+            "skipped: this kernel's Landlock (ABI {}) is not used, so nothing keeps a run out of \
+             ~/.ssh",
+            landlock_abi()
+        );
+        return;
+    }
+    let (user, _agent, _bus) = user();
+    let ssh = user.path("home/.ssh");
+    std::fs::create_dir_all(&ssh).unwrap();
+    std::fs::write(ssh.join("config"), "Host forge.invalid\n").unwrap();
+    let mcp = session(&user, SSH_REMOTE);
+    std::fs::write(user.path("work/app/planted"), "Match exec true\n").unwrap();
+    let ssh = ssh.display();
+
+    let read = done(line(&user, &mcp, &format!("cat {ssh}/config")));
+    let created = line(&user, &mcp, &format!("touch {ssh}/created")).text;
+    let changed = line(&user, &mcp, &format!("cp planted {ssh}/config")).text;
+    let moved = line(&user, &mcp, &format!("mv planted {ssh}/moved")).text;
+
+    assert!(read.contains("exited with code 0"), "{read}");
+    assert!(read.contains("Host forge.invalid"), "{read}");
+    for (what, answer) in [
+        ("created", &created),
+        ("changed", &changed),
+        ("moved", &moved),
+    ] {
+        assert!(answer.contains("exited with code"), "{what}: ran? {answer}");
+        assert!(!answer.contains("exited with code 0"), "{what}: {answer}");
+    }
+    assert!(!user.path("home/.ssh/created").exists());
+    assert!(!user.path("home/.ssh/moved").exists());
+    assert_eq!(
+        std::fs::read_to_string(user.path("home/.ssh/config")).unwrap(),
+        "Host forge.invalid\n"
+    );
+}
