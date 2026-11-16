@@ -20,15 +20,17 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 #[derive(Subcommand)]
 pub enum RemoteAction {
-    /// Make this machine the first member of a new hub, with the setup code it printed
+    /// Make this machine the first member of a new hub, with the setup code it printed, read on
+    /// the standard input (asked for on a terminal), never on the command line
     Setup {
         /// The hub's URL: http:// or https://, its host and its port
         url: String,
-        /// The setup code, from the hub's log or `flottille-hub setup-code`
-        code: String,
         /// This device's name among the user's [default: the host's name]
         #[arg(long)]
         name: Option<String>,
+        /// Set this machine up with another hub than the one it is set up with
+        #[arg(long)]
+        replace: bool,
         #[arg(long)]
         json: bool,
     },
@@ -72,18 +74,20 @@ pub fn run(paths: &Paths, action: RemoteAction) -> Result<ExitCode> {
         RemoteAction::Address { action } => action,
         RemoteAction::Setup {
             url,
-            code,
             name,
+            replace,
             json,
         } => {
             let name = match name {
                 Some(name) => name,
                 None => host_name()?,
             };
+            let code = setup_code()?;
             let device = device_key(paths)?;
             let machine: flottille_link::PublicKey =
                 serde_json::from_value(ask("remote.machines", json!({}))?["this"]["key"].clone())?;
-            let mut list = flottille_link::MemberList::start(&name, &device);
+            let mut list = flottille_link::MemberList::start(&name, &device)?;
+            // Claimed by the machine's daemon, which holds its key.
             list.sign(
                 flottille_link::Action::Machine {
                     key: device.public(),
@@ -93,7 +97,12 @@ pub fn run(paths: &Paths, action: RemoteAction) -> Result<ExitCode> {
             );
             let set = ask(
                 "remote.setup",
-                json!({"url": url, "code": code, "changes": list.changes()}),
+                json!({
+                    "url": url,
+                    "code": code.as_str(),
+                    "changes": list.changes(),
+                    "replace": replace,
+                }),
             )?;
             if json {
                 println!("{set}");
@@ -131,6 +140,23 @@ pub fn run(paths: &Paths, action: RemoteAction) -> Result<ExitCode> {
         );
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// The setup code, from the standard input: asked for when it is a terminal. Never an argument,
+/// which other users of the machine and the shell's history would see.
+fn setup_code() -> Result<zeroize::Zeroizing<String>> {
+    use std::io::{BufRead, IsTerminal, Write};
+    if std::io::stdin().is_terminal() {
+        eprint!("The hub's setup code: ");
+        std::io::stderr().flush()?;
+    }
+    let mut code = zeroize::Zeroizing::new(String::new());
+    std::io::stdin().lock().read_line(&mut code)?;
+    let trimmed = zeroize::Zeroizing::new(code.trim().to_owned());
+    if trimmed.is_empty() {
+        return Err("no setup code was given: type it, or give it on the standard input".into());
+    }
+    Ok(trimmed)
 }
 
 /// The device key of this user session's clients: in the session's keyring, or, with none,
@@ -180,11 +206,45 @@ impl SessionKeyring {
             .build()
             .map_err(|error| flottille_link::KeyringError::Failed(error.to_string()))?;
         runtime.block_on(async {
-            let keyring = oo7::Keyring::new()
-                .await
-                .map_err(|_| flottille_link::KeyringError::Absent)?;
+            let keyring = oo7::Keyring::new().await.map_err(|error| {
+                if no_service(&error) {
+                    flottille_link::KeyringError::Absent
+                } else {
+                    flottille_link::KeyringError::Failed(format!("the keyring: {error}"))
+                }
+            })?;
             act(keyring).await
         })
+    }
+}
+
+/// Whether `error` says there is no Secret Service to reach: no session bus, or none that has it.
+/// Any other failure is said, and the device key is not made in a file instead: a second identity
+/// for a passing failure would be worse than a refusal.
+fn no_service(error: &oo7::Error) -> bool {
+    use oo7::zbus;
+    let oo7::Error::DBus(oo7::dbus::Error::ZBus(error)) = error else {
+        return false;
+    };
+    let absent = |name: &str| {
+        matches!(
+            name,
+            "org.freedesktop.DBus.Error.ServiceUnknown"
+                | "org.freedesktop.DBus.Error.NameHasNoOwner"
+        )
+    };
+    match error {
+        zbus::Error::Address(_) => true,
+        zbus::Error::InputOutput(error) => matches!(
+            error.kind(),
+            std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+        ),
+        zbus::Error::FDO(error) => matches!(
+            **error,
+            zbus::fdo::Error::ServiceUnknown(_) | zbus::fdo::Error::NameHasNoOwner(_)
+        ),
+        zbus::Error::MethodError(name, _, _) => absent(name.as_str()),
+        _ => false,
     }
 }
 
@@ -241,4 +301,36 @@ fn host_name() -> Result<String> {
         return Err("the host has no name: give one with --name".into());
     }
     Ok(name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use oo7::zbus;
+
+    fn dbus(error: zbus::Error) -> oo7::Error {
+        oo7::Error::DBus(oo7::dbus::Error::ZBus(error))
+    }
+
+    #[test]
+    fn only_a_secret_service_that_is_not_there_is_no_keyring() {
+        let io = |kind: std::io::ErrorKind| {
+            dbus(zbus::Error::InputOutput(std::sync::Arc::new(kind.into())))
+        };
+        // No session bus, or none that has a Secret Service: the key file.
+        assert!(no_service(&dbus(zbus::Error::Address("no bus".to_owned()))));
+        assert!(no_service(&io(std::io::ErrorKind::NotFound)));
+        assert!(no_service(&io(std::io::ErrorKind::ConnectionRefused)));
+        assert!(no_service(&dbus(zbus::Error::FDO(Box::new(
+            zbus::fdo::Error::ServiceUnknown("org.freedesktop.secrets".to_owned())
+        )))));
+        // Anything else is a failure, said.
+        assert!(!no_service(&io(std::io::ErrorKind::PermissionDenied)));
+        assert!(!no_service(&io(std::io::ErrorKind::TimedOut)));
+        assert!(!no_service(&dbus(zbus::Error::Failure("busy".to_owned()))));
+        assert!(!no_service(&oo7::Error::DBus(oo7::dbus::Error::Dismissed)));
+        assert!(!no_service(&dbus(zbus::Error::FDO(Box::new(
+            zbus::fdo::Error::AccessDenied("no".to_owned())
+        )))));
+    }
 }
