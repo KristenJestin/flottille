@@ -1988,6 +1988,7 @@ impl Shell {
             meta: None,
             folder: project.folder.clone(),
             steps: Vec::new(),
+            total_ms: None,
             preparation: Preparation::Ready,
             sessions: self
                 .snapshot
@@ -2018,6 +2019,7 @@ impl Shell {
                 meta: Some(format!("from {}", workspace.bases.join(", "))),
                 folder: workspace.folder.clone(),
                 steps: workspace.steps.clone(),
+                total_ms: workspace.total_ms,
                 preparation: workspace.preparation.clone(),
                 sessions: self
                     .snapshot

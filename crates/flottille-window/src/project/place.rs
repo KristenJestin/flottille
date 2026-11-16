@@ -18,8 +18,8 @@ use gpui_design_system::color::mix;
 use gpui_design_system::motion::PANEL;
 use gpui_design_system::{
     Button, Chip, Confirm, Field, FlatRow, Icon, Item, Listing, Menu, Modal, Placement, Skeleton,
-    Toast, Type, awaiting, caption, enter, fade, hoverable, icon, palette, presence, presence_of,
-    space, toast,
+    Toast, Type, awaiting, caption, changed, enter, fade, hoverable, icon, palette, presence,
+    presence_of, space, toast,
 };
 use gpui_kit::base::input::{InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -112,6 +112,10 @@ fn step_time(step: &SetupLine, now: u64) -> Option<String> {
     match (step.state, step.started_at, step.ended_at) {
         (StepState::Skipped, ..) => Some("skipped".into()),
         (StepState::Running, Some(started), _) => Some(seconds(now.saturating_sub(started))),
+        // The daemon's own measure when it kept one: the timestamps are the wall clock's.
+        (StepState::Done | StepState::Failed, _, _) if step.duration_ms.is_some() => {
+            step.duration_ms.map(seconds)
+        }
         (StepState::Done | StepState::Failed, Some(started), Some(ended)) => {
             Some(seconds(ended.saturating_sub(started)))
         }
@@ -692,6 +696,7 @@ impl PlaceBlock {
             if let Some(time) = step_time(&step, now) {
                 row = row.time(SharedString::from(time));
             }
+            row = row.ticking(step.state == StepState::Running);
             // A command that ran or runs opens in the run drawer, and so does a step that failed
             // (the drawer says why); one still to do, or skipped, did nothing yet to show, and a
             // copy or a link that went well has no output.
@@ -979,7 +984,12 @@ impl PlaceBlock {
 
     /// A workspace's faint line, in labelled values: where it starts from, and where each
     /// repository stands (a project of one repository does not name it).
-    fn facts_line(&self, name: &str, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn facts_line(
+        &self,
+        name: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         let meta = self.data.meta.clone()?;
         let p = palette(cx);
         let mut values: Vec<(Option<String>, String)> = vec![(None, meta)];
@@ -1002,6 +1012,27 @@ impl PlaceBlock {
             .collect::<Vec<_>>()
             .join(" · ");
         let count = values.len();
+        // How long it took to be ready, from the request: it fades in when the last step ends (the
+        // setup block, which says each step's time, folds away then). Asked on every frame, with no
+        // text before, so that the first text is a change.
+        let total = self
+            .data
+            .total_ms
+            .map(|ms| SharedString::from(format!("ready in {}", seconds(ms))))
+            .unwrap_or_default();
+        let total_id = ElementId::Name(format!("place-total-{name}").into());
+        let faded = changed(&total_id, &total, window, cx);
+        let total = (!total.is_empty()).then(|| {
+            div()
+                .id(total_id)
+                .aria_label(total.clone())
+                .flex()
+                .gap(space::XS)
+                .opacity(faded)
+                .child("·")
+                .child(div().text_color(p.mute).child(total))
+                .test_support()
+        });
         Some(
             div()
                 .id(ElementId::Name(format!("place-facts-{name}").into()))
@@ -1020,6 +1051,7 @@ impl PlaceBlock {
                         .child(div().text_color(p.mute).child(value))
                         .when(i + 1 < count, |d| d.child("·"))
                 }))
+                .children(total)
                 .test_support()
                 .into_any_element(),
         )
@@ -1405,7 +1437,7 @@ impl Render for PlaceBlock {
         });
         let highlight = fade(id("place-highlight"), self.highlighted, PANEL, window, cx);
 
-        let facts = self.facts_line(&name, cx);
+        let facts = self.facts_line(&name, window, cx);
         let steps = self.setup(&name, now, cx);
         let setup = presence(
             id("place-setup"),
@@ -1466,5 +1498,45 @@ impl Render for PlaceBlock {
             .children(sessions)
             .children(runs)
             .test_support()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn line(state: StepState, started_at: Option<u64>, ended_at: Option<u64>) -> SetupLine {
+        SetupLine {
+            position: 0,
+            verb: "Run".into(),
+            runs: true,
+            object: Some("pnpm install".into()),
+            state,
+            started_at,
+            ended_at,
+            duration_ms: None,
+        }
+    }
+
+    #[test]
+    fn a_step_done_says_the_duration_the_daemon_measured_not_the_wall_clock_s() {
+        let mut done = line(StepState::Done, Some(1_000), Some(61_000));
+        done.duration_ms = Some(420);
+
+        assert_eq!(step_time(&done, 99_000).as_deref(), Some("0.4s"));
+        // A step recorded before durations were kept falls back on its two timestamps.
+        done.duration_ms = None;
+        assert_eq!(step_time(&done, 99_000).as_deref(), Some("60s"));
+    }
+
+    #[test]
+    fn a_step_running_ticks_from_its_start_and_a_step_to_do_says_nothing() {
+        let running = line(StepState::Running, Some(1_000), None);
+
+        assert_eq!(step_time(&running, 4_000).as_deref(), Some("3.0s"));
+        assert_eq!(
+            step_time(&line(StepState::Pending, None, None), 4_000),
+            None
+        );
     }
 }

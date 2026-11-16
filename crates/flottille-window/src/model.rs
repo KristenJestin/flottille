@@ -60,6 +60,9 @@ pub struct Workspace {
     /// When it was made, in milliseconds since the Unix epoch: the project page lists the newest
     /// first.
     pub created_at: u64,
+    /// From its creation to the end of its last step, once it is ready: what the setup block
+    /// says it took (the wall clock's timestamps, the daemon's own total being the same span).
+    pub total_ms: Option<u64>,
 }
 
 /// One step of a workspace's preparation, as its place lists it: "Run `pnpm install`".
@@ -76,6 +79,8 @@ pub struct SetupLine {
     /// Milliseconds since the Unix epoch.
     pub started_at: Option<u64>,
     pub ended_at: Option<u64>,
+    /// How long it took, as the daemon measured it on a monotonic clock, once it ended.
+    pub duration_ms: Option<u64>,
 }
 
 impl SetupLine {
@@ -99,6 +104,7 @@ impl SetupLine {
             state: step.state,
             started_at: step.started_at,
             ended_at: step.ended_at,
+            duration_ms: step.duration_ms,
         }
     }
 }
@@ -158,6 +164,15 @@ impl Workspace {
             },
             (None, None) => Preparation::Ready,
         };
+        let total_ms = match preparation {
+            Preparation::Ready => record
+                .steps
+                .iter()
+                .filter_map(|step| step.ended_at)
+                .max()
+                .map(|ended| ended.saturating_sub(record.created_at)),
+            _ => None,
+        };
         Workspace {
             project: record.project.clone(),
             name: record.name.clone(),
@@ -181,6 +196,7 @@ impl Workspace {
                 .map(SetupLine::of)
                 .collect(),
             created_at: record.created_at,
+            total_ms,
         }
     }
 }
@@ -1433,6 +1449,46 @@ mod tests {
         );
         assert_eq!(workspace.steps[1].ended_at, None);
         assert_eq!(workspace.steps[2].started_at, None);
+    }
+
+    #[test]
+    fn a_step_keeps_the_duration_the_daemon_measured_and_a_ready_workspace_its_total() {
+        let steps = json!([
+            {"position": 0, "repository": "api", "kind": "worktree", "state": "done",
+                "started_at": 1_000, "ended_at": 1_400, "duration_ms": 380},
+            {"position": 1, "kind": "copy", "globs": [".env"], "state": "done",
+                "started_at": 1_400, "ended_at": 1_500, "duration_ms": 90},
+            {"position": 2, "repository": "api", "kind": "run", "line": "pnpm install",
+                "time_limit": 60, "state": "done", "started_at": 1_500, "ended_at": 8_500,
+                "duration_ms": 6_900}]);
+        let mut shown = workspace_json(steps.clone());
+        shown["state"] = "ready".into();
+        let snapshot = Snapshot::build(Answers {
+            projects: &json!({"projects": []}),
+            workspaces: &json!({"workspaces": [shown]}),
+            agents: &json!({"agents": []}),
+            approvals: &json!({"requests": []}),
+            needs_user: &HashSet::new(),
+            questions: &HashMap::new(),
+            briefs: &HashMap::new(),
+            commands: &json!({"commands": []}),
+            subscriptions: &json!({"subscriptions": []}),
+        });
+        let ready = &snapshot.workspaces[0];
+        let durations: Vec<_> = ready.steps.iter().map(|step| step.duration_ms).collect();
+
+        assert_eq!(durations, [Some(90), Some(6_900)]);
+        // From its creation (at 1 ms) to the end of its last step.
+        assert_eq!(ready.total_ms, Some(8_499));
+        let preparing = preparation_of(json!([
+            {"position": 0, "kind": "copy", "globs": [".env"], "state": "done",
+                "started_at": 1_400, "ended_at": 1_500, "duration_ms": 90},
+            {"position": 1, "kind": "run", "line": "pnpm install", "time_limit": 60,
+                "state": "running", "started_at": 1_500}]));
+        assert_eq!(
+            preparing.total_ms, None,
+            "a workspace being prepared has no total"
+        );
     }
 
     #[test]
