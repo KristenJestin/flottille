@@ -2030,8 +2030,8 @@ struct Recorder {
     env: BTreeMap<OsString, OsString>,
     /// What the agent is saying, held back until it is settled.
     speech: Speech,
-    /// When the turn under way started.
-    started_at: Mutex<Option<u64>>,
+    /// When the turn under way started, and the optimisations on then (`docs/usage.md`).
+    started_at: Mutex<Option<(u64, String)>>,
 }
 
 /// Events of the session that say nothing of the conversation: they may come between two pieces
@@ -2183,12 +2183,17 @@ impl Recorder {
     /// name is the one it had taken.
     fn record_usage(&self, stop_reason: &str, used: Vec<Used>) {
         let ended_at = now_ms();
-        let started_at = self.started_at.lock().unwrap().take().unwrap_or(ended_at);
+        let started = self.started_at.lock().unwrap().take();
         let Ok(Some(agent)) = self.daemon.read(|store| store.agent(&self.agent)) else {
             return;
         };
+        let (started_at, tuning) = started.unwrap_or_else(|| {
+            (
+                ended_at,
+                crate::results::tuning(&self.daemon.paths, &agent.provider),
+            )
+        });
         let session = tree::root_of(&self.daemon, &agent.id);
-        let tuning = crate::results::tuning(&self.daemon.paths, &agent.provider);
         let rows: Vec<TurnUsage> = used
             .into_iter()
             .map(|used| TurnUsage {
@@ -2431,7 +2436,9 @@ impl acp::Events for Recorder {
     }
 
     fn turn_started(&self, text: &str, images: &[String], typed: &Value, deliveries: &[String]) {
-        *self.started_at.lock().unwrap() = Some(now_ms());
+        // What is on when the turn starts: a switch flipped during it applies from the next.
+        let tuning = crate::results::tuning(&self.daemon.paths, self.provider.name);
+        *self.started_at.lock().unwrap() = Some((now_ms(), tuning));
         let mut data = json!({"text": text, "deliveries": deliveries});
         // The pictures of a brief given again are the first message's, which shows them already.
         let again: Vec<String> = deliveries
