@@ -389,7 +389,7 @@ is not taken or not read; it is not a refusal.
 #### `project.progress`
 
 `{"project"}`. The milestones of the project's tracker and their tickets, for the window's
-Progress page (`docs/tickets.md`, "Progress"): `{"project", "tracker" (github or jira),
+Progress tab of a project's page (`docs/tickets.md`, "Progress"): `{"project", "tracker" (github or jira),
 "milestones", "problem"}`. Each milestone is `{"id", "name", "source", "jira_project", "state"
 (open or closed), "due", "closed_at" (the day GitHub closed it, when it says so), "url", "read",
 "problem" (why a Jira version's tickets could not be read), "counts": {"done", "review", "progress", "todo", "other",

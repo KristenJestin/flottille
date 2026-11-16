@@ -182,6 +182,33 @@ pub(super) async fn people(project: &Project, asked: &TicketsCall) -> Outcome {
     Outcome::Done(text)
 }
 
+/// The Jira account `who` names for `tickets worklogs`: found among the tracker's people, and
+/// how an answer says them. Jira's REST API takes the account id, which `acli` shows for a person.
+pub(super) async fn account_of(project: &Project, who: &str) -> Result<(String, String), String> {
+    let listing = read(project).await?;
+    if listing.people.is_empty() && listing.why.is_some() {
+        return Err(format!(
+            "refused: author: {who:?} is a name, and the tracker's people cannot be looked up \
+             ({}); give an account id (tickets people shows them)",
+            listing.why.as_deref().unwrap_or_default()
+        ));
+    }
+    let person = listing
+        .people
+        .find(who, listing.complete)
+        .map_err(|miss| miss.refusal("author", who, &listing.looked))?;
+    let account = std::iter::once(&person.send)
+        .chain(&person.keys)
+        .find(|id| super::worklogs::is_account(id))
+        .ok_or_else(|| {
+            format!(
+                "refused: author: {} has no account id among what acli shows of them: give it",
+                person.said()
+            )
+        })?;
+    Ok((account.clone(), person.said()))
+}
+
 /// The person `who` names for `key`, as what the tracker's command takes and how an answer says
 /// them: found among its people, or refused saying why. A GitHub repository whose users cannot
 /// be read takes a login as it was given, as before.

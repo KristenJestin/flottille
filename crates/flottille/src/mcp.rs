@@ -400,25 +400,26 @@ const SERVED: [Definition; 33] = [
         name: "tickets",
         title: "Tickets",
         description: "The tracker's tickets (GitHub #123, Jira ABC-123), via the user's gh/acli \
-            (never run them). list: by state (default open), label, assignee, updated_within; search asks the tracker: {\"action\":\"search\",\"query\":\"x\"}, \
+            (never run them). list: by state (default open), label, assignee, updated_within; search asks the tracker (query), \
             on Jira also in_comments, jql; show: a workspace's ticket (in \
             main, name workspace) or ticket, with links; detail full adds comments, \
             with ids; Jira images and files are named, not shown; \
-            types: a Jira project's work item types (never guess); link_types. \
+            types: a Jira project's work item types (never guess); link_types; \
+            worklogs (Jira: a day's or range's time). \
             Writes, judged, answered at once, the result maybe later: create, comment, reply, edit, close, \
             reopen, status, link, unlink, comment_edit, \
             comment_delete (both yours only); log_time (Jira), \
             time_spent (this session's, to propose). \
             Assign only if asked (assignee \"me\": the user; \
             GitHub: assignees). Jira create: parent, sprint (see sprints). \
-            Milestones (Jira: versions): milestones, progress (tickets and work); GitHub: milestone_create/_edit. \
+            Milestones (Jira: versions): milestones, progress; GitHub: milestone_create/_edit. \
             subscribe: a ticket's events wake you until it closes (maybe already); unsubscribe.",
         read_only: false,
         idempotent: false,
         destructive: false,
         schema: || {
             json!({"type": "object", "properties": {
-                "action": {"type": "string", "enum": ["list", "search", "show", "people", "types", "link_types", "sprints", "milestones", "progress", "subscribe", "unsubscribe", "create", "comment", "reply", "edit", "close", "reopen", "status", "link", "unlink", "comment_edit", "comment_delete", "milestone_create", "milestone_edit", "log_time", "time_spent"]},
+                "action": {"type": "string", "enum": ["list", "search", "show", "people", "types", "link_types", "sprints", "milestones", "progress", "subscribe", "unsubscribe", "create", "comment", "reply", "edit", "close", "reopen", "status", "link", "unlink", "comment_edit", "comment_delete", "milestone_create", "milestone_edit", "log_time", "time_spent", "worklogs"]},
                 "ticket": {"type": "string", "description": "#123 or ABC-123; the workspace's when left out."},
                 "duration": {"type": "string", "description": "log_time (Jira): the time spent, in Jira's form: 2h 30m, 1d, 45m (weeks, days, hours, minutes)."},
                 "started": {"type": "string", "description": "log_time: when the work started, RFC 3339 with its offset (2026-11-06T09:00:00+01:00); the duration before now when left out."},
@@ -453,7 +454,9 @@ const SERVED: [Definition; 33] = [
                 "project": {"type": "string", "description": "create, types, sprints, milestones on Jira: the tracker's project (a version belongs to one; list, search take it with milestone); status: the board."},
                 "type": {"type": "string", "description": "create on Jira: work item type, one of those types lists."},
                 "events": {"type": "array", "items": {"enum": crate::tickets::EVENTS}},
-                "from": {"enum": crate::subscriptions::FROM, "description": "subscribe: whose comments count: anyone (the default), or people (no bot nor agent)."},
+                "from": {"type": "string", "description": "subscribe: whose comments count: anyone (the default), or people (no bot nor agent). worklogs: the first day, YYYY-MM-DD."},
+                "to": {"type": "string", "description": "worklogs: the last day, YYYY-MM-DD; the first day when left out."},
+                "author": {"type": "string", "description": "worklogs: whose worklogs: an account id, or a name tickets people finds; the account of the user's token when left out."},
                 "minutes": {"type": "integer", "minimum": 1, "description": "subscribe: a deadline: past it with nothing come, you are woken once and it ends. Left out: none; each event wakes you until the ticket is closed (Jira: a done status), no need to subscribe again."}
             }, "required": ["action"], "additionalProperties": false})
         },
@@ -3198,7 +3201,7 @@ fn record(
     // A time that cannot be logged for want of the project's vault entry: the window offers its
     // Settings, where the user chooses one.
     if tool == "tickets"
-        && recorded["action"] == "log_time"
+        && matches!(recorded["action"].as_str(), Some("log_time" | "worklogs"))
         && matches!(outcome, Outcome::Refused(_))
         && crate::projects::load_project(daemon, &grant.place.project)
             .is_ok_and(|project| crate::tickets::worklog_unset(daemon, &project))
