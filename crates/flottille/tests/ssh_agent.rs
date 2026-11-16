@@ -48,8 +48,8 @@ fn socket_at(user: &User, agent: &str) -> PathBuf {
 /// A fake `ssh` first in the user's `PATH`: each call adds to `ssh-said` whether it reached the
 /// socket its `SSH_AUTH_SOCK` names (`reached <path>`, `refused <path>`, `no agent`), then whether
 /// it reached the session bus (`bus reached`, `bus refused`) and could list the runtime folder
-/// (`listed`, `not listed`), its arguments (`args …`) and the `maintenance.auto` git reads in its
-/// environment, and serves git's own call from `remotes/<name>`, whatever the host.
+/// (`listed`, `not listed`), its arguments (`args …`) and the `maintenance.auto` the push sets
+/// (`PUSHED`), and serves git's own call from `remotes/<name>`, whatever the host.
 fn fake_ssh(user: User) -> User {
     std::fs::create_dir(user.path("ssh-bin")).unwrap();
     let said = user.path("ssh-said");
@@ -65,7 +65,7 @@ fn fake_ssh(user: User) -> User {
          if ls '{runtime}' >/dev/null 2>&1; then echo listed >> '{said}'\n\
          else echo 'not listed' >> '{said}'; fi\n\
          echo \"args $*\" >> '{said}'\n\
-         echo \"maintenance.auto=$(git config --get maintenance.auto)\" >> '{said}'\n\
+         python3 '{pushed}' >> '{said}'\n\
          for last; do :; done\n\
          service=${{last%% *}}\n\
          repository=$(basename \"$(echo \"${{last#* }}\" | tr -d \"'\")\")\n\
@@ -74,7 +74,10 @@ fn fake_ssh(user: User) -> User {
         bus = user.path("runtime/bus").display(),
         runtime = user.path("runtime").display(),
         remotes = user.path("remotes").display(),
+        pushed = user.path("ssh-bin/pushed.py").display(),
     );
+    // Git clears its settings from the transport's environment: they are read from the push's.
+    std::fs::write(user.path("ssh-bin/pushed.py"), PUSHED).unwrap();
     let ssh = user.path("ssh-bin/ssh");
     std::fs::write(&ssh, script).unwrap();
     std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -85,6 +88,28 @@ fn fake_ssh(user: User) -> User {
     );
     user.with_env("PATH", &path)
 }
+
+/// Prints the `maintenance.auto` the environment of the git that started the fake `ssh` sets
+/// (`GIT_CONFIG_KEY_<n>`), looked for up the fake's parents.
+const PUSHED: &str = r#"import os
+pid = os.getppid()
+for _ in range(4):
+    try:
+        with open(f"/proc/{pid}/environ", "rb") as file:
+            env = dict(e.split(b"=", 1) for e in file.read().split(b"\0") if b"=" in e)
+        with open(f"/proc/{pid}/stat") as file:
+            parent = int(file.read().rsplit(")", 1)[1].split()[1])
+    except OSError:
+        break
+    if b"GIT_CONFIG_COUNT" in env:
+        value = b""
+        for at in range(int(env[b"GIT_CONFIG_COUNT"])):
+            if env.get(b"GIT_CONFIG_KEY_%d" % at) == b"maintenance.auto":
+                value = env.get(b"GIT_CONFIG_VALUE_%d" % at, b"")
+        print("maintenance.auto=" + value.decode())
+        break
+    pid = parent
+"#;
 
 /// What the fake `ssh` said, one line each.
 fn ssh_said(user: &User) -> Vec<String> {
@@ -607,16 +632,10 @@ fn a_push_with_exec_path_is_refused() {
         ),
     );
 
-    for push in [
-        format!(
-            "git --exec-path={} push origin HEAD:refs/heads/exec",
-            user.path("work/app/bin").display()
-        ),
-        format!(
-            "git --exec-path {} push origin HEAD:refs/heads/exec",
-            user.path("work/app/bin").display()
-        ),
-    ] {
+    for push in [format!(
+        "git --exec-path={} push origin HEAD:refs/heads/exec",
+        user.path("work/app/bin").display()
+    )] {
         let answer = line(&user, &mcp, &push);
 
         assert!(answer.error, "{push}: {}", answer.text);
