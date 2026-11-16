@@ -280,7 +280,10 @@ impl Context<'_> {
         {
             return Err(changed(&resolved, &why));
         }
-        if self.approved.is_some() {
+        // The gate lets an agent read its own pasted texts, out of its place (#848).
+        if self.approved.is_some()
+            || !write && gate::own_pasted_text(&self.own(), self.agent, &resolved)
+        {
             return Ok(resolved);
         }
         match gate::contained(std::slice::from_ref(&resolved)) {

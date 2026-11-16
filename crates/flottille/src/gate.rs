@@ -456,7 +456,7 @@ fn files(call: &Call) -> Verdict {
         }
         if let Some(why) = process(call.groups, path) {
             found.base(why);
-        } else if call.tool == "fs_read" && own_pasted_text(call, path) {
+        } else if call.tool == "fs_read" && own_pasted_text(call.own, &call.grant.agent, path) {
             // The text a large paste became, which its message tells the agent to read (#848).
         } else if let Some(place) = sensitive(call.own, home, path) {
             found.base(format!("{} is a sensitive place ({place})", path.shown));
@@ -476,14 +476,14 @@ fn files(call: &Call) -> Verdict {
 /// Whether `path` is a pasted text of the calling agent: a file named as the daemon names one
 /// (`<stamp>-text-<n>.txt`) right in its own folder of images in Flottille's data folder, the
 /// first of its own, both as written and where it leads (no link, no `..` out of it).
-fn own_pasted_text(call: &Call, path: &Resolved) -> bool {
-    let Some(data) = call.own.first() else {
+pub fn own_pasted_text(own: &[PathBuf], agent: &str, path: &Resolved) -> bool {
+    let Some(data) = own.first() else {
         return false;
     };
     if path.unfollowed.is_some() {
         return false;
     }
-    let folder = data.join("images").join(&call.grant.agent);
+    let folder = data.join("images").join(agent);
     let Ok(real) = place::real_path(&folder) else {
         return false;
     };
