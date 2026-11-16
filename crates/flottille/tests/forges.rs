@@ -1050,7 +1050,7 @@ fn cloud_pipeline(build: u64, kind: &str, commit: &str, result: &str) -> Value {
 }
 
 /// `pipeline` in the `state` Bitbucket gives it as it ends or stops: `COMPLETED` with a result
-/// (`STOPPED` for one the user stopped), or `IN_PROGRESS` with a `stage` (`HALTED`, `STOPPING`,
+/// (`STOPPED` for one the user stopped), or `IN_PROGRESS` with a `stage` (`STOPPING`, `HALTED`,
 /// `PAUSED`), whatever its steps' statuses still say.
 fn in_state(mut pipeline: Value, state: Value) -> Value {
     pipeline["state"] = state;
@@ -1241,15 +1241,25 @@ fn an_inprogress_status_of_a_stopped_pipeline_is_not_pending() {
 }
 
 #[test]
-fn a_halted_or_stopping_pipeline_is_not_running() {
-    for stage in ["HALTED", "STOPPING"] {
-        let line = after_a_green_build(
-            staged_pipeline(606, stage),
-            &[step_status(606, "test", "INPROGRESS")],
-        );
+fn a_stopping_pipeline_is_not_running() {
+    let line = after_a_green_build(
+        staged_pipeline(606, "STOPPING"),
+        &[step_status(606, "test", "INPROGRESS")],
+    );
 
-        assert_eq!(line, "checks: passing (test passing)", "{stage}");
-    }
+    assert_eq!(line, "checks: passing (test passing)");
+}
+
+#[test]
+fn a_halted_pipeline_can_be_resumed_so_it_stays_pending() {
+    // Bitbucket's API says a halted pipeline can be resumed: it is not over, and the green build
+    // before it does not stand in its place.
+    let line = after_a_green_build(
+        staged_pipeline(606, "HALTED"),
+        &[step_status(606, "test", "INPROGRESS")],
+    );
+
+    assert_eq!(line, "checks: pending (test pending)");
 }
 
 #[test]
@@ -1305,11 +1315,7 @@ fn a_lone_stopped_build_says_stopped_and_can_be_rerun() {
 fn a_stopped_build_with_a_failed_step_still_fails() {
     // The user stopped the remaining parallel steps of #606 after `test` failed: the stop is not a
     // verdict, the failed step is, and it is the latest build's.
-    for latest in [
-        stopped_pipeline(606),
-        staged_pipeline(606, "HALTED"),
-        staged_pipeline(606, "STOPPING"),
-    ] {
+    for latest in [stopped_pipeline(606), staged_pipeline(606, "STOPPING")] {
         let line = after_a_green_build(
             latest,
             &[

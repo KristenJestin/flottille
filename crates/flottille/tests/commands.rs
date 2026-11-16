@@ -1764,12 +1764,12 @@ fn bitbucket_rerun_runs_a_stopped_pipeline_again() {
 }
 
 #[test]
-fn bitbucket_rerun_runs_a_halted_pipeline_again() {
-    // The merge refusal of a lone halted build says to run it again: the rerun agrees it was
+fn bitbucket_rerun_runs_a_stopping_pipeline_again() {
+    // The merge refusal of a lone stopping build says to run it again: the rerun agrees it was
     // stopped, whatever its result says (it has none yet).
-    let mut halted = pull_request_pipeline(8, "app/login", "SUCCESSFUL");
-    halted["state"] = json!({"name": "IN_PROGRESS", "stage": {"name": "HALTED"}});
-    let (user, mcp, rerun) = rerun_setup(json!([halted]));
+    let mut stopping = pull_request_pipeline(8, "app/login", "SUCCESSFUL");
+    stopping["state"] = json!({"name": "IN_PROGRESS", "stage": {"name": "STOPPING"}});
+    let (user, mcp, rerun) = rerun_setup(json!([stopping]));
 
     let answer = write(&user, &mcp, rerun);
 
@@ -1986,6 +1986,30 @@ fn a_stopped_build_with_a_failed_step_refuses_the_merge_after_a_green_one() {
     assert!(answer.error, "{}", answer.text);
     assert!(
         answer.text.contains("its checks fail (test"),
+        "{}",
+        answer.text
+    );
+    assert_eq!(bkt_calls_starting(&user, "pr merge"), 0);
+}
+
+#[test]
+fn a_halted_build_after_a_green_one_refuses_the_merge_as_still_running() {
+    let (mut halted, status) = stopped_build(606);
+    halted["state"] = json!({"name": "IN_PROGRESS", "stage": {"name": "HALTED"}});
+    let green = pull_request_pipeline(603, "app/login", "SUCCESSFUL");
+
+    let (user, answer) = merge_with(
+        json!([
+            {"state": "SUCCESSFUL", "name": "build", "key": "603-build",
+             "url": "https://bitbucket.org/acme/app/pipelines/results/603"},
+            status
+        ]),
+        json!([halted, green]),
+    );
+
+    assert!(answer.error, "{}", answer.text);
+    assert!(
+        answer.text.contains("its checks are still running (build)"),
         "{}",
         answer.text
     );
