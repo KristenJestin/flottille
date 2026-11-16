@@ -548,12 +548,15 @@ async fn serve(
     let loading = daemon.clone();
     let loading = tokio::spawn(async move { crate::vault::load(&loading).await });
     let _ = tokio::time::timeout(VAULT_LOAD, loading).await;
+    // What a daemon that died left running is ended before anything tries a service or starts a
+    // run: a resumed setup step would find a leftover server answering, and take it for one
+    // started outside Flottille.
+    runs::settle_at_start(&daemon).await;
     runs::tell_guarded_at_start(&daemon);
     workspaces::resume_at_start(&daemon);
     agents::settle_at_start(&daemon);
     tree::brief_at_start(&daemon);
     crate::subscriptions::resume_at_start(&daemon);
-    runs::settle_at_start(&daemon).await;
     approvals::settle_at_start(&daemon);
     projects::migrate_files(&daemon);
     let picking = daemon.clone();

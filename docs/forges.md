@@ -441,12 +441,22 @@ the base the repository started from: its rule's, or the `base` the workspace wa
   `--message M` (subject and body in one text, as Bitbucket takes it); left out, the server writes
   its own. Not yet seen on a real server: that Cloud and Data Center keep it as the squashed
   commit's message. When the server refuses the merge, the
-  strategies the repository allows are read (Cloud: `destination.branch.merge_strategies` of the
-  pull request's own page; Data Center: the `enabled` ones of `mergeConfig.strategies[].id` in
-  `/rest/api/1.0/projects/{key}/repos/{repo}/settings/pull-requests`, both through `bkt api`,
-  **assumed shapes**) and, when the method is not among them, the refusal names the methods they
-  allow, then the strategies it allows that no method reaches (`ff`, `squash-ff-only`,
-  `fast_forward`…) as it names them; otherwise the server's own refusal is the result. Before it, as for GitHub, it is refused
+  answer says first what `bkt pr merge` said (its message, masked, up to 600 characters), then
+  Flottille's reading of it: the strategies the repository allows are read (Cloud:
+  `destination.branch.merge_strategies` of the pull request's own page; Data Center: the `enabled`
+  ones of `mergeConfig.strategies[].id` in `/rest/api/1.0/projects/{key}/repos/{repo}/settings/pull-requests`,
+  both through `bkt api`, **assumed shapes**) and, when the method is not among them, the reading
+  names the methods they allow, then the strategies it allows that no method reaches (`ff`,
+  `squash-ff-only`, `fast_forward`…) as it names them; when the method is among them, the server's
+  own refusal is the result. **A list that is absent, empty or unreadable is "unknown", never "none
+  allowed"**: the answer gives the server's refusal alone and says that which methods the
+  repository allows could not be read. "None of squash, merge and rebase" is said only when the
+  list is present and holds strategies that no method reaches. A `bkt pr merge` that does not
+  answer within the time of the forge's calls (30 s) is said as a timeout (`the merge did not
+  answer within N s: it may have happened; check the pull request`) and the pull request's page is
+  read back before anything else is said: it says `merged` (the answer is that it was merged), or
+  the state it is still in (so it was not merged yet), and a read back that fails says so, claiming
+  neither. Before the merge, as for GitHub, it is refused
   when no check ran on the pull request (`bkt pr checks` lists none, or answers `"statuses": null`
   for a commit with no status; an answer without `statuses` is not that: the checks could not be
   read, and nothing is merged), while a check of the pull

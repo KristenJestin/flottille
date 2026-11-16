@@ -19,6 +19,19 @@ use crate::subscription::Subscription;
 use crate::workspace::{Action, Failure, Step, StepState, Workspace};
 use crate::{Error, Result};
 
+/// A run's process recorded while it runs (`run_processes`), what a daemon started after a crash
+/// ends.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunProcess {
+    pub pid: u32,
+    /// In clock ticks after boot.
+    pub started: u64,
+    /// The run's id, also the value of `FLOTTILLE_RUN` in the environment of what it started.
+    pub run: String,
+    /// The boot it was recorded in (`/proc/sys/kernel/random/boot_id`).
+    pub boot: String,
+}
+
 /// Applied in order; the database's `user_version` is the number of those already applied. A
 /// migration is never edited once released: a change is a new one.
 const MIGRATIONS: &[&str] = &[
@@ -741,6 +754,12 @@ const MIGRATIONS: &[&str] = &[
         opened_at  INTEGER NOT NULL
     ) STRICT;
     CREATE INDEX opened_pulls_branch ON opened_pulls (project, repository, branch);
+",
+    "
+    -- The boot each run process was recorded in: a pid and a start time say nothing of a process
+    -- after a reboot, and a record from before one is dropped unsignalled. One recorded before
+    -- this has none, and counts as another boot's.
+    ALTER TABLE run_processes ADD COLUMN boot TEXT NOT NULL DEFAULT '';
 ",
 ];
 
@@ -1919,11 +1938,12 @@ impl Store {
         Ok(Some(event))
     }
 
-    /// A run's process group started: its leader's pid and start time.
-    pub fn add_run_process(&self, pid: u32, started: u64, run: &str) -> Result<()> {
+    /// A run's process group started: its leader's pid and start time, in the boot `boot`.
+    pub fn add_run_process(&self, pid: u32, started: u64, run: &str, boot: &str) -> Result<()> {
         self.connection.execute(
-            "INSERT OR REPLACE INTO run_processes (pid, started, run) VALUES (?1, ?2, ?3)",
-            params![pid, started, run],
+            "INSERT OR REPLACE INTO run_processes (pid, started, run, boot) \
+             VALUES (?1, ?2, ?3, ?4)",
+            params![pid, started, run, boot],
         )?;
         Ok(())
     }
@@ -1934,12 +1954,19 @@ impl Store {
         Ok(())
     }
 
-    /// Every run process recorded, each `(pid, start time)`.
-    pub fn run_processes(&self) -> Result<Vec<(u32, u64)>> {
+    /// Every run process recorded.
+    pub fn run_processes(&self) -> Result<Vec<RunProcess>> {
         let mut statement = self
             .connection
-            .prepare_cached("SELECT pid, started FROM run_processes ORDER BY pid")?;
-        let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+            .prepare_cached("SELECT pid, started, run, boot FROM run_processes ORDER BY pid")?;
+        let rows = statement.query_map([], |row| {
+            Ok(RunProcess {
+                pid: row.get(0)?,
+                started: row.get(1)?,
+                run: row.get(2)?,
+                boot: row.get(3)?,
+            })
+        })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
@@ -6403,8 +6430,16 @@ mod tests {
         assert_eq!(read.output, "ok\n");
         assert!(read.ended_at.is_some());
         assert!(store.running_runs().unwrap().is_empty());
-        store.add_run_process(4242, 7, "r1").unwrap();
-        assert_eq!(store.run_processes().unwrap(), [(4242, 7)]);
+        store.add_run_process(4242, 7, "r1", "b1").unwrap();
+        assert_eq!(
+            store.run_processes().unwrap(),
+            [RunProcess {
+                pid: 4242,
+                started: 7,
+                run: "r1".into(),
+                boot: "b1".into()
+            }]
+        );
         store.remove_run_process(4242).unwrap();
         assert!(store.run_processes().unwrap().is_empty());
     }

@@ -1552,9 +1552,7 @@ fn the_window_draws_no_frame_at_rest_with_chips_in_the_composer_and_a_message(
 }
 
 #[gpui_kit::test]
-fn the_window_draws_no_frame_at_rest_on_a_project_s_progress_with_a_milestone_unfolded(
-    cx: &mut TestAppContext,
-) {
+fn the_window_draws_no_frame_at_rest_on_a_project_page_s_progress_tab(cx: &mut TestAppContext) {
     let user = User::with_fake_agent().with_fake_gh();
     idle_session(&user);
     let folder = user.path("work/app");
@@ -1589,26 +1587,88 @@ fn the_window_draws_no_frame_at_rest_on_a_project_s_progress_with_a_milestone_un
         shell.read_with(cx, |s, _| !s.snapshot().projects.is_empty())
     });
     shell.update_in(cx, |s, window, cx| {
-        s.open(Selection::Progress("app".into()), window, cx)
+        s.open(Selection::Project("app".into()), window, cx)
     });
-    until(&shell, cx, "the progress is read", |cx| {
-        shell.read_with(cx, |s, cx| {
-            s.main()
-                .read(cx)
-                .progress_page()
-                .is_some_and(|page| page.read(cx).is_read())
-        })
+    until(&shell, cx, "the Progress tab shows", |cx| {
+        cx.update(|window, _| window.try_find("project-tabs-progress").is_some())
+    });
+    cx.update(|window, cx| window.click("project-tabs-progress", cx));
+    until(&shell, cx, "the milestones show", |cx| {
+        cx.update(|window, _| window.try_find("progress-milestone-github-1").is_some())
     });
     settle(&shell, cx);
     cx.update(|window, cx| window.click("progress-milestone-github-1", cx));
     until(&shell, cx, "its tickets show", |cx| {
         cx.update(|window, _| window.try_find("progress-github-1-0-1").is_some())
     });
+    cx.update(|window, cx| window.blur(cx));
     settle(&shell, cx);
 
     assert_eq!(
         frames_at_rest(&shell, cx),
         (0, 0),
         "(frames drawn, frames asked)"
+    );
+}
+
+#[gpui_kit::test]
+fn the_services_page_is_at_rest_with_the_stop_dialog_open_then_closed(cx: &mut TestAppContext) {
+    let user = User::with_fake_agent();
+    idle_session(&user);
+    std::fs::create_dir_all(user.path("bin")).unwrap();
+    let server = user.path("bin/fake-server");
+    std::os::unix::fs::symlink(common::fake_server(), &server).unwrap();
+    std::fs::write(
+        user.path("config/flottille/services.toml"),
+        format!(
+            "[services.db]\nline = \"{} --listen 0\"\nready = {{ line = \"listening on\" }}\n",
+            server.display()
+        ),
+    )
+    .unwrap();
+    // A task that runs and needs it: Stop asks first.
+    user.call(
+        "task.add",
+        json!({"project": "app", "name": "api", "line": format!("{} --listen 0", server.display()),
+            "serve": true, "needs": ["db"]}),
+    )
+    .unwrap();
+    user.call("task.run", json!({"project": "app", "name": "api"}))
+        .unwrap();
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the project is known", |cx| {
+        shell.read_with(cx, |s, _| !s.snapshot().projects.is_empty())
+    });
+    cx.update(|window, cx| window.click("services", cx));
+    until(
+        &shell,
+        cx,
+        "db is listed, needed by the running api",
+        |cx| {
+            cx.update(|window, _| {
+                window
+                    .try_find("service-needed-db")
+                    .and_then(|found| found.label().map(str::to_owned))
+                    .is_some_and(|label| label.contains("api running"))
+            })
+        },
+    );
+    settle(&shell, cx);
+
+    cx.update(|window, cx| window.click("service-stop-db", cx));
+    settle(&shell, cx);
+    assert!(cx.update(|window, _| window.try_find("service-stopping").is_some()));
+    assert_eq!(
+        frames_at_rest(&shell, cx),
+        (0, 0),
+        "open: (frames drawn, frames asked)"
+    );
+    cx.update(|window, cx| window.click("service-stopping-cancel", cx));
+    settle(&shell, cx);
+
+    assert_eq!(
+        frames_at_rest(&shell, cx),
+        (0, 0),
+        "closed: (frames drawn, frames asked)"
     );
 }

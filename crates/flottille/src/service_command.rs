@@ -51,9 +51,13 @@ pub enum ServiceAction {
         #[arg(long)]
         json: bool,
     },
-    /// Stop a service: what it needs and what needs it go on
+    /// Stop a service: what it needs and what needs it go on. Refused while something running
+    /// needs it, unless forced
     Stop {
         name: String,
+        /// Stop it even though something running needs it
+        #[arg(long)]
+        force: bool,
         #[arg(long)]
         json: bool,
     },
@@ -173,8 +177,23 @@ pub fn run(paths: &Paths, action: ServiceAction) -> Result<()> {
             text.push_str(&line_text(&started["service"]));
             (started, json, text)
         }
-        ServiceAction::Stop { name, json } => {
-            let stopped = client.request("service.stop", json!({"name": name}))?;
+        ServiceAction::Stop { name, force, json } => {
+            let stopped = client
+                .request("service.stop", json!({"name": name, "force": force}))
+                .map_err(|error| {
+                    let needed = error
+                        .downcast_ref::<crate::client::DaemonError>()
+                        .filter(|refused| refused.code == "needed")
+                        .map(|refused| refused.message.clone());
+                    match needed {
+                        Some(said) => format!(
+                            "{said}\n`{} service stop {name} --force` stops it anyway.",
+                            crate::program::name()
+                        )
+                        .into(),
+                        None => error,
+                    }
+                })?;
             let text = line_text(&stopped["service"]);
             (stopped, json, text)
         }

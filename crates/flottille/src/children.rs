@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::Once;
+use std::sync::{Once, OnceLock};
 use std::time::Duration;
 
 use crate::agents::start_time;
@@ -119,11 +119,50 @@ pub async fn end_session(leader: u32) {
     let _ = tokio::task::spawn_blocking(move || end_session_now(leader)).await;
 }
 
-/// `end_session`, on the calling thread. Each process is signalled through a pidfd opened before
-/// its session is read again, so a process that took the pid of one that ended meanwhile is
-/// never signalled. Again while one is found, up to `ROUNDS` times, after a pause that grows: a
-/// process may start another as it is killed, and a killed one takes a moment to leave.
+/// The variable the daemon sets, to the run's id, in the environment of each run, service and
+/// probe line it records (`run_processes`): what its processes inherit, and what tells them from
+/// another's once their session's leader is gone.
+pub const MARKER: &str = "FLOTTILLE_RUN";
+
+/// This boot's id (`/proc/sys/kernel/random/boot_id`), empty when it cannot be read: a pid and a
+/// start time say nothing of a process of another boot.
+pub fn boot() -> &'static str {
+    static BOOT: OnceLock<String> = OnceLock::new();
+    BOOT.get_or_init(|| {
+        std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
+            .map(|id| id.trim().to_owned())
+            .unwrap_or_default()
+    })
+}
+
+/// Whether `pid` carries the marker of the run `run` (`MARKER`) and started at `at` or later:
+/// started by what that run started. One whose environment cannot be read does not.
+pub fn marked(pid: u32, run: &str, at: u64) -> bool {
+    if !stat(pid).is_some_and(|stat| stat.started >= at) {
+        return false;
+    }
+    let Ok(environ) = std::fs::read(format!("/proc/{pid}/environ")) else {
+        return false;
+    };
+    let wanted = format!("{MARKER}={run}");
+    environ
+        .split(|byte| *byte == 0)
+        .any(|entry| entry == wanted.as_bytes())
+}
+
+/// `end_session`, on the calling thread.
 pub fn end_session_now(leader: u32) {
+    end_session_where(leader, |_| true);
+}
+
+/// Kills each process of the session `leader` started that `ours` says is ours, and only those:
+/// whether any was. Each process is signalled through a pidfd opened before its session is read
+/// again and `ours` asked, so a process that took the pid of one that ended meanwhile is never
+/// signalled: what is read of it is the newcomer's, and the pidfd's signal reaches nobody. Again
+/// while one is found, up to `ROUNDS` times, after a pause that grows: a process may start
+/// another as it is killed, and a killed one takes a moment to leave.
+pub fn end_session_where(leader: u32, ours: impl Fn(u32) -> bool) -> bool {
+    let mut any = false;
     for round in 0..ROUNDS {
         if round > 0 {
             std::thread::sleep(Duration::from_millis(2 * round as u64));
@@ -150,8 +189,9 @@ pub fn end_session_now(leader: u32) {
                 continue;
             }
             let fd = fd as libc::c_int;
-            if in_session(pid, leader) {
+            if in_session(pid, leader) && ours(pid) {
                 found = true;
+                any = true;
                 // SAFETY: the descriptor is the pidfd just opened; no siginfo is passed.
                 unsafe {
                     libc::syscall(
@@ -167,9 +207,10 @@ pub fn end_session_now(leader: u32) {
             unsafe { libc::close(fd) };
         }
         if !found {
-            return;
+            return any;
         }
     }
+    any
 }
 
 /// How many times `end_session` reads `/proc` at most.

@@ -78,7 +78,7 @@ pub async fn address(
     };
     let words = words(command, names, &[])?;
     let shown = words.join(" ");
-    let mut child = spawn(&words, env, folder, true)
+    let mut child = spawn(&words, env, folder, true, "address")
         .map_err(|e| format!("the command for its address, `{shown}`, cannot run: {e}"))?;
     let _group = Group::new(daemon, &child, "address");
     let mut stdout = child.stdout.take().expect("piped");
@@ -150,7 +150,8 @@ impl<'a> Group<'a> {
         if let Some(pid) = pid
             && let Some(started) = start_time(pid)
         {
-            let recorded = daemon.read(|store| store.add_run_process(pid, started, run));
+            let recorded = daemon
+                .read(|store| store.add_run_process(pid, started, run, crate::children::boot()));
             if let Err(error) = recorded {
                 eprintln!("flottille daemon: recording the probe process {pid}: {error}");
             }
@@ -180,12 +181,14 @@ fn last_line(bytes: &[u8]) -> Option<String> {
 }
 
 /// A line of the project's, started without a shell in a session of its own, with the
-/// run's environment; its output piped when `piped`, else dropped.
+/// run's environment and the marker of `run`, the name it is recorded under (`Group`); its
+/// output piped when `piped`, else dropped.
 fn spawn(
     words: &[String],
     env: &BTreeMap<OsString, OsString>,
     folder: &Path,
     piped: bool,
+    run: &str,
 ) -> std::io::Result<tokio::process::Child> {
     let output = || {
         if piped { Stdio::piped() } else { Stdio::null() }
@@ -195,6 +198,7 @@ fn spawn(
         .args(&words[1..])
         .env_clear()
         .envs(env)
+        .env(crate::children::MARKER, run)
         .current_dir(folder)
         .stdin(Stdio::null())
         .stdout(output())
@@ -213,7 +217,7 @@ pub async fn command_passes(
     env: &BTreeMap<OsString, OsString>,
     folder: &Path,
 ) -> bool {
-    let Ok(mut child) = spawn(words, env, folder, false) else {
+    let Ok(mut child) = spawn(words, env, folder, false, run) else {
         return false;
     };
     let _group = Group::new(daemon, &child, run);
