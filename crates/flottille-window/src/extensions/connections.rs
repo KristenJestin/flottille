@@ -13,9 +13,9 @@ use gpui_design_system::motion::{HOVER, Motion, PANEL};
 use gpui_design_system::{
     BulkBar, Button, CheckState, Checkbox, ChoiceRow, Confirm, DiffLine, DiffLines, EmptyLine,
     Field, FilterChip, FilterChips, Group, Grouped, Icon, Item, ListCard, ListRow, Listing, Menu,
-    Modal, RadioChoices, SearchField, Section, Select, SelectOption, Skeleton, Summary, Tag, Toast,
-    Tone, Type as _, Unfolding, awaiting, changing, enter, fade, fuzzy, icon, palette, presence,
-    presence_of, space, tipped_when_cut, toast,
+    Modal, RadioChoices, SearchField, Section, Select, SelectOption, Skeleton, Summary, Switch,
+    Tag, Toast, Tone, Type as _, Unfolding, awaiting, changing, enter, fade, fuzzy, icon, palette,
+    presence, presence_of, space, tipped_when_cut, toast,
 };
 use gpui_kit::base::input::{Input, InputEvent, InputState};
 use gpui_kit::{
@@ -55,6 +55,12 @@ pub const VARIABLES_HINT: &str = "Each one's value is a vault entry every projec
 /// What the limits' field says.
 pub const LIMITS_HINT: &str = "An argument of that name may take only these values, in every \
                                action that has it.";
+
+/// What *Show the browser* says: what it gives the server.
+pub const HEADED_HINT: &str = "Shows the browser an agent drives on your screen. A change stops \
+     the server that runs, and the next start applies it. With X11 the browser can read the keys \
+     you type in other windows and type into them, a terminal's included; on some Wayland \
+     compositors a client can capture the screen and the clipboard.";
 
 /// What the sites' field says: what a sign-in's extra hosts are for.
 pub const SITES_HINT: &str = "Hosts a sign-in goes through besides the sites of its entries, such \
@@ -117,15 +123,23 @@ pub struct Server {
     /// Each variable (or header, for a URL) and the vault entry it names.
     pub env: BTreeMap<String, String>,
     pub headers: BTreeMap<String, String>,
+    /// The vault entries of its other secrets: a query parameter, a cookie, basic authentication.
+    pub secrets: Vec<String>,
     pub only: BTreeMap<String, Vec<String>>,
     /// The hosts a sign-in also needs.
     pub sites: Vec<String>,
+    /// Whether an adapter's browser is shown on the screen.
+    pub headed: bool,
+    /// Why the browser of its running server is not shown though it is meant to be.
+    pub headless: Option<String>,
     /// `off`, `awaiting review`, `cut off` or `ready`.
     pub state: String,
     /// What changed when it was cut off.
     pub cut_off: Option<String>,
     /// Why its server did not start.
     pub failing: Option<String>,
+    /// Why its URL is not reached: the URL it was served is a cleaned one, never saved back.
+    pub url_fault: Option<String>,
     /// Why it must sign in again.
     pub signed_out: Option<String>,
     /// The version accepted, once it was.
@@ -155,6 +169,12 @@ impl Server {
             url: value["url"].as_str().map(str::to_owned),
             env: entries(&value["env"]),
             headers: entries(&value["headers"]),
+            secrets: value["secrets"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|secret| text(&secret["entry"]))
+                .collect(),
             only: value["only"]
                 .as_object()
                 .into_iter()
@@ -170,9 +190,12 @@ impl Server {
                 .flatten()
                 .map(text)
                 .collect(),
+            headed: value["headed"] == true,
+            headless: value["headless"].as_str().map(str::to_owned),
             state: text(&value["state"]),
             cut_off: value["cut_off"].as_str().map(str::to_owned),
             failing: value["failing"].as_str().map(str::to_owned),
+            url_fault: value["url_fault"].as_str().map(str::to_owned),
             signed_out: value["signed_out"].as_str().map(str::to_owned),
             version: value["server"]["version"].as_str().map(str::to_owned),
             actions: value["actions"]
@@ -817,9 +840,14 @@ pub struct ConnectionsSection {
     limit_rows: Listing<String>,
     sites: Vec<Site>,
     site_rows: Listing<Site>,
+    /// The form's *Show the browser*.
+    headed: bool,
     made: u64,
     saving: bool,
     form_error: Option<SharedString>,
+    /// Why the URL of the connection edited is not reached: under its field, left empty, until
+    /// the user types one.
+    url_fault: Option<SharedString>,
     review: Option<Review>,
     review_open: bool,
     confirming: Option<String>,
@@ -852,9 +880,11 @@ impl ConnectionsSection {
             limit_rows: Listing::default(),
             sites: Vec::new(),
             site_rows: Listing::default(),
+            headed: false,
             made: 0,
             saving: false,
             form_error: None,
+            url_fault: None,
             review: None,
             review_open: false,
             confirming: None,
@@ -901,6 +931,16 @@ impl ConnectionsSection {
     /// What the form says is wrong, under its fields.
     pub fn form_error(&self) -> Option<String> {
         self.form_error.as_ref().map(ToString::to_string)
+    }
+
+    /// Under the switch, while it is on: why the browser of the server that runs is not shown.
+    pub fn headless_said(&self) -> Option<String> {
+        let Form::Editing(Some(name)) = &self.form else {
+            return None;
+        };
+        let why = self.server(name)?.headless?;
+        (self.headed && self.reach == Reach::Command)
+            .then(|| format!("The browser is not shown, it runs headless: {why}"))
     }
 
     /// The review's search field, once the dialog has drawn it.
@@ -1213,7 +1253,9 @@ impl ConnectionsSection {
     fn watch(&mut self, input: &Entity<InputState>, cx: &mut Context<Self>) {
         self._subscriptions
             .push(cx.subscribe(input, |this, _, event, cx| {
-                if matches!(event, InputEvent::Change) && this.form_error.take().is_some() {
+                if matches!(event, InputEvent::Change)
+                    && (this.form_error.take().is_some() || this.url_fault.is_some())
+                {
                     cx.notify();
                 }
             }));
@@ -1249,7 +1291,10 @@ impl ConnectionsSection {
             (&fields.command, line),
             (
                 &fields.url,
-                server.and_then(|s| s.url.clone()).unwrap_or_default(),
+                server
+                    .filter(|s| s.url_fault.is_none())
+                    .and_then(|s| s.url.clone())
+                    .unwrap_or_default(),
             ),
         ] {
             field.update(cx, |f, cx| f.set_value(value, window, cx));
@@ -1261,6 +1306,7 @@ impl ConnectionsSection {
         self.variables.clear();
         self.limits.clear();
         self.sites.clear();
+        self.headed = server.is_some_and(|s| s.headed);
         if let Some(server) = server {
             let entries = match self.reach {
                 Reach::Command => &server.env,
@@ -1283,6 +1329,9 @@ impl ConnectionsSection {
         self.site_rows = Listing::default().at_rest();
         self.form = Form::Editing(server.map(|s| s.name.clone()));
         self.form_error = None;
+        self.url_fault = server
+            .and_then(|s| s.url_fault.clone())
+            .map(SharedString::from);
         self.saving = false;
         self.request = None;
         self.vault.update(cx, |vault, cx| vault.read(cx));
@@ -1468,8 +1517,12 @@ impl ConnectionsSection {
                 if editing || !sites.is_empty() {
                     params["sites"] = json!(sites);
                 }
+                if editing || self.headed {
+                    params["headed"] = json!(self.headed);
+                }
                 if editing {
                     params["headers"] = json!({});
+                    params["secrets"] = json!([]);
                 }
             }
             Reach::Url => {
@@ -1482,6 +1535,7 @@ impl ConnectionsSection {
                 if editing {
                     params["env"] = json!({});
                     params["sites"] = json!([]);
+                    params["headed"] = json!(false);
                 }
             }
         }
@@ -1968,12 +2022,24 @@ impl ConnectionsSection {
             boxed("connection-command", Input::new(&fields.command), cx),
         )
         .hint("The program and its arguments, run without a shell.");
+        // The fault of the URL saved stays under its field while the field is left empty.
+        let url_fault = self
+            .url_fault
+            .clone()
+            .filter(|_| fields.url.read(cx).value().trim().is_empty())
+            .map(|fault| {
+                let why = fault.strip_prefix("url: ").unwrap_or(&fault);
+                SharedString::from(format!(
+                    "The URL saved is not reached ({why}). Type it again."
+                ))
+            });
         let url = Field::new(
             "connection-url-field",
             "URL",
             boxed("connection-url", Input::new(&fields.url), cx),
         )
-        .hint("https://, or http:// on this machine.");
+        .hint("https://, or http:// on this machine.")
+        .error(url_fault);
         let offered = self.offered(original.as_deref().unwrap_or_default(), cx);
         let mut variables = div().flex().flex_col();
         for row in self
@@ -2065,6 +2131,13 @@ impl ConnectionsSection {
         )
         .optional()
         .hint(SITES_HINT);
+        let headed = Switch::new("connection-headed", self.headed, "Show the browser")
+            .hint(HEADED_HINT)
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.headed = !this.headed;
+                cx.notify();
+            }));
+        let why_headless = self.headless_said().map(SharedString::from);
         let body = div()
             .id("connection-form")
             .max_h(window.viewport_size().height - px(240.))
@@ -2144,6 +2217,20 @@ impl ConnectionsSection {
                 )
                 .space(space::LG),
             )
+            .child(
+                presence(
+                    "connection-headed-block",
+                    self.reach == Reach::Command,
+                    headed,
+                )
+                .space(space::LG),
+            )
+            .child(problem_line(
+                "connection-headed-why",
+                why_headless,
+                space::LG,
+                cx,
+            ))
             .test_support();
         // What a modal keeps in sight is a column without a gap: nothing to fold but the line.
         let error = problem_line("connection-error", self.form_error.clone(), px(0.), cx);
@@ -3234,11 +3321,19 @@ impl ConnectionsSection {
         };
         let entries: Vec<String> = match &answer {
             Some(Err(why)) if flottille_core::vault::refused_entry(why) => {
-                let mut kept: Vec<String> = self
+                let mut kept: Vec<String> = Vec::new();
+                for entry in self
                     .server(&review.name)
-                    .map(|server| server.headers.values().cloned().collect())
-                    .unwrap_or_default();
-                kept.dedup();
+                    .map(|server| {
+                        let headers = server.headers.values().cloned();
+                        headers.chain(server.secrets.clone()).collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default()
+                {
+                    if !kept.contains(&entry) {
+                        kept.push(entry);
+                    }
+                }
                 kept
             }
             _ => Vec::new(),

@@ -882,7 +882,68 @@ sentence on what it is for, and how to reach the server, either
 - a **local URL** (`http://127.0.0.1:…`, `localhost` or `[::1]`, Streamable HTTP, no redirect
   followed), for a server the user runs themselves; or
 - an **`https://` URL** (Streamable HTTP, the system's certificates, no redirect followed), for a
-  server elsewhere (decision 21). Its `headers` name vault entries, as `env` does.
+  server elsewhere (decision 21). Its `secrets` name vault entries, as `env` does, and say where
+  each goes in the requests: `secrets = [{in = "header"|"query"|"cookie"|"basic", name?, prefix?,
+  entry}]`. A **header** is `<name>: <prefix><secret>` (a prefix such as `Bearer ` is written in
+  the declaration, not in the entry); a **query parameter** `?<name>=<secret>` is added,
+  URL-encoded, to every request's URL by the daemon's client alone (never written in the URL
+  declared, never on an OAuth sign-in's own requests, and the URL is dropped from the client's
+  errors, its encoded value masked as the secret is); a **cookie** is `Cookie: <name>=<secret>`,
+  the cookies of a connection in one header; **basic** is `Authorization: Basic
+  base64(<entry's username>:<secret>)` and takes no name. The old `headers = { Name = { vault =
+  "<entry>" } }` is read as header lines with no prefix and written back as it was, so that a
+  connection pinned with it keeps its digest. A connection given `secrets` on an edit, without
+  `headers`, has those lines and no others: the plain header lines it had are replaced too, and
+  `secrets = null` removes them all. A header named `Cookie` beside cookie lines, or
+  `Authorization` beside basic, is refused as given twice.
+
+  A URL whose query or fragment (`#access_token=…`) holds a parameter named like a secret is
+  refused when the connection is added or edited, saying to move it to "Secrets of its requests";
+  its name is said, never its value. Its pairs are split at `&` and at `;`, which some servers
+  read as `&` (`?page=1;access_token=…` is refused). The name is read as words (`userToken`,
+  `user_token` and `UserToken` alike, a number at a word's end left out: `token2` is `token`, a
+  plural is its word: `access_tokens`, `apiKeys`, `secrets`, `passwords`): it is refused when its
+  last word is `token`, `key`, `sig`, `jwt`, `secret`, `password`, `passwd`, `pwd`, `passphrase`
+  or `signature` (`x_user_token`, `google_id_token`, `bearer_token`, `subscription-key`,
+  `app_key`, `X-Amz-Signature`, plain `key`), or when a last word run together ends with `token`,
+  `secret`, `password`, `passwd`, `passphrase`, `signature`, `apikey`, `accesskey`, `secretkey`
+  or `privatekey` (`usertoken`, `clientsecret`). A token or a key alone is excused by the words
+  before it, run together, a position, a state or an identifier the server hands out and no
+  credential:
+  - before `token`: `max`, `page`, `next`, `next_page`, `continuation`, `cursor`, `sync`,
+    `pagination`, `resume` (`max_tokens`, `maxTokens`, `pageToken`, `next_page_token`,
+    `pagetoken`, `pagination_token`, `resume_token`);
+  - before `key`: `cursor`, `project`, `idempotency`, `issue`, `space`, `partition`, `cache`,
+    `object`, `public`, `publishable`, `site`, `sort`, `last_evaluated`, `page`, `next`
+    (`cursor_key`, `project_key`, `issueKey`, `spaceKey`, `partition_key`, `sort_key`,
+    `object_key`, `public_key`, `publishable_key`, `site_key`, `last_evaluated_key`).
+
+  No word excuses the others: `project_secret`, `sync_password`, `page_passphrase` and
+  `cursor_signature` are refused. Any other plural of a secret word is refused on purpose
+  (`input_tokens`, `keys`): it goes through a vault entry, as every refused name does. It is
+  refused too when it is `session_id`, `auth`,
+  `authorization`, `bearer` or `sid`, whole or run together (`sessionid`). A word that only holds
+  one of them is allowed: `author`, `oauth_state`, `keyword`, `monkey`. Another name ending in
+  `key` or `token` for no credential is refused too: the user writes such a parameter from a
+  vault entry, a reversible cost against a credential sent in clear. The path is not looked at: a
+  token written in it is the user's to move. An error about a URL (its host, a login in it) says
+  it without its login, query and fragment. One whose scheme is no `http` or `https` says its
+  scheme alone when it is `ws`, `wss`, `ftp` or `file`, and otherwise only that it "is no http(s)
+  URL": what is read as the scheme may be a token pasted as a login without `https://`
+  (`xoxb-…:x@host`, a hex token).
+  A connection already declared with such a URL, or with one that is no `https://` URL nor
+  `http://` on this machine (written before this check, or by hand), is not refused with the file:
+  it is listed with `failing` and `url_fault` saying why, and its URL is served
+  (`connection.list`, the window, an agent's `connections list` and `show`, a request's before and
+  after) as an error says it: without its login, query and fragment, its scheme alone for a known
+  other scheme, empty for an unknown one. A card, an agent's `show` and the window's request dialog
+  (`connection.proposed`, the old value) mark it ("cleaned: its query is dropped", "cleaned: it
+  is not shown" for an unknown scheme), so that an edit to the URL served is not taken for one that keeps the rest.
+  The window's form leaves such a URL's field empty, its fault under it, for the user to type it
+  again: Save never writes the cleaned URL back by itself. Its server never starts, `login` is
+  refused with the same reason, and it is edited (its URL mended) or removed as any other; an edit
+  that keeps the URL, and its on or off, are refused with that reason until the URL is mended.
+  The other connections are untouched.
 
 A plain `http://` URL to any other address is refused: what crosses a network is encrypted.
 
@@ -900,6 +961,7 @@ env     = { ALMANAC_TOKEN = { vault = "almanac-token" } }
 only    = { }                        # limits on arguments, below
 except  = ["client-site"]            # projects whose agents do not get it
 sites   = [ ]                        # hosts an adapter adds to the browser's sites ("Adapters")
+headed  = false                      # an adapter's browser shown on the screen ("Adapters")
 ```
 
 **On, it is given to every agent of every project**, and off to none, **except the projects its
@@ -919,12 +981,31 @@ what is written is what the card showed: the request's words are made again from
 as it is then and compared with those the user read, and one that differs is not done. Once
 accepted it goes through the path of the user's own Save (added = given at once, every action
 judged). An agent's declaration is checked as the form's fields are (a command is one line split
-without a shell, shell syntax refused; a variable or a header names a vault entry that exists).
-**An agent sends a vault entry only to the entry's own host**: a header of a URL connection it
+without a shell, shell syntax refused; a variable names a vault entry that exists, a secret line
+of a URL's requests one that exists or one the user is to make).
+**A secret line may name an entry still missing**: an agent proposing a connection to a server
+whose token the user has not saved yet names the entry it is to be saved as. The name must be an
+entry's name (`valid_name`) and nothing that looks like a secret: no word of it between `-`, `_`
+and `.` is longer than 19 characters, it is not mostly hexadecimal digits once those are taken out
+(more than 15 of them making four fifths of it or more: a token split by dashes, a UUID), no word
+of 8 characters or more holds letters and three numbers or more apart (`Zq7Wx3Vp9`, a token's
+piece, where a name's word holds one number, at its end: `github-token-2`, `notion-api-v2`), and no
+masking rule takes it for a token, so that a token
+written where a name goes is refused unsaid instead of being shown to the user as a name to save.
+`connection.proposed` gives each secret line's `missing`, and `waits`, the sentence saying which
+entries are to be saved. The request stays held and **its Accept is refused while an entry it names
+is missing** (`approval.approve` answers why, the request still pending); once the user saved the
+entry, the checks of an entry apply to it as to any other, its host first, and an entry made on
+another host, or with no `url`, makes the accepted write refused. An entry deleted between the
+Accept and the write is refused where the write is decided, under the file's lock, which the
+vault's removal of an entry takes too: the write never lands with an entry whose host was not
+checked. An entry removed after the write fails the connection's start (each start looks its
+entries up again); its host is compared there with nothing, the user's own form binding any.
+**An agent sends a vault entry only to the entry's own host**: a secret of a URL connection it
 proposes names an entry whose `url` has the connection URL's host (over `https://`, or `http://`
 on this machine); an entry with no `url`, or of another host, is refused before the user is asked,
 with a sentence naming both hosts and saying the user can bind it in their own form, which keeps
-its freedom. A header the user bound already to the same host stays when an agent edits the
+its freedom. A secret the user bound already to the same host stays when an agent edits the
 rest; an edit that moves the URL elsewhere is refused the same way, since the entry would follow
 it. A command's variables may name any entry: they are the program's, and the card says each
 loudly. The words are compared once more where they are written, under the file's lock (a `set`
@@ -937,9 +1018,10 @@ A connection's name is lower-case letters, digits and `_`, 24 at most; the tool 
 so that no core tool, now or later, can take its name, and the gate's card says plainly that the
 tool is a third party's.
 
-**Secrets come from the vault** (`vault.md`). `env` (and, for a URL, `headers`) names an entry
+**Secrets come from the vault** (`vault.md`). `env` (and, for a URL, `secrets`) names an entry
 instead of holding a value: the daemon reads it when it starts the server and puts it where it goes
-(a variable of the server's environment, a header of every request to the URL).
+(a variable of the server's environment; a header, a query parameter, a cookie or basic
+authentication of every request to the URL).
 The entry must be one of every project (`vault.md`: no `project` on it), since the server is given
 to all; an entry tied to one project is refused, and so is one bound to another use than this
 connection (`vault.md`, "Bound to one use": `for = "connection:<name>"` makes it this one's alone). The agent sees neither the variable nor its
@@ -1368,7 +1450,44 @@ way in:
   bound to the connection**, the entries' hosts and the `sites` alike: a host one entry's sign-in
   needs is allowed in the login of every other, so the password of an entry whose site redirects
   to another entry's sign-on host reaches that host. Entries whose sign-ins must not share their
-  hosts go in connections of their own. The file is written when
+  hosts go in connections of their own.
+- **The browser can be shown.** A connection's server runs with the environment of a run, without
+  `XDG_RUNTIME_DIR` nor the display variables, so its browser is headless and `--headed` fails
+  (no runtime folder, no Wayland display). `headed = true` (`flottille connection edit --headed`
+  or `--headless`, the connection's form in the window, a toggle *Show the browser*, off by
+  default) has the adapter write `"headed": true` in the configuration file it writes and gives
+  the server the session's display, **never the user's real `XDG_RUNTIME_DIR`** (it holds the
+  session bus, hence the keyring, and the user's other sockets): the daemon makes a runtime folder
+  of the connection's own, `$XDG_RUNTIME_DIR/flottille/display/<connection>` (mode 0700, removed
+  when the server stops), holding a hard link of the session's Wayland socket alone, and the
+  server's `XDG_RUNTIME_DIR` is that folder, with `WAYLAND_DISPLAY`; `DISPLAY` is given only when
+  the session has no Wayland, and `DBUS_SESSION_BUS_ADDRESS` never. That folder is the one part of
+  the user's runtime folder Landlock leaves within the server's and its login's reach
+  (`docs/vault.md`, "The runtime folder"); the bus's address is not given, and the rest of the
+  runtime folder is denied where Landlock allows it. Below Landlock's ninth ABI a process that
+  guesses the bus's path can still connect to it, a gap of every run's (#976). When the folder cannot be made
+  (the filesystem refuses the hard link, the socket is not there) the browser runs headless and the
+  daemon says why, in its log and in the form, under the switch (kept there while a call runs),
+  never with the real folder. Off, the server gets no display variable of the daemon's; **whether
+  the browser is shown or not, it is never given `DBUS_SESSION_BUS_ADDRESS`**, and both the server
+  and its login run get `AGENT_BROWSER_SOCKET_DIR` naming the connection's own folder
+  (agent-browser puts its daemon's socket there, else under `$XDG_RUNTIME_DIR`), so they reach the
+  same browser and the removal of a display folder never takes a live socket. One browser per
+  connection, in the mode the switch says: a login uses the server's display folder (the running
+  server's own, else made under the connection's name for the time of the login), and the browser
+  agent-browser's daemon runs, which outlives the command that started it (a login's or the
+  server's), is closed (`agent-browser close`, on that socket folder) when the server is stopped
+  (an edit of what trust is given to, the switch included, turning it off, removing it) and when
+  the daemon stops; the next start, of the server or of a login, starts a browser in the mode the
+  switch says. **Showing the browser has a risk, said beside the switch and in the review**: with
+  X11 the browser can read the keys typed in other windows and type into them (a terminal's
+  included), and on some Wayland compositors a client can capture the screen and the clipboard. The daemon
+  removes every display folder when it starts, under its lock, and makes the last folder of a
+  connection itself, never taking one over. The folder is
+  made by one function (`display.rs`), which a run that opens windows reuses. It is the user's
+  alone (an agent's request sets no `headed`), **part of what trust is given to** and said in the
+  review, and the user's own edit stops the running server at once, the next start applying it,
+  as an edit of `sites` does; an edit made in the file waits for its review. The file is written when
   a login runs, and tool calls read it when they run: an entry bound after the server started is
   in the list from the next of either. **An entry whose URL host holds a comma, a `*`, a space or
   starts with `-` is no usable site** (agent-browser reads the list by commas and `*` as a

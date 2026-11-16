@@ -10,7 +10,7 @@
 //!
 //! With `--http`, it serves Streamable HTTP on a free port of `127.0.0.1` instead of stdio,
 //! written to that file, each request answered with one JSON body (no stream, so no request of
-//! its own to the client), and logs each request's headers (`http`). Over HTTP the script is read
+//! its own to the client), and logs each request's headers and query (`http`). Over HTTP the script is read
 //! again at each request.
 //!
 //! With `oauth` in the script, the HTTP server is protected (MCP authorization): `/mcp` answers
@@ -87,6 +87,13 @@
 //! arguments, its folder and what the plugin answered, never a password. The lines `start`, `login`
 //! and `open` carry `config`, the JSON of the file `--config` names when the line was written.
 //!
+//! With `AGENT_BROWSER_SOCKET_DIR` set, a login and each tool call reach the browser agent-browser's
+//! daemon runs there, which outlives the command that started it: the file `browser.json` in that
+//! folder, written by the first one with the mode (`headed`, from the configuration) and the
+//! `XDG_RUNTIME_DIR` it started in, and found again by the next; the log line `browser` says which
+//! (`by`: `login` or `call`, `started` or not). With `close` among its arguments (and no `mcp`), it
+//! plays `agent-browser close`: the file is removed, and the log line `close` says its arguments.
+//!
 //! The log, one JSON line each: `start` (its pid, process group, session, folder and arguments,
 //! the child's pid with `--child`), `initialize` (the client's capabilities), `list` (the cursor
 //! asked), `call` (the tool, the arguments, when it started and ended, in milliseconds since the
@@ -129,6 +136,9 @@ fn main() {
     if !args.iter().any(|arg| arg == "mcp") && args.iter().any(|arg| arg == "open") {
         return open(&args, &script, &log);
     }
+    if !args.iter().any(|arg| arg == "mcp") && args.iter().any(|arg| arg == "close") {
+        return close(&args, &log);
+    }
     let child = args.iter().any(|arg| arg == "--child").then(|| {
         std::process::Command::new("sleep")
             .arg("1000")
@@ -141,13 +151,22 @@ fn main() {
         .rsplit_once(')')
         .map(|(_, rest)| rest.split_whitespace().collect())
         .unwrap_or_default();
+    // `link_socket_to` in the script: tries to hard-link the display's socket out of its folder.
+    let linked = script["link_socket_to"].as_str().map(|to| {
+        let from = std::env::var_os("XDG_RUNTIME_DIR")
+            .zip(std::env::var_os("WAYLAND_DISPLAY"))
+            .map(|(dir, name)| std::path::Path::new(&dir).join(name));
+        let _ = std::fs::remove_file(to);
+        from.is_some_and(|from| std::fs::hard_link(from, to).is_ok())
+    });
     write_log(
         &log,
-        json!({"event": "start", "pid": std::process::id(),
-            "pgid": fields.get(2).and_then(|f| f.parse::<u32>().ok()),
-            "sid": fields.get(3).and_then(|f| f.parse::<u32>().ok()),
-            "cwd": std::env::current_dir().ok(), "args": args, "child": child,
-            "config": loaded_config(&args)}),
+        json!({"event": "start", "pid": std::process::id(), "linked": linked,
+        "pgid": fields.get(2).and_then(|f| f.parse::<u32>().ok()),
+        "sid": fields.get(3).and_then(|f| f.parse::<u32>().ok()),
+        "cwd": std::env::current_dir().ok(), "args": args, "child": child,
+        "config": loaded_config(&args),
+        "display": display_environment()}),
     );
     if let Some(line) = script["stderr"].as_str() {
         eprintln!("{line}");
@@ -252,6 +271,7 @@ fn main() {
                 let tool = params["name"].as_str().unwrap_or_default().to_owned();
                 let started = now_ms();
                 write_log(&log, json!({"event": "received", "tool": tool}));
+                browser(&args, &log, "call");
                 let answer = script["answers"][&tool].clone();
                 if let Some(message) = answer["rpc_error"].as_str() {
                     send(&json!({"jsonrpc": "2.0", "id": id,
@@ -309,6 +329,55 @@ fn send(message: &Value) {
     let mut out = std::io::stdout().lock();
     writeln!(out, "{message}").unwrap();
     out.flush().unwrap();
+}
+
+/// The environment a browser's display and sockets come from, for the tests to read: the
+/// display variables, the folders agent-browser puts its sockets in, and what the runtime folder
+/// held.
+fn display_environment() -> Value {
+    json!({"WAYLAND_DISPLAY": std::env::var("WAYLAND_DISPLAY").ok(),
+    "DISPLAY": std::env::var("DISPLAY").ok(),
+    "XDG_RUNTIME_DIR": std::env::var("XDG_RUNTIME_DIR").ok(),
+    "DBUS_SESSION_BUS_ADDRESS": std::env::var("DBUS_SESSION_BUS_ADDRESS").ok(),
+    "AGENT_BROWSER_SOCKET_DIR": std::env::var("AGENT_BROWSER_SOCKET_DIR").ok(),
+    "runtime_files": std::env::var("XDG_RUNTIME_DIR").ok().and_then(|dir| {
+        let mut names: Vec<String> = std::fs::read_dir(dir).ok()?
+            .filter_map(|e| e.ok()?.file_name().into_string().ok()).collect();
+        names.sort();
+        Some(names)
+    })})
+}
+
+/// The browser on `AGENT_BROWSER_SOCKET_DIR`, started by this command when none runs there: what
+/// agent-browser's daemon does, which then serves every command of that folder until it is closed.
+fn browser(args: &[String], log: &Option<String>, by: &str) {
+    let Some(folder) = std::env::var_os("AGENT_BROWSER_SOCKET_DIR") else {
+        return;
+    };
+    let file = std::path::Path::new(&folder).join("browser.json");
+    let running = std::fs::read_to_string(&file)
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok());
+    let started = running.is_none();
+    let browser = running.unwrap_or_else(|| {
+        let browser = json!({"headed": loaded_config(args)["headed"],
+            "XDG_RUNTIME_DIR": std::env::var("XDG_RUNTIME_DIR").ok()});
+        std::fs::write(&file, browser.to_string()).unwrap();
+        browser
+    });
+    write_log(
+        log,
+        json!({"event": "browser", "by": by, "started": started, "browser": browser}),
+    );
+}
+
+/// `agent-browser close`: the browser on `AGENT_BROWSER_SOCKET_DIR` ends.
+fn close(args: &[String], log: &Option<String>) {
+    if let Some(folder) = std::env::var_os("AGENT_BROWSER_SOCKET_DIR") {
+        let _ = std::fs::remove_file(std::path::Path::new(&folder).join("browser.json"));
+    }
+    write_log(log, json!({"event": "close", "args": args}));
+    println!("✓ Browser closed");
 }
 
 fn write_log(log: &Option<String>, line: Value) {
@@ -578,7 +647,7 @@ fn serve(
     } else {
         write_log(
             log,
-            json!({"event": "http", "method": method, "headers": headers}),
+            json!({"event": "http", "method": method, "headers": headers, "query": query}),
         );
     }
     let answer = match method.as_str() {
@@ -939,10 +1008,11 @@ fn login(args: &[String], script: &Value, log: &Option<String>) {
         eprintln!("✗ no credential provider {provider}");
         std::process::exit(1);
     };
+    browser(args, log, "login");
     let answer = ask(&plugin);
     let success = answer["success"] == true && answer["protocol"] == "agent-browser.plugin.v1";
     let mut line = json!({"event": "login", "args": args, "config": loaded_config(args),
-        "cwd": std::env::current_dir().ok(),
+        "cwd": std::env::current_dir().ok(), "display": display_environment(),
         "plugin": {"success": success, "error": answer["error"]}});
     if behaviour["replay"] == true {
         let again = ask(&plugin);
@@ -986,7 +1056,7 @@ fn open(args: &[String], script: &Value, log: &Option<String>) {
     write_log(
         log,
         json!({"event": "open", "args": args, "config": loaded_config(args),
-            "cwd": std::env::current_dir().ok()}),
+            "cwd": std::env::current_dir().ok(), "display": display_environment()}),
     );
     let behaviour = &script["login"];
     if behaviour["open_fail"] == true {

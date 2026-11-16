@@ -26,6 +26,7 @@ mod daemon;
 mod deliveries;
 mod desktop;
 mod developer;
+mod display;
 mod extensions;
 mod files;
 mod follow;

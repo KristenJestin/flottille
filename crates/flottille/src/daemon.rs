@@ -78,6 +78,9 @@ pub fn run(paths: &Paths) -> Result<()> {
     ensure_private_dir(&paths.runtime)?;
     ensure_private_dir(&paths.state)?;
     let _lock = take_lock(paths)?;
+    // What a daemon that died left: the display folders it made, which only a daemon holding the
+    // lock makes, so none is this daemon's; it makes its own again.
+    crate::display::clean(paths);
     // Nothing signs with it yet: the link comes with the transport (#839).
     let _machine_key = crate::remote::machine_key(paths)?;
     children::say_sessions_in(paths.sessions())?;

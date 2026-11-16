@@ -3226,6 +3226,70 @@ fn the_window_opens_only_an_https_or_a_local_http_address_to_sign_in(cx: &mut Te
     assert_eq!(opened.lock().unwrap().len(), 5);
 }
 
+#[gpui_kit::test]
+fn the_form_shows_the_browser_when_its_toggle_is_on(cx: &mut TestAppContext) {
+    let user = user();
+    turn_on(&user);
+    agent_browser(&user, &["agent_browser_click"], false);
+    let (shell, cx) = window(&user, cx);
+    open_the_form_of(&shell, cx, "browser");
+    // A labelled toggle, off by default.
+    assert_eq!(
+        label(cx, "connection-headed-label").as_deref(),
+        Some("Show the browser")
+    );
+    assert_eq!(connection(&user, "browser").unwrap()["headed"], Value::Null);
+    click(cx, "connection-headed");
+    settle(cx);
+    click(cx, "save-connection");
+    until(&shell, cx, "the form closes", |cx| {
+        !visible(cx, "connection-modal")
+    });
+    assert_eq!(connection(&user, "browser").unwrap()["headed"], json!(true));
+    // Open again: it is on, and saving another field keeps it.
+    click(cx, "connection-more-browser");
+    click(cx, "edit-connection-browser");
+    until(&shell, cx, "the form opens on it", |cx| {
+        visible(cx, "connection-modal")
+    });
+    settle(cx);
+    let fields = section(&shell, cx).read_with(cx, |s, _| s.form_fields().unwrap());
+    type_in(&fields.about, "The browser of the user.", cx);
+    click(cx, "save-connection");
+    until(&shell, cx, "the form closes", |cx| {
+        !visible(cx, "connection-modal")
+    });
+    assert_eq!(connection(&user, "browser").unwrap()["headed"], json!(true));
+}
+
+#[gpui_kit::test]
+fn a_browser_that_could_not_be_shown_says_why_under_its_switch(cx: &mut TestAppContext) {
+    // The session names a Wayland socket that is not there: the browser runs headless.
+    let user = user().with_env("WAYLAND_DISPLAY", "wayland-none");
+    turn_on(&user);
+    agent_browser(&user, &["agent_browser_click"], false);
+    user.call(
+        "connection.edit",
+        json!({"name": "browser", "headed": true}),
+    )
+    .unwrap();
+    user.call("connection.review", json!({"name": "browser"}))
+        .unwrap();
+    let (shell, cx) = window(&user, cx);
+    open_the_form_of(&shell, cx, "browser");
+    settle(cx);
+    assert!(visible(cx, "connection-headed-why"));
+    let said = section(&shell, cx)
+        .read_with(cx, |s, _| s.headless_said())
+        .expect("it says why");
+    assert!(said.contains("not shown"), "{said}");
+    assert!(said.contains("Wayland socket"), "{said}");
+    // Turned off in the form, there is nothing to say: it folds away.
+    click(cx, "connection-headed");
+    settle(cx);
+    assert!(!visible(cx, "connection-headed-why"));
+}
+
 // ── A review that needs a sign-in ────────────────────────────────────────────────────────────
 
 /// The review of `notes`, behind its authorization server and not signed in, opened from its row.
@@ -3398,6 +3462,112 @@ fn a_401_with_a_header_from_the_vault_names_the_entry_not_a_sign_in(cx: &mut Tes
     });
     let _ = server.kill();
     let _ = server.wait();
+}
+
+#[gpui_kit::test]
+fn a_401_with_query_and_cookie_secrets_offers_to_edit_each_entry(cx: &mut TestAppContext) {
+    let user = user();
+    turn_on(&user);
+    for name in ["notes-query", "notes-cookie", "notes-login"] {
+        user.call(
+            "vault.set",
+            json!({"name": name, "secret": SECRET, "description": "Notes' secret",
+                "username": "ada@example.com"}),
+        )
+        .unwrap();
+    }
+    let (mut server, url) = protected_server(&user);
+    // The cookie's entry is used twice (a cookie and a query parameter): offered once.
+    user.call(
+        "connection.add",
+        json!({"name": "notes", "about": "A notes server.", "url": url,
+            "secrets": [{"in": "query", "name": "userToken", "entry": "notes-query"},
+                {"in": "cookie", "name": "session", "entry": "notes-cookie"},
+                {"in": "query", "name": "again", "entry": "notes-cookie"},
+                {"in": "basic", "entry": "notes-login"}]}),
+    )
+    .unwrap();
+    let (shell, cx) = window(&user, cx);
+    open_page(&shell, cx);
+    until(&shell, cx, "its row", |cx| visible(cx, "connection-notes"));
+    click(cx, "connection-more-notes");
+    click(cx, "review-connection-notes");
+    until(&shell, cx, "what the review says", |cx| {
+        present(cx, "connection-review-needs-entry")
+            || present(cx, "connection-review-sign-in")
+            || present(cx, "connection-review-error")
+    });
+    settle(cx);
+    assert!(present(cx, "connection-review-needs-entry"));
+    // Each entry the server refused is offered, not only a header's.
+    for entry in ["notes-query", "notes-cookie", "notes-login"] {
+        assert_eq!(
+            label(cx, &format!("connection-review-edit-{entry}")),
+            Some(format!("Edit {entry}")),
+            "{}",
+            everything_said(cx)
+        );
+    }
+    let all = everything_said(cx);
+    assert_eq!(
+        all.matches("Edit notes-cookie").count(),
+        1,
+        "an entry used twice is offered once: {all}"
+    );
+    assert!(!all.contains(SECRET), "{all}");
+    let _ = server.kill();
+    let _ = server.wait();
+}
+
+/// The secret the faulty URL of `design` holds, which the window never shows nor writes back.
+const IN_A_URL: &str = "Zq7Wx3Vp9";
+
+#[gpui_kit::test]
+fn editing_a_faulty_url_leaves_its_field_empty_and_says_why(cx: &mut TestAppContext) {
+    let user = user();
+    turn_on(&user);
+    let path = user.path("config/flottille/extensions.toml");
+    let mut file = std::fs::read_to_string(&path).unwrap_or_default();
+    file.push_str(&format!(
+        "\n[[connections.server]]\nname = \"design\"\nabout = \"Designs.\"\n\
+         url = \"https://design.example.com/mcp?project=p&access_token={IN_A_URL}#k\"\n"
+    ));
+    std::fs::write(&path, file).unwrap();
+    let (shell, cx) = window(&user, cx);
+    open_the_form_of(&shell, cx, "design");
+    let section = section(&shell, cx);
+    let fields = section.read_with(cx, |s, _| s.form_fields().unwrap());
+    // The field is left empty, its fault beside it: what was served cleaned is never saved back.
+    assert_eq!(fields.url.read_with(cx, |f, _| f.value().to_string()), "");
+    let fault = label(cx, "connection-url-field-error").unwrap_or_default();
+    assert!(fault.contains("access_token"), "{fault}");
+    assert!(!everything_said(cx).contains(IN_A_URL));
+    type_in(&fields.about, "The designs.", cx);
+    click(cx, "save-connection");
+    assert!(visible(cx, "connection-modal"));
+    let written = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        written.contains(&format!("project=p&access_token={IN_A_URL}#k")),
+        "{written}"
+    );
+    // Typed again, the fault folds away, over a panel's time.
+    let whole = height(cx, "connection-url-field-error-fold");
+    type_in(&fields.url, "https://design.example.com/mcp?project=p", cx);
+    a_third_later(cx);
+    let folding = height(cx, "connection-url-field-error-fold");
+    assert!(
+        0. < folding && folding < whole,
+        "the fault folds away: {folding} of {whole}"
+    );
+    settle(cx);
+    assert!(!present(cx, "connection-url-field-error"));
+    click(cx, "save-connection");
+    until(&shell, cx, "the form closes", |cx| {
+        !visible(cx, "connection-modal")
+    });
+    let design = connection(&user, "design").unwrap();
+    assert_eq!(design["url"], "https://design.example.com/mcp?project=p");
+    assert_eq!(design["about"], "The designs.");
 }
 
 // ── The review opens at rest (#954) ──────────────────────────────────────────────────────────
