@@ -2188,6 +2188,7 @@ impl Recorder {
             return;
         };
         let session = tree::root_of(&self.daemon, &agent.id);
+        let tuning = crate::results::tuning(&self.daemon.paths, &agent.provider);
         let rows: Vec<TurnUsage> = used
             .into_iter()
             .map(|used| TurnUsage {
@@ -2201,6 +2202,7 @@ impl Recorder {
                 started_at,
                 ended_at,
                 stop_reason: stop_reason.to_owned(),
+                tuning: tuning.clone(),
                 used: Used {
                     model: used.model.or_else(|| agent.taken.model.clone()),
                     ..used

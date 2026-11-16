@@ -297,3 +297,33 @@ fn a_cancelled_turn_records_what_it_used() {
     assert_eq!(rows[0].stop_reason, "cancelled");
     assert_eq!(rows[0].used, claude_default());
 }
+
+#[test]
+fn a_turn_records_the_tuning_that_was_on() {
+    let user = User::with_fake_claude();
+    project(&user);
+    let id = run(&user, "hello");
+
+    user.call("tool_results.set", json!({"unchanged": true}))
+        .unwrap();
+    send(&user, &id, "again");
+
+    let tunings: Vec<String> = rows(&user).into_iter().map(|row| row.tuning).collect();
+    assert_eq!(tunings, ["", "unchanged"]);
+}
+
+#[test]
+fn a_turn_of_an_agent_that_cannot_be_told_unchanged_records_no_tuning() {
+    let user = User::with_fake_codex();
+    user.write_providers("[claude]\nenabled = false\n[codex]\nenabled = true\n");
+    user.call("tool_results.set", json!({"unchanged": true}))
+        .unwrap();
+    project(&user);
+
+    run(&user, "hello");
+
+    let rows = rows(&user);
+    assert_eq!(rows[0].provider, "codex", "{rows:?}");
+    let tunings: Vec<String> = rows.into_iter().map(|row| row.tuning).collect();
+    assert_eq!(tunings, [""]);
+}

@@ -104,6 +104,23 @@ pub fn says_unchanged(paths: &Paths) -> bool {
     read(paths).is_ok_and(|settings| settings.unchanged)
 }
 
+/// Whether "unchanged" can be said to an agent of `provider` (`files.rs`): only the Claude bridge
+/// says both its compactions and its calls' ids.
+pub fn can_be_told_unchanged(provider: &str) -> bool {
+    provider == "claude"
+}
+
+/// The optimisations on for a turn of an agent of `provider`, as `turn_usage` keeps them
+/// (`docs/usage.md`): their names, sorted and comma-separated; one the agent cannot have is not.
+pub fn tuning(paths: &Paths, provider: &str) -> String {
+    let mut on = Vec::new();
+    if can_be_told_unchanged(provider) && says_unchanged(paths) {
+        on.push("unchanged");
+    }
+    on.sort_unstable();
+    on.join(",")
+}
+
 /// How many bytes of text a result may hold now and still go to the agent whole: a tool that
 /// pages its own output sizes its page to it. The limit less what a page says of itself.
 pub fn page_room(paths: &Paths) -> usize {
