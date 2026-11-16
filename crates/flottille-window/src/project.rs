@@ -3,9 +3,10 @@
 //! row in the settings, Settings and New workspace), the composer that starts a session, then its
 //! tabs: **Work**, one column of the project's places (`main` first, then the workspaces from the
 //! newest), each with its sessions and the task runs going on there, the ended runs folded at the
-//! bottom; **Pull requests**, **Tickets**, **Specs** while Specs is on, and **Progress** for a project
-//! that declares a tracker: its milestones and their tickets (`progress.rs`). Each place is its own
-//! view: a session changing redraws its block, a letter typed in the composer redraws neither.
+//! bottom; **Pull requests**, **Tickets**, **Specs** while Specs is on, and **Progress** for a
+//! project that declares a tracker: its milestones and their tickets (`progress.rs`). Each place is
+//! its own view: a session changing redraws its block, a letter typed in the composer redraws
+//! neither.
 
 mod ended;
 mod place;
