@@ -183,14 +183,28 @@ fn a_run_that_is_not_a_push_gets_no_ssh_agent() {
 fn a_push_wrapped_in_another_command_gets_no_ssh_agent() {
     let (user, _agent, _bus) = user();
     let mcp = session(&user, SSH_REMOTE);
+    let script = user.path("work/app/push.sh");
+    std::fs::write(
+        &script,
+        "#!/bin/sh\nprintenv SSH_AUTH_SOCK || echo no-agent\n\
+         git push origin HEAD:refs/heads/scripted\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
 
-    let ran = done(mcp.call(
-        "run",
-        json!({"line": "sh -c \"printenv SSH_AUTH_SOCK || echo no-agent; git push origin HEAD:refs/heads/wrapped\""}),
-    ));
+    let scripted = done(mcp.call("run", json!({"line": "./push.sh"})));
+    // Run and walled, or refused: never pushed.
+    let wrapped = mcp
+        .call(
+            "run",
+            json!({"line": "env git push origin HEAD:refs/heads/wrapped"}),
+        )
+        .text;
 
-    assert!(ran.contains("no-agent"), "{ran}");
-    assert!(!ran.contains(socket(&user).to_str().unwrap()), "{ran}");
+    assert!(scripted.contains("no-agent"), "{scripted}");
+    assert!(!scripted.contains("exited with code 0"), "{scripted}");
+    assert!(!wrapped.contains("exited with code 0"), "{wrapped}");
+    assert!(!remote_has(&user, "scripted"));
     assert!(!remote_has(&user, "wrapped"));
     assert!(
         !ssh_said(&user)
