@@ -1042,21 +1042,23 @@ fn ask(daemon: &Daemon, grant: &Grant, asked: Asked) -> Outcome {
             ));
         }
     };
-    // The connection whose server is given the entry: named, or the one an agent's request
+    // The connection whose server is given the entry: named, or the one this agent's own request
     // waiting for the user names it in. Its entry is every project's, at its address unless the
     // agent gave one. A login's entry (`for`) is not one: its project is left as asked here.
     let connection = match given(asked.connection) {
-        Some(connection) => match crate::extensions::asked_for(daemon, &connection, &name) {
-            Ok(Some(origin)) => Some((connection, origin)),
-            Ok(None) => {
-                return Outcome::Refused(format!(
-                    "refused: there is no connection {connection}, declared or asked for: \
-                     connection names one the user declared, or one your request asks to add"
-                ));
+        Some(connection) => {
+            match crate::extensions::asked_for(daemon, &grant.agent, &connection, &name) {
+                Ok(Some(origin)) => Some((connection, origin)),
+                Ok(None) => {
+                    return Outcome::Refused(format!(
+                        "refused: there is no connection {connection}, declared or asked for: \
+                         connection names one the user declared, or one your request asks to add"
+                    ));
+                }
+                Err(why) => return Outcome::Refused(format!("refused: {why}")),
             }
-            Err(why) => return Outcome::Refused(format!("refused: {why}")),
-        },
-        None => crate::extensions::wanting(daemon, &name),
+        }
+        None => crate::extensions::wanting(daemon, &grant.agent, &name),
     };
     let project_asked = given(asked.project);
     if connection.is_some() && project_asked.as_deref() == Some("this") {

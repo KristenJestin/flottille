@@ -70,21 +70,22 @@ pub fn family_held_note(args: &Value) -> Option<String> {
     connections::requests::held_note(args)
 }
 
-/// The connection `name` the vault entry `entry` may be asked for, declared or asked by an agent's
-/// request waiting for the user, its server given that entry: its origin; `None` when there is no
-/// such connection, why when it gives its server no such entry.
+/// The connection `name` the vault entry `entry` may be asked for by the agent `agent`, declared
+/// or asked by its own request waiting for the user, its server given that entry: its origin;
+/// `None` when there is no such connection, why when it gives its server no such entry.
 pub fn asked_for(
     daemon: &Daemon,
+    agent: &str,
     name: &str,
     entry: &str,
 ) -> Result<Option<Option<String>>, String> {
-    connections::requests::asked_for(daemon, name, entry)
+    connections::requests::asked_for(daemon, agent, name, entry)
 }
 
-/// The connection an agent's request waiting for the user names the vault entry `entry` in, with
-/// its origin.
-pub fn wanting(daemon: &Daemon, entry: &str) -> Option<(String, Option<String>)> {
-    connections::requests::naming(daemon, entry)
+/// The connection a request of the agent `agent` waiting for the user names the vault entry
+/// `entry` in, with its origin.
+pub fn wanting(daemon: &Daemon, agent: &str, entry: &str) -> Option<(String, Option<String>)> {
+    connections::requests::naming(daemon, agent, entry)
 }
 
 /// A `connections` call performed: a read, or a write the user accepted, `approved` being the

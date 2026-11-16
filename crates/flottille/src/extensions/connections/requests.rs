@@ -1209,13 +1209,15 @@ pub(super) fn widened(daemon: &Daemon, method: &str, params: &Value) -> Result<V
 }
 
 /// The connection `name` the vault entry `entry` may be asked for (`vault {action: "ask",
-/// connection}`): the one declared, or the one an agent's request waiting for the user would add,
+/// connection}`) by the agent `agent`: the one declared, or the one its own request waiting for
+/// the user would add,
 /// and only when its declaration gives that entry to its server (a variable, a header, a query
 /// parameter, a cookie, basic): such an entry is every project's. Its origin, the address the
 /// entry is given (none for a command); `None` when there is no such connection, and why when it
 /// names no such entry: a login's entry (`for: "connection:<name>"`) keeps the project asked.
 pub fn asked_for(
     daemon: &Daemon,
+    agent: &str,
     name: &str,
     entry: &str,
 ) -> Result<Option<Option<String>>, String> {
@@ -1225,7 +1227,7 @@ pub fn asked_for(
     let named: Vec<Declaration> = declared
         .into_iter()
         .chain(
-            waiting(daemon)
+            waiting(daemon, agent)
                 .into_iter()
                 .filter(|after| after.name == name),
         )
@@ -1246,10 +1248,10 @@ pub fn asked_for(
         })
 }
 
-/// The connection an agent's request waiting for the user names the vault entry `entry` in, and
-/// its origin: what an ask for that entry is for.
-pub fn naming(daemon: &Daemon, entry: &str) -> Option<(String, Option<String>)> {
-    waiting(daemon)
+/// The connection a request of the agent `agent` waiting for the user names the vault entry
+/// `entry` in, and its origin: what that agent's ask for that entry is for.
+pub fn naming(daemon: &Daemon, agent: &str, entry: &str) -> Option<(String, Option<String>)> {
+    waiting(daemon, agent)
         .into_iter()
         .find(|after| after.entries().any(|named| named == entry))
         .map(|after| {
@@ -1258,14 +1260,16 @@ pub fn naming(daemon: &Daemon, entry: &str) -> Option<(String, Option<String>)> 
         })
 }
 
-/// What the agents' `add` and `edit` requests waiting for the user would leave.
-fn waiting(daemon: &Daemon) -> Vec<Declaration> {
+/// What the `add` and `edit` requests of the agent `agent` waiting for the user would leave:
+/// another agent's, maybe of another project, never chooses what this one's ask is for.
+fn waiting(daemon: &Daemon, agent: &str) -> Vec<Declaration> {
     daemon
         .read(|store| store.pending_requests(approval::USER))
         .unwrap_or_default()
         .into_iter()
         .filter(|request| {
-            request.tool == "connections"
+            request.agent == agent
+                && request.tool == "connections"
                 && matches!(request.arguments["action"].as_str(), Some("add" | "edit"))
         })
         .filter_map(|request| proposal(daemon, &request.arguments).ok()?.after)
