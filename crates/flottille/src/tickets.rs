@@ -1681,8 +1681,7 @@ async fn listed(daemon: &Daemon, project: &Project, asked: &TicketsCall) -> Outc
     }
     // A worklog date alone matches the worklogs of anyone: the work items of others show too.
     if let Some(jql) = asked_jql {
-        let lower = jql.to_lowercase();
-        if lower.contains("worklogdate") && !lower.contains("worklogauthor") {
+        if jql.to_lowercase().contains("worklogdate") && !restricts_worklog_author(jql) {
             text.push_str(
                 "(the JQL uses worklogDate without worklogAuthor: it matched anyone's worklogs \
                  on those days, not only the user's; tickets worklogs gives the user's own time \
@@ -1692,6 +1691,24 @@ async fn listed(daemon: &Daemon, project: &Project, asked: &TicketsCall) -> Outc
     }
     text.push_str("tickets {\"action\": \"show\", \"ticket\": …} reads one.");
     Outcome::Done(text)
+}
+
+/// Whether a JQL keeps to some worklog authors: `worklogAuthor` followed by `=` or `in`. Not `!=`
+/// nor `not in`, which leave everyone else's worklogs in.
+fn restricts_worklog_author(jql: &str) -> bool {
+    let lower = jql.to_lowercase();
+    let mut rest = lower.as_str();
+    while let Some(at) = rest.find("worklogauthor") {
+        rest = &rest[at + "worklogauthor".len()..];
+        let after = rest.trim_start();
+        let word_end = after
+            .find(|c: char| !c.is_ascii_alphabetic())
+            .unwrap_or(after.len());
+        if after.starts_with('=') || &after[..word_end] == "in" {
+            return true;
+        }
+    }
+    false
 }
 
 /// The tickets the items' rounds keep, as a list keeps them: by state, label and assignee, the
