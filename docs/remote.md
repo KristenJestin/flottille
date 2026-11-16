@@ -10,8 +10,9 @@ app) reads and answers the sessions of every machine of the user. It is the mile
 **Status: the design of v0.4, decided with the maintainer on 2026-11-12, 2026-11-13, 2026-11-14 and 2026-11-15.** Nothing
 here is built but the keys, and the member list, the invitation code and the four words as data
 and their checks, and the link between two machines with its version check (`crates/flottille-link`,
-`crates/flottille/src/link.rs`), and the hub's state and its rules, without the network
-it will serve on (`crates/flottille-hub`). What is decided is said as such; the defaults taken are in "Defaults taken, to
+`crates/flottille/src/link.rs`), and the hub with its rules, served on the network, the control
+session every machine keeps to it and the first member's setup (`crates/flottille-hub`,
+`crates/flottille-link/src/control.rs`, `crates/flottille/src/hub_session.rs`). What is decided is said as such; the defaults taken are in "Defaults taken, to
 confirm"; what is open is in "Open questions". It replaces the proposal of 2026-11-03 (a relay
 every device connects to, on a private network) and the review that put Tailscale and SSH at the
 centre: Flottille stays generic (`AGENTS.md`), and depends on no one network and no account of a
@@ -280,15 +281,38 @@ keys, roles, never a secret); the presence; the addresses members tell it. It do
 devices link to each other, nor what they say.
 
 **Its configuration**: a listen address (a device must be able to reach it, like any other), TLS (a certificate given, ACME, or plain behind a reverse
-proxy), a state folder. The hub URL is given to every device at join, in the invitation.
+proxy), a state folder. The hub URL is given to every device at join, in the invitation. Built
+(#820): `--listen <address>` (`0.0.0.0:7448` by default: every interface, one port), `--tls-cert
+<pem> --tls-key <pem>` for TLS on a certificate given, plain otherwise (for a reverse proxy that
+holds the certificate), and `--state <dir>`. ACME is not built: `--acme <domain>` is refused,
+saying to give a certificate or to put a proxy in front.
+
+**The control session.** A device reaches the hub at its URL (`http://` or `https://`, its port
+80 or 443 when the URL says none) over TCP, TLS for `https://` (the certificate checked against
+the system's roots), and asks for an HTTP/1.1 upgrade to `flottille-hub`, so that a reverse proxy
+carries it as it carries a WebSocket (it must pass upgrades on). Then each side says one JSON
+object per line (`crates/flottille-link/src/control.rs`): the device its key, a fresh nonce and
+its hello ("The version"); the hub its key, a nonce of its own, its hello and its proof, a
+signature over `flottille-hub-session-v1`, a zero byte, the side, the device's key and both
+nonces; the device its own proof, over the hub's key and the nonces. A device that pinned the
+hub's key refuses another one there, before it proves anything. The hub then welcomes a member's
+device, a member's machine, or, while the list is empty, anyone (who comes to set it up), and
+refuses any other key, saying the list's root, so that a device that pinned another root knows
+the hub was set up again. Once welcomed, a device asks (the setup, a member's change, its
+addresses, its presence) and is answered by number; the hub sends the list whole, the addresses
+every member's machine told, and, to a runner, the presence, at once and whenever they change.
+A machine's daemon keeps the session with its machine key; what it pinned is
+`remote/hub.json` (the hub's URL and key, the list's root and the list as last checked), and it
+writes `remote/peers.json` (the machines the link trusts) from the members' machines of the list
+that checked, with the addresses the hub told.
 
 **Its state folder** is `--state <dir>`, `$XDG_STATE_HOME/flottille-hub` by default, made 700. It
 holds the hub's key, `hub.key` (600, made at the first start with the machine key's care), and
 `hub.json` (600): the member list as the members signed it, and the setup code while no member
 exists, written whole under a temporary name and renamed over the old file. One process uses the
-folder at a time (a lock on `hub.lock`): a second hub, or `flottille-hub setup-code` with or
-without `--reset`, is refused while a hub runs (`another flottille-hub uses <folder>: stop it
-first`). A list in it that does not check stops the hub's start, saying to reset it. The
+folder at a time (a lock on `hub.lock`): a second hub, or `flottille-hub setup-code --reset`, is
+refused while a hub runs (`another flottille-hub uses <folder>: stop it first`); `flottille-hub
+setup-code` alone only reads, and serves while it runs. A list in it that does not check stops the hub's start, saying to reset it. The
 invitations, their join requests, the presence and the addresses are kept in memory: they last
 minutes, or are told again when a device connects.
 
@@ -301,7 +325,10 @@ it again while no member exists. The first device (usually the computer) joins w
 becomes the first member, a `runner`, its entry signed by itself; it is the **root** of the list, and
 every device that joins later pins it. The code is 80 random bits in Crockford's base32, read in
 any case and with or without its hyphens, compared in constant time; the entry it comes with must
-be the presenting device's own.
+be the presenting device's own. The command signs, with the device key, the root's entry and the
+declaration of the machine's key (a `machine` change, "Defaults taken"); the daemon carries them
+to the hub in a session its machine key opens, which must be the machine declared, and pins the
+hub's key from that session.
 
 **Recovery**: `flottille-hub setup-code --reset`, on the hub's machine only, empties the member list
 and prints a new setup code. Every device then refuses the new list (its root is not the one they
@@ -737,7 +764,8 @@ on a real phone, by hand, and reported.
   16 keys a minute at most, since a key costs a stranger nothing: past them, one line says the
   others are counted, and the count is said when the minute ends. The
   machines a daemon trusts, and the addresses it knows them at, are in `remote/peers.json` (`{"machines": [{"name", "key", "addresses", "told"}]}`),
-  which the hub will keep (#820) and a test writes until then; the addresses declared by hand in
+  which the control session to the hub writes from the member list once the machine is set up
+  (a test writes it for machines with no hub); the addresses declared by hand in
   `remote/addresses.json`. Both are read at every round (each second): the daemon dials each
   machine it trusts and is not linked to, waiting longer after each failure (5 seconds at most).
   A file caught half written, or broken by hand, leaves the last one read whole in use (said once
@@ -827,8 +855,9 @@ on a real phone, by hand, and reported.
   key: no database. The invitations and their join requests are kept in memory: a hub started
   again has none, and the member asks again.
 - The setup code is printed in the log at the start that made it only; a hub started again before
-  a first member joined prints none, and `flottille-hub setup-code` prints it. With no listener yet,
-  `flottille-hub` makes or reads its state, prints its key's fingerprint, and exits.
+  a first member joined prints none, and `flottille-hub setup-code` prints it, reading the state
+  without the folder's lock so that it serves while the hub runs (the state is written whole and
+  renamed, never seen half written).
 - A member's ask for an invitation signs, after `flottille-hub-invite-v1` and a zero byte, the
   hub's key, its own key, its time and 16 random bytes: an ask is for one hub, taken within 5
   minutes of the hub's time either way, and once. A `viewer`'s ask is refused.
@@ -842,6 +871,25 @@ on a real phone, by hand, and reported.
   told to it: the running hub would keep the old code valid and undo the reset at its next write.
   It reads nothing of the state, so a list that does not check, or a damaged file, does not stop
   it; the hub's key stays.
+
+- The list holds the devices' keys; the link and the control session run on the machines' keys.
+  The tie is a change of the list, `machine` (kind 4 of the signed bytes: the member's key, then
+  the machine's), which a member signs for itself only, any role: the hub cannot make it, and a
+  removal takes it away. A machine key is no member's key, nor another member's machine; declared
+  again, it replaces the one before. The first member's setup carries its own.
+- The hub listens on `0.0.0.0:7448` unless told otherwise: every interface, one port, as #820
+  says. Whether it should be loopback by default (a hub behind a reverse proxy on the same host)
+  is open; it is one line (`LISTEN`, `crates/flottille-hub/src/server.rs`).
+- ACME is not built (a dependency of weight): `--acme` is refused with what to do instead. TLS,
+  on the hub and to it, is TLS 1.3 only.
+- A machine that cannot reach another says every address it tried, from where, and how each
+  failed: `server is unreachable: tried 127.0.0.1:7447 from pc, no answer in 10 s`; `from` is the
+  machine's name in the member list (its key's fingerprint before it has one). A hub that cannot
+  be reached is said the same way, with since when: `the hub at hub.example.net:443 is
+  unreachable since 22:14: tried 192.0.2.10:443: Connection refused`.
+- A machine set up tells the hub its addresses at once, then whenever they change; the hub keeps
+  them in memory, 64 at most per machine, each a host and a port, and sends every member all of
+  them. A machine set up again (`remote.setup` while `hub.json` is there) replaces what it pinned.
 - The git work of "What travels" is `crates/flottille/src/git/bundle.rs`. The snapshot is made
   from a copy of the repository's index (a linked worktree's own), under Flottille's name
   (`Flottille <flottille@localhost>`), never signed: it is never kept as a commit. The bundle
