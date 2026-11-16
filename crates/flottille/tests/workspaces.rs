@@ -519,6 +519,33 @@ fn the_command_line_says_in_one_line_where_a_repository_without_remote_started()
 }
 
 #[test]
+fn the_command_line_says_each_step_s_time_and_the_total() {
+    let fixture = Fixture::new(false);
+    let slow = fixture.script("slow.sh", "sleep 0.3\n");
+    fixture.configure(&format!(
+        "[[setup]]\nrun = \"sh {}\"\nrepository = \"lib\"\n",
+        slow.display()
+    ));
+    fixture.create(json!({"repositories": ["lib"]})).unwrap();
+    fixture.settled("login");
+
+    let output = fixture.user.run(&["workspace", "show", "app", "login"]);
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{text}");
+    assert!(
+        text.contains("s to reach origin)"),
+        "the fetch of the repository: {text}"
+    );
+    assert!(
+        text.lines()
+            .any(|line| line.contains("slow.sh") && line.contains(" · ")),
+        "the step's time: {text}"
+    );
+    assert!(text.contains("\nReady in "), "the total: {text}");
+}
+
+#[test]
 fn a_workspace_created_with_two_of_three_repositories() {
     let fixture = Fixture::new(false);
     fixture.configure("");

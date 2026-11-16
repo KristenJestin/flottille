@@ -1584,6 +1584,15 @@ async fn prepare_steps(
     }
 }
 
+/// How long a part of a workspace's making took, as people say it: `0.4 s`, `42 s`,
+/// `1 min 42 s`. Under ten seconds the tenths still tell a fetch from a copy.
+pub fn took_said(ms: u64) -> String {
+    match ms {
+        0..10_000 => format!("{:.1} s", ms as f64 / 1000.0),
+        _ => crate::forge::events::lasted(ms / 1000),
+    }
+}
+
 /// The three parts of a workspace's making that took longest, longest first: the repositories'
 /// fetches and the steps, each as the show says it.
 fn slowest(workspace: &Workspace) -> Vec<Value> {

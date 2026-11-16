@@ -12,6 +12,7 @@ use serde_json::Value;
 
 use crate::client::Client;
 use crate::project_command::in_full;
+use crate::workspaces::took_said;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -278,6 +279,14 @@ fn repositories_text(workspace: &Value) -> String {
             };
             format!("offline: the tracking ref as of {age}, {commit}")
         };
+        let freshness = match base["fetch"]["duration_ms"].as_u64() {
+            Some(took) => format!(
+                "{freshness} ({} to reach {})",
+                took_said(took),
+                text(base, "remote")
+            ),
+            None => freshness,
+        };
         shown.push_str(&format!(
             "  {}: {}, {freshness}\n",
             text(repository, "path"),
@@ -353,10 +362,19 @@ fn show_text(workspace: &Value) -> String {
     shown.push_str("Steps:\n");
     for step in steps(workspace) {
         let doing = describe(step);
+        let took = step["duration_ms"]
+            .as_u64()
+            .map_or(String::new(), |took| format!(" · {}", took_said(took)));
         shown.push_str(&format!(
-            "  {:>2}. {:8} {doing}\n",
+            "  {:>2}. {:8} {doing}{took}\n",
             step["position"].as_u64().unwrap_or(0) + 1,
             text(step, "state"),
+        ));
+    }
+    if let Some(total) = workspace["total_ms"].as_u64() {
+        shown.push_str(&format!(
+            "Ready in {}, from the request.\n",
+            took_said(total)
         ));
     }
     if workspace["state"] == "failed" {
