@@ -310,7 +310,7 @@ leaves it out.
 
 `tickets {action, …}` (`docs/tools.md`, "The tickets"): `list` every ticket of a state in one call
 (by label, assignee and `updated_within`), `search` with words, `in_comments` or `jql`, `show` the workspace's ticket or another of the
-project's tracker by its key, `types` the work item types of a Jira project, `sprints` the open sprints of its boards, `milestones` the milestones of a GitHub repository or the versions of Jira's projects, `progress` their tickets grouped with the work on each ("Progress" below); `create` (on Jira also under a parent, in a sprint and in a version; on GitHub in a milestone), `milestone_create` and `milestone_edit` (GitHub, "Milestones" below; refused on Jira, "Versions"), `comment`, `log_time` (Jira, "Logging time" below) and `time_spent`, `edit` (labels on both; on GitHub assignees, on Jira the assignee), `close` (on
+project's tracker by its key, `types` the work item types of a Jira project, `sprints` the open sprints of its boards, `milestones` the milestones of a GitHub repository or the versions of Jira's projects, `progress` their tickets grouped with the work on each ("Progress" below); `create` (on Jira also under a parent, in a sprint and in a version; on GitHub in a milestone), `milestone_create` and `milestone_edit` (GitHub, "Milestones" below; refused on Jira, "Versions"), `comment`, `log_time` (Jira, "Logging time" below), `time_spent` and `worklogs` (Jira, "Reading worklogs" below), `edit` (labels on both; on GitHub assignees, on Jira the assignee), `close` (on
 GitHub, completed or not planned), `reopen` and `status` (on GitHub, the Status of the issue on its
 Projects board, `docs/tools.md`), each to judge, held in Ask and allowed in Full as the other writes are. A key the
 tracker does not take, or a creation in a Jira project that is not one of the tracker's, is
@@ -928,6 +928,47 @@ tickets {action: "log_time", ticket: "ABC-123", duration: "2h 30m", started: "20
 **The maintainer checks it on their Jira site**: one worklog logged on a real work item, with an
 API token of their own: Jira Cloud's answer to a worklog written as above is not something this was
 written against.
+
+### Reading worklogs
+
+`tickets worklogs {from, to?, ticket?, author?}` answers "what does Jira say about last Friday?":
+the worklogs of a day (`from`) or of a range (`from` to `to`, both days as `YYYY-MM-DD`), with their
+durations. It is a read, **never held** (like `show`), through Jira's REST API with the vault entry
+of `log_time` (`worklog_token`): the daemon uses the secret itself, toward the site the tracker
+names and no other, and the agent sees the entry's name only. The secret is in no result, event,
+log nor error, and every ticket text in the answer is masked as `search` and `show` results are.
+No entry named, one the project does not see, or one with no username is refused with the same
+sentence as `log_time`, how to set one up. GitHub is refused: `GitHub has no worklogs`.
+
+- **Whose time**: by default the token's own account, `GET /rest/api/3/myself` once, kept for the
+  daemon's life per project, entry and site (an entry set again is asked again, so that a changed
+  entry never has another's account). `author` is another account, by its id or by a name
+  `people` finds. The answer says it: `your account (Jane Doe)`, so that the agent does not guess.
+- **Which work items**: the JQL `project in (<the tracker's>) AND worklogDate >= from-1 AND
+  worklogDate <= to+1 AND worklogAuthor = <account>`, bounded to 100 work items (`search/jql`), and
+  said when the site had more (`the search was cut at 100 work items`); with `ticket`, that work
+  item alone, with no search. Then each one's worklogs (`/rest/api/3/issue/<KEY>/worklog`, read
+  page by page as the site pages them, `startAt` and `total`), **kept only those of the account
+  and started inside the range in the user's time zone**: the machine's, as the quota reset times
+  are read, said in the answer (`the days in the time zone Europe/Paris`). A worklog started at
+  23:30 the day before in that zone is left out whatever offset Jira wrote it with. The JQL's dates
+  are read by Jira in the time zone of the account's profile, which may not be the machine's, so
+  the search is **widened by one day on each side** and the exact cut is Flottille's, in the
+  machine's zone. The margin holds while the two zones are less than 24 hours apart. The worklog
+  endpoint is asked for the range too (`startedAfter` and `startedBefore`, in milliseconds, with a
+  day of margin each side), so that the worklogs of other days are not all read; the local cut
+  stays.
+- **The answer**: per day, each worklog as `KEY title — 1h30 (started 09:12) "comment"` (the comment
+  as one line, cut at 300 characters), the day's total, then the range's total.
+- **`search` and anyone's worklogs**: a `jql` that uses `worklogDate` without `worklogAuthor` (`=`
+  or `in`; `!=` and `not in` do not keep to anyone) matches
+  the work items on which *anyone* logged time that day, not the user's: its result says so.
+- The tests send the calls to the fake Jira REST server of the `log_time` tests
+  (`FLOTTILLE_TEST_JIRA_BASE`), with the daemon's in-memory keyring and `TZ=Europe/Paris`.
+
+**The maintainer checks it on their Jira site**: their time of one day, compared with Jira's own
+report; the answers of `myself`, of the search and of the worklog endpoint were not read from a real
+site.
 
 ## Tests
 

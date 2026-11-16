@@ -824,13 +824,15 @@ pub const FORGE_ACTIONS: &str = "list, show, people, subscribe, unsubscribe, cre
 /// The actions of `tickets`, as a refusal names them.
 pub const TICKET_ACTIONS: &str = "list, search, show, people, types, link_types, sprints, milestones, subscribe, unsubscribe, \
      create, comment, reply, edit, close, reopen, status, link, unlink, comment_edit, \
-     comment_delete, milestone_create, milestone_edit, log_time and time_spent";
+     comment_delete, milestone_create, milestone_edit, log_time, time_spent and worklogs";
 /// What `tickets close` closes for, as `gh issue close --reason` names it.
 pub const CLOSE_REASONS: [&str; 2] = ["completed", "not planned"];
 /// The arguments of `tickets` that belong to `edit` or `close` alone.
-const TICKET_ONLY: [(&str, &str); 6] = [
+const TICKET_ONLY: [(&str, &str); 8] = [
     ("duration", "log_time"),
     ("started", "log_time"),
+    ("to", "worklogs"),
+    ("author", "worklogs"),
     ("reason", "close"),
     ("remove_labels", "edit"),
     ("assignees", "edit"),
@@ -846,7 +848,7 @@ fn tickets(call: &Call) -> Verdict {
     let shown = |key: &str| crate::mcp::masked(&words(key), &call.grant.place);
     let said = match action {
         "list" | "search" | "show" | "people" | "types" | "link_types" | "sprints"
-        | "milestones" | "progress" | "subscribe" | "unsubscribe" | "time_spent" => {
+        | "milestones" | "progress" | "subscribe" | "unsubscribe" | "time_spent" | "worklogs" => {
             return Verdict::Allow;
         }
         "log_time" => format!(
