@@ -436,7 +436,12 @@ mod tests {
     fn a_git_diff_is_returned_byte_for_byte() {
         // A blank context line is a single space; identical added lines are a diff's, not a run.
         let diff = "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1,6 +1,6 @@\n one\n \n \n-two\n+\n+\n+\n+\n \n three\n";
-        for line in ["git diff", "git show", "git log -p", "git -C repo diff --stat"] {
+        for line in [
+            "git diff",
+            "git show",
+            "git log -p",
+            "git -C repo diff --stat",
+        ] {
             let found = apply(&words(line), diff, Some(0));
             assert_eq!(found.text, diff, "{line}");
             assert_eq!(found.removed, 0, "{line}");
