@@ -2,7 +2,6 @@
 //! merged (`docs/cli.md`, `docs/usage.md`).
 
 use flottille_core::paths::Paths;
-use jiff::Zoned;
 use jiff::civil::Date;
 use serde_json::{Value, json};
 
@@ -17,13 +16,13 @@ pub fn usage(
     by: &str,
     json: bool,
 ) -> Result<()> {
-    let today = Zoned::now().date();
-    let since = first_day(since.unwrap_or("30d"), today)?;
-    let stats = Client::connect_or_start(paths)?.request(
-        "usage.stats",
-        json!({"project": project, "since": since.to_string(), "until": today.to_string(),
-            "by": by}),
-    )?;
+    // The days are the daemon's: it says which day is today, not this command's time zone.
+    let mut asked = json!({"project": project, "by": by});
+    match period(since.unwrap_or("30d"))? {
+        Period::Days(days) => asked["days"] = days.into(),
+        Period::Since(date) => asked["since"] = date.to_string().into(),
+    }
+    let stats = Client::connect_or_start(paths)?.request("usage.stats", asked)?;
     if json {
         println!("{stats}");
     } else {
@@ -32,15 +31,23 @@ pub fn usage(
     Ok(())
 }
 
-/// The first day of `--since`: a date, or `N` days ending today.
-fn first_day(since: &str, today: Date) -> Result<Date> {
+#[derive(Debug, PartialEq)]
+enum Period {
+    /// The last days, today included.
+    Days(u64),
+    /// From this day to today.
+    Since(Date),
+}
+
+/// What `--since` says: a date, or `N` days ending today.
+fn period(since: &str) -> Result<Period> {
     if let Some(days) = since.strip_suffix('d')
-        && let Ok(days) = days.parse::<i64>()
+        && let Ok(days) = days.parse::<u64>()
         && days >= 1
     {
-        return Ok(today.checked_sub(jiff::Span::new().days(days - 1))?);
+        return Ok(Period::Days(days));
     }
-    since.parse::<Date>().map_err(|_| {
+    since.parse::<Date>().map(Period::Since).map_err(|_| {
         format!("--since takes a date (2026-11-01) or a number of days (30d), not `{since}`").into()
     })
 }
@@ -73,7 +80,8 @@ fn usage_text(stats: &Value) -> String {
     );
     match tasks["cost_per_merged_task"].as_f64() {
         Some(cost) => out.push_str(&format!(
-            "Cost per merged task: {} ({} merged, {} failed).\n",
+            "Cost per merged task: {} ({} merged, {} failed, finished in these days, each with \
+             all of its turns).\n",
             tokens(cost),
             count("merged"),
             count("failed")
@@ -91,30 +99,31 @@ fn usage_text(stats: &Value) -> String {
     ));
     if count("no_forge") > 0 {
         out.push_str(&format!(
-            "Tasks of projects without a forge: {} ({}), their outcome not known.\n",
+            "Tasks without a forge: {} ({}), their outcome not known.\n",
             count("no_forge"),
             tokens(tasks["no_forge"]["weighted"].as_f64().unwrap_or(0.0)),
         ));
     }
     out.push_str(&format!(
-        "\nTotal: {}, {} of it cache reads, {} turns",
+        "\nTotal: {}, {} of the input read from the cache, {} rows (one per turn and model)",
         tokens(total["weighted"].as_f64().unwrap_or(0.0)),
         share(&total["cache_read_share"]),
-        total["turns"],
+        total["rows"],
     ));
     match total["missing"].as_u64().unwrap_or(0) {
         0 => out.push_str(".\n"),
         missing => out.push_str(&format!(" ({missing} missing a count, taken as 0).\n")),
     }
-    out.push_str(&format!("\nBy {}:\n", stats["by"].as_str().unwrap_or("?")));
-    for group in stats["groups"].as_array().into_iter().flatten() {
+    let by = stats["by"][0].as_str().unwrap_or("?");
+    out.push_str(&format!("\nBy {by}:\n"));
+    for group in stats["groups"][by].as_array().into_iter().flatten() {
         let key = match &group["key"] {
             Value::String(key) if key.is_empty() => "(none)".to_owned(),
             Value::String(key) => key.clone(),
             _ => "(unknown)".to_owned(),
         };
         out.push_str(&format!(
-            "  {key:<24} {:>8}  {:>4} cache reads",
+            "  {key:<24} {:>8}  {:>4} from the cache",
             tokens(group["weighted"].as_f64().unwrap_or(0.0)),
             share(&group["cache_read_share"]),
         ));
@@ -131,33 +140,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn since_takes_a_date_or_a_number_of_days_ending_today() {
-        let today: Date = "2026-11-15".parse().unwrap();
-        assert_eq!(first_day("7d", today).unwrap().to_string(), "2026-11-09");
-        assert_eq!(first_day("1d", today).unwrap(), today);
+    fn since_takes_a_date_or_a_number_of_days_the_daemon_ends_today() {
+        assert_eq!(period("7d").unwrap(), Period::Days(7));
         assert_eq!(
-            first_day("2026-10-01", today).unwrap().to_string(),
-            "2026-10-01"
+            period("2026-10-01").unwrap(),
+            Period::Since("2026-10-01".parse().unwrap())
         );
-        assert!(first_day("0d", today).is_err());
-        assert!(first_day("last week", today).is_err());
+        assert!(period("0d").is_err());
+        assert!(period("last week").is_err());
     }
 
     #[test]
     fn the_text_says_the_cost_per_merged_task_then_each_group() {
         let task = |count: u64, weighted: f64| json!({"count": count, "weighted": weighted});
         let stats = json!({
-            "project": null, "since": "2026-11-09", "until": "2026-11-15", "by": "tuning",
-            "total": {"weighted": 4_500_000.0, "cache_read_share": 0.38, "turns": 120,
+            "project": null, "since": "2026-11-09", "until": "2026-11-15", "by": ["tuning"],
+            "total": {"weighted": 4_500_000.0, "cache_read_share": 0.38, "rows": 120,
                 "missing": 3, "tasks": {"merged": task(3, 3_000_000.0), "failed": task(1, 600_000.0),
                 "in_progress": task(2, 12_300.0), "no_forge": task(1, 950.0), "main": 900.0,
                 "cost_per_merged_task": 1_200_000.0}},
-            "groups": [
+            "groups": {"tuning": [
                 {"key": "", "weighted": 4_000_000.0, "cache_read_share": 0.4,
                     "tasks": {"cost_per_merged_task": 1_300_000.0}},
                 {"key": "unchanged", "weighted": 500_000.0, "cache_read_share": 0.2,
                     "tasks": {"cost_per_merged_task": null}}
-            ]
+            ]}
         });
 
         let text = usage_text(&stats);
@@ -167,15 +174,17 @@ mod tests {
             "Usage of every project from 2026-11-09 to 2026-11-15, in weighted tokens \
              (input + 1.25 × cache write + 0.1 × cache read + 5 × output).\n\
              \n\
-             Cost per merged task: 1.2M (3 merged, 1 failed).\n\
+             Cost per merged task: 1.2M (3 merged, 1 failed, finished in these days, each with \
+             all of its turns).\n\
              Left out of it: 2 in progress (12.3k), the turns in main (900).\n\
-             Tasks of projects without a forge: 1 (950), their outcome not known.\n\
+             Tasks without a forge: 1 (950), their outcome not known.\n\
              \n\
-             Total: 4.5M, 38% of it cache reads, 120 turns (3 missing a count, taken as 0).\n\
+             Total: 4.5M, 38% of the input read from the cache, 120 rows (one per turn and \
+             model) (3 missing a count, taken as 0).\n\
              \n\
              By tuning:\n\
-             \x20 (none)                       4.0M   40% cache reads  1.3M per merged task\n\
-             \x20 unchanged                  500.0k   20% cache reads\n"
+             \x20 (none)                       4.0M   40% from the cache  1.3M per merged task\n\
+             \x20 unchanged                  500.0k   20% from the cache\n"
         );
     }
 }

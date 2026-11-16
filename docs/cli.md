@@ -198,25 +198,26 @@ Turns it off: nothing more is written. The log stays where it is.
 
 What agents used from `--since` to today, in weighted tokens, and what a task that ends merged
 costs (`docs/usage.md`): of every project, or of `--project`. `--since` is a day (`2026-11-01`) or
-a number of days ending today (`7d`), `30d` when left out; `--by` splits the totals, `day` when
-left out. `--json` prints `usage.stats`'s answer.
+a number of days ending today (`7d`), `30d` when left out; today is the daemon's. `--by` splits the
+tokens, `day` when left out; only `tuning` gives a cost per merged task of its own. `--json` prints
+`usage.stats`'s answer.
 
 ```
 $ flottille usage --since 7d --by tuning
 Usage of every project from 2026-11-09 to 2026-11-15, in weighted tokens (input + 1.25 × cache write + 0.1 × cache read + 5 × output).
 
-Cost per merged task: 1.2M (3 merged, 1 failed).
+Cost per merged task: 1.2M (3 merged, 1 failed, finished in these days, each with all of its turns).
 Left out of it: 2 in progress (12.3k), the turns in main (900).
 
-Total: 4.5M, 38% of it cache reads, 120 turns.
+Total: 4.5M, 38% of the input read from the cache, 120 rows (one per turn and model).
 
 By tuning:
-  (none)                       4.0M   40% cache reads  1.3M per merged task
-  unchanged                  500.0k   20% cache reads
+  (none)                       4.0M   40% from the cache  1.3M per merged task
+  unchanged                  500.0k   20% from the cache
 ```
 
-A project without a forge adds one line, `Tasks of projects without a forge: N (…), their outcome
-not known.`, and turns missing a count say how many after the total.
+Tasks without a forge add one line, `Tasks without a forge: N (…), their outcome not known.`, and
+rows missing a count say how many after the total.
 
 ### `flottille update`
 
