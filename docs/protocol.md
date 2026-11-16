@@ -616,10 +616,19 @@ setting}]`, `setting` being `judged`, `passes`, `asked` or `off`).
   `connection.list` gives them (`null` for an add's `before` and a removal's `after`), `changed` the
   keys an edit changes, `settings` those a `set` gives, `secrets` where each vault entry of the
   declaration shown goes (`{"key": "env" | "headers", "name", "entry", "entry_host", "host",
-  "differs"}`: the entry's host, `null` without a `url`; the connection's, `null` for a command;
-  `differs` when they differ or it goes to a program), and `current` whether it is still what the
-  request says: one that is not is not done once allowed (`why` says why, when it can no longer be
-  done at all).
+  "differs", "missing", "project", "to_bind", "origin"}`: the entry's host, `null` without a
+  `url`; the connection's, `null` for a command; `differs` when they differ or it goes to a
+  program; `project` the one project the entry is alone to; `to_bind` when Accept waits for the
+  entry to be bound to the connection's host, `origin` the connection's scheme, host and port),
+  `current` whether it is still what the request says: one that is not is not done once allowed
+  (`why` says why, when it can no longer be done at all; an entry that is not right yet is no such
+  change), and `waits`, why Accept waits, if it does.
+- `connection.share_entry {number, entry}` and `connection.bind_entry {number, entry}` are the
+  user's **Share with every project** and **Bind it to <host>** on an agent's pending `add` or
+  `edit`: the vault entry `entry`, which the request must name, is made every project's, or its
+  `url` set to the origin of the request's own connection (a URL's secret line only). `refused`
+  for an entry the request does not name, a request already decided or another tool's, and a
+  worklog's entry to share; the entry's metadata as `vault.list` gives it otherwise.
 - `connection.add` and `connection.edit` take `request`, the number of a pending `add` or `edit`
   of that very connection an agent asked: the user's own values are written instead of the
   agent's (the card's **Edit**), and the request is answered, the agent told what was written. It
