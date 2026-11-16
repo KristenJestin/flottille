@@ -346,7 +346,7 @@ impl ProjectPage {
         // The tracker was taken off while its tab was shown: the page goes back to Work.
         changed |= self.tracked != data.tracked;
         self.tracked = data.tracked;
-        if !self.tracked {
+        if !self.tracked && self.tab == PageTab::Progress {
             self.choose(PageTab::Work, cx);
         }
         let mut old = std::mem::take(&mut self.blocks);
