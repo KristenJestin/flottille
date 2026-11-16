@@ -511,6 +511,7 @@ fn turn(session: &str, agent: &str, started: u64, lasted: u64, models: &[&str]) 
             started_at: started,
             ended_at: started + lasted,
             stop_reason: "end_turn".into(),
+            tuning: String::new(),
             used: Used {
                 model: Some((*model).into()),
                 ..Used::default()

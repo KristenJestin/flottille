@@ -430,6 +430,7 @@ deleted after it, which the answer to `workspace.remove` says, not an event.
 | Field | |
 |---|---|
 | `project`, `workspace` | |
+| `forge` | whether one of its repositories had a forge declared then: whether its outcome is known (`usage.md`); absent before it was said |
 
 ### The events of an item
 

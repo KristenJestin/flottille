@@ -165,6 +165,9 @@ pub struct TurnUsage {
     pub started_at: u64,
     pub ended_at: u64,
     pub stop_reason: String,
+    /// The optimisations on during the turn, sorted and comma-separated (`docs/usage.md`); empty
+    /// when none was, and for the rows recorded before it was kept.
+    pub tuning: String,
     pub used: Used,
 }
 

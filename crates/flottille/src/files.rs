@@ -325,10 +325,10 @@ impl Context<'_> {
     /// its compactions but gives no call id, and any other provider says neither.
     fn can_be_told_unchanged(&self) -> bool {
         let agent = self.daemon.read(|store| store.agent(self.agent));
-        matches!(
-            agent.ok().flatten().map(|agent| agent.provider).as_deref(),
-            Some("claude")
-        )
+        agent
+            .ok()
+            .flatten()
+            .is_some_and(|agent| crate::results::can_be_told_unchanged(&agent.provider))
     }
 
     /// Whether "unchanged" is safe for this call: the switch is on, the provider is one that can

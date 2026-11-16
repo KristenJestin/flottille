@@ -83,6 +83,8 @@ mod titles;
 mod tree;
 mod turn_failures;
 mod update;
+mod usage;
+mod usage_command;
 mod vault;
 mod vault_command;
 mod watchdog;
@@ -202,6 +204,21 @@ enum Command {
     Provider {
         #[command(subcommand)]
         action: ProviderAction,
+    },
+    /// What agents used, in weighted tokens, and what a task that ends merged costs
+    Usage {
+        /// Only this project
+        #[arg(long, value_name = "P")]
+        project: Option<String>,
+        /// From this day (2026-11-01), or over the last N days, today included (30d, the
+        /// default)
+        #[arg(long, value_name = "D")]
+        since: Option<String>,
+        /// Split by day, model, provider, role or tuning
+        #[arg(long, value_name = "BY", default_value = "day")]
+        by: String,
+        #[arg(long)]
+        json: bool,
     },
     /// What your root agents sent you: their reports, their questions, their failures
     Inbox {
@@ -447,6 +464,12 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         Command::Approvals { json } => approval_command::approvals(&paths, json)?,
         Command::Approve { number, discard } => approval_command::approve(&paths, number, discard)?,
         Command::Deny { number } => approval_command::deny(&paths, number)?,
+        Command::Usage {
+            project,
+            since,
+            by,
+            json,
+        } => usage_command::usage(&paths, project, since.as_deref(), &by, json)?,
         Command::Inbox { after, limit, json } => inbox_command::inbox(&paths, after, limit, json)?,
         Command::Mcp => pilot::run(&paths)?,
         Command::Extensions(command) => return extensions::run(&paths, command),

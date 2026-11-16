@@ -755,6 +755,10 @@ impl Bridge {
                 used[name] = count.into();
             }
         }
+        // OpenAI charges no cache write and Codex counts none: none was made, not one unknown.
+        if used.get("cachedWriteTokens").is_none() {
+            used["cachedWriteTokens"] = 0.into();
+        }
         if let (Some(input), Some(cached)) = (grew("inputTokens"), grew("cachedInputTokens")) {
             used["inputTokens"] = input.saturating_sub(cached).into();
         }

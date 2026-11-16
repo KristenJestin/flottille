@@ -1197,10 +1197,10 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   unfolding and folding away, and an empty list says so. A field saved
   on its own shows its Save only once it changed (rule 4);
 - Settings, in tabs by subject (`reference/gpui.md`, rule 13): **Agents**, **Approvals**,
-  **Features**, **Vault** and **General**, one shown at a time, as in a project's settings. It
-  opens on Agents; a link to a section opens its tab with the section in view; Usage will be the
-  sixth tab and the last. No part of Flottille adds a tab of its own: what the user turns on or
-  off is a row of Features.
+  **Features**, **Vault**, **General** and **Usage**, one shown at a time, as in a project's
+  settings. It opens on Agents; a link to a section opens its tab with the section in view; Usage
+  is the sixth tab and the last. No part of Flottille adds a tab of its own: what the user turns
+  on or off is a row of Features.
   **Agents** holds five sections. **Providers** (a count; "The agent programs Flottille can
   start. Each signs in with its own login."): one row per provider, its switch labelled with its
   name (`Claude`), its version as a tag (the path of its program in the version's tooltip), and
@@ -1255,7 +1255,20 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   "Where the workspaces go"). Later **Machines** (§12) comes under it. Last **Developer mode**,
   with no sentence: a switch, "Log what Flottille decides" ("Why each call was allowed, held or
   refused, one JSON line each, secrets masked. For working on Flottille."), off by default
-  (`developer.md`), and the path of its log unfolding under it;
+  (`developer.md`), and the path of its log unfolding under it.
+  **Usage** (`usage.md`), read when the tab is shown and when a choice changes: **Cost per merged
+  task** (what it is, in one sentence), with **Period**, a segmented choice of 7, 30 or 90 days
+  (30 at first), and **Project**, a select of All projects or one; then the cost in weighted
+  tokens (or "No task merged yet") and its counts, labelled: Merged, Failed, In progress (left
+  out); a project without a forge adds one line saying its tasks are left out. **Weighted tokens
+  by day** (the formula as its sentence): one bar per day of the period, eased to its height, its
+  tooltip the day, its tokens and the share of its input read from the cache, then the total and
+  its share; the chart fades back in when the period or the project changes. **By model** and **By
+  optimisation on** (the `tuning` of the turns, "Nothing on" for none, "Mixed, in one task" for the
+  tasks that ran with several), each a list of rows: the name, the weighted tokens and the share of
+  the input read from the cache; the optimisations add the cost per merged task of the tasks that
+  ran with each. One `usage.stats` reads the three, the period given in days. A
+  skeleton stands for each part until the first answer;
 - a session page: the root's conversation, live (messages, the user's own as selectable as the agent's, thoughts collapsed (their head says how long the thinking lasted, from the event before it
   to the one after it, and no time when it lasted less than a tenth of a second), tool calls with
   their result (a result cut at the source says so on its step, with the number of characters left out), the children launched, a session started for the user as one line, "started session <title>" (it is no sub-agent), reports and an edit's diff, each folded to one line until a click unfolds it), one compact line for each command a

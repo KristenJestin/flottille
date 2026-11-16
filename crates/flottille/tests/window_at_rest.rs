@@ -757,6 +757,54 @@ fn the_window_draws_no_frame_at_rest_on_the_vault(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn the_window_draws_no_frame_at_rest_on_the_usage_tab(cx: &mut TestAppContext) {
+    let user = User::new();
+    std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
+    let now = flottille_core::store::now_ms();
+    let turn = flottille_core::agent::TurnUsage {
+        agent: "root00000001".into(),
+        session: "root00000001".into(),
+        project: "app".into(),
+        provider: "claude".into(),
+        role: "lead".into(),
+        started_at: now,
+        ended_at: now,
+        stop_reason: "end_turn".into(),
+        used: flottille_core::agent::Used {
+            model: Some("model-a".into()),
+            input: Some(1200),
+            output: Some(30),
+            cache_read: Some(40_000),
+            cache_write: Some(500),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    user.call("daemon.status", json!({})).unwrap();
+    flottille_core::store::Store::open(&user.path("state/flottille/flottille.db"))
+        .unwrap()
+        .record_turn_usage(&[turn])
+        .unwrap();
+    let (shell, cx) = window(&user, cx);
+    cx.update(|window, cx| window.click("settings", cx));
+    until(&shell, cx, "the settings page is shown", |cx| {
+        shell.read_with(cx, |s, cx| s.main().read(cx).settings_page().is_some())
+    });
+    settle(&shell, cx);
+    cx.update(|window, cx| window.click("settings-tabs-usage", cx));
+    until(&shell, cx, "the model is listed", |cx| {
+        cx.update(|window, _| window.try_find("usage-models-list-model-a").is_some())
+    });
+    settle(&shell, cx);
+
+    assert_eq!(
+        frames_at_rest(&shell, cx),
+        (0, 0),
+        "(frames drawn, frames asked)"
+    );
+}
+
+#[gpui_kit::test]
 fn the_window_draws_no_frame_at_rest_on_a_session_with_a_leave(cx: &mut TestAppContext) {
     let user = User::with_fake_agent();
     let x = idle_session(&user);

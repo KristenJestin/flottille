@@ -849,6 +849,50 @@ The daemon reads the file when a check is due, at its start and about once an ho
 emits `sessions.changed` with what it answers. The user's door alone reaches them: no tool of an
 agent does.
 
+### The usage methods
+
+`usage.stats {project?, since?, until?, days?, by}` answers what agents used and what a task that
+ends merged costs (`docs/usage.md`), of every project or of `project`, over a period of the
+daemon's local days, both ends included: `since` to `until` (`2026-11-15`; `until` today when left
+out), or the last `days` ending `until`, which a client in another time zone gives rather than
+dates. `by` is one split or a list of them (`day`, `model`, `provider`, `role`, `tuning`): one
+call answers several.
+
+```json
+{"project": null, "since": "2026-11-09", "until": "2026-11-15", "by": ["tuning"],
+ "total": {"rows": 120, "missing": 3, "input": 81000, "cache_write": 52000,
+   "cache_read": 3400000, "output": 9000, "reasoning": 2100, "weighted": 531000.0,
+   "cache_read_share": 0.96,
+   "tasks": {"merged": {"count": 3, "weighted": 300000.0},
+     "failed": {"count": 1, "weighted": 60000.0},
+     "cost_per_merged_task": 120000.0,
+     "in_progress": {"count": 2, "weighted": 1230.0},
+     "no_forge": {"count": 0, "weighted": 0.0},
+     "main": 900.0}},
+ "groups": {"tuning": [
+   {"key": "", "rows": 100, "…": "…",
+     "tasks": {"merged": {"…": "…"}, "failed": {"…": "…"}, "cost_per_merged_task": 110000.0}},
+   {"key": "unchanged", "rows": 20, "…": "…", "tasks": {"…": "…"}}]}}
+```
+
+- Each sum gives its `rows` (one per turn and model) of the turns that started in the period,
+  `missing` (rows without one of the four counts, taken as 0), the counts, `weighted` (weighted
+  tokens) and `cache_read_share` (of the input tokens, raw, the share read from the cache:
+  `cache_read ÷ (input + cache_read + cache_write)`, 0 with none).
+- `total.tasks`: `merged` and `failed` are the tasks that finished in the period, each with the
+  weighted tokens of all of its turns, whatever their day, and `cost_per_merged_task` theirs,
+  `null` when none was merged; `in_progress` and `no_forge` the tasks with a turn in the period and
+  no outcome at its end, with the tokens of those turns; `main` the turns in no workspace.
+- `groups` has one list per split, one entry per `key`: with `day`, every day of the period in
+  order, empty ones included; otherwise by `weighted`, the largest first. A model the turn did not
+  name is `""`; no optimisation on is `""`. Only the `tuning` entries have `tasks` (`merged`,
+  `failed`, `cost_per_merged_task`): each finished task in one, its `tuning` when every turn of it
+  had the same, else `mixed` (an entry whose turns may all be outside the period). The other splits
+  give tokens alone: a task spans them.
+
+`invalid-params` for a date that is not one, an `until` before `since`, both or neither of
+`since` and `days`, or another `by`. The user's door alone reaches it: no tool of an agent does.
+
 ### The workspaces folder methods
 
 `workspaces_folder.show` and `workspaces_folder.set` read and keep where workspaces go

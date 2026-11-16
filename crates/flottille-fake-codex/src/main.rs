@@ -340,8 +340,9 @@ impl Fake {
             }
             self.step(thread, turn, step, answered);
         }
+        // As Codex's `TokenUsageBreakdown`: no count of cache writes, OpenAI charges none.
         let usage = json!({"totalTokens": 1300, "inputTokens": 1200, "cachedInputTokens": 1000,
-            "cacheWriteInputTokens": 0, "outputTokens": 100, "reasoningOutputTokens": 40});
+            "outputTokens": 100, "reasoningOutputTokens": 40});
         self.notify(
             "thread/tokenUsage/updated",
             json!({"threadId": thread, "turnId": turn, "tokenUsage": {"total": usage,
@@ -437,7 +438,7 @@ impl Fake {
             self.record.write(json!({"answered": answer}));
         } else if let Some(tokens) = step["context"].as_u64() {
             let usage = json!({"totalTokens": tokens, "inputTokens": tokens, "cachedInputTokens": 0,
-                "cacheWriteInputTokens": 0, "outputTokens": 0, "reasoningOutputTokens": 0});
+                "outputTokens": 0, "reasoningOutputTokens": 0});
             self.notify(
                 "thread/tokenUsage/updated",
                 json!({"threadId": thread, "turnId": turn, "tokenUsage": {"total": usage,

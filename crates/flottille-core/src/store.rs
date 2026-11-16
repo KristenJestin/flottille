@@ -742,6 +742,28 @@ const MIGRATIONS: &[&str] = &[
     ) STRICT;
     CREATE INDEX opened_pulls_branch ON opened_pulls (project, repository, branch);
 ",
+    "
+    -- The optimisations on during a turn (`docs/usage.md`), sorted and comma-separated. A row
+    -- recorded before reads as none: it is never rewritten.
+    ALTER TABLE turn_usage ADD COLUMN tuning TEXT NOT NULL DEFAULT '';
+",
+    "
+    -- Every pull request seen merged, kept when its item is forgotten (a repository removed, a
+    -- forge taken away): what makes a task a success (`docs/usage.md`). `opened_at` when its
+    -- forge said it, `merged_at` when Flottille first saw it merged.
+    CREATE TABLE merged_pulls (
+        project    TEXT NOT NULL,
+        repository TEXT NOT NULL,
+        key        TEXT NOT NULL,
+        branch     TEXT NOT NULL,
+        opened_at  INTEGER,
+        merged_at  INTEGER NOT NULL,
+        PRIMARY KEY (project, repository, key)
+    ) STRICT;
+    -- A task's turns, whatever the day (`docs/usage.md`), and the workspaces' events alone.
+    CREATE INDEX turn_usage_by_workspace ON turn_usage (project, workspace, started_at);
+    CREATE INDEX events_by_name ON events (name, seq);
+",
 ];
 
 /// How many of each extension's own migrations were applied (`docs/extensions.md`, "Data"): its
@@ -2810,6 +2832,24 @@ impl Store {
                     serde_json::to_string(&item.details)?
                 ],
             )?;
+            if item.kind == "pull"
+                && item.state == "merged"
+                && item.details["cross"] != true
+                && let Some(branch) = item.details["head"].as_str()
+            {
+                transaction.execute(
+                    "INSERT OR IGNORE INTO merged_pulls (project, repository, key, branch, \
+                     opened_at, merged_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![
+                        item.project,
+                        item.repository,
+                        item.key,
+                        branch,
+                        item.details["opened_at"].as_u64(),
+                        now_ms()
+                    ],
+                )?;
+            }
             for (position, check) in item.checks.iter().enumerate() {
                 transaction.execute(
                     "INSERT INTO item_checks (project, kind, repository, key, position, name, \
@@ -3091,8 +3131,9 @@ impl Store {
             let mut statement = transaction.prepare_cached(
                 "INSERT INTO turn_usage (agent, title, session, project, workspace, provider, \
                  role, model, started_at, ended_at, stop_reason, input, output, cache_read, \
-                 cache_write, reasoning, cost_usd) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+                 cache_write, reasoning, cost_usd, tuning) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, \
+                 ?18)",
             )?;
             for row in rows {
                 let used = &row.used;
@@ -3113,7 +3154,8 @@ impl Store {
                     used.cache_read,
                     used.cache_write,
                     used.reasoning,
-                    used.cost_usd
+                    used.cost_usd,
+                    row.tuning
                 ])?;
             }
         }
@@ -3123,35 +3165,77 @@ impl Store {
 
     /// Every row of the turns' usage, in the order they were recorded.
     pub fn turn_usage(&self) -> Result<Vec<TurnUsage>> {
+        let mut statement = self.connection.prepare_cached(&format!(
+            "SELECT {TURN_USAGE_COLUMNS} FROM turn_usage ORDER BY id"
+        ))?;
+        let rows = statement.query_map([], turn_usage_row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// The rows of the turns that started from `from` until before `to`, in milliseconds, of
+    /// every project or of `project`.
+    pub fn turn_usage_between(
+        &self,
+        project: Option<&str>,
+        from: u64,
+        to: u64,
+    ) -> Result<Vec<TurnUsage>> {
+        let mut statement = self.connection.prepare_cached(&format!(
+            "SELECT {TURN_USAGE_COLUMNS} FROM turn_usage \
+             WHERE started_at >= ?2 AND started_at < ?3 AND (?1 IS NULL OR project = ?1) \
+             ORDER BY id"
+        ))?;
+        let rows = statement.query_map(params![project, from, to], turn_usage_row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// The rows of the turns in the workspace `workspace` of `project` that started from `from`
+    /// until before `to`: one task's, whatever the period (`docs/usage.md`).
+    pub fn turn_usage_of_workspace(
+        &self,
+        project: &str,
+        workspace: &str,
+        from: u64,
+        to: u64,
+    ) -> Result<Vec<TurnUsage>> {
+        let mut statement = self.connection.prepare_cached(&format!(
+            "SELECT {TURN_USAGE_COLUMNS} FROM turn_usage \
+             WHERE project = ?1 AND workspace = ?2 AND started_at >= ?3 AND started_at < ?4 \
+             ORDER BY id"
+        ))?;
+        let rows = statement.query_map(params![project, workspace, from, to], turn_usage_row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Every pull request seen merged, of every project or of `project`, kept when its item is
+    /// forgotten.
+    pub fn merged_pulls(&self, project: Option<&str>) -> Result<Vec<MergedPull>> {
         let mut statement = self.connection.prepare_cached(
-            "SELECT agent, title, session, project, workspace, provider, role, model, started_at, \
-             ended_at, stop_reason, input, output, cache_read, cache_write, reasoning, cost_usd \
-             FROM turn_usage ORDER BY id",
+            "SELECT project, repository, branch, opened_at, merged_at FROM merged_pulls \
+             WHERE ?1 IS NULL OR project = ?1",
         )?;
-        let rows = statement.query_map([], |row| {
-            Ok(TurnUsage {
-                agent: row.get(0)?,
-                title: row.get(1)?,
-                session: row.get(2)?,
-                project: row.get(3)?,
-                workspace: row.get(4)?,
-                provider: row.get(5)?,
-                role: row.get(6)?,
-                started_at: row.get(8)?,
-                ended_at: row.get(9)?,
-                stop_reason: row.get(10)?,
-                used: Used {
-                    model: row.get(7)?,
-                    input: row.get(11)?,
-                    output: row.get(12)?,
-                    cache_read: row.get(13)?,
-                    cache_write: row.get(14)?,
-                    reasoning: row.get(15)?,
-                    cost_usd: row.get(16)?,
-                },
+        let rows = statement.query_map(params![project], |row| {
+            Ok(MergedPull {
+                project: row.get(0)?,
+                repository: row.get(1)?,
+                branch: row.get(2)?,
+                opened_at: row.get(3)?,
+                merged_at: row.get(4)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// The workspaces' events (`workspace.created`, `workspace.changed`, `workspace.removed`), of
+    /// every project or of `project`, in order.
+    pub fn workspace_history(&self, project: Option<&str>) -> Result<Vec<Event>> {
+        let mut statement = self.connection.prepare_cached(
+            "SELECT seq, at, name, data FROM events WHERE name IN ('workspace.created', \
+             'workspace.changed', 'workspace.removed') \
+             AND (?1 IS NULL OR json_extract(data, '$.project') = ?1) ORDER BY seq",
+        )?;
+        let rows = statement.query_map(params![project], event_row)?;
+        rows.map(|row| row?).collect()
     }
 
     /// The turns of a session, each once whatever the models it used: its agent and its start and
@@ -3762,6 +3846,48 @@ fn append_agent_event(
     Ok(event)
 }
 
+/// A pull request seen merged (`Store::merged_pulls`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MergedPull {
+    pub project: String,
+    pub repository: String,
+    /// Its head.
+    pub branch: String,
+    /// When it was opened, as its forge said it; none when it did not.
+    pub opened_at: Option<u64>,
+    /// When Flottille first saw it merged.
+    pub merged_at: u64,
+}
+
+const TURN_USAGE_COLUMNS: &str = "agent, title, session, project, workspace, provider, role, \
+    model, started_at, ended_at, stop_reason, input, output, cache_read, cache_write, reasoning, \
+    cost_usd, tuning";
+
+fn turn_usage_row(row: &rusqlite::Row) -> rusqlite::Result<TurnUsage> {
+    Ok(TurnUsage {
+        agent: row.get(0)?,
+        title: row.get(1)?,
+        session: row.get(2)?,
+        project: row.get(3)?,
+        workspace: row.get(4)?,
+        provider: row.get(5)?,
+        role: row.get(6)?,
+        started_at: row.get(8)?,
+        ended_at: row.get(9)?,
+        stop_reason: row.get(10)?,
+        tuning: row.get(17)?,
+        used: Used {
+            model: row.get(7)?,
+            input: row.get(11)?,
+            output: row.get(12)?,
+            cache_read: row.get(13)?,
+            cache_write: row.get(14)?,
+            reasoning: row.get(15)?,
+            cost_usd: row.get(16)?,
+        },
+    })
+}
+
 fn event_row(row: &rusqlite::Row) -> rusqlite::Result<Result<Event>> {
     let (seq, at, name, data): (u64, u64, String, String) =
         (row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?);
@@ -4220,6 +4346,34 @@ mod tests {
         // One that is too old no longer hides a pull request opened another way.
         store.add_opened_pull(on, 1_000).unwrap();
         assert!(!store.take_opened_pull(on, 2_000).unwrap());
+    }
+
+    #[test]
+    fn a_turn_recorded_before_the_tuning_column_reads_as_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("flottille.db");
+        let old = Connection::open(&path).unwrap();
+        let previous = MIGRATIONS
+            .iter()
+            .position(|m| m.contains("ADD COLUMN tuning"))
+            .unwrap();
+        for migration in &MIGRATIONS[..previous] {
+            old.execute_batch(migration).unwrap();
+        }
+        old.pragma_update(None, "user_version", previous).unwrap();
+        old.execute(
+            "INSERT INTO turn_usage (agent, session, project, provider, role, started_at, \
+             ended_at, stop_reason) VALUES ('a', 'a', 'app', 'claude', 'lead', 1, 2, 'end_turn')",
+            [],
+        )
+        .unwrap();
+        drop(old);
+
+        let store = Store::open(&path).unwrap();
+
+        let rows = store.turn_usage().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].tuning, "");
     }
 
     #[test]
@@ -7370,6 +7524,7 @@ mod tests {
             started_at: 1_792_843_730_808,
             ended_at: 1_792_843_731_808,
             stop_reason: "end_turn".into(),
+            tuning: "unchanged".into(),
             used: Used {
                 model: Some("claude-fake-1".into()),
                 input: Some(100),
