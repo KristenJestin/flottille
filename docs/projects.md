@@ -203,6 +203,7 @@ run_time_limit = 1800                 # seconds a run step of the setup may take
 never = [["git", "push"], ["rm", "-rf"]]   # programs with their leading arguments, one word per element, for the gate to refuse
 provider = "claude"                   # the provider of its agents that name none; default: the first one enabled
 model = "sonnet"                      # the model of its agents on that provider that name none; default: the provider's
+windows = true                        # its agents' runs may open windows on your screen (docs/tools.md); the user's alone, default false
 
 [[repositories]]                      # at least one
 path = "."                            # relative to the folder; "." is the folder itself

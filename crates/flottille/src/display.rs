@@ -3,7 +3,8 @@
 //! and nothing else of the user's real `$XDG_RUNTIME_DIR`: not the session bus's address, nor the
 //! other sockets. What keeps it from the real folder itself is Landlock's (`landlock.rs`), which
 //! leaves this folder alone within its reach. A connection's browser uses it
-//! (`docs/extensions.md`), and a run that opens windows will.
+//! (`docs/extensions.md`), and so does a run of a project that lets its runs open windows
+//! (`docs/tools.md`).
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -19,12 +20,19 @@ use flottille_core::paths::Paths;
 #[derive(Clone, Debug)]
 pub struct Folder(std::sync::Arc<Made>);
 
+/// The folder, and whether its owner is given X11's display (the session has no Wayland).
 #[derive(Debug)]
-struct Made(PathBuf);
+struct Made(PathBuf, bool);
 
 impl Folder {
     pub fn path(&self) -> &Path {
         &self.0.0
+    }
+
+    /// Its owner is given X11's display: Landlock leaves X11's sockets within its reach
+    /// (`landlock.rs`), which it keeps from every other program it confines.
+    pub fn x11(&self) -> bool {
+        self.0.1
     }
 }
 
@@ -36,7 +44,7 @@ impl Drop for Made {
 
 /// What a program that shows a window is given: its folder, kept while it runs, and the
 /// variables of its environment (`XDG_RUNTIME_DIR` is the folder, then `WAYLAND_DISPLAY`, or
-/// `DISPLAY` when the session has no Wayland).
+/// `DISPLAY` and `XAUTHORITY` when the session has no Wayland).
 #[derive(Clone, Debug)]
 pub struct Shown {
     pub folder: Folder,
@@ -54,13 +62,20 @@ pub fn clean(paths: &Paths) {
 /// `-` and `_`. The error says why nothing is shown, and the caller then runs without a display,
 /// never with the real folder.
 pub fn share(paths: &Paths, owner: &str) -> Result<Shown, String> {
-    share_with(
+    let mut shown = share_with(
         &paths.runtime.join("display"),
         owner,
         std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from),
         std::env::var_os("WAYLAND_DISPLAY"),
         std::env::var_os("DISPLAY"),
-    )
+    )?;
+    // X11's key goes with its display alone: a run is given neither otherwise (`runs.rs`).
+    if shown.folder.x11()
+        && let Some(key) = std::env::var_os("XAUTHORITY")
+    {
+        shown.env.insert("XAUTHORITY".into(), key);
+    }
+    Ok(shown)
 }
 
 /// [`share`] under `base`, with the session given.
@@ -87,7 +102,8 @@ fn share_with(
         .mode(0o700)
         .create(&folder)
         .map_err(|error| error.to_string())?;
-    let folder = Folder(std::sync::Arc::new(Made(folder)));
+    let given_x11 = wayland.is_none() && x11.is_some();
+    let folder = Folder(std::sync::Arc::new(Made(folder, given_x11)));
     let mut env = BTreeMap::new();
     env.insert(
         "XDG_RUNTIME_DIR".into(),

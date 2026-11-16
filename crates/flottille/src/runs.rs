@@ -143,6 +143,9 @@ struct Going {
     needs: Vec<String>,
     /// Those of them that stopped while it runs, in the order they stopped.
     needs_stopped: Mutex<Vec<String>>,
+    /// Its runtime folder holding the session's Wayland socket alone, when its project lets its
+    /// runs open windows: removed once it ends.
+    display: Mutex<Option<crate::display::Folder>>,
 }
 
 /// How a run is told ready: its probe, and whether its agent asked to be told.
@@ -748,6 +751,10 @@ pub(crate) fn environment(
     defend(&mut env, &empty, lift);
     // Where the daemon's socket is: a client a run starts is refused anyway (`daemon.rs`).
     env.remove(&OsString::from("XDG_RUNTIME_DIR"));
+    // The screen is the user's to give, by the project's setting (`start`), X11's key with it.
+    for name in ["WAYLAND_DISPLAY", "DISPLAY", "XAUTHORITY"] {
+        env.remove(&OsString::from(name));
+    }
     Ok(env)
 }
 
@@ -759,6 +766,10 @@ pub(crate) fn beside(daemon: &Daemon) -> Result<BTreeMap<OsString, OsString>, St
     flottille_core::paths::ensure_private_dir(&empty).map_err(|e| e.to_string())?;
     defend(&mut env, &empty, false);
     env.remove(&OsString::from("XDG_RUNTIME_DIR"));
+    // No screen either: a connection's browser that is shown gets its own (`adapters::display`).
+    for name in ["WAYLAND_DISPLAY", "DISPLAY", "XAUTHORITY"] {
+        env.remove(&OsString::from(name));
+    }
     Ok(env)
 }
 
@@ -869,7 +880,7 @@ fn start(
     daemon: &Arc<Daemon>,
     run: Run,
     words: Vec<String>,
-    env: BTreeMap<OsString, OsString>,
+    mut env: BTreeMap<OsString, OsString>,
     secrets: Vec<String>,
     phase: Phase,
     readying: Readying,
@@ -877,6 +888,10 @@ fn start(
     needs: &[String],
 ) -> Result<(), String> {
     crate::projects::refuse_removing(daemon, &run.project).map_err(|refused| refused.message)?;
+    let display = shown(daemon, &run).map(|shown| {
+        env.extend(shown.env);
+        shown.folder
+    });
     let (reader, writer) = std::io::pipe().map_err(|e| format!("cannot run it: {e}"))?;
     let mut command = tokio::process::Command::new(&words[0]);
     command
@@ -892,8 +907,9 @@ fn start(
         )
         .stderr(writer)
         .kill_on_drop(true);
-    let spawned = crate::children::spawn(crate::landlock::confined(
+    let spawned = crate::children::spawn(crate::landlock::confined_but(
         crate::children::in_own_session(&mut command),
+        display.as_ref(),
     ));
     // The command holds the pipe's writing end: dropped, only the processes hold it.
     drop(command);
@@ -941,6 +957,7 @@ fn start(
         guarded: Mutex::new(guarded),
         needs: crate::services::reached(daemon, needs),
         needs_stopped: Mutex::default(),
+        display: Mutex::new(display),
     });
     daemon
         .mcp
@@ -958,6 +975,27 @@ fn start(
     }
     tokio::spawn(follow(daemon.clone(), going, child, pid, reader));
     Ok(())
+}
+
+/// The display of a run of a project that lets its runs open windows (`docs/tools.md`): a
+/// runtime folder of its own, `run-<id>` (a connection's name has no `-`), holding the session's
+/// Wayland socket alone. A display that cannot be shared leaves the run without one, never with
+/// the real runtime folder.
+fn shown(daemon: &Daemon, run: &Run) -> Option<crate::display::Shown> {
+    let allowed = crate::projects::load_project(daemon, &run.project).is_ok_and(|p| p.windows);
+    if !allowed {
+        return None;
+    }
+    match crate::display::share(&daemon.paths, &format!("run-{}", run.id)) {
+        Ok(shown) => Some(shown),
+        Err(why) => {
+            eprintln!(
+                "flottille daemon: run {}: it opens no window: {why}",
+                run.id
+            );
+            None
+        }
+    }
 }
 
 /// The agent folders of an agent's place before one of its runs: the gate refuses every write
@@ -1192,6 +1230,8 @@ async fn follow(
     // waiting for it.
     signal_group(pid, libc::SIGKILL);
     crate::children::end_session(pid).await;
+    // Its display goes with it.
+    going.display.lock().unwrap().take();
     while let Ok(read) = reader.try_read(&mut buffer) {
         if read == 0 {
             break;
