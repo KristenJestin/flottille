@@ -1659,6 +1659,64 @@ fn an_outside_service_that_stops_answering_is_said_to_what_needs_it() {
 }
 
 #[test]
+fn an_outside_service_that_answers_again_is_said_back() {
+    let user = User::with_fake_agent().with_env("FLOTTILLE_TEST_FOLLOW_MS", "200");
+    let (mut outside, address) = by_hand();
+    services_file(
+        &user,
+        &format!(
+            "[services.db]\nfolder = \"{}\"\nline = \"{}\"\nready = {{ url = \"{address}\" }}\n",
+            folder(&user, "db").display(),
+            server(0)
+        ),
+    );
+    project(&user, &[]);
+    serving_api(&user, &["db"]);
+    let (agent, mcp) = root(&user, None);
+    set_mode(&user, &agent, "full");
+    let run = run_of(&done(mcp.call("run", json!({"task": "api"}))));
+    let _ = outside.kill();
+    let _ = outside.wait();
+    prompted_within(&user, 5, &["[flottille:service-stopped]"]);
+
+    // The user starts their own again, at the same address.
+    let port = address.rsplit_once(':').unwrap().1;
+    let _again = Ended(
+        Command::new(common::fake_server())
+            .args(["--listen", port])
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+
+    let told = prompted_within(
+        &user,
+        5,
+        &[
+            "[flottille:service-back]",
+            "db, which api needs, runs again",
+        ],
+    );
+    assert!(told[0].contains(&run), "{told:?}");
+    assert_eq!(show(&user, "db")["state"], "outside");
+    let status = done(mcp.call("run_status", json!({"run": run})));
+    assert!(!status.contains("needs db, stopped"), "{status}");
+    std::thread::sleep(Duration::from_secs(2));
+    let all = prompted_within(&user, 1, &["[flottille:service-back]"]);
+    assert_eq!(all.len(), 1, "{all:?}");
+}
+
+/// A child of the test's, killed and waited for when the test ends, passed or not.
+struct Ended(std::process::Child);
+
+impl Drop for Ended {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+#[test]
 fn a_need_through_another_service_counts() {
     let user = User::new();
     services_file(
