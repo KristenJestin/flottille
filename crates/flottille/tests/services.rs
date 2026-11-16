@@ -1489,6 +1489,51 @@ fn records_of_another_boot_are_dropped_unsignalled() {
     let _ = process.wait();
 }
 
+/// A process left alone in a session of its own, with `env`, the session's leader gone: the
+/// session's id, the leader's start, and the process's pid.
+fn left_in_a_session(env: &[(&str, &str)]) -> (u32, u64, u32) {
+    let mut leader = in_a_session("sleep 60 & echo $!", env);
+    let session = leader.id();
+    let started = start_ticks(session);
+    let mut line = String::new();
+    BufReader::new(leader.stdout.take().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    leader.wait().unwrap();
+    (session, started, line.trim().parse().unwrap())
+}
+
+#[test]
+fn a_member_marked_with_another_run_is_not_ended() {
+    let user = User::new();
+    user.status();
+    // Started by the run r2, in a session whose leader had the pid r1's leader had.
+    let (session, started, member) = left_in_a_session(&[("FLOTTILLE_RUN", "r2")]);
+    let _left = Left(vec![member]);
+    assert!(alive(member));
+
+    started_again_with_a_record(&user, session, started, "r1", &this_boot());
+
+    assert!(alive(member), "a process of another run was killed");
+}
+
+#[test]
+fn a_marked_member_started_before_the_recorded_leader_is_not_ended() {
+    let user = User::new();
+    user.status();
+    let (session, _, member) = left_in_a_session(&[("FLOTTILLE_RUN", "r1")]);
+    let _left = Left(vec![member]);
+    assert!(alive(member));
+
+    // The recorded leader started after it: it is not what that leader started.
+    started_again_with_a_record(&user, session, start_ticks(member) + 1, "r1", &this_boot());
+
+    assert!(
+        alive(member),
+        "a process older than the recorded leader was killed"
+    );
+}
+
 #[test]
 fn a_resumed_setup_step_starts_its_services_after_the_leftovers_are_ended() {
     let user = User::with_fake_agent();
