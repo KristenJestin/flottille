@@ -1,0 +1,39 @@
+# The filter of every command that has none of its own: what a terminal hides from a person and
+# an agent should not read. No `program`.
+name = "generic"
+
+[[tests]]
+name = "escapes and a redrawn line"
+input = "\u001b[32mgreen\u001b[0m text\nDownloading 10%\rDownloading 55%\rDownloading 100%\ndone\n"
+expected = """
+green text
+Downloading 100%
+done"""
+removed = 0
+
+[[tests]]
+name = "a run of identical lines"
+input = """
+retrying
+retrying
+retrying
+retrying
+connected
+"""
+expected = """
+retrying (×4)
+connected"""
+removed = 3
+
+[[tests]]
+name = "a run of identical warnings keeps the warning"
+input = """
+warning: the cache is cold
+warning: the cache is cold
+warning: the cache is cold
+ready
+"""
+expected = """
+warning: the cache is cold (×3)
+ready"""
+removed = 2
