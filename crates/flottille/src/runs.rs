@@ -489,7 +489,7 @@ pub async fn run(
     };
     // Only a push the gate read, and that the user or the judge let through, goes out.
     let lift = approved && gate::is_push(&words);
-    let env = match environment(daemon, place, &repository, lift) {
+    let mut env = match environment(daemon, place, &repository, lift) {
         Ok(env) => env,
         Err(why) => return Outcome::Failed(why),
     };
@@ -497,6 +497,10 @@ pub async fn run(
     // it makes, before it goes: however the commits were made, through a command the checks at
     // commit time read or not.
     if lift {
+        if let Some(refusal) = configures(&words) {
+            return Outcome::Refused(refusal);
+        }
+        crate::ssh_agent::pin(&mut env, &folder.path, &words).await;
         if let Err(refusal) = crate::ssh_agent::over_ssh(&folder.path, &words, &env).await {
             return Outcome::Refused(refusal);
         }
@@ -517,7 +521,8 @@ pub async fn run(
         ready.as_deref(),
         url.as_deref(),
         &names(place, &repository),
-        &env,
+        // A push's probes are not the push: they are not lent its SSH agent.
+        &crate::ssh_agent::withheld(&env),
         &folder.path,
         &secret_values,
     )
@@ -823,6 +828,21 @@ fn defend(env: &mut BTreeMap<OsString, OsString>, empty: &Path, lift: bool) {
     }
 }
 
+/// Why a push the gate let through is refused for a setting on its own line (`-c`,
+/// `--config-env`): it would beat the settings its environment sets around it, its hooks and its
+/// `ssh` (`ssh_agent::pin`). Refused in every mode.
+fn configures(words: &[String]) -> Option<String> {
+    let (_, globals) = gate::git_globals(&words[1..]);
+    let (option, _) = globals
+        .iter()
+        .find(|(option, _)| matches!(*option, "-c" | "--config-env"))?;
+    Some(format!(
+        "refused: a push takes no git {option}: a setting on its line would beat those Flottille \
+         sets around it (its hooks, its ssh); set it in the repository, or ask the user to push \
+         by hand; nothing was pushed"
+    ))
+}
+
 /// One more git setting through the environment, after those it already has: it wins over the
 /// repository's own.
 pub(crate) fn configure(env: &mut BTreeMap<OsString, OsString>, key: &str, value: &str) {
@@ -1051,7 +1071,7 @@ async fn probing(daemon: Arc<Daemon>, going: Arc<Going>, probe: Probe) {
                         &daemon,
                         &going.run.id,
                         words,
-                        &going.env,
+                        &crate::ssh_agent::withheld(&going.env),
                         &going.run.folder,
                     )
                     .await
