@@ -4256,8 +4256,8 @@ impl Row {
                 .collect(),
             commands: None,
         };
-        let row = Row::view(0, block, None, String::new(), root, page, weak, cx);
-        row.update(cx, |row, _| {
+        let row = Row::view(0, block.clone(), None, String::new(), root, page, weak, cx);
+        row.update(cx, |row, cx| {
             row.sent = Some(Sent {
                 key: pending.key,
                 images: pending.images.clone(),
@@ -4268,6 +4268,8 @@ impl Row {
                 failed: Motion::settled(if pending.refused.is_some() { 1.0 } else { 0.0 }),
                 failed_height: Rc::default(),
             });
+            // Its pasted texts' chips, which a message being sent shows before their files.
+            row.set_block(block, cx);
         });
         row
     }
@@ -4619,7 +4621,14 @@ impl Row {
                         })
                     },
                 );
-                let pieces = crate::tokens::text_chips(pieces, crate::tokens::shown_chip);
+                // A message still being sent has no file yet for its pasted texts.
+                let sending = self
+                    .sent
+                    .as_ref()
+                    .is_some_and(|sent| sent.ink.target() == 0.0);
+                let pieces = crate::tokens::text_chips(pieces, |found| {
+                    crate::tokens::shown_chip(found, sending)
+                });
                 self.pieces = crate::tokens::has_tokens(&pieces).then_some(pieces);
                 self.set_markdown(&as_typed(text), false, false, cx);
             }

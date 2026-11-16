@@ -100,18 +100,26 @@ pub fn text_chips(
 }
 
 /// The chip of a pasted text's marker in a message shown: one the daemon wrote its file for is
-/// opened by that file, one still being sent is a chip with no size and nothing to open.
-pub fn shown_chip(found: &flottille_core::pasted::Marker) -> Option<Token> {
-    Some(match &found.file {
-        Some(file) => Token::new(
-            sent_text_id(file.file_name()?),
-            pasted_look(&found.name, Some(file.bytes)),
-        ),
-        None => Token::new(
-            format!("pending-text-{}", found.number),
-            pasted_look(&found.name, None),
-        ),
-    })
+/// opened by that file; one with no file is a chip with no size and nothing to open while the
+/// message is `pending` (still being sent), and text once the daemon has it: typed by hand.
+pub fn shown_chip(found: &flottille_core::pasted::Marker, pending: bool) -> Option<Token> {
+    match &found.file {
+        Some(file) => {
+            let name = file
+                .file_name()
+                .filter(|name| flottille_core::pasted::is_file_name(name))?;
+            Some(Token::new(
+                sent_text_id(name),
+                pasted_look(&found.name, Some(file.bytes)),
+            ))
+        }
+        None => pending.then(|| {
+            Token::new(
+                format!("pending-text-{}", found.number),
+                pasted_look(&found.name, None),
+            )
+        }),
+    }
 }
 
 /// A command's chip: its `/name`, which is also its text.
