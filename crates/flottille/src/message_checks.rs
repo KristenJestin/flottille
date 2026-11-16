@@ -1038,6 +1038,12 @@ const PUSH: Options = Options {
     letters: &[('o', Opt::Valued)],
 };
 
+/// Whether a push's options, before its `--`, read as git reads them: one given `--dry-run` as
+/// its value would make a dry run the push.
+pub(crate) fn push_options_read(words: &[String]) -> bool {
+    read(words, &PUSH).is_ok()
+}
+
 /// The options of a command's words, read as git reads them, up to `--`.
 fn read(words: &[String], options: &Options) -> Result<Said, String> {
     let mut said = Said::default();

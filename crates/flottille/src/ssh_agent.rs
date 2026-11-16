@@ -44,7 +44,7 @@ const HTTP_MARK: &str = "/dev/null/flottille-http-push/";
 /// URL: only the SSH agent is lent, so it could not sign in. Git says where the push goes itself,
 /// in a dry run where each HTTP(S) push URL is rewritten to a path that says so and no transport
 /// but a local one is allowed: nothing leaves the machine. A push it cannot tell goes on, and
-/// fails or not as git says.
+/// fails or not as git says; so does one whose options do not read, never dry run.
 pub async fn over_ssh(
     folder: &Path,
     words: &[String],
@@ -65,6 +65,10 @@ pub async fn over_ssh(
         .iter()
         .position(|word| word == "--" || word == "--end-of-options")
         .unwrap_or(rest.len());
+    // No dry run of a line whose options do not read: it could be the push itself.
+    if !crate::message_checks::push_options_read(&rest[..end]) {
+        return Ok(());
+    }
     match crate::message_checks::dry_run(&words[..at_push], rest, end, folder, &probe).await {
         Err(why) if why.contains(HTTP_MARK) => Err(
             "refused: this push goes to an HTTP(S) URL, and a push signs in only through the \
