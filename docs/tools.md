@@ -516,7 +516,9 @@ pending requests.
     runtime folder", which also says how the runtime folder itself is denied);
   - no push: `url./dev/null/flottille-refused-push/.pushInsteadOf` set the same way, which
     rewrites every push URL to a path that is no remote, unless the run is itself a `git push`
-    (its own line, no wrapper) the user or the judge let through.
+    (its own line, no wrapper) the user or the judge let through;
+  - `FLOTTILLE_RUN` set to the run's id (to `address` for the line that prints a run's address),
+    the marker a daemon started after a crash finds what the run left by ("Runs are records").
 - **A run may open windows on the user's screen** when its project says so: the setting *Agents may
   open windows on my screen* (the key `windows` of the project's file, off by default; the project's
   Settings, Tasks tab; `flottille project edit <name> --windows on|off`) is the user's alone: no
@@ -605,9 +607,11 @@ pending requests.
   same rows and drawer as the session's rail, and in the left sidebar with the project's runs.
 - **Runs are records**: the store's `runs` (with the end of their output once ended), and the
   `run.started` and `run.ended` events. Each run's process group is recorded while it runs: a
-  daemon started after a crash ends the sessions and groups a previous one left, before it resumes
-  anything (while their leader is the process it started, or is gone and something it started
-  still runs in them; never a pid another program took since), and marks their runs interrupted. A daemon that stops stops its runs,
+  daemon started after a crash ends what a previous one left, before it resumes anything, and
+  marks their runs interrupted (`docs/projects.md`, "Services"): of the same boot only, a
+  session and group whole while their leader is the process it started, else only the processes
+  of that session that carry the run's marker, `FLOTTILLE_RUN=<run id>`, in their environment;
+  never a pid another program took since. A daemon that stops stops its runs,
   interrupted. When a run's own process ends, what it left in its group is killed with it. The
   runs that ended go with their session, as its images do: when its root failed or ended and
   cannot be resumed, or 7 days after a root that can (`docs/protocol.md`, `agent.image`).

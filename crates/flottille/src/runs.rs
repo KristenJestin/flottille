@@ -898,6 +898,7 @@ fn start(
         .args(&words[1..])
         .env_clear()
         .envs(&env)
+        .env(crate::children::MARKER, &run.id)
         .current_dir(&run.folder)
         .stdin(Stdio::null())
         .stdout(
@@ -923,7 +924,7 @@ fn start(
     let store = |store: &mut Store| {
         let event = store.create_run(&run, ("run.started", event))?;
         if let Some(started) = start_time(pid) {
-            store.add_run_process(pid, started, &run.id)?;
+            store.add_run_process(pid, started, &run.id, crate::children::boot())?;
         }
         Ok(((), event))
     };
@@ -2375,36 +2376,66 @@ pub fn tell_guarded_at_start(daemon: &Daemon) {
 }
 
 /// At daemon start, before anything starts a run or tries a service: ends what the runs of a
-/// previous daemon left running, and marks them interrupted. Each recorded run's session and
-/// process group is ended while it lives, its leader still the process it started or gone with
-/// something still in it (a server's child holding a port): Linux gives the pid of neither to
-/// another process meanwhile. A leader's pid taken by another process since says nothing of ours
-/// is left, and nothing is signalled.
+/// previous daemon left running, and marks them interrupted. A record of another boot is dropped
+/// and nothing is signalled: its pid and start time say nothing of this boot's processes. Of
+/// this boot, a record whose leader is still the process it started (same pid, same start time)
+/// has its process group and session ended whole: Linux gives a living leader's pid to nobody
+/// else. A record whose leader is gone has only the processes of that session ended that carry
+/// the run's marker (`FLOTTILLE_RUN=<run id>` in their environment, set on every line the daemon
+/// records) and started at or after the leader: a session of the user's own whose leader took
+/// that pid since, and also left, is never touched. A leader's pid taken by a living process
+/// since says nothing of ours is left, and nothing is signalled. The records are removed once
+/// this is done: a daemon killed meanwhile leaves them to the next.
 pub async fn settle_at_start(daemon: &Daemon) {
-    let recorded = daemon.read(|store| {
-        let recorded = store.run_processes()?;
-        for (pid, _) in &recorded {
-            store.remove_run_process(*pid)?;
-        }
-        Ok(recorded)
-    });
-    let recorded = recorded.unwrap_or_else(|error| {
-        eprintln!("flottille daemon: reading the runs' processes: {error}");
-        Vec::new()
-    });
-    // Outside the store: whether a session lives, and ending it, read all of `/proc`.
+    let recorded = daemon
+        .read(|store| store.run_processes())
+        .unwrap_or_else(|error| {
+            eprintln!("flottille daemon: reading the runs' processes: {error}");
+            Vec::new()
+        });
+    let ending = recorded.clone();
+    // Outside the store: ending a session reads all of `/proc`.
     let _ = tokio::task::spawn_blocking(move || {
-        for (pid, started) in recorded {
-            if crate::children::session_lives(pid, started) {
-                signal_group(pid, libc::SIGKILL);
-                crate::children::end_session_now(pid);
-                eprintln!(
-                    "flottille daemon: ended the run process {pid} left running, and its session"
-                );
+        let boot = crate::children::boot();
+        for process in ending {
+            if boot.is_empty() || process.boot != boot {
+                continue;
+            }
+            let pid = process.pid;
+            match start_time(pid) {
+                Some(started) if started == process.started => {
+                    signal_group(pid, libc::SIGKILL);
+                    crate::children::end_session_now(pid);
+                    eprintln!(
+                        "flottille daemon: ended the run process {pid} left running, and its \
+                         session"
+                    );
+                }
+                Some(_) => {}
+                None => {
+                    let ended = crate::children::end_session_where(pid, |member| {
+                        crate::children::marked(member, &process.run, process.started)
+                    });
+                    if ended {
+                        eprintln!(
+                            "flottille daemon: ended what the run process {pid} left running in \
+                             its session"
+                        );
+                    }
+                }
             }
         }
     })
     .await;
+    let removed = daemon.read(|store| {
+        for process in &recorded {
+            store.remove_run_process(process.pid)?;
+        }
+        Ok(())
+    });
+    if let Err(error) = removed {
+        eprintln!("flottille daemon: removing the runs' processes: {error}");
+    }
     let runs = daemon.read(Store::running_runs).unwrap_or_default();
     for run in runs {
         let _ = daemon.write(|store| {

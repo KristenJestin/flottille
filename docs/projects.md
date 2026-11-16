@@ -703,11 +703,17 @@ has no workspace, so its templates fill only `{url}`, in `ready`'s `url` and `li
   says it in its request. Nothing running needs it: it stops at once, as before. The services
   page marks, in a service's "Needed by", the tasks that run now.
 - **What a daemon that died left** is ended when the next one starts, before it resumes a
-  workspace's setup or starts anything: each recorded run's session and process group, whether
-  its first process still runs or only something it started does (a package manager's server,
-  still holding its port). Otherwise that leftover would answer the next start of the service,
-  which would take it for one started outside Flottille, and stop answering later, unseen. A
-  process whose pid was taken by another program since is never touched.
+  workspace's setup or starts anything. Each run's first process is recorded with its pid, its
+  start time and the machine's boot. A record of another boot is dropped, and nothing is
+  signalled. Of this boot: while that first process still runs (same pid, same start time), its
+  session and process group are ended whole; once it is gone, only the processes of its session
+  that carry the run's marker (`FLOTTILLE_RUN=<run id>` in their environment, which the daemon
+  sets on each run, service and probe line it records) and started after it are killed (a
+  package manager's server, still holding its port). Otherwise that leftover would answer the
+  next start of the service, which would take it for one started outside Flottille, and stop
+  answering later, unseen. A program of the user's own is never touched: one in a session whose
+  id is a recorded pid carries no marker, and a pid taken by a running program since says that
+  nothing of the run is left. A leftover that cleared its environment is not found.
 - **Its run** is a run of the daemon's, of no agent and no project (`project` is empty): its
   output is kept, masked and read as a run's is (`docs/tools.md`, "Tasks and runs"), in the
   environment of a run with no place's variables, its folder's `.env` files masked. Its state is
