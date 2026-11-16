@@ -500,7 +500,7 @@ pub async fn run(
     // it makes, before it goes: however the commits were made, through a command the checks at
     // commit time read or not.
     if lift {
-        if let Some(refusal) = configures(&words) {
+        if let Some(refusal) = globals_refused(&words, &folder.path) {
             return Outcome::Refused(refusal);
         }
         crate::ssh_agent::pin(&mut env, &folder.path, &words).await;
@@ -839,19 +839,67 @@ fn defend(env: &mut BTreeMap<OsString, OsString>, empty: &Path, lift: bool) {
     }
 }
 
-/// Why a push the gate let through is refused for a setting on its own line (`-c`,
-/// `--config-env`): it would beat the settings its environment sets around it, its hooks and its
-/// `ssh` (`ssh_agent::pin`). Refused in every mode.
-fn configures(words: &[String]) -> Option<String> {
+/// Why a push the gate let through, run in `folder`, is refused for a global option of its own
+/// line. A setting (`-c`, `--config-env`) would beat those its environment sets around it, its
+/// hooks and its `ssh` (`ssh_agent::pin`); `--exec-path` runs git's programs from another folder;
+/// `--git-dir`, `--work-tree` and the rest bring another repository, whose remote and settings
+/// were never read. Only options that change nothing of what runs pass, and `-C` into the
+/// repository's own folder (no other repository on the way). Refused in every mode.
+fn globals_refused(words: &[String], folder: &Path) -> Option<String> {
+    const HARMLESS: [&str; 4] = ["--no-pager", "-P", "--no-advice", "--no-optional-locks"];
+    let nothing = "ask the user to push by hand; nothing was pushed";
     let (_, globals) = gate::git_globals(&words[1..]);
-    let (option, _) = globals
-        .iter()
-        .find(|(option, _)| matches!(*option, "-c" | "--config-env"))?;
-    Some(format!(
-        "refused: a push takes no git {option}: a setting on its line would beat those Flottille \
-         sets around it (its hooks, its ssh); set it in the repository, or ask the user to push \
-         by hand; nothing was pushed"
-    ))
+    let mut at = folder.to_path_buf();
+    let mut moved = None;
+    for (option, value) in globals {
+        match (option, value) {
+            (option, _) if HARMLESS.contains(&option) => {}
+            ("-C", Some(to)) => {
+                at = at.join(to);
+                moved = Some(to);
+            }
+            ("-c" | "--config-env", _) => {
+                return Some(format!(
+                    "refused: a push takes no git {option}: a setting on its line would beat \
+                     those Flottille sets around it (its hooks, its ssh); set it in the \
+                     repository, or {nothing}"
+                ));
+            }
+            _ => {
+                return Some(format!(
+                    "refused: a push takes no git {option}: it would run git's programs or read \
+                     a repository other than the one Flottille checked; push from the \
+                     repository's folder with git push and its own options, or {nothing}"
+                ));
+            }
+        }
+    }
+    let to = moved?;
+    match within(folder, &at) {
+        true => None,
+        false => Some(format!(
+            "refused: git -C {to} takes the push out of its repository's folder ({}), the one \
+             Flottille checked; push from there, or {nothing}",
+            folder.display()
+        )),
+    }
+}
+
+/// Whether `at` is `folder` or a folder under it that git finds `folder`'s repository from: no
+/// `.git`, and no folder that looks like a bare repository (`HEAD`), on the way.
+fn within(folder: &Path, at: &Path) -> bool {
+    let (Ok(folder), Ok(at)) = (folder.canonicalize(), at.canonicalize()) else {
+        return false;
+    };
+    if !at.starts_with(&folder) {
+        return false;
+    }
+    at.ancestors()
+        .take_while(|step| *step != folder)
+        .all(|step| {
+            step.join(".git").symlink_metadata().is_err()
+                && step.join("HEAD").symlink_metadata().is_err()
+        })
 }
 
 /// One more git setting through the environment, after those it already has: it wins over the
