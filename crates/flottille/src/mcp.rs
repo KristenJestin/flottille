@@ -400,18 +400,19 @@ const SERVED: [Definition; 33] = [
         name: "tickets",
         title: "Tickets",
         description: "The tracker's tickets (GitHub #123, Jira ABC-123), via the user's gh/acli \
-            (never run them). list: by state (default open), label, assignee, updated_within; search asks the tracker: {\"action\":\"search\",\"query\":\"x\"}, \
+            (never run them). list: by state (default open), label, assignee, updated_within; search asks the tracker (query), \
             on Jira also in_comments, jql; show: a workspace's ticket (in \
             main, name workspace) or ticket, with links; detail full adds comments, \
             with ids; Jira images and files are named, not shown; \
-            types: a Jira project's work item types (never guess); link_types. \
+            types: a Jira project's work item types (never guess); link_types; \
+            worklogs (Jira: a day's or range's time). \
             Writes, judged, answered at once, the result maybe later: create, comment, reply, edit, close, \
             reopen, status, link, unlink, comment_edit, \
             comment_delete (both yours only); log_time (Jira), \
-            time_spent (to propose); worklogs (Jira). \
+            time_spent (this session's, to propose). \
             Assign only if asked (assignee \"me\": the user; \
             GitHub: assignees). Jira create: parent, sprint (see sprints). \
-            Milestones (Jira: versions): milestones, progress (tickets and work); GitHub: milestone_create/_edit. \
+            Milestones (Jira: versions): milestones, progress; GitHub: milestone_create/_edit. \
             subscribe: a ticket's events wake you until it closes (maybe already); unsubscribe.",
         read_only: false,
         idempotent: false,
