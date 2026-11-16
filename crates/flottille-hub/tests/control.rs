@@ -373,6 +373,16 @@ impl Running {
     }
 }
 
+/// A test that fails before it stops the hub kills it: an orphan would hold the test's output.
+impl Drop for Running {
+    fn drop(&mut self) {
+        if let Ok(None) = self.child.try_wait() {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn the_setup_code_is_printed_once_and_makes_the_first_member() {
     let place = Place::new();
