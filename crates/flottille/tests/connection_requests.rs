@@ -644,9 +644,9 @@ fn an_agent_binds_an_entry_of_the_same_host() {
     assert_eq!(
         proposed["secrets"],
         json!([{"key": "headers", "name": "Authorization", "entry": "notes-token",
-            "entry_host": "notes.example.com", "host": "notes.example.com", "differs": false,
-            "missing": false, "project": null, "to_bind": false,
-            "origin": "https://notes.example.com"}]),
+            "entry_host": "notes.example.com", "entry_url": "https://NOTES.example.com/api",
+            "host": "notes.example.com", "differs": false, "missing": false, "project": null,
+            "share": false, "to_bind": false, "origin": "https://notes.example.com"}]),
         "{proposed}"
     );
 
@@ -663,8 +663,9 @@ fn an_agent_binds_an_entry_of_the_same_host() {
     assert_eq!(
         proposed["secrets"],
         json!([{"key": "env", "name": "GITHUB_TOKEN", "entry": "github-token",
-            "entry_host": null, "host": null, "differs": true, "missing": false,
-            "project": null, "to_bind": false, "origin": null}]),
+            "entry_host": null, "entry_url": null, "host": null, "differs": true,
+            "missing": false, "project": null, "share": false, "to_bind": false,
+            "origin": null}]),
         "{proposed}"
     );
 }
