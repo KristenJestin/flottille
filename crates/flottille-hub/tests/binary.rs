@@ -134,8 +134,8 @@ fn the_binary_refuses_to_print_the_code_once_a_member_exists() {
     let mut opened = Hub::open(&state, SystemClock).unwrap();
     let code = opened.setup_code().unwrap().to_owned();
     let pc = DeviceKey::load_or_make(&Seeded([1; 32]), Path::new("/nonexistent")).unwrap();
-    let entry = MemberList::start("pc", &pc).changes()[0].clone();
-    opened.setup(&code, &pc.public(), entry).unwrap();
+    let entry = MemberList::start("pc", &pc).unwrap().changes()[0].clone();
+    opened.setup(&code, vec![entry]).unwrap();
     drop(opened);
 
     let refused = hub(

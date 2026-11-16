@@ -20,13 +20,18 @@ struct Cli {
     /// The hub's state folder [default: $XDG_STATE_HOME/flottille-hub]
     #[arg(long, value_name = "DIR", global = true)]
     state: Option<PathBuf>,
-    /// Where the hub listens: an IP address and a port
+    /// Where the hub listens: an IP address and a port. Another address than loopback takes TLS,
+    /// or --plain
     #[arg(long, value_name = "ADDRESS", default_value = LISTEN)]
     listen: SocketAddr,
     /// TLS: the certificate, in PEM (its chain after it); without it, the hub is plain, for a
     /// reverse proxy that holds the certificate
     #[arg(long, value_name = "FILE", requires = "tls_key")]
     tls_cert: Option<PathBuf>,
+    /// Plain on another address than loopback: for a reverse proxy on another host that holds
+    /// the certificate. The sessions cross the network between them in clear
+    #[arg(long, conflicts_with = "tls_cert")]
+    plain: bool,
     /// TLS: the certificate's private key, in PEM
     #[arg(long, value_name = "FILE", requires = "tls_cert")]
     tls_key: Option<PathBuf>,
@@ -85,6 +90,15 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         (Some(certificate), Some(key)) => Some(flottille_hub::tls_server(certificate, key)?),
         _ => None,
     };
+    if tls.is_none() && !cli.plain && !cli.listen.ip().is_loopback() {
+        return Err(format!(
+            "--listen {}: another address than loopback takes TLS (--tls-cert and --tls-key), or \
+             --plain when a reverse proxy on another host holds the certificate; without either, \
+             every session would cross the network in clear",
+            cli.listen
+        )
+        .into());
+    }
     let mut hub = Hub::open(&folder, SystemClock)?;
     eprintln!(
         "flottille-hub: state in {}; the hub's key is {}",
@@ -104,7 +118,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         let how = if tls.is_some() {
             "TLS on the certificate given"
         } else {
-            "plain: put it behind a reverse proxy that holds a certificate"
+            "plain: the traffic is in clear; put it behind a reverse proxy that holds a certificate"
         };
         let served =
             flottille_hub::serve(hub, listener, tls, Hello::ours(env!("CARGO_PKG_VERSION")))?;

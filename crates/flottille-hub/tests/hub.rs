@@ -85,7 +85,7 @@ fn mode(path: &Path) -> u32 {
 
 /// The first member's own entry, as `MemberList::start` signs it.
 fn root_entry(key: &DeviceKey, name: &str) -> Change {
-    MemberList::start(name, key).changes()[0].clone()
+    MemberList::start(name, key).unwrap().changes()[0].clone()
 }
 
 fn add(key: &DeviceKey, name: &str, role: Role) -> Action {
@@ -99,8 +99,7 @@ fn add(key: &DeviceKey, name: &str, role: Role) -> Action {
 /// `pc` sets the hub up with its code, and is the root.
 fn set_up(hub: &mut Hub<Time>, pc: &DeviceKey) {
     let code = hub.setup_code().unwrap().to_owned();
-    hub.setup(&code, &pc.public(), root_entry(pc, "pc"))
-        .unwrap();
+    hub.setup(&code, vec![root_entry(pc, "pc")]).unwrap();
 }
 
 /// The token `inviter` is given for an invitation asked now.
@@ -162,8 +161,7 @@ fn the_setup_code_is_printed_once_and_makes_the_first_member() {
     // Typed as a person may (Crockford's base32 is read in any case, hyphens or spaces between).
     let pc = key(1);
     let typed = code.to_lowercase().replace('-', " ");
-    hub.setup(&typed, &pc.public(), root_entry(&pc, "pc"))
-        .unwrap();
+    hub.setup(&typed, vec![root_entry(&pc, "pc")]).unwrap();
     assert_eq!(members(&hub, &pc), [("pc".to_owned(), Role::Runner)]);
     assert_eq!(hub.list().root(), Some(pc.public()));
 
@@ -190,30 +188,34 @@ fn the_setup_code_works_only_while_no_member_exists() {
                          from flottille-hub setup-code on the hub's machine";
     for wrong in [not_it.as_str(), "7KQ2-M4XP", "not a code", ""] {
         assert_eq!(
-            error(hub.setup(wrong, &pc.public(), root_entry(&pc, "pc"))),
+            error(hub.setup(wrong, vec![root_entry(&pc, "pc")])),
             not_the_hub_s,
             "{wrong:?}"
         );
     }
-    // The entry must be the presenting device's own, and a runner's.
+    // The entry must be its signer's own, and a runner's.
+    let not_own = Change::sign(
+        ChangeHash::default(),
+        add(&pixel, "pixel", Role::Runner),
+        &pc,
+    );
     assert_eq!(
-        error(hub.setup(&code, &pc.public(), root_entry(&pixel, "pixel"))),
-        "the first member's entry is not the entry of the device that presents the setup code"
+        error(hub.setup(&code, vec![not_own])),
+        "the hub refuses this change: its root is not the first member's"
     );
     let as_viewer = Change::sign(ChangeHash::default(), add(&pc, "pc", Role::Viewer), &pc);
     assert_eq!(
-        error(hub.setup(&code, &pc.public(), as_viewer)),
+        error(hub.setup(&code, vec![as_viewer])),
         "the hub refuses this change: change 1 is not the root's own entry as a runner"
     );
     assert!(hub.list().changes().is_empty());
 
-    hub.setup(&code, &pc.public(), root_entry(&pc, "pc"))
-        .unwrap();
+    hub.setup(&code, vec![root_entry(&pc, "pc")]).unwrap();
     let has_members = "the hub has a member already: a setup code serves only before the first \
                        member joins (flottille-hub setup-code --reset empties the list and makes a \
                        new one)";
     assert_eq!(
-        error(hub.setup(&code, &pixel.public(), root_entry(&pixel, "pixel"))),
+        error(hub.setup(&code, vec![root_entry(&pixel, "pixel")])),
         has_members
     );
     assert_eq!(error(hub.setup_code()), has_members);
@@ -255,12 +257,11 @@ fn a_reset_empties_the_list_and_makes_a_new_code() {
     assert_eq!(hub.take_announcement(), None);
 
     assert_eq!(
-        error(hub.setup(&old, &pixel.public(), root_entry(&pixel, "pixel"))),
+        error(hub.setup(&old, vec![root_entry(&pixel, "pixel")])),
         "this setup code is not the hub's: copy it again from the hub's log, or from \
          flottille-hub setup-code on the hub's machine"
     );
-    hub.setup(&new, &pixel.public(), root_entry(&pixel, "pixel"))
-        .unwrap();
+    hub.setup(&new, vec![root_entry(&pixel, "pixel")]).unwrap();
     assert_eq!(members(&hub, &pixel), [("pixel".to_owned(), Role::Runner)]);
     // A device that pinned the old root refuses the new list, saying the hub was reset.
     assert!(matches!(
@@ -426,8 +427,7 @@ fn a_second_hub_on_the_same_folder_is_refused_until_the_first_is_dropped() {
     assert_eq!(error(Hub::open(&folder, time.clone())), another);
     assert_eq!(error(reset(&folder)), another);
     assert_eq!(hub.setup_code().unwrap(), code);
-    hub.setup(&code, &key(1).public(), root_entry(&key(1), "pc"))
-        .unwrap();
+    hub.setup(&code, vec![root_entry(&key(1), "pc")]).unwrap();
 
     drop(hub);
     let hub = open(&folder, &time);
@@ -630,4 +630,95 @@ fn presence_and_addresses_are_kept_in_memory_for_members_only() {
     let hub = open(&folder, &time);
     assert_eq!(hub.presence(&pc.public()), None);
     assert_eq!(hub.addresses(&pc.public()), None);
+}
+
+#[test]
+fn a_member_makes_at_most_30_changes_an_hour() {
+    let (_dir, folder) = folder();
+    let time = Time::new();
+    let mut hub = open(&folder, &time);
+    let pc = key(1);
+    set_up(&mut hub, &pc);
+    let rename = |hub: &Hub<Time>, n: usize| {
+        next(
+            hub,
+            Action::Rename {
+                key: pc.public(),
+                name: format!("pc {n}"),
+            },
+            &pc,
+        )
+    };
+    for n in 0..30 {
+        let change = rename(&hub, n);
+        hub.submit(change).unwrap();
+    }
+    let change = rename(&hub, 30);
+    let refused = error(hub.submit(change.clone()));
+    assert!(
+        refused.contains("made 30 changes of the list within an hour"),
+        "{refused}"
+    );
+    time.pass(60 * 60);
+    hub.submit(change).unwrap();
+}
+
+#[test]
+fn the_hub_refuses_a_change_past_the_most_a_device_takes() {
+    let (_dir, folder) = folder();
+    let time = Time::new();
+    drop(open(&folder, &time));
+    // A list of 1000 changes, as a member could make it over months.
+    let pc = key(1);
+    let mut list = MemberList::start("pc", &pc).unwrap();
+    for n in 1..1000 {
+        list.sign(
+            Action::Rename {
+                key: pc.public(),
+                name: format!("pc {n}"),
+            },
+            &pc,
+        );
+    }
+    let state = serde_json::json!({"version": 1, "members": list});
+    std::fs::write(folder.join("hub.json"), state.to_string()).unwrap();
+    let mut hub = open(&folder, &time);
+    let change = next(
+        &hub,
+        Action::Rename {
+            key: pc.public(),
+            name: "one more".to_owned(),
+        },
+        &pc,
+    );
+    let refused = error(hub.submit(change));
+    assert!(refused.contains("more than 1000 changes"), "{refused}");
+}
+
+#[test]
+fn a_setup_is_stored_whole_or_not_at_all() {
+    let (_dir, folder) = folder();
+    let time = Time::new();
+    let mut hub = open(&folder, &time);
+    let code = hub.setup_code().unwrap().to_owned();
+    let pc = key(1);
+    // Its second change does not check: nothing of the setup is kept, and the code still works.
+    let mut list = MemberList::start("pc", &pc).unwrap();
+    list.sign(
+        Action::Machine {
+            key: pc.public(),
+            machine: key(10).public(),
+        },
+        &pc,
+    );
+    let refused = error(hub.setup(&code, list.changes().to_vec()));
+    assert!(
+        refused.contains("change 2 does not carry its machine's signature"),
+        "{refused}"
+    );
+    assert!(hub.list().changes().is_empty());
+    drop(hub);
+    let mut hub = open(&folder, &time);
+    assert_eq!(hub.setup_code().unwrap(), code);
+    hub.setup(&code, vec![list.changes()[0].clone()]).unwrap();
 }
