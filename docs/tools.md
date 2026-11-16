@@ -514,7 +514,9 @@ pending requests.
 - **A run may open windows on the user's screen** when its project says so: the setting *Agents may
   open windows on my screen* (the key `windows` of the project's file, off by default; the project's
   Settings, Tasks tab; `flottille project edit <name> --windows on|off`) is the user's alone: no
-  tool of an agent writes it, nor the project's file (Flottille's own folders). Each run of such a project (an agent's,
+  tool of an agent writes it, nor the project's file (Flottille's own folders), though a program run
+  in Full may still write the user's files, `~/.config` included, as for every key of the project's
+  file (the modes are not a sandbox, `docs/design.md` §7.1). Each run of such a project (an agent's,
   or a task the user runs) gets a runtime folder of its own,
   `$XDG_RUNTIME_DIR/flottille/display/run-<id>` (mode 0700), holding only a hard link of the
   session's Wayland socket, removed when the run ends; its `XDG_RUNTIME_DIR` is that folder and
