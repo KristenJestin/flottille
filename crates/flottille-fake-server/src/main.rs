@@ -4,8 +4,11 @@
 //! does, and keeps running until it is stopped.
 //!
 //! ```text
-//! flottille-fake-server [--wait <ms>] [--print <line>]... [--listen <port> | --exit <code>]
+//! flottille-fake-server [--child] [--wait <ms>] [--print <line>]... [--listen <port> | --exit <code>]
 //! ```
+//!
+//! `--child`, first, starts a copy of itself with the other options, in its own session (what a
+//! package manager's script does), prints `leader <pid>` and `child <pid>` and waits forever.
 //!
 //! Each option is done in its order: `--wait` sleeps, `--print` prints a line. `--listen` listens
 //! on that port (a test picks a free one) and prints `listening on http://127.0.0.1:<port>`;
@@ -16,7 +19,20 @@ use std::net::TcpListener;
 use std::time::Duration;
 
 fn main() {
-    let mut args = std::env::args().skip(1);
+    let mut args = std::env::args().skip(1).peekable();
+    if args.peek().map(String::as_str) == Some("--child") {
+        args.next();
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(args)
+            .spawn()
+            .unwrap();
+        println!("leader {}", std::process::id());
+        println!("child {}", child.id());
+        std::io::stdout().flush().unwrap();
+        loop {
+            std::thread::sleep(Duration::from_secs(60));
+        }
+    }
     let mut listen = None;
     let mut exit = None;
     while let Some(arg) = args.next() {

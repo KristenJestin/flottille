@@ -1007,7 +1007,9 @@ fn a_restart_of_a_task_starts_the_services_it_needs() {
     let run = user
         .call("task.run", json!({"project": "app", "name": "api"}))
         .unwrap();
-    user.call("service.stop", json!({"name": "db"})).unwrap();
+    // The task runs and needs it: stopping it is said, then forced.
+    user.call("service.stop", json!({"name": "db", "force": true}))
+        .unwrap();
     eventually("db stopped", || show(&user, "db")["state"] == "stopped");
 
     user.call("run.restart", json!({"run": run["run"]}))
@@ -1222,4 +1224,388 @@ fn a_setup_step_whose_task_needs_an_agent_s_service_is_held_naming_it_in_ask() {
     assert!(reasons.contains("outside this agent's place"), "{asked}");
     let says = asked["says"].to_string();
     assert!(says.contains("the service mongo"), "{says}");
+}
+
+// What a daemon that was killed left, and what a running task needs (#1006, #1005).
+
+/// A loopback port nothing listens on now.
+fn free_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
+/// A service whose server starts a child in its session (`--child`), the child listening on
+/// `port`, ready once its address answers.
+fn with_a_child(user: &User, name: &str, port: u16) -> String {
+    format!(
+        "[services.{name}]\nfolder = \"{}\"\nline = \"{} --child --listen {port}\"\nready = {{ url = \"http://127.0.0.1:{port}\" }}\n",
+        folder(user, name).display(),
+        common::fake_server().display()
+    )
+}
+
+/// The pid a `--child` server printed after `what`, `leader` or `child`.
+fn printed_pid(user: &User, name: &str, what: &str) -> u32 {
+    let mut found = None;
+    eventually(&format!("{name}'s {what}"), || {
+        let output = user.call("service.output", json!({"name": name})).unwrap();
+        found = output["output"].as_str().unwrap().lines().find_map(|line| {
+            line.strip_prefix(&format!("{what} "))
+                .and_then(|pid| pid.parse().ok())
+        });
+        found.is_some()
+    });
+    found.unwrap()
+}
+
+fn kill(pid: u32) {
+    // SAFETY: kill has no memory precondition.
+    unsafe { libc::kill(pid as i32, libc::SIGKILL) };
+}
+
+fn alive(pid: u32) -> bool {
+    // A zombie runs nothing.
+    match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        Ok(stat) => !stat
+            .rsplit_once(')')
+            .unwrap()
+            .1
+            .trim_start()
+            .starts_with('Z'),
+        Err(_) => false,
+    }
+}
+
+/// Kills what a failing test would leave running.
+struct Left(Vec<u32>);
+
+impl Drop for Left {
+    fn drop(&mut self) {
+        for pid in &self.0 {
+            if alive(*pid) {
+                kill(*pid);
+            }
+        }
+    }
+}
+
+/// Kills the daemon as a crash would, waits until it is gone, then kills `leader`: what it
+/// started in its session goes on, nobody's.
+fn killed_daemon_and(user: &User, leader: u32) {
+    let daemon = user.status()["pid"].as_u64().unwrap() as u32;
+    kill(daemon);
+    eventually("the daemon is gone", || !alive(daemon));
+    kill(leader);
+    eventually("the leader is gone", || !alive(leader));
+}
+
+/// Every prompt the fake agent was sent, oldest first.
+fn prompts(user: &User) -> Vec<String> {
+    user.received_requests("session/prompt")
+        .iter()
+        .map(|p| {
+            p["params"]["prompt"][0]["text"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        })
+        .collect()
+}
+
+/// The prompts holding every one of `parts`, once one was sent within `seconds`.
+fn prompted_within(user: &User, seconds: u64, parts: &[&str]) -> Vec<String> {
+    let deadline = Instant::now() + Duration::from_secs(seconds);
+    loop {
+        let found: Vec<String> = prompts(user)
+            .into_iter()
+            .filter(|p| parts.iter().all(|part| p.contains(part)))
+            .collect();
+        if !found.is_empty() {
+            return found;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no prompt with {parts:?} in {:?}",
+            prompts(user)
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// The run id an answer of `run` starts with, after the services it started.
+fn run_of(answer: &str) -> String {
+    answer
+        .lines()
+        .find_map(|line| line.strip_prefix("run "))
+        .and_then(|rest| rest.split(':').next())
+        .unwrap_or_else(|| panic!("no run in {answer}"))
+        .to_owned()
+}
+
+/// The task `api` keeps running (a server) and needs `needs`.
+fn serving_api(user: &User, needs: &[&str]) {
+    user.call(
+        "task.edit",
+        json!({"project": "app", "name": "api", "line": server(0), "serve": true, "needs": needs}),
+    )
+    .unwrap();
+}
+
+#[test]
+fn a_service_left_by_a_daemon_that_was_killed_is_ended_and_started_again() {
+    let user = User::new();
+    let port = free_port();
+    services_file(&user, &with_a_child(&user, "db", port));
+    project(&user, &["db"]);
+    let started = user.call("service.start", json!({"name": "db"})).unwrap();
+    assert_eq!(started["started"], json!(["db"]), "{started}");
+    let (leader, child) = (
+        printed_pid(&user, "db", "leader"),
+        printed_pid(&user, "db", "child"),
+    );
+    let _left = Left(vec![leader, child]);
+    let address = format!("http://127.0.0.1:{port}");
+    eventually("db answers", || answers(&address));
+
+    // The daemon dies without stopping it, then the server's leader: its child still listens,
+    // in the session the run started.
+    killed_daemon_and(&user, leader);
+    assert!(alive(child) && answers(&address));
+    user.call("task.run", json!({"project": "app", "name": "api"}))
+        .unwrap();
+
+    assert!(!alive(child), "the child the killed daemon left still runs");
+    let shown = show(&user, "db");
+    assert_eq!(shown["state"], "ready", "started, not outside: {shown}");
+    assert_eq!(service_runs(&user, "db"), 1);
+}
+
+#[test]
+fn a_resumed_setup_step_starts_its_services_after_the_leftovers_are_ended() {
+    let user = User::with_fake_agent();
+    let port = free_port();
+    services_file(&user, &with_a_child(&user, "db", port));
+    project(&user, &["db"]);
+    // The step runs a while: the daemon is killed while the workspace is being prepared.
+    user.call(
+        "task.edit",
+        json!({"project": "app", "name": "api",
+            "line": format!("{} --wait 3000 --exit 0", common::fake_server().display())}),
+    )
+    .unwrap();
+    user.call(
+        "setup.add",
+        json!({"project": "app", "step": {"task": "api"}}),
+    )
+    .unwrap();
+    user.call("service.start", json!({"name": "db"})).unwrap();
+    let (leader, child) = (
+        printed_pid(&user, "db", "leader"),
+        printed_pid(&user, "db", "child"),
+    );
+    let _left = Left(vec![leader, child]);
+    eventually("db answers", || {
+        answers(&format!("http://127.0.0.1:{port}"))
+    });
+    user.call("workspace.create", json!({"project": "app", "name": "one"}))
+        .unwrap();
+
+    killed_daemon_and(&user, leader);
+    let show_one = || {
+        user.call("workspace.show", json!({"project": "app", "name": "one"}))
+            .unwrap()
+    };
+    eventually("the setup's end", || show_one()["state"] != "preparing");
+
+    assert_eq!(show_one()["state"], "ready", "{}", show_one());
+    assert!(!alive(child), "the child the killed daemon left still runs");
+    let shown = show(&user, "db");
+    assert_eq!(shown["state"], "ready", "started, not outside: {shown}");
+    assert_eq!(service_runs(&user, "db"), 1);
+}
+
+#[test]
+fn a_task_s_agent_is_told_when_a_service_it_needs_stops() {
+    let user = User::with_fake_agent();
+    let port = free_port();
+    services_file(&user, &with_a_child(&user, "db", port));
+    project(&user, &[]);
+    serving_api(&user, &["db"]);
+    let (agent, mcp) = root(&user, None);
+    set_mode(&user, &agent, "full");
+    let run = run_of(&done(mcp.call("run", json!({"task": "api"}))));
+    let (leader, child) = (
+        printed_pid(&user, "db", "leader"),
+        printed_pid(&user, "db", "child"),
+    );
+    let _left = Left(vec![leader, child]);
+
+    // The service ends on its own, not by the user's hand.
+    kill(leader);
+
+    let told = prompted_within(
+        &user,
+        20,
+        &[
+            "[flottille:service-stopped]",
+            "db, which api needs, stopped",
+        ],
+    );
+    assert!(told[0].contains(&run), "{told:?}");
+    let status = done(mcp.call("run_status", json!({"run": run})));
+    assert!(status.contains("needs db, stopped"), "{status}");
+    let listed = user
+        .call("run.list", json!({"tree": agent}))
+        .unwrap()
+        .to_string();
+    assert!(listed.contains("\"needs_stopped\":[\"db\"]"), "{listed}");
+    // Told once.
+    std::thread::sleep(Duration::from_secs(1));
+    let all = prompted_within(&user, 1, &["[flottille:service-stopped]"]);
+    assert_eq!(all.len(), 1, "{all:?}");
+}
+
+#[test]
+fn an_outside_service_that_stops_answering_is_said_to_what_needs_it() {
+    let user = User::with_fake_agent();
+    let (mut outside, address) = by_hand();
+    services_file(
+        &user,
+        &format!(
+            "[services.db]\nfolder = \"{}\"\nline = \"{}\"\nready = {{ url = \"{address}\" }}\n",
+            folder(&user, "db").display(),
+            server(0)
+        ),
+    );
+    project(&user, &[]);
+    serving_api(&user, &["db"]);
+    let (agent, mcp) = root(&user, None);
+    set_mode(&user, &agent, "full");
+    let run = run_of(&done(mcp.call("run", json!({"task": "api"}))));
+    assert_eq!(show(&user, "db")["state"], "outside");
+
+    let _ = outside.kill();
+    let _ = outside.wait();
+
+    // Tried every 15 s.
+    let told = prompted_within(
+        &user,
+        40,
+        &[
+            "[flottille:service-stopped]",
+            "db, which api needs, stopped",
+        ],
+    );
+    assert!(told[0].contains(&run), "{told:?}");
+    let status = done(mcp.call("run_status", json!({"run": run})));
+    assert!(status.contains("needs db, stopped"), "{status}");
+}
+
+#[test]
+fn a_need_through_another_service_counts() {
+    let user = User::new();
+    services_file(
+        &user,
+        &format!(
+            "{}{}",
+            listening(&user, "mongo", 0, &[]),
+            listening(&user, "file", 0, &["mongo"])
+        ),
+    );
+    project(&user, &[]);
+    serving_api(&user, &["file"]);
+    user.call("task.run", json!({"project": "app", "name": "api"}))
+        .unwrap();
+
+    let (code, why) = user
+        .call("service.stop", json!({"name": "mongo"}))
+        .unwrap_err();
+
+    assert_eq!(code, "needed", "{why}");
+    assert!(why.contains("app's api"), "{why}");
+    assert!(why.contains("the service file"), "{why}");
+    assert_eq!(show(&user, "mongo")["state"], "ready");
+    let now = show(&user, "mongo")["needed_now"].to_string();
+    assert!(now.contains("app's api"), "{now}");
+    let needed = show(&user, "mongo")["needed_by"].to_string();
+    assert!(needed.contains("\"running\":[\"api\"]"), "{needed}");
+}
+
+#[test]
+fn the_cli_refuses_without_force_and_names_what_needs_it() {
+    let user = User::new();
+    services_file(&user, &listening(&user, "db", 0, &[]));
+    project(&user, &[]);
+    serving_api(&user, &["db"]);
+    user.call("task.run", json!({"project": "app", "name": "api"}))
+        .unwrap();
+
+    let refused = user.run(&["service", "stop", "db"]);
+
+    assert!(!refused.status.success());
+    let said = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        said.contains("app's api needs it and is running: it goes on without it"),
+        "{said}"
+    );
+    assert!(said.contains("--force"), "{said}");
+    assert_eq!(show(&user, "db")["state"], "ready");
+    let forced = user.run(&["service", "stop", "db", "--force"]);
+    assert!(
+        forced.status.success(),
+        "{}",
+        String::from_utf8_lossy(&forced.stderr)
+    );
+    assert_eq!(show(&user, "db")["state"], "stopped");
+}
+
+#[test]
+fn an_agent_stopping_a_service_another_session_s_run_needs_is_held() {
+    let user = User::with_fake_agent();
+    services_file(&user, &listening(&user, "db", 0, &[]));
+    project(&user, &[]);
+    serving_api(&user, &["db"]);
+    let (runner, runs) = root(&user, None);
+    set_mode(&user, &runner, "full");
+    done(runs.call("run", json!({"task": "api"})));
+    let (other, mcp) = root(&user, None);
+    set_mode(&user, &other, "full");
+
+    let number = held(&mcp.call("services", json!({"action": "stop", "name": "db"})));
+
+    let says = request(&user, number)["says"].to_string();
+    assert!(
+        says.contains("app's api needs it and is running: it goes on without it"),
+        "{says}"
+    );
+    assert_eq!(show(&user, "db")["state"], "ready");
+}
+
+#[test]
+fn the_agent_running_the_task_is_told_its_service_was_stopped() {
+    let user = User::with_fake_agent();
+    services_file(&user, &listening(&user, "db", 0, &[]));
+    project(&user, &[]);
+    serving_api(&user, &["db"]);
+    let (agent, mcp) = root(&user, None);
+    set_mode(&user, &agent, "full");
+    let run = run_of(&done(mcp.call("run", json!({"task": "api"}))));
+
+    user.call("service.stop", json!({"name": "db", "force": true}))
+        .unwrap();
+
+    let told = prompted_within(
+        &user,
+        20,
+        &[
+            "[flottille:service-stopped]",
+            "db, which api needs, was stopped by the user",
+        ],
+    );
+    assert!(told[0].contains(&run), "{told:?}");
+    let status = done(mcp.call("run_status", json!({"run": run})));
+    assert!(status.contains("needs db, stopped"), "{status}");
 }
