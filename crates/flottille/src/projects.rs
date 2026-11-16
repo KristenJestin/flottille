@@ -567,6 +567,7 @@ async fn settings_of(project: &Project) -> Value {
         "branch_prefix": project.branch_prefix,
         "branch_format": project.branch_format,
         "pull_request_template": project.pull_requests.template,
+        "windows": project.windows,
         "obsolete": project.obsolete,
     })
 }
@@ -775,6 +776,15 @@ pub async fn set_settings(
         }
         if let Some(prefix) = &asked.branch_prefix {
             document.insert("branch_prefix", toml_edit::value(prefix.as_str()));
+        }
+        match asked.windows {
+            Some(true) => {
+                document.insert("windows", toml_edit::value(true));
+            }
+            Some(false) => {
+                document.remove("windows");
+            }
+            None => {}
         }
         match &asked.tracker {
             None => {

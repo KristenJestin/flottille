@@ -1778,6 +1778,7 @@ async fn performed(
                     let repositories: Vec<_> = (call.repositories.iter().flatten())
                         .map(|setting| setting.declared(&project))
                         .collect();
+                    // Never `windows`: whether the project's runs may open windows is the user's.
                     let settings = projects::set_settings(
                         daemon.clone(),
                         json!({"name": name, "repositories": repositories, "tracker": tracker}),

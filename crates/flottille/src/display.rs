@@ -3,7 +3,8 @@
 //! and nothing else of the user's real `$XDG_RUNTIME_DIR`: not the session bus's address, nor the
 //! other sockets. What keeps it from the real folder itself is Landlock's (`landlock.rs`), which
 //! leaves this folder alone within its reach. A connection's browser uses it
-//! (`docs/extensions.md`), and a run that opens windows will.
+//! (`docs/extensions.md`), and so does a run of a project that lets its runs open windows
+//! (`docs/tools.md`).
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
