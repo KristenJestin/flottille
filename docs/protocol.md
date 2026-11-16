@@ -1021,16 +1021,21 @@ A workspace is one worktree per repository, on one branch, prepared by the proje
   "repositories": [
     {"path": "api", "base": {"branch": "develop", "remote": "origin", "ref": "refs/remotes/origin/develop",
       "urls": ["git@git.example.com:acme/api.git"], "commit": "503144c9654d6762b17fd670ddc9f88aa39ecfaf",
-      "fetched_now": true, "fetched_at": 1792843730790}},
+      "fetched_now": true, "fetched_at": 1792843730790,
+      "fetch": {"started_at": 1792843729905, "duration_ms": 885, "outcome": "fetched"}}},
     {"path": "lib", "base": {"branch": "main", "remote": "origin", "ref": "refs/heads/main",
       "commit": "9d1c0e4f6a2b8c3d5e7f9a1b2c3d4e5f6a7b8c9d", "fetched_now": false, "fetched_at": null,
       "note": "no remote origin: started from the local main"}}
   ],
   "steps": [
-    {"position": 0, "repository": "api", "kind": "worktree", "state": "done"},
-    {"position": 1, "repository": "api", "kind": "copy", "globs": [".env", ".env.*"], "state": "done"},
-    {"position": 2, "repository": null, "kind": "root_entries", "except": ["api"], "state": "done"},
+    {"position": 0, "repository": "api", "kind": "worktree", "state": "done",
+      "started_at": 1792843730810, "ended_at": 1792843731190, "duration_ms": 378},
+    {"position": 1, "repository": "api", "kind": "copy", "globs": [".env", ".env.*"], "state": "done",
+      "started_at": 1792843731192, "ended_at": 1792843731200, "duration_ms": 6},
+    {"position": 2, "repository": null, "kind": "root_entries", "except": ["api"], "state": "done",
+      "started_at": 1792843731201, "ended_at": 1792843731203, "duration_ms": 1},
     {"position": 3, "repository": "api", "kind": "run", "line": "npm install", "time_limit": 1800, "state": "failed",
+      "started_at": 1792843731204, "ended_at": 1792843733904, "duration_ms": 2698,
       "failure": {"doing": "npm install (in api)", "output": "npm ERR! …"}}
   ]
 }
@@ -1047,7 +1052,11 @@ out (`docs/commands.md`); absent for a workspace created before they were record
 (`except`: the top-level names of the project's repositories) or `run` (`line`, `time_limit` in
 seconds, and `task` when it is one of the project's tasks); its `state` is `pending`, `running`, `done`, `skipped` or
 `failed`, and `failure` is there only on a failed step. `repository` is `null` for a step done in
-the workspace folder.
+the workspace folder. A step that ended says how long it took: `duration_ms`, from a monotonic
+clock, beside `started_at` and `ended_at` (the wall clock's); a step that never ended, or ended
+before durations were kept, has none. A base's `fetch` says how long reaching its remote took
+(`started_at`, `duration_ms`, `outcome`: `fetched` or `failed`) and is absent when nothing was
+reached (`offline`, no remote) (`docs/workspaces.md`, "How long it took").
 
 Each method answers `not-found` when the project or the workspace does not exist;
 `workspace.create`, the only one that reads the project's file, answers `invalid-config` when it
@@ -1095,8 +1104,9 @@ its commits since its base commit, and `uncommitted`, how many files `git status
 Flottille made, the files a setup `copy` step wrote and that are still as it copied them, and the
 worktrees inside it left out), each `null` when its worktree is not there.
 `ready_at` is when its last preparation ended, the time of its newest `workspace.ready` event
-(`docs/events.md`), kept with the workspace; `null` while it is not `ready`. `workspace.list`
-leaves it out too.
+(`docs/events.md`), kept with the workspace; `null` while it is not `ready`. `total_ms` is
+the time from the request to then, `ready_at` less `created_at`, `null` as long as it is not
+`ready`. `workspace.list` leaves both out.
 
 #### `workspace.step_output`
 

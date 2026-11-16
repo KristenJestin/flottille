@@ -176,6 +176,38 @@ URL; JWTs and the tokens of the usual forges, registries and providers). A works
 Copies and links are Flottille's own actions, done for the setup the user wrote; they never go
 through the agents' gate.
 
+### How long it took
+
+A workspace's making is a measure before it is anything else: every part of it is timed, and
+nothing is reordered, skipped, cached or made parallel because of it.
+
+- **Per repository, the fetch**: from the listing of the remote's branches to the end of the fetch
+  (`git ls-remote --heads`, then `git fetch`), kept in the repository's base as `fetch`: when it
+  started, how long it took and its outcome (`fetched`, or `failed` when the remote could not be
+  listed or fetched or held none of the base branches, the base's `note` then saying where it
+  started from). A creation `--offline`, or from a repository with no remote, reached nothing and
+  has none. It is taken before the workspace exists, so it is written with the workspace.
+- **Per step, its own time**: the `worktree` step of each repository (`git worktree add`), each
+  `copy`, `link`, `root_entries` and `run`, kept with the step's state in its `duration_ms`, with
+  `started_at` for when it began. It runs from the moment the step is marked `running`, so what it
+  waits for first (the services a task needs, the agent folders put back after) is part of what it
+  costs. A failed step is timed too; a step put back to pending forgets its duration with its
+  state, and is timed again when it runs again.
+- **The total, from the request to ready**: `total_ms` in `workspace.show`, from the workspace's
+  creation (`created_at` is the time of the request, before the fetches) to the end of its
+  preparation (`ready_at`). A preparation resumed after a failure counts the wait.
+
+The durations of the parts come from a monotonic clock (`Instant`), which a change of the machine's
+clock cannot bend; the timestamps beside them (`started_at`, `ended_at`, `created_at`, `ready_at`)
+are the wall clock's, and so is the total, which has to span a restart of the daemon.
+
+They are said where the steps are: `workspace show` (`pnpm install · 1 min 42 s`, and `Ready in
+2 min 10 s, from the request.`), the `workspace` tool's `show`, the `workspace.ready` event (the
+total and the three slowest parts, fetches included) and the window: the setup lines of a workspace being prepared say each step's time (one done its duration,
+one running its time so far, ticking only while it runs) and, once it is ready, the line under its
+name says `ready in 4.2s`, which fades in as the last step ends. The window says durations as it
+does elsewhere (`0.4s`, `38s`, `4m`).
+
 ### Resuming
 
 `workspace prepare`:
