@@ -116,15 +116,7 @@ pub fn unwritable(tracker: &ProjectTracker, args: &Value) -> Option<String> {
         ProjectTracker::Jira { worklog_token, .. } => worklog_token,
     };
     if worklog_token.is_none() {
-        return Some(
-            "refused: this project names no vault entry to log time with: the user chooses one \
-             in the project's Settings, Tracker (the window offers the way), or creates one \
-             (flottille vault set <name> --username <their Jira account e-mail>, the secret \
-             being a Jira API token) and writes its name in the project's file, [tracker] \
-             worklog_token = \"<name>\"; Flottille never logs time with a sign-in it was not \
-             given"
-                .into(),
-        );
+        return Some(no_entry());
     }
     // Named, never the workspace's read at execution: the card says the ticket the user allows.
     if given(args, "ticket").is_none() {
@@ -147,6 +139,17 @@ pub fn unwritable(tracker: &ProjectTracker, args: &Value) -> Option<String> {
         Some(started) => started_of(started).err(),
         None => None,
     }
+}
+
+/// The refusal of a Jira tracker that names no vault entry for its worklogs, and how to set one.
+pub(super) fn no_entry() -> String {
+    "refused: this project names no vault entry to log time with: the user chooses one \
+     in the project's Settings, Tracker (the window offers the way), or creates one \
+     (flottille vault set <name> --username <their Jira account e-mail>, the secret \
+     being a Jira API token) and writes its name in the project's file, [tracker] \
+     worklog_token = \"<name>\"; Flottille never logs time with a sign-in it was not \
+     given"
+        .into()
 }
 
 /// What the card says of a worklog, and the refusal of a vault that does not hold the entry: found
@@ -185,7 +188,7 @@ pub fn says(
 
 /// The vault entry the project's tracker names: its name and its account. Seen by the project, or
 /// the refusal that says it is not.
-fn entry_of(daemon: &Daemon, project: &Project) -> Result<(String, String), String> {
+pub(super) fn entry_of(daemon: &Daemon, project: &Project) -> Result<(String, String), String> {
     let Some(ProjectTracker::Jira {
         worklog_token: Some(name),
         ..
@@ -330,7 +333,7 @@ pub async fn log_time(
 }
 
 /// What Jira said of a failure, as one line: its error messages, or the start of its answer.
-fn first_words(text: &str) -> String {
+pub(super) fn first_words(text: &str) -> String {
     let messages = serde_json::from_str::<Value>(text).ok().map(|answered| {
         let mut said: Vec<String> = answered["errorMessages"]
             .as_array()
@@ -358,18 +361,18 @@ fn first_words(text: &str) -> String {
         .collect()
 }
 
-/// `https://<site>/rest/api/3/issue/<KEY>/worklog`, or a test's own server in its place.
-fn worklog_url(site: &str, key: &Key) -> Result<Url, String> {
+/// `https://<site>/rest/api/3/<path>`, or a test's own server in its place.
+pub(super) fn rest_url(site: &str, path: &str) -> Result<Url, String> {
     let base = std::env::var(TEST_BASE)
         .ok()
         .filter(|_| cfg!(debug_assertions))
         .unwrap_or_else(|| format!("https://{site}"));
-    Url::parse(&format!(
-        "{}/rest/api/3/issue/{}/worklog",
-        base.trim_end_matches('/'),
-        key.text()
-    ))
-    .map_err(|error| format!("no address for {site}: {error}"))
+    Url::parse(&format!("{}/rest/api/3/{path}", base.trim_end_matches('/')))
+        .map_err(|error| format!("no address for {site}: {error}"))
+}
+
+fn worklog_url(site: &str, key: &Key) -> Result<Url, String> {
+    rest_url(site, &format!("issue/{}/worklog", key.text()))
 }
 
 /// One POST of `body` as JSON: the status and the start of the answer. A redirect is not followed,
@@ -378,6 +381,25 @@ async fn post(
     url: &Url,
     authorization: &str,
     body: &Value,
+) -> Result<(http::StatusCode, String), String> {
+    request(
+        http::Method::POST,
+        url,
+        authorization,
+        Some(body),
+        ANSWER_BYTES,
+    )
+    .await
+}
+
+/// One call of `method` (with `body` as JSON, if any): the status and the first `limit` bytes of
+/// the answer. A redirect is not followed, since the credentials would go with it.
+pub(super) async fn request(
+    method: http::Method,
+    url: &Url,
+    authorization: &str,
+    body: Option<&Value>,
+    limit: usize,
 ) -> Result<(http::StatusCode, String), String> {
     let host = url.host_str().unwrap_or_default().to_owned();
     let failed = |what: &str, error: &dyn std::fmt::Display| format!("{what} {host}: {error}");
@@ -410,14 +432,18 @@ async fn post(
         Some(port) => format!("{host}:{port}"),
         None => host.clone(),
     };
-    let request = Request::post(&url[url::Position::BeforePath..url::Position::AfterQuery])
+    let request = Request::builder()
+        .method(method)
+        .uri(&url[url::Position::BeforePath..url::Position::AfterQuery])
         .header(header::HOST, host_header)
         .header(header::USER_AGENT, "flottille")
         .header(header::ACCEPT, "application/json")
         .header(header::CONTENT_TYPE, "application/json")
         .header(header::AUTHORIZATION, authorization)
         .header(header::CONNECTION, "close")
-        .body(Full::new(Bytes::from(body.to_string())))
+        .body(Full::new(Bytes::from(
+            body.map_or_else(String::new, Value::to_string),
+        )))
         .map_err(|e| failed("no request for", &e))?;
     let response = sender
         .send_request(request)
@@ -429,7 +455,7 @@ async fn post(
     while let Some(frame) = incoming.frame().await {
         let frame = frame.map_err(|e| failed("the answer broke off from", &e))?;
         if let Ok(data) = frame.into_data() {
-            let room = ANSWER_BYTES - bytes.len();
+            let room = limit - bytes.len();
             bytes.extend_from_slice(&data[..data.len().min(room)]);
             if data.len() >= room {
                 break;

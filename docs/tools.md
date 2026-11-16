@@ -1067,7 +1067,7 @@ Jira: their account id, else their e-mail). The card shows the names as given.
 
 | Tool | |
 |---|---|
-| `tickets {action, ticket?, workspace?, query?, updated_within?, in_comments?, jql?, state?, label?, assignee?, detail?, fresh?, title?, body?, labels?, reason?, remove_labels?, assignees?, remove_assignees?, status?, other?, kind?, comment?, sprint?, parent?, board?, milestone?, remove_milestone?, due?, description?, project?, type?, events?, from?, minutes?}` | The tickets of the project's tracker, through the user's own `gh` or `acli`, run by the daemon; an agent has no tracker sign-in of its own. Every agent of a project that declares a tracker has it, in `main` as in a workspace, whether a ticket is linked or not. |
+| `tickets {action, ticket?, workspace?, query?, updated_within?, in_comments?, jql?, state?, label?, assignee?, detail?, fresh?, title?, body?, labels?, reason?, remove_labels?, assignees?, remove_assignees?, status?, other?, kind?, comment?, sprint?, parent?, board?, milestone?, remove_milestone?, due?, description?, project?, type?, events?, from?, to?, author?, minutes?}` | The tickets of the project's tracker, through the user's own `gh` or `acli`, run by the daemon; an agent has no tracker sign-in of its own. Every agent of a project that declares a tracker has it, in `main` as in a workspace, whether a ticket is linked or not. |
 
 - **`people {query?}`** (a read): who can be named as an assignee, each as `- Anne Example
   (anne@example.org)`: GitHub the tracker repository's assignable users and collaborators, as
@@ -1165,7 +1165,13 @@ Jira: their account id, else their e-mail). The card shows the names as given.
   item, with the vault entry the project's `[tracker] worklog_token` names; a write like `comment`,
   its card saying the ticket, the duration and the start; refused on GitHub. `time_spent` (a read)
   says how long the session's agents worked, the sum of their turns, to propose as the duration
-  (`docs/tickets.md`, "Logging time").
+  (`docs/tickets.md`, "Logging time"). **`worklogs {from, to?, ticket?, author?}`** (a read, never
+  held, like `show`; Jira only, GitHub is refused with `GitHub has no worklogs`) answers the
+  worklogs of a day or a range with their durations, per day and in total, of the token's own
+  account unless `author` names another (an account id, or a name `people` finds). It uses the
+  same vault entry as `log_time`, toward the tracker's site alone, and says whose time it is
+  (`your account (Jane Doe)`) and in which time zone the days are (`docs/tickets.md`, "Reading
+  worklogs").
 - **Links and comments**: `link_types` (a read, never held) lists the kinds of link the tracker has;
   `link {ticket, kind, other}` and `unlink {ticket, kind, other}` make and remove a link;
   `comment_edit {ticket, comment, body}` and `comment_delete {ticket, comment}` change or delete a

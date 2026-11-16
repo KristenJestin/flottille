@@ -42,6 +42,7 @@ mod replies;
 mod sprints;
 mod versions;
 mod worklog;
+mod worklogs;
 
 pub(crate) use events::item_of;
 pub use events::{EVENTS, offer, reference_of, target_named};
@@ -940,6 +941,10 @@ struct TicketsCall {
     /// its offset; the duration before now when left out).
     duration: Option<String>,
     started: Option<String>,
+    /// `worklogs`: the last day of the range (`from` is its first), and whose worklogs: an account
+    /// id, or a name found among the people; the token's own account when left out.
+    to: Option<String>,
+    author: Option<String>,
     /// A write at the user's gesture (`written_for_user`): its comment is recorded by the id the
     /// tracker gave, never by its words. Not a field of the tool: an agent cannot ask for it.
     #[serde(skip)]
@@ -1395,6 +1400,7 @@ pub async fn tickets(daemon: &Arc<Daemon>, agent: &str, place: &Place, args: Val
         "subscribe" => events::subscribe(daemon, agent, place, &project, &asked).await,
         "unsubscribe" => events::unsubscribe(daemon, agent, &project, &asked),
         "time_spent" => worklog::time_spent(daemon, agent),
+        "worklogs" => worklogs::worklogs(daemon, &project, &asked).await,
         "create" => {
             let created = create(daemon, &project, &asked).await;
             daemon.kept_tickets.drop_all();
@@ -1672,6 +1678,17 @@ async fn listed(daemon: &Daemon, project: &Project, asked: &TicketsCall) -> Outc
         text.push_str(&format!(
             "({nulls} answered by acli as null, with nothing of them, are left out)\n"
         ));
+    }
+    // A worklog date alone matches the worklogs of anyone: the work items of others show too.
+    if let Some(jql) = asked_jql {
+        let lower = jql.to_lowercase();
+        if lower.contains("worklogdate") && !lower.contains("worklogauthor") {
+            text.push_str(
+                "(the JQL uses worklogDate without worklogAuthor: it matched anyone's worklogs \
+                 on those days, not only the user's; tickets worklogs gives the user's own time \
+                 with its durations)\n",
+            );
+        }
     }
     text.push_str("tickets {\"action\": \"show\", \"ticket\": …} reads one.");
     Outcome::Done(text)
