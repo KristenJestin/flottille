@@ -58,6 +58,14 @@ tokio = { version = "1.54.1", features = ["rt", "net", "io-util", "sync", "macro
 tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring", "tls12", "logging"] }
 tokio-util = "0.7.20"
 toml_edit = "0.25.17"
+# The outline of a source file `fs_read` gives (`docs/tools.md`, "Files"): the parser and the
+# official grammars of the languages it knows, and no other.
+tree-sitter = "0.27.2"
+tree-sitter-go = "0.25.0"
+tree-sitter-javascript = "0.25.0"
+tree-sitter-python = "0.25.0"
+tree-sitter-rust = "0.24.2"
+tree-sitter-typescript = "0.23.2"
 url = "2.5.8"
 
 [dev-dependencies]

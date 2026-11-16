@@ -497,6 +497,9 @@ struct ReadArguments {
     /// Reads the page whole even when it is unchanged since the session read it.
     #[serde(default)]
     again: bool,
+    /// The declarations of a source file instead of a page of it.
+    #[serde(default)]
+    outline: bool,
 }
 
 #[derive(Deserialize)]
@@ -529,6 +532,20 @@ pub fn fs_read(cx: &Context, args: Value) -> Outcome {
         Ok(args) => args,
         Err(refusal) => return refusal,
     };
+    if args.outline && args.again {
+        return Outcome::Refused(
+            "refused: an outline is not a page: give no again, and read the part you want from \
+             its offset with fs_read"
+                .into(),
+        );
+    }
+    if args.outline && args.range.is_some() {
+        return Outcome::Refused(
+            "refused: an outline lists the whole file: give no range, and read the part you \
+             want from its offset with fs_read"
+                .into(),
+        );
+    }
     let (offset, length) = match page_of(args.range.as_ref()) {
         Ok(page) => page,
         Err(refusal) => return refusal,
@@ -537,6 +554,13 @@ pub fn fs_read(cx: &Context, args: Value) -> Outcome {
         Ok(path) => path,
         Err(refusal) => return refusal,
     };
+    if args.outline {
+        // The same path checks as a read, then none of what makes a read one: no fingerprint.
+        return match outline_of(cx, &path) {
+            Ok(outcome) => outcome,
+            Err(error) => failed(&path, error),
+        };
+    }
     // A page is sized so that its result is not cut (`docs/tools.md`, "Long results"): the
     // session knows the file's fingerprint once it read a page, and a page it was shown only in
     // part would let it write over text it never saw.
@@ -544,6 +568,79 @@ pub fn fs_read(cx: &Context, args: Value) -> Outcome {
     match page(Some(cx), &path, (offset, length), budget, args.again) {
         Ok(outcome) => outcome,
         Err(error) => failed(&path, error),
+    }
+}
+
+/// The most bytes of a file an outline is made of.
+const OUTLINE_BYTES: u64 = 512 * 1024;
+
+/// The outline of a source file (`docs/tools.md`, "Files"). It is not a read: the session is not
+/// given the file's fingerprint, so what it needs to write the file is still to read a page.
+fn outline_of(cx: &Context, path: &Resolved) -> std::io::Result<Outcome> {
+    let mut file = match open_regular(&path.path) {
+        Err(error) if error.kind() == ErrorKind::IsADirectory => {
+            return Ok(Outcome::Refused(format!(
+                "refused: {} is a folder: list it with fs_list",
+                path.shown
+            )));
+        }
+        Err(error) if error.kind() == ErrorKind::InvalidInput => return Ok(not_regular(path)),
+        opened => opened?,
+    };
+    if !crate::results::offers_outline(&cx.daemon.paths) {
+        return Ok(Outcome::Refused(
+            "refused: outlines are turned off by the user; read it with fs_read".into(),
+        ));
+    }
+    let extension = path.path.extension();
+    let Some(language) = extension
+        .and_then(|e| e.to_str())
+        .and_then(crate::outline::Language::of)
+    else {
+        return Ok(Outcome::Refused(no_outline_for(extension)));
+    };
+    let size = file.metadata()?.len();
+    if size > OUTLINE_BYTES {
+        return Ok(Outcome::Refused(format!(
+            "refused: {} is {size} bytes: too large for an outline ({} KiB at most); read it a \
+             page at a time with fs_read",
+            path.shown,
+            OUTLINE_BYTES / 1024
+        )));
+    }
+    let mut source = Vec::new();
+    file.read_to_end(&mut source)?;
+    // Masked here, entry by entry, before an entry is cut (the result is masked again as any).
+    let secrets = flottille_core::secrets::Secrets::new(
+        &std::env::vars_os().collect(),
+        &cx.place.secret_values(),
+    );
+    Ok(
+        match crate::outline::describe(
+            &path.shown,
+            language,
+            &source,
+            &|text| secrets.mask(text),
+            crate::outline::PARSE_TIME,
+        ) {
+            Ok(text) => Outcome::Done(text),
+            Err(crate::outline::Failure::TooLong) => Outcome::Refused(format!(
+                "refused: {} took too long for an outline; read it with fs_read",
+                path.shown
+            )),
+            Err(crate::outline::Failure::Failed(why)) => Outcome::Failed(why),
+        },
+    )
+}
+
+/// Why a file with this extension has no outline.
+fn no_outline_for(extension: Option<&std::ffi::OsStr>) -> String {
+    match extension {
+        Some(extension) => format!(
+            "refused: no outline for {} files; read it with fs_read",
+            extension.to_string_lossy()
+        ),
+        None => "refused: no outline for files without an extension; read it with fs_read".into(),
     }
 }
 
@@ -2432,5 +2529,24 @@ mod at_once {
 
         assert!(!kept.shown.lock().unwrap().contains_key("a"));
         assert!(!kept.calls.lock().unwrap().contains_key("a"));
+    }
+
+    #[test]
+    fn an_extension_that_is_not_utf8_is_named_not_said_missing() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let odd = OsStr::from_bytes(b"\xff\xfe");
+        let said = no_outline_for(Some(odd));
+        assert!(!said.contains("without an extension"), "{said}");
+        assert!(said.contains("fs_read"), "{said}");
+        assert_eq!(
+            no_outline_for(None),
+            "refused: no outline for files without an extension; read it with fs_read"
+        );
+        assert_eq!(
+            no_outline_for(Some(OsStr::new("md"))),
+            "refused: no outline for md files; read it with fs_read"
+        );
     }
 }

@@ -47,6 +47,7 @@ mod message_checks;
 mod models;
 mod nofollow;
 mod opencode;
+mod outline;
 mod people;
 mod pilot;
 mod place;

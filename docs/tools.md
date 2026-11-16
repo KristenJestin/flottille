@@ -183,7 +183,8 @@ program.
   The session knows a file's fingerprint once a page of it was read, and `fs_write` and `fs_edit`
   rely on that: a page cut in its middle would let the agent replace text it never saw. A page is
   shorter than before when the limit is the default (`range.length` is still at most 32 KiB, the
-  page ends on a line before the limit), and each page names the next offset.
+  page ends on a line before the limit), and each page names the next offset. The outline of a
+  file (`outline: true`) makes no fingerprint and is cut as any result.
 - **What is kept**: the whole masked text, in the store, for the agent whose call it was, and
   that agent alone (`refused: res_… is no cut result of this session`: another agent, another
   session, or an id that never existed). It is kept for as long as the session: it goes when the
@@ -270,7 +271,7 @@ Paths are shown relative to the place's top.
 
 | Tool | Arguments | |
 |---|---|---|
-| `fs_read` | `path`, `repository?`, `range? {offset?, length? 1..32768}`, `again?` | A page of a file, lines numbered `%6d\t`, then `(bytes a-b of N; the next page starts at offset M)` or `(…, the end of the file)`, then `{"offset", "end", "size", "next"}`. A page holds at most 32 KiB and ends after its last newline (else on a character); an offset inside a character starts at the next one. A page is cut shorter to keep the result under the limit (a file of empty lines). A page the session already read, whose file has not changed since and with no compaction of the session since, is answered in one line (see "Unchanged files"). |
+| `fs_read` | `path`, `repository?`, `range? {offset?, length? 1..32768}`, `again?`, `outline?` | A page of a file, lines numbered `%6d\t`, then `(bytes a-b of N; the next page starts at offset M)` or `(…, the end of the file)`, then `{"offset", "end", "size", "next"}`. A page holds at most 32 KiB and ends after its last newline (else on a character); an offset inside a character starts at the next one. A page is cut shorter to keep the result under the limit (a file of empty lines). A page the session already read, whose file has not changed since and with no compaction of the session since, is answered in one line (see "Unchanged files"). `outline: true` answers the file's declarations instead of a page (see "Outline of a source file"). |
 | `fs_list` | `path`, `repository?`, `depth? 1..5` | The entries, sorted, a folder's after it: `path  file  size`, `path/  folder`, `path  link  -> target`. `.git` is left out. It stops at 1000 entries, or shorter to stay under the limit, and says so. |
 | `search` | `pattern`, `repository?`, `glob?`, `cursor?` | A case-insensitive substring, not a pattern. A sorted, depth-first walk that never enters `.git` or `node_modules` nor follows a link; the top `.gitignore` applies (simple patterns: no `!`, a pattern with a `/` is anchored, a trailing `/` is a folder). A file `fs_read` refuses, a login's place (The gate, 1), is never searched. `glob` keeps to the files it matches (on the name alone without a `/`; `**` for any folders). A file with a NUL byte in its first 64 KiB is skipped and named (20 at most). Hits are `path:line: text`, trimmed and cut at 200 characters. It stops at 100 matches, 1 MiB read or the size limit, with a cursor `path:line` that resumes it. The head says the count, the stop and its cursor, the limits, the skipped files. |
 | `fs_write` | `path`, `content`, `repository?`, `why?` | The whole file, made with its folders when new. |
@@ -307,6 +308,42 @@ shown).
   results, trimming the history) is not seen, so the one line could then answer a page the model no
   longer has. Settings → Agents → Long tool results has it as "Say when a
   file is unchanged".
+
+**Outline of a source file.** `fs_read {path, outline: true}` answers the declarations of a Rust,
+TypeScript or TSX, JavaScript (`.js`, `.mjs`, `.cjs`, `.jsx`), Python or Go file without their
+bodies, read with tree-sitter (the extension says the language): functions, methods, types,
+traits and interfaces, `impl` blocks, constants, modules, namespaces and classes, a Go package
+clause. A head says what it is (`outline of src/api.rs (Rust, 612 bytes; line:byte offset, then
+the declaration; read one with fs_read range.offset). Not a read: fs_write and fs_edit still need
+a page of it read.`), then a line per declaration, `line:offset`, two spaces, the declaration
+indented by two spaces for each level it is nested in (the members of a class, an `impl`, a
+trait, an interface, a module or a namespace; `line` from 1, `offset` the byte where the
+declaration starts, as `range.offset` takes it). A declaration is its signature on one line (up to
+its body, or its value for a constant, at most 160 characters, masked of secrets before it is cut);
+a decorator is part of a Python one; doc comments, docstrings, bodies and `use`/`import` lines are
+left out. Some declarations are not listed either: Rust `extern` blocks, TypeScript `declare …`
+statements other than modules, functions and classes, an anonymous `export default`, and Python
+definitions under an `if` or a `try`.
+
+- **It is not a read.** It gives no fingerprint: `fs_write` and `fs_edit` still need a page of
+  the file read first (`refused: X exists and this session has not read it…`), and nothing is
+  remembered of it for "Unchanged files".
+- **Same gate as a read**: the same path checks and the same refusals (outside the place, a login's
+  place, a link, a folder, a file that is not a regular one), whoever allowed the call. Another
+  extension is refused: `refused: no outline for <ext> files; read it with fs_read` (`files without
+  an extension` for one with none; an extension that is not text is named as it reads); so is a
+  file over 512 KiB, a file the parser cannot read in 2 seconds (`refused: <path> took too long for
+  an outline; read it with fs_read`), and `range` or `again` given with it. An outline
+  longer than the limit is cut as any other result ("Long results"): only a
+  page of `fs_read` is sized not to be, since it makes a fingerprint.
+- **The switch** is `outline` in `tool-results.toml` (`docs/protocol.md`, "The tool results
+  methods"), **on unless it says `false`**; Settings → Agents → Long tool results has it as "Offer the
+  outline of a file". Off, `outline: true` is refused (`refused: outlines are turned off by the user;
+  read it with fs_read`) while the description of `fs_read` still names it: the descriptions of the
+  tools are the same for every agent whatever the user chose, as for "Unchanged files". Recording
+  it with the turns' `tuning` (#547) comes once that column is merged.
+- **The dependency**: the `tree-sitter` crate and the official grammars of those five languages
+  (Rust, TypeScript with TSX, JavaScript, Python, Go), no other.
 
 **Only regular files are read.** `fs_read` and `fs_edit` refuse a pipe, a socket or a device
 (`refused: X is not a regular file …`), which would hold the call forever; `search` skips them.

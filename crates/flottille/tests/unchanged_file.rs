@@ -233,11 +233,17 @@ fn the_switch_is_off_until_it_is_turned_on_and_is_kept_with_the_limit() {
     project(&user);
     // A test daemon has no cut of results until one is chosen.
     let shown = user.call("tool_results.show", json!({})).unwrap();
-    assert_eq!(shown, json!({"limit": "off", "unchanged": false}));
+    assert_eq!(
+        shown,
+        json!({"limit": "off", "unchanged": false, "outline": true})
+    );
     let shown = user
         .call("tool_results.set", json!({"limit": 16000}))
         .unwrap();
-    assert_eq!(shown, json!({"limit": 16000, "unchanged": false}));
+    assert_eq!(
+        shown,
+        json!({"limit": 16000, "unchanged": false, "outline": true})
+    );
 
     turn(&user, None, "read it twice");
 
@@ -248,11 +254,17 @@ fn the_switch_is_off_until_it_is_turned_on_and_is_kept_with_the_limit() {
     let shown = user
         .call("tool_results.set", json!({"unchanged": true}))
         .unwrap();
-    assert_eq!(shown, json!({"limit": 16000, "unchanged": true}));
+    assert_eq!(
+        shown,
+        json!({"limit": 16000, "unchanged": true, "outline": true})
+    );
     let shown = user
         .call("tool_results.set", json!({"limit": 8000}))
         .unwrap();
-    assert_eq!(shown, json!({"limit": 8000, "unchanged": true}));
+    assert_eq!(
+        shown,
+        json!({"limit": 8000, "unchanged": true, "outline": true})
+    );
 }
 
 #[test]
