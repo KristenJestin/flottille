@@ -223,9 +223,9 @@ pub fn withheld(env: &BTreeMap<OsString, OsString>) -> BTreeMap<OsString, OsStri
 /// the start in place of the line's, the `ssh` found then (`GIT_SSH_COMMAND` wins over
 /// `core.sshCommand` and `GIT_SSH`), sharing no connection with another ssh and running no
 /// `LocalCommand`, SSH the only transport (no `ext::`, `fd::` or path, which run a program of the
-/// machine), git's own `git-receive-pack` for every remote, no maintenance left running after
-/// the push, and none of the repository's settings that run a program (its fsmonitor, read with
-/// its submodules; its signing program). What `ssh` runs from its
+/// machine), git's own `git-receive-pack` and no mirror for every remote, no maintenance left
+/// running after the push, and none of the repository's settings that run a program (its
+/// fsmonitor, read with its submodules; its signing program). What `ssh` runs from its
 /// configuration (`ProxyCommand`, `Match exec`, `KnownHostsCommand`) goes through `$SHELL -c`
 /// and finds its programs on `PATH`: `/bin/sh`, and the system's folders alone. Settings and
 /// global options on the line itself are refused before (`runs::run`): they would beat these.
@@ -285,13 +285,21 @@ pub async fn pin(env: &mut BTreeMap<OsString, OsString>, folder: &Path, words: &
             &format!("remote.{name}.receivepack"),
             "git-receive-pack",
         );
+        crate::runs::configure(env, &format!("remote.{name}.mirror"), "false");
     }
 }
 
-/// Refuses a push `words` lent the agent (`env` names it) that says `--signed` (the signing
-/// program of the repository's settings) or `--recurse-submodules` (the submodules' repositories,
-/// never checked).
-pub fn judged(words: &[String], env: &BTreeMap<OsString, OsString>) -> Result<(), String> {
+/// Refuses a push `words` lent the agent (`env` names it) unless it is the push that was judged:
+/// no `--signed` nor `--recurse-submodules`, and, as git's dry run says it with the agent, every
+/// URL it goes to one of the `checked` URLs (`runs::remote_kept`), no ref forced or deleted that
+/// its line did not ask for (a `remote.<name>.push` of the repository's settings). A remote the
+/// line names is checked before the dry run, so that its URLs are not reached either.
+pub async fn judged(
+    folder: &Path,
+    words: &[String],
+    env: &BTreeMap<OsString, OsString>,
+    checked: &[String],
+) -> Result<(), String> {
     if lent_to(env).is_none() {
         return Ok(());
     }
@@ -323,7 +331,62 @@ pub fn judged(words: &[String], env: &BTreeMap<OsString, OsString>) -> Result<()
             ));
         }
     }
+    let elsewhere = |url: &str| {
+        format!(
+            "refused: this push would go to {}, which is not where the repository's remote led \
+             when it was checked ({}); say so, and the user checks the repository's remotes; \
+             {nothing}",
+            crate::forge::masked(url),
+            crate::forge::masked(&checked.join(", "))
+        )
+    };
+    let checked_shown: Vec<String> = checked.iter().map(|url| shown(url)).collect();
+    let unchecked = |url: &String| !checked_shown.contains(&shown(url));
+    if let Some(remote) = &asked.repository
+        && let Some(url) = crate::forge::urls_of(folder, remote)
+            .await
+            .iter()
+            .find(|url| unchecked(url))
+    {
+        return Err(elsewhere(url));
+    }
+    let tried = crate::message_checks::dry_run(&words[..at_push], rest, end, folder, env)
+        .await
+        .map_err(|why| format!("refused: {}; {nothing}", crate::forge::masked(&why)))?;
+    for (url, refs) in &tried {
+        if unchecked(url) {
+            return Err(elsewhere(url));
+        }
+        for (flag, _, destination) in refs {
+            let unasked = match flag.as_str() {
+                "+" if !asked.force => "forces",
+                "-" if !asked.delete => "deletes",
+                _ => continue,
+            };
+            return Err(format!(
+                "refused: this push {unasked} {destination}, which its line does not say (a \
+                 push setting of the repository's remote?); say it on the line, or ask the user \
+                 to push by hand; {nothing}"
+            ));
+        }
+    }
     Ok(())
+}
+
+/// A URL as git shows it in a push's `To` line: without its credentials, nor the user of an
+/// scp-like `user@host:path`.
+fn shown(url: &str) -> String {
+    let url = crate::forge::without_credentials(url);
+    if url.contains("://") {
+        return url;
+    }
+    match url.split_once(':') {
+        Some((user_host, path)) if !user_host.contains('/') => match user_host.rsplit_once('@') {
+            Some((_, host)) => format!("{host}:{path}"),
+            None => url,
+        },
+        _ => url,
+    }
 }
 
 /// Where an HTTP(S) push URL is sent in the dry run of `over_ssh`: a path that is no repository.

@@ -876,6 +876,8 @@ struct Said {
     no_verify: bool,
     /// Why the message comes from elsewhere than the line, the first said.
     elsewhere: Option<&'static str>,
+    /// The words that are no option nor an option's value, in their order.
+    positional: Vec<String>,
 }
 
 enum Part {
@@ -1039,9 +1041,18 @@ const PUSH: Options = Options {
     matter: &[
         ("recurse-submodules", Opt::Submodules(true)),
         ("no-recurse-submodules", Opt::Submodules(false)),
+        ("force", Opt::Switch("force")),
+        ("force-with-lease", Opt::Switch("force")),
+        ("delete", Opt::Switch("delete")),
+        ("prune", Opt::Switch("delete")),
+        ("mirror", Opt::Switch("mirror")),
         ("signed", Opt::Switch("signed")),
     ],
-    letters: &[('o', Opt::Valued)],
+    letters: &[
+        ('o', Opt::Valued),
+        ('f', Opt::Switch("force")),
+        ('d', Opt::Switch("delete")),
+    ],
 };
 
 /// Whether a push's options, before its `--`, read as git reads them: one given `--dry-run` as
@@ -1052,18 +1063,35 @@ pub(crate) fn push_options_read(words: &[String]) -> bool {
 
 /// What a push's line asks for itself, its options read as git reads them.
 pub(crate) struct Asked {
+    /// A forced update: `--force`, `--force-with-lease`, `--mirror`, or a refspec's `+`.
+    pub force: bool,
+    /// A ref deleted: `--delete`, `--prune`, `--mirror`, or a refspec with no source.
+    pub delete: bool,
     /// `--signed`, which runs the signing program of the repository's settings.
     pub signed: bool,
     /// `--recurse-submodules`, which pushes or reads the submodules' repositories.
     pub submodules: bool,
+    /// The repository it names, a remote or a URL.
+    pub repository: Option<String>,
 }
 
 /// What the push whose words after `push` are `rest`, its options up to `end`, asks for.
 pub(crate) fn push_asked(rest: &[String], end: usize) -> Result<Asked, String> {
     let said = read(&rest[..end], &PUSH)?;
+    let mut positional = said.positional;
+    positional.extend(rest.iter().skip(end + 1).cloned());
+    let switched = |name: &'static str| said.switches.contains(&name);
+    let refspecs = positional.get(1..).unwrap_or_default();
     Ok(Asked {
-        signed: said.switches.contains(&"signed"),
+        force: switched("force")
+            || switched("mirror")
+            || refspecs.iter().any(|refspec| refspec.starts_with('+')),
+        delete: switched("delete")
+            || switched("mirror")
+            || refspecs.iter().any(|refspec| refspec.starts_with(':')),
+        signed: switched("signed"),
         submodules: said.submodules.is_some_and(|value| !value.is_empty()),
+        repository: positional.into_iter().next(),
     })
 }
 
@@ -1108,6 +1136,8 @@ fn read(words: &[String], options: &Options) -> Result<Said, String> {
                     _ => take(&mut said, opt, "")?,
                 }
             }
+        } else {
+            said.positional.push(word.to_owned());
         }
     }
     Ok(said)

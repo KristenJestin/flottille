@@ -423,11 +423,13 @@ pub async fn run(
     if !approved && let Verdict::Deny(why) = gate::contained(std::slice::from_ref(&folder)) {
         return Outcome::Refused(why);
     }
-    if gate::pushes(&words)
-        && let Err(refusal) = remote_kept(daemon, place, &repository, &folder.path).await
-    {
-        return Outcome::Refused(refusal);
-    }
+    let checked = match gate::pushes(&words) {
+        true => match remote_kept(daemon, place, &repository, &folder.path).await {
+            Ok(checked) => checked,
+            Err(refusal) => return Outcome::Refused(refusal),
+        },
+        false => Vec::new(),
+    };
     // A server already running for the agent is joined, not started twice.
     let serving = match (serve, name.as_deref()) {
         (true, Some(task)) => Some(daemon.mcp.runs.serving(Some(agent), &place.project, task)),
@@ -512,7 +514,7 @@ pub async fn run(
         if let Err(refusal) = crate::ssh_agent::over_ssh(&folder.path, &words, &env).await {
             return Outcome::Refused(refusal);
         }
-        if let Err(refusal) = crate::ssh_agent::judged(&words, &env) {
+        if let Err(refusal) = crate::ssh_agent::judged(&folder.path, &words, &env, &checked).await {
             return Outcome::Refused(refusal);
         }
         tokio::select! {
@@ -926,15 +928,29 @@ pub(crate) fn configure(env: &mut BTreeMap<OsString, OsString>, key: &str, value
 
 /// Refuses a push from a workspace unless the repository's remote leads where it led when the
 /// workspace was created (`forge::remote_kept`): neither the judge nor the user reads where a
-/// remote leads now. A push from the project folder has nothing to compare with.
+/// remote leads now. A push from the project folder has nothing to compare with. The URLs a push
+/// lent the SSH agent may go to (`ssh_agent::judged`): the workspace's, or the project folder's
+/// remote's as they are now.
 async fn remote_kept(
     daemon: &Daemon,
     place: &Place,
     repository: &str,
     folder: &Path,
-) -> Result<(), String> {
+) -> Result<Vec<String>, String> {
     let Some(name) = &place.workspace else {
-        return Ok(());
+        let remote = projects::load_project(daemon, &place.project)
+            .ok()
+            .and_then(|project| {
+                project
+                    .repositories
+                    .into_iter()
+                    .find(|r| r.path == repository)
+                    .map(|r| r.remote)
+            });
+        return Ok(match remote {
+            Some(remote) => crate::forge::urls_of(folder, &remote).await,
+            None => Vec::new(),
+        });
     };
     let workspace = daemon
         .read(|store| store.workspace(&place.project, name))
@@ -948,7 +964,8 @@ async fn remote_kept(
         .ok_or_else(|| {
             format!("refused: {repository} is not a repository of this agent's workspace")
         })?;
-    crate::forge::remote_kept(folder, base).await
+    crate::forge::remote_kept(folder, base).await?;
+    Ok(base.urls.clone())
 }
 
 /// Spawns the run, records it, and leaves a task of its own to follow it to its end. `phase` is
