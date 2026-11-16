@@ -274,7 +274,10 @@ fn a_chosen_limit_is_kept_announced_and_read_back_after_a_restart() {
         .call("tool_results.set", json!({"limit": 16000}))
         .unwrap();
 
-    assert_eq!(shown, json!({"limit": 16000, "unchanged": false, "filters": true}));
+    assert_eq!(
+        shown,
+        json!({"limit": 16000, "unchanged": false, "filters": true})
+    );
     let file = std::fs::read_to_string(user.path("config/flottille/tool-results.toml")).unwrap();
     assert!(file.contains("limit = 16000"), "{file}");
     let seen = watch.until(|e| e["name"] == "tool_results.changed");

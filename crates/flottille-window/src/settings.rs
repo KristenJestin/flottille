@@ -2456,8 +2456,8 @@ pub(crate) fn grouped(n: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        COMPACTION_HINT, COMPACTION_LINE, COMPACTION_USAGE, COMPACTOR_COST, TOOL_RESULTS_SENTENCE,
-        FILTERS_HINT, UNCHANGED_HINT, grouped,
+        COMPACTION_HINT, COMPACTION_LINE, COMPACTION_USAGE, COMPACTOR_COST, FILTERS_HINT,
+        TOOL_RESULTS_SENTENCE, UNCHANGED_HINT, grouped,
     };
 
     #[test]

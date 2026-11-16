@@ -184,7 +184,9 @@ static FILTERS: LazyLock<Vec<Filter>> = LazyLock::new(|| {
 /// The output of the command `words` (its program, then its arguments, never a shell line),
 /// filtered by the filter of that program and its first argument, or by the generic one.
 pub fn apply(words: &[String], output: &str) -> Filtered {
-    let program = words.first().map(|word| word.rsplit('/').next().unwrap_or(word));
+    let program = words
+        .first()
+        .map(|word| word.rsplit('/').next().unwrap_or(word));
     // `cargo +nightly test`: the toolchain is not the subcommand.
     let first = words.iter().skip(1).find(|word| !word.starts_with('+'));
     let own = program.and_then(|program| {
@@ -253,7 +255,10 @@ mod tests {
             .map(|entry| entry.unwrap().file_name().into_string().unwrap())
             .collect();
         files.sort();
-        let mut built: Vec<String> = SOURCES.iter().map(|(file, _)| format!("{file}.toml")).collect();
+        let mut built: Vec<String> = SOURCES
+            .iter()
+            .map(|(file, _)| format!("{file}.toml"))
+            .collect();
         built.sort();
         assert_eq!(files, built);
         assert_eq!(FILTERS.len(), SOURCES.len(), "a file does not load");
@@ -360,7 +365,13 @@ mod tests {
         let said = |line: &str, output: &str| apply(&words(line), output);
 
         assert_eq!(said("cargo build", "   Compiling a v1\n").text, "cargo: ok");
-        assert_eq!(said("cargo build", ""), Filtered { text: String::new(), removed: 0 });
+        assert_eq!(
+            said("cargo build", ""),
+            Filtered {
+                text: String::new(),
+                removed: 0
+            }
+        );
         assert_eq!(said("make", "\n\n").text, "");
     }
 
@@ -368,7 +379,13 @@ mod tests {
     fn a_run_of_blank_lines_is_one_and_the_start_has_none() {
         let found = apply(&words("make"), "\n\na\n\n\n\nb\n");
 
-        assert_eq!(found, Filtered { text: "a\n\nb".into(), removed: 4 });
+        assert_eq!(
+            found,
+            Filtered {
+                text: "a\n\nb".into(),
+                removed: 4
+            }
+        );
     }
 
     macro_rules! file_test {
