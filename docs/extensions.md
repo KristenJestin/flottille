@@ -1214,7 +1214,8 @@ is reached (radios: a program, its command one line split as a task's, shell syn
 it; or a URL), its variables (a program's), each a name and a vault entry picked among those
 every project sees and no other use is bound to, or its **Secrets of its requests** (a URL's), one
 line each: where it goes (a header, a query parameter, a cookie or basic authentication), its name
-(not for basic), its prefix (a header's, as `Bearer `, kept as typed) and its vault entry, the old
+(not for basic), its prefix (a header's, as `Bearer `, kept as typed) and its vault entry (the name
+and the prefix fold away under a place that does not take them, and are emptied), the old
 header lines among them as header lines with no prefix; a save sends `headers` (the lines with no
 prefix, as they always were) and `secrets` (the others, in the form's order), so that one that
 changes nothing leaves the declaration and its digest as they were, and its limits (an argument and its values,

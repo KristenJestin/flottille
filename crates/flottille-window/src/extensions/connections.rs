@@ -2079,7 +2079,7 @@ impl ConnectionsSection {
                 .position(|(word, _)| *word == line.place)
                 .unwrap_or(0),
         )
-        .on_choose(move |index, _, cx| {
+        .on_choose(move |index, window, cx| {
             let Some((word, _)) = PLACES.get(index) else {
                 return;
             };
@@ -2087,6 +2087,17 @@ impl ConnectionsSection {
             this.update(cx, |this, cx| {
                 if let Some(line) = this.secrets.iter_mut().find(|l| l.key == key) {
                     line.place = *word;
+                    // What the place takes no more is not kept: the daemon would refuse it.
+                    let mut gone = Vec::new();
+                    if *word == "basic" {
+                        gone.push(line.name.clone());
+                    }
+                    if *word != "header" {
+                        gone.push(line.prefix.clone());
+                    }
+                    for field in gone {
+                        field.update(cx, |f, cx| f.set_value("", window, cx));
+                    }
                 }
                 this.form_error = None;
                 cx.notify();
@@ -2119,32 +2130,46 @@ impl ConnectionsSection {
             this.secrets.retain(|l| l.key != key);
             cx.notify();
         }));
+        // A basic line has no name, and only a header takes a prefix: each folds away where it
+        // does not apply.
+        let name = div().child(Field::new(
+            SharedString::from(format!("{id}-name-field")),
+            "Name",
+            boxed(format!("{id}-name"), Input::new(&line.name), cx),
+        ));
+        let prefix = div().w(px(260.)).child(Field::new(
+            SharedString::from(format!("{id}-prefix-field")),
+            "Prefix",
+            boxed(format!("{id}-prefix"), Input::new(&line.prefix), cx),
+        ));
         div()
             .id(SharedString::from(id.clone()))
             .flex()
-            .items_end()
-            .gap(space::SM)
-            .child(div().w(px(150.)).child(Field::new(
-                SharedString::from(format!("{id}-place-field")),
-                "Place",
-                place,
-            )))
-            .child(div().flex_1().min_w_0().child(Field::new(
-                SharedString::from(format!("{id}-name-field")),
-                "Name",
-                boxed(format!("{id}-name"), Input::new(&line.name), cx),
-            )))
-            .child(div().w(px(110.)).child(Field::new(
-                SharedString::from(format!("{id}-prefix-field")),
-                "Prefix",
-                boxed(format!("{id}-prefix"), Input::new(&line.prefix), cx),
-            )))
-            .child(div().flex_1().min_w_0().child(Field::new(
-                SharedString::from(format!("{id}-entry-field")),
-                "Vault entry",
-                entry,
-            )))
-            .child(remove)
+            .flex_col()
+            .child(
+                div()
+                    .flex()
+                    .items_end()
+                    .gap(space::SM)
+                    .child(div().w(px(150.)).child(Field::new(
+                        SharedString::from(format!("{id}-place-field")),
+                        "Place",
+                        place,
+                    )))
+                    .child(div().flex_1().min_w_0().child(Field::new(
+                        SharedString::from(format!("{id}-entry-field")),
+                        "Vault entry",
+                        entry,
+                    )))
+                    .child(remove),
+            )
+            .child(
+                presence(format!("{id}-name-block"), line.place != "basic", name).space(space::SM),
+            )
+            .child(
+                presence(format!("{id}-prefix-block"), line.place == "header", prefix)
+                    .space(space::SM),
+            )
             .into_any_element()
     }
 

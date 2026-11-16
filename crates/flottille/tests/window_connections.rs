@@ -4047,7 +4047,7 @@ fn edit_remote(shell: &Entity<Shell>, cx: &mut VisualTestContext, lines: usize) 
     click(cx, "connection-more-remote");
     click(cx, "edit-connection-remote");
     until(shell, cx, "its secrets are in the form", |cx| {
-        (0..lines).all(|at| visible(cx, &format!("connection-secret-{at}-name")))
+        (0..lines).all(|at| visible(cx, &format!("connection-secret-{at}-entry")))
     });
     settle(cx);
 }
@@ -4211,5 +4211,63 @@ fn a_secret_can_be_added_and_removed_in_the_form(cx: &mut TestAppContext) {
     assert_eq!(
         after["headers"],
         json!({"X-Plain": {"vault": "notes-plain"}})
+    );
+}
+
+#[gpui_kit::test]
+fn a_secret_s_name_and_prefix_fold_away_where_they_do_not_apply(cx: &mut TestAppContext) {
+    let user = user();
+    turn_on(&user);
+    remote_with_every_secret(&user);
+    let (shell, cx) = window(&user, cx);
+    open_page(&shell, cx);
+    edit_remote(&shell, cx, 5);
+    let section = section(&shell, cx);
+    // A basic line has no name; only a header has a prefix.
+    assert!(!visible(cx, "connection-secret-4-name"));
+    assert!(!visible(cx, "connection-secret-2-prefix"));
+    assert!(visible(cx, "connection-secret-1-prefix"));
+
+    // The bearer header moved to a query parameter: its prefix folds away, and is not kept.
+    let whole = height(cx, "connection-secret-1-prefix-block");
+    click(cx, "connection-secret-1-place");
+    press(cx, "connection-secret-1-place-query");
+    a_third_later(cx);
+    let folding = height(cx, "connection-secret-1-prefix-block");
+    assert!(
+        0. < folding && folding < whole,
+        "the prefix folds away: {folding}px of {whole}px a third in"
+    );
+    settle(cx);
+    assert!(!visible(cx, "connection-secret-1-prefix"));
+    assert!(visible(cx, "connection-secret-1-name"));
+    let (_, prefix) = section.read_with(cx, |s, _| s.secret_fields(1).unwrap());
+    assert_eq!(prefix.read_with(cx, |f, _| f.value().to_string()), "");
+
+    // A cookie made basic: its name folds away and is not kept; the basic line made a cookie
+    // unfolds a name to type.
+    click(cx, "connection-secret-3-place");
+    click(cx, "connection-secret-3-place-basic");
+    assert!(!visible(cx, "connection-secret-3-name"));
+    let (name, _) = section.read_with(cx, |s, _| s.secret_fields(3).unwrap());
+    assert_eq!(name.read_with(cx, |f, _| f.value().to_string()), "");
+    click(cx, "connection-secret-4-place");
+    click(cx, "connection-secret-4-place-cookie");
+    assert!(visible(cx, "connection-secret-4-name"));
+    assert!(!visible(cx, "connection-secret-4-prefix"));
+    let (name, _) = section.read_with(cx, |s, _| s.secret_fields(4).unwrap());
+    type_in(&name, "session", cx);
+
+    save_and_close(&shell, cx);
+    let after = connection(&user, "remote").unwrap();
+    assert_eq!(
+        after["secrets"],
+        json!([
+            {"in": "query", "name": "X-Api-Auth", "entry": "notes-key"},
+            {"in": "query", "name": "workspace", "entry": "notes-query"},
+            {"in": "basic", "entry": "notes-cookie"},
+            {"in": "cookie", "name": "session", "entry": "notes-basic"},
+        ]),
+        "{after}"
     );
 }
