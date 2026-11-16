@@ -103,6 +103,7 @@ pub const METHODS: &[(&str, Class)] = &[
     ("remote.machines", Read),
     ("remote.address.add", Drive),
     ("remote.address.remove", Drive),
+    ("remote.setup", Drive),
     ("skill.list", Read),
     ("skill.show", Read),
     ("skill.add", Drive),

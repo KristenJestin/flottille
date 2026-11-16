@@ -939,7 +939,23 @@ with the reason. No method answers a private key.
   `state` `online`, `offline` or `needs an update`, `since` when it is so (milliseconds since the
   Unix epoch), `reason` why it is not online (`server refused the link: …`, the sentence of
   `docs/remote.md`, "The version"), or `null`, and `addresses` those it knows it at: given (by
-  the hub, by hand), then told by it.
+  the hub, by hand), then told by it. `hub` is the hub this machine pinned (`docs/remote.md`, "The
+  hub"), `null` until it is set up: `{"url", "key", "fingerprint", "state", "since", "reason"}`,
+  `state` being `connected`, `unreachable` (`reason`: `the hub at hub.example.net:443 is
+  unreachable since 22:14: …`), `reset` (`the hub's member list was reset: set this device up
+  again`), `refused` (the hub has another key than when this device joined, refused this device,
+  or sent a member list that does not check: the sentence says which), `needs an update`, or
+  `none` before the first try. Once set up, the machines it trusts are the members' machines of
+  the list as last checked.
+- `remote.setup {url, code, changes}` makes this machine the first member of the hub at `url`
+  (`docs/remote.md`, "The first member"), with the setup `code` the hub printed. `changes` are
+  what the client signed with the device key, which the daemon never holds: the device's own entry
+  as the root, a `runner`, then the declaration of this machine's key (`flottille_link::Action`,
+  `machine`). The daemon reaches the hub, pins its key, presents the code and the changes, and
+  keeps the session; it answers `{"url", "hub", "root"}` (the hub's URL as written, the
+  fingerprints of the hub's key and of the root). `refused` with the hub's sentence: a code that
+  is not the hub's, a hub that has a member already, a hub that cannot be reached (`the hub at
+  192.0.2.10:7448 is unreachable: tried 192.0.2.10:7448: Connection refused`).
 - `remote.address.add {address}` declares an address of this machine: a host name or an IP
   address, and its port when it is not the link's own (`100.64.0.7`, `server.example.net:7447`).
   It answers `this` as above, and is told at once to the machines linked to this one.

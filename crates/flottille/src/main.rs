@@ -33,6 +33,7 @@ mod follow;
 mod forge;
 mod gate;
 mod git;
+mod hub_session;
 mod import_command;
 mod inactive;
 mod inbox;

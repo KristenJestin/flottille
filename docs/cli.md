@@ -224,6 +224,20 @@ $ flottille update --channel alpha --branch feat/specs
 ~/.local/bin/flottille is now 0.3.1-alpha.feat-specs.4.
 ```
 
+### `flottille remote setup <hub URL> <code> [--name <name>] [--json]`
+
+Makes this machine the first member of a new hub (`docs/remote.md`, "The first member"), with the
+setup code the hub printed in its log (or `flottille-hub setup-code` on the hub's machine). The
+command makes this user session's device key (in the session's keyring, or `remote/device.key`
+without one), signs its own entry as the root of the member list, a `runner` named `--name` (the
+host's name by default), and the declaration of this machine's key; the daemon reaches the hub,
+pins its key and keeps a session to it. `remote.setup`.
+
+```
+$ flottille remote setup https://hub.example.net 7KQ2-M4XP-9TRW-H3CD --name pc
+pc is the first member of the hub at https://hub.example.net:443/, whose key is 3f2a-91bc-0d4e-77a1: the root every device that joins pins
+```
+
 ### `flottille remote address list [--json]`
 
 With remote on (`docs/remote.md`, "Identity and keys"), the addresses another machine reaches this
