@@ -978,9 +978,12 @@ fn command_for(program: &Path, dir: &Path, env: &[(String, String)], args: &[&st
     command
         .envs(env.iter().map(|(k, v)| (k, v)))
         .stdin(Stdio::null());
-    // The daemon runs git: never with the machine's settings.
+    // The daemon runs git: never with the machine's settings, unless a test gives its own
+    // (`with_env`).
     for (name, value) in GIT_ENV {
-        command.env(name, value);
+        if !env.iter().any(|(given, _)| given == name) {
+            command.env(name, value);
+        }
     }
     command
 }

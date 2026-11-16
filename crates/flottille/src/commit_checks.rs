@@ -52,8 +52,7 @@ pub async fn commits(at: &Where<'_>, words: &[String]) -> Result<(), String> {
              {why}; {NOTHING}"
         )
     };
-    let env =
-        crate::runs::environment(at.daemon, at.place, at.repository, false).map_err(unknown)?;
+    let env = crate::runs::environment(at.daemon, at.place, at.repository).map_err(unknown)?;
     let commons = common_dirs(at.place, &env).await;
     for git in gits {
         // What makes the gate unsure of the repository git commits in: refused for a commit, and

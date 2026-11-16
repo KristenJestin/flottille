@@ -514,20 +514,10 @@ pending requests.
     "The gaps");
   - no `DBUS_SESSION_BUS_ADDRESS`: the session bus leads to the keyring (`docs/vault.md`, "The
     runtime folder", which also says how the runtime folder itself is denied);
-  - no `SSH_AUTH_SOCK`, unless the run is itself a `git push` (its own line, no wrapper) the user,
-    the judge or Full mode let through: it, and the dry run made for its checks, are lent the
-    user's SSH agent, the socket the daemon's own environment named at its start and only it,
-    through the `git` and the `ssh` the daemon found then, over SSH alone (`docs/vault.md`, "The
-    runtime folder"). Such a push to an HTTP(S) URL is refused before it runs, saying to give the
-    remote an SSH push URL (`git remote set-url --push`) or to push by hand: nothing else signs it
-    in. Such a push with a global option on its line but `-C` into its own repository's folder,
-    `--no-pager`, `-P`, `--no-advice` and `--no-optional-locks` (a setting, `--exec-path`,
-    `--git-dir`, `--work-tree`…) is refused in every mode, as is one with `--signed` or
-    `--recurse-submodules`, and one whose dry run goes to a URL its remote was not checked to
-    lead to or forces or deletes a ref its line does not say;
+  - no `SSH_AUTH_SOCK`, and from Landlock's ninth ABI no connecting to the user's SSH agent's
+    socket, wherever it is (`docs/vault.md`, "The runtime folder");
   - no push: `url./dev/null/flottille-refused-push/.pushInsteadOf` set the same way, which
-    rewrites every push URL to a path that is no remote, unless the run is itself a `git push`
-    (its own line, no wrapper) the user or the judge let through;
+    rewrites every push URL to a path that is no remote;
   - `FLOTTILLE_RUN` set to the run's id (to `address` for the line that prints a run's address),
     the marker a daemon started after a crash finds what the run left by ("Runs are records").
 - **A run may open windows on the user's screen** when its project says so: the setting *Agents may
@@ -576,7 +566,12 @@ pending requests.
   are the user's to skip, not the agent's. The hooks of the repository are never run.
 - **A push is the gate's**: `git push` is a call to judge, a forced one base, and only the push
   the gate read and let through goes out. A harmless command (a task, a test run)
-  cannot push from a script the gate never read. A push from a workspace is also refused, before
+  cannot push from a script the gate never read. A run that is itself a `git push` (its own
+  line, no wrapper) the user, the judge, a rule or Full mode let through does not get the
+  environment above: it runs outside the sandbox (no Landlock), with the daemon's own
+  environment and `core.hooksPath=/dev/null`, and none of the place's variables, as if the user
+  had typed it (`docs/commands.md`, "The environment"). Its task's `ready` and `url` commands
+  still run in the sandbox. A push from a workspace is also refused, before
   git runs, when a repository's remote no longer leads where it did when the workspace was made
   (`docs/commands.md`, "Where the remote leads").
 - **A stop ends the run's session, not every descendant.** A run starts in a session of its own

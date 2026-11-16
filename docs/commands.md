@@ -151,11 +151,18 @@ composer, lists the project's commands, filtered as the user types; picking one 
 into `/name `, for the user to add what it is about, and Enter sends it. The commands are edited in
 the project's Settings, section Commands.
 
-**The environment.** An agent's runs get their environment without forge tokens: a push goes with
-the user's own git credentials (an SSH key, a credential helper that needs no forge command line).
-`git push` is a call to judge, and a forced one (even with a lease) is base. Every other run has
-its pushes walled (`url.<nowhere>.pushInsteadOf`): only a run that is itself a `git push` the user
-or the judge let through goes out, so a script cannot push behind the gate (`docs/tools.md`).
+**The environment.** An agent's runs get their environment without forge tokens, forge sign-in,
+SSH agent nor session bus, and with their pushes walled (`url.<nowhere>.pushInsteadOf`), so a
+script cannot push behind the gate (`docs/tools.md`). `git push` is a call to judge, and a forced
+one (even with a lease) is base. The gate judges; once a push goes, it runs as if the user had
+typed it: a run that is itself a `git push` (its own line, no wrapper) the user, the judge, a rule
+or Full mode let through runs **outside the sandbox**, with no Landlock and the daemon's own
+environment, in the run's folder. It signs in the way the user's git does, whatever the remote
+(HTTPS or SSH) and the forge: their credential helper (`gh auth git-credential`, `libsecret`, Git
+Credential Manager), keyring or SSH agent. One thing is kept: no hook (below). The project's and
+the workspace's variables are not applied to it: they are a file a run may write, and one of them
+(`GIT_CONFIG_PARAMETERS`) would undo the hooks setting. The dry run the project's commit checks
+read before a push runs the same way.
 
 **No hook.** Every line an agent runs gets `core.hooksPath=/dev/null`, given through
 `GIT_CONFIG_COUNT` in its environment so that the agent's line is unchanged: the hooks are files of
