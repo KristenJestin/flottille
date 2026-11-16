@@ -2616,7 +2616,18 @@ async fn remove_held(
         }
     }
 
-    let event = Value::Object(about(workspace));
+    // Whether a forge could say its outcome, kept with its removal: taken away later, it does
+    // not make a failed task one of unknown outcome (`docs/usage.md`).
+    let forge = crate::projects::load_project(daemon, &workspace.project).is_ok_and(|project| {
+        project.repositories.iter().any(|repository| {
+            repository.forge.is_some()
+                && workspace
+                    .repositories
+                    .iter()
+                    .any(|worktree| worktree.path == repository.path)
+        })
+    });
+    let event = with(about(workspace), json!({"forge": forge}));
     match moving {
         None => daemon.write(|store| {
             store
