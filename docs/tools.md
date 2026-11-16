@@ -502,10 +502,10 @@ pending requests.
     run outside the gate's sight;
   - no `XDG_RUNTIME_DIR`, which says where the daemon's socket is (a client a run starts is
     refused anyway), and no display (`WAYLAND_DISPLAY`, `DISPLAY`, X11's key `XAUTHORITY`),
-    unless the project lets its runs open windows (below); Landlock keeps X11's sockets out of
-    reach too where the kernel allows it (`docs/vault.md`, "The runtime folder" and "The gaps":
-    by their path from its ninth ABI, by their abstract name from its sixth; below, a run that
-    sets `DISPLAY` itself may still reach X11);
+    unless the project lets its runs open windows (below); Landlock keeps X11's abstract
+    sockets out of reach too from its sixth ABI, but not its sockets by their path, which a run
+    that names them itself may still reach until #976 (`docs/vault.md`, "The runtime folder" and
+    "The gaps");
   - no `DBUS_SESSION_BUS_ADDRESS`: the session bus leads to the keyring (`docs/vault.md`, "The
     runtime folder", which also says how the runtime folder itself is denied);
   - no push: `url./dev/null/flottille-refused-push/.pushInsteadOf` set the same way, which
@@ -523,8 +523,9 @@ pending requests.
   `WAYLAND_DISPLAY` names the socket: no session bus, no keyring, no other socket, and Landlock
   still keeps the real runtime folder out of reach. X11's `DISPLAY` (with `XAUTHORITY`) is given
   only when the session has no Wayland, which the setting's help says: an X11 client can read the
-  keys typed in other windows and type into them; Landlock then leaves X11's sockets within the
-  run's reach, which it keeps from every other run where the kernel allows it (above). On a wlroots
+  keys typed in other windows and type into them; Landlock then leaves every abstract socket of
+  the session within the run's reach, X11's and a session bus `dbus-launch` put on one alike,
+  which it keeps from every other run where the kernel allows it (above). On a wlroots
   compositor (Hyprland, Sway…) a Wayland client may also get the virtual keyboard and pointer
   protocols, and so type into other windows. When the folder cannot be made (the socket cannot be
   linked), the run has no display, never the real folder, and the daemon's log says why. The gate
