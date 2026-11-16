@@ -186,9 +186,13 @@ pub fn says(
     )])
 }
 
-/// The vault entry the project's tracker names: its name and its account. Seen by the project, or
-/// the refusal that says it is not.
-pub(super) fn entry_of(daemon: &Daemon, project: &Project) -> Result<(String, String), String> {
+/// The vault entry the project's tracker names: its name, its account and the moment it was last
+/// set (read together, so that a secret read after it is not of a later entry). Seen by the
+/// project, or the refusal that says it is not.
+pub(super) fn entry_of(
+    daemon: &Daemon,
+    project: &Project,
+) -> Result<(String, String, u64), String> {
     let Some(ProjectTracker::Jira {
         worklog_token: Some(name),
         ..
@@ -228,7 +232,7 @@ pub(super) fn entry_of(daemon: &Daemon, project: &Project) -> Result<(String, St
         .map(str::trim)
         .filter(|u| !u.is_empty())
     {
-        Some(account) => Ok((name.clone(), account.to_owned())),
+        Some(account) => Ok((name.clone(), account.to_owned(), entry.updated_at)),
         None => Err(format!(
             "refused: the vault entry {name} has no username, and Jira's API takes the account's \
              e-mail with the token: the user sets it again in Settings, Vault (or with --username)"
@@ -272,7 +276,7 @@ pub async fn log_time(
         }
     };
     let (name, account) = match entry_of(daemon, project) {
-        Ok(entry) => entry,
+        Ok((name, account, _)) => (name, account),
         Err(why) => return Outcome::Refused(why + nothing),
     };
     let secret = match vault::secret(

@@ -202,7 +202,7 @@ pub async fn worklogs(daemon: &Daemon, project: &Project, asked: &TicketsCall) -
     if worklog_token.is_none() {
         return Outcome::Refused(no_entry());
     }
-    let (name, email) = match entry_of(daemon, project) {
+    let (name, email, stamp) = match entry_of(daemon, project) {
         Ok(entry) => entry,
         Err(why) => return Outcome::Refused(why),
     };
@@ -225,7 +225,17 @@ pub async fn worklogs(daemon: &Daemon, project: &Project, asked: &TicketsCall) -
         secrets: [secret, credentials, authorization.clone()],
         authorization,
     };
-    match read(daemon, project, &jira, &name, (from, to), ticket, asked).await {
+    match read(
+        daemon,
+        project,
+        &jira,
+        (&name, stamp),
+        (from, to),
+        ticket,
+        asked,
+    )
+    .await
+    {
         Ok(text) => Outcome::Done(text),
         Err(Outcome::Failed(why)) => {
             Outcome::Failed(format!("the worklogs could not be read: {why}"))
@@ -236,10 +246,9 @@ pub async fn worklogs(daemon: &Daemon, project: &Project, asked: &TicketsCall) -
 
 /// Whose worklogs are read: the account, and how the answer names it.
 async fn account(
-    daemon: &Daemon,
     project: &Project,
     jira: &Site<'_>,
-    entry: &str,
+    (entry, stamp): (&str, u64),
     asked: &TicketsCall,
 ) -> Result<(String, String), Outcome> {
     let failed = |why: String| Outcome::Failed(why);
@@ -254,12 +263,6 @@ async fn account(
             .await
             .map_err(Outcome::Refused),
         None => {
-            let stamp = daemon
-                .read(|store| store.vault_entries())
-                .map_err(|error| failed(error.to_string()))?
-                .iter()
-                .find(|e| e.name == entry)
-                .map_or(0, |e| e.updated_at);
             let key = (
                 project.name.clone(),
                 entry.to_owned(),
@@ -296,13 +299,13 @@ async fn read(
     daemon: &Daemon,
     project: &Project,
     jira: &Site<'_>,
-    entry: &str,
+    entry: (&str, u64),
     (from, to): (Date, Date),
     ticket: Option<flottille_core::ticket::Key>,
     asked: &TicketsCall,
 ) -> Result<String, Outcome> {
     let failed = Outcome::Failed;
-    let (account, mut whose) = account(daemon, project, jira, entry, asked).await?;
+    let (account, mut whose) = account(project, jira, entry, asked).await?;
     let zone = TimeZone::system();
     let mut notes = Vec::new();
 
@@ -328,11 +331,18 @@ async fn read(
                     .join(", "),
                 _ => String::new(),
             };
+            // Jira reads the days of a JQL in the zone of the account's profile, which may not be
+            // the machine's: a day of margin on each side, and the exact cut is the local one
+            // below. Zones more than 24 hours apart are not covered.
+            let (before, after) = (
+                from.yesterday().unwrap_or(from),
+                to.tomorrow().unwrap_or(to),
+            );
             let jql = format!(
                 "project in ({projects}) AND worklogDate >= {} AND worklogDate <= {} AND \
                  worklogAuthor = {} ORDER BY key ASC",
-                jql_quoted(&from.to_string()),
-                jql_quoted(&to.to_string()),
+                jql_quoted(&before.to_string()),
+                jql_quoted(&after.to_string()),
                 jql_quoted(&account)
             );
             let max = SEARCHED.to_string();
@@ -366,6 +376,15 @@ async fn read(
 
     // Each item's worklogs, paged as the site pages them, kept those of the account and started
     // inside the range in the user's time zone.
+    // The site is asked for the range only, a day of margin each side (as the search is), so that
+    // the worklogs of every other day and person are not all read; the cut below stays exact.
+    let day_ms = 24 * 3600 * 1000;
+    let edge = |day: Date| {
+        day.to_zoned(zone.clone())
+            .map_or(0, |zoned| zoned.timestamp().as_millisecond())
+    };
+    let asked_after = (edge(from) - day_ms).to_string();
+    let asked_before = (edge(to.tomorrow().unwrap_or(to)) + day_ms).to_string();
     let mut days: BTreeMap<Date, Vec<Entry>> = BTreeMap::new();
     let mut name_seen = None;
     for (key, title) in &items {
@@ -381,7 +400,12 @@ async fn read(
             let answer = jira
                 .get(
                     &format!("issue/{key}/worklog"),
-                    &[("startAt", &at), ("maxResults", "100")],
+                    &[
+                        ("startAt", &at),
+                        ("maxResults", "100"),
+                        ("startedAfter", &asked_after),
+                        ("startedBefore", &asked_before),
+                    ],
                 )
                 .await
                 .map_err(failed)?;
