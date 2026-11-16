@@ -2222,7 +2222,7 @@ async fn add_if(
         )));
     }
     if let Some(number) = request {
-        requests::answerable(daemon, number, "add", None, &declaration)?;
+        requests::answerable(daemon, number, "add", &name)?;
     }
     let new = table_of(&declaration)?;
     let mut claimed = None;
@@ -2231,6 +2231,7 @@ async fn add_if(
         // that decided it first is the one that writes, and this Save writes nothing.
         still()?;
         if let Some(number) = request {
+            requests::saved_checked(daemon, None, &declaration)?;
             claimed = Some(requests::claimed(daemon, number)?);
         }
         servers(table)?.push(new);
@@ -2338,10 +2339,10 @@ async fn edit_if(
     let (params, request) = requests::taken(params)?;
     let name = named(&params)?;
     let old = declaration(&daemon.paths, &name)?;
-    let new = edited(&old, &params)?;
     if let Some(number) = request {
-        requests::answerable(daemon, number, "edit", Some(&old), &new)?;
+        requests::answerable(daemon, number, "edit", &name)?;
     }
+    let new = edited(&old, &params)?;
     entries_checked(daemon, &new)?;
     let written = table_of(&new)?;
     let mut claimed = None;
@@ -2358,6 +2359,7 @@ async fn edit_if(
         still()?;
         // Decided under the file's lock, as an add's.
         if let Some(number) = request {
+            requests::saved_checked(daemon, Some(&old), &new)?;
             claimed = Some(requests::claimed(daemon, number)?);
         }
         *servers.get_mut(at).expect("found") = written;

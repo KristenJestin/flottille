@@ -917,17 +917,13 @@ pub(super) fn taken(mut params: Value) -> Result<(Value, Option<u64>), Failure> 
 }
 
 /// Refuses a request the user's own Save cannot answer: another tool's, another action's, an
-/// edit of another connection, or one already decided. A Save that answers one writes the
-/// agent's secret lines it keeps: it waits for their entries and checks their hosts as Accept
-/// would, else Edit then Save would send a token to a host its entry is not bound to.
+/// edit of another connection, or one already decided.
 pub(super) fn answerable(
     daemon: &Daemon,
     number: u64,
     action: &str,
-    before: Option<&Declaration>,
-    after: &Declaration,
+    name: &str,
 ) -> Result<(), Failure> {
-    let name = after.name.as_str();
     let request = daemon
         .read(|store| store.request(number))?
         .ok_or_else(|| Failure::new("not-found", format!("there is no request #{number}")))?;
@@ -947,8 +943,26 @@ pub(super) fn answerable(
             request.state.as_str()
         )));
     }
-    if let Some(why) = waits(daemon, &request.arguments) {
-        return Err(Failure::refused(why));
+    Ok(())
+}
+
+/// What the user's Save that answers a request writes (`after`, over `before`) is held to
+/// Accept's rules for secrets, checked under the file's lock: it waits for every entry it names,
+/// and a line new to the connection goes only to its entry's own host. Else Edit then Save would
+/// write a token's line for a host its entry, made later, is not bound to.
+pub(super) fn saved_checked(
+    daemon: &Daemon,
+    before: Option<&Declaration>,
+    after: &Declaration,
+) -> Result<(), Failure> {
+    let missing = missing(daemon, after);
+    if !missing.is_empty() {
+        return Err(Failure::refused(format!(
+            "Save waits for the vault entr{} {}: save {} in the vault, then save",
+            if missing.len() == 1 { "y" } else { "ies" },
+            missing.join(", "),
+            if missing.len() == 1 { "it" } else { "them" },
+        )));
     }
     headers_checked(daemon, before, after).map_err(Failure::refused)
 }
