@@ -49,9 +49,10 @@ fn socket_at(user: &User, agent: &str) -> PathBuf {
 /// socket its `SSH_AUTH_SOCK` names (`reached <path>`, `refused <path>`, `no agent`), then whether
 /// it reached the session bus (`bus reached`, `bus refused`) and could list the runtime folder
 /// (`listed`, `not listed`), its arguments (`args …`), the `SHELL` and `PATH` it runs its config's
-/// commands with (`shell=…`, `path=…`) and the settings the push sets (`PUSHED`), and serves git's
-/// own call from `remotes/<name>`, whatever the host. Its folder is the one a test build of the
-/// daemon takes programs from though the user can write it (`FLOTTILLE_TEST_TRUSTED_PROGRAMS`).
+/// commands with (`shell=…`, `path=…`) and the settings the push sets (`PUSHED`), runs
+/// `SSH_ASKPASS` when `SSH_ASKPASS_REQUIRE` is `force` (as ssh would), and serves git's own call
+/// from `remotes/<name>`, whatever the host. Its folder is the one a test build of the daemon
+/// takes programs from though the user can write it (`FLOTTILLE_TEST_TRUSTED_PROGRAMS`).
 fn fake_ssh(user: User) -> User {
     std::fs::create_dir(user.path("ssh-bin")).unwrap();
     let said = user.path("ssh-said");
@@ -70,6 +71,7 @@ fn fake_ssh(user: User) -> User {
          echo \"shell=$SHELL\" >> '{said}'\n\
          echo \"path=$PATH\" >> '{said}'\n\
          python3 '{pushed}' >> '{said}'\n\
+         if [ \"$SSH_ASKPASS_REQUIRE\" = force ] && [ -n \"$SSH_ASKPASS\" ]; then \"$SSH_ASKPASS\" passphrase; fi\n\
          for last; do :; done\n\
          service=${{last%% *}}\n\
          repository=$(basename \"$(echo \"${{last#* }}\" | tr -d \"'\")\")\n\
@@ -1042,4 +1044,53 @@ fn a_lent_push_refuses_a_pushurl_it_did_not_check() {
         "{:?}",
         ssh_said(&user)
     );
+}
+
+#[test]
+fn a_lent_push_ignores_the_project_variables_that_change_git_or_the_loader() {
+    let (user, _agent, _bus) = user();
+    let mcp = session(&user, SSH_REMOTE);
+    let planted = user.path("planted");
+    let plant = |name: &str| format!("echo {name} >> '{}'\nexit 1\n", planted.display());
+    // Programs an agent could write, and the project's variables (a file it could write too)
+    // that would run them in the next push the gate lets through.
+    script(&user.path("hooks/pre-push"), &plant("hook"));
+    script(&user.path("exec/git"), &plant("git"));
+    script(&user.path("askpass"), &plant("askpass"));
+    let file = user.project_file("app");
+    let mut text = std::fs::read_to_string(&file).unwrap();
+    text.push_str(&format!(
+        "\n[variables]\nGIT_CONFIG_PARAMETERS = \"'core.hookspath'='{hooks}'\"\n\
+         GIT_EXEC_PATH = \"{exec}\"\nLD_PRELOAD = \"{preload}\"\n\
+         SSH_ASKPASS = \"{askpass}\"\nSSH_ASKPASS_REQUIRE = \"force\"\n",
+        hooks = user.path("hooks").display(),
+        exec = user.path("exec").display(),
+        preload = user.path("preload.so").display(),
+        askpass = user.path("askpass").display(),
+    ));
+    std::fs::write(&file, text).unwrap();
+    // An agent's place, its variables with it, is read when it starts.
+    drop(mcp);
+    let opened = user.received_requests("session/new").len();
+    user.call(
+        "agent.run",
+        json!({"project": "app", "message": "push the work, then stop"}),
+    )
+    .unwrap();
+    let (url, authorization) = server_of(&user, opened);
+    let mcp = Mcp::initialize(&url, &authorization);
+
+    let pushed = done(mcp.call(
+        "run",
+        json!({"line": "git push origin HEAD:refs/heads/allowed"}),
+    ));
+
+    assert!(pushed.contains("exited with code 0"), "{pushed}");
+    assert!(remote_has(&user, "allowed"));
+    let ran = std::fs::read_to_string(&planted).unwrap_or_default();
+    assert!(ran.is_empty(), "planted programs ran: {ran:?}");
+    // The loader says so of each program a missing `LD_PRELOAD` was given to.
+    assert!(!pushed.contains("preload.so"), "{pushed}");
+    let reached = format!("reached {}", socket(&user).display());
+    assert!(ssh_said(&user).contains(&reached), "{:?}", ssh_said(&user));
 }
