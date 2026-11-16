@@ -1,0 +1,10 @@
+[package]
+name = "flottille-fake-cargo"
+description = "A `cargo` that prints a recorded output, for the tests of the filters of a command's output"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]

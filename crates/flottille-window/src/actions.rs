@@ -171,6 +171,11 @@ pub enum Command {
     UnchangedSet {
         unchanged: bool,
     },
+    /// Chooses whether the output of a command is filtered before the agent reads it
+    /// (`tool_results.set`).
+    FiltersSet {
+        filters: bool,
+    },
     /// After how many days an inactive session is ended (`sessions.show`).
     SessionsRead,
     /// Chooses it (`sessions.set`): `None` is off.
@@ -970,7 +975,7 @@ pub enum Outcome {
     /// unchanged, after a read (`written` false) or a choice.
     ToolResults {
         written: bool,
-        shown: Result<(Option<usize>, bool), String>,
+        shown: Result<(Option<usize>, bool, bool), String>,
     },
     /// After how many days an inactive session is ended as the daemon says it (`None` is off),
     /// and whether a session is resumed at its quota's reset, after a read (`written` none) or a
@@ -1629,7 +1634,8 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
         }
         Command::ToolResultsRead
         | Command::ToolResultsSet { .. }
-        | Command::UnchangedSet { .. } => {
+        | Command::UnchangedSet { .. }
+        | Command::FiltersSet { .. } => {
             let (method, params, written) = match command {
                 Command::ToolResultsSet { limit } => (
                     "tool_results.set",
@@ -1639,12 +1645,16 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
                 Command::UnchangedSet { unchanged } => {
                     ("tool_results.set", json!({"unchanged": unchanged}), true)
                 }
+                Command::FiltersSet { filters } => {
+                    ("tool_results.set", json!({"filters": filters}), true)
+                }
                 _ => ("tool_results.show", json!({}), false),
             };
             let shown = answer(ask_alone(connect, method, params, bounds.quick)).map(|shown| {
                 (
                     shown["limit"].as_u64().map(|limit| limit as usize),
                     shown["unchanged"] == true,
+                    shown["filters"] != false,
                 )
             });
             Outcome::ToolResults { written, shown }

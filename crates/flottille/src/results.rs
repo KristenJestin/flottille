@@ -4,7 +4,9 @@
 //! and the id of the cut. No model is involved. The limit is `tool-results.toml` of Flottille's
 //! configuration folder, read at every call so that a change applies at once
 //! (`docs/protocol.md`, "The tool results methods"). The same file says whether `fs_read` answers
-//! "unchanged" for a page the session already read (`unchanged`, off unless it says `true`).
+//! "unchanged" for a page the session already read (`unchanged`, off unless it says `true`), and
+//! whether the output of a command is filtered before the agent reads it (`filters`, on unless it
+//! says `false`).
 
 use std::path::PathBuf;
 
@@ -49,6 +51,8 @@ struct Settings {
     limit: Option<usize>,
     /// Whether `fs_read` says a page is unchanged instead of sending it again.
     unchanged: bool,
+    /// Whether the output of a command is filtered (`docs/tools.md`, "Filtered command output").
+    filters: bool,
 }
 
 /// What `tool-results.toml` says; the defaults when there is no file.
@@ -56,6 +60,7 @@ fn read(paths: &Paths) -> Result<Settings, String> {
     let mut settings = Settings {
         limit: Some(DEFAULT_LIMIT),
         unchanged: false,
+        filters: true,
     };
     let text = match std::fs::read_to_string(config(paths)) {
         Ok(text) => text,
@@ -66,7 +71,7 @@ fn read(paths: &Paths) -> Result<Settings, String> {
         .parse()
         .map_err(|e: toml_edit::TomlError| format!("tool-results.toml: {}", e.message()))?;
     for (key, _) in document.iter() {
-        if key != "limit" && key != "unchanged" {
+        if !["limit", "unchanged", "filters"].contains(&key) {
             return Err(format!("tool-results.toml: unknown key `{key}`"));
         }
     }
@@ -89,6 +94,11 @@ fn read(paths: &Paths) -> Result<Settings, String> {
             .as_bool()
             .ok_or("tool-results.toml: unchanged is true or false")?;
     }
+    if let Some(item) = document.get("filters") {
+        settings.filters = item
+            .as_bool()
+            .ok_or("tool-results.toml: filters is true or false")?;
+    }
     Ok(settings)
 }
 
@@ -102,6 +112,12 @@ fn limit(paths: &Paths) -> Option<usize> {
 /// (#547 records the cost of a turn): a file that cannot be read is the default's.
 pub fn says_unchanged(paths: &Paths) -> bool {
     read(paths).is_ok_and(|settings| settings.unchanged)
+}
+
+/// Whether the output of a command is filtered now. On by default: a file that cannot be read is
+/// the default's.
+pub fn filters_on(paths: &Paths) -> bool {
+    read(paths).map_or(true, |settings| settings.filters)
 }
 
 /// How many bytes of text a result may hold now and still go to the agent whole: a tool that
@@ -120,12 +136,17 @@ pub fn call(daemon: &Daemon, method: &str, params: Value) -> Result<Value, Failu
             let mut wanted = read(paths).unwrap_or(Settings {
                 limit: Some(DEFAULT_LIMIT),
                 unchanged: false,
+                filters: true,
             });
-            let (limit, unchanged) = (params.get("limit"), params.get("unchanged"));
-            if limit.is_none() && unchanged.is_none() {
+            let (limit, unchanged, filters) = (
+                params.get("limit"),
+                params.get("unchanged"),
+                params.get("filters"),
+            );
+            if limit.is_none() && unchanged.is_none() && filters.is_none() {
                 return Err(Failure::new(
                     "invalid-params",
-                    "give a limit, unchanged, or both",
+                    "give a limit, unchanged, filters, or several",
                 ));
             }
             match limit {
@@ -154,6 +175,13 @@ pub fn call(daemon: &Daemon, method: &str, params: Value) -> Result<Value, Failu
                     return Err(Failure::new("invalid-params", "unchanged is true or false"));
                 }
             }
+            match filters {
+                None => {}
+                Some(Value::Bool(on)) => wanted.filters = *on,
+                _ => {
+                    return Err(Failure::new("invalid-params", "filters is true or false"));
+                }
+            }
             std::fs::create_dir_all(&paths.config).map_err(|e| {
                 Failure::new("unavailable", format!("{}: {e}", paths.config.display()))
             })?;
@@ -163,6 +191,9 @@ pub fn call(daemon: &Daemon, method: &str, params: Value) -> Result<Value, Failu
             };
             if wanted.unchanged {
                 text.push_str("unchanged = true\n");
+            }
+            if !wanted.filters {
+                text.push_str("filters = false\n");
             }
             providers::write_in_place(&config(paths), &text)
                 .map_err(|e| Failure::new("unavailable", format!("tool-results.toml: {e}")))?;
@@ -189,7 +220,7 @@ fn said(settings: &Settings) -> Value {
         Some(limit) => json!(limit),
         None => json!("off"),
     };
-    json!({"limit": limit, "unchanged": settings.unchanged})
+    json!({"limit": limit, "unchanged": settings.unchanged, "filters": settings.filters})
 }
 
 /// A result that was cut: what its call is recorded with.

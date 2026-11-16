@@ -1,0 +1,42 @@
+# `git fetch`, `clone`, `pull` and `push`: the progress of the transfer goes; the refs it moved,
+# the remote's messages and every error stay.
+name = "git-transfer"
+program = "git"
+args = ["fetch", "clone", "pull", "push"]
+drop = [
+  '^(remote: )?(Enumerating|Counting|Compressing|Writing|Receiving|Resolving|Unpacking|Total) ',
+  '^Delta compression ',
+]
+
+[[tests]]
+name = "a push keeps the ref it moved"
+input = """
+Enumerating objects: 9, done.
+Counting objects: 100% (9/9), done.
+Delta compression using up to 8 threads
+Compressing objects: 100% (4/4), done.
+Writing objects: 100% (5/5), 612 bytes | 612.00 KiB/s, done.
+Total 5 (delta 2), reused 0 (delta 0), pack-reused 0
+remote: Resolving deltas: 100% (2/2), completed with 2 local objects.
+To github.com:acme/app.git
+   1a2b3c4..5d6e7f8  feat/login -> feat/login
+"""
+expected = """
+To github.com:acme/app.git
+   1a2b3c4..5d6e7f8  feat/login -> feat/login"""
+removed = 7
+
+[[tests]]
+name = "a clone keeps where it cloned and a refusal"
+input = """
+Cloning into 'app'...
+remote: Enumerating objects: 120, done.
+remote: Counting objects: 100% (120/120), done.
+Receiving objects: 100% (120/120), 48.00 KiB | 2.40 MiB/s, done.
+Resolving deltas: 100% (40/40), done.
+warning: remote HEAD refers to nonexistent ref, unable to checkout
+"""
+expected = """
+Cloning into 'app'...
+warning: remote HEAD refers to nonexistent ref, unable to checkout"""
+removed = 4

@@ -230,6 +230,11 @@ const TOOL_RESULTS_SENTENCE: &str = "A longer result reaches the agent as its st
 pub const UNCHANGED_HINT: &str = "A file the agent already read and that has not changed \
      since is answered in one line, unless the session was compacted.";
 
+/// What the switch that filters the output of commands does, under its label.
+pub const FILTERS_HINT: &str = "The progress a command prints for a person (compiler lines, \
+     downloads, passing tests) is left out of what the agent reads; every line that says an \
+     error, a warning or a place stays, and the agent can read the whole output.";
+
 /// The days the Sessions select offers. The daemon takes any number from 1 to 90
 /// (`docs/protocol.md`): a file edited by hand keeps its own, shown as one more option.
 pub const DAYS: [u64; 7] = [1, 3, 7, 14, 30, 60, 90];
@@ -292,6 +297,10 @@ pub struct SettingsPage {
     /// asked it to become while the daemon has not answered.
     unchanged: Option<bool>,
     unchanged_pending: Option<bool>,
+    /// Whether the output of a command is filtered before the agent reads it, as the daemon last
+    /// said it, and what the user asked it to become while the daemon has not answered.
+    filters: Option<bool>,
+    filters_pending: Option<bool>,
     /// After how many days an inactive session is ended, once the daemon said it (`Some(None)` is
     /// off).
     sessions: Option<Option<u64>>,
@@ -392,6 +401,8 @@ impl SettingsPage {
             tool_results_pending: None,
             unchanged: None,
             unchanged_pending: None,
+            filters: None,
+            filters_pending: None,
             sessions: None,
             sessions_pending: None,
             resume: None,
@@ -1300,8 +1311,32 @@ impl SettingsPage {
         self.unchanged
     }
 
+    /// Whether the daemon last said the output of commands is filtered (`None` before it said),
+    /// whatever was asked since.
+    pub fn filters_said(&self) -> Option<bool> {
+        self.filters
+    }
+
     fn asked_tool_results(&self) -> bool {
-        self.tool_results_pending.is_some() || self.unchanged_pending.is_some()
+        self.tool_results_pending.is_some()
+            || self.unchanged_pending.is_some()
+            || self.filters_pending.is_some()
+    }
+
+    fn choose_filters(&mut self, cx: &mut Context<Self>) {
+        let Some(filters) = self.filters else {
+            return;
+        };
+        if self.asked_tool_results() {
+            return;
+        }
+        self.filters_pending = Some(!filters);
+        self.shell
+            .update(cx, |shell, _| {
+                shell.perform(Command::FiltersSet { filters: !filters })
+            })
+            .ok();
+        cx.notify();
     }
 
     fn choose_unchanged(&mut self, cx: &mut Context<Self>) {
@@ -1339,23 +1374,28 @@ impl SettingsPage {
     /// why.
     pub fn tool_results_answered(
         &mut self,
-        shown: Result<(Option<usize>, bool), String>,
+        shown: Result<(Option<usize>, bool, bool), String>,
         written: bool,
         cx: &mut Context<Self>,
     ) {
         let asked_unchanged = self.unchanged_pending.is_some();
+        let asked_filters = self.filters_pending.is_some();
         if written {
             self.tool_results_pending = None;
             self.unchanged_pending = None;
+            self.filters_pending = None;
         }
         match shown {
-            Ok((limit, unchanged)) => {
+            Ok((limit, unchanged, filters)) => {
                 self.tool_results = Some(limit);
                 self.unchanged = Some(unchanged);
+                self.filters = Some(filters);
             }
             Err(why) if written => toast(
                 Toast::failure(if asked_unchanged {
                     "The switch for unchanged files was not kept"
+                } else if asked_filters {
+                    "The switch for filtering command output was not kept"
                 } else {
                     "The limit of tool results was not kept"
                 })
@@ -1412,6 +1452,23 @@ impl SettingsPage {
             .border_color(p.line)
             .child(unchanged)
             .test_support();
+        let filters = Switch::new(
+            "tool-results-filters-switch",
+            self.filters_pending.or(self.filters).unwrap_or(true),
+            "Filter command output",
+        )
+        .hint(FILTERS_HINT)
+        .disabled(self.filters.is_none() || self.asked_tool_results())
+        .on_click(cx.listener(|this, _, _, cx| this.choose_filters(cx)));
+        let filters_card = div()
+            .id("tool-results-filters")
+            .p(space::LG)
+            .rounded(px(12.))
+            .bg(p.card)
+            .border_1()
+            .border_color(p.line)
+            .child(filters)
+            .test_support();
         Section::new("tool-results", "Long tool results")
             .sentence(TOOL_RESULTS_SENTENCE)
             .child(
@@ -1420,7 +1477,8 @@ impl SettingsPage {
                     .flex_col()
                     .gap(space::MD)
                     .child(Field::new("tool-results-field", "Cut above", select))
-                    .child(unchanged_card),
+                    .child(unchanged_card)
+                    .child(filters_card),
             )
     }
 
@@ -2398,13 +2456,14 @@ pub(crate) fn grouped(n: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        COMPACTION_HINT, COMPACTION_LINE, COMPACTION_USAGE, COMPACTOR_COST, TOOL_RESULTS_SENTENCE,
-        UNCHANGED_HINT, grouped,
+        COMPACTION_HINT, COMPACTION_LINE, COMPACTION_USAGE, COMPACTOR_COST, FILTERS_HINT,
+        TOOL_RESULTS_SENTENCE, UNCHANGED_HINT, grouped,
     };
 
     #[test]
     fn the_sentence_of_the_tool_results_section_has_no_run_of_spaces() {
         assert!(!UNCHANGED_HINT.contains("  "), "{UNCHANGED_HINT}");
+        assert!(!FILTERS_HINT.contains("  "), "{FILTERS_HINT}");
         assert!(
             !TOOL_RESULTS_SENTENCE.contains("  "),
             "{TOOL_RESULTS_SENTENCE}"

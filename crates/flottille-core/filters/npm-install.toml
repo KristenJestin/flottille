@@ -1,0 +1,28 @@
+# `npm install`, `ci` and `add`: the fetches and the timings go; the deprecation notices, the
+# count of packages and the audit stay.
+name = "npm-install"
+program = "npm"
+args = ["install", "i", "ci", "add"]
+drop = [
+  '^npm (http|sill|timing|verb) ',
+]
+
+[[tests]]
+name = "the fetches go and the summary stays"
+input = """
+npm http fetch GET 200 https://registry.npmjs.org/left-pad 41ms (cache miss)
+npm http fetch GET 200 https://registry.npmjs.org/is-odd 12ms (cache hit)
+npm timing reify:unpack Completed in 301ms
+npm warn deprecated left-pad@1.3.0: use String.prototype.padStart()
+
+added 2 packages, and audited 3 packages in 2s
+
+found 0 vulnerabilities
+"""
+expected = """
+npm warn deprecated left-pad@1.3.0: use String.prototype.padStart()
+
+added 2 packages, and audited 3 packages in 2s
+
+found 0 vulnerabilities"""
+removed = 3

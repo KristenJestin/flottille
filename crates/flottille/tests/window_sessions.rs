@@ -28,7 +28,7 @@ fn window<'a>(
     };
     cx.update(|cx| flottille_window::init_with(env, cx));
     let (shell, cx) = cx.add_window_view(|window, cx| Shell::new_polled(connect, window, cx));
-    cx.simulate_resize(size(px(1280.), px(1600.)));
+    cx.simulate_resize(size(px(1280.), px(1800.)));
     (shell, cx)
 }
 

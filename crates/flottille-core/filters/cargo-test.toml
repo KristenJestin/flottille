@@ -1,0 +1,114 @@
+# `cargo test`: the progress of the compiler and each test that passed go; the summary of every
+# binary, each failure and its output stay.
+name = "cargo-test"
+program = "cargo"
+args = ["test", "t"]
+drop = [
+  '^\s*(Compiling|Checking|Downloaded|Downloading|Updating|Locking|Adding|Blocking|Fresh|Documenting|Generated) ',
+  '^test .* \.\.\. ok$',
+  '^\.+$',
+]
+
+[[tests]]
+name = "a run with one failure keeps the failure and the summary"
+input = """
+   Compiling serde v1.0.219
+   Compiling app v0.3.1 (/work/app)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.31s
+     Running unittests src/lib.rs (target/debug/deps/app-3f2a9c1d7b)
+
+running 5 tests
+test parse::reads_a_number ... ok
+test parse::reads_a_sign ... ok
+test parse::rejects_a_letter ... ok
+test total::adds_two_numbers ... FAILED
+test total::adds_nothing ... ok
+
+failures:
+
+---- total::adds_two_numbers stdout ----
+thread 'total::adds_two_numbers' panicked at src/total.rs:18:9:
+assertion `left == right` failed
+  left: 4
+ right: 5
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    total::adds_two_numbers
+
+test result: FAILED. 4 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+error: test failed, to rerun pass `-p app --lib`
+"""
+expected = """
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.31s
+     Running unittests src/lib.rs (target/debug/deps/app-3f2a9c1d7b)
+
+running 5 tests
+test total::adds_two_numbers ... FAILED
+
+failures:
+
+---- total::adds_two_numbers stdout ----
+thread 'total::adds_two_numbers' panicked at src/total.rs:18:9:
+assertion `left == right` failed
+  left: 4
+ right: 5
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    total::adds_two_numbers
+
+test result: FAILED. 4 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+error: test failed, to rerun pass `-p app --lib`"""
+removed = 6
+
+[[tests]]
+name = "a green run keeps the summary"
+input = """
+   Compiling app v0.3.1 (/work/app)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.00s
+     Running unittests src/main.rs (target/debug/deps/app-9d41e0aa55)
+
+running 3 tests
+test one ... ok
+test two ... ok
+test three ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests app
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+"""
+expected = """
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.00s
+     Running unittests src/main.rs (target/debug/deps/app-9d41e0aa55)
+
+running 3 tests
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests app
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"""
+removed = 4
+
+[[tests]]
+name = "a quiet run drops its dots and keeps its summary"
+input = """
+running 12 tests
+............
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+"""
+expected = """
+running 12 tests
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s"""
+removed = 1

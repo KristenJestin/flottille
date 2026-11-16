@@ -515,6 +515,17 @@ fn a_run_in_the_conversation_is_one_compact_line_and_its_output_is_in_the_panel_
     until(&shell, cx, "the line is in the conversation", |cx| {
         card_of(&page, cx).is_some()
     });
+    // What the agent read of the output is filtered, and is never the card's: its lines are the
+    // program's, from the daemon's list, and the first it ever holds already has the bytes.
+    let first_lines = std::cell::RefCell::new(None);
+    until(&shell, cx, "the card holds the program's lines", |cx| {
+        if let Some((_, Block::Command(card))) = card_of(&page, cx)
+            && !card.lines.is_empty()
+        {
+            first_lines.borrow_mut().get_or_insert(card.lines);
+        }
+        first_lines.borrow().is_some()
+    });
     settle(cx);
 
     let (at, Block::Command(card)) = card_of(&page, cx).unwrap() else {
@@ -527,6 +538,10 @@ fn a_run_in_the_conversation_is_one_compact_line_and_its_output_is_in_the_panel_
     assert!(
         card.lines[0].contains('\u{1b}'),
         "the model keeps the bytes"
+    );
+    assert!(
+        first_lines.borrow().as_ref().unwrap()[0].contains('\u{1b}'),
+        "the first output drawn already holds the program's bytes"
     );
     // The line says the command, how it ended and for how long; no output is drawn in the chat.
     assert_eq!(

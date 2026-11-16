@@ -1,0 +1,73 @@
+# `cargo build`, `check`, `clippy` and `doc`: the progress of the compiler goes, its diagnostics
+# stay whole (every line of one says an error, a warning or a place).
+name = "cargo-build"
+program = "cargo"
+args = ["build", "b", "check", "c", "clippy", "doc"]
+drop = [
+  '^\s*(Compiling|Checking|Downloaded|Downloading|Updating|Locking|Adding|Blocking|Fresh|Documenting|Generated|Finished) ',
+]
+on_empty = "cargo: ok"
+
+[[tests]]
+name = "a clean build is said in one line"
+input = """
+    Updating crates.io index
+ Downloading crates ...
+  Downloaded serde v1.0.219
+  Downloaded tokio v1.45.0
+   Compiling serde v1.0.219
+   Compiling tokio v1.45.0
+   Compiling app v0.3.1 (/work/app)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 14.20s
+"""
+expected = "cargo: ok"
+removed = 8
+
+[[tests]]
+name = "a warning stays with its place and its code"
+input = """
+   Compiling app v0.3.1 (/work/app)
+warning: unused variable: `count`
+ --> src/main.rs:12:9
+   |
+12 |     let count = 3;
+   |         ^^^^^ help: if this is intentional, prefix it with an underscore: `_count`
+   |
+   = note: `#[warn(unused_variables)]` on by default
+
+warning: `app` (bin "app") generated 1 warning
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.02s
+"""
+expected = """
+warning: unused variable: `count`
+ --> src/main.rs:12:9
+   |
+12 |     let count = 3;
+   |         ^^^^^ help: if this is intentional, prefix it with an underscore: `_count`
+   |
+   = note: `#[warn(unused_variables)]` on by default
+
+warning: `app` (bin "app") generated 1 warning"""
+removed = 2
+
+[[tests]]
+name = "a failed build keeps its error"
+input = """
+   Compiling app v0.3.1 (/work/app)
+error[E0425]: cannot find value `total` in this scope
+ --> src/lib.rs:40:5
+   |
+40 |     total + 1
+   |     ^^^^^ not found in this scope
+
+error: could not compile `app` (lib) due to 1 previous error
+"""
+expected = """
+error[E0425]: cannot find value `total` in this scope
+ --> src/lib.rs:40:5
+   |
+40 |     total + 1
+   |     ^^^^^ not found in this scope
+
+error: could not compile `app` (lib) due to 1 previous error"""
+removed = 1

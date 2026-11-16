@@ -444,7 +444,14 @@ pub async fn run(
             going.notify.store(true, Ordering::SeqCst);
         }
         crate::mcp::started_run(&going.run.id);
-        return Outcome::Done(describe(daemon, &going.run.id, None, None, true, false));
+        return Outcome::Done(describe(
+            daemon,
+            &going.run.id,
+            (None, None),
+            false,
+            true,
+            false,
+        ));
     }
     // The project's checks of a commit's message, then the commit checks of its repository,
     // before git makes it.
@@ -571,7 +578,7 @@ pub async fn run(
     crate::mcp::started_run(&id);
     if serve {
         detach(daemon, &id);
-        let described = describe(daemon, &id, None, None, true, false);
+        let described = describe(daemon, &id, (None, None), false, true, false);
         return Outcome::Done(format!("{services_said}{described}"));
     }
     // Held now: once ended, the run is no longer among those going on.
@@ -586,7 +593,7 @@ pub async fn run(
         }
     }
     let by_user = going.is_some_and(|going| going.stopped_by_user.load(Ordering::SeqCst));
-    let described = describe(daemon, &id, None, None, true, by_user);
+    let described = describe(daemon, &id, (None, None), false, true, by_user);
     Outcome::Done(format!("{services_said}{described}"))
 }
 
@@ -1262,7 +1269,7 @@ async fn follow(
         && told
         && let Some(agent) = &run.agent
     {
-        let body = ended_text(&going, end, &output, by_user, missed);
+        let body = ended_text(&daemon, &going, end, &output, by_user, missed);
         deliveries::deliver(
             &daemon,
             agent,
@@ -1277,7 +1284,14 @@ async fn follow(
 
 /// What the agent is told of a run that ended after its call: how it ended, how long it ran and
 /// the end of its output.
-fn ended_text(going: &Going, end: End, output: &str, by_user: bool, missed: bool) -> String {
+fn ended_text(
+    daemon: &Daemon,
+    going: &Going,
+    end: End,
+    output: &str,
+    by_user: bool,
+    missed: bool,
+) -> String {
     let state = state_text(Some(end), by_user);
     let seconds = (now_ms() - going.run.started_at) as f64 / 1000.0;
     let mut text = format!(
@@ -1287,9 +1301,15 @@ fn ended_text(going: &Going, end: End, output: &str, by_user: bool, missed: bool
     if missed {
         text.push_str(" It ended before it was ready.");
     }
-    let lines = display_lines(output);
+    let (output, removed) = agent_output(daemon, &going.run.line, output, false, Some(end));
+    let lines = display_lines(&output);
     if lines.is_empty() {
-        text.push_str("\nIt wrote nothing.");
+        if removed == 0 {
+            text.push_str("\nIt wrote nothing.");
+        } else {
+            text.push_str("\n(no output left)");
+            text.push_str(&filtered_note(&going.run.id, removed));
+        }
         return text;
     }
     let (from, to) = shown_range(&lines, ENDED_TAIL_LINES, None);
@@ -1301,6 +1321,7 @@ fn ended_text(going: &Going, end: End, output: &str, by_user: bool, missed: bool
         going.run.id,
         lines[from..to].join("\n")
     ));
+    text.push_str(&filtered_note(&going.run.id, removed));
     text
 }
 
@@ -1658,6 +1679,9 @@ struct StatusArguments {
     start: Option<usize>,
     /// notify: what to be told of; only `ready`.
     when: Option<String>,
+    /// output: the lines as the command wrote them, no filter applied.
+    #[serde(default)]
+    raw: bool,
 }
 
 /// `run_status`: the state and the output of a run this agent started, or its stop; with no
@@ -1672,9 +1696,10 @@ pub async fn run_status(daemon: &Daemon, agent: &str, args: Value) -> Outcome {
             || args.tail.is_some()
             || args.start.is_some()
             || args.when.is_some()
+            || args.raw
         {
             return Outcome::Refused(
-                "refused: run_status without run lists your commands: action, tail, start and \
+                "refused: run_status without run lists your commands: action, tail, start, raw and \
                  when go with a run"
                     .into(),
             );
@@ -1683,6 +1708,11 @@ pub async fn run_status(daemon: &Daemon, agent: &str, args: Value) -> Outcome {
     };
     // A cut result's id is read the same way a run's output is, by lines.
     if crate::results::is_id(id) {
+        if args.raw {
+            return Outcome::Refused(format!(
+                "refused: {id} is a cut result, already whole: raw is for the output of a run"
+            ));
+        }
         return crate::results::read_kept(
             daemon,
             agent,
@@ -1708,6 +1738,11 @@ pub async fn run_status(daemon: &Daemon, agent: &str, args: Value) -> Outcome {
                         .into(),
                 );
             }
+            if args.raw {
+                return Outcome::Refused(
+                    "refused: raw is for action output; action notify only asks to be told".into(),
+                );
+            }
             if args.when.as_deref() != Some("ready") {
                 return Outcome::Refused(
                     "refused: action notify takes when: \"ready\"; Flottille tells you when a \
@@ -1722,7 +1757,14 @@ pub async fn run_status(daemon: &Daemon, agent: &str, args: Value) -> Outcome {
             if let Some(going) = going {
                 going.notify.store(true, Ordering::SeqCst);
             }
-            Outcome::Done(describe(daemon, &run.id, Some(1), None, false, false))
+            Outcome::Done(describe(
+                daemon,
+                &run.id,
+                (Some(1), None),
+                false,
+                false,
+                false,
+            ))
         }
         "output" => {
             let tail = args.tail.unwrap_or(TAIL_LINES);
@@ -1731,7 +1773,14 @@ pub async fn run_status(daemon: &Daemon, agent: &str, args: Value) -> Outcome {
                     "refused: tail must be 1 to {TAIL_LINES_MAX} lines: read on with start"
                 ));
             }
-            Outcome::Done(describe(daemon, id, Some(tail), args.start, false, false))
+            Outcome::Done(describe(
+                daemon,
+                id,
+                (Some(tail), args.start),
+                args.raw,
+                false,
+                false,
+            ))
         }
         "stop" => {
             if args.tail.is_some() || args.start.is_some() {
@@ -1741,8 +1790,15 @@ pub async fn run_status(daemon: &Daemon, agent: &str, args: Value) -> Outcome {
                         .into(),
                 );
             }
+            if args.raw {
+                return Outcome::Refused(
+                    "refused: raw is for action output; action stop only stops the run and \
+                     answers with the end of its output"
+                        .into(),
+                );
+            }
             stop(daemon, id, RunState::Stopped).await;
-            Outcome::Done(describe(daemon, id, None, None, false, false))
+            Outcome::Done(describe(daemon, id, (None, None), false, false, false))
         }
         other => Outcome::Refused(format!(
             "refused: run_status has no action {other:?}: its actions are output (the default), \
@@ -1833,8 +1889,8 @@ fn own(daemon: &Daemon, agent: &str, id: &str) -> Result<Run, Outcome> {
 fn describe(
     daemon: &Daemon,
     id: &str,
-    tail: Option<usize>,
-    start: Option<usize>,
+    (tail, start): (Option<usize>, Option<usize>),
+    raw: bool,
     answer_of_run: bool,
     by_user: bool,
 ) -> String {
@@ -1877,13 +1933,20 @@ fn describe(
             id = run.id
         ));
     }
+    let (output, removed) = agent_output(daemon, &run.line, &output, raw, end);
     let lines = display_lines(&output);
     if lines.is_empty() {
-        text.push_str("\n(no output)");
+        text.push_str(if removed == 0 {
+            "\n(no output)"
+        } else {
+            "\n(no output left)"
+        });
+        text.push_str(&filtered_note(&run.id, removed));
         return text;
     }
     let tail = tail.unwrap_or(TAIL_LINES);
     let (from, to) = shown_range(&lines, tail, start);
+    let raw_key = if raw { ", \"raw\": true" } else { "" };
     let mut about = format!("\n(lines {}-{} of {}", from + 1, to, lines.len());
     if cut > 0 || (end.is_some() && run.output.len() >= OUTPUT_KEPT && going.is_none()) {
         about.push_str(", the output being cut to its last 64 KiB");
@@ -1891,13 +1954,13 @@ fn describe(
     if from > 0 {
         let earlier = from.saturating_sub(tail) + 1;
         about.push_str(&format!(
-            "; earlier lines: run_status {{\"run\": \"{}\", \"start\": {earlier}}}",
+            "; earlier lines: run_status {{\"run\": \"{}\", \"start\": {earlier}{raw_key}}}",
             run.id
         ));
     }
     if to < lines.len() {
         about.push_str(&format!(
-            "; later lines: run_status {{\"run\": \"{}\", \"start\": {}}}",
+            "; later lines: run_status {{\"run\": \"{}\", \"start\": {}{raw_key}}}",
             run.id,
             to + 1
         ));
@@ -1906,7 +1969,46 @@ fn describe(
     text.push_str(&about);
     text.push('\n');
     text.push_str(&lines[from..to].join("\n"));
+    text.push_str(&filtered_note(&run.id, removed));
     text
+}
+
+/// What the agent reads of a run's output: filtered, with how many lines the filter took out,
+/// unless `raw` asks for the lines as they are, the user turned the filters off or the run still
+/// goes (its lines would shift under the pages a reader follows): `docs/tools.md`, "Filtered
+/// command output". The command is its line's words, as it ran; `end` is how it ended.
+fn agent_output(
+    daemon: &Daemon,
+    line: &str,
+    output: &str,
+    raw: bool,
+    end: Option<End>,
+) -> (String, usize) {
+    let Some(end) = end else {
+        return (output.to_owned(), 0);
+    };
+    if raw || !crate::results::filters_on(&daemon.paths) {
+        return (output.to_owned(), 0);
+    }
+    let words = flottille_core::command::split_line(line).unwrap_or_default();
+    // "ok" is for a command that exited 0 on its own, not one stopped or killed.
+    let code = match end.state {
+        RunState::Exited => end.exit_code,
+        _ => None,
+    };
+    let filtered = flottille_core::filters::apply(&words, output, code);
+    (filtered.text, filtered.removed)
+}
+
+/// The line that ends an answer whose output lost lines to a filter, and says how to read them.
+fn filtered_note(id: &str, removed: usize) -> String {
+    if removed == 0 {
+        return String::new();
+    }
+    let lines = if removed == 1 { "line" } else { "lines" };
+    format!(
+        "\n[{removed} {lines} filtered out: read the whole output with run_status {{\"run\": \"{id}\", \"start\": 1, \"raw\": true}}]"
+    )
 }
 
 /// What an answer says of whether the run is ready and where it answers; nothing for a run whose

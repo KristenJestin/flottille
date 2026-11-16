@@ -2322,6 +2322,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "flottille-fake-cargo"
+version = "0.1.0"
+
+[[package]]
 name = "flottille-fake-claude"
 version = "0.1.0"
 dependencies = [

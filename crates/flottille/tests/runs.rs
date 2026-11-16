@@ -210,9 +210,10 @@ fn a_long_command_delivers_command_ended_with_its_code_and_tail() {
     assert!(prompt.contains("exited with code 3"), "{prompt}");
     assert!(prompt.contains("tail-line"), "{prompt}");
     assert!(prompt.contains("start"), "{prompt}");
-    // The program's own bytes: the window turns them into colours, the agent is told them as
-    // they were written.
-    assert!(prompt.contains("\u{1b}[31mred"), "{prompt:?}");
+    // The generic filter takes the colour codes out of what an agent reads (the window turns
+    // them into colours from the run's own lines, which stay as written).
+    assert!(prompt.contains("\nred tail-line"), "{prompt:?}");
+    assert!(!prompt.contains('\u{1b}'), "{prompt:?}");
 }
 
 #[test]

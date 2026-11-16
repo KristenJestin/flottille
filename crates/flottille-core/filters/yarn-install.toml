@@ -1,0 +1,26 @@
+# `yarn install` and `add`: the numbered steps go; the warnings and the result stay.
+name = "yarn-install"
+program = "yarn"
+args = ["install", "add"]
+drop = [
+  '^\[\d+/\d+\] ',
+  '^yarn (install|add) v\d',
+]
+
+[[tests]]
+name = "the steps go and the result stays"
+input = """
+yarn install v1.22.22
+[1/4] Resolving packages...
+[2/4] Fetching packages...
+[3/4] Linking dependencies...
+warning " > left-pad@1.3.0" has unmet peer dependency "react@^18".
+[4/4] Building fresh packages...
+success Saved lockfile.
+Done in 4.20s.
+"""
+expected = """
+warning " > left-pad@1.3.0" has unmet peer dependency "react@^18".
+success Saved lockfile.
+Done in 4.20s."""
+removed = 5

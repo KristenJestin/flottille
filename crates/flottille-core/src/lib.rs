@@ -9,6 +9,7 @@ pub mod commands;
 pub mod declared;
 pub mod detect;
 pub mod error;
+pub mod filters;
 pub mod glob;
 pub mod images;
 pub mod item;

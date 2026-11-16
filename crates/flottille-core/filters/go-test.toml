@@ -1,0 +1,53 @@
+# `go test`: the lines of a test that passed go; a failure, its output and the line of each
+# package stay.
+name = "go-test"
+program = "go"
+args = ["test"]
+drop = [
+  '^=== (RUN|PAUSE)\b',
+  '^\s*--- PASS: ',
+  '^PASS$',
+  '^\?\s+\S+\s+\[no test files\]$',
+]
+
+[[tests]]
+name = "a run with one failure keeps the failure and the package lines"
+input = """
+=== RUN   TestParse
+--- PASS: TestParse (0.00s)
+=== RUN   TestTotal
+    total_test.go:14: got 4, want 5
+--- FAIL: TestTotal (0.00s)
+FAIL
+FAIL	example.com/app/total	0.004s
+?   	example.com/app/cmd	[no test files]
+ok  	example.com/app/parse	0.003s
+FAIL
+"""
+expected = """
+    total_test.go:14: got 4, want 5
+--- FAIL: TestTotal (0.00s)
+FAIL
+FAIL	example.com/app/total	0.004s
+ok  	example.com/app/parse	0.003s
+FAIL"""
+removed = 4
+
+[[tests]]
+name = "the lines that tie a streamed log to its test stay"
+input = """
+=== RUN   TestSlow
+=== PAUSE TestSlow
+=== CONT  TestSlow
+=== NAME  TestSlow
+    slow_test.go:9: waiting for the lock
+--- PASS: TestSlow (0.10s)
+PASS
+ok  	example.com/app/slow	0.101s
+"""
+expected = """
+=== CONT  TestSlow
+=== NAME  TestSlow
+    slow_test.go:9: waiting for the lock
+ok  	example.com/app/slow	0.101s"""
+removed = 4
