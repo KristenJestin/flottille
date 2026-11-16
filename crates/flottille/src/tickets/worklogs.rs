@@ -225,17 +225,7 @@ pub async fn worklogs(daemon: &Daemon, project: &Project, asked: &TicketsCall) -
         secrets: [secret, credentials, authorization.clone()],
         authorization,
     };
-    match read(
-        daemon,
-        project,
-        &jira,
-        (&name, stamp),
-        (from, to),
-        ticket,
-        asked,
-    )
-    .await
-    {
+    match read(project, &jira, (&name, stamp), (from, to), ticket, asked).await {
         Ok(text) => Outcome::Done(text),
         Err(Outcome::Failed(why)) => {
             Outcome::Failed(format!("the worklogs could not be read: {why}"))
@@ -296,7 +286,6 @@ async fn account(
 }
 
 async fn read(
-    daemon: &Daemon,
     project: &Project,
     jira: &Site<'_>,
     entry: (&str, u64),

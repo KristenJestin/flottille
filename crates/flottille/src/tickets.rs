@@ -1680,14 +1680,15 @@ async fn listed(daemon: &Daemon, project: &Project, asked: &TicketsCall) -> Outc
         ));
     }
     // A worklog date alone matches the worklogs of anyone: the work items of others show too.
-    if let Some(jql) = asked_jql {
-        if jql.to_lowercase().contains("worklogdate") && !restricts_worklog_author(jql) {
-            text.push_str(
-                "(the JQL uses worklogDate without worklogAuthor: it matched anyone's worklogs \
-                 on those days, not only the user's; tickets worklogs gives the user's own time \
-                 with its durations)\n",
-            );
-        }
+    if let Some(jql) = asked_jql
+        && jql.to_lowercase().contains("worklogdate")
+        && !restricts_worklog_author(jql)
+    {
+        text.push_str(
+            "(the JQL uses worklogDate without a worklogAuthor = or in: it matched anyone's \
+             worklogs on those days, not only the user's; tickets worklogs gives the user's own \
+             time with its durations)\n",
+        );
     }
     text.push_str("tickets {\"action\": \"show\", \"ticket\": …} reads one.");
     Outcome::Done(text)
