@@ -14,7 +14,8 @@ use std::time::{Duration, Instant};
 use common::User;
 use flottille_hub::{Hub, Served, SystemClock};
 use flottille_link::{
-    Action, Change, Device, DeviceKey, Hello, InvitationAsk, Keyring, KeyringError, PublicKey, Role,
+    Action, Change, Device, DeviceKey, Hello, HubKey, InvitationAsk, Keyring, KeyringError,
+    MachineKey, MemberList, PublicKey, Role, ToDevice,
 };
 use serde_json::{Value, json};
 use zeroize::Zeroizing;
@@ -140,6 +141,12 @@ impl Machine {
         DeviceKey::load_or_make(&NoKeyring, &self.folder()).unwrap()
     }
 
+    /// The key this machine's daemon holds, read as the daemon reads it: what claims its
+    /// declaration in a list the test makes.
+    fn machine_key(&self) -> MachineKey {
+        MachineKey::load_or_make(&self.folder()).unwrap()
+    }
+
     fn machine(&self, name: &str) -> Option<Value> {
         self.remote()["machines"]
             .as_array()
@@ -190,9 +197,10 @@ impl Machine {
 /// `pc` set up as the hub's first member with `flottille remote setup`, then `server` added by
 /// it, a runner; each machine's addresses told to the hub by its daemon.
 fn members(hub: &TestHub, pc: &Machine, server: &Machine) {
-    let output = pc
-        .user
-        .run(&["remote", "setup", &hub.url(), &hub.code(), "--name", "pc"]);
+    let output = pc.user.run_with_input(
+        &["remote", "setup", &hub.url(), "--name", "pc"],
+        &format!("{}\n", hub.code()),
+    );
     assert!(
         output.status.success(),
         "{}\n{}",
@@ -223,14 +231,17 @@ fn members(hub: &TestHub, pc: &Machine, server: &Machine) {
             &pc_device,
         );
         hub.submit(added.clone()).unwrap();
-        hub.submit(Change::sign(
-            added.hash(),
-            Action::Machine {
-                key: server_device.public(),
-                machine: server_machine,
-            },
-            &server_device,
-        ))
+        hub.submit(
+            Change::sign(
+                added.hash(),
+                Action::Machine {
+                    key: server_device.public(),
+                    machine: server_machine,
+                },
+                &server_device,
+            )
+            .claimed_by(&server.machine_key()),
+        )
         .unwrap();
     });
     // What #812's joining will leave on the new machine: its hub, pinned.
@@ -381,6 +392,249 @@ fn the_daemon_keeps_a_list_the_hub_forged_out() {
     assert_eq!(
         seen["hub"]["reason"],
         "the hub's member list was reset: set this device up again"
+    );
+}
+
+/// A hub of the test's own, which a machine pinned: it holds its key, welcomes the machine's
+/// daemon, sends `list` once the daemon asked something, and answers the n-th ask of addresses as
+/// `answer(n)` says: never (`None`), done (`Some(None)`), or refused for a reason.
+struct FakeHub {
+    runtime: tokio::runtime::Runtime,
+    address: SocketAddr,
+    key: PublicKey,
+    addresses_asked: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    _folder: tempfile::TempDir,
+}
+
+impl FakeHub {
+    fn new(list: MemberList, answer: fn(usize) -> Option<Option<String>>) -> FakeHub {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let folder = tempfile::tempdir().unwrap();
+        let key = HubKey::load_or_make(&folder.path().join("hub")).unwrap();
+        let public = key.public();
+        let addresses_asked = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = addresses_asked.clone();
+        let address = runtime.block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let key = std::sync::Arc::new(key);
+            tokio::spawn(async move {
+                while let Ok((stream, _)) = listener.accept().await {
+                    let (key, list, counted) = (key.clone(), list.clone(), counted.clone());
+                    tokio::spawn(async move {
+                        let Ok(arriving) =
+                            flottille_link::arrive(Box::new(stream), &key, &Hello::ours("0.4.0"))
+                                .await
+                        else {
+                            return;
+                        };
+                        let mut session = arriving.welcome().await.unwrap();
+                        let mut sent = false;
+                        while let Ok(asked) = session.ask().await {
+                            if !sent {
+                                sent = true;
+                                session.send(&ToDevice::List(list.clone())).await.unwrap();
+                            }
+                            let answer = match asked.ask {
+                                flottille_link::Ask::Addresses { .. } => {
+                                    let n = counted
+                                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                                        + 1;
+                                    answer(n)
+                                }
+                                _ => Some(None),
+                            };
+                            if let Some(refused) = answer {
+                                let answer = ToDevice::Answer {
+                                    id: asked.id,
+                                    refused,
+                                    proof: None,
+                                };
+                                if session.send(&answer).await.is_err() {
+                                    return;
+                                }
+                            }
+                        }
+                    });
+                }
+            });
+            address
+        });
+        FakeHub {
+            runtime,
+            address,
+            key: public,
+            addresses_asked,
+            _folder: folder,
+        }
+    }
+
+    fn asked(&self) -> usize {
+        self.addresses_asked
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+/// The list a fake hub sends `machine`: its device the root, declaring its machine, and a laptop
+/// the root added, with a machine of its own.
+fn list_for(machine: &Machine) -> MemberList {
+    let (pc, laptop) = (machine.device(), seeded(31));
+    let mut list = MemberList::start("pc", &pc).unwrap();
+    list.declare(&pc, &machine.machine_key());
+    list.sign(
+        Action::Add {
+            key: laptop.public(),
+            name: "laptop".to_owned(),
+            role: Role::Runner,
+        },
+        &pc,
+    );
+    let laptop_machine = MachineKey::load_or_make(&machine.user.path("laptop")).unwrap();
+    list.declare(&laptop, &laptop_machine);
+    list
+}
+
+/// `machine` pinned to `hub`, its daemon started again to take it.
+fn pin(machine: &Machine, hub: &FakeHub) {
+    let pinned = Device {
+        url: format!("http://{}", hub.address),
+        hub: hub.key,
+        root: machine.device().public(),
+        list: MemberList::default(),
+    };
+    std::fs::write(
+        machine.folder().join("hub.json"),
+        serde_json::to_string(&pinned).unwrap(),
+    )
+    .unwrap();
+    machine.restart();
+}
+
+/// A device key made from a fixed seed.
+fn seeded(n: u8) -> DeviceKey {
+    struct Seeded([u8; 32]);
+    impl Keyring for Seeded {
+        fn read(
+            &self,
+            _attributes: &[(&str, &str)],
+        ) -> Result<Option<Zeroizing<Vec<u8>>>, KeyringError> {
+            Ok(Some(Zeroizing::new(self.0.to_vec())))
+        }
+
+        fn store(
+            &self,
+            _label: &str,
+            _attributes: &[(&str, &str)],
+            _secret: &[u8],
+        ) -> Result<(), KeyringError> {
+            unreachable!("the key is there")
+        }
+    }
+    DeviceKey::load_or_make(&Seeded([n; 32]), Path::new("/nonexistent")).unwrap()
+}
+
+#[test]
+fn the_daemon_takes_the_hub_s_news_while_its_ask_waits() {
+    let pc = Machine::new(None);
+    // A hub that never answers the daemon's ask, and sends the list meanwhile.
+    let hub = FakeHub::new(list_for(&pc), |_| None);
+    pin(&pc, &hub);
+    pc.wait_until("the laptop the hub's list names is not trusted", |seen| {
+        seen["machines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|machine| machine["name"] == "laptop")
+    });
+    assert!(hub.asked() >= 1);
+    drop(hub.runtime);
+}
+
+#[test]
+fn addresses_the_hub_refused_are_told_again() {
+    let pc = Machine::new(None);
+    let hub = FakeHub::new(list_for(&pc), |n| {
+        Some((n == 1).then(|| "not now".to_owned()))
+    });
+    pin(&pc, &hub);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while hub.asked() < 2 {
+        assert!(
+            Instant::now() < deadline,
+            "the addresses the hub refused were not told again\n{}",
+            pc.log()
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    drop(hub.runtime);
+}
+
+/// `remote.setup` of `machine` with `hub`, as `flottille remote setup` asks it; `replace` when
+/// asked to replace the hub pinned.
+fn setup_call(machine: &Machine, hub: &TestHub, replace: bool) -> Result<Value, (String, String)> {
+    let device = machine.device();
+    let mut list = MemberList::start("pc", &device).unwrap();
+    list.sign(
+        Action::Machine {
+            key: device.public(),
+            machine: machine.key(),
+        },
+        &device,
+    );
+    let mut params = json!({"url": hub.url(), "code": hub.code(), "changes": list.changes()});
+    if replace {
+        params["replace"] = json!(true);
+    }
+    machine.user.call("remote.setup", params)
+}
+
+#[test]
+fn a_machine_with_a_hub_pinned_sets_up_another_only_when_asked_to_replace_it() {
+    let (first, second) = (TestHub::new(), TestHub::new());
+    let pc = Machine::new(None);
+    setup_call(&pc, &first, false).unwrap();
+    let (_, refused) = setup_call(&pc, &second, false).unwrap_err();
+    assert!(refused.contains("--replace"), "{refused}");
+    let pinned: Value =
+        serde_json::from_str(&std::fs::read_to_string(pc.folder().join("hub.json")).unwrap())
+            .unwrap();
+    assert_eq!(pinned["url"], format!("{}/", first.url()));
+
+    setup_call(&pc, &second, true).unwrap();
+    let pinned: Value =
+        serde_json::from_str(&std::fs::read_to_string(pc.folder().join("hub.json")).unwrap())
+            .unwrap();
+    assert_eq!(pinned["url"], format!("{}/", second.url()));
+}
+
+#[test]
+fn the_setup_code_is_read_from_the_standard_input_never_from_the_command_line() {
+    let hub = TestHub::new();
+    let pc = Machine::new(None);
+    let code = hub.code();
+    let output = pc
+        .user
+        .run(&["remote", "setup", &hub.url(), &code, "--name", "pc"]);
+    assert!(
+        !output.status.success(),
+        "a setup code was taken from the command line"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("unexpected argument"),
+        "the refusal does not say the argument is not one"
+    );
+    let output = pc.user.run_with_input(
+        &["remote", "setup", &hub.url(), "--name", "pc"],
+        &format!("{code}\n"),
+    );
+    assert!(
+        output.status.success(),
+        "the setup from the standard input failed\n{}",
+        pc.log()
     );
 }
 

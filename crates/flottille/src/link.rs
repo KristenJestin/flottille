@@ -837,6 +837,9 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Result<Va
                 url: String,
                 code: String,
                 changes: Vec<flottille_link::Change>,
+                /// Set up again on a machine that pinned a hub already.
+                #[serde(default)]
+                replace: bool,
             }
             let setup: Setup = serde_json::from_value(params).map_err(|error| {
                 Failure::new(flottille_protocol::code::INVALID_PARAMS, error.to_string())
@@ -845,7 +848,7 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Result<Va
                 Failure::new(flottille_protocol::code::UNAVAILABLE, "the link is not up")
             })?;
             control
-                .setup(&setup.url, &setup.code, setup.changes)
+                .setup(&setup.url, &setup.code, setup.changes, setup.replace)
                 .await
                 .map_err(Failure::refused)
         }

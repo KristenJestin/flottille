@@ -18,8 +18,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use flottille_link::{
-    Ask, Change, ControlError, Device, HubUrl, ListError, MachineKey, Members, PublicKey, Pushed,
-    Session, Tls,
+    Action, Ask, Change, ControlError, Device, HubUrl, ListError, MachineKey, Members, PublicKey,
+    Pushed, Session, Tls,
 };
 use serde_json::{Value, json};
 
@@ -31,6 +31,8 @@ pub const HUB_FILE: &str = "hub.json";
 const LONGEST_WAIT: Duration = Duration::from_secs(30);
 /// How often this machine's addresses are compared with those the hub was told.
 const ROUND: Duration = Duration::from_secs(1);
+/// How long the hub may take to answer an ask before it is asked again.
+const ASK_WAIT: Duration = Duration::from_secs(10);
 
 /// How the daemon sees its hub.
 struct Seen {
@@ -121,13 +123,38 @@ impl Control {
     }
 
     /// `remote.setup`: this machine, carrying its device's signed changes, becomes the hub's
-    /// first member. The hub's key is pinned from this session.
+    /// first member; the declaration of this machine is claimed here, with the machine's key. The
+    /// hub's key is pinned from this session. A machine set up already is set up again only when
+    /// asked to `replace` the hub it pinned.
     pub async fn setup(
         &self,
         url: &str,
         code: &str,
-        changes: Vec<Change>,
+        mut changes: Vec<Change>,
+        replace: bool,
     ) -> Result<Value, String> {
+        if !replace && let Some(pinned) = self.pinned() {
+            let url =
+                pinned.map_or_else(|_| self.file().display().to_string(), |device| device.url);
+            return Err(format!(
+                "this machine is set up with the hub at {url} already: give --replace to set it \
+                 up with another (the machines it trusts through that hub are forgotten)"
+            ));
+        }
+        let own = self.key.public();
+        match changes.get_mut(1) {
+            Some(change) if matches!(&change.action, Action::Machine { machine, .. } if *machine == own) =>
+            {
+                *change = change.clone().claimed_by(&self.key);
+            }
+            _ => {
+                return Err(
+                    "the setup's second change must declare this machine, whose key is \
+                     remote.machines' this.key"
+                        .to_owned(),
+                );
+            }
+        }
         let (device, session) = Device::setup(
             url,
             code,
@@ -257,6 +284,10 @@ async fn keep_session(
     let mut addresses: HashMap<[u8; 32], Vec<String>> = HashMap::new();
     let mut members: Option<Members> = device.members().ok();
     let mut round = tokio::time::interval(ROUND);
+    let asker = session.asker();
+    // The ask of this machine's addresses on its way, at most one: dropped with the session.
+    let mut telling = tokio::task::JoinSet::new();
+    let mut said: Option<String> = None;
     loop {
         tokio::select! {
             pushed = session.next() => {
@@ -298,14 +329,32 @@ async fn keep_session(
             }
             _ = round.tick() => {
                 let now = remote.told_addresses();
-                if told.as_ref() != Some(&now) {
-                    told = Some(now.clone());
-                    // Answered later: the session goes on meanwhile, and a refusal is said.
-                    if let Err(error) = session.ask(Ask::Addresses { addresses: now }).await {
-                        eprintln!("flottille daemon: the hub was not told this machine's addresses: {error}");
-                    }
+                if telling.is_empty() && told.as_ref() != Some(&now) {
+                    // Answered later: the session goes on meanwhile.
+                    let asker = asker.clone();
+                    telling.spawn(async move {
+                        let asked = asker.ask(Ask::Addresses { addresses: now.clone() });
+                        let answer = match tokio::time::timeout(ASK_WAIT, asked).await {
+                            Ok(answer) => answer.map_err(|error| error.to_string()),
+                            Err(_) => Err(format!("it did not answer in {} s", ASK_WAIT.as_secs())),
+                        };
+                        (now, answer)
+                    });
                 }
             }
+            Some(Ok((sent, answer))) = telling.join_next() => match answer {
+                // Told only once the hub took them: a refusal is asked again at the next round.
+                Ok(()) => {
+                    told = Some(sent);
+                    said = None;
+                }
+                Err(error) => {
+                    if said.as_ref() != Some(&error) {
+                        eprintln!("flottille daemon: the hub was not told this machine's addresses: {error}");
+                    }
+                    said = Some(error);
+                }
+            },
             _ = control.again.notified() => return Ended::Again,
             _ = stopped(stopping) => return Ended::Stopping,
         }
