@@ -319,8 +319,11 @@ a page of it read.`), then a line per declaration, `line:offset`, two spaces, th
 indented by two spaces for each level it is nested in (the members of a class, an `impl`, a
 trait, an interface, a module or a namespace; `line` from 1, `offset` the byte where the
 declaration starts, as `range.offset` takes it). A declaration is its signature on one line (up to
-its body, or its value for a constant, at most 160 characters); a decorator is part of a Python
-one; doc comments, docstrings, bodies and `use`/`import` lines are left out.
+its body, or its value for a constant, at most 160 characters, masked of secrets before it is cut);
+a decorator is part of a Python one; doc comments, docstrings, bodies and `use`/`import` lines are
+left out. Some declarations are not listed either: Rust `extern` blocks, TypeScript `declare …`
+statements other than modules, functions and classes, an anonymous `export default`, and Python
+definitions under an `if` or a `try`.
 
 - **It is not a read.** It gives no fingerprint: `fs_write` and `fs_edit` still need a page of
   the file read first (`refused: X exists and this session has not read it…`), and nothing is
@@ -328,7 +331,9 @@ one; doc comments, docstrings, bodies and `use`/`import` lines are left out.
 - **Same gate as a read**: the same path checks and the same refusals (outside the place, a login's
   place, a link, a folder, a file that is not a regular one), whoever allowed the call. Another
   extension is refused: `refused: no outline for <ext> files; read it with fs_read` (`files without
-  an extension` for one with none); so is a file over 2 MiB, and `range` given with it. An outline
+  an extension` for one with none; an extension that is not text is named as it reads); so is a
+  file over 512 KiB, a file the parser cannot read in 2 seconds (`refused: <path> took too long for
+  an outline; read it with fs_read`), and `range` or `again` given with it. An outline
   longer than the limit is cut as any other result ("Long results"): only a
   page of `fs_read` is sized not to be, since it makes a fingerprint.
 - **The switch** is `outline` in `tool-results.toml` (`docs/protocol.md`, "The tool results

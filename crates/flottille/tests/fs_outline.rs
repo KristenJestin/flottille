@@ -213,7 +213,20 @@ fn an_outline_is_refused_as_a_read_is() {
     let pipe = std::ffi::CString::new(folder.join("pipe.rs").to_str().unwrap()).unwrap();
     assert_eq!(unsafe { libc::mkfifo(pipe.as_ptr(), 0o644) }, 0);
 
-    for path in ["../outside.rs", "link.rs", "pipe.rs", "src", "missing.rs"] {
+    // A login's place of the user (the temporary HOME's), which no call reaches.
+    let keys = user.path("home/.ssh");
+    std::fs::create_dir_all(&keys).unwrap();
+    std::fs::write(keys.join("x.rs"), "pub fn secret() {}\n").unwrap();
+    let login = keys.join("x.rs").display().to_string();
+
+    for path in [
+        "../outside.rs",
+        "link.rs",
+        "pipe.rs",
+        "src",
+        "missing.rs",
+        login.as_str(),
+    ] {
         let read = mcp.call("fs_read", json!({"path": path}));
         let listed = outline(&mcp, path);
         assert_eq!(
@@ -233,6 +246,85 @@ fn an_outline_is_refused_as_a_read_is() {
 /// read and an outline alike.
 fn held(text: &str) -> bool {
     text.starts_with("Waiting for the user's approval, request #")
+}
+
+#[test]
+fn an_outline_never_shows_part_of_a_secret() {
+    let user = User::with_fake_agent();
+    let (mcp, folder) = session(&user);
+    // Each secret starts a few characters before the 160th of its signature, so that cutting
+    // the signature there would show a part of it that no mask knows.
+    let padding = |n: usize| "a".repeat(n);
+    let source = format!(
+        "pub fn url(first: &str, {}, link: &str = \"https://deploy:Hunter2Hunter2Hunter2@forge.example/x.git\") {{}}\n\
+         pub fn token(first: &str, {}, token: &str = \"ghp_abcdefghijklmnopqrstuvwxyz0123456789\") {{}}\n",
+        padding(110),
+        padding(108),
+    );
+    std::fs::write(folder.join("src/secrets.rs"), source).unwrap();
+
+    let text = ok(outline(&mcp, "src/secrets.rs"));
+
+    for part in ["Hunter2", "ghp_", "abcdefghij", "deploy:"] {
+        assert!(!text.contains(part), "{part:?} in {text}");
+    }
+    assert!(text.contains("pub fn url("), "{text}");
+    assert!(text.contains("pub fn token("), "{text}");
+}
+
+#[test]
+fn a_pathological_file_is_answered_in_bounded_time() {
+    let user = User::with_fake_agent();
+    let (mcp, folder) = session(&user);
+    // The most an outline takes, of nested brackets that cost a parser dearly. How long it takes
+    // depends on the machine: either way it is answered at once, and when it was stopped the
+    // answer says so and names fs_read (the stop itself is a unit test of `outline.rs`).
+    std::fs::write(folder.join("src/nested.js"), "a=[".repeat(512 * 1024 / 3)).unwrap();
+
+    let started = std::time::Instant::now();
+    let answer = outline(&mcp, "src/nested.js");
+
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(15),
+        "{:?}",
+        started.elapsed()
+    );
+    if answer.error {
+        assert_eq!(
+            answer.text,
+            "refused: src/nested.js took too long for an outline; read it with fs_read"
+        );
+    }
+}
+
+#[test]
+fn a_file_over_the_limit_is_refused_naming_it_and_fs_read() {
+    let user = User::with_fake_agent();
+    let (mcp, folder) = session(&user);
+    let big = "pub fn f() {}\n".repeat(40_000);
+    assert!(big.len() > 512 * 1024);
+    std::fs::write(folder.join("src/big.rs"), &big).unwrap();
+
+    let text = refused(outline(&mcp, "src/big.rs"));
+
+    assert!(text.contains("512 KiB at most"), "{text}");
+    assert!(text.contains("fs_read"), "{text}");
+}
+
+#[test]
+fn an_outline_is_refused_with_again_as_with_a_range() {
+    let user = User::with_fake_agent();
+    let (mcp, _) = session(&user);
+
+    let text = refused(mcp.call(
+        "fs_read",
+        json!({"path": "src/api.rs", "outline": true, "again": true}),
+    ));
+
+    assert!(
+        text.starts_with("refused: an outline is not a page: give no again"),
+        "{text}"
+    );
 }
 
 #[test]

@@ -2,13 +2,29 @@
 //! declarations without their bodies, each with its line and its byte offset, read with
 //! tree-sitter. No model is involved, and nothing here opens a file: the caller gives the bytes.
 
-use tree_sitter::{Node, Parser};
+use std::ops::ControlFlow;
+use std::time::{Duration, Instant};
+
+use tree_sitter::{Node, ParseOptions, Parser};
 
 /// How far down a declaration inside another is listed (modules, classes, namespaces). Source
 /// nested deeper than this is no source a reader wants an outline of, and it bounds the walk.
 const DEPTH: usize = 32;
 /// How many characters of a declaration are shown: a signature longer than this is cut.
 const SHOWN_CHARS: usize = 160;
+
+/// How long the parse of a file may take: a hostile file can make it run for minutes and grow in
+/// memory, on a thread nothing can stop.
+pub const PARSE_TIME: Duration = Duration::from_secs(2);
+
+/// Why there is no outline.
+#[derive(Debug, PartialEq)]
+pub enum Failure {
+    /// The parse went past its time: refused, not failed (the file is fine, an outline of it is
+    /// not worth more of the daemon).
+    TooLong,
+    Failed(String),
+}
 
 /// A language the outline knows.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -70,8 +86,16 @@ struct Entry {
 
 /// The outline of `source` as `fs_read` answers it: a head that says what it is and is not, then
 /// a line per declaration, `line:offset`, then the declaration indented by its nesting.
-pub fn describe(shown: &str, language: Language, source: &[u8]) -> Result<String, String> {
-    let entries = declarations(language, source)?;
+/// `mask` hides the secrets of each declaration before it is cut: cut first, half of a secret
+/// would show that no mask knows.
+pub fn describe(
+    shown: &str,
+    language: Language,
+    source: &[u8],
+    mask: &dyn Fn(&str) -> String,
+    within: Duration,
+) -> Result<String, Failure> {
+    let entries = declarations(language, source, mask, within)?;
     let mut text = format!(
         "outline of {shown} ({}, {} bytes; line:byte offset, then the declaration; read one with \
          fs_read range.offset). Not a read: fs_write and fs_edit still need a page of it read.\n",
@@ -93,17 +117,39 @@ pub fn describe(shown: &str, language: Language, source: &[u8]) -> Result<String
     Ok(text)
 }
 
-fn declarations(language: Language, source: &[u8]) -> Result<Vec<Entry>, String> {
+fn declarations(
+    language: Language,
+    source: &[u8],
+    mask: &dyn Fn(&str) -> String,
+    within: Duration,
+) -> Result<Vec<Entry>, Failure> {
     let mut parser = Parser::new();
-    parser
-        .set_language(&language.grammar())
-        .map_err(|error| format!("the {} grammar did not load: {error}", language.name()))?;
+    parser.set_language(&language.grammar()).map_err(|error| {
+        Failure::Failed(format!(
+            "the {} grammar did not load: {error}",
+            language.name()
+        ))
+    })?;
+    let deadline = Instant::now() + within;
+    let mut stop = |_: &tree_sitter::ParseState| {
+        if Instant::now() >= deadline {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    };
+    // A parse that is stopped answers `None`: the only other way to is a missing grammar.
     let tree = parser
-        .parse(source, None)
-        .ok_or_else(|| format!("the {} source could not be parsed", language.name()))?;
+        .parse_with_options(
+            &mut |at, _| source.get(at..).unwrap_or_default(),
+            None,
+            Some(ParseOptions::new().progress_callback(&mut stop)),
+        )
+        .ok_or(Failure::TooLong)?;
     let mut walk = Walk {
         source,
         language,
+        mask,
         entries: Vec::new(),
     };
     walk.members(tree.root_node(), 0);
@@ -113,6 +159,7 @@ fn declarations(language: Language, source: &[u8]) -> Result<Vec<Entry>, String>
 struct Walk<'a> {
     source: &'a [u8],
     language: Language,
+    mask: &'a dyn Fn(&str) -> String,
     entries: Vec<Entry>,
 }
 
@@ -139,12 +186,12 @@ impl Walk<'_> {
     fn squashed(&self, from: usize, to: usize) -> String {
         let text = String::from_utf8_lossy(&self.source[from..to.max(from)]);
         let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
-        let text = text.trim_end_matches([' ', '=', ':', ';', ',']);
+        let text = (self.mask)(text.trim_end_matches([' ', '=', ':', ';', ',']));
         if text.chars().count() > SHOWN_CHARS {
             let cut: String = text.chars().take(SHOWN_CHARS).collect();
             format!("{}…", cut.trim_end())
         } else {
-            text.to_owned()
+            text
         }
     }
 
@@ -249,11 +296,11 @@ impl Walk<'_> {
             "lexical_declaration" | "variable_declaration" => {
                 let constant = self.source[node.start_byte()..].starts_with(b"const");
                 let mut cursor = node.walk();
-                let mut first = true;
-                for declarator in node.named_children(&mut cursor) {
-                    if declarator.kind() != "variable_declarator" {
-                        continue;
-                    }
+                for (index, declarator) in node
+                    .named_children(&mut cursor)
+                    .filter(|declarator| declarator.kind() == "variable_declarator")
+                    .enumerate()
+                {
                     let value = declarator.child_by_field_name("value");
                     let function = value.filter(|value| {
                         matches!(
@@ -267,8 +314,8 @@ impl Walk<'_> {
                     if !constant && function.is_none() {
                         continue;
                     }
-                    let at = if first { at } else { declarator };
-                    first = false;
+                    // A later declarator is not the statement's: its text starts at itself.
+                    let at = if index == 0 { at } else { declarator };
                     let end = function
                         .and_then(|function| function.child_by_field_name("body"))
                         .or(value)
@@ -344,27 +391,27 @@ impl Walk<'_> {
             }
             "type_declaration" => {
                 let mut cursor = node.walk();
-                let specs: Vec<Node> = node
+                let items: Vec<Node> = node
                     .named_children(&mut cursor)
-                    .filter(|spec| matches!(spec.kind(), "type_spec" | "type_alias"))
+                    .filter(|item| matches!(item.kind(), "type_spec" | "type_alias"))
                     .collect();
-                for spec in &specs {
-                    let at = if specs.len() == 1 { node } else { *spec };
-                    let kind = spec.child_by_field_name("type").map(|kind| kind.kind());
+                for item in &items {
+                    let at = if items.len() == 1 { node } else { *item };
+                    let kind = item.child_by_field_name("type").map(|kind| kind.kind());
                     let words = match kind {
                         Some("struct_type") => Some("struct"),
                         Some("interface_type") => Some("interface"),
                         _ => None,
                     };
-                    let text = match (words, spec.child_by_field_name("type")) {
+                    let text = match (words, item.child_by_field_name("type")) {
                         (Some(words), Some(kind)) => {
-                            let name = self.squashed(spec.start_byte(), kind.start_byte());
+                            let name = self.squashed(item.start_byte(), kind.start_byte());
                             format!("type {name} {words}")
                         }
-                        _ => format!("type {}", self.squashed(spec.start_byte(), spec.end_byte())),
+                        _ => format!("type {}", self.squashed(item.start_byte(), item.end_byte())),
                     };
                     self.push(at, depth, text);
-                    if let Some(kind) = spec.child_by_field_name("type")
+                    if let Some(kind) = item.child_by_field_name("type")
                         && kind.kind() == "interface_type"
                     {
                         let mut cursor = kind.walk();
@@ -378,16 +425,16 @@ impl Walk<'_> {
             }
             "const_declaration" => {
                 let mut cursor = node.walk();
-                let specs: Vec<Node> = node
+                let items: Vec<Node> = node
                     .named_children(&mut cursor)
-                    .filter(|spec| spec.kind() == "const_spec")
+                    .filter(|item| item.kind() == "const_spec")
                     .collect();
-                for spec in &specs {
-                    let at = if specs.len() == 1 { node } else { *spec };
-                    let end = spec
+                for item in &items {
+                    let at = if items.len() == 1 { node } else { *item };
+                    let end = item
                         .child_by_field_name("value")
-                        .map_or(spec.end_byte(), |value| value.start_byte());
-                    let text = format!("const {}", self.squashed(spec.start_byte(), end));
+                        .map_or(item.end_byte(), |value| value.start_byte());
+                    let text = format!("const {}", self.squashed(item.start_byte(), end));
                     self.push(at, depth, text);
                 }
             }
@@ -399,6 +446,17 @@ impl Walk<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `describe` with no secret to mask and all the time it takes.
+    fn described(shown: &str, language: Language, source: &[u8]) -> Result<String, Failure> {
+        describe(
+            shown,
+            language,
+            source,
+            &|text| text.to_owned(),
+            Duration::from_secs(60),
+        )
+    }
 
     /// The line and the byte offset where `needle` first appears in `source`.
     fn at(source: &str, needle: &str) -> String {
@@ -412,7 +470,7 @@ mod tests {
     /// The declarations of `source` as lines, the head left out, and that no doc comment or body
     /// shows in it.
     fn listed(language: Language, source: &str, left_out: &[&str]) -> Vec<String> {
-        let text = describe("fixture", language, source.as_bytes()).unwrap();
+        let text = described("fixture", language, source.as_bytes()).unwrap();
         let (head, lines) = text.split_once('\n').unwrap();
         assert!(head.contains("Not a read"), "{head}");
         for word in left_out {
@@ -732,7 +790,7 @@ func (c *Conn) Close() error {
 
     #[test]
     fn an_offset_of_the_outline_starts_its_declaration() {
-        let text = describe("fixture", Language::Rust, RUST.as_bytes()).unwrap();
+        let text = described("fixture", Language::Rust, RUST.as_bytes()).unwrap();
         let offsets: Vec<usize> = text
             .lines()
             .skip(1)
@@ -748,8 +806,59 @@ func (c *Conn) Close() error {
     }
 
     #[test]
+    fn a_later_declarator_starts_at_itself_and_shows_nothing_of_an_earlier_one() {
+        let source = "let token = \"first-value\", f = () => {};\nconst A = 1, B = 2;\n";
+
+        let listed = listed(Language::JavaScript, source, &["first-value", "let token"]);
+
+        assert_eq!(
+            listed,
+            expect(
+                source,
+                &[
+                    ("f =", 0, "f = () =>"),
+                    ("const A", 0, "const A"),
+                    ("B =", 0, "B")
+                ]
+            )
+        );
+    }
+
+    #[test]
+    fn a_signature_is_masked_before_it_is_cut_so_no_part_of_a_secret_shows() {
+        let secret = "hunter2hunter2hunter2";
+        // The secret starts a few characters before the 160th of the signature.
+        let source = format!(
+            "fn f({}, {secret}: u32) {{}}\nfn g() {{}}\n",
+            "a".repeat(SHOWN_CHARS - 10)
+        );
+        let mask = |text: &str| text.replace(secret, "[masked]");
+
+        let text = describe("s.rs", Language::Rust, source.as_bytes(), &mask, PARSE_TIME).unwrap();
+
+        assert!(!text.contains("hun"), "{text}");
+        assert!(text.contains("fn g()"), "{text}");
+    }
+
+    #[test]
+    fn a_parse_past_its_time_is_stopped_and_not_an_outline() {
+        // Big enough for the parser to look at the clock (it does so every few thousand steps).
+        let source = "a=[".repeat(100_000);
+
+        let said = describe(
+            "slow.js",
+            Language::JavaScript,
+            source.as_bytes(),
+            &|text| text.to_owned(),
+            Duration::ZERO,
+        );
+
+        assert_eq!(said, Err(Failure::TooLong));
+    }
+
+    #[test]
     fn a_file_with_no_declaration_says_so() {
-        let text = describe("empty.py", Language::Python, b"print(1)\n").unwrap();
+        let text = described("empty.py", Language::Python, b"print(1)\n").unwrap();
 
         assert!(text.contains("(no declarations)"), "{text}");
     }
@@ -758,7 +867,7 @@ func (c *Conn) Close() error {
     fn a_signature_longer_than_a_line_is_cut() {
         let source = format!("fn long({}) {{}}\n", "argument: u32, ".repeat(40));
 
-        let text = describe("long.rs", Language::Rust, source.as_bytes()).unwrap();
+        let text = described("long.rs", Language::Rust, source.as_bytes()).unwrap();
 
         let line = text.lines().nth(1).unwrap();
         assert!(line.ends_with('…'), "{line}");
@@ -767,7 +876,7 @@ func (c *Conn) Close() error {
 
     #[test]
     fn a_source_with_a_syntax_error_still_lists_what_is_there() {
-        let text = describe(
+        let text = described(
             "broken.rs",
             Language::Rust,
             b"fn good() {}\nfn broken( {\nfn also_good() {}\n",
