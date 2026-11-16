@@ -93,6 +93,13 @@ pub const SECTIONS: [(&str, &str); 6] = [
     ("vault", "Vault"),
 ];
 
+/// What *Agents may open windows on my screen* says: what a run is given.
+pub const WINDOWS_HINT: &str = "Each run of its agents, a program it builds or starts, gets a \
+     runtime folder of its own holding your session's Wayland socket alone: never the session \
+     bus, the keyring nor your other sockets. Without Wayland it gets X11's display, and with X11 \
+     a program can read the keys you type in other windows and type into them, a terminal's \
+     included; on some Wayland compositors a client can capture the screen and the clipboard.";
+
 /// What the Vault tab says it lists.
 pub const VAULT_SENTENCE: &str = "The secrets this project's agents can use: its own first, then \
                                   every project's. A secret is never shown.";
@@ -343,6 +350,7 @@ enum Saving {
     Forge { path: String, used: bool },
     Tracker,
     BranchPrefix,
+    Windows,
 }
 
 /// The dialogs' fields, made once a window is at hand.
@@ -470,6 +478,9 @@ pub struct ProjectSettingsPage {
     branch_prefix: Option<String>,
     /// Made when first drawn, since a text field needs a window.
     prefix_field: Option<Entity<InputState>>,
+    /// Its agents' runs may open windows on the user's screen: what the file says, or what the
+    /// switch asks while it is saved.
+    windows: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -597,6 +608,7 @@ impl ProjectSettingsPage {
             workspaces,
             branch_prefix: None,
             prefix_field: None,
+            windows: false,
             _subscriptions: [observed, checked, focused]
                 .into_iter()
                 .chain(counted)
@@ -684,6 +696,27 @@ impl ProjectSettingsPage {
 
     pub fn setup(&self) -> &Entity<SetupSection> {
         &self.setup
+    }
+
+    /// Whether its agents' runs may open windows on the user's screen.
+    pub fn allows_windows(&self) -> bool {
+        self.windows
+    }
+
+    /// The switch of the windows: it moves at once and the file follows; a refused save puts it
+    /// back.
+    pub fn toggle_windows(&mut self, cx: &mut Context<Self>) {
+        if self.saving.is_some() || !self.loaded {
+            return;
+        }
+        self.windows = !self.windows;
+        // Only the setting: the tracker is given as it stands, so the save writes nothing else.
+        let settings = json!({
+            "name": self.name,
+            "tracker": self.tracker,
+            "windows": self.windows,
+        });
+        self.send(settings, Saving::Windows, cx);
     }
 
     /// The command lines its forges and tracker need, checked.
@@ -803,6 +836,9 @@ impl ProjectSettingsPage {
         if saved {
             let saving = self.saving.take();
             wrote_prefix = saving == Some(Saving::BranchPrefix);
+            if saving == Some(Saving::Windows) && read.is_err() {
+                self.windows = !self.windows;
+            }
             // A new forge or tracker may need another program: read them anew.
             if saving.is_some() && read.is_ok() {
                 self.programs.update(cx, |checks, cx| checks.reread(cx));
@@ -883,6 +919,7 @@ impl ProjectSettingsPage {
             field.update(cx, |field, cx| field.set_value(kept, window, cx));
         }
         self.branch_prefix = kept;
+        self.windows = settings["windows"] == true;
         cx.notify();
     }
 
@@ -953,6 +990,14 @@ impl ProjectSettingsPage {
                     }
                 },
             ),
+            Some(Saving::Windows) => match settings["windows"] == true {
+                true => Toast::success("Windows allowed").detail(
+                    "Each run of its agents may open windows on your screen, from its next \
+                     run.",
+                ),
+                false => Toast::success("Windows turned off")
+                    .detail("Its agents' runs open no window on your screen."),
+            },
             None => Toast::success("Settings saved"),
         };
         toast(said, cx);
@@ -2083,6 +2128,24 @@ impl ProjectSettingsPage {
         Field::new("depends-field", "Depends on", control).hint(hint)
     }
 
+    /// Whether its agents' runs may open windows on the user's screen: the user's alone.
+    fn windows_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let this = cx.entity().downgrade();
+        Section::new(format!("windows-section-{}", self.name), "Windows")
+            .sentence("What its agents' runs may show on your screen.")
+            .child(
+                Switch::new(
+                    "project-windows",
+                    self.windows,
+                    "Agents may open windows on my screen",
+                )
+                .hint(WINDOWS_HINT)
+                .on_click(move |_, _, cx| {
+                    this.update(cx, |this, cx| this.toggle_windows(cx)).ok();
+                }),
+            )
+    }
+
     /// What a merge of this repository's pull requests does with their branch.
     fn delete_branch_switch(&self, this: WeakEntity<Self>) -> Switch {
         Switch::new(
@@ -2858,7 +2921,10 @@ impl Render for ProjectSettingsPage {
                 ),
                 ("setup", self.setup.clone().into_any_element()),
             ],
-            "tasks" => vec![("tasks", self.tasks.clone().into_any_element())],
+            "tasks" => vec![
+                ("tasks", self.tasks.clone().into_any_element()),
+                ("windows", self.windows_section(cx).into_any_element()),
+            ],
             "instructions" => vec![
                 ("rules", self.rules.clone().into_any_element()),
                 ("commands", self.commands.clone().into_any_element()),
