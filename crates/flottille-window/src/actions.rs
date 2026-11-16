@@ -412,10 +412,12 @@ pub enum Command {
         method: &'static str,
         params: Value,
     },
-    /// Starts a service (and what it needs first), or stops it.
+    /// Starts a service (and what it needs first), or stops it; `force` stops it even though
+    /// something running needs it, which the user confirmed.
     ServiceAct {
         name: String,
         start: bool,
+        force: bool,
     },
     /// The output of a service's run, as a run's.
     ServiceOutput {
@@ -2319,13 +2321,17 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
             };
             Outcome::ServiceWritten { refused }
         }
-        Command::ServiceAct { name, start } => {
+        Command::ServiceAct { name, start, force } => {
             // A start waits for what the service needs to be ready.
-            let (method, bound) = match start {
-                true => ("service.start", bounds.slow),
-                false => ("service.stop", bounds.quick),
+            let (method, params, bound) = match start {
+                true => ("service.start", json!({"name": name}), bounds.slow),
+                false => (
+                    "service.stop",
+                    json!({"name": name, "force": force}),
+                    bounds.quick,
+                ),
             };
-            let answer = ask_alone(connect, method, json!({"name": name}), bound).and_then(|a| a);
+            let answer = ask_alone(connect, method, params, bound).and_then(|a| a);
             Outcome::ServiceActed {
                 name,
                 start,
