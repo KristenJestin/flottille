@@ -406,7 +406,7 @@ pub async fn run(
     let Request {
         name,
         line,
-        mut words,
+        words,
         repository,
         serve,
         folder,
@@ -423,13 +423,11 @@ pub async fn run(
     if !approved && let Verdict::Deny(why) = gate::contained(std::slice::from_ref(&folder)) {
         return Outcome::Refused(why);
     }
-    let checked = match gate::pushes(&words) {
-        true => match remote_kept(daemon, place, &repository, &folder.path).await {
-            Ok(checked) => checked,
-            Err(refusal) => return Outcome::Refused(refusal),
-        },
-        false => Vec::new(),
-    };
+    if gate::pushes(&words)
+        && let Err(refusal) = remote_kept(daemon, place, &repository, &folder.path).await
+    {
+        return Outcome::Refused(refusal);
+    }
     // A server already running for the agent is joined, not started twice.
     let serving = match (serve, name.as_deref()) {
         (true, Some(task)) => Some(daemon.mcp.runs.serving(Some(agent), &place.project, task)),
@@ -497,28 +495,19 @@ pub async fn run(
         true => String::new(),
         false => format!("started the services it needs: {}\n", started.join(", ")),
     };
-    // Only a push the gate read, and that the user or the judge let through, goes out.
-    let lift = approved && gate::is_push(&words);
-    let mut env = match environment(daemon, place, &repository, lift) {
+    // Only a push the gate read, and that the user or the judge let through, goes out: outside
+    // the sandbox, as the user's own.
+    let lifted = (approved && gate::is_push(&words)).then(lifted);
+    let env = match environment(daemon, place, &repository) {
         Ok(env) => env,
         Err(why) => return Outcome::Failed(why),
     };
     // The project's checks of each commit the push sends, and its branch format on each branch
     // it makes, before it goes: however the commits were made, through a command the checks at
     // commit time read or not.
-    if lift {
-        if let Some(refusal) = globals_refused(&words, &folder.path) {
-            return Outcome::Refused(refusal);
-        }
-        crate::ssh_agent::pin(&mut env, &folder.path, &mut words).await;
-        if let Err(refusal) = crate::ssh_agent::over_ssh(&folder.path, &words, &env).await {
-            return Outcome::Refused(refusal);
-        }
-        if let Err(refusal) = crate::ssh_agent::judged(&folder.path, &words, &env, &checked).await {
-            return Outcome::Refused(refusal);
-        }
+    if let Some(lifted) = &lifted {
         tokio::select! {
-            checked = crate::message_checks::push(&at, &words, &env) => {
+            checked = crate::message_checks::push(&at, &words, lifted) => {
                 if let Err(refusal) = checked {
                     return Outcome::Refused(refusal);
                 }
@@ -534,8 +523,8 @@ pub async fn run(
         ready.as_deref(),
         url.as_deref(),
         &names(place, &repository),
-        // A push's probes are not the push: they are not lent its SSH agent.
-        &crate::ssh_agent::withheld(&env),
+        // A push's probes are not the push: they run in the sandbox.
+        &env,
         &folder.path,
         &secret_values,
     )
@@ -582,6 +571,7 @@ pub async fn run(
         run,
         words,
         env,
+        lifted,
         secret_values,
         Phase::Waited,
         Readying { probe, notify },
@@ -651,7 +641,7 @@ pub async fn run_for_user(
     let words = split_line(&task.line)?;
     let (repository, base) = place.base_for(task.repository.as_deref(), Folder::Task)?;
     let folder = place.resolve(base, ".");
-    let env = environment(daemon, &place, repository, false)?;
+    let env = environment(daemon, &place, repository)?;
     let secret_values = place.secret_values();
     let (url, url_error, probe) = readied(
         daemon,
@@ -688,6 +678,7 @@ pub async fn run_for_user(
         run,
         words,
         env,
+        None,
         secret_values,
         Phase::Waited,
         Readying {
@@ -745,13 +736,12 @@ pub(crate) fn wait_for_end(daemon: &Daemon, id: &str) -> impl Future<Output = ()
     }
 }
 
-/// The environment of a run in the place: the daemon's, the place's variables filled, the forges
-/// and the daemon kept out of reach, and pushes too unless `lift`.
+/// The environment of a run in the place: the daemon's, the place's variables filled, the forges,
+/// the daemon and pushes kept out of reach.
 pub(crate) fn environment(
     daemon: &Daemon,
     place: &Place,
     repository: &str,
-    lift: bool,
 ) -> Result<BTreeMap<OsString, OsString>, String> {
     let names = names(place, repository);
     let mut filled = BTreeMap::new();
@@ -761,7 +751,7 @@ pub(crate) fn environment(
     let mut env = variables::environment(std::env::vars_os(), &[&filled]);
     let empty = daemon.paths.state.join("empty");
     flottille_core::paths::ensure_private_dir(&empty).map_err(|e| e.to_string())?;
-    defend(&mut env, &empty, lift);
+    defend(&mut env, &empty);
     // Where the daemon's socket is: a client a run starts is refused anyway (`daemon.rs`).
     env.remove(&OsString::from("XDG_RUNTIME_DIR"));
     // The screen is the user's to give, by the project's setting (`start`), X11's key with it.
@@ -777,7 +767,7 @@ pub(crate) fn beside(daemon: &Daemon) -> Result<BTreeMap<OsString, OsString>, St
     let mut env: BTreeMap<OsString, OsString> = std::env::vars_os().collect();
     let empty = daemon.paths.state.join("empty");
     flottille_core::paths::ensure_private_dir(&empty).map_err(|e| e.to_string())?;
-    defend(&mut env, &empty, false);
+    defend(&mut env, &empty);
     env.remove(&OsString::from("XDG_RUNTIME_DIR"));
     // No screen either: a connection's browser that is shown gets its own (`adapters::display`).
     for name in ["WAYLAND_DISPLAY", "DISPLAY", "XAUTHORITY"] {
@@ -821,13 +811,12 @@ pub fn groups_of(daemon: &Daemon, agent: &str) -> Vec<u32> {
 }
 
 /// No forge token, the forge command lines' configuration in `empty` (`forge` is the way to
-/// the forge), and no hook: the hooks are files the agent writes, and a commit or a push the gate
-/// let through would run them where it does not look. Every push URL is rewritten to a path that
-/// is no remote (`url.<nowhere>.pushInsteadOf` of every URL), and the user's SSH agent is not
-/// named, unless `lift`: the run is itself a `git push` the user or the judge let through, lent
-/// the agent the daemon's own environment names (`ssh_agent`). A harmless command cannot push
-/// from a script the gate never read (`docs/design.md` §7).
-fn defend(env: &mut BTreeMap<OsString, OsString>, empty: &Path, lift: bool) {
+/// the forge), no SSH agent, and no hook: the hooks are files the agent writes, and a commit or a
+/// push the gate let through would run them where it does not look. Every push URL is rewritten
+/// to a path that is no remote (`url.<nowhere>.pushInsteadOf` of every URL): a harmless command
+/// cannot push from a script the gate never read (`docs/design.md` §7). A push the gate let
+/// through runs with [`lifted`] instead.
+fn defend(env: &mut BTreeMap<OsString, OsString>, empty: &Path) {
     for name in FORGE_TOKENS {
         env.insert(name.into(), OsString::new());
     }
@@ -839,84 +828,28 @@ fn defend(env: &mut BTreeMap<OsString, OsString>, empty: &Path, lift: bool) {
     // kept: it holds no secret of the user's, and its socket is at a fixed path anyway.
     env.remove(&OsString::from("DBUS_SESSION_BUS_ADDRESS"));
     env.remove(&OsString::from(crate::ssh_agent::VARIABLE));
-    if lift && let Some(lent) = crate::ssh_agent::lend() {
-        env.insert(crate::ssh_agent::VARIABLE.into(), lent.path().into());
-    }
-    if !lift {
-        configure(
-            env,
-            "url./dev/null/flottille-refused-push/.pushInsteadOf",
-            "",
-        );
-    }
+    configure(
+        env,
+        "url./dev/null/flottille-refused-push/.pushInsteadOf",
+        "",
+    );
 }
 
-/// Why a push the gate let through, run in `folder`, is refused for a global option of its own
-/// line. A setting (`-c`, `--config-env`) would beat those its environment sets around it, its
-/// hooks and its `ssh` (`ssh_agent::pin`); `--exec-path` runs git's programs from another folder;
-/// `--git-dir`, `--work-tree` and the rest bring another repository, whose remote and settings
-/// were never read. Only options that change nothing of what runs pass, and `-C` into the
-/// repository's own folder (no other repository on the way). Refused in every mode.
-fn globals_refused(words: &[String], folder: &Path) -> Option<String> {
-    const HARMLESS: [&str; 4] = ["--no-pager", "-P", "--no-advice", "--no-optional-locks"];
-    let nothing = "ask the user to push by hand; nothing was pushed";
-    let (_, globals) = gate::git_globals(&words[1..]);
-    let mut at = folder.to_path_buf();
-    let mut moved = None;
-    for (option, value) in globals {
-        match (option, value) {
-            (option, _) if HARMLESS.contains(&option) => {}
-            ("-C", Some(to)) => {
-                at = at.join(to);
-                moved = Some(to);
-            }
-            ("-c" | "--config-env", _) => {
-                return Some(format!(
-                    "refused: a push takes no git {option}: a setting on its line would beat \
-                     those Flottille sets around it (its hooks, its ssh); set it in the \
-                     repository, or {nothing}"
-                ));
-            }
-            _ => {
-                return Some(format!(
-                    "refused: a push takes no git {option}: it would run git's programs or read \
-                     a repository other than the one Flottille checked; push from the \
-                     repository's folder with git push and its own options, or {nothing}"
-                ));
-            }
-        }
-    }
-    let to = moved?;
-    match within(folder, &at) {
-        true => None,
-        false => Some(format!(
-            "refused: git -C {to} takes the push out of its repository's folder ({}), the one \
-             Flottille checked; push from there, or {nothing}",
-            folder.display()
-        )),
-    }
-}
-
-/// Whether `at` is `folder` or a folder under it that git finds `folder`'s repository from: no
-/// `.git`, and no folder that looks like a bare repository (`HEAD`), on the way.
-fn within(folder: &Path, at: &Path) -> bool {
-    let (Ok(folder), Ok(at)) = (folder.canonicalize(), at.canonicalize()) else {
-        return false;
-    };
-    if !at.starts_with(&folder) {
-        return false;
-    }
-    at.ancestors()
-        .take_while(|step| *step != folder)
-        .all(|step| {
-            step.join(".git").symlink_metadata().is_err()
-                && step.join("HEAD").symlink_metadata().is_err()
-        })
+/// The environment of a run that is itself a `git push` the user, the judge, a rule or Full mode
+/// let through: the daemon's own, as if the user had typed it (their credential helper, keyring,
+/// SSH agent, forge command line's sign-in), and no hook: the hooks are files the agent writes.
+/// The project's and the workspace's variables are not applied: they are a file a run may write,
+/// and one of them (`GIT_CONFIG_PARAMETERS`) would undo the hooks setting. It runs outside the
+/// sandbox (`start`).
+fn lifted() -> BTreeMap<OsString, OsString> {
+    let mut env = std::env::vars_os().collect();
+    configure(&mut env, "core.hooksPath", "/dev/null");
+    env
 }
 
 /// One more git setting through the environment, after those it already has: it wins over the
 /// repository's own.
-pub(crate) fn configure(env: &mut BTreeMap<OsString, OsString>, key: &str, value: &str) {
+fn configure(env: &mut BTreeMap<OsString, OsString>, key: &str, value: &str) {
     let count: usize = env
         .get(&OsString::from("GIT_CONFIG_COUNT"))
         .and_then(|count| count.to_str()?.parse().ok())
@@ -928,29 +861,15 @@ pub(crate) fn configure(env: &mut BTreeMap<OsString, OsString>, key: &str, value
 
 /// Refuses a push from a workspace unless the repository's remote leads where it led when the
 /// workspace was created (`forge::remote_kept`): neither the judge nor the user reads where a
-/// remote leads now. A push from the project folder has nothing to compare with. The URLs a push
-/// lent the SSH agent may go to (`ssh_agent::judged`): the workspace's, or the project folder's
-/// remote's as they are now.
+/// remote leads now. A push from the project folder has nothing to compare with.
 async fn remote_kept(
     daemon: &Daemon,
     place: &Place,
     repository: &str,
     folder: &Path,
-) -> Result<Vec<String>, String> {
+) -> Result<(), String> {
     let Some(name) = &place.workspace else {
-        let remote = projects::load_project(daemon, &place.project)
-            .ok()
-            .and_then(|project| {
-                project
-                    .repositories
-                    .into_iter()
-                    .find(|r| r.path == repository)
-                    .map(|r| r.remote)
-            });
-        return Ok(match remote {
-            Some(remote) => crate::forge::urls_of(folder, &remote).await,
-            None => Vec::new(),
-        });
+        return Ok(());
     };
     let workspace = daemon
         .read(|store| store.workspace(&place.project, name))
@@ -964,19 +883,21 @@ async fn remote_kept(
         .ok_or_else(|| {
             format!("refused: {repository} is not a repository of this agent's workspace")
         })?;
-    crate::forge::remote_kept(folder, base).await?;
-    Ok(base.urls.clone())
+    crate::forge::remote_kept(folder, base).await
 }
 
 /// Spawns the run, records it, and leaves a task of its own to follow it to its end. `phase` is
 /// what it is in from the start: a run that ends at once must find it already detached to have
-/// its end delivered.
+/// its end delivered. It runs in the sandbox with `env`, or outside it with `lifted`, the
+/// environment of a push the gate let through (`fn lifted`); its probes run in the sandbox with
+/// `env` either way.
 #[allow(clippy::too_many_arguments)]
 fn start(
     daemon: &Arc<Daemon>,
     run: Run,
     words: Vec<String>,
     mut env: BTreeMap<OsString, OsString>,
+    lifted: Option<BTreeMap<OsString, OsString>>,
     secrets: Vec<String>,
     phase: Phase,
     readying: Readying,
@@ -984,10 +905,17 @@ fn start(
     needs: &[String],
 ) -> Result<(), String> {
     crate::projects::refuse_removing(daemon, &run.project).map_err(|refused| refused.message)?;
-    let display = shown(daemon, &run).map(|shown| {
-        env.extend(shown.env);
-        shown.folder
-    });
+    // A lifted push has the daemon's own display already, and needs none.
+    let display = match lifted {
+        Some(_) => None,
+        None => shown(daemon, &run).map(|shown| {
+            env.extend(shown.env);
+            shown.folder
+        }),
+    };
+    let probed = env.clone();
+    let outside = lifted.is_some();
+    let env = lifted.unwrap_or(env);
     let (reader, writer) = std::io::pipe().map_err(|e| format!("cannot run it: {e}"))?;
     let mut command = tokio::process::Command::new(&words[0]);
     command
@@ -1004,12 +932,11 @@ fn start(
         )
         .stderr(writer)
         .kill_on_drop(true);
-    let lent = crate::ssh_agent::lent_to(&env);
-    let spawned = crate::children::spawn(crate::landlock::confined_with(
-        crate::children::in_own_session(&mut command),
-        display.as_ref(),
-        lent.as_ref(),
-    ));
+    crate::children::in_own_session(&mut command);
+    if !outside {
+        crate::landlock::confined_but(&mut command, display.as_ref());
+    }
+    let spawned = crate::children::spawn(&mut command);
     // The command holds the pipe's writing end: dropped, only the processes hold it.
     drop(command);
     let child = spawned.map_err(|e| format!("cannot run {}: {e}", words[0]))?;
@@ -1070,7 +997,7 @@ fn start(
         crate::services::follow_needs(daemon, &going.needs);
     }
     if let Some(probe @ (Probe::Url(_) | Probe::Command(_))) = readying.probe {
-        tokio::spawn(probing(daemon.clone(), going.clone(), probe));
+        tokio::spawn(probing(daemon.clone(), going.clone(), probe, probed));
     }
     tokio::spawn(follow(daemon.clone(), going, child, pid, reader));
     Ok(())
@@ -1179,22 +1106,22 @@ fn starting(going: &Going) -> bool {
     *going.readiness.lock().unwrap() == Some(Readiness::Starting)
 }
 
-/// Probes the starting run once a second, one probe at a time, until it is ready or ends.
-async fn probing(daemon: Arc<Daemon>, going: Arc<Going>, probe: Probe) {
+/// Probes the starting run once a second, one probe at a time, until it is ready or ends, a
+/// command in the sandbox's environment `env`.
+async fn probing(
+    daemon: Arc<Daemon>,
+    going: Arc<Going>,
+    probe: Probe,
+    env: BTreeMap<OsString, OsString>,
+) {
     let mut end = going.end.subscribe();
     while starting(&going) {
         let passed = async {
             match &probe {
                 Probe::Url(address) => ready::answers(address).await,
                 Probe::Command(words) => {
-                    ready::command_passes(
-                        &daemon,
-                        &going.run.id,
-                        words,
-                        &crate::ssh_agent::withheld(&going.env),
-                        &going.run.folder,
-                    )
-                    .await
+                    ready::command_passes(&daemon, &going.run.id, words, &env, &going.run.folder)
+                        .await
                 }
                 Probe::Line(_) => false,
             }
@@ -1689,7 +1616,7 @@ pub async fn restart_by_user(
                 name.as_deref().unwrap_or_default()
             )
         })?;
-    let env = environment(daemon, &place, &repository, false)?;
+    let env = environment(daemon, &place, &repository)?;
     let secret_values = place.secret_values();
     let (url, url_error, probe) = readied(
         daemon,
@@ -1756,6 +1683,7 @@ pub async fn restart_by_user(
             run,
             words,
             env,
+            None,
             secret_values,
             phase,
             readying,
@@ -2212,7 +2140,7 @@ pub(crate) async fn service_start(
     let mut env = variables::environment(std::env::vars_os(), &[]);
     let empty = daemon.paths.state.join("empty");
     flottille_core::paths::ensure_private_dir(&empty).map_err(|e| e.to_string())?;
-    defend(&mut env, &empty, false);
+    defend(&mut env, &empty);
     env.remove(&OsString::from("XDG_RUNTIME_DIR"));
     let mut secret_values = Vec::new();
     for entry in std::fs::read_dir(&folder).into_iter().flatten().flatten() {
@@ -2309,6 +2237,7 @@ pub(crate) fn start_service(
         run,
         start.words,
         start.env,
+        None,
         start.secrets,
         Phase::Waited,
         Readying {
@@ -2589,21 +2518,35 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_run_s_pushes_are_walled_unless_it_is_a_push_that_passed_the_gate() {
-        for lift in [false, true] {
-            let mut env = BTreeMap::new();
-            defend(&mut env, Path::new("/state/empty"), lift);
-            let keys: Vec<&str> = (0..3)
-                .filter_map(|n| env.get(&OsString::from(format!("GIT_CONFIG_KEY_{n}"))))
-                .map(|key| key.to_str().unwrap())
-                .collect();
-            assert_eq!(
-                keys.contains(&"url./dev/null/flottille-refused-push/.pushInsteadOf"),
-                !lift,
-                "{keys:?}"
-            );
-            assert!(keys.contains(&"core.hooksPath"));
+    fn a_run_s_pushes_are_walled() {
+        let mut env = BTreeMap::new();
+        defend(&mut env, Path::new("/state/empty"));
+        let keys: Vec<&str> = (0..3)
+            .filter_map(|n| env.get(&OsString::from(format!("GIT_CONFIG_KEY_{n}"))))
+            .map(|key| key.to_str().unwrap())
+            .collect();
+        assert!(
+            keys.contains(&"url./dev/null/flottille-refused-push/.pushInsteadOf"),
+            "{keys:?}"
+        );
+        assert!(keys.contains(&"core.hooksPath"));
+    }
+
+    #[test]
+    fn a_lifted_push_keeps_the_daemon_s_environment_but_its_hooks() {
+        let env = lifted();
+        let daemon: BTreeMap<OsString, OsString> = std::env::vars_os().collect();
+        let count: usize = daemon
+            .get(&OsString::from("GIT_CONFIG_COUNT"))
+            .map_or(0, |count| count.to_str().unwrap().parse().unwrap());
+        for (name, value) in &daemon {
+            if !name.to_str().unwrap_or_default().starts_with("GIT_CONFIG_") {
+                assert_eq!(env.get(name), Some(value), "{name:?}");
+            }
         }
+        let get = |name: String| env[&OsString::from(name)].to_str().unwrap().to_owned();
+        assert_eq!(get(format!("GIT_CONFIG_KEY_{count}")), "core.hooksPath");
+        assert_eq!(get(format!("GIT_CONFIG_VALUE_{count}")), "/dev/null");
     }
 
     #[test]
@@ -2622,16 +2565,16 @@ mod tests {
         .map(|(k, v)| (k.into(), v.into()))
         .collect();
 
-        defend(&mut env, Path::new("/state/empty"), true);
+        defend(&mut env, Path::new("/state/empty"));
 
         let get = |name: &str| env[&OsString::from(name)].to_str().unwrap().to_owned();
         assert_eq!(get("GH_TOKEN"), "");
         assert_eq!(get("GITHUB_TOKEN"), "");
         assert_eq!(get("GH_CONFIG_DIR"), "/state/empty");
-        assert_eq!(get("GIT_CONFIG_COUNT"), "3");
+        assert_eq!(get("GIT_CONFIG_COUNT"), "4");
         assert_eq!(get("GIT_CONFIG_KEY_2"), "core.hooksPath");
         assert_eq!(get("GIT_CONFIG_VALUE_2"), "/dev/null");
-        assert!(!env.contains_key(&OsString::from("GIT_CONFIG_KEY_3")));
+        assert!(!env.contains_key(&OsString::from("GIT_CONFIG_KEY_4")));
         assert_eq!(get("PATH"), "/bin");
         assert!(!env.contains_key(&OsString::from("DBUS_SESSION_BUS_ADDRESS")));
         assert_eq!(

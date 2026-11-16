@@ -69,6 +69,33 @@ pub async fn run_in<S: AsRef<OsStr>>(
     env: &BTreeMap<OsString, OsString>,
     input: Option<Vec<u8>>,
 ) -> Result<Output, String> {
+    let mut command = read_in(dir, words, env, input.is_some());
+    // It runs the line's own options and its transport (a remote's helper, its ssh command), as
+    // the run would: kept from what a run is kept from.
+    crate::landlock::confined(&mut command);
+    let limit = Class::Read.limit();
+    bounded(command, dir, &words[1..], limit, OUTPUT_LIMIT, input).await
+}
+
+/// [`run_in`] outside the sandbox: for what a push the gate let through reads of its remote
+/// before it goes (its dry run), which signs in as the push itself does (`runs::lifted`).
+pub async fn run_outside<S: AsRef<OsStr>>(
+    dir: &Path,
+    words: &[S],
+    env: &BTreeMap<OsString, OsString>,
+) -> Result<Output, String> {
+    let command = read_in(dir, words, env, false);
+    let limit = Class::Read.limit();
+    bounded(command, dir, &words[1..], limit, OUTPUT_LIMIT, None).await
+}
+
+/// The command of [`run_in`] and [`run_outside`]: never a prompt, nowhere to answer it.
+fn read_in<S: AsRef<OsStr>>(
+    dir: &Path,
+    words: &[S],
+    env: &BTreeMap<OsString, OsString>,
+    input: bool,
+) -> tokio::process::Command {
     let mut command = tokio::process::Command::new(&words[0]);
     command
         .args(&words[1..])
@@ -77,21 +104,12 @@ pub async fn run_in<S: AsRef<OsStr>>(
         .envs(env)
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GCM_INTERACTIVE", "never")
-        .stdin(if input.is_some() {
-            Stdio::piped()
-        } else {
-            Stdio::null()
-        })
+        .stdin(if input { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .process_group(0)
         .kill_on_drop(true);
-    // It runs the line's own options and its transport (a remote's helper, its ssh command), as
-    // the run would: kept from what a run is kept from, and lent the SSH agent when the run is.
-    let lent = crate::ssh_agent::lent_to(env);
-    crate::landlock::confined_with(&mut command, None, lent.as_ref());
-    let limit = Class::Read.limit();
-    bounded(command, dir, &words[1..], limit, OUTPUT_LIMIT, input).await
+    command
 }
 
 fn command<S: AsRef<OsStr>>(dir: &Path, args: &[S]) -> tokio::process::Command {
