@@ -1105,8 +1105,9 @@ pub enum Outcome {
         start: bool,
         answer: Result<Value, String>,
         /// The stop was refused because something running needs the service (the code
-        /// `needed`): what started since the list was read.
-        needed: bool,
+        /// `needed`), which started since the list was read: what needs it, as the daemon's
+        /// data says it.
+        needed: Option<Vec<String>>,
     },
     /// The output of a service's run.
     ServiceOutput {
@@ -2337,9 +2338,15 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
             let asked = connected(connect)
                 .and_then(|mut conn| conn.ask_within_coded(method, params, bound));
             let (answer, needed) = match asked {
-                Ok(Ok(answer)) => (Ok(answer), false),
-                Ok(Err(refused)) => (Err(refused.message), refused.code == "needed"),
-                Err(why) => (Err(why), false),
+                Ok(Ok(answer)) => (Ok(answer), None),
+                Ok(Err(refused)) => {
+                    let needed = (refused.code == "needed").then(|| {
+                        let data = refused.data.unwrap_or_default();
+                        crate::tasks::names_of(&data["needed_by"])
+                    });
+                    (Err(refused.message), needed)
+                }
+                Err(why) => (Err(why), None),
             };
             Outcome::ServiceActed {
                 name,
