@@ -1275,8 +1275,10 @@ pub fn tools_of(
     launched: Option<(&str, &str)>,
 ) -> Vec<String> {
     let given = crate::extensions::tools_for(daemon, project, root, launched);
-    // A connection's login takes an entry the user may have yet to add: its agent may ask for it.
+    // A connection's login takes an entry the user may have yet to add, and so may a connection
+    // a root proposes while Connections is on: its agent may ask for it.
     let vault = vault
+        || (root && launched.is_none() && crate::extensions::entries_proposed(daemon))
         || given
             .iter()
             .any(|tool| crate::extensions::logs_in(daemon, tool));

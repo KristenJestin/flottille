@@ -54,9 +54,37 @@ pub fn family_says(daemon: &Daemon, root: bool, args: &Value) -> Result<Vec<Stri
     connections::requests::says(daemon, root, args)
 }
 
-/// Why the user's Accept of a held `connections` call waits: an entry it names is still missing.
+/// Why the user's Accept of a held `connections` call waits: an entry it names is not right for
+/// it yet (missing, one project's, bound to another use or to no address of its host).
 pub fn family_waits(daemon: &Daemon, args: &Value) -> Option<String> {
     connections::requests::waits(daemon, args)
+}
+
+/// Whether a root may propose what needs vault entries it then asks for: Connections is on.
+pub fn entries_proposed(daemon: &Daemon) -> bool {
+    is_on(&daemon.paths, &connections::EXTENSION)
+}
+
+/// What an agent is told with its held `connections` write that names vault entries.
+pub fn family_held_note(args: &Value) -> Option<String> {
+    connections::requests::held_note(args)
+}
+
+/// The connection `name` the vault entry `entry` may be asked for, declared or asked by an agent's
+/// request waiting for the user, its server given that entry: its origin; `None` when there is no
+/// such connection, why when it gives its server no such entry.
+pub fn asked_for(
+    daemon: &Daemon,
+    name: &str,
+    entry: &str,
+) -> Result<Option<Option<String>>, String> {
+    connections::requests::asked_for(daemon, name, entry)
+}
+
+/// The connection an agent's request waiting for the user names the vault entry `entry` in, with
+/// its origin.
+pub fn wanting(daemon: &Daemon, entry: &str) -> Option<(String, Option<String>)> {
+    connections::requests::naming(daemon, entry)
 }
 
 /// A `connections` call performed: a read, or a write the user accepted, `approved` being the

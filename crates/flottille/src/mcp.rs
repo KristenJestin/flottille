@@ -625,6 +625,10 @@ const SERVED: [Definition; 33] = [
             edit, remove, set (an action's setting: judged, passes, asked or off), on and off \
             are always held for the user, whatever the mode: you are answered at once, the \
             result comes later; the user reads the declaration whole before it is written. \
+            A connection is given to every project, so the vault entries it names are every \
+            project's, and a URL's secret goes only to its entry's own address (its url): the \
+            user's Accept waits until they are, and the user sets them from the request. One \
+            the vault lacks: vault {action: \"ask\", name, why, connection: \"<name>\"}. \
             {\"action\": \"add\", \"name\": \"notes\", \"about\": \"The user's notes.\", \
             \"command\": \"notes-server mcp\", \"env\": {\"NOTES_TOKEN\": \"notes-token\"}}.",
         read_only: false,
@@ -667,7 +671,8 @@ const SERVED: [Definition; 33] = [
                 "url": {"type": "string", "description": "ask: where the secret goes (a login page)."},
                 "username": {"type": "string", "description": "ask: the account, if known."},
                 "for": {"type": "string", "description": "ask: its one use: worklog, or connection:<name> (a login)."},
-                "project": {"type": "string", "enum": ["this", "every"], "description": "ask: whose it is; a connection's is every project's."}
+                "project": {"type": "string", "enum": ["this", "every"], "description": "ask: whose it is; a connection's is every project's."},
+                "connection": {"type": "string", "description": "ask: the connection it is for, declared or that your request asks to add: the entry is every project's, at the connection's address."}
             }, "required": ["action"], "additionalProperties": false})
         },
     },
