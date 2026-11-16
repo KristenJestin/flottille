@@ -579,3 +579,48 @@ mod window {
         assert_eq!(pending_frames(cx), 0);
     }
 }
+
+#[test]
+fn a_run_makes_moves_and_uses_its_own_files_and_sockets_in_tmp() {
+    // X11's folder in a stand-in of `/tmp` that holds no runtime folder, as the machine's does:
+    // nothing ruled about X11 may take from a run what it makes in `/tmp` after it started.
+    let user = user_with_display();
+    let tmp = user.path("tmp");
+    std::fs::create_dir_all(tmp.join(".X11-unix")).unwrap();
+    let user = user.with_env(
+        "FLOTTILLE_X11_SOCKETS",
+        tmp.join(".X11-unix").to_str().unwrap(),
+    );
+    let (_, mcp, place) = session(&user);
+    std::fs::write(
+        place.join("scratch.py"),
+        format!(
+            "import os, socket\n\
+             made = os.path.join({tmp:?}, 'scratch')\n\
+             os.mkdir(made)\n\
+             with open(os.path.join(made, 'a'), 'w') as f:\n\
+             \x20   f.write('notes')\n\
+             os.replace(os.path.join(made, 'a'), os.path.join(made, 'b'))\n\
+             os.link(os.path.join(made, 'b'), os.path.join(made, 'c'))\n\
+             listening = socket.socket(socket.AF_UNIX)\n\
+             listening.bind(os.path.join(made, 'sock'))\n\
+             listening.listen(1)\n\
+             client = socket.socket(socket.AF_UNIX)\n\
+             client.connect(os.path.join(made, 'sock'))\n\
+             os.replace(os.path.join(made, 'b'), 'moved.txt')\n\
+             print('[made, moved and connected]')\n",
+            tmp = tmp.to_str().unwrap(),
+        ),
+    )
+    .unwrap();
+
+    let ran = done(mcp.call("run", json!({"line": "python3 scratch.py"})));
+
+    // Only the ninth ABI ruled the way to X11's folder: below, this proves nothing more than it says.
+    eprintln!("this kernel's Landlock ABI: {}", landlock_abi());
+    assert!(ran.contains("[made, moved and connected]"), "{ran}");
+    assert_eq!(
+        std::fs::read_to_string(place.join("moved.txt")).unwrap(),
+        "notes"
+    );
+}
