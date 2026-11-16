@@ -981,7 +981,7 @@ mod tests {
         let later = start + SAID_AGAIN;
         assert_eq!(
             remote.refused_lines(None, later),
-            ["24 other links were refused in the last minute, from keys not said"]
+            ["72 other links were refused in the last minute, from keys not said"]
         );
         assert!(remote.refused_lines(None, later).is_empty());
         assert_eq!(remote.refused_lines(Some(&keys[0]), later).len(), 1);
@@ -992,7 +992,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (remote, keys) = remote_in(dir.path(), 1);
         let remote = Arc::new(remote);
-        for at in 0..50 {
+        remote.told_by(keys[0], vec!["192.0.2.0:4000".to_owned()]);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        for at in 1..50 {
             remote.told_by(keys[0], vec![format!("192.0.2.{at}:4000")]);
         }
         // The first is written at once; those told after it wait, the latest kept.
