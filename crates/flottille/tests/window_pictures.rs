@@ -448,6 +448,275 @@ fn an_attached_picture_in_the_composer_opens_large_too(cx: &mut TestAppContext) 
     assert!(!has("picture-modal", cx), "Escape closes it");
 }
 
+/// The size of an element, in points.
+fn size_of(id: &'static str, cx: &mut VisualTestContext) -> (f32, f32) {
+    cx.update(|window, _| {
+        let bounds = window.find(id).bounds();
+        (f32::from(bounds.size.width), f32::from(bounds.size.height))
+    })
+}
+
+/// Opens the `n`th picture of the message at `at`, and lets the dialog's entrance end.
+fn open_picture(at: usize, n: usize, cx: &mut VisualTestContext) {
+    cx.update(|window, cx| window.click(format!("row-{at}-image-{n}"), cx));
+    settle(cx);
+}
+
+#[gpui_kit::test]
+fn a_small_picture_opens_in_a_dialog_its_size(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    let lead = start(&user, "atlas", "hello");
+    let (shell, _reply, cx) = open_session(&user, &lead, cx);
+    let at = say_with_pictures(&user, &lead, &shell, cx, &[png(250, 160)]);
+    open_picture(at, 0, cx);
+
+    let own = points(250., 160., cx);
+    assert_eq!(
+        size_of("picture-stage", cx),
+        own,
+        "the body is the picture's size"
+    );
+    assert_eq!(size_of("picture-large-0", cx), own);
+    let (dialog, window) = (
+        size_of("picture-modal", cx),
+        cx.update(|window, _| window.viewport_size()),
+    );
+    assert!(
+        dialog.0 < f32::from(window.width) / 2. && dialog.1 < f32::from(window.height) / 2.,
+        "the dialog wraps the picture, it is not the large modal: {dialog:?} in {window:?}"
+    );
+    assert!(
+        dialog.0 >= own.0 && dialog.1 >= own.1,
+        "and holds it: {dialog:?}"
+    );
+}
+
+#[gpui_kit::test]
+fn a_large_picture_is_scaled_down_to_fit_the_window(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    let lead = start(&user, "atlas", "hello");
+    let (shell, _reply, cx) = open_session(&user, &lead, cx);
+    let at = say_with_pictures(&user, &lead, &shell, cx, &[png(2000, 1400)]);
+    open_picture(at, 0, cx);
+
+    let own = points(2000., 1400., cx);
+    let picture = size_of("picture-large-0", cx);
+    assert!(
+        picture.0 < own.0 && picture.1 < own.1,
+        "scaled down: {picture:?}"
+    );
+    assert!(
+        (picture.0 / picture.1 - 2000. / 1400.).abs() < 0.01,
+        "proportions kept"
+    );
+    assert_eq!(
+        size_of("picture-stage", cx),
+        picture,
+        "the body is the picture"
+    );
+    let (dialog, window) = cx.update(|window, _| {
+        (
+            window.find("picture-modal").bounds(),
+            window.viewport_size(),
+        )
+    });
+    assert!(
+        dialog.size.width <= window.width - px(48.)
+            && dialog.size.height <= window.height - px(48.),
+        "the dialog stays in the window, less its margins: {dialog:?} in {window:?}"
+    );
+}
+
+#[gpui_kit::test]
+fn going_to_another_picture_resizes_the_dialog_smoothly(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    let lead = start(&user, "atlas", "hello");
+    let (shell, _reply, cx) = open_session(&user, &lead, cx);
+    let at = say_with_pictures(&user, &lead, &shell, cx, &[png(250, 160), png(600, 440)]);
+    open_picture(at, 0, cx);
+    let before = size_of("picture-modal", cx);
+
+    cx.simulate_keystrokes("right");
+    cx.executor().advance_clock(Duration::from_millis(60));
+    let asked = cx.update(|window, cx| window.simulate_next_frame(cx));
+    cx.run_until_parked();
+    let during = size_of("picture-modal", cx);
+    assert!(asked > 0, "frames are asked while the dialog resizes");
+    assert!(
+        during.1 > before.1,
+        "the dialog has begun to grow: {before:?} then {during:?}"
+    );
+
+    settle(cx);
+    let after = size_of("picture-modal", cx);
+    let target = points(440., 440., cx).1;
+    assert!(
+        during.1 < after.1 && after.1 > target,
+        "and was not there yet: {during:?} then {after:?}"
+    );
+    assert_eq!(
+        size_of("picture-stage", cx),
+        points(600., 440., cx),
+        "the second's size"
+    );
+    let asked = cx.update(|window, cx| window.simulate_next_frame(cx));
+    assert_eq!(asked, 0, "at rest after it");
+}
+
+#[gpui_kit::test]
+fn the_zoom_steps_and_says_its_level(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    let lead = start(&user, "atlas", "hello");
+    let (shell, _reply, cx) = open_session(&user, &lead, cx);
+    let at = say_with_pictures(&user, &lead, &shell, cx, &[png(2000, 1400)]);
+    open_picture(at, 0, cx);
+    let own = points(2000., 1400., cx);
+    // The header's words: empty while it is at fit.
+    let said = |cx: &mut VisualTestContext| {
+        label_of("picture-zoom-level", cx).filter(|words| !words.is_empty())
+    };
+
+    assert_eq!(said(cx), None, "fit says nothing");
+    assert_eq!(
+        label_of("picture-zoom-in", cx).as_deref(),
+        Some("Zoom in (+)")
+    );
+    assert_eq!(
+        label_of("picture-zoom-out", cx).as_deref(),
+        Some("Zoom out (\u{2212})")
+    );
+
+    cx.simulate_keystrokes("+");
+    settle(cx);
+    assert_eq!(said(cx).as_deref(), Some("100 %"));
+    assert_eq!(size_of("picture-large-0", cx), own, "100 % is its own size");
+
+    cx.simulate_keystrokes("+");
+    settle(cx);
+    assert_eq!(said(cx).as_deref(), Some("200 %"));
+    assert_eq!(
+        size_of("picture-large-0", cx),
+        (own.0 * 2., own.1 * 2.),
+        "200 % is twice its own size"
+    );
+    let window = cx.update(|window, _| window.viewport_size());
+    let dialog = size_of("picture-modal", cx);
+    assert!(
+        dialog.0 <= f32::from(window.width) - 48. && dialog.1 <= f32::from(window.height) - 48.,
+        "the dialog does not grow past the window: {dialog:?}"
+    );
+
+    cx.simulate_keystrokes("-");
+    settle(cx);
+    assert_eq!(said(cx).as_deref(), Some("100 %"), "the key - steps back");
+    cx.update(|window, cx| window.click("picture-zoom-in", cx));
+    settle(cx);
+    assert_eq!(said(cx).as_deref(), Some("200 %"), "the button zooms in");
+    cx.update(|window, cx| window.click("picture-zoom-in", cx));
+    settle(cx);
+    assert_eq!(said(cx).as_deref(), Some("400 %"));
+    cx.update(|window, cx| window.click("picture-zoom-out", cx));
+    settle(cx);
+    assert_eq!(said(cx).as_deref(), Some("200 %"), "the button zooms out");
+
+    cx.simulate_keystrokes("0");
+    settle(cx);
+    assert_eq!(said(cx), None, "0 is back to fit");
+    let fit = size_of("picture-large-0", cx);
+    assert!(
+        fit.0 < own.0,
+        "fit is smaller than its own size here: {fit:?}"
+    );
+
+    cx.update(|window, cx| window.double_click("picture-large-0", cx));
+    settle(cx);
+    assert_eq!(
+        said(cx).as_deref(),
+        Some("200 %"),
+        "a double click zooms to 200 %"
+    );
+    cx.update(|window, cx| window.double_click("picture-large-0", cx));
+    settle(cx);
+    assert_eq!(said(cx), None, "and back to fit");
+}
+
+#[gpui_kit::test]
+fn a_small_picture_zooms_from_its_own_size(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    let lead = start(&user, "atlas", "hello");
+    let (shell, _reply, cx) = open_session(&user, &lead, cx);
+    let at = say_with_pictures(&user, &lead, &shell, cx, &[png(250, 160)]);
+    open_picture(at, 0, cx);
+    assert!(
+        cx.update(|window, _| window.try_find("picture-zoom-out").is_some()),
+        "the buttons are there"
+    );
+
+    cx.simulate_keystrokes("+");
+    settle(cx);
+    let own = points(250., 160., cx);
+    assert_eq!(
+        label_of("picture-zoom-level", cx).as_deref(),
+        Some("200 %"),
+        "fit already is 100 %: the first step is 200 %"
+    );
+    assert_eq!(size_of("picture-large-0", cx), (own.0 * 2., own.1 * 2.));
+    assert_eq!(
+        size_of("picture-stage", cx),
+        (own.0 * 2., own.1 * 2.),
+        "the dialog grows with it"
+    );
+}
+
+#[gpui_kit::test]
+fn a_zoomed_picture_is_panned_by_dragging(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    let lead = start(&user, "atlas", "hello");
+    let (shell, _reply, cx) = open_session(&user, &lead, cx);
+    let at = say_with_pictures(&user, &lead, &shell, cx, &[png(2000, 1400)]);
+    open_picture(at, 0, cx);
+    cx.simulate_keystrokes("+");
+    cx.simulate_keystrokes("+");
+    settle(cx);
+
+    let at_first = cx.update(|window, _| window.find("picture-large-0").bounds().origin);
+    let stage = cx.update(|window, _| window.find("picture-stage").bounds());
+    let from = stage.center();
+    cx.update(|window, cx| window.drag(from, from - gpui_kit::point(px(120.), px(50.)), cx));
+    settle(cx);
+    let dragged = cx.update(|window, _| window.find("picture-large-0").bounds().origin);
+    assert_eq!(
+        (dragged.x - at_first.x, dragged.y - at_first.y),
+        (px(-120.), px(-50.)),
+        "the picture follows the pointer"
+    );
+    assert_eq!(
+        cx.update(|window, _| window.find("picture-stage").bounds()),
+        stage,
+        "the dialog does not move"
+    );
+
+    cx.update(|window, cx| {
+        window.scroll(
+            "picture-stage",
+            gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(-30.))),
+            cx,
+        )
+    });
+    settle(cx);
+    let scrolled = cx.update(|window, _| window.find("picture-large-0").bounds().origin);
+    assert!(
+        scrolled.y < dragged.y,
+        "the wheel scrolls it: {dragged:?} then {scrolled:?}"
+    );
+}
+
 /// Pastes the clipboard in the reply's field, focused as a user would.
 fn paste(item: ClipboardItem, cx: &mut VisualTestContext) {
     cx.update(|window, cx| window.click("reply-field", cx));
