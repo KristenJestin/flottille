@@ -1490,7 +1490,31 @@ fn the_card_of_a_reply_shows_what_is_posted_and_who_is_notified() {
         card.contains("> @alice wrote:\n> I can reproduce\n> it fails twice\n\nFixed"),
         "{card}"
     );
+    assert!(
+        card.contains("It mentions alice, who is notified"),
+        "{card}"
+    );
     assert!(!card.contains("Its body:"), "{card}");
+
+    // A deleted user has no login: nobody is mentioned, nobody is said to be notified.
+    let ghost = self::user();
+    on_github(&ghost);
+    ghost.gh_script(json!({"issues": {"acme/app": {"1": {
+    "number": 1, "title": "The login fails", "state": "OPEN", "body": "", "comments": [
+        {"author": {"login": ""}, "createdAt": "2026-10-01T10:00:00Z", "body": "I can reproduce",
+         "url": "https://github.com/acme/app/issues/1#issuecomment-500"}
+    ]}}}}));
+    let mcp = root_in(&ghost);
+    held(&mcp.call(
+        "tickets",
+        json!({"action": "reply", "ticket": "#1", "comment": "issuecomment-500", "body": "Fixed"}),
+    ));
+    let card = card_of_the_last(&ghost);
+    assert!(
+        card.contains("> A deleted user wrote:\n> I can reproduce\n\nFixed"),
+        "{card}"
+    );
+    assert!(!card.contains('@') && !card.contains("notified"), "{card}");
 }
 
 #[test]
@@ -1630,5 +1654,106 @@ fn a_comment_that_goes_or_is_restricted_after_the_card_is_not_answered() {
             .all(|c| !c.starts_with("jira workitem comment create")),
         "{:?}",
         acli_calls(&user)
+    );
+}
+
+fn github_issue_with(comment: &str) -> Value {
+    json!({"issues": {"acme/app": {"1": {
+    "number": 1, "title": "The login fails", "state": "OPEN", "body": "", "comments": [
+        {"author": {"login": "alice"}, "createdAt": "2026-10-01T10:00:00Z", "body": comment,
+         "url": "https://github.com/acme/app/issues/1#issuecomment-500"}
+    ]}}}})
+}
+
+#[test]
+fn a_comment_edited_after_the_card_is_not_answered() {
+    let user = user();
+    on_jira(&user);
+    let script = |text: &str| {
+        jira_script(
+            &user,
+            json!({"items": {"ABC-1": commented("ABC-1", json!([
+                person_with_account("20000", text)]))}}),
+        );
+    };
+    script("I can reproduce");
+    let mcp = root_in(&user);
+    // The comment is edited between the card and the user's answer: the quote they read is gone.
+    let number = held(&mcp.call(
+        "tickets",
+        json!({"action": "reply", "ticket": "ABC-1", "comment": "20000", "body": "Fixed"}),
+    ));
+    script("Actually it was my mistake");
+    let answer = allow(&user, number);
+    assert!(
+        answer.contains("what it does changed since the user allowed it"),
+        "{answer}"
+    );
+    assert!(
+        acli_calls(&user)
+            .iter()
+            .all(|c| !c.starts_with("jira workitem comment create")),
+        "{:?}",
+        acli_calls(&user)
+    );
+
+    let github = self::user();
+    on_github(&github);
+    github.gh_script(github_issue_with("I can reproduce"));
+    let mcp = root_in(&github);
+    let number = held(&mcp.call(
+        "tickets",
+        json!({"action": "reply", "ticket": "#1", "comment": "issuecomment-500", "body": "Fixed"}),
+    ));
+    github.gh_script(github_issue_with("Actually it was my mistake"));
+    let answer = allow(&github, number);
+    assert!(
+        answer.contains("what it does changed since the user allowed it"),
+        "{answer}"
+    );
+    assert!(
+        gh_calls(&github)
+            .iter()
+            .all(|c| !c.starts_with("issue comment")),
+        "{:?}",
+        gh_calls(&github)
+    );
+}
+
+#[test]
+fn a_comment_that_cannot_be_read_gets_no_card() {
+    let user = user();
+    on_jira(&user);
+    jira_script(
+        &user,
+        json!({"items": {"ABC-1": commented("ABC-1", json!([
+            person_with_account("20000", "I can reproduce")]))},
+            "fail": {"ABC-1": "Error: the work item could not be fetched"}}),
+    );
+    let mcp = root_in(&user);
+    // A card without its quote would say less than what is posted: nothing is asked of the user.
+    refused_at_once(
+        &user,
+        &mcp,
+        json!({"action": "reply", "ticket": "ABC-1", "comment": "20000", "body": "Fixed"}),
+    );
+
+    let github = self::user();
+    on_github(&github);
+    let mut script = github_issue_with("I can reproduce");
+    script["view_fail"] = json!({"acme/app": {"1": "HTTP 502: Bad Gateway"}});
+    github.gh_script(script);
+    let mcp = root_in(&github);
+    refused_at_once(
+        &github,
+        &mcp,
+        json!({"action": "reply", "ticket": "#1", "comment": "issuecomment-500", "body": "Fixed"}),
+    );
+    assert!(
+        gh_calls(&github)
+            .iter()
+            .all(|c| !c.starts_with("issue comment")),
+        "{:?}",
+        gh_calls(&github)
     );
 }
