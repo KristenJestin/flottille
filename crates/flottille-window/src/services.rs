@@ -1210,7 +1210,6 @@ impl ServicesPage {
                 div()
                     .flex()
                     .items_center()
-                    .whitespace_nowrap()
                     .children(pieces)
                     .into_any_element(),
             );
@@ -1218,7 +1217,7 @@ impl ServicesPage {
         div()
             .flex()
             .items_center()
-            .gap(px(6.))
+            .gap(space::SM)
             .children(projects)
             .into_any_element()
     }
