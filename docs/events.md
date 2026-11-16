@@ -1090,7 +1090,8 @@ A restart (`run.restart`) is a `run.ended` with state `stopped` for the first ru
 #### `run.needs`
 
 A service the run's task needs (`docs/projects.md`, "Services") stopped while it runs, or runs
-again: the agent that started it is told of a stop once (`service-stopped`, `docs/tools.md`).
+again: the agent that started it is told of a stop once (`service-stopped`, `docs/tools.md`), and
+of its return once (`service-back`).
 
 | Field | |
 |---|---|

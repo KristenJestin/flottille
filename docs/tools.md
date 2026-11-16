@@ -432,7 +432,9 @@ pending requests.
   `run_status` says `needs auth, stopped` (in its list too), and a `service-stopped` delivery,
   urgent, tells the agent once: `auth, which dev-api needs, stopped. Your run <id> of dev-api goes
   on without it: services {"action": "start", "name": "auth"} starts it again.` (`was stopped by
-  the user` when the user stopped it).
+  the user` when the user stopped it). When it runs again, a `service-back` delivery, between
+  turns, tells it once: `auth, which dev-api needs, runs again. Your run <id> of dev-api has it
+  back.`
 - **Waiting**: the call waits `timeout` seconds (30 by default) for the end. A task
   that keeps running (`serve`) answers at once, and one already running for the agent is joined.
   A call stopped by its client stops its run.
