@@ -944,19 +944,24 @@ sentence as `log_time`, how to set one up. GitHub is refused: `GitHub has no wor
   daemon's life per project, entry and site (an entry set again is asked again, so that a changed
   entry never has another's account). `author` is another account, by its id or by a name
   `people` finds. The answer says it: `your account (Jane Doe)`, so that the agent does not guess.
-- **Which work items**: the JQL `project in (<the tracker's>) AND worklogDate >= from AND
-  worklogDate <= to AND worklogAuthor = <account>`, bounded to 100 work items (`search/jql`), and
+- **Which work items**: the JQL `project in (<the tracker's>) AND worklogDate >= from-1 AND
+  worklogDate <= to+1 AND worklogAuthor = <account>`, bounded to 100 work items (`search/jql`), and
   said when the site had more (`the search was cut at 100 work items`); with `ticket`, that work
   item alone, with no search. Then each one's worklogs (`/rest/api/3/issue/<KEY>/worklog`, read
   page by page as the site pages them, `startAt` and `total`), **kept only those of the account
   and started inside the range in the user's time zone**: the machine's, as the quota reset times
   are read, said in the answer (`the days in the time zone Europe/Paris`). A worklog started at
   23:30 the day before in that zone is left out whatever offset Jira wrote it with. The JQL's dates
-  are read by Jira in the time zone of the account's profile, and the worklogs it finds are then
-  sorted by Flottille's.
+  are read by Jira in the time zone of the account's profile, which may not be the machine's, so
+  the search is **widened by one day on each side** and the exact cut is Flottille's, in the
+  machine's zone. The margin holds while the two zones are less than 24 hours apart. The worklog
+  endpoint is asked for the range too (`startedAfter` and `startedBefore`, in milliseconds, with a
+  day of margin each side), so that the worklogs of other days are not all read; the local cut
+  stays.
 - **The answer**: per day, each worklog as `KEY title — 1h30 (started 09:12) "comment"` (the comment
   as one line, cut at 300 characters), the day's total, then the range's total.
-- **`search` and anyone's worklogs**: a `jql` that uses `worklogDate` without `worklogAuthor` matches
+- **`search` and anyone's worklogs**: a `jql` that uses `worklogDate` without `worklogAuthor` (`=`
+  or `in`; `!=` and `not in` do not keep to anyone) matches
   the work items on which *anyone* logged time that day, not the user's: its result says so.
 - The tests send the calls to the fake Jira REST server of the `log_time` tests
   (`FLOTTILLE_TEST_JIRA_BASE`), with the daemon's in-memory keyring and `TZ=Europe/Paris`.
