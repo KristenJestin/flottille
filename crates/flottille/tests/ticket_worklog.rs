@@ -827,8 +827,9 @@ fn worklogs_of_a_day_are_the_token_owner_s_with_their_durations_and_total() {
     assert_eq!(search.len(), 1, "{:?}", jira.received());
     let decoded = unquote(&search[0].path);
     for part in [
-        "worklogDate >= \"2026-11-06\"",
-        "worklogDate <= \"2026-11-06\"",
+        // The day asked, a day wider on each side.
+        "worklogDate >= \"2026-11-05\"",
+        "worklogDate <= \"2026-11-07\"",
         &format!("worklogAuthor = \"{MINE}\""),
         "project in (\"ABC\")",
     ] {
@@ -963,11 +964,11 @@ fn worklogs_over_a_range_are_totalled_per_day() {
     );
     let decoded = unquote(&asked(&jira, "/rest/api/3/search/jql")[0].path);
     assert!(
-        decoded.contains("worklogDate >= \"2026-11-05\""),
+        decoded.contains("worklogDate >= \"2026-11-04\""),
         "{decoded}"
     );
     assert!(
-        decoded.contains("worklogDate <= \"2026-11-06\""),
+        decoded.contains("worklogDate <= \"2026-11-07\""),
         "{decoded}"
     );
 }
