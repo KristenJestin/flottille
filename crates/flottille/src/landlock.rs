@@ -4,6 +4,12 @@
 //! cover every folder but the runtime ones: each entry of `/`, and of each folder on the way to
 //! one of them, but that way itself. Applied in the child before it runs its program, never to
 //! the daemon.
+//!
+//! X11's display is kept out the same way, unless the program is given it (a
+//! [`crate::display::Folder`] made for X11): an X11 client reads the keys typed in other windows.
+//! Its sockets are reached by a path under `/tmp/.X11-unix`, which only the ninth ABI's right to
+//! connect governs, and by an abstract name, which the sixth ABI's scope does (`docs/vault.md`,
+//! "The gaps", says what older kernels leave open).
 
 use std::ffi::{CStr, CString};
 use std::io;
@@ -21,6 +27,8 @@ const TRUNCATE: u64 = 1 << 14;
 const IOCTL_DEV: u64 = 1 << 15;
 /// Connecting to a socket by its path: only from the ninth ABI on.
 const RESOLVE_UNIX: u64 = 1 << 16;
+/// Abstract sockets made outside the program's domain are out of its reach: from the sixth ABI.
+const SCOPE_ABSTRACT_UNIX_SOCKET: u64 = 1 << 0;
 /// The rights a rule on a file, not a folder, may hold.
 const FILE_RIGHTS: u64 = EXECUTE | WRITE_FILE | READ_FILE | TRUNCATE | IOCTL_DEV | RESOLVE_UNIX;
 
@@ -78,6 +86,29 @@ fn runtime_folders() -> Vec<PathBuf> {
     folders
 }
 
+/// X11's socket folder: `/tmp/.X11-unix`, or the tests' own (`FLOTTILLE_X11_SOCKETS`).
+fn x11_folder() -> Option<PathBuf> {
+    std::env::var_os("FLOTTILLE_X11_SOCKETS")
+        .map_or_else(|| PathBuf::from("/tmp/.X11-unix"), PathBuf::from)
+        .canonicalize()
+        .ok()
+        .filter(|folder| folder != Path::new("/"))
+}
+
+/// The folders on the way to X11's that hold no runtime folder (`/tmp`): ruled with every right
+/// but connecting by a path, so that a program still makes and uses what it likes in them while
+/// X11's sockets, which no rule of their own opens, stay out of reach. Without this, the way
+/// would get no rule and nothing could be made in `/tmp`; listing X11's folder stays possible.
+fn ways_to(folder: &Path, denied: &[PathBuf]) -> Vec<PathBuf> {
+    folder
+        .ancestors()
+        .skip(1)
+        .filter(|way| *way != Path::new("/"))
+        .filter(|way| !denied.iter().any(|denied| denied.starts_with(way)))
+        .map(Path::to_owned)
+        .collect()
+}
+
 /// Every path under `dir` but the `denied` folders: an entry on the way to one of them is
 /// opened up in turn. A symbolic link gets no rule: what it leads to has its own place.
 fn allowed(dir: &Path, denied: &[PathBuf], out: &mut Vec<CString>) {
@@ -115,33 +146,58 @@ pub fn confined_but<'a>(
     open: Option<&crate::display::Folder>,
 ) -> &'a mut tokio::process::Command {
     let abi = abi();
-    let denied = runtime_folders();
-    if abi < 2 || denied.is_empty() {
+    let mut denied = runtime_folders();
+    // X11 too, unless given: by its path where the kernel governs connecting to one, by its
+    // abstract name where it has the scope.
+    let given_x11 = open.is_some_and(crate::display::Folder::x11);
+    let mut ways = Vec::new();
+    if !given_x11
+        && abi >= 9
+        && let Some(x11) = x11_folder()
+    {
+        ways = ways_to(&x11, &denied);
+        denied.push(x11);
+    }
+    let scoped = match !given_x11 && abi >= 6 {
+        true => SCOPE_ABSTRACT_UNIX_SOCKET,
+        false => 0,
+    };
+    if abi < 2 || (denied.is_empty() && scoped == 0) {
         return command;
     }
     let rights = rights(abi);
     let mut paths = Vec::new();
     allowed(Path::new("/"), &denied, &mut paths);
+    let ways: Vec<CString> = ways
+        .iter()
+        .filter_map(|way| CString::new(way.as_os_str().as_bytes()).ok())
+        .collect();
     let open = open.and_then(|folder| CString::new(folder.path().as_os_str().as_bytes()).ok());
     // SAFETY: the closure allocates nothing and only makes system calls (open, fstat,
     // landlock_*, prctl, close), all async-signal-safe.
-    unsafe { command.pre_exec(move || restrict(rights, &paths, open.as_deref())) }
+    unsafe { command.pre_exec(move || restrict(rights, scoped, &paths, &ways, open.as_deref())) }
 }
 
-/// In the child: every path a rule with every right, `open` one without `REFER`, then the child
-/// bound to them.
-fn restrict(rights: u64, paths: &[CString], open: Option<&CStr>) -> io::Result<()> {
-    let handled = [rights];
-    // SAFETY: the attribute is a `u64` of the size given, which the kernel reads as the first
-    // field of its own, the rest zero.
-    let ruleset = unsafe {
-        libc::syscall(
-            libc::SYS_landlock_create_ruleset,
-            handled.as_ptr(),
-            std::mem::size_of_val(&handled),
-            0,
-        )
+/// In the child: every path a rule with every right, each of `ways` one without connecting by a
+/// path, `open` one without `REFER`, then the child bound to them and to the `scoped` scopes.
+fn restrict(
+    rights: u64,
+    scoped: u64,
+    paths: &[CString],
+    ways: &[CString],
+    open: Option<&CStr>,
+) -> io::Result<()> {
+    // The attribute's fields: the handled rights of files, of the network (none), the scopes.
+    let handled = [rights, 0, scoped];
+    // A kernel older than the scopes refuses a longer attribute: the rights' field alone then.
+    let size = match scoped {
+        0 => std::mem::size_of::<u64>(),
+        _ => std::mem::size_of_val(&handled),
     };
+    // SAFETY: the attribute is `u64` fields of the size given, which the kernel reads as the
+    // first fields of its own, the rest zero.
+    let ruleset =
+        unsafe { libc::syscall(libc::SYS_landlock_create_ruleset, handled.as_ptr(), size, 0) };
     if ruleset < 0 {
         return Err(io::Error::last_os_error());
     }
@@ -149,6 +205,10 @@ fn restrict(rights: u64, paths: &[CString], open: Option<&CStr>) -> io::Result<(
     let ruled = paths
         .iter()
         .map(|path| (path.as_c_str(), rights))
+        .chain(
+            ways.iter()
+                .map(|way| (way.as_c_str(), rights & !RESOLVE_UNIX)),
+        )
         .chain(open.map(|path| (path, rights & !REFER)));
     for (path, granted) in ruled {
         // SAFETY: a valid C string; O_PATH opens nothing but a handle.
@@ -238,5 +298,20 @@ mod tests {
 
         let at = |sub: &str| root.path().join(sub).to_string_lossy().into_owned();
         assert_eq!(paths, [at("home"), at("run/lock")]);
+    }
+
+    #[test]
+    fn the_way_to_x11_s_folder_is_ruled_unless_it_holds_a_runtime_folder() {
+        let x11 = Path::new("/tmp/.X11-unix");
+        assert_eq!(
+            ways_to(x11, &[PathBuf::from("/run/user/1000")]),
+            [Path::new("/tmp")]
+        );
+        assert!(ways_to(x11, &[PathBuf::from("/tmp/runtime")]).is_empty());
+        let deep = Path::new("/tmp/test/x11");
+        assert_eq!(
+            ways_to(deep, &[]),
+            [Path::new("/tmp/test"), Path::new("/tmp")]
+        );
     }
 }

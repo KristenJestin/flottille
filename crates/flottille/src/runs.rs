@@ -744,9 +744,10 @@ pub(crate) fn environment(
     defend(&mut env, &empty, lift);
     // Where the daemon's socket is: a client a run starts is refused anyway (`daemon.rs`).
     env.remove(&OsString::from("XDG_RUNTIME_DIR"));
-    // The screen is the user's to give, by the project's setting (`start`).
-    env.remove(&OsString::from("WAYLAND_DISPLAY"));
-    env.remove(&OsString::from("DISPLAY"));
+    // The screen is the user's to give, by the project's setting (`start`), X11's key with it.
+    for name in ["WAYLAND_DISPLAY", "DISPLAY", "XAUTHORITY"] {
+        env.remove(&OsString::from(name));
+    }
     Ok(env)
 }
 

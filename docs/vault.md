@@ -222,6 +222,19 @@ The daemon's own runtime folder is denied with the rest: a `flottille daemon sto
 agent cannot read the daemon's lock, and refuses itself when the daemon does not answer, as a
 client started by an agent does.
 
+X11's display is kept out of the same processes, since an X11 client can read the keys typed in
+other windows and type into them: a run has no `DISPLAY` and no `XAUTHORITY`, and Landlock keeps
+X11's sockets out of reach, the ones under `/tmp/.X11-unix` by their path (from its ninth ABI:
+`/tmp` and the folders on the way get every right but connecting by a path, so what a process
+makes there is still its own, and X11's folder gets no rule) and the abstract ones by its scope
+`LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET` (from its sixth ABI, Linux 6.12). Only a run of a project
+that lets its runs open windows, and a connection's browser that is shown, in a session without
+Wayland, are given X11 (`docs/tools.md`, `docs/extensions.md`): their display folder says so, and
+their process gets neither denial. The scope keeps out every abstract
+socket made outside the process's own Landlock domain, not X11's alone: a session bus or another
+service of the user's that listens on one (`@/tmp/dbus-…`, a container runtime's shim), as much as
+X11's. The abstract sockets the process, or one it starts, makes are its own and stay reachable.
+
 The gaps, where the platform does not allow more:
 
 - Landlock denies **connecting** to a socket by its path from its ninth ABI only (the right
@@ -235,7 +248,14 @@ The gaps, where the platform does not allow more:
 - without Landlock (a kernel before 5.19, or one built without it), the process runs as before,
   with only the environment kept from it;
 - a bus listening on an abstract socket (`unix:abstract=…`, older setups) is not a path, and is
-  not kept out;
+  kept out only from Landlock's sixth ABI on (its abstract scope, above);
+- X11 below those ABIs: before the ninth, a process that is not given X11 can still connect to
+  its socket by its path (`/tmp/.X11-unix/X0`), with `DISPLAY=:0` set by itself, and before the
+  sixth by its abstract name too; the folder itself is not denied, since `/tmp` holds it and a
+  rule on `/tmp` would hold for it. Without `XAUTHORITY` the server may still refuse it, but not
+  where it lets the user's local connections in without the key (`xhost +si:localuser:…`);
+- a run given X11 gets the daemon's `XAUTHORITY` as it is: a key file in the runtime folder (as
+  some display managers put it) stays out of its reach, and X11 then refuses it;
 - a process cannot create an entry directly in a folder on the way to a runtime folder (`/`,
   `/run`, `/run/user`): they get no rule of their own, only their entries do; and an entry
   created there after the process started is denied to it. A rule on such a folder would hold
