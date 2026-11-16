@@ -802,7 +802,7 @@ fn a_version_whose_search_fails_says_so_on_its_row(cx: &mut TestAppContext) {
 }
 
 /// Where the page says it could not read the milestones: the line is a block of its own, which
-/// holds the space above it (#884), and sits where it sat under the gap of the page's column.
+/// holds the space above it (#884), and sits where the gap of the tab's column puts it.
 #[gpui_kit::test]
 fn the_line_that_says_the_milestones_were_not_read_sits_where_the_gap_put_it(
     cx: &mut TestAppContext,
@@ -817,15 +817,16 @@ fn the_line_that_says_the_milestones_were_not_read_sits_where_the_gap_put_it(
     let (_shell, _page, cx) = open_progress(&user, cx);
 
     assert!(present(cx, "progress-problem"), "the page says why");
-    let (header, line) = cx.update(|window, _| {
+    let (legend, line) = cx.update(|window, _| {
         (
-            window.find("progress-header").bounds(),
+            window.find("progress-legend").bounds(),
             window.find("progress-problem").bounds(),
         )
     });
-    let under = f32::from(line.top() - header.bottom());
-    // Measured on `origin/dev`, where the column's gap put it: legend, an empty list, then the line.
-    assert_eq!(under, 84.0);
+    let under = f32::from(line.top() - legend.bottom());
+    // The gap after the legend, then the space the line holds above itself: the tab has no
+    // header of its own any more, the legend is what the line is measured from.
+    assert_eq!(under, 32.0);
 }
 
 #[gpui_kit::test]
