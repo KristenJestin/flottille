@@ -234,7 +234,10 @@ its other sockets (the bus, gpg-agent) refused. A socket outside the runtime fol
 ninth ABI every other command the daemon runs is kept from connecting to it: the folders on the
 way to it are ruled without the right to connect, their other entries with every right.
 
-What runs with the agent is pinned. The push runs the `git` the daemon found on its own `PATH` at
+What runs with the agent is pinned. The push and its dry runs get an environment rebuilt from
+an allowlist, never the project's nor the workspace's variables (a file a run may write): the
+daemon's `HOME`, `USER`, `LOGNAME`, `LANG`, `LC_*`, `TERM` and `TMPDIR`, the agent's socket, and
+what Flottille sets below. The push runs the `git` the daemon found on its own `PATH` at
 its start, whatever the line's `git` and the run's `PATH` lead to, and its `GIT_SSH_COMMAND` is the
 `ssh` found then: for each, the first one outside the user's home (`~/bin`, `~/.local/bin`,
 `~/.cargo/bin`, the projects, the agents' folders) and Flottille's folders, links followed, so
