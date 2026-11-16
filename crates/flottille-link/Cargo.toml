@@ -24,7 +24,11 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 # Already built under ed25519-dalek: a public key's fingerprint.
 sha2 = "0.10.9"
-tokio = { version = "1.54.1", features = ["rt", "net", "sync", "time", "macros"] }
+tokio = { version = "1.54.1", features = ["rt", "net", "io-util", "sync", "time", "macros"] }
+# TLS to an `https://` hub, and the hub's on a certificate given (`src/transport.rs`): the certificate
+# checked against the system's roots. Both were in the lock already, under reqwest.
+tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring"] }
+rustls-native-certs = "0.8.5"
 zeroize = "1.9.1"
 
 [dev-dependencies]

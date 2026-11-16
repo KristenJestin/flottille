@@ -8,6 +8,7 @@
 //! and hands its keyring in.
 
 mod address;
+mod control;
 mod hello;
 mod invitation;
 mod link;
@@ -29,6 +30,10 @@ use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
 pub use address::Address;
+pub use control::{
+    Arriving, Ask, Asked, ControlError, Device, HUB_PORT, HubSession, HubUrl, LINE_LIMIT,
+    PresenceOf, Pushed, Session, Stream, Tls, ToDevice, Told, arrive,
+};
 pub use hello::{Hello, NeedsUpdate, PeerState, choose};
 pub use invitation::{Invitation, InvitationAsk, InvitationError, Token};
 pub use link::{
@@ -40,6 +45,7 @@ pub use members::{
 pub use request::{
     Accepted, NONCES_PER_DEVICE, Nonce, REQUEST_WINDOW, Request, RequestError, Requests, Signed,
 };
+pub use transport::TlsServer;
 pub use words::verification_words;
 
 /// The machine key's file in the key folder: the daemon's alone.
