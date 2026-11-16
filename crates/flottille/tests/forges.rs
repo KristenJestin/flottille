@@ -1302,6 +1302,58 @@ fn a_lone_stopped_build_says_stopped_and_can_be_rerun() {
 }
 
 #[test]
+fn a_stopped_build_with_a_failed_step_still_fails() {
+    // The user stopped the remaining parallel steps of #606 after `test` failed: the stop is not a
+    // verdict, the failed step is, and it is the latest build's.
+    for latest in [
+        stopped_pipeline(606),
+        staged_pipeline(606, "HALTED"),
+        staged_pipeline(606, "STOPPING"),
+    ] {
+        let line = after_a_green_build(
+            latest,
+            &[
+                step_status(606, "test", "FAILED"),
+                step_status(606, "lint", "STOPPED"),
+            ],
+        );
+
+        assert_eq!(line, "checks: failing (test failing, lint stopped)");
+    }
+}
+
+#[test]
+fn a_failed_status_of_a_completed_successful_pipeline_stays_failing() {
+    // The override only replaces a status that still runs: a verdict is never rewritten.
+    let line = after_a_green_build(
+        cloud_pipeline(606, "pull request", HEAD, "SUCCESSFUL"),
+        &[step_status(606, "test", "FAILED")],
+    );
+
+    assert_eq!(line, "checks: failing (test failing)");
+}
+
+#[test]
+fn a_stopped_build_leaves_the_status_of_an_older_build_out_of_the_pipelines_as_it_is() {
+    // Build 20 is older than the newest 50 pipelines the repository lists: nothing explains its
+    // status, which is kept as it is and still blocks while it says it runs.
+    let text = shown_with(
+        &now_text(),
+        json!([
+            step_status(20, "deploy", "INPROGRESS"),
+            step_status(606, "test", "STOPPED")
+        ]),
+        json!([stopped_pipeline(606)]),
+    );
+
+    assert_eq!(
+        checks_line(&text),
+        "checks: pending (deploy pending, test stopped)",
+        "{text}"
+    );
+}
+
+#[test]
 fn a_paused_pipeline_stays_waiting() {
     // A manual step waits: nothing is stopped, the run is not over.
     let line = after_a_green_build(

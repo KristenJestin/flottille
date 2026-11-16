@@ -1764,6 +1764,25 @@ fn bitbucket_rerun_runs_a_stopped_pipeline_again() {
 }
 
 #[test]
+fn bitbucket_rerun_runs_a_halted_pipeline_again() {
+    // The merge refusal of a lone halted build says to run it again: the rerun agrees it was
+    // stopped, whatever its result says (it has none yet).
+    let mut halted = pull_request_pipeline(8, "app/login", "SUCCESSFUL");
+    halted["state"] = json!({"name": "IN_PROGRESS", "stage": {"name": "HALTED"}});
+    let (user, mcp, rerun) = rerun_setup(json!([halted]));
+
+    let answer = write(&user, &mcp, rerun);
+
+    assert!(!answer.error, "{}", answer.text);
+    assert!(
+        answer.text.contains("after #8 was stopped"),
+        "{}",
+        answer.text
+    );
+    assert_eq!(bkt_calls_starting(&user, "pipeline run"), 1);
+}
+
+#[test]
 fn bitbucket_rerun_is_refused_when_nothing_of_the_branch_failed() {
     let (user, mcp, rerun) = rerun_setup(json!([branch_pipeline(9, "main", "FAILED")]));
     // None for the branch.
@@ -1943,6 +1962,29 @@ fn a_lone_stopped_build_refuses_the_merge_and_says_how_to_run_it_again() {
         answer.text
     );
     assert!(!answer.text.contains("still running"), "{}", answer.text);
+    assert_eq!(bkt_calls_starting(&user, "pr merge"), 0);
+}
+
+#[test]
+fn a_stopped_build_with_a_failed_step_refuses_the_merge_after_a_green_one() {
+    let (stopped, _) = stopped_build(606);
+    let green = pull_request_pipeline(603, "app/login", "SUCCESSFUL");
+    let step = |number: u64, name: &str, state: &str| {
+        json!({"state": state, "name": name, "key": format!("{number}-{name}"),
+            "url": format!("https://bitbucket.org/acme/app/pipelines/results/{number}")})
+    };
+
+    let (user, answer) = merge_with(
+        json!([
+            step(603, "test", "SUCCESSFUL"),
+            step(606, "test", "FAILED"),
+            step(606, "lint", "STOPPED")
+        ]),
+        json!([stopped, green]),
+    );
+
+    assert!(answer.error, "{}", answer.text);
+    assert!(answer.text.contains("its checks fail (test"), "{}", answer.text);
     assert_eq!(bkt_calls_starting(&user, "pr merge"), 0);
 }
 
