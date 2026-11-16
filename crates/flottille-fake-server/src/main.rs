@@ -22,13 +22,15 @@ fn main() {
     let mut args = std::env::args().skip(1).peekable();
     if args.peek().map(String::as_str) == Some("--child") {
         args.next();
-        let child = std::process::Command::new(std::env::current_exe().unwrap())
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
             .args(args)
             .spawn()
             .unwrap();
         println!("leader {}", std::process::id());
         println!("child {}", child.id());
         std::io::stdout().flush().unwrap();
+        // It stays, whether its child does or not, as a package manager waiting on its script.
+        let _ = child.wait();
         loop {
             std::thread::sleep(Duration::from_secs(60));
         }
