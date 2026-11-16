@@ -22,6 +22,24 @@ const OPEN: &str = "[Pasted text ";
 const SEPARATOR: &str = " · ";
 const WHERE: &str = "read it at ";
 
+/// Whether `name` is shaped as the file of a pasted text the daemon writes: `<stamp>-text-<n>.txt`,
+/// the stamp twelve lowercase hexadecimal digits and `n` from 1.
+pub fn is_file_name(name: &str) -> bool {
+    let Some((stamp, rest)) = name.split_once("-text-") else {
+        return false;
+    };
+    let Some(number) = rest.strip_suffix(".txt") else {
+        return false;
+    };
+    stamp.len() == 12
+        && stamp
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        && !number.is_empty()
+        && !number.starts_with('0')
+        && number.bytes().all(|b| b.is_ascii_digit())
+}
+
 /// Whether a paste is large enough to be attached as a file.
 pub fn is_large(text: &str) -> bool {
     text.chars().count() > LARGE_PASTE.0 || text.lines().count() > LARGE_PASTE.1
@@ -177,6 +195,25 @@ mod tests {
         assert!(!is_large(&"x\n".repeat(80)));
         assert!(is_large(&"x\n".repeat(81)));
         assert!(!is_large("one\ntwo\nthree"));
+    }
+
+    #[test]
+    fn a_pasted_text_s_file_is_named_by_a_stamp_and_its_number() {
+        for name in ["0a1b2c3d4e5f-text-1.txt", "0a1b2c3d4e5f-text-20.txt"] {
+            assert!(is_file_name(name), "{name}");
+        }
+        for name in [
+            "pasted-text.txt",
+            "x-text-1.txt",
+            "0A1B2C3D4E5F-text-1.txt",
+            "0a1b2c3d4e5f-text-0.txt",
+            "0a1b2c3d4e5f-text-.txt",
+            "0a1b2c3d4e5f-text-1.txt.bak",
+            "0a1b2c3d4e5f-1.png",
+            "../0a1b2c3d4e5f-text-1.txt",
+        ] {
+            assert!(!is_file_name(name), "{name}");
+        }
     }
 
     #[test]
