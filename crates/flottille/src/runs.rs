@@ -512,6 +512,9 @@ pub async fn run(
         if let Err(refusal) = crate::ssh_agent::over_ssh(&folder.path, &words, &env).await {
             return Outcome::Refused(refusal);
         }
+        if let Err(refusal) = crate::ssh_agent::judged(&words, &env) {
+            return Outcome::Refused(refusal);
+        }
         tokio::select! {
             checked = crate::message_checks::push(&at, &words, &env) => {
                 if let Err(refusal) = checked {

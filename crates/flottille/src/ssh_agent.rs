@@ -223,8 +223,9 @@ pub fn withheld(env: &BTreeMap<OsString, OsString>) -> BTreeMap<OsString, OsStri
 /// the start in place of the line's, the `ssh` found then (`GIT_SSH_COMMAND` wins over
 /// `core.sshCommand` and `GIT_SSH`), sharing no connection with another ssh and running no
 /// `LocalCommand`, SSH the only transport (no `ext::`, `fd::` or path, which run a program of the
-/// machine), git's own `git-receive-pack` for every remote, and no maintenance left running after
-/// the push. What `ssh` runs from its
+/// machine), git's own `git-receive-pack` for every remote, no maintenance left running after
+/// the push, and none of the repository's settings that run a program (its fsmonitor, read with
+/// its submodules; its signing program). What `ssh` runs from its
 /// configuration (`ProxyCommand`, `Match exec`, `KnownHostsCommand`) goes through `$SHELL -c`
 /// and finds its programs on `PATH`: `/bin/sh`, and the system's folders alone. Settings and
 /// global options on the line itself are refused before (`runs::run`): they would beat these.
@@ -248,6 +249,14 @@ pub async fn pin(env: &mut BTreeMap<OsString, OsString>, folder: &Path, words: &
     env.insert("PATH".into(), found.search.clone());
     // `git maintenance run --auto --detach` would go on after the push, with its environment.
     crate::runs::configure(env, "maintenance.auto", "false");
+    for (key, value) in [
+        ("core.fsmonitor", "false"),
+        ("push.recurseSubmodules", "no"),
+        ("submodule.recurse", "false"),
+        ("push.gpgSign", "false"),
+    ] {
+        crate::runs::configure(env, key, value);
+    }
     let at_push = crate::gate::git_globals(&words[1..]).0 + 1;
     let mut read: Vec<String> = words[..at_push].to_vec();
     read.extend(
@@ -277,6 +286,44 @@ pub async fn pin(env: &mut BTreeMap<OsString, OsString>, folder: &Path, words: &
             "git-receive-pack",
         );
     }
+}
+
+/// Refuses a push `words` lent the agent (`env` names it) that says `--signed` (the signing
+/// program of the repository's settings) or `--recurse-submodules` (the submodules' repositories,
+/// never checked).
+pub fn judged(words: &[String], env: &BTreeMap<OsString, OsString>) -> Result<(), String> {
+    if lent_to(env).is_none() {
+        return Ok(());
+    }
+    let nothing = "nothing was pushed";
+    let at_push = crate::gate::git_globals(&words[1..]).0 + 1;
+    let rest = &words[at_push + 1..];
+    let end = rest
+        .iter()
+        .position(|word| word == "--" || word == "--end-of-options")
+        .unwrap_or(rest.len());
+    let asked = crate::message_checks::push_asked(rest, end)
+        .map_err(|why| format!("refused: this push's options cannot be read ({why}); {nothing}"))?;
+    for (said, option, why) in [
+        (
+            asked.signed,
+            "--signed",
+            "it runs the signing program of the repository's settings",
+        ),
+        (
+            asked.submodules,
+            "--recurse-submodules",
+            "it reads or pushes the submodules' repositories, which were not checked",
+        ),
+    ] {
+        if said {
+            return Err(format!(
+                "refused: a push lent the user's SSH agent takes no {option}: {why}; push \
+                 without it, or ask the user to push by hand; {nothing}"
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Where an HTTP(S) push URL is sent in the dry run of `over_ssh`: a path that is no repository.

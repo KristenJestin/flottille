@@ -1039,6 +1039,7 @@ const PUSH: Options = Options {
     matter: &[
         ("recurse-submodules", Opt::Submodules(true)),
         ("no-recurse-submodules", Opt::Submodules(false)),
+        ("signed", Opt::Switch("signed")),
     ],
     letters: &[('o', Opt::Valued)],
 };
@@ -1047,6 +1048,23 @@ const PUSH: Options = Options {
 /// its value would make a dry run the push.
 pub(crate) fn push_options_read(words: &[String]) -> bool {
     read(words, &PUSH).is_ok()
+}
+
+/// What a push's line asks for itself, its options read as git reads them.
+pub(crate) struct Asked {
+    /// `--signed`, which runs the signing program of the repository's settings.
+    pub signed: bool,
+    /// `--recurse-submodules`, which pushes or reads the submodules' repositories.
+    pub submodules: bool,
+}
+
+/// What the push whose words after `push` are `rest`, its options up to `end`, asks for.
+pub(crate) fn push_asked(rest: &[String], end: usize) -> Result<Asked, String> {
+    let said = read(&rest[..end], &PUSH)?;
+    Ok(Asked {
+        signed: said.switches.contains(&"signed"),
+        submodules: said.submodules.is_some_and(|value| !value.is_empty()),
+    })
 }
 
 /// The options of a command's words, read as git reads them, up to `--`.
