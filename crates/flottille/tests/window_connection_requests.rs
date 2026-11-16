@@ -349,6 +349,41 @@ fn an_edit_shows_its_differences_in_the_dialog(cx: &mut TestAppContext) {
     assert!(!present(cx, "connection-request-changed-command"));
 }
 
+/// The secret the faulty URL of `design` holds, which the dialog never shows.
+const IN_A_URL: &str = "Zq7Wx3Vp9";
+
+#[gpui_kit::test]
+fn the_dialog_marks_the_old_url_of_an_edit_served_cleaned(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, mcp) = a_root(&user);
+    let path = user.path("config/flottille/extensions.toml");
+    let mut file = std::fs::read_to_string(&path).unwrap_or_default();
+    file.push_str(&format!(
+        "\n[[connections.server]]\nname = \"design\"\nabout = \"Designs.\"\n\
+         url = \"https://design.example.com/mcp?project=p&access_token={IN_A_URL}\"\n"
+    ));
+    std::fs::write(&path, file).unwrap();
+    let number = held(
+        &mcp,
+        json!({"action": "edit", "name": "design",
+            "url": "https://design.example.com/mcp?project=p"}),
+    );
+
+    let (shell, cx) = window(&user, cx);
+    open_card(&shell, cx, &lead, number);
+    open_dialog(&shell, cx, number);
+
+    assert_eq!(
+        label(cx, "connection-request-url").as_deref(),
+        Some("https://design.example.com/mcp?project=p")
+    );
+    // What was there is said cleaned, never as if it were the whole URL.
+    assert_eq!(
+        label(cx, "connection-request-was-url").as_deref(),
+        Some("https://design.example.com/mcp (cleaned: its query is dropped)")
+    );
+}
+
 #[gpui_kit::test]
 fn refuse_writes_nothing_without_a_confirmation(cx: &mut TestAppContext) {
     let user = user();

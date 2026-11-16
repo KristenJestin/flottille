@@ -2018,6 +2018,346 @@ fn a_ticked_row_hidden_by_the_search_is_not_set(cx: &mut TestAppContext) {
     );
 }
 
+/// The names of the actions of `driftbrowser` whose row is drawn now.
+fn shown_rows(cx: &mut VisualTestContext) -> Vec<String> {
+    let names: Vec<String> = driftbrowser()["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| tool["name"].as_str().unwrap().to_owned())
+        .collect();
+    names
+        .into_iter()
+        .filter(|name| !rows_of(cx, name).is_empty())
+        .collect()
+}
+
+/// The names of the actions of `driftbrowser` whose row shows a ticked box now.
+fn ticked_rows(cx: &mut VisualTestContext) -> Vec<String> {
+    shown_rows(cx)
+        .into_iter()
+        .filter(|name| match rows_of(cx, name).first() {
+            Some(row) => selected(cx, &format!("{row}-pick")),
+            None => false,
+        })
+        .collect()
+}
+
+/// What a tick says of its rows: its value, "mixed" when only part of them is ticked.
+fn tick_value(cx: &mut VisualTestContext, id: &str) -> Option<String> {
+    cx.update(|window, _| {
+        window
+            .try_find(id.to_owned())
+            .and_then(|found| found.value().map(str::to_owned))
+    })
+}
+
+#[gpui_kit::test]
+fn a_group_s_tick_selects_every_shown_row_of_the_group(cx: &mut TestAppContext) {
+    let user = user();
+    turn_on(&user);
+    declare_waiting(&user, "driftbrowser");
+    write_script(&user, "driftbrowser", &driftbrowser());
+    let (shell, cx) = window(&user, cx);
+    open_the_review(
+        &shell,
+        cx,
+        "driftbrowser",
+        "connection-review-row-3-browser_open",
+    );
+    // Ask one row first: the Judged group is then every other action.
+    choose(cx, "browser_click", "asked");
+    let tick = "connection-review-group-judged-pick";
+    assert!(visible(cx, tick), "the header has a tick");
+    assert!(ticked_rows(cx).is_empty());
+
+    click(cx, tick);
+    let ticked = ticked_rows(cx);
+    assert!(!ticked.is_empty());
+    assert!(
+        !ticked.iter().any(|name| name == "browser_click"),
+        "a row of another group is not ticked: {ticked:?}"
+    );
+    for name in &ticked {
+        assert_eq!(group_of(cx, name), Some("judged"), "{name}");
+    }
+    assert!(selected(cx, tick), "the tick says all");
+    assert_eq!(
+        label(cx, "connection-review-bulk-count"),
+        Some(format!("{} selected", ticked.len()))
+    );
+
+    // A second click unticks them all.
+    click(cx, tick);
+    assert!(ticked_rows(cx).is_empty());
+    assert!(!selected(cx, tick));
+    assert!(!present(cx, "connection-review-bulk"));
+}
+
+#[gpui_kit::test]
+fn a_group_s_tick_says_some_when_part_of_it_is_ticked(cx: &mut TestAppContext) {
+    let user = user();
+    turn_on(&user);
+    declare_waiting(&user, "driftbrowser");
+    write_script(&user, "driftbrowser", &driftbrowser());
+    let (shell, cx) = window(&user, cx);
+    open_the_review(
+        &shell,
+        cx,
+        "driftbrowser",
+        "connection-review-row-3-browser_open",
+    );
+    let tick = "connection-review-group-judged-pick";
+    assert_eq!(tick_value(cx, tick), None, "none ticked says none");
+    let row = row_of(cx, "browser_open");
+    click(cx, &format!("{row}-pick"));
+    assert_eq!(tick_value(cx, tick).as_deref(), Some("mixed"));
+    assert!(!selected(cx, tick));
+
+    // A click on a tick that says some ticks them all.
+    click(cx, tick);
+    assert!(selected(cx, tick));
+    assert_eq!(tick_value(cx, tick), None);
+
+    // Unticking one row says some again.
+    click(cx, &format!("{row}-pick"));
+    assert_eq!(tick_value(cx, tick).as_deref(), Some("mixed"));
+}
+
+#[gpui_kit::test]
+fn select_all_shown_ticks_what_the_search_shows(cx: &mut TestAppContext) {
+    let user = user();
+    turn_on(&user);
+    declare_waiting(&user, "driftbrowser");
+    write_script(&user, "driftbrowser", &driftbrowser());
+    let (shell, cx) = window(&user, cx);
+    open_the_review(
+        &shell,
+        cx,
+        "driftbrowser",
+        "connection-review-row-3-browser_open",
+    );
+    let row = row_of(cx, "browser_back");
+    click(cx, &format!("{row}-pick"));
+    let field = search_field(&shell, cx);
+    type_in(&field, "cookie", cx);
+    settle(cx);
+    // The bar shows with a ticked row that shows: tick one of the found rows to bring it.
+    let first = shown_rows(cx).remove(0);
+    let first = row_of(cx, &first);
+    click(cx, &format!("{first}-pick"));
+    assert_eq!(
+        label(cx, "connection-review-bulk-select-all").as_deref(),
+        Some("Select all shown")
+    );
+    click(cx, "connection-review-bulk-select-all");
+    // What the search shows is ticked, and what it hides is left as it was.
+    let shown = shown_rows(cx);
+    assert!(1 < shown.len() && shown.len() < 14, "{shown:?}");
+    assert_eq!(ticked_rows(cx), shown);
+    assert_eq!(
+        label(cx, "connection-review-bulk-count"),
+        Some(format!("{} selected", shown.len()))
+    );
+
+    type_in(&field, "", cx);
+    settle(cx);
+    let (back, press) = (row_of(cx, "browser_back"), row_of(cx, "browser_press"));
+    assert!(
+        selected(cx, &format!("{back}-pick")),
+        "the tick of a hidden row stays"
+    );
+    assert!(
+        !selected(cx, &format!("{press}-pick")),
+        "a hidden row was not ticked by it"
+    );
+    assert_eq!(
+        label(cx, "connection-review-bulk-count"),
+        Some(format!("{} selected", shown.len() + 1))
+    );
+}
+
+#[gpui_kit::test]
+fn ctrl_a_in_the_review_selects_every_shown_row(cx: &mut TestAppContext) {
+    let user = user();
+    turn_on(&user);
+    declare_waiting(&user, "driftbrowser");
+    write_script(&user, "driftbrowser", &driftbrowser());
+    let (shell, cx) = window(&user, cx);
+    open_the_review(
+        &shell,
+        cx,
+        "driftbrowser",
+        "connection-review-row-3-browser_open",
+    );
+    let field = search_field(&shell, cx);
+    type_in(&field, "browser_c", cx);
+    settle(cx);
+    // The list has the focus once it is clicked in: a click on a row's name opens it, and the
+    // focus stays with the list.
+    let row = row_of(cx, "browser_click");
+    click(cx, &row);
+    cx.simulate_keystrokes("ctrl-a");
+    settle(cx);
+    let shown = shown_rows(cx);
+    assert!(1 < shown.len() && shown.len() < 14, "{shown:?}");
+    assert_eq!(ticked_rows(cx), shown);
+    assert_eq!(
+        label(cx, "connection-review-bulk-count"),
+        Some(format!("{} selected", shown.len()))
+    );
+}
+
+#[gpui_kit::test]
+fn ctrl_a_on_a_failed_review_keeps_its_message(cx: &mut TestAppContext) {
+    let user = user();
+    turn_on(&user);
+    user.call(
+        "connection.add",
+        json!({"name": "broken", "about": "Nothing.",
+            "command": [user.path("no-such-program").display().to_string()]}),
+    )
+    .unwrap();
+    let (shell, cx) = window(&user, cx);
+    open_page(&shell, cx);
+    until(&shell, cx, "its row", |cx| visible(cx, "connection-broken"));
+    click(cx, "connection-more-broken");
+    click(cx, "review-connection-broken");
+    until(&shell, cx, "why it did not start", |cx| {
+        visible(cx, "connection-review-error")
+    });
+    let said = label(cx, "connection-review-error");
+    assert!(said.is_some(), "it says why");
+
+    // The list has the focus once it is clicked in; Ctrl+A on it has nothing to tick.
+    click(cx, "connection-review-error");
+    cx.simulate_keystrokes("ctrl-a");
+    settle(cx);
+    assert!(
+        visible(cx, "connection-review-error"),
+        "the message stays after Ctrl+A"
+    );
+    assert_eq!(label(cx, "connection-review-error"), said);
+}
+
+#[gpui_kit::test]
+fn ctrl_a_in_the_search_ticks_no_row(cx: &mut TestAppContext) {
+    let user = user();
+    turn_on(&user);
+    declare_waiting(&user, "driftbrowser");
+    write_script(&user, "driftbrowser", &driftbrowser());
+    let (shell, cx) = window(&user, cx);
+    open_the_review(
+        &shell,
+        cx,
+        "driftbrowser",
+        "connection-review-row-3-browser_open",
+    );
+    let field = search_field(&shell, cx);
+    type_in(&field, "cookie", cx);
+    settle(cx);
+    field.update_in(cx, |field, window, cx| field.focus(window, cx));
+    cx.simulate_keystrokes("ctrl-a");
+    settle(cx);
+    assert!(
+        ticked_rows(cx).is_empty(),
+        "Ctrl+A in the search selects its text, no row"
+    );
+    assert!(!present(cx, "connection-review-bulk"));
+
+    // With nothing focused it is nobody's.
+    cx.update(|window, cx| window.blur(cx));
+    cx.simulate_keystrokes("ctrl-a");
+    settle(cx);
+    assert!(ticked_rows(cx).is_empty(), "nothing focused ticks nothing");
+    assert!(!present(cx, "connection-review-bulk"));
+}
+
+#[gpui_kit::test]
+fn a_group_s_tick_under_a_search_leaves_hidden_rows_as_they_were(cx: &mut TestAppContext) {
+    let user = user();
+    turn_on(&user);
+    declare_waiting(&user, "driftbrowser");
+    write_script(&user, "driftbrowser", &driftbrowser());
+    let (shell, cx) = window(&user, cx);
+    open_the_review(
+        &shell,
+        cx,
+        "driftbrowser",
+        "connection-review-row-3-browser_open",
+    );
+    choose(cx, "browser_click", "asked");
+    // One hidden row ticked before the search, the others not.
+    let back = row_of(cx, "browser_back");
+    click(cx, &format!("{back}-pick"));
+
+    let field = search_field(&shell, cx);
+    type_in(&field, "cookie", cx);
+    settle(cx);
+    let found = shown_rows(cx);
+    assert_eq!(found.len(), 2, "{found:?}");
+    let tick = "connection-review-group-judged-pick";
+    click(cx, tick);
+    assert_eq!(ticked_rows(cx), found, "the tick ticks the shown rows");
+
+    type_in(&field, "", cx);
+    settle(cx);
+    let mut ticked = ticked_rows(cx);
+    ticked.sort();
+    let mut expected = found.clone();
+    expected.push("browser_back".to_owned());
+    expected.sort();
+    assert_eq!(ticked, expected, "the hidden rows kept their state");
+
+    // Unticking under the search leaves the hidden ticked row ticked.
+    type_in(&field, "cookie", cx);
+    settle(cx);
+    click(cx, tick);
+    assert!(ticked_rows(cx).is_empty());
+    type_in(&field, "", cx);
+    settle(cx);
+    assert_eq!(ticked_rows(cx), ["browser_back"]);
+}
+
+#[gpui_kit::test]
+fn a_group_title_does_not_move_when_a_search_leaves_it_only_locked_rows(cx: &mut TestAppContext) {
+    let user = user();
+    turn_on(&user);
+    agent_browser(
+        &user,
+        &[
+            "agent_browser_click",
+            "agent_browser_fill",
+            "agent_browser_auth_save",
+            "agent_browser_eval",
+        ],
+        true,
+    );
+    let (shell, cx) = window(&user, cx);
+    open_the_review(&shell, cx, "browser", "connection-review-adapter");
+    // The Off group holds a row with a box and the locked login.
+    choose(cx, "agent_browser_eval", "off");
+    let title = "connection-review-group-off-title";
+    let left = |cx: &mut VisualTestContext| {
+        cx.update(|window, _| f32::from(window.find(title).bounds().origin.x))
+    };
+    let before = left(cx);
+
+    let field = search_field(&shell, cx);
+    type_in(&field, "auth_save", cx);
+    settle(cx);
+    assert!(
+        rows_of(cx, "agent_browser_eval").is_empty(),
+        "the search leaves the Off group the locked row only"
+    );
+    assert!(!rows_of(cx, "agent_browser_auth_save").is_empty());
+    assert_eq!(left(cx), before, "the title stays where it was");
+
+    type_in(&field, "", cx);
+    settle(cx);
+    assert_eq!(left(cx), before);
+}
+
 /// A server with `n` actions, `tool_000` to `tool_{n-1}`, each with a sentence of its own.
 fn many_tools(n: usize) -> Value {
     let tools: Vec<Value> = (0..n)
@@ -2886,6 +3226,70 @@ fn the_window_opens_only_an_https_or_a_local_http_address_to_sign_in(cx: &mut Te
     assert_eq!(opened.lock().unwrap().len(), 5);
 }
 
+#[gpui_kit::test]
+fn the_form_shows_the_browser_when_its_toggle_is_on(cx: &mut TestAppContext) {
+    let user = user();
+    turn_on(&user);
+    agent_browser(&user, &["agent_browser_click"], false);
+    let (shell, cx) = window(&user, cx);
+    open_the_form_of(&shell, cx, "browser");
+    // A labelled toggle, off by default.
+    assert_eq!(
+        label(cx, "connection-headed-label").as_deref(),
+        Some("Show the browser")
+    );
+    assert_eq!(connection(&user, "browser").unwrap()["headed"], Value::Null);
+    click(cx, "connection-headed");
+    settle(cx);
+    click(cx, "save-connection");
+    until(&shell, cx, "the form closes", |cx| {
+        !visible(cx, "connection-modal")
+    });
+    assert_eq!(connection(&user, "browser").unwrap()["headed"], json!(true));
+    // Open again: it is on, and saving another field keeps it.
+    click(cx, "connection-more-browser");
+    click(cx, "edit-connection-browser");
+    until(&shell, cx, "the form opens on it", |cx| {
+        visible(cx, "connection-modal")
+    });
+    settle(cx);
+    let fields = section(&shell, cx).read_with(cx, |s, _| s.form_fields().unwrap());
+    type_in(&fields.about, "The browser of the user.", cx);
+    click(cx, "save-connection");
+    until(&shell, cx, "the form closes", |cx| {
+        !visible(cx, "connection-modal")
+    });
+    assert_eq!(connection(&user, "browser").unwrap()["headed"], json!(true));
+}
+
+#[gpui_kit::test]
+fn a_browser_that_could_not_be_shown_says_why_under_its_switch(cx: &mut TestAppContext) {
+    // The session names a Wayland socket that is not there: the browser runs headless.
+    let user = user().with_env("WAYLAND_DISPLAY", "wayland-none");
+    turn_on(&user);
+    agent_browser(&user, &["agent_browser_click"], false);
+    user.call(
+        "connection.edit",
+        json!({"name": "browser", "headed": true}),
+    )
+    .unwrap();
+    user.call("connection.review", json!({"name": "browser"}))
+        .unwrap();
+    let (shell, cx) = window(&user, cx);
+    open_the_form_of(&shell, cx, "browser");
+    settle(cx);
+    assert!(visible(cx, "connection-headed-why"));
+    let said = section(&shell, cx)
+        .read_with(cx, |s, _| s.headless_said())
+        .expect("it says why");
+    assert!(said.contains("not shown"), "{said}");
+    assert!(said.contains("Wayland socket"), "{said}");
+    // Turned off in the form, there is nothing to say: it folds away.
+    click(cx, "connection-headed");
+    settle(cx);
+    assert!(!visible(cx, "connection-headed-why"));
+}
+
 // ── A review that needs a sign-in ────────────────────────────────────────────────────────────
 
 /// The review of `notes`, behind its authorization server and not signed in, opened from its row.
@@ -3060,6 +3464,112 @@ fn a_401_with_a_header_from_the_vault_names_the_entry_not_a_sign_in(cx: &mut Tes
     let _ = server.wait();
 }
 
+#[gpui_kit::test]
+fn a_401_with_query_and_cookie_secrets_offers_to_edit_each_entry(cx: &mut TestAppContext) {
+    let user = user();
+    turn_on(&user);
+    for name in ["notes-query", "notes-cookie", "notes-login"] {
+        user.call(
+            "vault.set",
+            json!({"name": name, "secret": SECRET, "description": "Notes' secret",
+                "username": "ada@example.com"}),
+        )
+        .unwrap();
+    }
+    let (mut server, url) = protected_server(&user);
+    // The cookie's entry is used twice (a cookie and a query parameter): offered once.
+    user.call(
+        "connection.add",
+        json!({"name": "notes", "about": "A notes server.", "url": url,
+            "secrets": [{"in": "query", "name": "userToken", "entry": "notes-query"},
+                {"in": "cookie", "name": "session", "entry": "notes-cookie"},
+                {"in": "query", "name": "again", "entry": "notes-cookie"},
+                {"in": "basic", "entry": "notes-login"}]}),
+    )
+    .unwrap();
+    let (shell, cx) = window(&user, cx);
+    open_page(&shell, cx);
+    until(&shell, cx, "its row", |cx| visible(cx, "connection-notes"));
+    click(cx, "connection-more-notes");
+    click(cx, "review-connection-notes");
+    until(&shell, cx, "what the review says", |cx| {
+        present(cx, "connection-review-needs-entry")
+            || present(cx, "connection-review-sign-in")
+            || present(cx, "connection-review-error")
+    });
+    settle(cx);
+    assert!(present(cx, "connection-review-needs-entry"));
+    // Each entry the server refused is offered, not only a header's.
+    for entry in ["notes-query", "notes-cookie", "notes-login"] {
+        assert_eq!(
+            label(cx, &format!("connection-review-edit-{entry}")),
+            Some(format!("Edit {entry}")),
+            "{}",
+            everything_said(cx)
+        );
+    }
+    let all = everything_said(cx);
+    assert_eq!(
+        all.matches("Edit notes-cookie").count(),
+        1,
+        "an entry used twice is offered once: {all}"
+    );
+    assert!(!all.contains(SECRET), "{all}");
+    let _ = server.kill();
+    let _ = server.wait();
+}
+
+/// The secret the faulty URL of `design` holds, which the window never shows nor writes back.
+const IN_A_URL: &str = "Zq7Wx3Vp9";
+
+#[gpui_kit::test]
+fn editing_a_faulty_url_leaves_its_field_empty_and_says_why(cx: &mut TestAppContext) {
+    let user = user();
+    turn_on(&user);
+    let path = user.path("config/flottille/extensions.toml");
+    let mut file = std::fs::read_to_string(&path).unwrap_or_default();
+    file.push_str(&format!(
+        "\n[[connections.server]]\nname = \"design\"\nabout = \"Designs.\"\n\
+         url = \"https://design.example.com/mcp?project=p&access_token={IN_A_URL}#k\"\n"
+    ));
+    std::fs::write(&path, file).unwrap();
+    let (shell, cx) = window(&user, cx);
+    open_the_form_of(&shell, cx, "design");
+    let section = section(&shell, cx);
+    let fields = section.read_with(cx, |s, _| s.form_fields().unwrap());
+    // The field is left empty, its fault beside it: what was served cleaned is never saved back.
+    assert_eq!(fields.url.read_with(cx, |f, _| f.value().to_string()), "");
+    let fault = label(cx, "connection-url-field-error").unwrap_or_default();
+    assert!(fault.contains("access_token"), "{fault}");
+    assert!(!everything_said(cx).contains(IN_A_URL));
+    type_in(&fields.about, "The designs.", cx);
+    click(cx, "save-connection");
+    assert!(visible(cx, "connection-modal"));
+    let written = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        written.contains(&format!("project=p&access_token={IN_A_URL}#k")),
+        "{written}"
+    );
+    // Typed again, the fault folds away, over a panel's time.
+    let whole = height(cx, "connection-url-field-error-fold");
+    type_in(&fields.url, "https://design.example.com/mcp?project=p", cx);
+    a_third_later(cx);
+    let folding = height(cx, "connection-url-field-error-fold");
+    assert!(
+        0. < folding && folding < whole,
+        "the fault folds away: {folding} of {whole}"
+    );
+    settle(cx);
+    assert!(!present(cx, "connection-url-field-error"));
+    click(cx, "save-connection");
+    until(&shell, cx, "the form closes", |cx| {
+        !visible(cx, "connection-modal")
+    });
+    let design = connection(&user, "design").unwrap();
+    assert_eq!(design["url"], "https://design.example.com/mcp?project=p");
+    assert_eq!(design["about"], "The designs.");
+}
+
 // ── The review opens at rest (#954) ──────────────────────────────────────────────────────────
 
 /// The user of a re-review: `driftbrowser` pinned with settings, then announcing one more tool,
@@ -3111,6 +3621,20 @@ fn open_frame_by_frame(
     watched: &[&str],
     hidden: &[&str],
 ) -> Opening {
+    open_frame_by_frame_while(shell, cx, name, ready, watched, hidden, |_| {})
+}
+
+/// `open_frame_by_frame`, with `while_asked` called after each frame drawn before the data, with
+/// the number of those frames so far: a test that holds the server's answer releases it there.
+fn open_frame_by_frame_while(
+    shell: &Entity<Shell>,
+    cx: &mut VisualTestContext,
+    name: &str,
+    ready: &str,
+    watched: &[&str],
+    hidden: &[&str],
+    mut while_asked: impl FnMut(usize),
+) -> Opening {
     open_page(shell, cx);
     until(shell, cx, "its row", |cx| {
         visible(cx, &format!("connection-{name}"))
@@ -3135,6 +3659,7 @@ fn open_frame_by_frame(
         if !present(cx, ready) {
             assert!(Instant::now() < deadline, "the data never came");
             opening.loading.push(skeleton);
+            while_asked(opening.loading.len());
             std::thread::sleep(Duration::from_millis(25));
             continue;
         }
@@ -3284,6 +3809,9 @@ fn opening_a_group_of_the_review_still_unfolds_it(cx: &mut TestAppContext) {
     );
 }
 
+/// Frames drawn while the held server is asked, before the test lets its listing go.
+const LOADING_FRAMES: usize = 10;
+
 #[gpui_kit::test]
 fn a_review_whose_server_is_asked_shows_one_loading_state_then_fades_to_its_content(
     cx: &mut TestAppContext,
@@ -3291,25 +3819,36 @@ fn a_review_whose_server_is_asked_shows_one_loading_state_then_fades_to_its_cont
     let user = user();
     turn_on(&user);
     declare_waiting(&user, "almanac");
-    // The server is slow to list its tools, so that frames are drawn while it is asked.
-    let mut slow = almanac();
-    slow["list_sleep_ms"] = json!(500);
-    write_script(&user, "almanac", &slow);
+    // The server holds its listing until the test lets it go, so the frames drawn while it is
+    // asked do not depend on how long the machine takes to draw them.
+    let release = user.path("almanac-release");
+    let mut held = almanac();
+    held["list_when"] = json!(release.display().to_string());
+    write_script(&user, "almanac", &held);
     let (shell, cx) = window(&user, cx);
     let watched = [
         "connection-review-group-judged",
         "connection-review-row-3-search",
     ];
-    let opening = open_frame_by_frame(
+    let opening = open_frame_by_frame_while(
         &shell,
         cx,
         "almanac",
         "connection-review-row-3-search",
         &watched,
         &[],
+        |asked| {
+            if asked == LOADING_FRAMES {
+                std::fs::write(&release, "").unwrap();
+            }
+        },
     );
     // One loading state while the server is asked, from the first frame to the data.
-    assert!(!opening.loading.is_empty(), "the server was asked");
+    assert!(
+        opening.loading.len() >= LOADING_FRAMES,
+        "the server was asked: {} frames drawn before its answer",
+        opening.loading.len()
+    );
     assert!(
         opening.loading.iter().all(|shown| *shown),
         "{:?}",

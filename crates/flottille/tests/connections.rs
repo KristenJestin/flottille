@@ -6164,3 +6164,458 @@ fn an_entry_whose_host_is_no_usable_site_is_refused() {
         );
     }
 }
+
+/// A user whose daemon has a display, as a desktop session gives it.
+fn user_with_display() -> User {
+    let user = User::with_fake_agent()
+        .with_env("WAYLAND_DISPLAY", "wayland-test")
+        .with_env("DISPLAY", ":7")
+        .with_env("DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/user/1000/bus");
+    user.fake_script(json!({"turns": [{"when": "", "do": [{"say": "ready"}]}]}));
+    user
+}
+
+/// The session's Wayland socket, in the user's real runtime folder, with a session bus socket and
+/// the like beside it: what the browser must not reach but the socket.
+fn wayland_socket(user: &User) -> std::os::unix::net::UnixListener {
+    let runtime = user.path("runtime");
+    std::fs::create_dir_all(&runtime).unwrap();
+    std::fs::write(runtime.join("bus"), "").unwrap();
+    std::os::unix::net::UnixListener::bind(runtime.join("wayland-test")).unwrap()
+}
+
+/// The display variables the server of `name` got when it last started.
+fn display_of(user: &User, name: &str) -> Value {
+    logged(user, name, "start").last().unwrap()["display"].clone()
+}
+
+#[test]
+fn a_shown_browser_gets_the_display_variables() {
+    let user = user_with_display();
+    let _wayland = wayland_socket(&user);
+    browser_declared(
+        &user,
+        &agent_browser("0.43.0"),
+        json!({"fail": true}),
+        &[],
+        json!({"headed": true}),
+    );
+    // Its review starts the server: the session's display through a folder of its own, and the
+    // file says headed.
+    user.call("connection.review", json!({"name": "browser"}))
+        .unwrap();
+    let folder = user.path("runtime/flottille/display/browser");
+    assert_eq!(
+        display_of(&user, "browser"),
+        json!({"WAYLAND_DISPLAY": "wayland-test", "DISPLAY": null,
+            "XDG_RUNTIME_DIR": folder.to_str().unwrap(),
+            "DBUS_SESSION_BUS_ADDRESS": null,
+            "AGENT_BROWSER_SOCKET_DIR": user.path("state/flottille/connections/browser")
+                .to_str().unwrap(),
+            "runtime_files": ["wayland-test"]})
+    );
+    let started = logged(&user, "browser", "start");
+    assert_eq!(started.last().unwrap()["config"]["headed"], json!(true));
+    assert_eq!(connection(&user, "browser")["headed"], json!(true));
+    // The review says it, where it says what the adapter changes.
+    let review = user
+        .call("connection.review", json!({"name": "browser"}))
+        .unwrap();
+    let changed = review["adapter"]["changed"].to_string();
+    assert!(changed.contains("is shown on the screen"), "{changed}");
+    // With X11, what it can do to the other windows is said: read and type.
+    assert!(changed.contains("type into"), "{changed}");
+}
+
+#[test]
+fn a_hidden_browser_gets_none() {
+    let user = user_with_display();
+    browser(&user, &agent_browser("0.43.0"), json!({"fail": true}));
+    user.call("connection.review", json!({"name": "browser"}))
+        .unwrap();
+    let seen = display_of(&user, "browser");
+    for variable in ["WAYLAND_DISPLAY", "DISPLAY", "XDG_RUNTIME_DIR"] {
+        assert_eq!(seen[variable], Value::Null, "{variable}: {seen}");
+    }
+    let started = logged(&user, "browser", "start");
+    assert_eq!(started.last().unwrap()["config"].get("headed"), None);
+    assert_eq!(connection(&user, "browser")["headed"], Value::Null);
+}
+
+#[test]
+fn showing_the_browser_restarts_its_server() {
+    let user = user_with_display();
+    let _wayland = wayland_socket(&user);
+    browser(&user, &agent_browser("0.43.0"), json!({}));
+    let (_, mcp) = signed_up(&user);
+    user.call(
+        "connection.accept",
+        json!({"name": "browser", "actions": {"agent_browser_click": "passes"}}),
+    )
+    .unwrap();
+    restart(&user, "browser");
+    done(mcp.call(
+        "conn_browser",
+        json!({"action": "agent_browser_click", "arguments": {"name": "buy"}}),
+    ));
+    let first = logged(&user, "browser", "start").last().unwrap().clone();
+    assert_eq!(first["display"]["DISPLAY"], Value::Null);
+    let pid = first["pid"].as_u64().unwrap();
+    // The user's edit stops the server that runs, and gives the new one at once.
+    let edited = user
+        .call(
+            "connection.edit",
+            json!({"name": "browser", "headed": true}),
+        )
+        .unwrap();
+    assert_eq!(edited["state"], "ready", "{edited}");
+    eventually("the server that was hidden stops", || !pid_alive(pid));
+    done(mcp.call(
+        "conn_browser",
+        json!({"action": "agent_browser_click", "arguments": {"name": "buy"}}),
+    ));
+    assert_eq!(
+        display_of(&user, "browser")["WAYLAND_DISPLAY"],
+        "wayland-test"
+    );
+    assert_eq!(
+        logged(&user, "browser", "start").last().unwrap()["config"]["headed"],
+        json!(true)
+    );
+    // The command line says it both ways, and hiding it stops the server again.
+    let output = user.run(&["connection", "edit", "browser", "--headless"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(connection(&user, "browser")["headed"], Value::Null);
+    let output = user.run(&["connection", "edit", "browser", "--headed"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(connection(&user, "browser")["headed"], json!(true));
+}
+
+#[test]
+fn a_shown_browser_gets_the_display_socket_alone() {
+    use std::os::unix::fs::PermissionsExt;
+    let user = user_with_display();
+    let _wayland = wayland_socket(&user);
+    browser_declared(
+        &user,
+        &agent_browser("0.43.0"),
+        json!({}),
+        &[],
+        json!({"headed": true}),
+    );
+    let (_, mcp) = signed_up(&user);
+    user.call(
+        "connection.accept",
+        json!({"name": "browser", "actions": {"agent_browser_click": "passes"}}),
+    )
+    .unwrap();
+    restart(&user, "browser");
+    done(mcp.call(
+        "conn_browser",
+        json!({"action": "agent_browser_click", "arguments": {"name": "buy"}}),
+    ));
+    let folder = user.path("runtime/flottille/display/browser");
+    let seen = display_of(&user, "browser");
+    // Its own runtime folder, not the user's: the Wayland socket is all it holds, with no session
+    // bus, and no X11 beside a Wayland session.
+    assert_eq!(seen["XDG_RUNTIME_DIR"], folder.to_str().unwrap(), "{seen}");
+    assert_eq!(seen["runtime_files"], json!(["wayland-test"]), "{seen}");
+    assert_eq!(seen["DBUS_SESSION_BUS_ADDRESS"], Value::Null, "{seen}");
+    assert_eq!(seen["DISPLAY"], Value::Null, "{seen}");
+    assert_eq!(
+        std::fs::metadata(&folder).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+    // Removed when the server stops.
+    let pid = logged(&user, "browser", "start").last().unwrap()["pid"]
+        .as_u64()
+        .unwrap();
+    user.call(
+        "connection.edit",
+        json!({"name": "browser", "enabled": false}),
+    )
+    .unwrap();
+    eventually("the server stops", || !pid_alive(pid));
+    eventually("its folder is removed", || !folder.exists());
+}
+
+#[test]
+fn a_shown_browser_runs_headless_when_the_socket_cannot_be_shared() {
+    // The daemon's session names a socket that is not there: never the real folder instead.
+    let user = user_with_display();
+    browser_declared(
+        &user,
+        &agent_browser("0.43.0"),
+        json!({"fail": true}),
+        &[],
+        json!({"headed": true}),
+    );
+    user.call("connection.review", json!({"name": "browser"}))
+        .unwrap();
+    let started = logged(&user, "browser", "start");
+    let seen = &started.last().unwrap()["display"];
+    assert_eq!(seen["XDG_RUNTIME_DIR"], Value::Null, "{seen}");
+    assert_eq!(seen["WAYLAND_DISPLAY"], Value::Null, "{seen}");
+    assert_eq!(started.last().unwrap()["config"].get("headed"), None);
+    assert!(!user.path("runtime/flottille/display/browser").exists());
+}
+
+#[test]
+fn a_hidden_browser_gets_no_session_bus_address() {
+    // Hidden or shown, the browser has no way to the session bus, hence none to the keyring.
+    let user = user_with_display();
+    browser(&user, &agent_browser("0.43.0"), json!({"fail": true}));
+    user.call("connection.review", json!({"name": "browser"}))
+        .unwrap();
+    let seen = display_of(&user, "browser");
+    assert_eq!(seen["DBUS_SESSION_BUS_ADDRESS"], Value::Null, "{seen}");
+}
+
+#[test]
+fn the_server_and_its_login_share_one_browser_socket_folder() {
+    // agent-browser puts its daemon's socket in `AGENT_BROWSER_SOCKET_DIR`, else under
+    // `$XDG_RUNTIME_DIR`: the server and its login run, with display folders of their own, would
+    // reach two browsers, and a folder removed with one would take the other's socket with it.
+    let user = user_with_display();
+    let _wayland = wayland_socket(&user);
+    browser_declared(
+        &user,
+        &agent_browser("0.43.0"),
+        json!({}),
+        &[],
+        json!({"headed": true}),
+    );
+    let (_, mcp) = signed_up(&user);
+    user.call(
+        "connection.accept",
+        json!({"name": "browser", "actions": {"agent_browser_click": "passes"}}),
+    )
+    .unwrap();
+    restart(&user, "browser");
+    done(mcp.call(
+        "conn_browser",
+        json!({"action": "agent_browser_click", "arguments": {"name": "buy"}}),
+    ));
+    done(mcp.call(
+        "conn_browser",
+        json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+    ));
+    let shared = user.path("state/flottille/connections/browser");
+    let server = display_of(&user, "browser");
+    let login = logged(&user, "browser", "login").last().unwrap()["display"].clone();
+    assert_eq!(
+        server["AGENT_BROWSER_SOCKET_DIR"],
+        shared.to_str().unwrap(),
+        "{server}"
+    );
+    assert_eq!(
+        login["AGENT_BROWSER_SOCKET_DIR"],
+        shared.to_str().unwrap(),
+        "{login}"
+    );
+    // One display folder, the server's: the browser either of them starts is the other's too.
+    assert_eq!(server["XDG_RUNTIME_DIR"], login["XDG_RUNTIME_DIR"]);
+    assert_eq!(login["runtime_files"], json!(["wayland-test"]), "{login}");
+}
+
+#[test]
+fn a_connection_variable_cannot_choose_the_landlock_exception() {
+    // A variable of the connection's own, the user's or an agent's approved request, named
+    // `XDG_RUNTIME_DIR`: the folder the login's reload may reach is the one the daemon made, never
+    // the one this variable names.
+    if common::landlock_abi() < 2 {
+        eprintln!(
+            "skipped: this kernel's Landlock (ABI {}) is not used",
+            common::landlock_abi()
+        );
+        return;
+    }
+    let user = user_with_display();
+    let _wayland = wayland_socket(&user);
+    // The folder itself, not the test's link to it: Landlock's rule is on a path that is no link.
+    let runtime = user.path("runtime").canonicalize().unwrap();
+    user.call(
+        "vault.set",
+        json!({"name": "runtime-path", "secret": runtime.to_str().unwrap()}),
+    )
+    .unwrap();
+    browser_declared(
+        &user,
+        &agent_browser("0.43.0"),
+        json!({"fail": true}),
+        &[],
+        json!({"headed": true, "env": {"XDG_RUNTIME_DIR": {"vault": "runtime-path"}}}),
+    );
+    let (_, mcp) = signed_up(&user);
+    let said = refused(mcp.call(
+        "conn_browser",
+        json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+    ));
+    assert!(said.contains("failed"), "{said}");
+    // The reload ran with the variable, and could read nothing of the folder it names.
+    let opened = logged(&user, "browser", "open");
+    assert_eq!(opened.len(), 1, "{opened:?}");
+    let seen = &opened[0]["display"];
+    assert_eq!(seen["XDG_RUNTIME_DIR"], runtime.to_str().unwrap(), "{seen}");
+    assert_eq!(seen["runtime_files"], Value::Null, "{seen}");
+}
+
+#[test]
+fn a_shown_server_cannot_link_the_socket_out_of_its_folder() {
+    // A hard link of the Wayland socket elsewhere would outlive the folder, and be reachable
+    // under a name the folder's rule does not cover.
+    if common::landlock_abi() < 2 {
+        eprintln!(
+            "skipped: this kernel's Landlock (ABI {}) cannot deny a link out of a folder",
+            common::landlock_abi()
+        );
+        return;
+    }
+    let user = user_with_display();
+    let _wayland = wayland_socket(&user);
+    let out = user.path("state/flottille/connections/browser/linked-socket");
+    let mut script = agent_browser("0.43.0");
+    script["link_socket_to"] = json!(out.to_str().unwrap());
+    browser_declared(
+        &user,
+        &script,
+        json!({"fail": true}),
+        &[],
+        json!({"headed": true}),
+    );
+    user.call("connection.review", json!({"name": "browser"}))
+        .unwrap();
+    let started = logged(&user, "browser", "start");
+    // The socket is in the folder the server got, and the link out of it was refused.
+    assert_eq!(
+        started.last().unwrap()["display"]["runtime_files"],
+        json!(["wayland-test"])
+    );
+    assert_eq!(
+        started.last().unwrap()["linked"],
+        json!(false),
+        "{started:?}"
+    );
+    assert!(!out.exists());
+}
+
+/// The browser on the connection's socket folder, as the fake keeps it: none once it is closed.
+fn browser_running(user: &User) -> Option<Value> {
+    std::fs::read_to_string(user.path("state/flottille/connections/browser/browser.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+}
+
+#[test]
+fn a_browser_the_login_started_follows_the_switch_at_the_next_start() {
+    // The login starts the browser before the server does: it outlives the login, and must not
+    // outlive the switch.
+    let user = user_with_display();
+    let _wayland = wayland_socket(&user);
+    browser_declared(
+        &user,
+        &agent_browser("0.43.0"),
+        json!({}),
+        &[],
+        json!({"headed": true}),
+    );
+    let (_, mcp) = signed_up(&user);
+    user.call(
+        "connection.accept",
+        json!({"name": "browser", "actions": {"agent_browser_click": "passes"}}),
+    )
+    .unwrap();
+    done(mcp.call(
+        "conn_browser",
+        json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+    ));
+    let started = logged(&user, "browser", "browser");
+    assert_eq!(started.len(), 1, "{started:?}");
+    assert_eq!(started[0]["by"], "login");
+    let folder = user.path("runtime/flottille/display/browser");
+    assert_eq!(
+        browser_running(&user),
+        Some(json!({"headed": true, "XDG_RUNTIME_DIR": folder.to_str().unwrap()}))
+    );
+    let login = logged(&user, "browser", "login").last().unwrap()["display"].clone();
+    assert_eq!(login["runtime_files"], json!(["wayland-test"]), "{login}");
+
+    // The user hides it: the browser on the socket folder is closed, whoever started it.
+    user.call(
+        "connection.edit",
+        json!({"name": "browser", "headed": false}),
+    )
+    .unwrap();
+    eventually("the browser is closed", || browser_running(&user).is_none());
+    let closed = logged(&user, "browser", "close");
+    assert!(
+        closed[0]["args"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("close")),
+        "{closed:?}"
+    );
+
+    // The next start gets a browser in the mode the switch says.
+    done(mcp.call(
+        "conn_browser",
+        json!({"action": "agent_browser_click", "arguments": {"name": "buy"}}),
+    ));
+    let last = logged(&user, "browser", "browser").last().unwrap().clone();
+    assert_eq!(last["by"], "call", "{last}");
+    assert_eq!(last["started"], true, "{last}");
+    assert_eq!(
+        last["browser"],
+        json!({"headed": null, "XDG_RUNTIME_DIR": null}),
+        "{last}"
+    );
+}
+
+#[test]
+fn the_reason_a_browser_is_not_shown_stays_said_during_a_call() {
+    // No Wayland socket to share: the browser runs headless, and says why while a call holds the
+    // server's turn too.
+    let user = user_with_display();
+    let mut script = agent_browser("0.43.0");
+    script["answers"]["agent_browser_click"] = json!({"sleep_ms": 1500});
+    browser_declared(&user, &script, json!({}), &[], json!({"headed": true}));
+    let (_, mcp) = signed_up(&user);
+    user.call(
+        "connection.accept",
+        json!({"name": "browser", "actions": {"agent_browser_click": "passes"}}),
+    )
+    .unwrap();
+    restart(&user, "browser");
+    done(mcp.call(
+        "conn_browser",
+        json!({"action": "agent_browser_click", "arguments": {"name": "cart"}}),
+    ));
+    let said = connection(&user, "browser")["headless"].clone();
+    assert!(
+        said.as_str().is_some_and(|why| why.contains("hard link")),
+        "{said}"
+    );
+    std::thread::scope(|scope| {
+        let call = scope.spawn(|| {
+            mcp.call(
+                "conn_browser",
+                json!({"action": "agent_browser_click", "arguments": {"name": "buy"}}),
+            )
+        });
+        eventually("the server received the click", || {
+            logged(&user, "browser", "received")
+                .iter()
+                .any(|line| line["tool"] == "agent_browser_click")
+        });
+        assert_eq!(connection(&user, "browser")["headless"], said);
+        done(call.join().unwrap());
+    });
+}

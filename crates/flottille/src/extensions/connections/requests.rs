@@ -11,7 +11,7 @@ use flottille_core::approval::{self, Decision, RequestState};
 use serde_json::{Map, Value, json};
 
 use super::{
-    Declaration, EXTENSION, KEYS, Reach, SETTINGS, State, Still, client, declaration, declarations,
+    Declaration, EXTENSION, KEYS, Reach, SETTINGS, State, Still, declaration, declarations,
     entries_checked, row, setting_of, settings_only, state_of,
 };
 use crate::daemon::Daemon;
@@ -22,7 +22,9 @@ const ACTIONS: [&str; 8] = ["list", "show", "add", "edit", "remove", "set", "on"
 const WRITES: [&str; 6] = ["add", "edit", "remove", "set", "on", "off"];
 /// What an agent may declare; the projects a connection leaves out, its OAuth client and its
 /// switch are the user's (the switch through `on` and `off`).
-const AGENT_KEYS: [&str; 7] = ["name", "about", "command", "url", "env", "headers", "only"];
+const AGENT_KEYS: [&str; 8] = [
+    "name", "about", "command", "url", "env", "headers", "secrets", "only",
+];
 
 /// Whether a call writes a connection: held for the user every time, in every mode.
 pub fn writes(tool: &str, args: &Value) -> bool {
@@ -115,9 +117,32 @@ fn fields(declaration: &Declaration) -> Vec<(&'static str, &'static str, String)
             ));
             fields.push(("env", "Its variables", entries(&declaration.env)));
         }
-        Reach::Url(url) => {
-            fields.push(("url", "Its URL", url.clone()));
-            fields.push(("headers", "Its headers", entries(&declaration.headers)));
+        Reach::Url(_) => {
+            fields.push((
+                "url",
+                "Its URL",
+                declaration.marked_url().unwrap_or_default(),
+            ));
+            let secrets = match declaration.secrets.is_empty() {
+                true => "none".to_owned(),
+                false => declaration
+                    .secrets
+                    .iter()
+                    .map(|secret| {
+                        let prefix = match secret.prefix.is_empty() {
+                            true => String::new(),
+                            false => format!(" after {:?}", secret.prefix),
+                        };
+                        format!(
+                            "{}{prefix} from the vault entry {}",
+                            secret.said(),
+                            secret.entry
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("; "),
+            };
+            fields.push(("secrets", "Its secrets", secrets));
         }
     }
     let only = match declaration.only.is_empty() {
@@ -181,7 +206,24 @@ fn params_of(daemon: &Daemon, args: &Value, editing: bool) -> Result<Map<String,
             ));
         }
         let value = match (key.as_str(), value) {
-            ("env" | "headers" | "only", Value::Null) if editing => Value::Null,
+            ("env" | "headers" | "secrets" | "only", Value::Null) if editing => Value::Null,
+            ("secrets", Value::Array(lines)) => {
+                for (n, line) in lines.iter().enumerate() {
+                    let entry = line["entry"].as_str().unwrap_or_default();
+                    if !nameable(&entries, entry, true) {
+                        // The value is not said back: it may be a secret written where a name goes.
+                        return Err(format!(
+                            "secrets[{n}].entry: names no vault entry: a secret is never written \
+                             here, only the name of an entry the vault list gives (or, on a URL's \
+                             secret line, of one the user is to make)"
+                        ));
+                    }
+                }
+                value.clone()
+            }
+            ("secrets", _) => {
+                return Err("secrets: must be a list of {in, name, prefix, entry}".into());
+            }
             ("command", Value::String(text)) => json!(flottille_core::command::split_line(text)?),
             ("command", _) => {
                 return Err("command: one line, the program and its arguments, as a task's".into());
@@ -192,11 +234,12 @@ fn params_of(daemon: &Daemon, args: &Value, editing: bool) -> Result<Map<String,
                     let entry = entry.as_str().ok_or_else(|| {
                         format!("{key}.{variable}: must name a vault entry, a text")
                     })?;
-                    if !entries.iter().any(|known| known.name == entry) {
+                    if !nameable(&entries, entry, key == "headers") {
                         // The value is not said back: it may be a secret written where a name goes.
                         return Err(format!(
                             "{key}.{variable}: names no vault entry: a secret is never written \
-                             here, only the name of an entry the vault list gives"
+                             here, only the name of an entry the vault list gives (or, on a URL's \
+                             secret line, of one the user is to make)"
                         ));
                     }
                     named.insert(variable.clone(), json!({"vault": entry}));
@@ -213,6 +256,86 @@ fn params_of(daemon: &Daemon, args: &Value, editing: bool) -> Result<Map<String,
         params.insert(key.clone(), value);
     }
     Ok(params)
+}
+
+/// Whether an agent may name `entry`: one of the vault, or, on a secret line of a URL's requests
+/// (`to_make`), one the user is to make before they accept (`waits`), whose name is an entry's and
+/// nothing that looks like a secret. A command's variables name entries that exist.
+fn nameable(entries: &[flottille_core::vault::Entry], entry: &str, to_make: bool) -> bool {
+    entries.iter().any(|known| known.name == entry)
+        || (to_make
+            && flottille_core::project::valid_name(entry)
+            && !random_like(entry)
+            && flottille_core::secrets::mask(entry, &std::env::vars_os().collect()) == entry)
+}
+
+/// The most characters a word of a name to make has between `-`, `_` and `.`: a longer one is
+/// taken for a secret written where a name goes (a 40-character hexadecimal token), which the
+/// user would otherwise be asked to save under it, in clear in the file and the vault's list.
+const NAME_WORD: usize = 19;
+
+/// The most hexadecimal digits a name to make holds, its separators taken out, when they are most
+/// of it: more is a token split where a name goes (`0123456789-abcdef0123-…`, a UUID).
+const NAME_HEX: usize = 15;
+
+/// The shortest word of a name to make that is random when letters and numbers alternate in it
+/// `NAME_NUMBERS` times or more (`Zq7Wx3Vp9`): a token's piece, where a word of a name holds one
+/// number, at its end (`v2`, `token-2`).
+const NAME_MIXED: usize = 8;
+const NAME_NUMBERS: usize = 3;
+
+fn random_like(name: &str) -> bool {
+    let joined: Vec<char> = name
+        .chars()
+        .filter(|c| !matches!(c, '-' | '_' | '.'))
+        .collect();
+    let hex = joined.iter().filter(|c| c.is_ascii_hexdigit()).count();
+    let mixed = |word: &str| {
+        let numbers = word
+            .split(|c: char| !c.is_ascii_digit())
+            .filter(|number| !number.is_empty())
+            .count();
+        word.chars().count() >= NAME_MIXED
+            && word.chars().any(|c| c.is_alphabetic())
+            && numbers >= NAME_NUMBERS
+    };
+    name.split(['-', '_', '.'])
+        .any(|word| word.chars().count() > NAME_WORD || mixed(word))
+        || (hex > NAME_HEX && hex * 5 >= joined.len() * 4)
+}
+
+/// The vault entries a declaration names that the vault does not hold yet.
+fn missing(daemon: &Daemon, declaration: &Declaration) -> Vec<String> {
+    let entries = daemon
+        .read(|store| store.vault_entries())
+        .unwrap_or_default();
+    let mut missing: Vec<String> = declaration
+        .entries()
+        .filter(|entry| !entries.iter().any(|known| &&known.name == entry))
+        .cloned()
+        .collect();
+    missing.sort();
+    missing.dedup();
+    missing
+}
+
+/// Why the user's Accept of an agent's request waits: a vault entry it names does not exist yet.
+/// The request stays held; once the entry is saved, the checks of an entry apply to it.
+pub fn waits(daemon: &Daemon, args: &Value) -> Option<String> {
+    if !matches!(args["action"].as_str(), Some("add" | "edit")) {
+        return None;
+    }
+    let after = proposal(daemon, args).ok()?.after?;
+    let missing = missing(daemon, &after);
+    (!missing.is_empty()).then(|| {
+        format!(
+            "Accept waits for the vault entr{} {}: save {} in the vault (New entry…), then \
+             accept",
+            if missing.len() == 1 { "y" } else { "ies" },
+            missing.join(", "),
+            if missing.len() == 1 { "it" } else { "them" },
+        )
+    })
 }
 
 /// The host an address names, as a connection's URL or a vault entry's `url` gives it: over
@@ -266,15 +389,21 @@ fn headers_checked(
     let Reach::Url(url) = &after.reach else {
         return Ok(());
     };
-    let host = host_of(url).ok_or_else(|| format!("{url:?}: names no host"))?;
+    // Not the URL itself: its query may hold a secret.
+    let host = host_of(url).ok_or_else(|| "url: names no host".to_owned())?;
     let entries = daemon
         .read(|store| store.vault_entries())
         .map_err(|error| error.to_string())?;
     let kept = before.filter(|before| host_of_reach(before).as_deref() == Some(host.as_str()));
     let theirs = "an agent binds an entry only to a connection on the entry's own host (its url); \
                   the user can bind it in their own form, in Settings, Connections";
-    for (header, entry) in &after.headers {
-        if kept.is_some_and(|before| before.headers.get(header) == Some(entry)) {
+    for secret in &after.secrets {
+        if kept.is_some_and(|before| before.secrets.contains(secret)) {
+            continue;
+        }
+        let (said, entry) = (secret.said(), &secret.entry);
+        // An entry still to make is checked once it exists, before the user's Accept.
+        if !entries.iter().any(|known| &known.name == entry) {
             continue;
         }
         let entry_host = entries
@@ -286,13 +415,13 @@ fn headers_checked(
             Some(entry_host) if entry_host == host => {}
             Some(entry_host) => {
                 return Err(format!(
-                    "headers.{header}: the vault entry {entry} is for {entry_host}, and this \
+                    "secrets: {said}: the vault entry {entry} is for {entry_host}, and this \
                      connection would send it to {host}: {theirs}"
                 ));
             }
             None => {
                 return Err(format!(
-                    "headers.{header}: the vault entry {entry} has no address (its url, \
+                    "secrets: {said}: the vault entry {entry} has no address (its url, \
                      https://), so nothing says it is for {host}, where this connection would \
                      send it: {theirs}"
                 ));
@@ -311,17 +440,28 @@ fn secrets(daemon: &Daemon, declaration: &Declaration) -> Value {
         .unwrap_or_default();
     let host = host_of_reach(declaration);
     let mut secrets = Vec::new();
-    for (key, named) in [("env", &declaration.env), ("headers", &declaration.headers)] {
-        for (name, entry) in named {
-            let entry_host = entries
-                .iter()
-                .find(|known| &known.name == entry)
-                .and_then(|known| known.url.as_deref())
-                .and_then(host_of);
-            let differs = host.is_none() || entry_host != host;
-            secrets.push(json!({"key": key, "name": name, "entry": entry,
-                "entry_host": entry_host, "host": host, "differs": differs}));
-        }
+    let lines = declaration
+        .env
+        .iter()
+        .map(|(name, entry)| ("env", name.clone(), entry))
+        .chain(declaration.secrets.iter().map(|secret| {
+            // A header's key is the one `headers` always had.
+            let key = match secret.place {
+                super::Carried::Header => "headers",
+                place => place.word(),
+            };
+            (key, secret.name.clone(), &secret.entry)
+        }));
+    for (key, name, entry) in lines {
+        let entry_host = entries
+            .iter()
+            .find(|known| &known.name == entry)
+            .and_then(|known| known.url.as_deref())
+            .and_then(host_of);
+        let differs = host.is_none() || entry_host != host;
+        let missing = !entries.iter().any(|known| &known.name == entry);
+        secrets.push(json!({"key": key, "name": name, "entry": entry,
+            "entry_host": entry_host, "host": host, "differs": differs, "missing": missing}));
     }
     Value::Array(secrets)
 }
@@ -357,6 +497,9 @@ fn proposal(daemon: &Daemon, args: &Value) -> Result<Proposal, String> {
             }
             let params = params_of(daemon, args, false)?;
             let declaration = Declaration::of(&params, "connection")?;
+            if let Some(why) = declaration.url_fault() {
+                return Err(why);
+            }
             entries_checked(daemon, &declaration).map_err(|f| f.message)?;
             headers_checked(daemon, None, &declaration)?;
             (None, Some(declaration))
@@ -562,7 +705,7 @@ fn listed(daemon: &Daemon, declaration: &Declaration, on: bool) -> String {
         declaration.name,
         declaration.about
     );
-    if let Some(failing) = client::failing(daemon, &declaration.name) {
+    if let Some(failing) = super::failing(daemon, declaration) {
         line.push_str(&format!(" Failing: {failing}"));
     }
     line
@@ -649,6 +792,21 @@ async fn write(
     };
     let still = || {
         let now = self::proposal(daemon, &args).map_err(Failure::refused)?;
+        // An entry deleted since the Accept: its host is checked once it is made again, by
+        // another Accept, never skipped by this write.
+        if let Some(after) = &now.after
+            && matches!(now.action.as_str(), "add" | "edit")
+        {
+            let missing = missing(daemon, after);
+            if !missing.is_empty() {
+                return Err(Failure::refused(format!(
+                    "the vault entr{} {} it names {} no longer there: nothing is written",
+                    if missing.len() == 1 { "y" } else { "ies" },
+                    missing.join(", "),
+                    if missing.len() == 1 { "is" } else { "are" },
+                )));
+            }
+        }
         let said: Vec<String> = words(daemon, &now)
             .iter()
             .map(|said| mcp::masked(said, place))
@@ -856,7 +1014,7 @@ pub(super) fn proposed(daemon: &Daemon, params: &Value) -> Result<Value, Failure
             return Ok(
                 json!({"number": number, "action": args["action"], "name": args["name"],
                 "before": declaration(&daemon.paths, args["name"].as_str().unwrap_or_default())
-                    .ok().map(|d| d.json()),
+                    .ok().map(|d| d.served_marked()),
                 "after": null, "changed": [], "settings": {}, "secrets": [], "current": false,
                 "why": why}),
             );
@@ -883,14 +1041,15 @@ pub(super) fn proposed(daemon: &Daemon, params: &Value) -> Result<Value, Failure
         "number": number,
         "action": proposal.action,
         "name": proposal.name,
-        "before": proposal.before.as_ref().map(Declaration::json),
-        "after": proposal.after.as_ref().map(Declaration::json),
+        "before": proposal.before.as_ref().map(Declaration::served_marked),
+        "after": proposal.after.as_ref().map(Declaration::served_marked),
         "changed": changed,
         "settings": proposal.settings,
         "secrets": proposal.after.as_ref().or(proposal.before.as_ref())
             .map_or(json!([]), |shown| secrets(daemon, shown)),
         "current": current,
         "why": null,
+        "waits": waits(daemon, args),
     }))
 }
 
@@ -965,6 +1124,138 @@ mod tests {
             "refused"
         );
         assert_eq!(file(), before);
+    }
+
+    #[tokio::test]
+    async fn an_entry_deleted_after_accept_is_refused_at_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = a_daemon(dir.path());
+        let place = crate::place::Place {
+            project: "app".into(),
+            workspace: None,
+            root: dir.path().into(),
+            repositories: Vec::new(),
+            branch: String::new(),
+            variables: Default::default(),
+            home: None,
+        };
+        let entry = flottille_core::vault::Entry {
+            name: "notes-token".into(),
+            description: None,
+            url: Some("https://notes.example.com".into()),
+            username: None,
+            project: None,
+            updated_at: 0,
+            bound: None,
+        };
+        daemon.write(|store| store.put_vault_entry(&entry)).unwrap();
+        let file = || std::fs::read_to_string(dir.path().join("config/extensions.toml")).unwrap();
+        let before = file();
+        let args = json!({"action": "add", "name": "notes", "about": "Notes.",
+            "url": "https://notes.example.com/mcp",
+            "secrets": [{"in": "header", "name": "Authorization", "prefix": "Bearer ",
+                "entry": "notes-token"}]});
+        // What the user read and accepted, the entry there.
+        let read: Vec<String> = words(&daemon, &proposal(&daemon, &args).unwrap())
+            .iter()
+            .map(|said| mcp::masked(said, &place))
+            .collect();
+        // Deleted before the write: made again on another host, it would skip the host check.
+        daemon
+            .write(|store| store.remove_vault_entry("notes-token"))
+            .unwrap();
+
+        let outcome = tool(&daemon, args, &read, &place).await;
+        assert!(
+            matches!(&outcome, Outcome::Refused(why) | Outcome::Failed(why)
+                if why.contains("notes-token")),
+            "refused"
+        );
+        assert_eq!(file(), before);
+    }
+
+    /// The user's removal of an entry and the write of an accepted request, which checks the
+    /// entries it names are there (`still`), are not interleaved: the removal waits for the file.
+    #[test]
+    fn a_vault_entry_is_removed_under_the_extensions_file_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("config")).unwrap();
+        std::fs::write(
+            dir.path().join("config/keyring.toml"),
+            "backend = \"memory\"\n",
+        )
+        .unwrap();
+        let daemon = a_daemon(dir.path());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime
+            .block_on(crate::vault::call(
+                daemon.clone(),
+                "vault.set",
+                json!({"name": "notes-token", "secret": "a-secret-of-the-test",
+                    "url": "https://notes.example.com"}),
+            ))
+            .map_err(|failure| failure.message)
+            .unwrap();
+        // Whether the keyring still holds its secret: the removal takes it first, then waits
+        // for the file's lock to take the row.
+        let kept = |daemon: &Daemon| {
+            runtime
+                .block_on(crate::vault::every_project_s(
+                    daemon,
+                    "notes",
+                    "notes-token",
+                ))
+                .map_err(|why| assert!(why.contains("no longer holds"), "{why}"))
+                .is_ok()
+        };
+        assert!(kept(&daemon));
+        let there = |daemon: &Daemon| {
+            daemon
+                .read(|store| store.vault_entries())
+                .unwrap()
+                .iter()
+                .any(|entry| entry.name == "notes-token")
+        };
+        let (taken, held) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let writer = std::thread::spawn(move || {
+            let _writing = crate::extensions::WRITING.lock().unwrap();
+            taken.send(()).unwrap();
+            released.recv().unwrap();
+        });
+        held.recv().unwrap();
+        let remover = daemon.clone();
+        let removing = std::thread::spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(crate::vault::call(
+                    remover,
+                    "vault.remove",
+                    json!({"name": "notes-token"}),
+                ))
+                .map_err(|failure| failure.message)
+        });
+        // The removal has reached the lock once the secret is gone: the row is still there then.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while kept(&daemon) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the removal never took the secret"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let during = there(&daemon);
+        release.send(()).unwrap();
+        writer.join().unwrap();
+        removing.join().unwrap().unwrap();
+        assert!(during, "removed while the file was being written");
+        assert!(!there(&daemon));
     }
 
     #[test]
