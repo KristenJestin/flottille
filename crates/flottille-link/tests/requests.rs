@@ -41,7 +41,7 @@ fn key(n: u8) -> DeviceKey {
 /// The root `pc`, a runner; a controller `pixel`; a viewer `tablet`.
 fn three() -> (DeviceKey, DeviceKey, DeviceKey, MemberList) {
     let (pc, pixel, tablet) = (key(1), key(2), key(3));
-    let mut list = MemberList::start("pc", &pc);
+    let mut list = MemberList::start("pc", &pc).unwrap();
     for (device, name, role) in [
         (&pixel, "pixel", Role::Controller),
         (&tablet, "tablet", Role::Viewer),
@@ -382,14 +382,20 @@ fn every_method_of_the_catalogue_has_a_class() {
     let mut requests = Requests::new(time(0));
     for (method, class) in METHODS {
         let text = signed(&pixel, method, Value::Null, 0);
-        assert!(
-            requests.check(&text, "pc", &members, time(0)).is_ok(),
-            "a controller may call {method}"
-        );
+        let controlled = requests.check(&text, "pc", &members, time(0));
         let text = signed(&tablet, method, Value::Null, 0);
         let viewed = requests.check(&text, "pc", &members, time(0));
+        if *class == Class::Local {
+            let local =
+                format!("refused: {method} is answered only on its own machine, never over a link");
+            assert_eq!(controlled.unwrap_err().to_string(), local);
+            assert_eq!(viewed.unwrap_err().to_string(), local);
+            continue;
+        }
+        assert!(controlled.is_ok(), "a controller may call {method}");
         match class {
             Class::Read => assert!(viewed.is_ok(), "a viewer may call {method}"),
+            Class::Local => unreachable!("checked above"),
             Class::Drive => assert_eq!(
                 viewed.unwrap_err().to_string(),
                 format!(
@@ -502,5 +508,26 @@ fn a_refusal_shows_no_control_character_nor_a_long_text() {
     assert!(
         sentence.starts_with("refused: this is not a signed request"),
         "{sentence}"
+    );
+}
+
+#[test]
+fn remote_setup_is_answered_only_on_its_own_machine() {
+    let (_, pixel, _, list) = three();
+    let members = members(&list);
+    let mut requests = Requests::new(time(0));
+    let text = signed(
+        &pixel,
+        "remote.setup",
+        json!({"url": "http://hub.example.net"}),
+        0,
+    );
+    let refused = requests
+        .check(&text, "pc", &members, time(0))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        refused.contains("remote.setup is answered only on its own machine"),
+        "{refused}"
     );
 }
