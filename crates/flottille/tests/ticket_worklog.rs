@@ -684,6 +684,32 @@ fn ledger(items: Vec<(&'static str, &'static str, Vec<Value>)>, cut: bool, page:
     })
 }
 
+<<<<<<< HEAD
+=======
+/// A query string as the daemon sent it, decoded: `+` and `%XX` as the text they stand for.
+fn unquote(query: &str) -> String {
+    let bytes = query.replace('+', " ").into_bytes();
+    let mut out = Vec::new();
+    let mut at = 0;
+    while at < bytes.len() {
+        let hex = bytes
+            .get(at + 1..at + 3)
+            .and_then(|h| std::str::from_utf8(h).ok());
+        match (bytes[at], hex.and_then(|h| u8::from_str_radix(h, 16).ok())) {
+            (b'%', Some(byte)) => {
+                out.push(byte);
+                at += 3;
+            }
+            (byte, _) => {
+                out.push(byte);
+                at += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+>>>>>>> b3bcb3db (fixup! test(tools): the worklogs of a day, with their durations)
 /// A user whose Jira is `jira`, in the time zone of the tests.
 fn zoned(jira: &Jira) -> User {
     user(jira).with_env("TZ", ZONE)
@@ -818,11 +844,23 @@ fn a_worklog_started_the_day_before_in_the_user_s_zone_is_left_out() {
             "Fix the login redirect",
             vec![
                 // 22:30 UTC on the 5th: the 5th in Paris.
-                mine("2026-11-05T23:30:00.000+0100", 3_600, Some("Late the day before")),
+                mine(
+                    "2026-11-05T23:30:00.000+0100",
+                    3_600,
+                    Some("Late the day before"),
+                ),
                 // 23:30 UTC on the 5th, which is the 6th in Paris: kept, though not in UTC.
-                mine("2026-11-06T00:30:00.000+0100", 1_800, Some("Just after midnight")),
+                mine(
+                    "2026-11-06T00:30:00.000+0100",
+                    1_800,
+                    Some("Just after midnight"),
+                ),
                 // 04:30 UTC on the 7th, 05:30 on the 7th in Paris.
-                mine("2026-11-06T23:30:00.000-0500", 900, Some("Late in New York")),
+                mine(
+                    "2026-11-06T23:30:00.000-0500",
+                    900,
+                    Some("Late in New York"),
+                ),
             ],
         )],
         false,
@@ -878,6 +916,7 @@ fn worklogs_over_a_range_are_totalled_per_day() {
         ["  Day total: 2h", "  Day total: 1h30", "Range total: 3h30"],
         "{text}"
     );
+<<<<<<< HEAD
     let decoded = asked(&jira, "/rest/api/3/search/jql")[0]
         .path
         .replace("%22", "\"")
@@ -885,6 +924,17 @@ fn worklogs_over_a_range_are_totalled_per_day() {
         .replace('+', " ");
     assert!(decoded.contains("worklogDate >= \"2026-11-05\""), "{decoded}");
     assert!(decoded.contains("worklogDate <= \"2026-11-06\""), "{decoded}");
+=======
+    let decoded = unquote(&asked(&jira, "/rest/api/3/search/jql")[0].path);
+    assert!(
+        decoded.contains("worklogDate >= \"2026-11-05\""),
+        "{decoded}"
+    );
+    assert!(
+        decoded.contains("worklogDate <= \"2026-11-06\""),
+        "{decoded}"
+    );
+>>>>>>> b3bcb3db (fixup! test(tools): the worklogs of a day, with their durations)
 }
 
 #[test]
@@ -895,14 +945,22 @@ fn worklogs_without_the_vault_entry_say_how_to_add_it() {
     entry(&user);
     let (mcp, _) = root_in(&user);
 
-    let said = refused_at_once(&user, &mcp, json!({"action": "worklogs", "from": "2026-11-06"}));
+    let said = refused_at_once(
+        &user,
+        &mcp,
+        json!({"action": "worklogs", "from": "2026-11-06"}),
+    );
     for how in ["worklog_token", "[tracker]", "vault", "Settings"] {
         assert!(said.contains(how), "{how} is not said: {said}");
     }
 
     // An entry named but not in the vault is refused too, saying which.
     jira_with_entry(&user, "nowhere");
-    let said = refused_at_once(&user, &mcp, json!({"action": "worklogs", "from": "2026-11-06"}));
+    let said = refused_at_once(
+        &user,
+        &mcp,
+        json!({"action": "worklogs", "from": "2026-11-06"}),
+    );
     assert!(said.contains("nowhere"), "{said}");
     assert!(jira.received().is_empty(), "{:?}", jira.received());
 }
@@ -938,13 +996,14 @@ fn a_search_on_worklog_date_without_an_author_says_it_matched_anyone() {
 fn worklogs_are_refused_on_github() {
     let jira = ledger(Vec::new(), false, 100);
     let user = zoned(&jira);
-    fixture(
-        &user,
-        json!({"kind": "github", "repository": "acme/app"}),
-    );
+    fixture(&user, json!({"kind": "github", "repository": "."}));
     let (mcp, _) = root_in(&user);
 
-    let said = refused_at_once(&user, &mcp, json!({"action": "worklogs", "from": "2026-11-06"}));
+    let said = refused_at_once(
+        &user,
+        &mcp,
+        json!({"action": "worklogs", "from": "2026-11-06"}),
+    );
     assert!(said.contains("GitHub has no worklogs"), "{said}");
     assert!(jira.received().is_empty());
 }
@@ -993,7 +1052,11 @@ fn a_work_item_with_more_worklogs_than_a_page_is_read_in_full() {
             )
         })
         .collect();
-    all.push(mine("2026-11-06T09:00:00.000+0100", 3_600, Some("On the last page")));
+    all.push(mine(
+        "2026-11-06T09:00:00.000+0100",
+        3_600,
+        Some("On the last page"),
+    ));
     // The site hands out 50 at a time whatever is asked.
     let jira = ledger(vec![("ABC-1", "Fix the login redirect", all)], false, 50);
     let user = zoned(&jira);
