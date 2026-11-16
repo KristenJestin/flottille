@@ -190,43 +190,47 @@ async fn a_machine_answering_with_another_key_is_refused() {
 fn staller(ip: &'static str, server: SocketAddr, key: PublicKey) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let client = Machine::new().await;
-        let ip: IpAddr = ip.parse().unwrap();
-        let relay = tokio::net::UdpSocket::bind(SocketAddr::new(ip, 0))
-            .await
-            .unwrap();
-        let at = relay.local_addr().unwrap();
-        let dialling = async {
-            let _ = client
-                .endpoint
-                .connect(
-                    key,
-                    &[at],
-                    Traffic::Machine,
-                    &Hello::ours("0.4.1"),
-                    "server",
-                )
-                .await;
-            std::future::pending::<()>().await;
-        };
-        let relaying = async {
-            let (mut dialler, mut passed, mut datagram) = (None, 0, vec![0u8; 65536]);
-            loop {
-                let (size, from) = relay.recv_from(&mut datagram).await.unwrap();
-                if from == server {
-                    if let Some(dialler) = dialler {
-                        let _ = relay.send_to(&datagram[..size], dialler).await;
-                    }
-                } else {
-                    dialler = Some(from);
-                    if passed < 2 {
-                        passed += 1;
-                        let _ = relay.send_to(&datagram[..size], server).await;
-                    }
+        stall(client.endpoint.clone(), ip, server, key).await;
+    })
+}
+
+/// A staller as `staller`, dialling from `client`.
+async fn stall(client: Endpoint, ip: &str, server: SocketAddr, key: PublicKey) {
+    let ip: IpAddr = ip.parse().unwrap();
+    let relay = tokio::net::UdpSocket::bind(SocketAddr::new(ip, 0))
+        .await
+        .unwrap();
+    let at = relay.local_addr().unwrap();
+    let dialling = async {
+        let _ = client
+            .connect(
+                key,
+                &[at],
+                Traffic::Machine,
+                &Hello::ours("0.4.1"),
+                "server",
+            )
+            .await;
+        std::future::pending::<()>().await;
+    };
+    let relaying = async {
+        let (mut dialler, mut passed, mut datagram) = (None, 0, vec![0u8; 65536]);
+        loop {
+            let (size, from) = relay.recv_from(&mut datagram).await.unwrap();
+            if from == server {
+                if let Some(dialler) = dialler {
+                    let _ = relay.send_to(&datagram[..size], dialler).await;
+                }
+            } else {
+                dialler = Some(from);
+                if passed < 2 {
+                    passed += 1;
+                    let _ = relay.send_to(&datagram[..size], server).await;
                 }
             }
-        };
-        tokio::join!(dialling, relaying);
-    })
+        }
+    };
+    tokio::join!(dialling, relaying);
 }
 
 /// Dials `server` until it links; how long it took.
@@ -317,23 +321,56 @@ async fn stalling_hosts_past_every_place_do_not_stop_a_known_machine() {
     // The server knows the laptop's address: a place is kept for it.
     server.endpoint.know([laptop.addresses()[0].ip()]);
     // More hosts than the places for all hold, two by host.
-    let key = server.key();
-    let stallers: Vec<_> = (0..140)
-        .flat_map(|host: usize| {
-            let ip: &'static str = format!("127.0.{}.{}", 2 + host / 200, 1 + host % 200).leak();
-            (0..2).map(move |_| staller(ip, at, key))
+    let (key, client) = (server.key(), Machine::new().await);
+    // Ten at a time: of a burst past the 32 connections the transport queues, the rest is refused
+    // before it takes a place.
+    let mut stallers = Vec::new();
+    for host in 0..140 {
+        let ip = format!("127.0.{}.{}", 2 + host / 200, 1 + host % 200);
+        for _ in 0..2 {
+            let (endpoint, ip) = (client.endpoint.clone(), ip.clone());
+            stallers.push(tokio::spawn(
+                async move { stall(endpoint, &ip, at, key).await },
+            ));
+        }
+        if host % 5 == 4 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+    // The server refuses every key but the laptop's, as long as they come.
+    let serving = {
+        let (endpoint, laptop, ours) = (server.endpoint.clone(), laptop.key(), ours.clone());
+        tokio::spawn(async move {
+            loop {
+                let accepting = endpoint.accept().await.expect("the endpoint is open");
+                if accepting.peer() == laptop {
+                    return accepting.handshake(&ours, "laptop").await;
+                }
+                accepting.refuse("refused: this machine's key is not one of the user's");
+            }
         })
-        .collect();
-    tokio::time::sleep(Duration::from_millis(1500)).await;
-    // A stranger finds no place.
+    };
+    // Until a stranger finds no place: refused at once, before any TLS.
     let stranger = Machine::at("127.0.9.1").await;
-    let refused = stranger
-        .endpoint
-        .connect(server.key(), &[at], Traffic::Machine, &ours, "server")
+    let mut full = false;
+    for _ in 0..20 {
+        let dialled = tokio::time::timeout(
+            Duration::from_millis(500),
+            stranger
+                .endpoint
+                .connect(server.key(), &[at], Traffic::Machine, &ours, "server"),
+        )
         .await;
-    assert!(refused.is_err(), "a stranger found a place");
+        if let Ok(Err(error)) = &dialled
+            && error.to_string().contains("refused to accept")
+        {
+            full = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(full, "the stallers never held every place");
 
-    let serving = serve(&server, laptop.key(), ours.clone());
     let (link, took) = link_timed(&laptop, &server, &ours).await;
     serving.await.unwrap().unwrap();
     assert!(
