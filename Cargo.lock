@@ -2388,6 +2388,7 @@ dependencies = [
  "ed25519-dalek",
  "flottille-protocol",
  "getrandom 0.3.4",
+ "hmac",
  "libc",
  "quinn",
  "rustls",
