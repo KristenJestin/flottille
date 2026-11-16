@@ -759,6 +759,10 @@ pub(crate) fn beside(daemon: &Daemon) -> Result<BTreeMap<OsString, OsString>, St
     flottille_core::paths::ensure_private_dir(&empty).map_err(|e| e.to_string())?;
     defend(&mut env, &empty, false);
     env.remove(&OsString::from("XDG_RUNTIME_DIR"));
+    // No screen either: a connection's browser that is shown gets its own (`adapters::display`).
+    for name in ["WAYLAND_DISPLAY", "DISPLAY", "XAUTHORITY"] {
+        env.remove(&OsString::from(name));
+    }
     Ok(env)
 }
 

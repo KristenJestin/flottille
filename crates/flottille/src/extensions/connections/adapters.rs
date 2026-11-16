@@ -633,7 +633,12 @@ pub fn display(
     shown: Option<&BTreeMap<OsString, OsString>>,
     folder: &Path,
 ) {
-    for name in ["WAYLAND_DISPLAY", "DISPLAY", "DBUS_SESSION_BUS_ADDRESS"] {
+    for name in [
+        "WAYLAND_DISPLAY",
+        "DISPLAY",
+        "XAUTHORITY",
+        "DBUS_SESSION_BUS_ADDRESS",
+    ] {
         env.remove(&OsString::from(name));
     }
     if let Some(shown) = shown {
