@@ -473,8 +473,8 @@ pub enum Command {
     WorkspacesFolderRead {
         project: Option<String>,
     },
-    /// What agents used over the last `days`, of every project or of one (`usage.stats`, by day,
-    /// by model and by tuning).
+    /// What agents used over the last `days`, of every project or of one (one `usage.stats`, by
+    /// day, by model and by tuning).
     UsageRead {
         project: Option<String>,
         days: u64,
@@ -2022,27 +2022,15 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
             }
         }
         Command::UsageRead { project, days } => {
-            let until = jiff::Zoned::now().date();
-            let since = until
-                .checked_sub(jiff::Span::new().days(days.saturating_sub(1) as i64))
-                .unwrap_or(until);
-            let ask = |by: &str| {
-                ask_alone(
-                    connect,
-                    "usage.stats",
-                    json!({"project": project, "since": since.to_string(),
-                        "until": until.to_string(), "by": by}),
-                    bounds.quick,
-                )
-                .and_then(|answer| answer)
-            };
-            let read = ask("day").and_then(|by_day| {
-                Ok(crate::usage::Usage::of(
-                    &by_day,
-                    &ask("model")?,
-                    &ask("tuning")?,
-                ))
-            });
+            // The daemon says which day is today: the window asks for days, not dates.
+            let read = ask_alone(
+                connect,
+                "usage.stats",
+                json!({"project": project, "days": days, "by": ["day", "model", "tuning"]}),
+                bounds.quick,
+            )
+            .and_then(|answer| answer)
+            .map(|stats| crate::usage::Usage::of(&stats));
             Outcome::Usage {
                 project,
                 days,

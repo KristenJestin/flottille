@@ -32,12 +32,13 @@ const FIRST_PERIOD: usize = 1;
 const CHART: f32 = 96.;
 
 /// What the first section says under its title.
-pub const COST_SENTENCE: &str = "What the finished tasks cost for each one merged. A task is a \
-     workspace; one removed without a merged pull request counts against the merged ones.";
+pub const COST_SENTENCE: &str = "What the tasks finished in these days cost, each with all of \
+     its turns, for each one merged. A task is a workspace; one removed without a merged pull \
+     request counts against the merged ones.";
 
 /// What the days' section says under its title: the unit.
-pub const WEIGHTED_SENTENCE: &str = "Input + 1.25 × cache write + 0.1 × cache read + 5 × \
-     output, so that providers and subscriptions compare.";
+pub const WEIGHTED_SENTENCE: &str = "Input tokens, plus cache writes weighing 1.25, cache reads \
+     0.1 and output 5, so that providers and subscriptions compare.";
 
 /// Said once when a project has no forge to say which tasks were merged.
 pub const NO_FORGE: &str = "Tasks of projects without a forge show their cost but are left out: \
@@ -48,7 +49,7 @@ pub const NO_FORGE: &str = "Tasks of projects without a forge show their cost bu
 pub struct Spent {
     pub key: String,
     pub weighted: f64,
-    /// The part of it that was cache reads, 0 to 1.
+    /// The share of its input tokens read from the cache, 0 to 1.
     pub share: f64,
     pub per_merged: Option<f64>,
 }
@@ -69,10 +70,10 @@ pub struct Usage {
 }
 
 impl Usage {
-    /// The three answers of `usage.stats`, by day, by model and by tuning.
-    pub fn of(by_day: &Value, by_model: &Value, by_tuning: &Value) -> Usage {
-        let spent = |stats: &Value| -> Vec<Spent> {
-            stats["groups"]
+    /// The answer of `usage.stats` by day, by model and by tuning.
+    pub fn of(stats: &Value) -> Usage {
+        let spent = |by: &str| -> Vec<Spent> {
+            stats["groups"][by]
                 .as_array()
                 .into_iter()
                 .flatten()
@@ -84,12 +85,12 @@ impl Usage {
                 })
                 .collect()
         };
-        let total = &by_day["total"];
+        let total = &stats["total"];
         let count = |outcome: &str| total["tasks"][outcome]["count"].as_u64().unwrap_or(0);
         Usage {
-            days: spent(by_day),
-            models: spent(by_model),
-            tunings: spent(by_tuning),
+            days: spent("day"),
+            models: spent("model"),
+            tunings: spent("tuning"),
             weighted: total["weighted"].as_f64().unwrap_or(0.0),
             share: total["cache_read_share"].as_f64().unwrap_or(0.0),
             merged: count("merged"),
@@ -119,6 +120,7 @@ fn tuning_label(key: &str) -> String {
     match key {
         "" => "Nothing on".to_owned(),
         "unchanged" => "Unchanged files in one line".to_owned(),
+        "mixed" => "Mixed, in one task".to_owned(),
         other => other.to_owned(),
     }
 }
@@ -278,7 +280,15 @@ impl UsageSection {
                         .test_support(),
                 )
         };
-        let key = format!("{}-{:?}-{figure}", self.days(), self.project);
+        // The counts change with the figure or alone: either fades the block in again.
+        let key = format!(
+            "{}-{:?}-{figure}-{}-{}-{}",
+            self.days(),
+            self.project,
+            usage.merged,
+            usage.failed,
+            usage.in_progress
+        );
         let content = changing("usage-cost-change", key, move |_| {
             div()
                 .flex()
@@ -387,7 +397,7 @@ impl UsageSection {
                         .test_support(),
                 ));
             let said = format!(
-                "{}: {}, {} cache reads",
+                "{}: {}, {} of the input from the cache",
                 day.key,
                 tokens(day.weighted),
                 percent(day.share)
@@ -395,7 +405,7 @@ impl UsageSection {
             bars = bars.child(tipped(bar, said, CHART, window, cx));
         }
         let total = format!(
-            "{} in all, {} of it cache reads",
+            "{} in all, {} of the input read from the cache",
             tokens(usage.weighted),
             percent(usage.share)
         );
@@ -435,7 +445,7 @@ impl UsageSection {
         let mut card = ListCard::new(id);
         for row in rows.rows() {
             let spent = row.value;
-            let mut line = format!("{} cache reads", percent(spent.share));
+            let mut line = format!("{} of the input from the cache", percent(spent.share));
             if let Some(cost) = spent.per_merged {
                 line.push_str(&format!(", {} per merged task", tokens(cost)));
             }
@@ -510,7 +520,10 @@ impl Render for UsageSection {
                 .into_any_element(),
             Section::new("usage-tunings", "By optimisation on")
                 .count(self.tunings.len().to_string())
-                .sentence("What was on during each turn: the same days, with and without each one.")
+                .sentence(
+                    "The tokens of the turns run with each, and what the tasks that ran with it \
+                     throughout cost; every provider together.",
+                )
                 .child(Self::list(
                     "usage-tunings-list",
                     &self.tunings,
@@ -546,23 +559,23 @@ mod tests {
     }
 
     #[test]
-    fn the_answers_give_the_days_the_models_and_the_tasks() {
-        let group = |key: &str, weighted: f64| {
-            json!({"key": key, "weighted": weighted, "cache_read_share": 0.5,
-                "tasks": {"cost_per_merged_task": null}})
-        };
-        let day = json!({"total": {"weighted": 30.0, "cache_read_share": 0.25,
+    fn the_answer_gives_the_days_the_models_and_the_tasks() {
+        let group = |key: &str, weighted: f64| json!({"key": key, "weighted": weighted, "cache_read_share": 0.5});
+        let stats = json!({"total": {"weighted": 30.0, "cache_read_share": 0.25,
             "tasks": {"merged": {"count": 2}, "failed": {"count": 1},
                 "in_progress": {"count": 3}, "no_forge": {"count": 0},
                 "cost_per_merged_task": 15.0}},
-            "groups": [group("2026-11-14", 10.0), group("2026-11-15", 20.0)]});
-        let model = json!({"groups": [group("model-a", 30.0)]});
-        let tuning = json!({"groups": [group("", 30.0)]});
+            "groups": {"day": [group("2026-11-14", 10.0), group("2026-11-15", 20.0)],
+                "model": [group("model-a", 30.0)],
+                "tuning": [{"key": "", "weighted": 30.0, "cache_read_share": 0.5,
+                    "tasks": {"cost_per_merged_task": 15.0}}]}});
 
-        let usage = Usage::of(&day, &model, &tuning);
+        let usage = Usage::of(&stats);
 
         assert_eq!(usage.days.len(), 2);
         assert_eq!(usage.models[0].key, "model-a");
+        assert_eq!(usage.models[0].per_merged, None);
+        assert_eq!(usage.tunings[0].per_merged, Some(15.0));
         assert_eq!((usage.merged, usage.failed, usage.in_progress), (2, 1, 3));
         assert_eq!(usage.per_merged, Some(15.0));
     }

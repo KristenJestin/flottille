@@ -1262,10 +1262,12 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   tokens (or "No task merged yet") and its counts, labelled: Merged, Failed, In progress (left
   out); a project without a forge adds one line saying its tasks are left out. **Weighted tokens
   by day** (the formula as its sentence): one bar per day of the period, eased to its height, its
-  tooltip the day, its tokens and its share of cache reads, then the total and its share of cache
-  reads; the chart fades back in when the period or the project changes. **By model** and **By
-  optimisation on** (the `tuning` of the turns, "Nothing on" for none), each a list of rows: the
-  name, the weighted tokens, the share of cache reads and the cost per merged task of its turns. A
+  tooltip the day, its tokens and the share of its input read from the cache, then the total and
+  its share; the chart fades back in when the period or the project changes. **By model** and **By
+  optimisation on** (the `tuning` of the turns, "Nothing on" for none, "Mixed, in one task" for the
+  tasks that ran with several), each a list of rows: the name, the weighted tokens and the share of
+  the input read from the cache; the optimisations add the cost per merged task of the tasks that
+  ran with each. One `usage.stats` reads the three, the period given in days. A
   skeleton stands for each part until the first answer;
 - a session page: the root's conversation, live (messages, the user's own as selectable as the agent's, thoughts collapsed (their head says how long the thinking lasted, from the event before it
   to the one after it, and no time when it lasted less than a tenth of a second), tool calls with
