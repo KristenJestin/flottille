@@ -5,6 +5,8 @@
 
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use flottille_link::{
@@ -213,24 +215,71 @@ async fn stall(client: Endpoint, ip: &str, server: SocketAddr, key: PublicKey) {
             .await;
         std::future::pending::<()>().await;
     };
-    let relaying = async {
-        let (mut dialler, mut passed, mut datagram) = (None, 0, vec![0u8; 65536]);
-        loop {
-            let (size, from) = relay.recv_from(&mut datagram).await.unwrap();
-            if from == server {
-                if let Some(dialler) = dialler {
-                    let _ = relay.send_to(&datagram[..size], dialler).await;
-                }
-            } else {
-                dialler = Some(from);
-                if passed < 2 {
-                    passed += 1;
-                    let _ = relay.send_to(&datagram[..size], server).await;
-                }
+    tokio::join!(dialling, relaying(&relay, server));
+}
+
+/// What a staller's relay does: passes the server's datagrams to the client, and the client's
+/// first two only.
+async fn relaying(relay: &tokio::net::UdpSocket, server: SocketAddr) {
+    let (mut dialler, mut passed, mut datagram) = (None, 0, vec![0u8; 65536]);
+    loop {
+        let (size, from) = relay.recv_from(&mut datagram).await.unwrap();
+        if from == server {
+            if let Some(dialler) = dialler {
+                let _ = relay.send_to(&datagram[..size], dialler).await;
+            }
+        } else {
+            dialler = Some(from);
+            if passed < 2 {
+                passed += 1;
+                let _ = relay.send_to(&datagram[..size], server).await;
             }
         }
-    };
-    tokio::join!(dialling, relaying);
+    }
+}
+
+/// How long a held staller's round lasts: less than the server's handshake time, so that the next
+/// round asks for the place as it is freed.
+const ROUND: Duration = Duration::from_millis(4500);
+
+/// A staller as `stall` that holds its place for as long as it lives, however slow the machine
+/// it runs on: when the server lets its handshake go, or refused it for want of a place, it dials
+/// again. `placed` counts the stallers that are holding a place just now.
+async fn hold(
+    client: Endpoint,
+    ip: &str,
+    server: SocketAddr,
+    key: PublicKey,
+    placed: Arc<AtomicUsize>,
+) {
+    let ip: IpAddr = ip.parse().unwrap();
+    loop {
+        let relay = tokio::net::UdpSocket::bind(SocketAddr::new(ip, 0))
+            .await
+            .unwrap();
+        let at = relay.local_addr().unwrap();
+        let round = async {
+            let (at, ours) = ([at], Hello::ours("0.4.1"));
+            let answered = client.connect(key, &at, Traffic::Machine, &ours, "server");
+            tokio::pin!(answered);
+            // Refused, or failing at once: no place was taken.
+            tokio::select! {
+                _ = &mut answered => return false,
+                _ = tokio::time::sleep(Duration::from_secs(1)) => {}
+            }
+            placed.fetch_add(1, Ordering::SeqCst);
+            let _ = tokio::time::timeout(ROUND - Duration::from_secs(1), &mut answered).await;
+            placed.fetch_sub(1, Ordering::SeqCst);
+            true
+        };
+        let held = tokio::select! {
+            _ = relaying(&relay, server) => unreachable!("the relay never ends"),
+            held = round => held,
+        };
+        if !held {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
 }
 
 /// Dials `server` until it links; how long it took.
@@ -320,19 +369,25 @@ async fn stalling_hosts_past_every_place_do_not_stop_a_known_machine() {
     let at = server.addresses()[0];
     // The server knows the laptop's address: a place is kept for it.
     server.endpoint.know([laptop.addresses()[0].ip()]);
-    // More hosts than the places for all hold, two by host.
-    let (key, client) = (server.key(), Machine::new().await);
-    // Ten at a time: of a burst past the 32 connections the transport queues, the rest is refused
-    // before it takes a place.
+    // More hosts than the places for all hold, two by host. They hold their places on their own
+    // and ask again for those they were refused, so the setup may take as long as a loaded
+    // machine needs.
+    let (key, client, placed) = (
+        server.key(),
+        Machine::new().await,
+        Arc::new(AtomicUsize::new(0)),
+    );
     let mut stallers = Vec::new();
     for host in 0..140 {
         let ip = format!("127.0.{}.{}", 2 + host / 200, 1 + host % 200);
         for _ in 0..2 {
-            let (endpoint, ip) = (client.endpoint.clone(), ip.clone());
-            stallers.push(tokio::spawn(
-                async move { stall(endpoint, &ip, at, key).await },
-            ));
+            let (endpoint, ip, placed) = (client.endpoint.clone(), ip.clone(), placed.clone());
+            stallers.push(tokio::spawn(async move {
+                hold(endpoint, &ip, at, key, placed).await
+            }));
         }
+        // Ten at a time: of a burst past the 32 connections the transport queues, the rest is
+        // refused before it takes a place.
         if host % 5 == 4 {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
@@ -350,10 +405,11 @@ async fn stalling_hosts_past_every_place_do_not_stop_a_known_machine() {
             }
         })
     };
-    // Until a stranger finds no place: refused at once, before any TLS.
+    // Until a stranger finds no place: refused at once, before any TLS. It waits for the state,
+    // not for a time: as long as it takes a loaded machine, 30 s at most.
     let stranger = Machine::at("127.0.9.1").await;
-    let mut full = false;
-    for _ in 0..20 {
+    let (started, mut last) = (Instant::now(), String::new());
+    let full = loop {
         let dialled = tokio::time::timeout(
             Duration::from_millis(500),
             stranger
@@ -361,15 +417,23 @@ async fn stalling_hosts_past_every_place_do_not_stop_a_known_machine() {
                 .connect(server.key(), &[at], Traffic::Machine, &ours, "server"),
         )
         .await;
-        if let Ok(Err(error)) = &dialled
-            && error.to_string().contains("refused to accept")
-        {
-            full = true;
-            break;
+        last = match &dialled {
+            Ok(Err(error)) if error.to_string().contains("refused to accept") => break true,
+            Ok(Err(error)) => error.to_string(),
+            Ok(Ok(_)) => "linked".to_string(),
+            Err(_) => "no answer in 500 ms".to_string(),
+        };
+        if started.elapsed() > Duration::from_secs(30) {
+            break false;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    assert!(full, "the stallers never held every place");
+    };
+    assert!(
+        full,
+        "the stallers never held every place: {} of 280 hold one after {:?}, the stranger's last dial: {last}",
+        placed.load(Ordering::SeqCst),
+        started.elapsed()
+    );
 
     let (link, took) = link_timed(&laptop, &server, &ours).await;
     serving.await.unwrap().unwrap();
