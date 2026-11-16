@@ -1280,13 +1280,30 @@ fn alive(pid: u32) -> bool {
     }
 }
 
-/// Kills what a failing test would leave running.
-struct Left(Vec<u32>);
+/// When the process started, in clock ticks since boot (field 22 of `/proc/<pid>/stat`): what a
+/// pid taken by another program later does not share.
+fn started_at(pid: u32) -> Option<u64> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    stat.rsplit_once(')')?
+        .1
+        .split_whitespace()
+        .nth(19)?
+        .parse()
+        .ok()
+}
+
+/// Kills what a failing test would leave running: a process that is still the one it was, never
+/// one that took its pid after it ended.
+struct Left(Vec<(u32, Option<u64>)>);
+
+fn left(pids: &[u32]) -> Left {
+    Left(pids.iter().map(|pid| (*pid, started_at(*pid))).collect())
+}
 
 impl Drop for Left {
     fn drop(&mut self) {
-        for pid in &self.0 {
-            if alive(*pid) {
+        for (pid, started) in &self.0 {
+            if started.is_some() && started_at(*pid) == *started && alive(*pid) {
                 kill(*pid);
             }
         }
@@ -1367,7 +1384,7 @@ fn a_service_left_by_a_daemon_that_was_killed_is_ended_and_started_again() {
         printed_pid(&user, "db", "leader"),
         printed_pid(&user, "db", "child"),
     );
-    let _left = Left(vec![leader, child]);
+    let _left = left(&[leader, child]);
     let address = format!("http://127.0.0.1:{port}");
     eventually("db answers", || answers(&address));
 
@@ -1463,7 +1480,7 @@ fn a_session_with_a_recorded_sid_that_is_not_ours_stays_alive() {
         .read_line(&mut line)
         .unwrap();
     let program: u32 = line.trim().parse().unwrap();
-    let _left = Left(vec![program]);
+    let _left = left(&[program]);
     leader.wait().unwrap();
     assert!(alive(program));
 
@@ -1480,7 +1497,7 @@ fn records_of_another_boot_are_dropped_unsignalled() {
     // Everything of a leftover run, its marker and start included, but its boot.
     let mut process = in_a_session("exec sleep 60", &[("FLOTTILLE_RUN", "r1")]);
     let pid = process.id();
-    let _left = Left(vec![pid]);
+    let _left = left(&[pid]);
 
     started_again_with_a_record(&user, pid, start_ticks(pid), "r1", "another-boot");
 
@@ -1509,7 +1526,7 @@ fn a_member_marked_with_another_run_is_not_ended() {
     user.status();
     // Started by the run r2, in a session whose leader had the pid r1's leader had.
     let (session, started, member) = left_in_a_session(&[("FLOTTILLE_RUN", "r2")]);
-    let _left = Left(vec![member]);
+    let _left = left(&[member]);
     assert!(alive(member));
 
     started_again_with_a_record(&user, session, started, "r1", &this_boot());
@@ -1522,7 +1539,7 @@ fn a_marked_member_started_before_the_recorded_leader_is_not_ended() {
     let user = User::new();
     user.status();
     let (session, _, member) = left_in_a_session(&[("FLOTTILLE_RUN", "r1")]);
-    let _left = Left(vec![member]);
+    let _left = left(&[member]);
     assert!(alive(member));
 
     // The recorded leader started after it: it is not what that leader started.
@@ -1557,7 +1574,7 @@ fn a_resumed_setup_step_starts_its_services_after_the_leftovers_are_ended() {
         printed_pid(&user, "db", "leader"),
         printed_pid(&user, "db", "child"),
     );
-    let _left = Left(vec![leader, child]);
+    let _left = left(&[leader, child]);
     eventually("db answers", || {
         answers(&format!("http://127.0.0.1:{port}"))
     });
@@ -1592,7 +1609,7 @@ fn a_task_s_agent_is_told_when_a_service_it_needs_stops() {
         printed_pid(&user, "db", "leader"),
         printed_pid(&user, "db", "child"),
     );
-    let _left = Left(vec![leader, child]);
+    let _left = left(&[leader, child]);
 
     // The service ends on its own, not by the user's hand.
     kill(leader);
@@ -1661,7 +1678,9 @@ fn an_outside_service_that_stops_answering_is_said_to_what_needs_it() {
 #[test]
 fn an_outside_service_that_answers_again_is_said_back() {
     let user = User::with_fake_agent().with_env("FLOTTILLE_TEST_FOLLOW_MS", "200");
-    let (mut outside, address) = by_hand();
+    // Ended with the test, whatever fails before it is killed by hand.
+    let (outside, address) = by_hand();
+    let mut outside = Ended(outside);
     services_file(
         &user,
         &format!(
@@ -1675,8 +1694,8 @@ fn an_outside_service_that_answers_again_is_said_back() {
     let (agent, mcp) = root(&user, None);
     set_mode(&user, &agent, "full");
     let run = run_of(&done(mcp.call("run", json!({"task": "api"}))));
-    let _ = outside.kill();
-    let _ = outside.wait();
+    let _ = outside.0.kill();
+    let _ = outside.0.wait();
     prompted_within(&user, 5, &["[flottille:service-stopped]"]);
 
     // The user starts their own again, at the same address.
