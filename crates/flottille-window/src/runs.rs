@@ -702,12 +702,12 @@ pub fn ready_mark(
         .into_any_element()
 }
 
-/// An address as a row shows it: its host and path, without its scheme.
 /// What a run's row says of the services it needs that stopped: `needs auth, stopped`.
 fn needs_said(stopped: &[String]) -> String {
     format!("needs {}, stopped", stopped.join(", "))
 }
 
+/// An address as a row shows it: its host and path, without its scheme.
 pub fn address_shown(url: &str) -> String {
     let rest = url
         .strip_prefix("https://")
