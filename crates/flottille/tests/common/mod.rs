@@ -963,7 +963,9 @@ fn command_for(program: &Path, dir: &Path, env: &[(String, String)], args: &[&st
         .env("FLOTTILLE_X11_SOCKETS", dir.join("x11"))
         // No round of the items unless a test asks for it (`with_fetcher`).
         .env("FLOTTILLE_TEST_NO_FETCH", "1")
-        .env_remove("TMUX");
+        .env_remove("TMUX")
+        // Never the machine's SSH agent: a test that lends one sets its own (`with_env`).
+        .env_remove("SSH_AUTH_SOCK");
     // No display of the machine's: a test that wants one gives its own.
     for name in ["WAYLAND_DISPLAY", "DISPLAY", "XAUTHORITY"] {
         command.env_remove(name);

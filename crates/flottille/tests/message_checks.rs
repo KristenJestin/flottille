@@ -788,8 +788,9 @@ fn a_push_to_a_remote_rewritten_for_reads_on_the_line_is_refused() {
         &format!("git -c {reads}={remote} -c {pushes}={remote} push origin HEAD"),
     );
 
+    // A setting on a push's line is refused before anything is read (`ssh_agent.rs`).
     assert!(answer.error, "{}", answer.text);
-    assert!(answer.text.contains("rewritten"), "{}", answer.text);
+    assert!(answer.text.contains("git -c"), "{}", answer.text);
     assert_eq!(remote_head(&user, &branch(&user)), None);
     assert_eq!(seen(&user), "");
 }
@@ -1005,7 +1006,12 @@ fn a_push_that_pushes_submodules_is_refused_while_checks_are_declared() {
         let answer = line(&user, &mcp, push);
 
         assert!(answer.error, "{push} {keys:?}: {}", answer.text);
-        assert!(answer.text.contains("submodule"), "{push}: {}", answer.text);
+        // A setting on a push's line is refused on its own (`ssh_agent.rs`).
+        let said = match push.starts_with("git -c") {
+            true => "git -c",
+            false => "submodule",
+        };
+        assert!(answer.text.contains(said), "{push}: {}", answer.text);
         assert_eq!(remote_head(&user, &branch(&user)), None, "{push} {keys:?}");
         for (key, _) in keys {
             user.git(&worktree, &["config", "--unset", key]);

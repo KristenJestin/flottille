@@ -142,7 +142,7 @@ pub(crate) async fn unaliased(
             .map_err(unread)?;
         // Where the run looks for a `git-<command>`: the `PATH` of its environment.
         let listed = ["git", "--list-cmds=builtins,main,others"];
-        let commands = crate::git::run_in(folder, &listed, env, None)
+        let commands = crate::git::run_in(folder, &listed, &crate::ssh_agent::withheld(env), None)
             .await
             .map_err(unread)?;
         if !commands.success {
@@ -217,8 +217,10 @@ pub async fn push(at: &Where<'_>, words: &[String], env: &Env) -> Result<(), Str
     // Read before any dry run: an option given `--dry-run` as its value would make it the push.
     let said = read(&rest[..end], &PUSH)
         .map_err(|why| unknown(format!("its options cannot be read: {why}")))?;
+    // Only the dry run reaches the remote: what is read besides it is not lent the SSH agent.
+    let reads = crate::ssh_agent::withheld(env);
     if !checks.is_empty() {
-        recursion(git, said.submodules, at.folder, env)
+        recursion(git, said.submodules, at.folder, &reads)
             .await
             .map_err(unknown)?;
     }
@@ -229,8 +231,11 @@ pub async fn push(at: &Where<'_>, words: &[String], env: &Env) -> Result<(), Str
     if checks.is_empty() {
         return Ok(());
     }
-    for sha in sent(git, &tried, at.folder, env).await.map_err(unknown)? {
-        let object = read_git(git, &["cat-file", "commit", &sha], at.folder, env, None)
+    for sha in sent(git, &tried, at.folder, &reads)
+        .await
+        .map_err(unknown)?
+    {
+        let object = read_git(git, &["cat-file", "commit", &sha], at.folder, &reads, None)
             .await
             .map_err(unknown)?;
         let message = object.split_once("\n\n").map_or("", |(_, message)| message);
@@ -283,7 +288,7 @@ type Pushed = (String, String, String);
 
 /// What the push would do, as git says it without doing it (`--dry-run --porcelain`): for each URL
 /// it goes to, each ref with its flag (`*` a new one), its source and its destination.
-async fn dry_run(
+pub(crate) async fn dry_run(
     git: &[String],
     rest: &[String],
     end: usize,
@@ -871,6 +876,8 @@ struct Said {
     no_verify: bool,
     /// Why the message comes from elsewhere than the line, the first said.
     elsewhere: Option<&'static str>,
+    /// The words that are no option nor an option's value, in their order.
+    positional: Vec<String>,
 }
 
 enum Part {
@@ -1034,9 +1041,59 @@ const PUSH: Options = Options {
     matter: &[
         ("recurse-submodules", Opt::Submodules(true)),
         ("no-recurse-submodules", Opt::Submodules(false)),
+        ("force", Opt::Switch("force")),
+        ("force-with-lease", Opt::Switch("force")),
+        ("delete", Opt::Switch("delete")),
+        ("prune", Opt::Switch("delete")),
+        ("mirror", Opt::Switch("mirror")),
+        ("signed", Opt::Switch("signed")),
     ],
-    letters: &[('o', Opt::Valued)],
+    letters: &[
+        ('o', Opt::Valued),
+        ('f', Opt::Switch("force")),
+        ('d', Opt::Switch("delete")),
+    ],
 };
+
+/// Whether a push's options, before its `--`, read as git reads them: one given `--dry-run` as
+/// its value would make a dry run the push.
+pub(crate) fn push_options_read(words: &[String]) -> bool {
+    read(words, &PUSH).is_ok()
+}
+
+/// What a push's line asks for itself, its options read as git reads them.
+pub(crate) struct Asked {
+    /// A forced update: `--force`, `--force-with-lease`, `--mirror`, or a refspec's `+`.
+    pub force: bool,
+    /// A ref deleted: `--delete`, `--prune`, `--mirror`, or a refspec with no source.
+    pub delete: bool,
+    /// `--signed`, which runs the signing program of the repository's settings.
+    pub signed: bool,
+    /// `--recurse-submodules`, which pushes or reads the submodules' repositories.
+    pub submodules: bool,
+    /// The repository it names, a remote or a URL.
+    pub repository: Option<String>,
+}
+
+/// What the push whose words after `push` are `rest`, its options up to `end`, asks for.
+pub(crate) fn push_asked(rest: &[String], end: usize) -> Result<Asked, String> {
+    let said = read(&rest[..end], &PUSH)?;
+    let mut positional = said.positional;
+    positional.extend(rest.iter().skip(end + 1).cloned());
+    let switched = |name: &'static str| said.switches.contains(&name);
+    let refspecs = positional.get(1..).unwrap_or_default();
+    Ok(Asked {
+        force: switched("force")
+            || switched("mirror")
+            || refspecs.iter().any(|refspec| refspec.starts_with('+')),
+        delete: switched("delete")
+            || switched("mirror")
+            || refspecs.iter().any(|refspec| refspec.starts_with(':')),
+        signed: switched("signed"),
+        submodules: said.submodules.is_some_and(|value| !value.is_empty()),
+        repository: positional.into_iter().next(),
+    })
+}
 
 /// The options of a command's words, read as git reads them, up to `--`.
 fn read(words: &[String], options: &Options) -> Result<Said, String> {
@@ -1079,6 +1136,8 @@ fn read(words: &[String], options: &Options) -> Result<Said, String> {
                     _ => take(&mut said, opt, "")?,
                 }
             }
+        } else {
+            said.positional.push(word.to_owned());
         }
     }
     Ok(said)

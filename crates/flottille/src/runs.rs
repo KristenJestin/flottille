@@ -406,7 +406,7 @@ pub async fn run(
     let Request {
         name,
         line,
-        words,
+        mut words,
         repository,
         serve,
         folder,
@@ -423,11 +423,13 @@ pub async fn run(
     if !approved && let Verdict::Deny(why) = gate::contained(std::slice::from_ref(&folder)) {
         return Outcome::Refused(why);
     }
-    if gate::pushes(&words)
-        && let Err(refusal) = remote_kept(daemon, place, &repository, &folder.path).await
-    {
-        return Outcome::Refused(refusal);
-    }
+    let checked = match gate::pushes(&words) {
+        true => match remote_kept(daemon, place, &repository, &folder.path).await {
+            Ok(checked) => checked,
+            Err(refusal) => return Outcome::Refused(refusal),
+        },
+        false => Vec::new(),
+    };
     // A server already running for the agent is joined, not started twice.
     let serving = match (serve, name.as_deref()) {
         (true, Some(task)) => Some(daemon.mcp.runs.serving(Some(agent), &place.project, task)),
@@ -497,7 +499,7 @@ pub async fn run(
     };
     // Only a push the gate read, and that the user or the judge let through, goes out.
     let lift = approved && gate::is_push(&words);
-    let env = match environment(daemon, place, &repository, lift) {
+    let mut env = match environment(daemon, place, &repository, lift) {
         Ok(env) => env,
         Err(why) => return Outcome::Failed(why),
     };
@@ -505,6 +507,16 @@ pub async fn run(
     // it makes, before it goes: however the commits were made, through a command the checks at
     // commit time read or not.
     if lift {
+        if let Some(refusal) = globals_refused(&words, &folder.path) {
+            return Outcome::Refused(refusal);
+        }
+        crate::ssh_agent::pin(&mut env, &folder.path, &mut words).await;
+        if let Err(refusal) = crate::ssh_agent::over_ssh(&folder.path, &words, &env).await {
+            return Outcome::Refused(refusal);
+        }
+        if let Err(refusal) = crate::ssh_agent::judged(&folder.path, &words, &env, &checked).await {
+            return Outcome::Refused(refusal);
+        }
         tokio::select! {
             checked = crate::message_checks::push(&at, &words, &env) => {
                 if let Err(refusal) = checked {
@@ -522,7 +534,8 @@ pub async fn run(
         ready.as_deref(),
         url.as_deref(),
         &names(place, &repository),
-        &env,
+        // A push's probes are not the push: they are not lent its SSH agent.
+        &crate::ssh_agent::withheld(&env),
         &folder.path,
         &secret_values,
     )
@@ -810,9 +823,10 @@ pub fn groups_of(daemon: &Daemon, agent: &str) -> Vec<u32> {
 /// No forge token, the forge command lines' configuration in `empty` (`forge` is the way to
 /// the forge), and no hook: the hooks are files the agent writes, and a commit or a push the gate
 /// let through would run them where it does not look. Every push URL is rewritten to a path that
-/// is no remote (`url.<nowhere>.pushInsteadOf` of every URL), unless `lift`: the run is itself a
-/// `git push` the user or the judge let through. A harmless command cannot push from a script
-/// the gate never read (`docs/design.md` §7).
+/// is no remote (`url.<nowhere>.pushInsteadOf` of every URL), and the user's SSH agent is not
+/// named, unless `lift`: the run is itself a `git push` the user or the judge let through, lent
+/// the agent the daemon's own environment names (`ssh_agent`). A harmless command cannot push
+/// from a script the gate never read (`docs/design.md` §7).
 fn defend(env: &mut BTreeMap<OsString, OsString>, empty: &Path, lift: bool) {
     for name in FORGE_TOKENS {
         env.insert(name.into(), OsString::new());
@@ -824,6 +838,10 @@ fn defend(env: &mut BTreeMap<OsString, OsString>, empty: &Path, lift: bool) {
     // The session bus leads to the keyring, where the vault is. The system bus's address is
     // kept: it holds no secret of the user's, and its socket is at a fixed path anyway.
     env.remove(&OsString::from("DBUS_SESSION_BUS_ADDRESS"));
+    env.remove(&OsString::from(crate::ssh_agent::VARIABLE));
+    if lift && let Some(lent) = crate::ssh_agent::lend() {
+        env.insert(crate::ssh_agent::VARIABLE.into(), lent.path().into());
+    }
     if !lift {
         configure(
             env,
@@ -833,9 +851,72 @@ fn defend(env: &mut BTreeMap<OsString, OsString>, empty: &Path, lift: bool) {
     }
 }
 
+/// Why a push the gate let through, run in `folder`, is refused for a global option of its own
+/// line. A setting (`-c`, `--config-env`) would beat those its environment sets around it, its
+/// hooks and its `ssh` (`ssh_agent::pin`); `--exec-path` runs git's programs from another folder;
+/// `--git-dir`, `--work-tree` and the rest bring another repository, whose remote and settings
+/// were never read. Only options that change nothing of what runs pass, and `-C` into the
+/// repository's own folder (no other repository on the way). Refused in every mode.
+fn globals_refused(words: &[String], folder: &Path) -> Option<String> {
+    const HARMLESS: [&str; 4] = ["--no-pager", "-P", "--no-advice", "--no-optional-locks"];
+    let nothing = "ask the user to push by hand; nothing was pushed";
+    let (_, globals) = gate::git_globals(&words[1..]);
+    let mut at = folder.to_path_buf();
+    let mut moved = None;
+    for (option, value) in globals {
+        match (option, value) {
+            (option, _) if HARMLESS.contains(&option) => {}
+            ("-C", Some(to)) => {
+                at = at.join(to);
+                moved = Some(to);
+            }
+            ("-c" | "--config-env", _) => {
+                return Some(format!(
+                    "refused: a push takes no git {option}: a setting on its line would beat \
+                     those Flottille sets around it (its hooks, its ssh); set it in the \
+                     repository, or {nothing}"
+                ));
+            }
+            _ => {
+                return Some(format!(
+                    "refused: a push takes no git {option}: it would run git's programs or read \
+                     a repository other than the one Flottille checked; push from the \
+                     repository's folder with git push and its own options, or {nothing}"
+                ));
+            }
+        }
+    }
+    let to = moved?;
+    match within(folder, &at) {
+        true => None,
+        false => Some(format!(
+            "refused: git -C {to} takes the push out of its repository's folder ({}), the one \
+             Flottille checked; push from there, or {nothing}",
+            folder.display()
+        )),
+    }
+}
+
+/// Whether `at` is `folder` or a folder under it that git finds `folder`'s repository from: no
+/// `.git`, and no folder that looks like a bare repository (`HEAD`), on the way.
+fn within(folder: &Path, at: &Path) -> bool {
+    let (Ok(folder), Ok(at)) = (folder.canonicalize(), at.canonicalize()) else {
+        return false;
+    };
+    if !at.starts_with(&folder) {
+        return false;
+    }
+    at.ancestors()
+        .take_while(|step| *step != folder)
+        .all(|step| {
+            step.join(".git").symlink_metadata().is_err()
+                && step.join("HEAD").symlink_metadata().is_err()
+        })
+}
+
 /// One more git setting through the environment, after those it already has: it wins over the
 /// repository's own.
-fn configure(env: &mut BTreeMap<OsString, OsString>, key: &str, value: &str) {
+pub(crate) fn configure(env: &mut BTreeMap<OsString, OsString>, key: &str, value: &str) {
     let count: usize = env
         .get(&OsString::from("GIT_CONFIG_COUNT"))
         .and_then(|count| count.to_str()?.parse().ok())
@@ -847,15 +928,29 @@ fn configure(env: &mut BTreeMap<OsString, OsString>, key: &str, value: &str) {
 
 /// Refuses a push from a workspace unless the repository's remote leads where it led when the
 /// workspace was created (`forge::remote_kept`): neither the judge nor the user reads where a
-/// remote leads now. A push from the project folder has nothing to compare with.
+/// remote leads now. A push from the project folder has nothing to compare with. The URLs a push
+/// lent the SSH agent may go to (`ssh_agent::judged`): the workspace's, or the project folder's
+/// remote's as they are now.
 async fn remote_kept(
     daemon: &Daemon,
     place: &Place,
     repository: &str,
     folder: &Path,
-) -> Result<(), String> {
+) -> Result<Vec<String>, String> {
     let Some(name) = &place.workspace else {
-        return Ok(());
+        let remote = projects::load_project(daemon, &place.project)
+            .ok()
+            .and_then(|project| {
+                project
+                    .repositories
+                    .into_iter()
+                    .find(|r| r.path == repository)
+                    .map(|r| r.remote)
+            });
+        return Ok(match remote {
+            Some(remote) => crate::forge::urls_of(folder, &remote).await,
+            None => Vec::new(),
+        });
     };
     let workspace = daemon
         .read(|store| store.workspace(&place.project, name))
@@ -869,7 +964,8 @@ async fn remote_kept(
         .ok_or_else(|| {
             format!("refused: {repository} is not a repository of this agent's workspace")
         })?;
-    crate::forge::remote_kept(folder, base).await
+    crate::forge::remote_kept(folder, base).await?;
+    Ok(base.urls.clone())
 }
 
 /// Spawns the run, records it, and leaves a task of its own to follow it to its end. `phase` is
@@ -908,9 +1004,11 @@ fn start(
         )
         .stderr(writer)
         .kill_on_drop(true);
-    let spawned = crate::children::spawn(crate::landlock::confined_but(
+    let lent = crate::ssh_agent::lent_to(&env);
+    let spawned = crate::children::spawn(crate::landlock::confined_with(
         crate::children::in_own_session(&mut command),
         display.as_ref(),
+        lent.as_ref(),
     ));
     // The command holds the pipe's writing end: dropped, only the processes hold it.
     drop(command);
@@ -1093,7 +1191,7 @@ async fn probing(daemon: Arc<Daemon>, going: Arc<Going>, probe: Probe) {
                         &daemon,
                         &going.run.id,
                         words,
-                        &going.env,
+                        &crate::ssh_agent::withheld(&going.env),
                         &going.run.folder,
                     )
                     .await
