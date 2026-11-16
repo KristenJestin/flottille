@@ -99,9 +99,9 @@ pub const WINDOWS_HINT: &str = "Each run of its agents, a program it builds or s
      bus, the keyring nor your other sockets. Without Wayland it gets X11's display, and with X11 \
      a program can read the keys you type in other windows and type into them, a terminal's \
      included. On some Wayland compositors a client can capture the screen and the clipboard, \
-     and on wlroots ones (Hyprland among them) type into other windows too. Off, a run gets no \
-     display, though on a kernel too old to deny it (before Landlock's ninth version) a program \
-     that names X11's display itself may still reach it.";
+     and on wlroots ones (Hyprland among them) type into other windows too; with X11 a run can \
+     also reach the session's other abstract sockets, a session bus among them. Off, a run gets \
+     no display, though a program that names X11's socket itself may still reach it.";
 
 /// What the Vault tab says it lists.
 pub const VAULT_SENTENCE: &str = "The secrets this project's agents can use: its own first, then \
