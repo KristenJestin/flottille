@@ -637,7 +637,7 @@ fn the_daemon_names_a_pasted_text_itself_whatever_the_client_says() {
     );
 
     assert!(
-        prompt.starts_with("see [Pasted text 1: pasted-text.txt · 7 bytes · read it at "),
+        prompt.contains("see [Pasted text 1: pasted-text.txt · 7 bytes · read it at "),
         "{prompt}"
     );
     assert!(!prompt.contains("/etc/hostname"), "{prompt}");

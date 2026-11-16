@@ -1702,6 +1702,8 @@ fn the_window_draws_no_frame_at_rest_on_the_session_page_with_a_pasted_text(
                 .any(|piece| matches!(piece, gpui_design_system::Piece::Token(_)))
         })
     });
+    // The field let go, as the other scenarios leave it: a focused field's caret blinks.
+    cx.update(|window, cx| window.blur(cx));
     // The toast that says it once goes away on its own: the rest is after it.
     let deadline = Instant::now() + Duration::from_secs(30);
     while shell.read_with(cx, |s, cx| s.toasts().read(cx).toasts().count() > 0) {
