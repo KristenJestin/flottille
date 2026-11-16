@@ -1617,9 +1617,9 @@ fn the_window_draws_no_frame_at_rest_on_a_project_s_progress_with_a_milestone_un
 /// its dialog open on the lines that offer to share and to bind it, at rest. Ignored until a
 /// session with a request pending rests: on dev already, such a session draws a frame about
 /// every other step of the window with no dialog open (seen with a plain `add` request), which
-/// this scenario cannot tell from the dialog's own.
+/// this scenario cannot tell from the dialog's own. Issue #1036 takes that scenario on.
 #[gpui_kit::test]
-#[ignore = "a session with a pending request redraws at rest on dev already, dialog or not"]
+#[ignore = "#1036: a session page at rest draws frames on dev, request or not"]
 fn the_window_draws_no_frame_at_rest_on_a_connection_request_with_entries_to_widen(
     cx: &mut TestAppContext,
 ) {
