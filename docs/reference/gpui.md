@@ -245,7 +245,7 @@ the wrong code first).
 13. **Tabs by subject; a feature is a row, never a tab.** Settings has five tabs (Agents,
     Approvals, Features, Vault, General) and six at most, Usage the last; a project's settings
     have six (Repositories, Workspaces, Tasks, Instructions, Features, Vault); the project page
-    four at most and room for a fifth. A new part of Flottille adds no tab: a part the user turns on or
+    four at most and room for a fifth (Progress, for a project with a tracker). A new part of Flottille adds no tab: a part the user turns on or
     off (Specs, Review, the compaction, Connections, later the handbook) is a row of the
     Features tab, which opens its page in place of the list (`Subpage`); a setting every agent
     shares is a section of a tab that exists. A tab with a single control is a section of
