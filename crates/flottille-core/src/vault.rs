@@ -41,14 +41,20 @@ pub fn connection(name: &str) -> String {
 pub const SIGN_IN_ASKED: &str = "the server asks to be signed in";
 pub const SIGNED_OUT: &str = " is signed out (";
 
-/// What the daemon says when a connection's server answers `401` to the headers its vault entries
-/// gave: the server refused what it was given, which no sign-in changes. It names the header and
-/// the entry, never the value.
-pub const REFUSED_ENTRY: &str = "the server refused the request (401) with the header";
+/// What the daemon says when a connection's server answers `401` to the secrets its vault entries
+/// gave (a header, a query parameter, a cookie, basic authentication): the server refused what it
+/// was given, which no sign-in changes. It names where each went and the entry, never the value.
+pub const REFUSED_ENTRY: &str = "the server refused the request (401) with";
 
-/// Whether what the daemon said is that the server refused the vault entries of its headers.
+/// How the daemon begins what it says of a connection whose server did not start.
+pub const NOT_STARTED: &str = "the connection could not start: ";
+
+/// Whether what the daemon said is that the server refused the vault entries its requests carried:
+/// by how it begins, so that a failure that only quotes it is none.
 pub fn refused_entry(said: &str) -> bool {
-    said.contains(REFUSED_ENTRY)
+    said.strip_prefix(NOT_STARTED)
+        .unwrap_or(said)
+        .starts_with(REFUSED_ENTRY)
 }
 
 /// Whether what the daemon said of a connection's server is that a sign-in is missing.
@@ -103,5 +109,27 @@ impl Entry {
     pub fn to_json(&self) -> Value {
         json!({"name": self.name, "description": self.description, "url": self.url,
             "username": self.username, "project": self.project, "for": self.bound})
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_refused_entry_is_recognised_by_its_prefix_only() {
+        let refused = format!(
+            "the connection could not start: {REFUSED_ENTRY} the header Authorization from the \
+             vault entry notes-token: check the entry's value"
+        );
+        assert!(refused_entry(&refused));
+        assert!(refused_entry(&format!(
+            "{REFUSED_ENTRY} the query parameter userToken from the vault entry notes-token"
+        )));
+        // A failure that only quotes it is no refusal of the entries.
+        assert!(!refused_entry(&format!(
+            "the connection could not start: the server said \"{REFUSED_ENTRY} nothing\""
+        )));
+        assert!(!refused_entry(&format!("it failed: {REFUSED_ENTRY} x")));
     }
 }

@@ -109,15 +109,35 @@ impl<R: AsyncRead + Unpin> AsyncRead for Lines<R> {
 /// The HTTP client of a connection's server: reqwest's, but for the answer to a message it sends,
 /// which is read up to `ANSWER_LIMIT` bytes. The stream a server keeps open for what it says of
 /// itself, which has no end, is left to rmcp's own limit on one event of it (set to the same).
+///
+/// It also adds the connection's query secrets to each request's URL, here and never in rmcp's
+/// configuration, and drops the URL from its errors: no error, log or event says them.
 #[derive(Clone)]
 pub(super) struct Bounded {
     client: reqwest::Client,
     cut: Cut,
+    query: Arc<Vec<(String, String)>>,
 }
 
 impl Bounded {
-    pub(super) fn new(client: reqwest::Client, cut: Cut) -> Self {
-        Self { client, cut }
+    pub(super) fn new(client: reqwest::Client, cut: Cut, query: Vec<(String, String)>) -> Self {
+        Self {
+            client,
+            cut,
+            query: Arc::new(query),
+        }
+    }
+
+    /// `uri` with the query secrets, URL-encoded.
+    fn at(&self, uri: Arc<str>) -> Arc<str> {
+        if self.query.is_empty() {
+            return uri;
+        }
+        let Ok(mut url) = url::Url::parse(&uri) else {
+            return uri;
+        };
+        url.query_pairs_mut().extend_pairs(self.query.iter());
+        Arc::from(url.as_str())
     }
 
     /// The error of an answer that passed the limit.
@@ -170,7 +190,10 @@ fn chunks(response: reqwest::Response, cut: Cut) -> impl Stream<Item = io::Resul
                         Some((Ok(chunk), (response, taken, false)))
                     }
                     Ok(None) => None,
-                    Err(error) => Some((Err(io::Error::other(error)), (response, taken, true))),
+                    Err(error) => Some((
+                        Err(io::Error::other(error.without_url())),
+                        (response, taken, true),
+                    )),
                 }
             }
         },
@@ -188,16 +211,15 @@ impl StreamableHttpClient for Bounded {
         auth_token: Option<String>,
         custom_headers: HashMap<HeaderName, HeaderValue>,
     ) -> Result<BoxStream<'static, Result<Sse, SseError>>, StreamableHttpError<Self::Error>> {
-        self.client
-            .get_stream_with_max_sse_event_size(
-                uri,
-                session_id,
-                last_event_id,
-                auth_token,
-                custom_headers,
-                ANSWER_LIMIT,
-            )
-            .await
+        self.get_stream_with_max_sse_event_size(
+            uri,
+            session_id,
+            last_event_id,
+            auth_token,
+            custom_headers,
+            ANSWER_LIMIT,
+        )
+        .await
     }
 
     async fn get_stream_with_max_sse_event_size(
@@ -211,7 +233,7 @@ impl StreamableHttpClient for Bounded {
     ) -> Result<BoxStream<'static, Result<Sse, SseError>>, StreamableHttpError<Self::Error>> {
         self.client
             .get_stream_with_max_sse_event_size(
-                uri,
+                self.at(uri),
                 session_id,
                 last_event_id,
                 auth_token,
@@ -219,6 +241,7 @@ impl StreamableHttpClient for Bounded {
                 max_sse_event_size,
             )
             .await
+            .map_err(hidden)
     }
 
     async fn delete_session(
@@ -229,8 +252,9 @@ impl StreamableHttpClient for Bounded {
         custom_headers: HashMap<HeaderName, HeaderValue>,
     ) -> Result<(), StreamableHttpError<Self::Error>> {
         self.client
-            .delete_session(uri, session, auth_token, custom_headers)
+            .delete_session(self.at(uri), session, auth_token, custom_headers)
             .await
+            .map_err(hidden)
     }
 
     async fn post_message(
@@ -265,6 +289,35 @@ impl StreamableHttpClient for Bounded {
         custom_headers: HashMap<HeaderName, HeaderValue>,
         _max_sse_event_size: usize,
     ) -> Result<StreamableHttpPostResponse, StreamableHttpError<Self::Error>> {
+        self.post(
+            self.at(uri),
+            message,
+            session_id,
+            auth_token,
+            custom_headers,
+        )
+        .await
+        .map_err(hidden)
+    }
+}
+
+/// An error of the client without its URL, which may hold a query secret.
+fn hidden(error: StreamableHttpError<reqwest::Error>) -> StreamableHttpError<reqwest::Error> {
+    match error {
+        StreamableHttpError::Client(error) => StreamableHttpError::Client(error.without_url()),
+        other => other,
+    }
+}
+
+impl Bounded {
+    async fn post(
+        &self,
+        uri: Arc<str>,
+        message: ClientJsonRpcMessage,
+        session_id: Option<Arc<str>>,
+        auth_token: Option<String>,
+        custom_headers: HashMap<HeaderName, HeaderValue>,
+    ) -> Result<StreamableHttpPostResponse, StreamableHttpError<reqwest::Error>> {
         use reqwest::StatusCode;
         use reqwest::header::{ACCEPT, CONTENT_TYPE, WWW_AUTHENTICATE};
         let mut request = self
@@ -411,6 +464,96 @@ mod tests {
             .read_to_end(&mut Vec::new())
             .await;
         assert!(read.is_err() && cut.take());
+    }
+
+    /// A query secret that URL-encoding changes, so that both of its forms are looked for.
+    const SECRET: &str = "s3cret/t0ken+of=design";
+    const ENCODED: &str = "s3cret%2Ft0ken%2Bof%3Ddesign";
+
+    /// Every error a request of a connection's client gives at `uri`, by POST, GET and DELETE,
+    /// as Display and Debug say it.
+    async fn errors_at(uri: &str) -> Vec<String> {
+        let client = super::super::client::http_client(uri).unwrap();
+        let bounded = Bounded::new(
+            client,
+            Cut::default(),
+            vec![("userToken".into(), SECRET.into())],
+        );
+        let uri: Arc<str> = Arc::from(uri);
+        let ping: ClientJsonRpcMessage = serde_json::from_value(
+            serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "ping"}),
+        )
+        .unwrap();
+        let mut said = Vec::new();
+        let mut say = |error: &dyn std::fmt::Display, debug: String| {
+            said.push(error.to_string());
+            said.push(debug);
+        };
+        if let Err(error) = bounded
+            .post_message(uri.clone(), ping, None, None, HashMap::new())
+            .await
+        {
+            say(&error, format!("{error:?}"));
+        }
+        if let Err(error) = bounded
+            .get_stream(
+                uri.clone(),
+                Some(Arc::from("s")),
+                None,
+                None,
+                HashMap::new(),
+            )
+            .await
+        {
+            say(&error, format!("{error:?}"));
+        }
+        if let Err(error) = bounded
+            .delete_session(uri, Arc::from("s"), None, HashMap::new())
+            .await
+        {
+            say(&error, format!("{error:?}"));
+        }
+        said
+    }
+
+    fn never_said(said: &[String]) {
+        for text in said {
+            assert!(!text.contains(SECRET) && !text.contains(ENCODED), "{text}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_query_secret_is_never_in_an_error_of_a_post_a_get_or_a_delete() {
+        // Nothing listens there: each request fails to be sent.
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let said = errors_at(&format!("http://127.0.0.1:{port}/mcp")).await;
+        assert_eq!(said.len(), 6, "each request fails: {said:?}");
+        never_said(&said);
+    }
+
+    #[tokio::test]
+    async fn a_query_secret_is_never_in_an_error_of_a_status_that_is_no_success() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let mut request = [0; 4096];
+                let _ = stream.read(&mut request);
+                let _ = stream.write_all(
+                    b"HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/plain\r\n\
+                      Content-Length: 4\r\nConnection: close\r\n\r\nboom",
+                );
+            }
+        });
+        let said = errors_at(&format!("http://127.0.0.1:{port}/mcp")).await;
+        assert!(!said.is_empty(), "a 500 is an error");
+        never_said(&said);
     }
 
     #[test]

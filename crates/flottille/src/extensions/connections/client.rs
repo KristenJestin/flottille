@@ -77,6 +77,11 @@ struct Server {
     /// Its tools listed again after it said they changed: one listing at a time, of the server
     /// that runs.
     noticed: Mutex<Noticed>,
+    /// Why the browser of the server it last kept runs headless: said while a call holds the
+    /// turn, which hides the server itself.
+    headless: Mutex<Option<String>>,
+    /// The browser its server or a login started, which outlives them: closed when it stops.
+    browser: Mutex<Option<super::adapters::Browser>>,
 }
 
 #[derive(Default)]
@@ -186,6 +191,10 @@ struct Running {
     expires_at: Option<u64>,
     /// Set when one of its answers was cut for its size.
     cut: Cut,
+    /// The runtime folder of its shown browser, removed when it stops, and its variables.
+    display: Option<crate::display::Shown>,
+    /// Why its browser runs headless though the user shows it, when it cannot be shown.
+    headless: Option<String>,
 }
 
 impl Running {
@@ -248,10 +257,41 @@ pub(super) async fn exclusively<T>(
     work.await
 }
 
+/// `exclusively`, `work` given the display variables of the server that runs, if it shows its
+/// browser: a login reaches the browser in the server's display folder.
+pub(super) async fn exclusively_shown<T, F: std::future::Future<Output = T>>(
+    daemon: &Daemon,
+    name: &str,
+    work: impl FnOnce(Option<crate::display::Shown>) -> F,
+) -> T {
+    let server = server_of(daemon, name);
+    let turn = server.turn.lock().await;
+    let served = turn
+        .as_ref()
+        .and_then(|running| running.display.as_ref())
+        .cloned();
+    work(served).await
+}
+
+/// The browser `browser` may now run for the connection, to close when its server stops.
+pub(super) fn browser_started(daemon: &Daemon, name: &str, browser: super::adapters::Browser) {
+    *server_of(daemon, name).browser.lock().unwrap() = Some(browser);
+}
+
 /// Whether the connection's server runs.
 pub fn running(daemon: &Daemon, name: &str) -> bool {
     existing(daemon, name)
         .is_some_and(|server| server.turn.try_lock().map_or(true, |turn| turn.is_some()))
+}
+
+/// Why the browser of its running server is not shown though the user shows it, if it is not.
+pub fn headless(daemon: &Daemon, name: &str) -> Option<String> {
+    let server = existing(daemon, name)?;
+    match server.turn.try_lock() {
+        Ok(turn) => turn.as_ref()?.headless.clone(),
+        // A call holds the turn: the reason of the server it last kept, not nothing for a moment.
+        Err(_) => server.headless.lock().unwrap().clone(),
+    }
 }
 
 /// Why its server could not start the last time, if it did not.
@@ -382,6 +422,72 @@ pub(super) async fn secrets(
     Ok(read)
 }
 
+/// What a URL connection's requests carry of its secrets: its headers (a header, the cookies
+/// together, basic authentication), and the query parameters `Bounded` adds to each request.
+async fn carried(
+    daemon: &Daemon,
+    declaration: &Declaration,
+) -> Result<
+    (
+        HashMap<http::HeaderName, http::HeaderValue>,
+        Vec<(String, String)>,
+    ),
+    String,
+> {
+    use super::Carried;
+    use base64::Engine;
+    let mut headers = HashMap::new();
+    let mut cookies = Vec::new();
+    let mut query = Vec::new();
+    let mut header = |name: &str, value: String, of: &str| -> Result<(), String> {
+        let name = http::HeaderName::from_bytes(name.as_bytes()).map_err(|e| e.to_string())?;
+        let mut value = http::HeaderValue::from_str(&value)
+            .map_err(|_| format!("the vault entry {of} is no header's value"))?;
+        value.set_sensitive(true);
+        headers.insert(name, value);
+        Ok(())
+    };
+    // Each entry is looked up again at each start: one removed since the declaration was written
+    // fails it. Its host is not compared with the URL's here: the user's own form binds an entry
+    // of any host; an agent's request had it compared before its write, under the file's lock.
+    for line in &declaration.secrets {
+        let secret = crate::vault::every_project_s(daemon, &declaration.name, &line.entry).await?;
+        match line.place {
+            Carried::Header => header(&line.name, format!("{}{secret}", line.prefix), &line.entry)?,
+            Carried::Cookie => cookies.push(format!("{}={secret}", line.name)),
+            Carried::Basic => {
+                let username = daemon
+                    .read(|store| store.vault_entries())
+                    .map_err(|error| error.to_string())?
+                    .into_iter()
+                    .find(|entry| entry.name == line.entry)
+                    .and_then(|entry| entry.username)
+                    .ok_or_else(|| {
+                        format!(
+                            "the vault entry {} has no username, which basic authentication needs",
+                            line.entry
+                        )
+                    })?;
+                let pair = base64::engine::general_purpose::STANDARD
+                    .encode(format!("{username}:{secret}"));
+                flottille_core::secrets::add_vault_value(&pair);
+                header("authorization", format!("Basic {pair}"), &line.entry)?;
+            }
+            Carried::Query => {
+                // As the URL carries it, masked too wherever it is said.
+                let encoded: String =
+                    url::form_urlencoded::byte_serialize(secret.as_bytes()).collect();
+                flottille_core::secrets::add_vault_value(&encoded);
+                query.push((line.name.clone(), secret));
+            }
+        }
+    }
+    if !cookies.is_empty() {
+        header("cookie", cookies.join("; "), "of a cookie")?;
+    }
+    Ok((headers, query))
+}
+
 /// The lines of its error output a server that stopped during its start is asked about.
 const ERROR_LINES: usize = 3;
 
@@ -426,6 +532,11 @@ fn cut_during_start(
 /// a server that turns out to be another (its first review, a version that moved) is started
 /// once more with the options of its own.
 async fn start(daemon: &Arc<Daemon>, declaration: &Declaration) -> Result<Running, String> {
+    // Declared before the check of its URL existed, or by hand: it fails alone until it is
+    // edited.
+    if let Some(why) = declaration.url_fault() {
+        return Err(why);
+    }
     let pinned = super::row(daemon, &declaration.name)
         .pin
         .as_ref()
@@ -461,6 +572,9 @@ async fn start_with(
         start,
     };
     let mut expires_at = None;
+    // The browser's display folder, removed when the server is dropped.
+    let mut display = None;
+    let mut headless = None;
     let cut = Cut::default();
     let (service, leader) = match &declaration.reach {
         Reach::Command(words) => {
@@ -470,11 +584,23 @@ async fn start_with(
             let options = match adapter {
                 Some(adapter) => {
                     let sites = super::adapters::kept_to(daemon, adapter, declaration);
-                    super::adapters::start_options(&folder, &sites)?
+                    (display, headless) =
+                        super::adapters::shown(daemon, declaration, &declaration.name);
+                    if let Some(browser) = super::adapters::browser(daemon, declaration) {
+                        browser_started(daemon, &declaration.name, browser);
+                    }
+                    super::adapters::start_options(&folder, &sites, display.is_some())?
                 }
                 None => Vec::new(),
             };
             let mut env = crate::runs::beside(daemon)?;
+            if adapter.is_some() {
+                super::adapters::display(
+                    &mut env,
+                    display.as_ref().map(|shown| &shown.env),
+                    &folder,
+                );
+            }
             // Every value it was given, masked in what it says whatever its variable is named.
             let mut given = Vec::new();
             for (name, secret) in secrets(daemon, &declaration.name, &declaration.env).await? {
@@ -492,8 +618,9 @@ async fn start_with(
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .kill_on_drop(true);
-            let mut child = crate::children::spawn(crate::landlock::confined(
+            let mut child = crate::children::spawn(crate::landlock::confined_but(
                 crate::children::in_own_session(&mut command),
+                display.as_ref().map(|shown| &shown.folder),
             ))
             .map_err(|error| format!("{}: {error}", words[0]))?;
             let leader = child.id();
@@ -555,15 +682,7 @@ async fn start_with(
             }
         }
         Reach::Url(url) => {
-            let mut headers = HashMap::new();
-            for (name, secret) in secrets(daemon, &declaration.name, &declaration.headers).await? {
-                let name = http::HeaderName::from_bytes(name.as_bytes())
-                    .map_err(|error| error.to_string())?;
-                let mut value = http::HeaderValue::from_str(&secret)
-                    .map_err(|_| format!("the vault entry for {name} is no header's value"))?;
-                value.set_sensitive(true);
-                headers.insert(name, value);
-            }
+            let (headers, query) = carried(daemon, declaration).await?;
             let client = http_client(url)?;
             let mut config =
                 StreamableHttpClientTransportConfig::with_uri(url.as_str()).custom_headers(headers);
@@ -584,7 +703,7 @@ async fn start_with(
                 }
             }
             let transport = StreamableHttpClientTransport::with_client(
-                Bounded::new(client, cut.clone()),
+                Bounded::new(client, cut.clone(), query),
                 config,
             );
             let served = tokio::time::timeout(
@@ -599,10 +718,10 @@ async fn start_with(
                     if bearing && let Some(said) = token_refused(daemon, declaration).await {
                         return Err(said);
                     }
-                    // A header the user gave from the vault is what the server refused: a
+                    // A secret the user gave from the vault is what the server refused: a
                     // sign-in does not change it, the entry does.
-                    if !declaration.headers.is_empty() {
-                        return Err(refused_headers(&declaration.headers));
+                    if !declaration.secrets.is_empty() {
+                        return Err(refused_secrets(&declaration.secrets));
                     }
                     return Err(format!(
                         "{}: the user signs it in with `flottille connection login {name}`",
@@ -630,6 +749,8 @@ async fn start_with(
                 start,
                 expires_at,
                 cut: cut.clone(),
+                display,
+                headless,
             })
             .await;
             return Err(why);
@@ -658,6 +779,8 @@ async fn start_with(
         start,
         expires_at,
         cut,
+        display,
+        headless,
     })
 }
 
@@ -701,14 +824,15 @@ async fn token_refused(daemon: &Arc<Daemon>, declaration: &Declaration) -> Optio
     }
 }
 
-/// What a start says of a server that answered `401` to the headers of vault entries: which
-/// header and which entry, never the value.
-fn refused_headers(headers: &std::collections::BTreeMap<String, String>) -> String {
-    let given: Vec<String> = headers
+/// What a start says of a server that answered `401` to the secrets of vault entries its requests
+/// carried: where each went (a header, a query parameter, a cookie, basic authentication) and
+/// which entry, never the value.
+fn refused_secrets(secrets: &[super::Secret]) -> String {
+    let given: Vec<String> = secrets
         .iter()
-        .map(|(header, entry)| format!("{header} from the vault entry {entry}"))
+        .map(|secret| format!("{} from the vault entry {}", secret.said(), secret.entry))
         .collect();
-    let given = given.join(", the header ");
+    let given = given.join(", ");
     format!(
         "{} {given}: check the entry's value (its prefix, e.g. \"Bearer \") and that its URL \
          is of this host",
@@ -770,6 +894,7 @@ fn keep(
     let start = running.start;
     *server.leader.lock().unwrap() = running.leader;
     *server.failing.lock().unwrap() = None;
+    *server.headless.lock().unwrap() = running.headless.clone();
     *turn = Some(running);
     let (daemon, name, server) = (Arc::downgrade(daemon), name.to_owned(), server.clone());
     tokio::spawn(async move {
@@ -826,11 +951,25 @@ pub async fn stop(daemon: &Arc<Daemon>, name: &str) {
         return;
     };
     let mut turn = server.turn.lock().await;
-    if let Some(running) = turn.take() {
+    let stopped = turn.take();
+    let running = stopped.is_some();
+    if let Some(running) = stopped {
         *server.leader.lock().unwrap() = None;
         stop_running(running).await;
-        drop(turn);
+    }
+    // Under the turn, so no login nor start meets the browser as it closes.
+    closed(daemon, &server).await;
+    drop(turn);
+    if running {
         super::changed_event(daemon, name, None);
+    }
+}
+
+/// The browser the server or a login of it started, closed: the next start applies the switch.
+async fn closed(daemon: &Daemon, server: &Server) {
+    let browser = server.browser.lock().unwrap().take();
+    if let Some(browser) = browser {
+        super::adapters::close(daemon, &browser).await;
     }
 }
 
@@ -875,7 +1014,9 @@ pub async fn stop_all(daemon: &Arc<Daemon>) {
         .values()
         .cloned()
         .collect();
-    for server in servers {
+    // At once, not one after another: each close is bounded, but a daemon with several shown
+    // browsers must not wait for the sum of them.
+    futures::future::join_all(servers.iter().map(|server| async move {
         let leader = server.leader.lock().unwrap().take();
         if let Some(leader) = leader {
             crate::children::end_session(leader).await;
@@ -885,14 +1026,17 @@ pub async fn stop_all(daemon: &Arc<Daemon>) {
         {
             stop_running(running).await;
         }
-    }
+        closed(daemon, server).await;
+    }))
+    .await;
 }
 
 /// Why the server could not start, masked by `mask` before it is cut: a secret is never cut in
 /// two, half of it left unmasked.
 fn not_started(why: &str, mask: impl FnOnce(&str) -> String) -> String {
     format!(
-        "the connection could not start: {}",
+        "{}{}",
+        flottille_core::vault::NOT_STARTED,
         super::short_to(&mask(why), super::START_CHARS)
     )
 }

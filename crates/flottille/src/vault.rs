@@ -324,7 +324,12 @@ pub async fn call(
             // The secret first: a keyring that refuses (locked) leaves the entry whole, to be
             // removed again once it is unlocked.
             daemon.vault.delete(&name).await.map_err(unavailable)?;
-            let Some(removed) = daemon.write(|store| store.remove_vault_entry(&name))? else {
+            // An accepted connection's write checks the entries it names are there, then writes:
+            // the entry goes before or after, never between (`requests::write`).
+            let removed = crate::extensions::between_writes(|| {
+                daemon.write(|store| store.remove_vault_entry(&name))
+            })?;
+            let Some(removed) = removed else {
                 return Err(Failure::new(
                     "not-found",
                     format!("the vault has no entry {name}"),
