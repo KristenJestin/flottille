@@ -2404,12 +2404,12 @@ pub async fn settle_at_start(daemon: &Daemon) {
             let pid = process.pid;
             match start_time(pid) {
                 Some(started) if started == process.started => {
-                    signal_group(pid, libc::SIGKILL);
-                    crate::children::end_session_now(pid);
-                    eprintln!(
-                        "flottille daemon: ended the run process {pid} left running, and its \
-                         session"
-                    );
+                    if crate::children::end_session_led(pid, started) {
+                        eprintln!(
+                            "flottille daemon: ended the run process {pid} left running, and its \
+                             session"
+                        );
+                    }
                 }
                 Some(_) => {}
                 None => {
