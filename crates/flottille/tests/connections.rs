@@ -1858,8 +1858,15 @@ fn an_ordinary_connection_server_gets_no_display() {
     .unwrap();
     let (_, mcp) = session(&user, "app");
 
-    for action in ["search", "write", "open"] {
-        done(mcp.call("conn_almanac", json!({"action": action, "arguments": {}})));
+    for (action, arguments) in [
+        ("search", json!({"query": "a"})),
+        ("write", json!({"text": "a"})),
+        ("open", json!({})),
+    ] {
+        done(mcp.call(
+            "conn_almanac",
+            json!({"action": action, "arguments": arguments}),
+        ));
     }
 
     let answered: Vec<Value> = logged(&user, "almanac", "call")
