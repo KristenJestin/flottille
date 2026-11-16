@@ -444,7 +444,14 @@ pub async fn run(
             going.notify.store(true, Ordering::SeqCst);
         }
         crate::mcp::started_run(&going.run.id);
-        return Outcome::Done(describe(daemon, &going.run.id, (None, None), false, true, false));
+        return Outcome::Done(describe(
+            daemon,
+            &going.run.id,
+            (None, None),
+            false,
+            true,
+            false,
+        ));
     }
     // The project's checks of a commit's message, then the commit checks of its repository,
     // before git makes it.
@@ -1740,7 +1747,14 @@ pub async fn run_status(daemon: &Daemon, agent: &str, args: Value) -> Outcome {
             if let Some(going) = going {
                 going.notify.store(true, Ordering::SeqCst);
             }
-            Outcome::Done(describe(daemon, &run.id, (Some(1), None), false, false, false))
+            Outcome::Done(describe(
+                daemon,
+                &run.id,
+                (Some(1), None),
+                false,
+                false,
+                false,
+            ))
         }
         "output" => {
             let tail = args.tail.unwrap_or(TAIL_LINES);
@@ -1749,7 +1763,14 @@ pub async fn run_status(daemon: &Daemon, agent: &str, args: Value) -> Outcome {
                     "refused: tail must be 1 to {TAIL_LINES_MAX} lines: read on with start"
                 ));
             }
-            Outcome::Done(describe(daemon, id, (Some(tail), args.start), args.raw, false, false))
+            Outcome::Done(describe(
+                daemon,
+                id,
+                (Some(tail), args.start),
+                args.raw,
+                false,
+                false,
+            ))
         }
         "stop" => {
             if args.tail.is_some() || args.start.is_some() || args.raw {
