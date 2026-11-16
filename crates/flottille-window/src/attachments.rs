@@ -666,6 +666,8 @@ impl Attachments {
     /// a browser gives the picture's address or its HTML as well); else the field takes it.
     pub fn pasted<T: 'static>(&mut self, cx: &mut Context<T>, of: Of<T>) -> bool {
         use gpui_kit::ClipboardEntry;
+        // Ctrl+Shift+V asked for this one inline, whatever it holds; the next is as any other.
+        let inline = std::mem::take(&mut self.inline);
         let Some(clipboard) = cx.read_from_clipboard() else {
             return false;
         };
@@ -674,8 +676,7 @@ impl Attachments {
             .iter()
             .any(|entry| matches!(entry, ClipboardEntry::Image(_)));
         if clipboard.text().is_some() && !has_image {
-            // Ctrl+Shift+V asked for this one inline; the next is as any other.
-            if std::mem::take(&mut self.inline) {
+            if inline {
                 return false;
             }
             return match clipboard
