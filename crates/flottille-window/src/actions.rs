@@ -1104,6 +1104,9 @@ pub enum Outcome {
         name: String,
         start: bool,
         answer: Result<Value, String>,
+        /// The stop was refused because something running needs the service (the code
+        /// `needed`): what started since the list was read.
+        needed: bool,
     },
     /// The output of a service's run.
     ServiceOutput {
@@ -2331,11 +2334,18 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
                     bounds.quick,
                 ),
             };
-            let answer = ask_alone(connect, method, params, bound).and_then(|a| a);
+            let asked = connected(connect)
+                .and_then(|mut conn| conn.ask_within_coded(method, params, bound));
+            let (answer, needed) = match asked {
+                Ok(Ok(answer)) => (Ok(answer), false),
+                Ok(Err(refused)) => (Err(refused.message), refused.code == "needed"),
+                Err(why) => (Err(why), false),
+            };
             Outcome::ServiceActed {
                 name,
                 start,
                 answer,
+                needed,
             }
         }
         Command::ServiceOutput { run } => {

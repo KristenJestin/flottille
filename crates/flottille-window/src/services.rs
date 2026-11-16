@@ -754,15 +754,29 @@ impl ServicesPage {
         cx.notify();
     }
 
-    /// The daemon started or stopped the service, or refused with why: a toast says it.
+    /// The daemon started or stopped the service, or refused with why: a toast says it. A stop
+    /// refused because something running needs it (`needed`), which started since the list was
+    /// read, is asked in the confirmation instead, with the daemon's sentence.
     pub fn acted(
         &mut self,
         name: &str,
         start: bool,
         answer: Result<Value, String>,
+        needed: bool,
         cx: &mut Context<Self>,
     ) {
         self.acting.remove(name);
+        if let (false, true, Err(why)) = (start, needed, &answer) {
+            let said = why
+                .strip_prefix(&format!("Stop {name}? "))
+                .unwrap_or(why)
+                .to_owned();
+            self.stopping = Some(name.to_owned());
+            self.stop_asked = (name.to_owned(), said, Vec::new());
+            self.read(cx);
+            cx.notify();
+            return;
+        }
         let said = match (start, answer) {
             (true, Ok(answer)) => {
                 let started = names_of(&answer["started"]);
