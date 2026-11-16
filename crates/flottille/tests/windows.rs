@@ -342,10 +342,8 @@ fn a_run_given_x11_reaches_it() {
     let reached = reached(&mcp, &place, &socket, &name);
 
     assert_eq!(seen["env"]["DISPLAY"], ":7", "{seen}");
-    assert_eq!(
-        seen["env"]["XAUTHORITY"], "/home/someone/.Xauthority",
-        "{seen}"
-    );
+    // Given, its value masked in what the run prints, as every key's.
+    assert_eq!(seen["env"]["XAUTHORITY"], "[masked]", "{seen}");
     assert_eq!(reached["path"], "connected", "{reached}");
     assert_eq!(reached["abstract"], "connected", "{reached}");
 }
