@@ -1731,11 +1731,16 @@ pub async fn run_status(daemon: &Daemon, agent: &str, args: Value) -> Outcome {
     }
     match args.action.as_deref().unwrap_or("output") {
         "notify" => {
-            if args.tail.is_some() || args.start.is_some() || args.raw {
+            if args.tail.is_some() || args.start.is_some() {
                 return Outcome::Refused(
-                    "refused: tail, start and raw are for action output; action notify only asks \
-                     to be told"
+                    "refused: tail and start are for action output; action notify only asks to \
+                     be told"
                         .into(),
+                );
+            }
+            if args.raw {
+                return Outcome::Refused(
+                    "refused: raw is for action output; action notify only asks to be told".into(),
                 );
             }
             if args.when.as_deref() != Some("ready") {
@@ -1778,10 +1783,17 @@ pub async fn run_status(daemon: &Daemon, agent: &str, args: Value) -> Outcome {
             ))
         }
         "stop" => {
-            if args.tail.is_some() || args.start.is_some() || args.raw {
+            if args.tail.is_some() || args.start.is_some() {
                 return Outcome::Refused(
-                    "refused: tail, start and raw are for action output; action stop only stops \
-                     the run and answers with the end of its output"
+                    "refused: tail and start are for action output; action stop only stops the \
+                     run and answers with the end of its output"
+                        .into(),
+                );
+            }
+            if args.raw {
+                return Outcome::Refused(
+                    "refused: raw is for action output; action stop only stops the run and \
+                     answers with the end of its output"
                         .into(),
                 );
             }
