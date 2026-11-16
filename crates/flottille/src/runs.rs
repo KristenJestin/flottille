@@ -138,6 +138,11 @@ struct Going {
     readied: Notify,
     /// The agent folders of an agent's place as they were before it, put back once it ends.
     guarded: Mutex<Option<Guard>>,
+    /// The services its task needs, those they need included, followed while it runs
+    /// (`services::follow_needs`).
+    needs: Vec<String>,
+    /// Those of them that stopped while it runs, in the order they stopped.
+    needs_stopped: Mutex<Vec<String>>,
     /// Its runtime folder holding the session's Wayland socket alone, when its project lets its
     /// runs open windows: removed once it ends.
     display: Mutex<Option<crate::display::Folder>>,
@@ -568,6 +573,7 @@ pub async fn run(
         Phase::Waited,
         Readying { probe, notify },
         guarded,
+        &needs,
     ) {
         return Outcome::Failed(why);
     }
@@ -676,6 +682,7 @@ pub async fn run_for_user(
             notify: false,
         },
         None,
+        &task.needs,
     )?;
     Ok(id)
 }
@@ -878,6 +885,7 @@ fn start(
     phase: Phase,
     readying: Readying,
     guarded: Option<Guard>,
+    needs: &[String],
 ) -> Result<(), String> {
     crate::projects::refuse_removing(daemon, &run.project).map_err(|refused| refused.message)?;
     let display = shown(daemon, &run).map(|shown| {
@@ -890,6 +898,7 @@ fn start(
         .args(&words[1..])
         .env_clear()
         .envs(&env)
+        .env(crate::children::MARKER, &run.id)
         .current_dir(&run.folder)
         .stdin(Stdio::null())
         .stdout(
@@ -915,7 +924,7 @@ fn start(
     let store = |store: &mut Store| {
         let event = store.create_run(&run, ("run.started", event))?;
         if let Some(started) = start_time(pid) {
-            store.add_run_process(pid, started, &run.id)?;
+            store.add_run_process(pid, started, &run.id, crate::children::boot())?;
         }
         Ok(((), event))
     };
@@ -947,6 +956,8 @@ fn start(
         notify: AtomicBool::new(readying.notify),
         readied: Notify::new(),
         guarded: Mutex::new(guarded),
+        needs: crate::services::reached(daemon, needs),
+        needs_stopped: Mutex::default(),
         display: Mutex::new(display),
     });
     daemon
@@ -956,6 +967,10 @@ fn start(
         .lock()
         .unwrap()
         .insert(going.run.id.clone(), going.clone());
+    if !going.needs.is_empty() {
+        needed(daemon, &going, true);
+        crate::services::follow_needs(daemon, &going.needs);
+    }
     if let Some(probe @ (Probe::Url(_) | Probe::Command(_))) = readying.probe {
         tokio::spawn(probing(daemon.clone(), going.clone(), probe));
     }
@@ -1288,6 +1303,9 @@ async fn follow(
         eprintln!("flottille daemon: run {}: {error}", run.id);
     }
     daemon.mcp.runs.runs.lock().unwrap().remove(&run.id);
+    if !going.needs.is_empty() {
+        needed(&daemon, &going, false);
+    }
     let detached =
         std::mem::replace(&mut *going.phase.lock().unwrap(), Phase::Over) == Phase::Detached;
     let by_user = going.stopped_by_user.load(Ordering::SeqCst);
@@ -1644,6 +1662,7 @@ pub async fn restart_by_user(
             phase,
             readying,
             guarded,
+            &needs,
         )
     }) {
         // The stop was the user's and its end was not told: the agent hears of both.
@@ -1840,6 +1859,9 @@ fn list(daemon: &Daemon, agent: &str) -> Outcome {
             state_text(end, false),
             crate::tree::ago(now.saturating_sub(run.started_at)),
         ));
+        if let Some(said) = needs_said(&needs_stopped(daemon, &run.id)) {
+            text.push_str(&format!(", {said}"));
+        }
         if run.agent.as_deref() != Some(agent)
             && let Some(starter) = run.agent.as_deref()
         {
@@ -1909,6 +1931,12 @@ fn describe(
         .as_ref()
         .is_some_and(|going| going.notify.load(Ordering::SeqCst));
     text.push_str(&readiness_text(&run, end.is_none(), told));
+    if end.is_none()
+        && let Some(going) = &going
+        && let Some(said) = needs_said(&going.needs_stopped.lock().unwrap())
+    {
+        text.push_str(&format!("\n{said}"));
+    }
     if end.is_none() && answer_of_run {
         text.push_str(&format!(
             "\nit keeps going: read it with run_status {{\"run\": \"{id}\"}}, stop it with \
@@ -2190,8 +2218,106 @@ pub(crate) fn start_service(
             notify: false,
         },
         None,
+        &[],
     )?;
     Ok(id)
+}
+
+// What a running task needs (`services::follow_needs`).
+
+/// A run that needs services started or ended: the services page says what running needs them.
+fn needed(daemon: &Daemon, going: &Going, running: bool) {
+    let _ = daemon.emit(
+        "service.needed",
+        json!({"run": going.run.id, "project": going.run.project, "name": going.run.name,
+            "services": going.needs, "running": running}),
+    );
+}
+
+/// A run going on that needs a service.
+pub(crate) struct Needing {
+    pub id: String,
+    pub project: String,
+    /// Its task.
+    pub name: String,
+    pub agent: Option<String>,
+}
+
+/// The runs going on that need the service, through what another service needs included.
+pub(crate) fn needing(daemon: &Daemon, service: &str) -> Vec<Needing> {
+    let mut found: Vec<Needing> = daemon
+        .mcp
+        .runs
+        .runs
+        .lock()
+        .unwrap()
+        .values()
+        .filter(|going| going.end.borrow().is_none() && going.needs.iter().any(|n| n == service))
+        .map(|going| Needing {
+            id: going.run.id.clone(),
+            project: going.run.project.clone(),
+            name: going.run.name.clone().unwrap_or_default(),
+            agent: going.run.agent.clone(),
+        })
+        .collect();
+    found.sort_by(|a, b| (&a.project, &a.name, &a.id).cmp(&(&b.project, &b.name, &b.id)));
+    found
+}
+
+/// The services a run needs that stopped while it runs.
+pub(crate) fn needs_stopped(daemon: &Daemon, id: &str) -> Vec<String> {
+    let going = daemon.mcp.runs.runs.lock().unwrap().get(id).cloned();
+    going.map_or_else(Vec::new, |going| {
+        going.needs_stopped.lock().unwrap().clone()
+    })
+}
+
+/// A service the run needs stopped (`how`, as the agent is told it: `stopped`, `was stopped by
+/// the user`), or runs again (`None`): its state says it, and the agent that started it is told
+/// of the stop, once.
+pub(crate) fn need_changed(daemon: &Arc<Daemon>, id: &str, service: &str, how: Option<&str>) {
+    let going = daemon.mcp.runs.runs.lock().unwrap().get(id).cloned();
+    let Some(going) = going else { return };
+    let changed = {
+        let mut stopped = going.needs_stopped.lock().unwrap();
+        let had = stopped.iter().any(|s| s == service);
+        match how {
+            Some(_) if !had => stopped.push(service.to_owned()),
+            None if had => stopped.retain(|s| s != service),
+            _ => {}
+        }
+        had != how.is_some()
+    };
+    if !changed {
+        return;
+    }
+    let run = &going.run;
+    let _ = daemon.emit(
+        "run.needs",
+        json!({"agent": run.agent, "project": run.project, "run": run.id,
+            "needs_stopped": going.needs_stopped.lock().unwrap().clone()}),
+    );
+    if let (Some(how), Some(agent)) = (how, &run.agent) {
+        let task = run.name.as_deref().unwrap_or_default();
+        let body = format!(
+            "{service}, which {task} needs, {how}. Your run {} of {task} goes on without it: \
+             services {{\"action\": \"start\", \"name\": \"{service}\"}} starts it again.",
+            run.id
+        );
+        deliveries::deliver(
+            daemon,
+            agent,
+            "service-stopped",
+            None,
+            &body,
+            approval::URGENT,
+        );
+    }
+}
+
+/// What a run's state says of the services it needs that stopped: `needs auth, stopped`.
+fn needs_said(stopped: &[String]) -> Option<String> {
+    (!stopped.is_empty()).then(|| format!("needs {}, stopped", stopped.join(", ")))
 }
 
 /// Whether the run is going on.
@@ -2249,27 +2375,66 @@ pub fn tell_guarded_at_start(daemon: &Daemon) {
     }
 }
 
-/// At daemon start: kills the run process groups a previous daemon left running, each only when
-/// its leader is still the process it started, and marks their runs interrupted.
+/// At daemon start, before anything starts a run or tries a service: ends what the runs of a
+/// previous daemon left running, and marks them interrupted. A record of another boot is dropped
+/// and nothing is signalled: its pid and start time say nothing of this boot's processes. Of
+/// this boot, a record whose leader is still the process it started (same pid, same start time)
+/// has its process group and session ended whole: Linux gives a living leader's pid to nobody
+/// else. A record whose leader is gone has only the processes of that session ended that carry
+/// the run's marker (`FLOTTILLE_RUN=<run id>` in their environment, set on every line the daemon
+/// records) and started at or after the leader: a session of the user's own whose leader took
+/// that pid since, and also left, is never touched. A leader's pid taken by a living process
+/// since says nothing of ours is left, and nothing is signalled. The records are removed once
+/// this is done: a daemon killed meanwhile leaves them to the next.
 pub async fn settle_at_start(daemon: &Daemon) {
-    let mut left = Vec::new();
-    let result = daemon.read(|store| {
-        for (pid, started) in store.run_processes()? {
-            if start_time(pid) == Some(started) {
-                signal_group(pid, libc::SIGKILL);
-                left.push(pid);
-                eprintln!("flottille daemon: killed the run process {pid} that was left running");
+    let recorded = daemon
+        .read(|store| store.run_processes())
+        .unwrap_or_else(|error| {
+            eprintln!("flottille daemon: reading the runs' processes: {error}");
+            Vec::new()
+        });
+    let ending = recorded.clone();
+    // Outside the store: ending a session reads all of `/proc`.
+    let _ = tokio::task::spawn_blocking(move || {
+        let boot = crate::children::boot();
+        for process in ending {
+            if boot.is_empty() || process.boot != boot {
+                continue;
             }
-            store.remove_run_process(pid)?;
+            let pid = process.pid;
+            match start_time(pid) {
+                Some(started) if started == process.started => {
+                    signal_group(pid, libc::SIGKILL);
+                    crate::children::end_session_now(pid);
+                    eprintln!(
+                        "flottille daemon: ended the run process {pid} left running, and its \
+                         session"
+                    );
+                }
+                Some(_) => {}
+                None => {
+                    let ended = crate::children::end_session_where(pid, |member| {
+                        crate::children::marked(member, &process.run, process.started)
+                    });
+                    if ended {
+                        eprintln!(
+                            "flottille daemon: ended what the run process {pid} left running in \
+                             its session"
+                        );
+                    }
+                }
+            }
+        }
+    })
+    .await;
+    let removed = daemon.read(|store| {
+        for process in &recorded {
+            store.remove_run_process(process.pid)?;
         }
         Ok(())
     });
-    if let Err(error) = result {
-        eprintln!("flottille daemon: reading the runs' processes: {error}");
-    }
-    // Outside the store: ending a session reads all of `/proc`, more than once.
-    for pid in left {
-        crate::children::end_session(pid).await;
+    if let Err(error) = removed {
+        eprintln!("flottille daemon: removing the runs' processes: {error}");
     }
     let runs = daemon.read(Store::running_runs).unwrap_or_default();
     for run in runs {

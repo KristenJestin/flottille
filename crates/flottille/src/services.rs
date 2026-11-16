@@ -4,7 +4,7 @@
 //! as a run's is, and it stops with the daemon. The `service.*` methods, the agents' `services`
 //! tool, and what starts the services a task needs before it runs.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -29,6 +29,22 @@ const SHOWN_LINES: usize = 20;
 /// The lines of output `service.output` gives by default and at most.
 const TAIL_LINES: usize = 200;
 const TAIL_LINES_MAX: usize = 1000;
+/// How often a service a running task needs is tried at its address, when it runs outside
+/// Flottille; one Flottille runs is known to end at once.
+const FOLLOW_EVERY: Duration = Duration::from_secs(15);
+
+/// [`FOLLOW_EVERY`], or, in a test build, `FLOTTILLE_TEST_FOLLOW_MS`: a test sees the follower
+/// turn many times without waiting minutes for it.
+fn follow_every() -> Duration {
+    if cfg!(debug_assertions)
+        && let Some(ms) = std::env::var("FLOTTILLE_TEST_FOLLOW_MS")
+            .ok()
+            .and_then(|ms| ms.parse().ok())
+    {
+        return Duration::from_millis(ms);
+    }
+    FOLLOW_EVERY
+}
 
 /// What the daemon knows of its services besides their file.
 #[derive(Default)]
@@ -38,6 +54,8 @@ pub struct Live {
     starting: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// One write of the file at a time.
     writing: Mutex<()>,
+    /// The services followed while a run going on needs them (`follow_needs`).
+    following: Mutex<HashSet<String>>,
 }
 
 #[derive(Clone, Default)]
@@ -561,6 +579,7 @@ fn to_json(
         .iter()
         .filter(|need| !now_of(daemon, need).runs())
         .collect();
+    let going = runs::needing(daemon, name);
     json!({
         "name": name,
         "folder": folder,
@@ -578,7 +597,22 @@ fn to_json(
             .get(name)
             .into_iter()
             .flatten()
-            .map(|(project, tasks)| json!({"project": project, "tasks": tasks}))
+            .map(|(project, tasks)| {
+                // Those of its tasks that run now.
+                let running: Vec<&String> = tasks
+                    .iter()
+                    .filter(|task| {
+                        going
+                            .iter()
+                            .any(|run| &run.project == project && &run.name == *task)
+                    })
+                    .collect();
+                json!({"project": project, "tasks": tasks, "running": running})
+            })
+            .collect::<Vec<_>>(),
+        "needed_now": needed_now(daemon, name)
+            .into_iter()
+            .map(|(said, _)| said)
             .collect::<Vec<_>>(),
     })
 }
@@ -620,31 +654,161 @@ fn flottille_runs(daemon: &Daemon, name: &str) -> bool {
 /// service being started is left to its start.
 async fn probed(daemon: &Arc<Daemon>, services: &BTreeMap<String, Service>) {
     for (name, service) in services {
-        let Some(address) = runs::service_address(service) else {
-            continue;
-        };
-        let lock = daemon.services.lock_of(name);
-        let Ok(_starting) = lock.try_lock() else {
-            continue;
-        };
-        let known = daemon.services.known(name);
-        if !known.outside
-            || known
-                .run
-                .as_ref()
-                .is_some_and(|id| runs::is_going(daemon, id))
+        tried_again(daemon, name, service).await;
+    }
+}
+
+/// [`probed`], of one service.
+async fn tried_again(daemon: &Daemon, name: &str, service: &Service) {
+    let Some(address) = runs::service_address(service) else {
+        return;
+    };
+    let lock = daemon.services.lock_of(name);
+    let Ok(_starting) = lock.try_lock() else {
+        return;
+    };
+    let known = daemon.services.known(name);
+    if !known.outside
+        || known
+            .run
+            .as_ref()
+            .is_some_and(|id| runs::is_going(daemon, id))
+    {
+        return;
+    }
+    if !crate::ready::answers(&address).await {
+        daemon.services.set(
+            name,
+            Known {
+                outside: false,
+                ..known
+            },
+        );
+    }
+}
+
+// What a running task needs.
+
+/// The services `needs` names, those they need included, in the order they start; the names
+/// alone when the file cannot be read.
+pub fn reached(daemon: &Daemon, needs: &[String]) -> Vec<String> {
+    if needs.is_empty() {
+        return Vec::new();
+    }
+    match load(daemon) {
+        Ok(services) => service::in_order(&services, needs),
+        Err(_) => needs.to_vec(),
+    }
+}
+
+/// A run that needs these services started: each is followed while a run going on needs it,
+/// one follower by service.
+pub fn follow_needs(daemon: &Arc<Daemon>, needs: &[String]) {
+    for name in needs {
+        if daemon
+            .services
+            .following
+            .lock()
+            .unwrap()
+            .insert(name.clone())
         {
-            continue;
+            tokio::spawn(follow_need(daemon.clone(), name.clone()));
         }
-        if !crate::ready::answers(&address).await {
-            daemon.services.set(
-                name,
-                Known {
-                    outside: false,
-                    ..known
-                },
-            );
+    }
+}
+
+/// Follows a service while a run going on needs it, and says to each such run when it stops and
+/// when it runs again. The end of a run of Flottille's is known at once; a service running
+/// outside Flottille is tried every 15 s at its address (a connection, 5 s at most), never by its
+/// `ready` command, which no gate judged for this. What the daemon's stop interrupts is said to
+/// nobody: what needs it stops with it.
+async fn follow_need(daemon: Arc<Daemon>, name: String) {
+    loop {
+        let needing = {
+            let mut following = daemon.services.following.lock().unwrap();
+            let needing = runs::needing(&daemon, &name);
+            if needing.is_empty() {
+                following.remove(&name);
+                return;
+            }
+            needing
+        };
+        let known = daemon.services.known(&name);
+        let how = match now_of(&daemon, &name) {
+            state if state.runs() => None,
+            _ => match known.run.as_deref().and_then(|id| runs::view(&daemon, id)) {
+                Some(view) if view.run.state == RunState::Interrupted => {
+                    daemon.services.following.lock().unwrap().remove(&name);
+                    return;
+                }
+                Some(view) if view.run.state == RunState::Stopped => {
+                    Some("was stopped by the user")
+                }
+                _ => Some("stopped"),
+            },
+        };
+        for run in &needing {
+            runs::need_changed(&daemon, &run.id, &name, how);
         }
+        match known.run.filter(|id| runs::is_going(&daemon, id)) {
+            Some(id) => {
+                tokio::select! {
+                    () = runs::wait_for_end(&daemon, &id) => {}
+                    () = tokio::time::sleep(follow_every()) => {}
+                }
+            }
+            None => {
+                tokio::time::sleep(follow_every()).await;
+                if let Ok(services) = load(&daemon)
+                    && let Some(service) = services.get(&name)
+                {
+                    tried_again(&daemon, &name, service).await;
+                }
+            }
+        }
+    }
+}
+
+/// What runs now and needs the service, in words, with the agents of those runs: each run of a
+/// task whose needs reach it (`palbank's dev-api`), and each other service that runs and needs
+/// it, directly or through another (`the service file`).
+pub fn needed_now(daemon: &Daemon, name: &str) -> Vec<(String, Option<String>)> {
+    let mut found: Vec<(String, Option<String>)> = Vec::new();
+    for run in runs::needing(daemon, name) {
+        let said = format!("{}'s {}", run.project, run.name);
+        if !found.iter().any(|(each, _)| *each == said) {
+            found.push((said, run.agent));
+        }
+    }
+    if let Ok(services) = load(daemon) {
+        for (other, service) in &services {
+            if other != name
+                && service::in_order(&services, &service.needs).contains(&name.to_owned())
+                && now_of(daemon, other).runs()
+            {
+                found.push((format!("the service {other}"), None));
+            }
+        }
+    }
+    found
+}
+
+/// [`needed_now`] in one sentence: `palbank's dev-api needs it and is running: it goes on without
+/// it.`; `None` when nothing running needs it.
+pub fn needed_now_said(daemon: &Daemon, name: &str) -> Option<String> {
+    let names: Vec<String> = needed_now(daemon, name)
+        .into_iter()
+        .map(|(said, _)| said)
+        .collect();
+    match names.as_slice() {
+        [] => None,
+        [one] => Some(format!(
+            "{one} needs it and is running: it goes on without it."
+        )),
+        [first @ .., last] => Some(format!(
+            "{} and {last} need it and are running: they go on without it.",
+            first.join(", ")
+        )),
     }
 }
 
@@ -881,6 +1045,15 @@ fn split(
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct StopAsked {
+    name: String,
+    /// Stops it even when something running needs it.
+    #[serde(default)]
+    force: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct OutputAsked {
     name: String,
     tail: Option<usize>,
@@ -938,7 +1111,14 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
             Ok(json!({"service": shown, "started": started}))
         }
         "service.stop" => {
-            let Named { name } = serde_json::from_value(params)?;
+            let StopAsked { name, force } = serde_json::from_value(params)?;
+            // What runs and needs it is said first: the user stops it knowing.
+            if !force
+                && flottille_runs(&daemon, &name)
+                && let Some(said) = needed_now_said(&daemon, &name)
+            {
+                return Err(Failure::new("needed", format!("Stop {name}? {said}")));
+            }
             stop(&daemon, &name).await?;
             let services = load(&daemon)?;
             let shown = to_json(&daemon, &services, &needed(&daemon, &services), &name);
@@ -1145,9 +1325,11 @@ pub fn says(
                 true => "no project's task needs it".to_owned(),
                 false => format!("the tasks that need it: {}", needed.join("; ")),
             };
-            Ok(vec![format!(
+            let mut says = vec![format!(
                 "Stop the service {name}, shared by every project ({by})"
-            )])
+            )];
+            says.extend(needed_now_said(daemon, name));
+            Ok(says)
         }
         _ => {
             services.get(name).ok_or_else(unknown)?;

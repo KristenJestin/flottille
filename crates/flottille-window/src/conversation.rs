@@ -3817,6 +3817,7 @@ mod tests {
             ready: None,
             url: None,
             service: false,
+            needs_stopped: Vec::new(),
         }
     }
 

@@ -263,9 +263,16 @@ fn an_agent_reading_or_writing_the_remote_folder_is_refused_in_every_mode() {
     let device = folder.join("device.key");
     std::fs::write(&device, b"fake-device-key-of-the-clients-.").unwrap();
     std::fs::set_permissions(&device, PermissionsExt::from_mode(0o600)).unwrap();
+    // The machines it trusts and the addresses declared by hand, beside the keys.
+    let peers = folder.join("peers.json");
+    let addresses = folder.join("addresses.json");
+    std::fs::write(&peers, br#"{"machines": []}"#).unwrap();
+    std::fs::write(&addresses, br#"{"addresses": []}"#).unwrap();
     let before = [
         std::fs::read(&machine).unwrap(),
         std::fs::read(&device).unwrap(),
+        std::fs::read(&peers).unwrap(),
+        std::fs::read(&addresses).unwrap(),
     ];
     // A link the agent could make in its place, to the key folder.
     std::os::unix::fs::symlink(&folder, place.join("keys")).unwrap();
@@ -299,6 +306,22 @@ fn an_agent_reading_or_writing_the_remote_folder_is_refused_in_every_mode() {
         ),
         ("run", json!({"line": "cp README.md keys/machine.key"})),
         ("run", json!({"line": format!("rm -f {}", shown(&device))})),
+        ("fs_read", json!({"path": peers})),
+        ("fs_read", json!({"path": addresses})),
+        ("fs_read", json!({"path": "keys/peers.json"})),
+        (
+            "fs_write",
+            json!({"path": peers, "content": "{\"machines\": [{\"name\": \"mine\"}]}"}),
+        ),
+        (
+            "fs_edit",
+            json!({"path": addresses, "edits": [{"old": "[]", "new": "[\"192.0.2.66\"]"}]}),
+        ),
+        ("run", json!({"line": format!("cat {}", shown(&peers))})),
+        (
+            "run",
+            json!({"line": format!("cp README.md {}", shown(&addresses))}),
+        ),
     ];
     for mode in ["ask", "auto", "full"] {
         let output = user.run(&["agent", "mode", &id, mode]);
@@ -321,7 +344,9 @@ fn an_agent_reading_or_writing_the_remote_folder_is_refused_in_every_mode() {
     assert_eq!(
         [
             std::fs::read(&machine).unwrap(),
-            std::fs::read(&device).unwrap()
+            std::fs::read(&device).unwrap(),
+            std::fs::read(&peers).unwrap(),
+            std::fs::read(&addresses).unwrap(),
         ],
         before
     );

@@ -428,10 +428,12 @@ pub enum Command {
         method: &'static str,
         params: Value,
     },
-    /// Starts a service (and what it needs first), or stops it.
+    /// Starts a service (and what it needs first), or stops it; `force` stops it even though
+    /// something running needs it, which the user confirmed.
     ServiceAct {
         name: String,
         start: bool,
+        force: bool,
     },
     /// The output of a service's run, as a run's.
     ServiceOutput {
@@ -1120,6 +1122,9 @@ pub enum Outcome {
         name: String,
         start: bool,
         answer: Result<Value, String>,
+        /// The stop was refused because something running needs the service (the code
+        /// `needed`): what started since the list was read.
+        needed: bool,
     },
     /// The output of a service's run.
     ServiceOutput {
@@ -2338,17 +2343,28 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
             };
             Outcome::ServiceWritten { refused }
         }
-        Command::ServiceAct { name, start } => {
+        Command::ServiceAct { name, start, force } => {
             // A start waits for what the service needs to be ready.
-            let (method, bound) = match start {
-                true => ("service.start", bounds.slow),
-                false => ("service.stop", bounds.quick),
+            let (method, params, bound) = match start {
+                true => ("service.start", json!({"name": name}), bounds.slow),
+                false => (
+                    "service.stop",
+                    json!({"name": name, "force": force}),
+                    bounds.quick,
+                ),
             };
-            let answer = ask_alone(connect, method, json!({"name": name}), bound).and_then(|a| a);
+            let asked = connected(connect)
+                .and_then(|mut conn| conn.ask_within_coded(method, params, bound));
+            let (answer, needed) = match asked {
+                Ok(Ok(answer)) => (Ok(answer), false),
+                Ok(Err(refused)) => (Err(refused.message), refused.code == "needed"),
+                Err(why) => (Err(why), false),
+            };
             Outcome::ServiceActed {
                 name,
                 start,
                 answer,
+                needed,
             }
         }
         Command::ServiceOutput { run } => {

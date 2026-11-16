@@ -224,6 +224,31 @@ $ flottille update --channel alpha --branch feat/specs
 ~/.local/bin/flottille is now 0.3.1-alpha.feat-specs.4.
 ```
 
+### `flottille remote address list [--json]`
+
+With remote on (`docs/remote.md`, "Identity and keys"), the addresses another machine reaches this
+one at: the one its link listens on, `found` (its interfaces' when it listens on all of them; none
+until `[remote] listen` is set), and those declared by hand, `declared`. Flottille finds no path by itself, and relays nothing: how two
+machines reach each other (a LAN, a VPN, a public address, a tunnel) is the user's to arrange.
+`remote.machines` (`docs/protocol.md`).
+
+```
+$ flottille remote address list
+192.168.1.20:7447  found
+100.64.0.7:7447  declared
+```
+
+### `flottille remote address add <address> [--json]`
+
+Declares an address of this machine: a VPN address, a DNS name, a forwarded port, with its port
+when it is not the link's own (`100.64.0.7`, `server.example.net:7447`). It is told at once to the
+machines linked to this one. `remote.address.add`.
+
+### `flottille remote address remove <address> [--json]`
+
+Removes an address declared by hand, and tells the machines linked to this one.
+`remote.address.remove`.
+
 ## Extensions and specs
 
 Parts of Flottille that can be turned off with Flottille still working (`docs/extensions.md`).
@@ -1305,9 +1330,12 @@ Removes it from `services.toml`, refused while a service or a project's task nee
 Starts it, what it needs first and waited for: `Started mongo, auth.`, or `Nothing started: auth
 runs.`, then its line (`service.start`).
 
-### `flottille service stop <name>`
+### `flottille service stop <name> [--force]`
 
-Stops it and what it started; what it needs and what needs it go on (`service.stop`).
+Stops it and what it started; what it needs and what needs it go on (`service.stop`). While
+something running needs it (a project's task, another service), it is refused, saying what
+(`Stop auth? app's api needs it and is running: it goes on without it.`) and that `--force` stops
+it anyway.
 
 ### `flottille service output <name> [--tail N]`
 

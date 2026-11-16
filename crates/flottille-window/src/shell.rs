@@ -1826,9 +1826,10 @@ impl Shell {
                 name,
                 start,
                 answer,
+                needed,
             } => {
                 self.services
-                    .update(cx, |page, cx| page.acted(&name, start, answer, cx));
+                    .update(cx, |page, cx| page.acted(&name, start, answer, needed, cx));
             }
             Outcome::ServiceOutput { output } => {
                 self.services

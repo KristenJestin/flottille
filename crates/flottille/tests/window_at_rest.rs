@@ -1714,3 +1714,65 @@ fn the_window_draws_no_frame_at_rest_on_the_session_page_with_a_pasted_text(
         "(frames drawn, frames asked)"
     );
 }
+
+#[gpui_kit::test]
+fn the_services_page_is_at_rest_with_the_stop_dialog_open_then_closed(cx: &mut TestAppContext) {
+    let user = User::with_fake_agent();
+    idle_session(&user);
+    std::fs::create_dir_all(user.path("bin")).unwrap();
+    let server = user.path("bin/fake-server");
+    std::os::unix::fs::symlink(common::fake_server(), &server).unwrap();
+    std::fs::write(
+        user.path("config/flottille/services.toml"),
+        format!(
+            "[services.db]\nline = \"{} --listen 0\"\nready = {{ line = \"listening on\" }}\n",
+            server.display()
+        ),
+    )
+    .unwrap();
+    // A task that runs and needs it: Stop asks first.
+    user.call(
+        "task.add",
+        json!({"project": "app", "name": "api", "line": format!("{} --listen 0", server.display()),
+            "serve": true, "needs": ["db"]}),
+    )
+    .unwrap();
+    user.call("task.run", json!({"project": "app", "name": "api"}))
+        .unwrap();
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the project is known", |cx| {
+        shell.read_with(cx, |s, _| !s.snapshot().projects.is_empty())
+    });
+    cx.update(|window, cx| window.click("services", cx));
+    until(
+        &shell,
+        cx,
+        "db is listed, needed by the running api",
+        |cx| {
+            cx.update(|window, _| {
+                window
+                    .try_find("service-needed-db")
+                    .and_then(|found| found.label().map(str::to_owned))
+                    .is_some_and(|label| label.contains("api running"))
+            })
+        },
+    );
+    settle(&shell, cx);
+
+    cx.update(|window, cx| window.click("service-stop-db", cx));
+    settle(&shell, cx);
+    assert!(cx.update(|window, _| window.try_find("service-stopping").is_some()));
+    assert_eq!(
+        frames_at_rest(&shell, cx),
+        (0, 0),
+        "open: (frames drawn, frames asked)"
+    );
+    cx.update(|window, cx| window.click("service-stopping-cancel", cx));
+    settle(&shell, cx);
+
+    assert_eq!(
+        frames_at_rest(&shell, cx),
+        (0, 0),
+        "closed: (frames drawn, frames asked)"
+    );
+}

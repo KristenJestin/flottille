@@ -8986,6 +8986,7 @@ pub(crate) fn pull_row(id: ElementId, pull: &PullRequest, cx: &App) -> Stateful<
     let (mark, color, said) = match pull.mark.as_deref() {
         Some("passing") => (Some(Icon::Check), p.ok, "checks passing"),
         Some("failing") => (Some(Icon::Close), p.fail, "checks failing"),
+        Some("stopped") => (Some(Icon::Stopped), p.faint, "checks stopped"),
         Some(_) => (Some(Icon::Running), p.run, "checks pending"),
         None => (None, p.faint, "no checks"),
     };

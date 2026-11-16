@@ -1,0 +1,453 @@
+//! The transport under the link (`docs/remote.md`, "The transport"): QUIC, whose TLS runs on the
+//! machines' own Ed25519 keys, sent as raw public keys (RFC 7250) rather than certificates. The
+//! only module that names the libraries it is made of: the rest of the crate, and everything
+//! above it, sees Flottille's types, so that changing the transport changes this file.
+//!
+//! It reaches what it is given: an endpoint listens on the address it is configured with, and
+//! dials the addresses its caller names for a key. No relay, no NAT traversal, no discovery: how
+//! two machines reach each other (a LAN, a VPN, a public address, a tunnel) is the user's.
+
+use std::net::SocketAddr;
+use std::sync::Arc;
+use std::time::Duration;
+
+use quinn::crypto::rustls::{HandshakeData, QuicClientConfig, QuicServerConfig};
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::crypto::{CryptoProvider, WebPkiSupportedAlgorithms};
+use rustls::pki_types::{
+    CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName, SubjectPublicKeyInfoDer,
+    UnixTime,
+};
+use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
+use rustls::sign::CertifiedKey;
+use rustls::{DigitallySignedStruct, DistinguishedName, SignatureScheme};
+use zeroize::Zeroizing;
+
+/// An Ed25519 public key's SubjectPublicKeyInfo, before its 32 bytes (RFC 8410).
+const SPKI_PREFIX: [u8; 12] = [
+    0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
+];
+/// An Ed25519 private key in PKCS #8, before its 32 bytes (RFC 8410).
+const PKCS8_PREFIX: [u8; 16] = [
+    0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04, 0x20,
+];
+/// A link with nothing to say still says so this often, so that it stays open.
+const KEEP_ALIVE: Duration = Duration::from_secs(5);
+/// A link that hears nothing for this long is lost: the other side went without closing it.
+const IDLE: Duration = Duration::from_secs(15);
+/// The name a client gives in its hello. Nothing checks it: the key is the identity.
+const SERVER_NAME: &str = "flottille";
+/// The most connections that came in and are not taken yet, and what they may hold buffered all
+/// together: a host that opens many and finishes none cannot fill the machine's memory.
+const MOST_INCOMING: usize = 32;
+const INCOMING_BUFFERED: u64 = 1 << 20;
+
+/// Why the transport failed: the other side closed with a reason of its own, or the connection
+/// was lost or never made.
+pub(crate) enum Failure {
+    Closed(String),
+    Lost(String),
+}
+
+/// One machine's endpoint: a UDP socket that accepts links and dials them; or, when it listens
+/// nowhere, a socket opened at its first dial, which accepts nothing.
+pub(crate) struct Transport {
+    endpoint: std::sync::Mutex<Option<quinn::Endpoint>>,
+    listens: bool,
+    key: Arc<CertifiedKey>,
+    provider: Arc<CryptoProvider>,
+}
+
+impl Transport {
+    /// Listens nowhere: it only dials, with the key whose private half is `seed`.
+    pub(crate) fn dialler(seed: &[u8; 32], public: &[u8; 32]) -> Result<Transport, String> {
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let key = certified(seed, public, &provider)?;
+        Ok(Transport {
+            endpoint: std::sync::Mutex::new(None),
+            listens: false,
+            key,
+            provider,
+        })
+    }
+
+    /// Listens at `listen` with the key whose private half is `seed`, for the protocol names
+    /// `alpns`.
+    pub(crate) fn bind(
+        seed: &[u8; 32],
+        public: &[u8; 32],
+        listen: SocketAddr,
+        alpns: &[&[u8]],
+    ) -> Result<Transport, String> {
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let key = certified(seed, public, &provider)?;
+        let mut tls = rustls::ServerConfig::builder_with_provider(provider.clone())
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .map_err(|error| error.to_string())?
+            .with_client_cert_verifier(Arc::new(AnyKey(provider.signature_verification_algorithms)))
+            .with_cert_resolver(Arc::new(
+                rustls::server::AlwaysResolvesServerRawPublicKeys::new(key.clone()),
+            ));
+        tls.alpn_protocols = alpns.iter().map(|alpn| alpn.to_vec()).collect();
+        let quic = QuicServerConfig::try_from(tls).map_err(|error| error.to_string())?;
+        let mut server = quinn::ServerConfig::with_crypto(Arc::new(quic));
+        server.transport_config(Arc::new(transport_config()));
+        server
+            .max_incoming(MOST_INCOMING)
+            .incoming_buffer_size_total(INCOMING_BUFFERED);
+        let endpoint = quinn::Endpoint::server(server, listen)
+            .map_err(|error| format!("cannot listen on {listen}: {error}"))?;
+        Ok(Transport {
+            endpoint: std::sync::Mutex::new(Some(endpoint)),
+            listens: true,
+            key,
+            provider,
+        })
+    }
+
+    /// The socket it listens on.
+    pub(crate) fn local(&self) -> Option<SocketAddr> {
+        if !self.listens {
+            return None;
+        }
+        self.endpoint.lock().unwrap().as_ref()?.local_addr().ok()
+    }
+
+    /// The endpoint, its socket opened now when it listens nowhere and never dialled yet.
+    fn endpoint(&self) -> Result<quinn::Endpoint, String> {
+        let mut endpoint = self.endpoint.lock().unwrap();
+        if let Some(endpoint) = endpoint.as_ref() {
+            return Ok(endpoint.clone());
+        }
+        // Both families when the system allows it, IPv4 alone otherwise.
+        let opened = quinn::Endpoint::client(SocketAddr::from(([0u16; 8], 0)))
+            .or_else(|_| quinn::Endpoint::client(SocketAddr::from(([0u8; 4], 0))))
+            .map_err(|error| format!("cannot open a socket to dial: {error}"))?;
+        *endpoint = Some(opened.clone());
+        Ok(opened)
+    }
+
+    /// A connection to the key `peer` at `address`, for the protocol name `alpn`: refused unless
+    /// the other side proves it holds that key.
+    pub(crate) async fn connect(
+        &self,
+        peer: &[u8; 32],
+        address: SocketAddr,
+        alpn: &[u8],
+    ) -> Result<Conn, Failure> {
+        let verifier = ExactKey {
+            spki: spki(peer),
+            algorithms: self.provider.signature_verification_algorithms,
+        };
+        let mut tls = rustls::ClientConfig::builder_with_provider(self.provider.clone())
+            .with_protocol_versions(&[&rustls::version::TLS13])
+            .map_err(|error| Failure::Lost(error.to_string()))?
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(verifier))
+            .with_client_cert_resolver(Arc::new(
+                rustls::client::AlwaysResolvesClientRawPublicKeys::new(self.key.clone()),
+            ));
+        tls.alpn_protocols = vec![alpn.to_vec()];
+        let quic =
+            QuicClientConfig::try_from(tls).map_err(|error| Failure::Lost(error.to_string()))?;
+        let mut client = quinn::ClientConfig::new(Arc::new(quic));
+        client.transport_config(Arc::new(transport_config()));
+        let connecting = self
+            .endpoint()
+            .map_err(Failure::Lost)?
+            .connect_with(client, address, SERVER_NAME)
+            .map_err(|error| Failure::Lost(error.to_string()))?;
+        connecting.await.map(Conn).map_err(failure)
+    }
+
+    /// The next connection that comes from an address that proved it is the sender's, `None`
+    /// once the endpoint is closed or when it listens nowhere. One from an address not proved yet
+    /// is asked to prove it (a QUIC retry) and is not handed over: a forged source costs nothing
+    /// but one packet.
+    pub(crate) async fn accept(&self) -> Option<Incoming> {
+        if !self.listens {
+            return None;
+        }
+        let endpoint = self.endpoint.lock().unwrap().clone()?;
+        loop {
+            let incoming = endpoint.accept().await?;
+            if incoming.remote_address_validated() {
+                return Some(Incoming(incoming));
+            }
+            if let Err(error) = incoming.retry() {
+                error.into_incoming().ignore();
+            }
+        }
+    }
+
+    /// Closes every connection, and waits a little for the other sides to be told.
+    pub(crate) async fn close(&self) {
+        let Some(endpoint) = self.endpoint.lock().unwrap().clone() else {
+            return;
+        };
+        endpoint.close(0u32.into(), b"this machine stops");
+        let _ = tokio::time::timeout(Duration::from_secs(1), endpoint.wait_idle()).await;
+    }
+}
+
+fn transport_config() -> quinn::TransportConfig {
+    let mut config = quinn::TransportConfig::default();
+    config.keep_alive_interval(Some(KEEP_ALIVE));
+    config.max_idle_timeout(Some(IDLE.try_into().expect("a short idle timeout")));
+    config
+}
+
+/// The private key as rustls signs with it, and the public key it shows.
+fn certified(
+    seed: &[u8; 32],
+    public: &[u8; 32],
+    provider: &CryptoProvider,
+) -> Result<Arc<CertifiedKey>, String> {
+    let mut der = Zeroizing::new(Vec::with_capacity(PKCS8_PREFIX.len() + seed.len()));
+    der.extend_from_slice(&PKCS8_PREFIX);
+    der.extend_from_slice(seed);
+    let private = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(der.as_slice()).clone_key());
+    let signing = provider
+        .key_provider
+        .load_private_key(private)
+        .map_err(|_| "the machine key cannot sign for the link".to_owned())?;
+    Ok(Arc::new(CertifiedKey::new(
+        vec![CertificateDer::from(spki(public))],
+        signing,
+    )))
+}
+
+fn spki(public: &[u8; 32]) -> Vec<u8> {
+    let mut der = SPKI_PREFIX.to_vec();
+    der.extend_from_slice(public);
+    der
+}
+
+/// The Ed25519 key a raw public key is, when it is one.
+fn key_of(der: &[u8]) -> Option<[u8; 32]> {
+    der.strip_prefix(SPKI_PREFIX.as_slice())?.try_into().ok()
+}
+
+/// A connection that came in, its TLS not done yet.
+pub(crate) struct Incoming(quinn::Incoming);
+
+impl Incoming {
+    /// The address it came from, proved by the retry.
+    pub(crate) fn from(&self) -> SocketAddr {
+        self.0.remote_address()
+    }
+
+    /// Refuses it at once, telling the other side.
+    pub(crate) fn refuse(self) {
+        self.0.refuse();
+    }
+
+    pub(crate) async fn finish(self) -> Result<Conn, Failure> {
+        self.0.await.map(Conn).map_err(failure)
+    }
+}
+
+/// A connection, its TLS done: the other side holds the key it showed.
+#[derive(Clone)]
+pub(crate) struct Conn(quinn::Connection);
+
+impl Conn {
+    /// The other side's key.
+    pub(crate) fn peer(&self) -> Option<[u8; 32]> {
+        let identity = self.0.peer_identity()?;
+        let shown = identity.downcast::<Vec<CertificateDer<'static>>>().ok()?;
+        key_of(shown.first()?)
+    }
+
+    /// The protocol name both sides agreed on.
+    pub(crate) fn alpn(&self) -> Option<Vec<u8>> {
+        let data = self.0.handshake_data()?;
+        data.downcast::<HandshakeData>().ok()?.protocol
+    }
+
+    /// Sends `frame` on a stream of its own, and reads the other side's answer on it.
+    pub(crate) async fn request(&self, frame: &[u8], limit: usize) -> Result<Vec<u8>, Failure> {
+        let (mut send, mut recv) = self.0.open_bi().await.map_err(failure)?;
+        send.write_all(frame).await.map_err(write_failure)?;
+        let _ = send.finish();
+        recv.read_to_end(limit).await.map_err(read_failure)
+    }
+
+    /// The next frame the other side sends, with the stream to answer it on; `None` once the
+    /// connection is gone. A stream that fails alone is passed over.
+    pub(crate) async fn next(&self, limit: usize) -> Option<(Vec<u8>, Reply)> {
+        loop {
+            let (send, mut recv) = self.0.accept_bi().await.ok()?;
+            if let Ok(frame) = recv.read_to_end(limit).await {
+                return Some((frame, Reply(send)));
+            }
+        }
+    }
+
+    pub(crate) fn close(&self, code: u32, reason: &str) {
+        self.0.close(code.into(), reason.as_bytes());
+    }
+
+    /// Waits until the connection is gone; why.
+    pub(crate) async fn closed(&self) -> Failure {
+        failure(self.0.closed().await)
+    }
+}
+
+/// Where the answer to one frame goes.
+pub(crate) struct Reply(quinn::SendStream);
+
+impl Reply {
+    pub(crate) async fn send(mut self, frame: &[u8]) {
+        if self.0.write_all(frame).await.is_ok() {
+            let _ = self.0.finish();
+            // The answer is sent before the stream is let go.
+            let _ = self.0.stopped().await;
+        }
+    }
+
+    pub(crate) async fn send_owned(self, frame: Vec<u8>) {
+        self.send(&frame).await;
+    }
+}
+
+fn failure(error: quinn::ConnectionError) -> Failure {
+    match error {
+        quinn::ConnectionError::ApplicationClosed(close) => {
+            Failure::Closed(String::from_utf8_lossy(&close.reason).into_owned())
+        }
+        other => Failure::Lost(other.to_string()),
+    }
+}
+
+fn write_failure(error: quinn::WriteError) -> Failure {
+    match error {
+        quinn::WriteError::ConnectionLost(error) => failure(error),
+        other => Failure::Lost(other.to_string()),
+    }
+}
+
+fn read_failure(error: quinn::ReadToEndError) -> Failure {
+    match error {
+        quinn::ReadToEndError::Read(quinn::ReadError::ConnectionLost(error)) => failure(error),
+        quinn::ReadToEndError::TooLong => Failure::Lost("a frame is too long".to_owned()),
+        other => Failure::Lost(other.to_string()),
+    }
+}
+
+/// A client checks that the server holds the very key it dialled.
+#[derive(Debug)]
+struct ExactKey {
+    spki: Vec<u8>,
+    algorithms: WebPkiSupportedAlgorithms,
+}
+
+impl ServerCertVerifier for ExactKey {
+    fn verify_server_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: UnixTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        if end_entity.as_ref() == self.spki.as_slice() {
+            Ok(ServerCertVerified::assertion())
+        } else {
+            Err(rustls::Error::InvalidCertificate(
+                rustls::CertificateError::ApplicationVerificationFailure,
+            ))
+        }
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        Err(rustls::Error::General("TLS 1.2 is not spoken".to_owned()))
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        verify(message, cert, dss, &self.algorithms)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        vec![SignatureScheme::ED25519]
+    }
+
+    fn requires_raw_public_keys(&self) -> bool {
+        true
+    }
+}
+
+/// A server takes any Ed25519 key a client proves it holds: whether it trusts that key is the
+/// link's to say, which can then tell the other side why it refuses.
+#[derive(Debug)]
+struct AnyKey(WebPkiSupportedAlgorithms);
+
+impl ClientCertVerifier for AnyKey {
+    fn root_hint_subjects(&self) -> &[DistinguishedName] {
+        &[]
+    }
+
+    fn verify_client_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _now: UnixTime,
+    ) -> Result<ClientCertVerified, rustls::Error> {
+        match key_of(end_entity) {
+            Some(_) => Ok(ClientCertVerified::assertion()),
+            None => Err(rustls::Error::InvalidCertificate(
+                rustls::CertificateError::BadEncoding,
+            )),
+        }
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        Err(rustls::Error::General("TLS 1.2 is not spoken".to_owned()))
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        verify(message, cert, dss, &self.0)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        vec![SignatureScheme::ED25519]
+    }
+
+    fn requires_raw_public_keys(&self) -> bool {
+        true
+    }
+}
+
+fn verify(
+    message: &[u8],
+    cert: &CertificateDer<'_>,
+    dss: &DigitallySignedStruct,
+    algorithms: &WebPkiSupportedAlgorithms,
+) -> Result<HandshakeSignatureValid, rustls::Error> {
+    rustls::crypto::verify_tls13_signature_with_raw_key(
+        message,
+        &SubjectPublicKeyInfoDer::from(cert.as_ref()),
+        dss,
+        algorithms,
+    )
+}

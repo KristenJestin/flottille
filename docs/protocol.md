@@ -923,6 +923,30 @@ The requests agents made for an entry (`docs/vault.md`, "Asking the user for an 
 - `vault.ask_dismiss {ask}` closes it, answers `{"dismissed": <request>}`, and hands each agent
   `the user dismissed the request …`; `not-found` when no such request is open.
 
+### The remote methods
+
+The link to the user's other machines (`docs/remote.md`, "Architecture", "The transport"), with
+remote on (`[remote] on = true` in `daemon.toml`). With it off, each is `refused` (`remote is off:
+turn it on in daemon.toml ([remote] on = true)`); with a link that could not listen, `unavailable`,
+with the reason. No method answers a private key.
+
+- `remote.machines` answers `{"this": {"key", "fingerprint", "listening", "addresses": [{"address",
+  "how"}]}, "machines": [{"name", "key", "fingerprint", "state", "since", "reason",
+  "addresses"}]}`: this machine's public key, the socket its link listens on (`null` until
+  `[remote] listen` is set), and its addresses,
+  `how` being `found` (the one it listens on, or its interfaces' when it listens on all of them) or
+  `declared` (by hand, with the link's port when it gave none); then each machine it trusts, its
+  `state` `online`, `offline` or `needs an update`, `since` when it is so (milliseconds since the
+  Unix epoch), `reason` why it is not online (`server refused the link: …`, the sentence of
+  `docs/remote.md`, "The version"), or `null`, and `addresses` those it knows it at: given (by
+  the hub, by hand), then told by it.
+- `remote.address.add {address}` declares an address of this machine: a host name or an IP
+  address, and its port when it is not the link's own (`100.64.0.7`, `server.example.net:7447`).
+  It answers `this` as above, and is told at once to the machines linked to this one.
+  `invalid-params` for what is not an address; one declared already changes nothing.
+- `remote.address.remove {address}` removes one, answers and tells as `add` does; `not-found` when
+  it was not declared.
+
 ### The skill methods
 
 A project's skills (`docs/skills.md`). The daemon edits the project's file in place, the rest of it
@@ -1358,7 +1382,8 @@ a result:
   "run": "5d2c0f1a9b3e",
   "address": "http://localhost:3001",
   "needs_stopped": [],
-  "needed_by": [{"project": "app", "tasks": ["api"]}]
+  "needed_by": [{"project": "app", "tasks": ["api", "web"], "running": ["api"]}],
+  "needed_now": ["app's api"]
 }
 ```
 
@@ -1369,7 +1394,9 @@ as the file says them. `state` is `stopped`, `starting`, `ready`, `running` (it 
 service's run has an empty `project` and is not listed by `run.list`. `address` is its run's
 address, or the file's. `needs_stopped` lists what it needs that does not run. `needed_by` lists
 the projects whose tasks need it, directly or through another service's `needs`, each with those
-tasks. `not-found` for a
+tasks and, in `running`, those of them that run now. `needed_now` says what runs now and needs it:
+each running task's (`app's api`) and each other service that runs and needs it, directly or not
+(`the service file`). `not-found` for a
 service the file does not hold, `invalid-config` when the file cannot be used, `refused` for a
 write the file would refuse (nothing is written).
 
@@ -1407,9 +1434,12 @@ started again (`started` is empty), nor one that answers already (its state is t
 
 #### `service.stop`
 
-`{"name"}`: `{"service": {...}}`, once it ended: its whole process group, as `run.stop` does.
-What it needs and what needs it go on. `refused` when it is not running, or runs outside
-Flottille, which does not stop it.
+`{"name", "force"?}`: `{"service": {...}}`, once it ended: its whole process group, as `run.stop`
+does. What it needs and what needs it go on. `needed` while something running needs it (its
+`needed_now`) and `force` is not `true`, with the sentence that says what goes on without it
+(`Stop auth? app's api needs it and is running: it goes on without it.`): nothing is stopped.
+`refused` when it is not running, or runs outside Flottille, which does not stop it. The agent of
+each run that needs it is told it was stopped (`docs/tools.md`, "Tasks and runs").
 
 #### `service.output`
 
@@ -1875,7 +1905,8 @@ user ran, the one it runs in (`null` in the project folder). `state` is `running
 it was ready); `url` its address, `url_error` why it has none when its task's line for it failed
 (`docs/projects.md`, "Tasks"). `last_line` is the
 last line of its output with something on it, masked of secrets and as the program wrote it
-(colours included), cut at 300 characters. `tail` is the last 20 lines
+(colours included), cut at 300 characters. `needs_stopped` lists the services its task needs that
+stopped while it runs (`run.needs`). `tail` is the last 20 lines
 of its output (a list of texts, masked and as written, each cut at 300 characters), which a result
 card in the conversation shows folded, a running command's as well as one that ended.
 

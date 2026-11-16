@@ -76,7 +76,10 @@
 //! and `pr edit <id>` (`--title`, `--description`, at least one) `✓ Updated pull request #N`, as
 //! `pkg/cmd/pr/pr.go` does (`:1707`, `:829`); both need a pull request of `pulls`, as does `pr decline <id>` (it prints `Declined pull
 //! request #N`, `pkg/cmd/pr/pr.go` v0.37.0). With `strategies` (`{"acme/api": ["merge_commit"]}`), `pr merge` fails for a `--strategy` the
-//! repository's list does not hold, as the server refuses it. A pull request whose `checks` is the
+//! repository's list does not hold, as the server refuses it; `refuses` (`{"acme/api": "400 Bad Request: …"}`) makes it refuse
+//! every merge with that message, and `merge_delay_ms` makes it answer only after that long, as a
+//! server that hangs. `after_merge` (`{"<path>": <body>}`) is what `bkt api` answers for that path once a
+//! `pr merge` was received, instead of the `api` body: a string is an error it fails with. A pull request whose `checks` is the
 //! string `"unreadable"` has a `bkt pr checks --json` answer without `statuses`, as a `bkt` whose
 //! output changed shape.
 //!
@@ -391,6 +394,13 @@ fn answer(script: &Value, args: &[String]) -> i32 {
         }
         ["pr", "merge", id] => {
             let strategy = option("--strategy").unwrap_or_default();
+            if let Some(refusal) = script["refuses"][&key].as_str() {
+                eprintln!("Error: {refusal}");
+                return 1;
+            }
+            if let Some(ms) = script["merge_delay_ms"].as_u64() {
+                std::thread::sleep(std::time::Duration::from_millis(ms));
+            }
             if let Some(allowed) = script["strategies"][&key].as_array()
                 && !allowed.iter().any(|s| s == strategy)
             {
@@ -476,6 +486,18 @@ fn data_center_comment(script: &Value, method: &str, path: &str, input: Option<&
     }
 }
 
+/// Whether a `pr merge` was received, this one included.
+fn merged_yet() -> bool {
+    std::env::var_os("FLOTTILLE_FAKE_BKT_DIR")
+        .and_then(|dir| std::fs::read_to_string(PathBuf::from(dir).join("received.jsonl")).ok())
+        .is_some_and(|record| {
+            record
+                .lines()
+                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                .any(|call| call["args"][0] == "pr" && call["args"][1] == "merge")
+        })
+}
+
 /// The body the script holds for `path`: its `api`, else the `pipelines` of a Cloud repository,
 /// or one of them by its uuid.
 fn body_of(script: &Value, path: &str) -> Option<Value> {
@@ -529,7 +551,12 @@ fn api(
     if let Some(method) = method.filter(|method| *method != "GET") {
         return posted(script, method, path, input);
     }
-    let Some(mut body) = body_of(script, path) else {
+    let after_merge = script["after_merge"].get(path).filter(|_| merged_yet());
+    if let Some(failure) = after_merge.and_then(Value::as_str) {
+        eprintln!("Error: {failure}");
+        return 1;
+    }
+    let Some(mut body) = after_merge.cloned().or_else(|| body_of(script, path)) else {
         eprintln!("Error: 404 Not Found: {path}");
         return 1;
     };
