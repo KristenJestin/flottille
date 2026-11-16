@@ -1431,7 +1431,6 @@ impl Conversation {
             if card.ending == Ending::Running {
                 card.ending = ended.ending;
                 card.seconds = ended.seconds;
-                card.lines = ended.lines.clone();
                 changes.push(Change::Changed(at));
             }
         }
@@ -1720,25 +1719,25 @@ pub fn command_card(text: &str) -> Option<CommandCard> {
     {
         lines.next();
     }
-    if lines.peek().is_some_and(|l| {
-        l.starts_with("(lines ") || *l == "(no output)" || *l == "(no output left)"
-    }) {
+    if lines
+        .peek()
+        .is_some_and(|l| l.starts_with("(lines ") || *l == "(no output)")
+    {
         lines.next();
     }
-    let mut lines: Vec<&str> = lines.collect();
-    // The line that says how many lines a filter took out is the agent's, not the output's.
-    if lines
-        .last()
-        .is_some_and(|l| l.starts_with('[') && l.contains(" filtered out: read the whole output"))
-    {
-        lines.pop();
-    }
+    // What the agent read of an ended run's output is filtered (and holds its note): never the
+    // run's output. The card gets the program's lines from the daemon's list, as `run.list` has
+    // them. A running run is not filtered.
+    let lines = match ending {
+        Ending::Running => lines.map(str::to_owned).collect(),
+        _ => Vec::new(),
+    };
     Some(CommandCard {
         run: run.to_owned(),
         line: line.to_owned(),
         ending,
         seconds,
-        lines: lines.into_iter().map(str::to_owned).collect(),
+        lines,
         allowed_by: None,
     })
 }
@@ -1766,7 +1765,6 @@ struct Ended {
     line: String,
     ending: Ending,
     seconds: Option<f64>,
-    lines: Vec<String>,
 }
 
 /// The end of a command as its agent is told (`runs.rs`, `ended_text`): `Your command `<line>`
@@ -1776,7 +1774,7 @@ fn command_ended(body: &str) -> Option<Ended> {
     let rest = body.strip_prefix("Your command `")?;
     let (line, rest) = rest.split_once("` (run ")?;
     let (run, rest) = rest.split_once(") ")?;
-    let (header, tail) = rest.split_once('\n').unwrap_or((rest, ""));
+    let header = rest.split_once('\n').map_or(rest, |(header, _)| header);
     let header = header.trim_end().trim_end_matches('.');
     let (how, seconds) = match header.rsplit_once(" after ") {
         Some((how, time)) => (
@@ -1785,15 +1783,12 @@ fn command_ended(body: &str) -> Option<Ended> {
         ),
         None => (header, None),
     };
-    let mut lines = tail.lines();
-    // The line that says where the lines come from, or that there are none.
-    lines.next();
+    // Its lines are the agent's, filtered: the card's come from the daemon's list.
     Some(Ended {
         run: run.to_owned(),
         line: line.to_owned(),
         ending: ending_of(how)?,
         seconds,
-        lines: lines.map(str::to_owned).collect(),
     })
 }
 
@@ -3239,14 +3234,9 @@ mod tests {
         assert_eq!(card.ending, Ending::Exited(101));
         assert_eq!(card.seconds, Some(12.4));
         assert_eq!(card.allowed_by, None);
-        // The program's bytes, for the card to colour or strip.
-        assert_eq!(
-            card.lines,
-            [
-                "\u{1b}[32mok\u{1b}[0m one",
-                "\u{1b}[1;31mFAILED\u{1b}[0m two",
-                "three"
-            ]
+        assert!(
+            card.lines.is_empty(),
+            "the agent's filtered lines are not the output: the daemon's list has it"
         );
         assert!(
             matches!(c.blocks()[0], Block::Steps { .. }),
@@ -3297,7 +3287,10 @@ mod tests {
         };
         assert_eq!(card.ending, Ending::Exited(101));
         assert_eq!(card.allowed_by.as_deref(), Some("you"));
-        assert_eq!(card.lines.len(), 3);
+        assert!(
+            card.lines.is_empty(),
+            "the agent's lines are not the output"
+        );
         assert!(c.blocks().iter().all(|b| !matches!(
             b,
             Block::Notice { text, .. } if text.contains("Request #")
@@ -3453,7 +3446,11 @@ mod tests {
         let card = cards(&c)[0];
         assert_eq!(card.ending, Ending::Exited(3));
         assert_eq!(card.seconds, Some(2.0));
-        assert_eq!(card.lines, ["start", "boom"], "the final tail");
+        assert_eq!(
+            card.lines,
+            ["start"],
+            "the agent's filtered tail is not taken: the card keeps what it had, and the daemon's list gives the rest"
+        );
         assert!(c.blocks().iter().all(|b| !matches!(
             b,
             Block::Notice { text, .. } if text.contains("Your command")
@@ -3867,24 +3864,28 @@ mod tests {
     }
 
     #[test]
-    fn an_ended_card_shows_the_lines_as_the_program_wrote_them_not_as_the_agent_read_them() {
+    fn an_ended_card_never_holds_the_lines_the_agent_read_only_the_programs() {
         let mut c = root();
-        let text = "run r1: `./fails.sh` exited with code 1 after 3.5 s\n(lines 1-1 of 1)\nred failed\n\
+        let filtered = "run r1: `./fails.sh` exited with code 1 after 3.5 s\n(lines 1-1 of 1)\nred failed\n\
                     [1 line filtered out: read the whole output with run_status {\"run\": \"r1\", \"start\": 1, \"raw\": true}]";
-        let card = command_card(text).unwrap();
-        assert_eq!(card.lines, ["red failed"], "the agent's note is not output");
-        c.push(Block::Command(CommandCard {
-            run: "r1".into(),
-            ..card
-        }));
-
-        let changes = c.update_commands(
-            &[row("exited", Some(1), &["\u{1b}[31mred\u{1b}[0m failed"])],
-            9_000,
+        for text in [
+            filtered,
+            "run r1: `./fails.sh` exited with code 1 after 3.5 s\n(no output left)\n[2 lines filtered out: read the whole output]",
+        ] {
+            let card = command_card(text).unwrap();
+            assert!(card.lines.is_empty(), "{:?}", card.lines);
+        }
+        c.push(Block::Command(command_card(filtered).unwrap()));
+        assert!(
+            cards(&c)[0].lines.is_empty(),
+            "nothing is shown until the list answers"
         );
 
+        let program = "\u{1b}[31mred\u{1b}[0m failed";
+        let changes = c.update_commands(&[row("exited", Some(1), &[program])], 9_000);
+
         assert_eq!(changes, [Change::Changed(0)]);
-        assert_eq!(cards(&c)[0].lines, ["\u{1b}[31mred\u{1b}[0m failed"]);
+        assert_eq!(cards(&c)[0].lines, [program]);
     }
 
     #[test]
