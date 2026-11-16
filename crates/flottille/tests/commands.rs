@@ -2627,6 +2627,137 @@ fn a_method_a_data_center_repository_forbids_is_refused_naming_the_allowed_ones(
     );
 }
 
+/// A Cloud pull request #12 of `acme/app` that is green and approved, `page` its own page and
+/// `script` what else the fake `bkt` is told; the merge by squash is then asked of it.
+fn cloud_merge(user: &User, page: Value, script: Value) -> Answer {
+    on_bitbucket(user, "git@bitbucket.org:acme/app.git");
+    command(user, "merge");
+    let (_, mcp) = run(user, "merge");
+    let mut held = json!({
+        "pulls": {"acme/app": [cloud_pull(12, "acme/app", "acme/app", "main")]},
+        "checks": {"acme/app": {"12": [{"state": "SUCCESSFUL", "name": "build"}]}},
+        "api": {"/repositories/acme/app/pullrequests/12": page}});
+    for (key, value) in script.as_object().unwrap() {
+        held[key] = value.clone();
+    }
+    user.bkt_script(held);
+    write(user, &mcp, json!({"action": "merge", "repository": "."}))
+}
+
+#[test]
+fn a_refused_merge_says_the_server_s_reason_first() {
+    let user = User::with_fake_agent().with_fake_bkt();
+    let token = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    let mut page = cloud_page(&["approved"]);
+    page["destination"] = json!({"branch": {"name": "main",
+        "merge_strategies": ["merge_commit"], "default_merge_strategy": "merge_commit"}});
+    let reason = "400 Bad Request: a required merge check has not passed";
+
+    let answer = cloud_merge(
+        &user,
+        page,
+        json!({"refuses": {"acme/app": format!("{reason} ({token})")}}),
+    );
+
+    assert!(answer.error, "{}", answer.text);
+    let said = answer.text.find(reason).expect(&answer.text);
+    let read = answer
+        .text
+        .find("acme/app does not allow merging by squash: it allows merge (method)")
+        .expect(&answer.text);
+    assert!(said < read, "the server's reason comes first: {}", answer.text);
+    assert!(!answer.text.contains(token), "{}", answer.text);
+    assert!(answer.text.contains("[masked]"), "{}", answer.text);
+
+    // A method the repository does allow: the server's refusal is the whole answer.
+    let user = User::with_fake_agent().with_fake_bkt();
+    let mut page = cloud_page(&["approved"]);
+    page["destination"] = json!({"branch": {"name": "main",
+        "merge_strategies": ["squash", "merge_commit"], "default_merge_strategy": "squash"}});
+    let answer = cloud_merge(&user, page, json!({"refuses": {"acme/app": reason}}));
+    assert!(answer.error, "{}", answer.text);
+    assert!(answer.text.contains(reason), "{}", answer.text);
+    assert!(!answer.text.contains("does not allow"), "{}", answer.text);
+}
+
+#[test]
+fn strategies_that_cannot_be_read_are_not_none_allowed() {
+    let reason = "400 Bad Request: the pull request is out of date";
+    let unknown = "which merge methods the repository allows could not be read";
+
+    // The page says no `merge_strategies`, and one that says an empty list is no different.
+    for destination in [
+        json!({"branch": {"name": "main"}}),
+        json!({"branch": {"name": "main", "merge_strategies": []}}),
+    ] {
+        let user = User::with_fake_agent().with_fake_bkt();
+        let mut page = cloud_page(&["approved"]);
+        page["destination"] = destination;
+        let answer = cloud_merge(&user, page, json!({"refuses": {"acme/app": reason}}));
+
+        assert!(answer.error, "{}", answer.text);
+        assert!(answer.text.contains(reason), "{}", answer.text);
+        assert!(answer.text.contains(unknown), "{}", answer.text);
+        assert!(!answer.text.contains("does not allow"), "{}", answer.text);
+        assert!(!answer.text.contains("none of"), "{}", answer.text);
+    }
+
+    // The page cannot be read once the merge is refused.
+    let user = User::with_fake_agent().with_fake_bkt();
+    let answer = cloud_merge(
+        &user,
+        cloud_page(&["approved"]),
+        json!({"refuses": {"acme/app": reason},
+            "after_merge": {"/repositories/acme/app/pullrequests/12": "500 Internal Server Error"}}),
+    );
+
+    assert!(answer.error, "{}", answer.text);
+    assert!(answer.text.contains(reason), "{}", answer.text);
+    assert!(answer.text.contains(unknown), "{}", answer.text);
+    assert!(!answer.text.contains("does not allow"), "{}", answer.text);
+}
+
+#[test]
+fn a_merge_that_times_out_is_read_back() {
+    // `bkt pr merge` outlasts the 2 s the forge's calls are cut after, here; the page it leaves is
+    // what `after_merge` says.
+    let merging = |after: Value| {
+        let user = User::with_fake_agent()
+            .with_fake_bkt()
+            .with_env("FLOTTILLE_FORGE_TIMEOUT_MS", "2000");
+        cloud_merge(
+            &user,
+            cloud_page(&["approved"]),
+            json!({"merge_delay_ms": 6000,
+                "after_merge": {"/repositories/acme/app/pullrequests/12": after}}),
+        )
+    };
+    let timeout = "the merge did not answer within 2 s: it may have happened; check the pull \
+                   request";
+
+    // It went through meanwhile: said merged.
+    let answer = merging(json!({"id": 12, "state": "MERGED"}));
+    assert!(!answer.error, "{}", answer.text);
+    assert!(answer.text.contains("was merged"), "{}", answer.text);
+    assert!(answer.text.contains("did not answer within 2 s"), "{}", answer.text);
+
+    // It did not: said so, with the timeout.
+    let answer = merging(json!({"id": 12, "state": "OPEN"}));
+    assert!(answer.error, "{}", answer.text);
+    assert!(answer.text.contains(timeout), "{}", answer.text);
+    assert!(answer.text.contains("still open"), "{}", answer.text);
+    assert!(answer.text.contains("not merged"), "{}", answer.text);
+
+    // The read back fails too: neither merged nor not merged is claimed.
+    let answer = merging(json!("500 Internal Server Error"));
+    assert!(answer.error, "{}", answer.text);
+    assert!(answer.text.contains(timeout), "{}", answer.text);
+    assert!(answer.text.contains("could not be read back"), "{}", answer.text);
+    assert!(!answer.text.contains("still open"), "{}", answer.text);
+    assert!(!answer.text.contains("not merged"), "{}", answer.text);
+    assert!(!answer.text.contains("was merged"), "{}", answer.text);
+}
+
 /// A root agent started in `login` with no command: its id and MCP session.
 fn plain_agent_with_id(user: &User) -> (String, Mcp) {
     let opened = user.received_requests("session/new").len();
