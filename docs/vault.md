@@ -201,8 +201,8 @@ The keyring answers on the session bus, whose socket is in the user's runtime fo
 (`/run/user/<uid>/bus`), and any program can speak D-Bus: refusing `secret-tool` or `busctl` by
 name keeps nothing out. So what the daemon runs for an agent or a connection reaches no session
 bus: a run, a project's service and its readiness probe, a workspace's setup line, a commit's or
-a push's message checks and the git reads made for them (the push's dry run, with the line's own
-options and the remote's transport), a connection's server and its login:
+a push's message checks and the git reads made for them, a connection's server and its login. A
+push the gate let through, and its checks' dry run, are the exception (below):
 
 - its environment has no `DBUS_SESSION_BUS_ADDRESS`, and no `XDG_RUNTIME_DIR` either, so libdbus,
   sd-bus and GDBus find no bus by default. `DBUS_SYSTEM_BUS_ADDRESS` is kept: the system bus holds
@@ -218,63 +218,21 @@ options and the remote's transport), a connection's server and its login:
   alone (`docs/extensions.md`, "Adapters"), without the right to link or move a file out of it.
   The folder is the one the daemon made, never one a variable of the connection names.
 
-**The SSH agent is lent to a push alone.** What the daemon runs gets no `SSH_AUTH_SOCK`, but a run
-that is itself a `git push` (its own line, no wrapper) the user, the judge or Full mode let
-through, and the dry run made for its checks, which reaches the remote: their `SSH_AUTH_SOCK`
-is the socket the daemon's own environment named **when the daemon started**, resolved then
-(links followed) and kept with its device and inode, never a path a variable of the run or the
-agent gives. At each push the name is followed again and the socket looked at again: a link moved
-since, or a socket put in its place, lends nothing (the push runs without an agent). A socket that
-is the session bus is never lent. From Landlock's ninth ABI the push is granted
-`LANDLOCK_ACCESS_FS_RESOLVE_UNIX` on that socket file alone (its device and inode checked again in
-the child). Landlock checks connecting from the socket's own path up and counts that right among a
-file's, so the rule on the socket grants it and nothing else: the runtime folder stays unlisted,
-its other sockets (the bus, gpg-agent) refused. A socket outside the runtime folder
-(`/tmp/ssh-…/agent.…`, a password manager's under the home) is lent the same way, and from the
-ninth ABI every other command the daemon runs is kept from connecting to it: the folders on the
-way to it are ruled without the right to connect, their other entries with every right.
+**The SSH agent stays out of every run.** What the daemon runs gets no `SSH_AUTH_SOCK`. The socket
+the daemon's own environment named when it started (resolved then, links followed) is also kept out
+by its path: inside the runtime folder it is denied with it; outside it (`/tmp/ssh-…/agent.…`, a
+password manager's under the home), from Landlock's ninth ABI, the folders on the way to it are
+ruled without the right to connect, their other entries with every right, and the socket itself
+gets no rule.
 
-What runs with the agent is pinned. The push and its dry runs get an environment rebuilt from
-an allowlist, never the project's nor the workspace's variables (a file a run may write): the
-daemon's `HOME`, `USER`, `LOGNAME`, `LANG`, `LC_*`, `TERM` and `TMPDIR`, the agent's socket, and
-what Flottille sets below. The push runs the `git` the daemon found on its own `PATH` at
-its start, whatever the line's `git` and the run's `PATH` lead to, and its `GIT_SSH_COMMAND` is the
-`ssh` found then: for each, the first one outside the user's home (`~/bin`, `~/.local/bin`,
-`~/.cargo/bin`, the projects, the agents' folders) and Flottille's folders, links followed, so
-neither is a program the run's `PATH` or a folder of the home puts first. It must also be a file
-the daemon's user cannot write, in folders it cannot write either, up to `/` (a Homebrew or a
-`/usr/local` of the user's is not): otherwise a run could replace it, and no agent is lent.
-What `ssh` runs from its configuration (`ProxyCommand`, `Match exec`, `KnownHostsCommand`) goes
-through `$SHELL -c` with the push's `PATH`: the push's `SHELL` is `/bin/sh` (zsh would read
-`~/.zshenv`, fish its `config.fish`) and its `PATH` the folders of the daemon's own `PATH` that
-the same rule takes (none of the home's, none the user can write). `GIT_SSH_COMMAND` wins
-over `core.sshCommand` and `GIT_SSH`, which the gate refuses on the line anyway, and it shares no
-connection (`-o ControlMaster=no -o ControlPath=none`: no master outlives the push for another ssh
-to reuse) and runs no `LocalCommand` (`-o PermitLocalCommand=no`). No such `git` or `ssh`, no agent
-is lent, and the daemon says why at its start. `GIT_ALLOW_PROTOCOL=ssh` takes away every other
-transport (`ext::` and `fd::` run a program, a path runs `git-receive-pack` here), each remote's
-`receivepack` is set back to `git-receive-pack` and its `mirror` to `false`, `maintenance.auto` is
-`false` (no `git maintenance run --auto --detach` goes on after the push with its environment),
-and no setting of the repository runs a program: `core.fsmonitor` is `false` (git reads the
-index for the submodules), `push.recurseSubmodules` is `no`, `submodule.recurse` is `false` and
-`push.gpgSign` is `false` (the signing program), all through the environment, which wins over the
-repository's settings. Its line takes no `--signed` nor `--recurse-submodules` (refused, in every
-mode). Before it runs, git's dry run of the push itself, lent the agent, says where it goes and
-what it does: it is refused when a URL is not one the push was checked against (the workspace's
-remote as it was when the workspace was created; in the project folder, the URLs of the
-repository's remote), or when it forces or deletes a ref its line does not ask for (`+`, `--force`,
-`--delete`, `:<ref>`, `--mirror`), such as a `remote.<name>.push` of the repository's settings. A
-remote the line names is checked before the dry run, so its URLs are not reached either. The push's own line takes no global
-option but `-C` into its repository's own folder (no other repository on the way), `--no-pager`,
-`-P`, `--no-advice` and `--no-optional-locks`: a setting (`git -c …`, `--config-env`) would win
-over the pins and the hooks' wall, `--exec-path` would run git's programs from another folder, and
-`--git-dir`, `--work-tree` and the rest bring another repository, whose remote no one checked.
-Such a push is refused in every mode, saying why and to push by hand. Such a push signs in over
-SSH only: a push to an HTTP(S) URL is refused before it runs (git resolves its URLs in an offline
-dry run, which is not lent the agent, since a repository of a path may answer it), saying to give
-the remote an SSH push URL (`git remote set-url --push`) or to push by hand. The other git reads
-made for a push, and the probes of a push's task (its `ready` and `url` commands), are not lent
-the agent.
+**A push the gate let through runs outside the sandbox.** A run that is itself a `git push` (its own
+line, no wrapper) the user, the judge, a rule or Full mode let through, and the dry run the
+project's commit checks make of it, run with no Landlock and the daemon's own environment, as if
+the user had typed the push: the session bus (so the keyring), the SSH agent, the credential
+helper and the forge command line's sign-in are theirs. Only `core.hooksPath=/dev/null` is added,
+and the project's and the workspace's variables are not applied (`docs/commands.md`, "The
+environment"). The other git reads made for a push, and the probes of a push's task (its `ready`
+and `url` commands), run in the sandbox.
 
 The daemon's own runtime folder is denied with the rest: a `flottille daemon stop` run for an
 agent cannot read the daemon's lock, and refuses itself when the daemon does not answer, as a
@@ -302,27 +260,17 @@ The gaps, where the platform does not allow more:
   `LANDLOCK_ACCESS_FS_RESOLVE_UNIX`). Before it, the runtime folder cannot be listed and its files
   cannot be opened, but a process that guesses the bus's path can still connect to it;
 - from the ninth ABI on, connecting is denied to every socket of the runtime folder, not only the
-  bus, but the SSH agent's lent to a push (above): a gpg-agent socket there cannot be reached, so a
-  commit signed through gpg-agent fails;
-- below the ninth ABI, connecting is not governed: a run that is not a push gets no
-  `SSH_AUTH_SOCK`, but one that guesses the agent's path can still connect to it, as to the bus;
-- what `ssh` reads is not pinned: the user's `~/.ssh/config` may run a program
-  (`ProxyCommand`, `Match exec`) with the agent's socket, and pinning it would break jump hosts.
-  A confined command can still write in `~/.ssh` until the private mount namespace (#976)
-  mounts it read-only: change `config` and what it includes, add to `authorized_keys`, `chmod`
-  the folder or the keys. Against a lent push, that means a `ProxyCommand` or a `Match exec`
-  added to `~/.ssh/config` by code an agent wrote runs at the next push the gate lets through,
-  with the agent's socket. So from the ninth ABI the guarantee is this: code an agent wrote
-  reaches the SSH agent only through the files the user's `ssh` reads from the home; a `git` or
-  an `ssh` earlier on `PATH`, or one the user can write, is not run, and what `ssh` runs gets
-  `/bin/sh` and the system's `PATH` (above). Connection sharing is off for the push itself,
-  but a master another program of the user's started (`ControlMaster` in `~/.ssh/config`) is
-  not Flottille's to close;
-- a lent push is the one git's dry run showed, not more: in the project folder no record says
-  where the repository's remote led, so a push URL an agent's script gives that remote itself
-  is followed (a workspace's is refused); a run going on beside the push can still change the
-  repository's settings between the dry run and the push; and a push whose line names no remote
-  (`git push`, a URL) reaches its URL in the dry run, the agent lent, before it is refused;
+  bus: a gpg-agent socket there cannot be reached, so a commit signed through gpg-agent fails;
+- below the ninth ABI, connecting is not governed: a run gets no `SSH_AUTH_SOCK`, but one that
+  guesses the agent's path can still connect to it, as to the bus;
+- a push the gate let through runs with what the repository's settings say, as the user's own
+  push from that folder would: a script the gate never read may have changed them before
+  (`credential.helper`, `core.sshCommand`, `core.fsmonitor`, `url.*.insteadOf`), and that applies
+  to the push, outside the sandbox, with the user's credentials. So does what the user's
+  `~/.ssh/config` runs (`ProxyCommand`, `Match exec`), which a confined command can still write
+  until the private mount namespace (#976) mounts `~/.ssh` read-only. The gate judges the push's
+  line, not the repository it runs in: an accepted risk, decided so that a push the user allowed
+  signs in as theirs does;
 - from the ninth ABI, a socket made after a command started directly in a folder on the way to a
   kept-out agent socket (`/tmp` for `/tmp/ssh-…/agent.…`) cannot be connected to by that command;
 - without Landlock (a kernel before 5.19, or one built without it), the process runs as before,
