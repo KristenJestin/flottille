@@ -3858,3 +3858,232 @@ fn a_refusal_during_a_removal_says_it_is_being_removed() {
         assert!(!message.contains("being prepared"), "{message}");
     }
 }
+
+/// How long each part of a workspace's making took, as `workspace.show` gives it: the fetches of
+/// its repositories, then its steps (`docs/workspaces.md`, "How long it took").
+fn timed(workspace: &Value) -> Vec<(String, u64)> {
+    let mut parts = Vec::new();
+    for repository in workspace["repositories"].as_array().unwrap() {
+        if let Some(took) = repository["base"]["fetch"]["duration_ms"].as_u64() {
+            parts.push((format!("fetch {}", repository["path"]), took));
+        }
+    }
+    for step in workspace["steps"].as_array().unwrap() {
+        if let Some(took) = step["duration_ms"].as_u64() {
+            parts.push((format!("{} {}", step["kind"], step["position"]), took));
+        }
+    }
+    parts
+}
+
+#[test]
+fn each_setup_step_says_how_long_it_took() {
+    let fixture = Fixture::new(false);
+    let slow = fixture.script("slow.sh", "sleep 0.4\n");
+    let fast = fixture.script("fast.sh", "exit 0\n");
+    let broken = fixture.script("broken.sh", "sleep 0.2\nexit 3\n");
+    fixture.configure(&format!(
+        "[[setup]]\nrun = \"sh {}\"\nrepository = \"lib\"\n\
+         [[setup]]\nrun = \"sh {}\"\nrepository = \"lib\"\n\
+         [[setup]]\nrun = \"sh {}\"\nrepository = \"lib\"\n\
+         [[setup]]\nrun = \"sh {}\"\nrepository = \"lib\"\n",
+        fast.display(),
+        slow.display(),
+        broken.display(),
+        fast.display()
+    ));
+    fixture.create(json!({"repositories": ["lib"]})).unwrap();
+
+    let workspace = fixture.settled("login");
+
+    assert_eq!(workspace["state"], "failed", "{workspace}");
+    let steps = workspace["steps"].as_array().unwrap();
+    for done in &steps[..2] {
+        assert_eq!(done["state"], "done");
+        assert!(done["duration_ms"].is_u64(), "a step done is timed: {done}");
+        assert!(
+            done["started_at"].is_u64(),
+            "and says when it started: {done}"
+        );
+    }
+    assert!(
+        steps[2]["duration_ms"].as_u64().unwrap() >= 400,
+        "a step that sleeps lasts at least that long: {}",
+        steps[2]
+    );
+    assert_eq!(steps[3]["state"], "failed");
+    assert!(
+        steps[3]["duration_ms"].as_u64().unwrap() >= 200,
+        "a failed step is timed too: {}",
+        steps[3]
+    );
+    assert!(
+        steps[4].get("duration_ms").is_none(),
+        "a step that never ran has no duration: {}",
+        steps[4]
+    );
+
+    let watch = fixture.user.watch(&["--after", "0"]);
+    let done = loop {
+        let event = watch.next_event();
+        if event["name"] == "workspace.step_done" && event["data"]["position"] == 2 {
+            break event;
+        }
+    };
+    assert_eq!(
+        done["data"]["duration_ms"], steps[2]["duration_ms"],
+        "the event says it as the show does"
+    );
+}
+
+#[test]
+fn the_worktree_and_the_fetch_are_timed_per_repository() {
+    let fixture = Fixture::new(false);
+    fixture.configure("");
+    fixture.create(json!({})).unwrap();
+
+    let workspace = fixture.settled("login");
+
+    assert_eq!(workspace["state"], "ready", "{workspace}");
+    let repositories = workspace["repositories"].as_array().unwrap();
+    assert_eq!(repositories.len(), 3);
+    for repository in repositories {
+        let fetch = &repository["base"]["fetch"];
+        assert!(fetch["duration_ms"].is_u64(), "{repository}");
+        assert!(fetch["started_at"].is_u64(), "{repository}");
+        assert_eq!(fetch["outcome"], "fetched", "{repository}");
+    }
+    for step in workspace["steps"].as_array().unwrap() {
+        assert_eq!(step["kind"], "worktree");
+        assert!(
+            step["duration_ms"].is_u64(),
+            "each repository's worktree is timed: {step}"
+        );
+    }
+}
+
+#[test]
+fn a_fetch_that_failed_says_so_and_an_offline_creation_has_none() {
+    let fixture = Fixture::new(false);
+    fixture.configure("");
+    // `web` cannot reach its remote: the creation goes on from the tracking ref, as it always did.
+    std::fs::remove_dir_all(fixture.remote("web")).unwrap();
+    fixture.create(json!({})).unwrap();
+    let workspace = fixture.settled("login");
+    let by_path = |path: &str| {
+        workspace["repositories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|repository| repository["path"] == path)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(by_path("web")["base"]["fetch"]["outcome"], "failed");
+    assert!(by_path("web")["base"]["fetch"]["duration_ms"].is_u64());
+    assert_eq!(by_path("api")["base"]["fetch"]["outcome"], "fetched");
+
+    fixture
+        .create(json!({"name": "offline", "repositories": ["api"], "offline": true}))
+        .unwrap();
+    let offline = fixture.settled("offline");
+    assert!(
+        offline["repositories"][0]["base"].get("fetch").is_none(),
+        "nothing was fetched, so nothing is timed: {offline}"
+    );
+}
+
+#[test]
+fn workspace_show_gives_the_total_from_request_to_ready() {
+    let fixture = Fixture::new(false);
+    let slow = fixture.script("slow.sh", "sleep 0.4\n");
+    fixture.configure(&format!(
+        "[[setup]]\nrun = \"sh {}\"\nrepository = \"lib\"\n",
+        slow.display()
+    ));
+
+    fixture.create(json!({"repositories": ["lib"]})).unwrap();
+    let during = fixture.show("login").unwrap();
+    let workspace = fixture.settled("login");
+
+    assert_eq!(during["total_ms"], json!(null), "{during}");
+    assert_eq!(workspace["state"], "ready", "{workspace}");
+    let total = workspace["total_ms"].as_u64().unwrap();
+    let parts: u64 = timed(&workspace).iter().map(|(_, took)| took).sum();
+    assert!(
+        total >= 400,
+        "the total holds the step that sleeps: {total}"
+    );
+    assert!(
+        total >= parts,
+        "the total holds every part: {total} < {parts}"
+    );
+    assert_eq!(
+        total,
+        workspace["ready_at"].as_u64().unwrap() - workspace["created_at"].as_u64().unwrap(),
+        "from the request (the workspace's creation) to its readiness"
+    );
+}
+
+#[test]
+fn the_ready_event_names_the_slowest_steps() {
+    let fixture = Fixture::new(false);
+    let long = fixture.script("long.sh", "sleep 1.2\n");
+    let middle = fixture.script("middle.sh", "sleep 0.8\n");
+    let short = fixture.script("short.sh", "sleep 0.5\n");
+    let none = fixture.script("none.sh", "exit 0\n");
+    fixture.configure(&format!(
+        "[[setup]]\nrun = \"sh {}\"\nrepository = \"lib\"\n\
+         [[setup]]\nrun = \"sh {}\"\nrepository = \"lib\"\n\
+         [[setup]]\nrun = \"sh {}\"\nrepository = \"lib\"\n\
+         [[setup]]\nrun = \"sh {}\"\nrepository = \"lib\"\n",
+        middle.display(),
+        none.display(),
+        long.display(),
+        short.display()
+    ));
+    fixture.create(json!({"repositories": ["lib"]})).unwrap();
+    let workspace = fixture.settled("login");
+    assert_eq!(workspace["state"], "ready", "{workspace}");
+
+    let watch = fixture.user.watch(&["--after", "0"]);
+    let ready = loop {
+        let event = watch.next_event();
+        if event["name"] == "workspace.ready" {
+            break event;
+        }
+    };
+
+    let data = &ready["data"];
+    assert!(data["total_ms"].as_u64().unwrap() >= 2500, "{data}");
+    assert!(
+        data["total_ms"].as_u64().unwrap() <= workspace["total_ms"].as_u64().unwrap(),
+        "the event is said before the show: {data}"
+    );
+    let slowest = data["slowest"].as_array().unwrap();
+    assert_eq!(slowest.len(), 3, "{data}");
+    let took: Vec<u64> = slowest
+        .iter()
+        .map(|part| part["duration_ms"].as_u64().unwrap())
+        .collect();
+    assert!(
+        took.windows(2).all(|pair| pair[0] >= pair[1]),
+        "slowest first: {took:?}"
+    );
+    // The three the show's own durations make the slowest, whatever the machine's load.
+    let mut every: Vec<u64> = timed(&workspace)
+        .into_iter()
+        .map(|(_, took)| took)
+        .collect();
+    every.sort_unstable_by(|a, b| b.cmp(a));
+    assert_eq!(took, every[..3], "{data}");
+    assert_eq!(slowest[0]["kind"], "run", "{data}");
+    assert_eq!(
+        slowest[0]["position"], 3,
+        "the line that sleeps longest: {data}"
+    );
+    assert!(
+        slowest[0]["doing"].as_str().unwrap().contains("long.sh"),
+        "{data}"
+    );
+}
