@@ -66,6 +66,14 @@ impl Address {
         })
     }
 
+    /// Its IP address, when it is one rather than a name.
+    pub fn ip(&self) -> Option<IpAddr> {
+        match &self.host {
+            Host::Ip(ip) => Some(*ip),
+            Host::Name(_) => None,
+        }
+    }
+
     pub fn port(&self) -> Option<u16> {
         self.port
     }

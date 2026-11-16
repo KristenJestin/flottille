@@ -275,6 +275,78 @@ async fn a_stalled_handshake_does_not_stop_a_trusted_pair_from_linking() {
 }
 
 #[tokio::test]
+async fn eight_stalling_hosts_do_not_stop_a_trusted_pair() {
+    let (laptop, server) = (Machine::new().await, Machine::new().await);
+    let ours = Hello::ours("0.4.1");
+    let at = server.addresses()[0];
+    // Eight hosts, each stalling as many handshakes as one host may hold, and more.
+    const HOSTS: [&str; 8] = [
+        "127.0.1.1",
+        "127.0.1.2",
+        "127.0.1.3",
+        "127.0.1.4",
+        "127.0.1.5",
+        "127.0.1.6",
+        "127.0.1.7",
+        "127.0.1.8",
+    ];
+    let stallers: Vec<_> = HOSTS
+        .iter()
+        .flat_map(|ip| (0..3).map(|_| staller(ip, at, server.key())))
+        .collect();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let serving = serve(&server, laptop.key(), ours.clone());
+    let (link, took) = link_timed(&laptop, &server, &ours).await;
+    serving.await.unwrap().unwrap();
+    assert!(
+        took < Duration::from_secs(3),
+        "the trusted pair waited {took:?}"
+    );
+    assert_eq!(link.peer(), server.key());
+    for staller in stallers {
+        staller.abort();
+    }
+}
+
+#[tokio::test]
+async fn stalling_hosts_past_every_place_do_not_stop_a_known_machine() {
+    let (laptop, server) = (Machine::new().await, Machine::new().await);
+    let ours = Hello::ours("0.4.1");
+    let at = server.addresses()[0];
+    // The server knows the laptop's address: a place is kept for it.
+    server.endpoint.know([laptop.addresses()[0].ip()]);
+    // More hosts than the places for all hold, two by host.
+    let key = server.key();
+    let stallers: Vec<_> = (0..140)
+        .flat_map(|host: usize| {
+            let ip: &'static str = format!("127.0.{}.{}", 2 + host / 200, 1 + host % 200).leak();
+            (0..2).map(move |_| staller(ip, at, key))
+        })
+        .collect();
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    // A stranger finds no place.
+    let stranger = Machine::at("127.0.9.1").await;
+    let refused = stranger
+        .endpoint
+        .connect(server.key(), &[at], Traffic::Machine, &ours, "server")
+        .await;
+    assert!(refused.is_err(), "a stranger found a place");
+
+    let serving = serve(&server, laptop.key(), ours.clone());
+    let (link, took) = link_timed(&laptop, &server, &ours).await;
+    serving.await.unwrap().unwrap();
+    assert!(
+        took < Duration::from_secs(3),
+        "the trusted pair waited {took:?}"
+    );
+    assert_eq!(link.peer(), server.key());
+    for staller in stallers {
+        staller.abort();
+    }
+}
+
+#[tokio::test]
 async fn a_flood_of_untrusted_keys_does_not_stop_a_trusted_pair() {
     let (laptop, server) = (Machine::new().await, Machine::new().await);
     let ours = Hello::ours("0.4.1");

@@ -7,7 +7,7 @@
 //! other way. The first stream is the handshake: the side that dials sends its hello, the other
 //! answers its own, and each chooses the protocol, or refuses, by itself.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
@@ -28,11 +28,18 @@ const WAIT: Duration = Duration::from_secs(10);
 /// How long the TLS of a link that came in may take: on loopback or a LAN it takes milliseconds.
 const HANDSHAKE: Duration = Duration::from_secs(5);
 /// The most links that came in whose TLS is under way at once: one that stalls holds a place,
-/// not the others.
-const HANDSHAKES: usize = 16;
+/// not the others. A stalled handshake costs the endpoint a connection's state, a few kilobytes,
+/// for `HANDSHAKE` at most: places are cheap, and many of them leave a distributed staller far
+/// more hosts to find before it holds them all.
+const HANDSHAKES: usize = 256;
 /// The most of them from one host (an IPv4 address, an IPv6 /64): a host that stalls its own
 /// cannot hold the places of the others.
 const HANDSHAKES_FROM_ONE: usize = 2;
+/// The most of them from one IPv6 /48, which one site is given whole: its /64s are many.
+const HANDSHAKES_FROM_SITE: usize = 8;
+/// The places kept for the addresses of the machines this one trusts (`Endpoint::know`): hosts
+/// it does not know cannot take them.
+const KEPT_FOR_KNOWN: usize = 8;
 /// The codes a side closes a link with.
 const CLOSE_REFUSED: u32 = 1;
 const CLOSE_NEEDS_UPDATE: u32 = 2;
@@ -148,7 +155,12 @@ pub struct Endpoint {
     key: PublicKey,
     /// The links that came in, their keys proved, in the order their TLS finished.
     accepted: Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<Accepting>>>,
+    /// The addresses of the machines this one trusts.
+    known: Known,
 }
+
+/// The addresses of the machines an endpoint trusts, which may take the places kept for them.
+type Known = Arc<std::sync::RwLock<HashSet<IpAddr>>>;
 
 impl Endpoint {
     /// Listens at `listen` with the machine's key, for both kinds of traffic. Within a Tokio
@@ -174,12 +186,22 @@ impl Endpoint {
     fn over(transport: Transport, key: PublicKey) -> Endpoint {
         let transport = Arc::new(transport);
         let (sender, accepted) = tokio::sync::mpsc::channel(HANDSHAKES);
-        tokio::spawn(take_in(transport.clone(), sender));
+        let known = Known::default();
+        tokio::spawn(take_in(transport.clone(), sender, known.clone()));
         Endpoint {
             transport,
             key,
             accepted: Arc::new(tokio::sync::Mutex::new(accepted)),
+            known,
         }
+    }
+
+    /// The addresses of the machines this one trusts, in place of those it was told before: a
+    /// link that comes in from one of them may take a place kept for them when every other is
+    /// held.
+    pub fn know(&self, addresses: impl IntoIterator<Item = IpAddr>) {
+        let known: HashSet<IpAddr> = addresses.into_iter().map(unmapped).collect();
+        *self.known.write().unwrap() = known;
     }
 
     pub fn key(&self) -> PublicKey {
@@ -258,9 +280,12 @@ impl Endpoint {
 /// no other; until the endpoint is closed, or every copy of it dropped. One that finds no place
 /// free, for all or for its host, is refused at once: the links that come in are still taken,
 /// and the one refused dials again.
-async fn take_in(transport: Arc<Transport>, accepted: tokio::sync::mpsc::Sender<Accepting>) {
-    let places = Arc::new(tokio::sync::Semaphore::new(HANDSHAKES));
-    let hosts = Hosts::default();
+async fn take_in(
+    transport: Arc<Transport>,
+    accepted: tokio::sync::mpsc::Sender<Accepting>,
+    known: Known,
+) {
+    let places = Places::default();
     loop {
         let incoming = tokio::select! {
             incoming = transport.accept() => incoming,
@@ -269,17 +294,15 @@ async fn take_in(transport: Arc<Transport>, accepted: tokio::sync::mpsc::Sender<
         let Some(incoming) = incoming else {
             return;
         };
-        let Some(host) = Host::take(&hosts, incoming.from().ip()) else {
-            incoming.refuse();
-            continue;
-        };
-        let Ok(place) = places.clone().try_acquire_owned() else {
+        let ip = unmapped(incoming.from().ip());
+        let is_known = known.read().unwrap().contains(&ip);
+        let Some(place) = places.take(ip, is_known) else {
             incoming.refuse();
             continue;
         };
         let accepted = accepted.clone();
         tokio::spawn(async move {
-            let _places = (place, host);
+            let _place = place;
             let Ok(Ok(conn)) = tokio::time::timeout(HANDSHAKE, incoming.finish()).await else {
                 return;
             };
@@ -306,53 +329,116 @@ async fn take_in(transport: Arc<Transport>, accepted: tokio::sync::mpsc::Sender<
     }
 }
 
-/// The places each host holds.
-type Hosts = Arc<std::sync::Mutex<HashMap<IpAddr, usize>>>;
-
-/// A place a host holds among the handshakes under way, let go when dropped.
-struct Host {
-    hosts: Hosts,
-    host: IpAddr,
+/// The places of the handshakes under way: those for every host, and those kept for the hosts
+/// this machine knows.
+struct Places {
+    all: Pool,
+    kept: Pool,
 }
 
-impl Host {
-    /// A place for the host at `ip`, unless it holds all of its own.
-    fn take(hosts: &Hosts, ip: IpAddr) -> Option<Host> {
-        let host = host_of(ip);
-        let mut held = hosts.lock().unwrap();
-        let count = held.entry(host).or_default();
-        if *count >= HANDSHAKES_FROM_ONE {
+impl Default for Places {
+    fn default() -> Places {
+        Places {
+            all: Pool::new(HANDSHAKES),
+            kept: Pool::new(KEPT_FOR_KNOWN),
+        }
+    }
+}
+
+impl Places {
+    /// A place for a link from `ip`: one for every host, or, for a host it knows, one kept.
+    fn take(&self, ip: IpAddr, known: bool) -> Option<Place> {
+        self.all
+            .take(ip)
+            .or_else(|| known.then(|| self.kept.take(ip)).flatten())
+    }
+}
+
+/// Places, and those each host and each IPv6 site holds.
+struct Pool {
+    free: Arc<tokio::sync::Semaphore>,
+    held: Held,
+}
+
+/// The places each host or site holds, by its address and its prefix's length: a /64 and the
+/// /48 it starts are one address.
+type Held = Arc<std::sync::Mutex<HashMap<(IpAddr, u8), usize>>>;
+
+impl Pool {
+    fn new(places: usize) -> Pool {
+        Pool {
+            free: Arc::new(tokio::sync::Semaphore::new(places)),
+            held: Held::default(),
+        }
+    }
+
+    /// A place for `ip`, unless its host or its site holds all of its own, or none is free.
+    fn take(&self, ip: IpAddr) -> Option<Place> {
+        let mut counted = vec![((host_of(ip), 64), HANDSHAKES_FROM_ONE)];
+        counted.extend(site_of(ip).map(|site| ((site, 48), HANDSHAKES_FROM_SITE)));
+        let mut held = self.held.lock().unwrap();
+        if counted
+            .iter()
+            .any(|(at, most)| held.get(at).is_some_and(|count| count >= most))
+        {
             return None;
         }
-        *count += 1;
-        Some(Host {
-            hosts: hosts.clone(),
-            host,
+        let free = self.free.clone().try_acquire_owned().ok()?;
+        for (at, _) in &counted {
+            *held.entry(*at).or_default() += 1;
+        }
+        Some(Place {
+            held: self.held.clone(),
+            counted: counted.into_iter().map(|(at, _)| at).collect(),
+            _free: free,
         })
     }
 }
 
-impl Drop for Host {
+/// A place among the handshakes under way, let go when dropped.
+struct Place {
+    held: Held,
+    /// The host, and the site, it is counted for.
+    counted: Vec<(IpAddr, u8)>,
+    _free: tokio::sync::OwnedSemaphorePermit,
+}
+
+impl Drop for Place {
     fn drop(&mut self) {
-        let mut held = self.hosts.lock().unwrap();
-        if let Some(count) = held.get_mut(&self.host) {
-            *count -= 1;
-            if *count == 0 {
-                held.remove(&self.host);
+        let mut held = self.held.lock().unwrap();
+        for at in &self.counted {
+            if let Some(count) = held.get_mut(at) {
+                *count -= 1;
+                if *count == 0 {
+                    held.remove(at);
+                }
             }
         }
     }
 }
 
-/// The host an address is: an IPv4 address (mapped into IPv6 or not), or the /64 of an IPv6 one,
-/// which one host is given whole.
-fn host_of(ip: IpAddr) -> IpAddr {
+/// An IPv4 address mapped into IPv6 as the IPv4 address it is.
+fn unmapped(ip: IpAddr) -> IpAddr {
     match ip {
-        IpAddr::V4(v4) => IpAddr::V4(v4),
-        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
-            Some(v4) => IpAddr::V4(v4),
-            None => IpAddr::V6((u128::from(v6) & !u128::from(u64::MAX)).into()),
-        },
+        IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(ip, IpAddr::V4),
+        IpAddr::V4(_) => ip,
+    }
+}
+
+/// The host an address is: an IPv4 address, or the /64 of an IPv6 one, which one host is given
+/// whole.
+fn host_of(ip: IpAddr) -> IpAddr {
+    match unmapped(ip) {
+        IpAddr::V6(v6) => IpAddr::V6((u128::from(v6) & !u128::from(u64::MAX)).into()),
+        v4 => v4,
+    }
+}
+
+/// The site of an IPv6 address, its /48; none for an IPv4 one.
+fn site_of(ip: IpAddr) -> Option<IpAddr> {
+    match unmapped(ip) {
+        IpAddr::V6(v6) => Some(IpAddr::V6((u128::from(v6) & !(u128::MAX >> 48)).into())),
+        IpAddr::V4(_) => None,
     }
 }
 
@@ -648,4 +734,72 @@ fn interfaces() -> Vec<IpAddr> {
     // SAFETY: `list` is what getifaddrs returned, freed once.
     unsafe { libc::freeifaddrs(list) };
     found
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ip(text: &str) -> IpAddr {
+        text.parse().unwrap()
+    }
+
+    #[test]
+    fn an_ipv6_host_holds_two_places_and_its_site_eight() {
+        let places = Places::default();
+        let mut held = Vec::new();
+        // Two for one /64, refused a third.
+        held.push(places.take(ip("2001:db8:1:1::1"), false).unwrap());
+        held.push(places.take(ip("2001:db8:1:1::2"), false).unwrap());
+        assert!(places.take(ip("2001:db8:1:1::3"), false).is_none());
+        // Eight for the /48, whichever of its /64s they come from.
+        for subnet in 2..5 {
+            for _ in 0..2 {
+                held.push(
+                    places
+                        .take(ip(&format!("2001:db8:1:{subnet}::1")), false)
+                        .unwrap(),
+                );
+            }
+        }
+        assert!(places.take(ip("2001:db8:1:99::1"), false).is_none());
+        // Another site is not counted with it.
+        held.push(places.take(ip("2001:db8:2::1"), false).unwrap());
+        // A place let go is free again.
+        held.remove(0);
+        assert!(places.take(ip("2001:db8:1:99::1"), false).is_some());
+    }
+
+    #[test]
+    fn an_ipv4_address_mapped_into_ipv6_is_one_host() {
+        let places = Places::default();
+        let _held = [
+            places.take(ip("192.0.2.1"), false).unwrap(),
+            places.take(ip("::ffff:192.0.2.1"), false).unwrap(),
+        ];
+        assert!(places.take(ip("192.0.2.1"), false).is_none());
+        assert!(places.take(ip("::ffff:192.0.2.1"), false).is_none());
+    }
+
+    #[test]
+    fn the_places_kept_are_for_known_hosts_only() {
+        let places = Places::default();
+        // Every place for all held, two by host.
+        let _held: Vec<Place> = (0..HANDSHAKES)
+            .map(|at| {
+                let at = at / 2;
+                places
+                    .take(ip(&format!("10.0.{}.{}", at / 256, at % 256)), false)
+                    .unwrap()
+            })
+            .collect();
+        assert!(places.take(ip("192.0.2.1"), false).is_none());
+        // A known host takes a kept place; still two at most for it.
+        let _kept = [
+            places.take(ip("192.0.2.7"), true).unwrap(),
+            places.take(ip("192.0.2.7"), true).unwrap(),
+        ];
+        assert!(places.take(ip("192.0.2.7"), true).is_none());
+        assert!(places.take(ip("192.0.2.8"), true).is_some());
+    }
 }
