@@ -39,7 +39,7 @@ pub struct Project {
     pub model: Option<String>,
     /// How many commands its agents run now: the tree shows an icon while there is one.
     pub commands: usize,
-    /// It declares a tracker: the tree shows its Progress page under it.
+    /// It declares a tracker: its page has a Progress tab.
     pub tracked: bool,
 }
 

@@ -46,11 +46,6 @@ impl TreeLevel {
     }
 }
 
-/// The element id of a project's Progress entry.
-pub fn progress_id(name: &str) -> ElementId {
-    ElementId::Name(format!("tree-progress-{name}").into())
-}
-
 /// The element id of a project's row.
 pub fn project_id(name: &str) -> ElementId {
     ElementId::Name(format!("project-{name}").into())
@@ -537,10 +532,6 @@ pub struct ProjectNode {
     held: Option<AgentState>,
     /// How many commands its agents run now.
     commands: usize,
-    /// It declares a tracker: its Progress entry is under its row.
-    tracked: bool,
-    /// Its Progress page is the one open.
-    progress_selected: bool,
     sessions: Entity<Level>,
     fold: Entity<Fold>,
     shell: WeakEntity<Shell>,
@@ -556,8 +547,6 @@ impl ProjectNode {
             mark: Mark::new(cx),
             held: None,
             commands: 0,
-            tracked: false,
-            progress_selected: false,
             sessions,
             fold,
             shell,
@@ -582,25 +571,6 @@ impl ProjectNode {
 
     pub fn is_open(&self) -> bool {
         self.open
-    }
-
-    /// Whether it declares a tracker, and so has a Progress page.
-    pub fn tracked(&self) -> bool {
-        self.tracked
-    }
-
-    pub fn set_tracked(&mut self, tracked: bool, cx: &mut Context<Self>) {
-        if self.tracked != tracked {
-            self.tracked = tracked;
-            cx.notify();
-        }
-    }
-
-    pub fn set_progress_selected(&mut self, selected: bool, cx: &mut Context<Self>) {
-        if self.progress_selected != selected {
-            self.progress_selected = selected;
-            cx.notify();
-        }
     }
 
     /// Its sessions' rows in the order drawn: the one that moved last first.
@@ -670,8 +640,8 @@ impl Render for ProjectNode {
                 cx,
             ))
             .on_toggle(cx.listener(|this, _, _, cx| this.toggle(cx)))
-            // Not a `cx.listener`: that runs inside this node's update, and opening a project's
-            // page from its own Progress page updates this node again (its Progress mark).
+            // Not a `cx.listener`: that runs inside this node's update, and opening a page may
+            // update this node again (#993).
             .on_click(move |_, window, cx| {
                 let project = name.clone();
                 shell
@@ -680,31 +650,11 @@ impl Render for ProjectNode {
                     })
                     .ok();
             });
-        // Its Progress page, above its sessions: it folds away with them, and comes and goes
-        // with its tracker.
-        let (shell, name) = (self.shell.clone(), self.name.clone());
-        let progress = TreeLevel::Session
-            .row(progress_id(&self.name), "Progress")
-            .leading(gpui_design_system::icon(glyphs::MILESTONE).size(px(14.)))
-            .selected(self.progress_selected)
-            .on_click(move |_, window, cx| {
-                let project = name.clone();
-                shell
-                    .update(cx, |shell, cx| {
-                        shell.open(Selection::Progress(project), window, cx)
-                    })
-                    .ok();
-            });
         div()
             .flex()
             .flex_col()
             .flex_none()
             .child(row)
-            .child(presence(
-                ElementId::Name(format!("tree-progress-entry-{}", self.name).into()),
-                self.tracked && self.open,
-                progress,
-            ))
             .child(self.fold.clone())
     }
 }

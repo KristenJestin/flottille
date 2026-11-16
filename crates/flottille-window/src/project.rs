@@ -3,7 +3,8 @@
 //! row in the settings, Settings and New workspace), the composer that starts a session, then its
 //! tabs: **Work**, one column of the project's places (`main` first, then the workspaces from the
 //! newest), each with its sessions and the task runs going on there, the ended runs folded at the
-//! bottom; **Pull requests**, **Tickets**, and **Specs** while Specs is on. Each place is its own
+//! bottom; **Pull requests**, **Tickets**, **Specs** while Specs is on, and **Progress** for a project
+//! that declares a tracker: its milestones and their tickets (`progress.rs`). Each place is its own
 //! view: a session changing redraws its block, a letter typed in the composer redraws neither.
 
 mod ended;
@@ -32,6 +33,7 @@ use crate::actions::{Command, Details, RepositoryStatus};
 use crate::composer::Composer;
 use crate::items::{Kind, ProjectItems};
 use crate::model::{Place, Preparation};
+use crate::progress::ProgressPage;
 use crate::project_settings::Reveal;
 use crate::repositories::ProjectRepositories;
 use crate::runs::{CommandRow, arrange};
@@ -79,6 +81,8 @@ pub struct ProjectData {
     pub folder: String,
     pub repositories: Vec<String>,
     pub places: Vec<PlaceData>,
+    /// It declares a tracker: its Progress tab shows.
+    pub tracked: bool,
 }
 
 /// A repository's name on the page: the project's own name for the folder itself.
@@ -111,6 +115,8 @@ pub enum PageTab {
     Work,
     /// One of the lists: which one is the items' own.
     Lists,
+    /// The milestones of the tracker and their tickets.
+    Progress,
 }
 
 /// What the tabs say of the lists, kept so that the page is drawn again only when it changes.
@@ -143,6 +149,10 @@ pub struct ProjectPage {
     repositories_section: Entity<ProjectRepositories>,
     /// Its pull requests and tickets.
     items: Entity<ProjectItems>,
+    /// Whether the project declares a tracker: its Progress tab shows.
+    tracked: bool,
+    /// What the Progress tab shows, read when the tab is chosen and dropped when it is left.
+    progress: Option<Entity<ProgressPage>>,
     tab: PageTab,
     /// A tab was chosen since the page opened: its content enters at once, not after the
     /// page's own entrance.
@@ -207,6 +217,8 @@ impl ProjectPage {
             ended,
             repositories_section,
             items,
+            tracked: false,
+            progress: None,
             tab: PageTab::Work,
             switched: false,
             lists: ListsSaid::default(),
@@ -262,12 +274,33 @@ impl ProjectPage {
             .cloned()
     }
 
-    /// Shows Work, or the lists.
+    /// The Progress tab's page, while that tab is the one shown.
+    pub fn progress(&self) -> Option<&Entity<ProgressPage>> {
+        self.progress.as_ref()
+    }
+
+    /// Shows Work, the lists, or Progress (a project that declares no tracker has none). Opening
+    /// Progress reads it, as its page did when it opened; leaving it drops what it held.
     pub fn choose(&mut self, tab: PageTab, cx: &mut Context<Self>) {
-        if self.tab != tab {
-            self.tab = tab;
-            cx.notify();
+        let tab = match tab {
+            PageTab::Progress if !self.tracked => PageTab::Work,
+            tab => tab,
+        };
+        if self.tab == tab {
+            return;
         }
+        self.tab = tab;
+        self.progress = match tab {
+            PageTab::Progress => {
+                let (shell, name) = (self.shell.clone(), self.name.clone());
+                let made = cx.new(|cx| ProgressPage::new(shell, name, cx));
+                let reading = made.clone();
+                cx.defer(move |cx| reading.update(cx, |page, cx| page.read(cx)));
+                Some(made)
+            }
+            _ => None,
+        };
+        cx.notify();
     }
 
     /// Each repository and the branch it is on, once known: the header's chips, drawn for a
@@ -309,6 +342,12 @@ impl ProjectPage {
         let mut changed = self.folder != data.folder || self.repositories != data.repositories;
         self.folder = data.folder;
         self.repositories = data.repositories;
+        // The tracker was taken off while its tab was shown: the page goes back to Work.
+        changed |= self.tracked != data.tracked;
+        self.tracked = data.tracked;
+        if !self.tracked {
+            self.choose(PageTab::Work, cx);
+        }
         let mut old = std::mem::take(&mut self.blocks);
         let mut blocks = Vec::new();
         let places: Vec<Place> = data.places.iter().map(|p| p.place.clone()).collect();
@@ -514,15 +553,20 @@ impl Render for ProjectPage {
             header
         };
 
-        // The tabs: Work, the two lists, and Specs while it is on.
+        // The tabs: Work, the two lists, Specs while it is on, and Progress while the project
+        // declares a tracker.
+        let progress_at = 3 + usize::from(self.lists.specs.is_some());
         let chosen = match (self.tab, self.lists.chosen) {
             (PageTab::Work, _) => 0,
             (PageTab::Lists, Some(Kind::Pulls)) => 1,
             (PageTab::Lists, Some(Kind::Tickets)) => 2,
             (PageTab::Lists, None) => 3,
+            (PageTab::Progress, _) => progress_at,
         };
+        let (shell, project) = (self.shell.clone(), self.name.clone());
         let this = cx.entity().downgrade();
         let items = self.items.clone();
+        let tracked = self.tracked;
         let tabs = Tabs::new("project-tabs", "Project", chosen)
             .tab("work", "Work")
             .counted("pulls", "Pull requests", self.lists.counts[0].to_string())
@@ -530,16 +574,19 @@ impl Render for ProjectPage {
             .when_some(self.lists.specs, |tabs, count| {
                 tabs.counted("specs", "Specs", count.to_string())
             })
+            .when(self.tracked, |tabs| tabs.tab("progress", "Progress"))
             .on_choose(move |at, _, cx| {
-                let tab = if at == 0 {
-                    PageTab::Work
-                } else {
-                    PageTab::Lists
+                let tab = match at {
+                    0 => PageTab::Work,
+                    at if at == progress_at && tracked => PageTab::Progress,
+                    _ => PageTab::Lists,
                 };
                 match at {
                     1 => items.update(cx, |items, cx| items.choose(Kind::Pulls, cx)),
                     2 => items.update(cx, |items, cx| items.choose(Kind::Tickets, cx)),
-                    3 => items.update(cx, |items, cx| items.choose_specs(cx)),
+                    3 if tab == PageTab::Lists => {
+                        items.update(cx, |items, cx| items.choose_specs(cx))
+                    }
                     _ => {}
                 }
                 this.update(cx, |page, cx| {
@@ -547,6 +594,13 @@ impl Render for ProjectPage {
                     page.choose(tab, cx);
                 })
                 .ok();
+                // Not inside the page's own update: the shell keeps the history, and feeds the
+                // Progress page the sessions it shows.
+                shell
+                    .update(cx, |shell, cx| {
+                        shell.tab_chosen(&project, tab == PageTab::Progress, cx)
+                    })
+                    .ok();
             });
 
         let shown = match self.tab {
@@ -584,11 +638,16 @@ impl Render for ProjectPage {
                     .into_any_element()
             }
             PageTab::Lists => self.items.clone().into_any_element(),
+            PageTab::Progress => match &self.progress {
+                Some(progress) => progress.clone().into_any_element(),
+                None => div().into_any_element(),
+            },
         };
         let shown_key = match chosen {
             0 => "work",
             1 => "pulls",
             2 => "tickets",
+            at if at == progress_at && self.tracked => "progress",
             _ => "specs",
         };
         let column = div()
