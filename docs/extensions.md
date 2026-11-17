@@ -1211,8 +1211,14 @@ your browser`, and a toast says how it ended (`Signed in to notes`, or why not),
 connection signed out or whose tokens were not saved.
 Adding or editing one is a form dialog: its name (not editable once made), what it is for, how it
 is reached (radios: a program, its command one line split as a task's, shell syntax refused under
-it; or a URL), its variables (headers for a URL), each a name and a vault entry picked among those
-every project sees and no other use is bound to, and its limits (an argument and its values,
+it; or a URL), its variables (a program's), each a name and a vault entry picked among those
+every project sees and no other use is bound to, or its **Secrets of its requests** (a URL's), one
+line each: where it goes (a header, a query parameter, a cookie or basic authentication), its name
+(not for basic), its prefix (a header's, as `Bearer `, kept as typed) and its vault entry (the name
+and the prefix fold away under a place that does not take them, and are emptied), the old
+header lines among them as header lines with no prefix; a save sends `headers` (the lines with no
+prefix, as they always were) and `secrets` (the others, in the form's order), so that one that
+changes nothing leaves the declaration and its digest as they were, and its limits (an argument and its values,
 separated by commas). The projects a connection excepts are not in the form yet: the command line
 sets them. **Review** opens the diff in a wide dialog (640 px, `Modal::wide`), its server and its
 version (`almanac 1.0.0 → 2.0.0`), a search field and filter chips under the title, a bar and the
@@ -1251,13 +1257,24 @@ server**, filled with what it would write and read-only, an edit's changed field
 value struck above the new one, a `set` its settings, **Where its secrets go**: one line per vault
 entry the declaration names, with the entry's host (its `url`, or "no address") and where it goes
 (the connection's host, or the program's environment), in the warning colour and tagged when they
-differ, under a warning, and **Accept**, **Edit** and **Refuse** (a quiet button that answers at
+differ, under a warning (an entry that names no address is said as such, `bound to no address`, and
+tagged `No address`, not as another host), and **Accept**, **Edit** and **Refuse** (a quiet button that answers at
 once, as the rail's Deny: it writes nothing, so nothing is confirmed). **Edit** opens the server's
-form with the agent's values; its Save writes the user's values and answers the request
-(`connection.add`/`.edit` with `request`), which it decides under the file's lock before it
-writes: a request accepted meanwhile is refused to the Save, and only one of them writes. A request whose declaration changed since it was asked says so, and Accept is not
-offered. Everything animates as the rest of the window does:
-the servers fold away and unfold with the switch, a row unfolds when it arrives and folds away
+form with the agent's values, the secrets of its requests among them, and says it answers the
+request `#N`: its Save writes the user's values and answers the request, its Cancel leaves it
+waiting (`connection.add`/`.edit` with `request`), which it decides under the file's lock before it
+writes: a request accepted meanwhile is refused to the Save, and only one of them writes. That Save
+is held to Accept's rules for secrets, on what it writes and under the file's lock: it waits, as
+Accept does, while a vault entry the connection names is not made yet, and a secret line new to the
+connection goes only to its entry's own host (the user's own form, answering no request, binds
+freely). A request whose declaration changed since it was asked says so, and Accept is not
+offered. When Accept answers that the request names a vault entry that is not made yet, the dialog
+shows a **New entry…** button per missing entry beside that answer (only that one: no other
+failure offers them, and they fold away with their block when it goes): it opens the vault's own entry
+dialog on the entry's name and, as its address, the host the request sends it to, the secret left
+for the user to type there (the request's dialog never holds it); saved or closed, the request's
+dialog is back, and Accept goes through once the entry exists. Everything animates as the rest of
+the window does: the servers fold away and unfold with the switch, a row unfolds when it arrives and folds away
 when it leaves, a field that a radio or a switch needs unfolds under it, the dialogs rise and
 fade, the review crossfades from its skeleton; in it, the server, the adapter's sentence, the bar,
 the search and the chips come one after the other, a row that changes setting folds away in its

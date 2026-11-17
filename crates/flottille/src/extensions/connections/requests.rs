@@ -946,6 +946,27 @@ pub(super) fn answerable(
     Ok(())
 }
 
+/// What the user's Save that answers a request writes (`after`, over `before`) is held to
+/// Accept's rules for secrets, checked under the file's lock: it waits for every entry it names,
+/// and a line new to the connection goes only to its entry's own host. Else Edit then Save would
+/// write a token's line for a host its entry, made later, is not bound to.
+pub(super) fn saved_checked(
+    daemon: &Daemon,
+    before: Option<&Declaration>,
+    after: &Declaration,
+) -> Result<(), Failure> {
+    let missing = missing(daemon, after);
+    if !missing.is_empty() {
+        return Err(Failure::refused(format!(
+            "Save waits for the vault entr{} {}: save {} in the vault, then save",
+            if missing.len() == 1 { "y" } else { "ies" },
+            missing.join(", "),
+            if missing.len() == 1 { "it" } else { "them" },
+        )));
+    }
+    headers_checked(daemon, before, after).map_err(Failure::refused)
+}
+
 /// The request the user answers by writing their own values, decided before it is written; one
 /// decided meanwhile (an Accept of it) is refused, and the Save writes nothing.
 pub(super) fn claimed(daemon: &Daemon, number: u64) -> Result<approval::Request, Failure> {
