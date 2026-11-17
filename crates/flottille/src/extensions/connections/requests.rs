@@ -319,15 +319,23 @@ fn missing(daemon: &Daemon, declaration: &Declaration) -> Vec<String> {
     missing
 }
 
+/// Whether `name` waits for a review the user can make: its server is not what they read, and it
+/// starts (a server that does not start waits for no one).
+fn awaits_review(daemon: &Daemon, name: &str) -> bool {
+    super::now_of(daemon, name).is_some_and(|(declaration, _, state)| {
+        state == State::Awaiting && super::failing(daemon, &declaration).is_none()
+    })
+}
+
 /// Why the user's Accept of an agent's request waits: a vault entry it names is not right for it
 /// yet (`entry_problems`). The request stays held, and is accepted once its entries are right.
 pub fn waits(daemon: &Daemon, args: &Value) -> Option<String> {
     // Settings are given to what the user read: a `set` waits, held, for the review of the
-    // connection, which its card offers.
+    // connection when one can be made (`awaits_review`). A connection off, cut off or signed out
+    // has no review to wait for: its request goes through, or says its own reason.
     if args["action"] == "set"
         && let Some(name) = args["name"].as_str()
-        && let Some((_, _, state)) = super::now_of(daemon, name)
-        && state != State::Ready
+        && awaits_review(daemon, name)
     {
         return Some(format!(
             "Accept waits: review the connection {name} first, where its actions are set"
@@ -1033,7 +1041,7 @@ fn given_said(daemon: &Daemon, name: &str, shown: &Value) -> String {
         (Some("ready"), _) => {
             return format!("The connection {name} is written; it was given already.");
         }
-        _ => {
+        (Some("awaiting review"), _) => {
             // The agent is told what is happening, never sent looking for a menu: the user is
             // led into the review at once, and a delivery says when it was done.
             let unread = unread(daemon, name);
@@ -1049,6 +1057,17 @@ fn given_said(daemon: &Daemon, name: &str, shown: &Value) -> String {
                  then do not use {what}, and do not ask again."
             );
         }
+        // No review is made for these, so no delivery comes: the agent is told what is true.
+        (Some("cut off"), _) => {
+            "it is cut off: its server is not what the user accepted, and nothing of it is given \
+             to agents until the user accepts it again"
+                .to_owned()
+        }
+        (Some("signed out"), _) => {
+            "its sign-in ended, and nothing of it is given to agents until the user signs in again"
+                .to_owned()
+        }
+        _ => "it is not given to agents yet".to_owned(),
     };
     format!("The connection {name} is written, not given to agents yet: {why}.")
 }
@@ -1088,8 +1107,8 @@ pub fn settled(daemon: &Arc<Daemon>, request: &approval::Request, done: bool) ->
     }
     let name = args["name"].as_str()?;
     review_closed(daemon, name);
-    let (declaration, _, state) = super::now_of(daemon, name)?;
-    let review = state == State::Awaiting && super::failing(daemon, &declaration).is_none();
+    let (_, _, state) = super::now_of(daemon, name)?;
+    let review = awaits_review(daemon, name);
     if review && done && matches!(args["action"].as_str(), Some("add" | "edit" | "on")) {
         review_waits(daemon, request, name);
     }
@@ -1099,6 +1118,24 @@ pub fn settled(daemon: &Arc<Daemon>, request: &approval::Request, done: bool) ->
 /// The user is to review `name`, after the request of `request.agent`: the card of its session,
 /// and the inbox, as a connection cut off is said.
 fn review_waits(daemon: &Arc<Daemon>, request: &approval::Request, name: &str) {
+    // One card and one delivery per connection awaiting review, for the agent: a card this agent
+    // already has for `name` folds away, and its request's delivery is not sent, since the new
+    // one says it all (`unread` is of the connection, not of one request).
+    let open = open_reviews(daemon, name);
+    for (earlier, agent, actions) in &open {
+        if *agent == request.agent {
+            let data = json!({"agent": agent, "name": name, "request": earlier,
+                "outcome": "superseded", "actions": actions});
+            let written = daemon.write(|store| {
+                let event =
+                    store.append_agent_event(agent, "connection.review_done", data, false)?;
+                Ok(((), event))
+            });
+            if let Err(error) = written {
+                eprintln!("flottille daemon: connection {name}: {error}");
+            }
+        }
+    }
     let actions = unread(daemon, name);
     let data = json!({"agent": request.agent, "name": name, "request": request.number,
         "actions": actions});
@@ -1110,14 +1147,13 @@ fn review_waits(daemon: &Arc<Daemon>, request: &approval::Request, name: &str) {
     if let Err(error) = written {
         eprintln!("flottille daemon: connection {name}: {error}");
     }
+    // The inbox says it once: a connection already waiting for a review has its item.
     let event = json!({"name": name, "tool": format!("{}{name}", super::PREFIX),
         "actions": actions});
-    if let Err(error) = super::write_row(
-        daemon,
-        name,
-        |_| {},
-        Some(("connection.awaiting_review", event)),
-    ) {
+    let inbox = open
+        .is_empty()
+        .then_some(("connection.awaiting_review", event));
+    if let Err(error) = super::write_row(daemon, name, |_| {}, inbox) {
         eprintln!("flottille daemon: connection {name}: {error}");
     }
 }
@@ -1367,9 +1403,7 @@ pub(super) fn proposed(daemon: &Daemon, params: &Value) -> Result<Value, Failure
         "why": null,
         "waits": waits(daemon, args),
         // The connection waits for the user's review: its card says it first, with Review.
-        "review": super::now_of(daemon, &proposal.name).is_some_and(|(declaration, _, state)| {
-            state == State::Awaiting && super::failing(daemon, &declaration).is_none()
-        }),
+        "review": awaits_review(daemon, &proposal.name),
     }))
 }
 
