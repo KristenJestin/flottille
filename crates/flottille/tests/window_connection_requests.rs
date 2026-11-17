@@ -859,6 +859,45 @@ fn the_new_entry_buttons_fold_away_with_their_block(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn the_new_entry_buttons_fold_away_when_the_request_is_no_longer_current(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, mcp) = a_root(&user);
+    let number = a_bearer_request(&mcp);
+    let (shell, cx) = window(&user, cx);
+    waiting_for_its_entry(&shell, cx, &lead, number);
+
+    // The user adds a server of that name meanwhile: the agent's add would no longer be done.
+    user.call(
+        "connection.add",
+        json!({"name": "notes", "about": "Mine.", "url": "https://mine.example.com/mcp"}),
+    )
+    .unwrap();
+    let reading = user
+        .call("connection.proposed", json!({"number": number}))
+        .unwrap();
+    assert_eq!(reading["current"], false, "{reading}");
+    // Read again, as the dialog does after a Share or a Bind: it says so, and no entry is
+    // offered to make for it.
+    let request = shell.read_with(cx, |s, _| s.connection_request().clone());
+    request.update(cx, |r, cx| {
+        r.answered(
+            flottille_window::extensions::connection_request::Then::Proposed { number },
+            Ok(reading),
+            cx,
+        )
+    });
+    a_third_later(cx);
+    assert!(
+        visible(cx, "connection-request-new-entry-notes-key"),
+        "the button folds away with its block, it does not vanish first"
+    );
+    until(&shell, cx, "the block folds away", |cx| {
+        !present(cx, "connection-request-new-entry-notes-key")
+    });
+    assert!(!present(cx, "connection-request-accept"));
+}
+
+#[gpui_kit::test]
 fn the_new_entry_buttons_answer_only_an_accept_that_waits(cx: &mut TestAppContext) {
     let user = user();
     let (lead, mcp) = a_root(&user);
