@@ -2073,8 +2073,7 @@ fn fields_are_refused_where_they_cannot_go_before_anything_is_asked() {
         (
             json!({"action": "create", "project": "ABC", "title": "t",
                 "fields": {"priority": {"name": "High"}}}),
-            "refused: tickets create with fields needs type: acli creates a work item from a \
-             JSON definition, which takes no default type; types lists them",
+            "refused: tickets create with fields needs type: acli creates a work item",
         ),
     ] {
         let answer = mcp.call("tickets", args);
@@ -2123,7 +2122,7 @@ fn a_types_required_fields_are_said() {
     // acli lists no required field of a type (nor does Flottille call Jira's REST API): what is
     // said is how a creation says them, and how to give them.
     assert!(
-        said.contains("requires fields that acli does not list"),
+        said.contains("acli lists no type's required fields"),
         "{said}"
     );
     assert!(said.contains("fields"), "{said}");

@@ -709,6 +709,10 @@ fn posted_says(args: &Value) -> Vec<String> {
     if let Some(parent) = args["parent"].as_str() {
         says.push(format!("It puts it under {}", parent.trim().to_uppercase()));
     }
+    // Each field a Jira work item is given, with its value as it is sent.
+    for (field, value) in args["fields"].as_object().into_iter().flatten() {
+        says.push(format!("It sets the field {field}: {value}"));
+    }
     // A `null` assignee is how an edit takes the assignee away.
     if args["action"] == "edit" && args["assignee"].is_null() && args.get("assignee").is_some() {
         says.push("It removes the assignee".into());

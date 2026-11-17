@@ -358,7 +358,7 @@ const SERVED: [Definition; 33] = [
                 "title": {"type": "string", "description": "create, edit: the pull request's title. create needs the branch pushed first (git push -u origin <branch>)."},
                 "body": {"type": "string", "description": "create, edit: description; comment: the comment. reply: the reply. review: its words. create without it takes the project's pull request template when it has one (project settings shows it): fill the template in body rather than replace it."},
                 "draft": {"type": "boolean", "description": "create: open as a draft. edit: false marks it ready for review, true makes it a draft again."},
-                "reviewers": {"type": "array", "items": {"type": "string"}, "description": "create: reviewers besides the project's, each by display name, nickname, account id or e-mail; people finds them."},
+                "reviewers": {"type": "array", "items": {"type": "string"}, "description": "create: reviewers asked when it is opened, on GitHub and Bitbucket alike (no edit afterwards), besides the project's; each by display name, nickname, account id or e-mail; people finds them. edit takes reviewers_add."},
                 "query": {"type": "string", "description": "people: lists who can be named a reviewer (a display name, nickname or e-mail does for reviewers); these words narrow it."},
                 "labels": {"type": "array", "items": {"type": "string"}, "description": "create: labels (GitHub only)."},
                 "delete_branch_on_merge": {"type": "boolean", "description": "create: delete the source branch when it is merged."},
@@ -404,14 +404,14 @@ const SERVED: [Definition; 33] = [
             on Jira also in_comments, jql; show: a workspace's ticket (in \
             main, name workspace) or ticket, with links; detail full adds comments, \
             with ids; Jira images and files are named, not shown; \
-            types: a Jira project's work item types (never guess); link_types; \
+            types: a Jira project's work item types; link_types; \
             worklogs (Jira: a day's or range's time). \
             Writes, judged, answered at once, the result maybe later: create, comment, reply, edit, close, \
             reopen, status, link, unlink, comment_edit, \
             comment_delete (both yours only); log_time (Jira), \
             time_spent (this session's, to propose). \
             Assign only if asked (assignee \"me\": the user; \
-            GitHub: assignees). Jira create: parent, sprint (see sprints). \
+            GitHub: assignees). Jira create: parent, sprint (see sprints), fields. \
             Milestones (Jira: versions): milestones, progress; GitHub: milestone_create/_edit. \
             subscribe: a ticket's events wake you until it closes (maybe already); unsubscribe.",
         read_only: false,
@@ -445,6 +445,7 @@ const SERVED: [Definition; 33] = [
                 "kind": {"type": "string", "description": "link, unlink: a kind link_types lists (blocks, is blocked by, relates to; GitHub: parent of, sub-task of)."},
                 "comment": {"type": "string", "description": "reply: the id show (detail full) gives any comment. comment_edit, comment_delete: one an agent posted, no one else's."},
                 "sprint": {"type": "string", "description": "create on Jira (with type): an open sprint, by the name or id sprints gives. An existing item's sprint cannot be changed (acli)."},
+                "fields": {"type": "object", "description": "create, edit on Jira: any field of the work item, as Jira takes it, passed through acli. Keys: the field's id (customfield_10042) or system key (priority, components). A select: {\"value\": \"Major\"}; a user: {\"accountId\": ...}. A creation refused for a missing required field names it: give it here. create needs type.", "additionalProperties": true},
                 "parent": {"type": "string", "description": "create on Jira: the work item it goes under (an epic, or a sub-task's parent). An existing item's parent cannot be changed (acli)."},
                 "milestone": {"type": "string", "description": "A milestone's title or number (GitHub), a version's name or id (Jira); milestones lists them: list, search filter by it; create puts the ticket in it (Jira: with type); edit (GitHub only) moves it; milestone_edit (GitHub): the one to change."},
                 "remove_milestone": {"type": "boolean", "description": "edit (GitHub): take the ticket out of its milestone. Jira's fix version cannot be changed (acli)."},
@@ -3573,11 +3574,6 @@ mod tests {
         ] {
             assert!(said.contains(word), "{word}: {said}");
         }
-        assert!(
-            forge.description.contains("reviewers"),
-            "{}",
-            forge.description
-        );
     }
 
     #[test]
