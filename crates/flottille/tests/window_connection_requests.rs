@@ -745,7 +745,7 @@ fn a_missing_entry_is_made_from_the_request_s_dialog_then_accept_goes_through(
             s.connection_request()
                 .read(cx)
                 .error()
-                .is_some_and(|said| said.contains("Accept waits for the vault entry notes-key"))
+                .is_some_and(|said| said.contains("the vault entry notes-key is not saved yet"))
         })
     });
     assert_eq!(pending(&user), 1, "nothing was answered");
