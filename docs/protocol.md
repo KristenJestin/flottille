@@ -626,6 +626,8 @@ setting}]`, `setting` being `judged`, `passes`, `asked` or `off`).
   `to_bind` when Accept waits for the entry, usable for the connection, to be bound to the
   connection's host; `entry_url` the entry's `url`; `origin` the connection's scheme, host and
   port),
+  `review` whether the connection waits for the user's review (a server that does not start waits for
+  no one): its card offers the review first, and a `set`'s Accept waits for it (`waits` says so),
   `current` whether it is still what the request says: one that is not is not done once allowed
   (`why` says why, when it can no longer be done at all; an entry that is not right yet is no such
   change), and `waits`, why Accept waits, if it does.
@@ -2274,7 +2276,12 @@ there is no such agent).
 `discard`, `true` for a workspace's removal only (`refused` for any other request), removes it
 even with what would be lost (`docs/workspaces.md`, "Removal"). Answered `{"request"}` once it
 is decided; the call is then checked again, performed in the background, and its answer stored for
-the agent (`approval.settled`). An `action` is done only while what it `says` still holds (a
+the agent (`approval.settled`), except a `connections` write, which the call waits for (the user's
+own Save does the same, up to 30 seconds for a server's tools) and whose answer then also says what
+became of the connection: `{"request", "outcome", "failure"?, "connection": {"name", "state", "review"}}`,
+`outcome` being how the write ended (`done`, or what it was not: `failed`, `refused`, `not_executed`,
+with `failure`, the sentence that says why), `review` being `true` when the connection now waits for a
+review the user can make, which the window opens at once, once the write is `done`. An `action` is done only while what it `says` still holds (a
 command edited meanwhile is not written). `not-found` when there is no such request; `refused` when it is held by an agent, or already
 decided.
 

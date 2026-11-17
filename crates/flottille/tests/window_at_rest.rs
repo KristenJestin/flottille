@@ -2113,3 +2113,106 @@ fn the_window_draws_no_frame_at_rest_on_a_connection_request_with_entries_to_wid
     settle(&shell, cx);
     assert_eq!(frames_at_rest(&shell, cx), (0, 0), "the dialog");
 }
+
+/// #1031: a session whose agent's accepted edit left a connection waiting for the user's review:
+/// the card of that review, open, then folded away once it is reviewed.
+#[gpui_kit::test]
+fn the_window_draws_no_frame_at_rest_on_a_session_with_the_card_of_a_connection_waiting_for_its_review(
+    cx: &mut TestAppContext,
+) {
+    let user = User::with_fake_agent();
+    let opened = user.received_requests("session/new").len();
+    let id = idle_session(&user);
+    let (url, authorization) = common::mcp::server_of(&user, opened);
+    let mcp = common::mcp::Mcp::initialize(&url, &authorization);
+    user.call(
+        "extension.set",
+        json!({"name": "connections", "enabled": true}),
+    )
+    .unwrap();
+    let fake =
+        std::path::Path::new(env!("CARGO_BIN_EXE_flottille")).with_file_name("flottille-fake-mcp");
+    let script = user.path("notes-script.json");
+    let listing = |more: bool| {
+        let mut tools = vec![json!({"name": "search", "description": "Finds notes.",
+            "inputSchema": {"type": "object"}})];
+        if more {
+            tools.push(json!({"name": "link", "description": "Links two notes.",
+                "inputSchema": {"type": "object"}}));
+        }
+        json!({"server": {"name": "notes", "version": "1.0.0"}, "instructions": "Be brief.",
+            "tools": tools, "answers": {"search": {"text": "found"}}})
+        .to_string()
+    };
+    std::fs::write(&script, listing(false)).unwrap();
+    let command = format!("{} --script {}", fake.display(), script.display());
+    user.call(
+        "connection.add",
+        json!({"name": "notes", "about": "A notes server.",
+            "command": flottille_core::command::split_line(&command).unwrap()}),
+    )
+    .unwrap();
+    // The server now announces one more action: the agent's edit is held, and accepted.
+    std::fs::write(&script, listing(true)).unwrap();
+    let held = mcp.call(
+        "connections",
+        json!({"action": "edit", "name": "notes", "command": format!("{command} --verbose")}),
+    );
+    let number: u64 = held
+        .text
+        .strip_prefix("Waiting for the user's approval, request #")
+        .and_then(|rest| rest.split('.').next())
+        .unwrap_or_else(|| panic!("not held: {}", held.text))
+        .parse()
+        .unwrap();
+    user.call("approval.approve", json!({"number": number}))
+        .unwrap();
+
+    let (shell, cx) = window(&user, cx);
+    cx.simulate_resize(size(px(1280.), px(1800.)));
+    until(&shell, cx, "the session is in the tree", |cx| {
+        cx.update(|window, _| window.try_find(session_id(&id)).is_some())
+    });
+    cx.update(|window, cx| window.click(session_id(&id), cx));
+    let card = |shell: &Entity<Shell>, cx: &mut VisualTestContext| {
+        shell.read_with(cx, |s, cx| {
+            s.main().read(cx).session_page().and_then(|page| {
+                page.read(cx)
+                    .conversation()
+                    .read(cx)
+                    .blocks()
+                    .iter()
+                    .position(|block| {
+                        matches!(
+                            block,
+                            flottille_window::conversation::Block::ConnectionReview(_)
+                        )
+                    })
+            })
+        })
+    };
+    until(&shell, cx, "the card of the review", |cx| {
+        card(&shell, cx).is_some_and(|at| {
+            cx.update(|window, _| window.try_find(format!("row-{at}-review-open")).is_some())
+        })
+    });
+    settle(&shell, cx);
+    assert_eq!(frames_at_rest(&shell, cx), (0, 0), "the card, open");
+
+    // Reviewed: the card folds away, and the window rests again.
+    user.call("connection.review", json!({"name": "notes"}))
+        .unwrap();
+    user.call("connection.accept", json!({"name": "notes"}))
+        .unwrap();
+    until(&shell, cx, "the card folds away", |cx| {
+        card(&shell, cx).is_some_and(|at| {
+            cx.update(|window, _| {
+                window
+                    .try_find(format!("row-{at}-review-open"))
+                    .is_none_or(|found| !found.visible())
+            })
+        })
+    });
+    settle(&shell, cx);
+    assert_eq!(frames_at_rest(&shell, cx), (0, 0), "the card, folded away");
+}
