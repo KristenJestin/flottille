@@ -311,7 +311,7 @@ fn an_agents_request_opens_as_the_form_filled_and_read_only_and_accept_writes_it
     until(&shell, cx, "the toast", |cx| {
         toasts(&shell, cx)
             .iter()
-            .any(|t| t == "Request accepted: the server almanac is being added")
+            .any(|t| t == "Request accepted: the server almanac was added")
     });
     let deadline = Instant::now() + Duration::from_secs(20);
     while connection(&user, "almanac").is_none_or(|c| c["state"] != "ready") {
@@ -1047,7 +1047,7 @@ fn accept_goes_through(user: &User, shell: &Entity<Shell>, cx: &mut VisualTestCo
         let said = toasts(shell, cx);
         if said
             .iter()
-            .any(|t| t == "Request accepted: the server hippocampe is being added")
+            .any(|t| t == "Request accepted: the server hippocampe was added")
         {
             break;
         }
@@ -1540,7 +1540,7 @@ fn accepting_a_request_that_adds_actions_opens_their_review(cx: &mut TestAppCont
     let said = toasts(&shell, cx);
     assert!(
         said.iter()
-            .any(|t| t == "Request accepted: the server almanac is being saved"),
+            .any(|t| t == "Request accepted: the server almanac was saved"),
         "{said:?}"
     );
 
@@ -1679,4 +1679,43 @@ fn a_request_on_a_connection_awaiting_review_offers_its_review_first(cx: &mut Te
         present(cx, "connection-review-server")
     });
     assert_eq!(pending(&user), 1, "the request stays held");
+}
+
+#[gpui_kit::test]
+fn a_failed_write_of_an_accepted_request_says_so_and_opens_no_review(cx: &mut TestAppContext) {
+    use std::os::unix::fs::PermissionsExt;
+    let user = user();
+    let (lead, mcp) = a_root(&user);
+    // The connection already waits for its review, and the agent asks for one more edit.
+    let first = edit_giving_an_action(&user, &mcp);
+    user.call("approval.approve", json!({"number": first}))
+        .unwrap();
+    let number = held(
+        &mcp,
+        json!({"action": "edit", "name": "almanac", "about": "The notes of the user, again."}),
+    );
+
+    let (shell, cx) = window(&user, cx);
+    open_card(&shell, cx, &lead, number);
+    open_dialog(&shell, cx, number);
+    // The write cannot happen: the folder of the declarations is read-only.
+    let folder = user.path("config/flottille");
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o555)).unwrap();
+    click(cx, "connection-request-accept");
+
+    until(&shell, cx, "the failure is said", |cx| {
+        toasts(&shell, cx)
+            .iter()
+            .any(|t| t == "The server almanac was not written")
+    });
+    settle(cx);
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let said = toasts(&shell, cx);
+    assert!(
+        !said.iter().any(|t| t.contains("was saved")),
+        "never said saved: {said:?}"
+    );
+    // Nothing was written, so no review is opened for it: the connection is as it was.
+    assert!(!present(cx, "connection-review-server"));
+    assert!(!visible(cx, "connection-review"));
 }
