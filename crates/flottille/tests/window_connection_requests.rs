@@ -311,7 +311,7 @@ fn an_agents_request_opens_as_the_form_filled_and_read_only_and_accept_writes_it
     until(&shell, cx, "the toast", |cx| {
         toasts(&shell, cx)
             .iter()
-            .any(|t| t == "Request accepted: the server almanac is being added")
+            .any(|t| t == "Request accepted: the server almanac was added")
     });
     let deadline = Instant::now() + Duration::from_secs(20);
     while connection(&user, "almanac").is_none_or(|c| c["state"] != "ready") {
@@ -1047,7 +1047,7 @@ fn accept_goes_through(user: &User, shell: &Entity<Shell>, cx: &mut VisualTestCo
         let said = toasts(shell, cx);
         if said
             .iter()
-            .any(|t| t == "Request accepted: the server hippocampe is being added")
+            .any(|t| t == "Request accepted: the server hippocampe was added")
         {
             break;
         }
@@ -1480,4 +1480,242 @@ fn the_confirmation_says_the_change_stays_and_the_address_it_replaces(cx: &mut T
             && sentence.contains("http://127.0.0.1:7469"),
         "{sentence}"
     );
+}
+
+// ── Accepting a request that gives new actions leads into their review (#1031) ───────────────
+
+/// `almanac` given to agents, its server then announcing one more action: the agent's edit (an
+/// argument added to its command) is held, and what it gives needs the user's review.
+fn edit_giving_an_action(user: &User, mcp: &Mcp) -> u64 {
+    let line = line_of(user, "almanac");
+    user.call(
+        "connection.add",
+        json!({"name": "almanac", "about": "The notes of the user.",
+            "command": flottille_core::command::split_line(&line).unwrap()}),
+    )
+    .unwrap();
+    let mut newer = almanac();
+    newer["tools"].as_array_mut().unwrap().push(json!({
+        "name": "link", "description": "Links two notes.", "inputSchema": {"type": "object"}}));
+    std::fs::write(user.path("almanac-script.json"), newer.to_string()).unwrap();
+    held(
+        mcp,
+        json!({"action": "edit", "name": "almanac", "command": format!("{line} --verbose")}),
+    )
+}
+
+/// The toast whose action reads `Review`, if one is shown: the id of its action.
+fn review_toast(cx: &mut VisualTestContext) -> Option<String> {
+    (1..16)
+        .map(|n| format!("toast-{n}-action"))
+        .find(|id| label(cx, id).as_deref() == Some("Review"))
+}
+
+#[gpui_kit::test]
+fn accepting_a_request_that_adds_actions_opens_their_review(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, mcp) = a_root(&user);
+    let number = edit_giving_an_action(&user, &mcp);
+
+    let (shell, cx) = window(&user, cx);
+    open_card(&shell, cx, &lead, number);
+    open_dialog(&shell, cx, number);
+    click(cx, "connection-request-accept");
+
+    // The review opens at once, over the page the user is on: what the server announces is
+    // there, the new action first among what is read.
+    until(&shell, cx, "the review opens", |cx| {
+        present(cx, "connection-review-server")
+    });
+    settle(cx);
+    assert!(visible(cx, "connection-review"));
+    assert_eq!(
+        label(cx, "connection-review-server").as_deref(),
+        Some("almanac 1.0.0")
+    );
+    assert_eq!(
+        connection(&user, "almanac").unwrap()["state"],
+        "awaiting review"
+    );
+    let said = toasts(&shell, cx);
+    assert!(
+        said.iter()
+            .any(|t| t == "Request accepted: the server almanac was saved"),
+        "{said:?}"
+    );
+
+    // Accept in the review gives the agent its actions.
+    click(cx, "accept-connection");
+    until(&shell, cx, "the review closes", |cx| {
+        !visible(cx, "connection-review")
+    });
+    assert_eq!(connection(&user, "almanac").unwrap()["state"], "ready");
+}
+
+#[gpui_kit::test]
+fn closing_the_review_of_an_accepted_request_says_the_connection_still_waits(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    let (lead, mcp) = a_root(&user);
+    let number = edit_giving_an_action(&user, &mcp);
+
+    let (shell, cx) = window(&user, cx);
+    open_card(&shell, cx, &lead, number);
+    open_dialog(&shell, cx, number);
+    click(cx, "connection-request-accept");
+    until(&shell, cx, "the review opens", |cx| {
+        present(cx, "connection-review-server")
+    });
+    settle(cx);
+
+    click(cx, "connection-review-cancel");
+    until(&shell, cx, "the review closes", |cx| {
+        !visible(cx, "connection-review")
+    });
+    // Left awaiting review, and the toast says so, with the kit's button to come back to it.
+    until(&shell, cx, "the toast", |cx| {
+        toasts(&shell, cx)
+            .iter()
+            .any(|t| t == "The server almanac still waits for your review")
+    });
+    let again = review_toast(cx).expect("the toast has a Review button");
+    assert_eq!(
+        connection(&user, "almanac").unwrap()["state"],
+        "awaiting review"
+    );
+    click(cx, &again);
+    until(&shell, cx, "the review opens again", |cx| {
+        visible(cx, "connection-review") && present(cx, "connection-review-server")
+    });
+}
+
+#[gpui_kit::test]
+fn the_session_of_the_agent_shows_the_review_its_request_led_to(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, mcp) = a_root(&user);
+    let number = edit_giving_an_action(&user, &mcp);
+    user.call("approval.approve", json!({"number": number}))
+        .unwrap();
+
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the session is in the tree", |cx| {
+        present(cx, &format!("session-{lead}"))
+    });
+    click(cx, &format!("session-{lead}"));
+    until(&shell, cx, "the card of the review", |cx| {
+        review_row(&shell, cx).is_some_and(|at| present(cx, &format!("row-{at}-review-card")))
+    });
+    settle(cx);
+    let at = review_row(&shell, cx).unwrap();
+    assert_eq!(
+        label(cx, &format!("row-{at}-review-said")).as_deref(),
+        Some("almanac waits for your review of its new actions")
+    );
+    click(cx, &format!("row-{at}-review-open"));
+    until(&shell, cx, "the review opens", |cx| {
+        present(cx, "connection-review-server")
+    });
+
+    // Reviewed: the daemon says so to the session, and the card is no longer open once the user
+    // is back in it.
+    click(cx, "accept-connection");
+    until(&shell, cx, "the review closes", |cx| {
+        !visible(cx, "connection-review")
+    });
+    click(cx, &format!("session-{lead}"));
+    until(&shell, cx, "the card is done", |cx| {
+        session_page(&shell, cx).is_some_and(|page| {
+            page.read_with(cx, |page, cx| {
+                page.conversation()
+                    .read(cx)
+                    .blocks()
+                    .iter()
+                    .any(|block| matches!(block, Block::ConnectionReview(review) if !review.open))
+            })
+        })
+    });
+    assert_eq!(connection(&user, "almanac").unwrap()["state"], "ready");
+}
+
+/// The row of the card of a connection waiting for its review, in the session shown.
+fn review_row(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Option<usize> {
+    let page = session_page(shell, cx)?;
+    page.read_with(cx, |page, cx| {
+        page.conversation()
+            .read(cx)
+            .blocks()
+            .iter()
+            .position(|block| matches!(block, Block::ConnectionReview(_)))
+    })
+}
+
+#[gpui_kit::test]
+fn a_request_on_a_connection_awaiting_review_offers_its_review_first(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, mcp) = a_root(&user);
+    let first = edit_giving_an_action(&user, &mcp);
+    user.call("approval.approve", json!({"number": first}))
+        .unwrap();
+    assert_eq!(
+        connection(&user, "almanac").unwrap()["state"],
+        "awaiting review"
+    );
+    // Held, not refused: the agent has nothing to relay.
+    let number = held(
+        &mcp,
+        json!({"action": "set", "name": "almanac", "settings": {"search": "passes"}}),
+    );
+
+    let (shell, cx) = window(&user, cx);
+    open_card(&shell, cx, &lead, number);
+    open_dialog(&shell, cx, number);
+    assert_eq!(
+        label(cx, "connection-request-review-said").as_deref(),
+        Some("almanac waits for your review of its actions first")
+    );
+    click(cx, "connection-request-review");
+    until(&shell, cx, "the review opens", |cx| {
+        present(cx, "connection-review-server")
+    });
+    assert_eq!(pending(&user), 1, "the request stays held");
+}
+
+#[gpui_kit::test]
+fn a_failed_write_of_an_accepted_request_says_so_and_opens_no_review(cx: &mut TestAppContext) {
+    use std::os::unix::fs::PermissionsExt;
+    let user = user();
+    let (lead, mcp) = a_root(&user);
+    // The connection already waits for its review, and the agent asks for one more edit.
+    let first = edit_giving_an_action(&user, &mcp);
+    user.call("approval.approve", json!({"number": first}))
+        .unwrap();
+    let number = held(
+        &mcp,
+        json!({"action": "edit", "name": "almanac", "about": "The notes of the user, again."}),
+    );
+
+    let (shell, cx) = window(&user, cx);
+    open_card(&shell, cx, &lead, number);
+    open_dialog(&shell, cx, number);
+    // The write cannot happen: the folder of the declarations is read-only.
+    let folder = user.path("config/flottille");
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o555)).unwrap();
+    click(cx, "connection-request-accept");
+
+    until(&shell, cx, "the failure is said", |cx| {
+        toasts(&shell, cx)
+            .iter()
+            .any(|t| t == "The server almanac was not written")
+    });
+    settle(cx);
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let said = toasts(&shell, cx);
+    assert!(
+        !said.iter().any(|t| t.contains("was saved")),
+        "never said saved: {said:?}"
+    );
+    // Nothing was written, so no review is opened for it: the connection is as it was.
+    assert!(!present(cx, "connection-review-server"));
+    assert!(!visible(cx, "connection-review"));
 }

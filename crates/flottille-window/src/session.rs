@@ -56,9 +56,9 @@ use crate::actions::{
 use crate::attachments::{Attachments, STILL_SCALING};
 use crate::commands::{CommandInfo, spaced};
 use crate::conversation::{
-    Activity, Block, COMPACTED_KIND, COMPACTION_FAILED_KIND, Call, CallState, Change, Conversation,
-    DiffLine, Ending, STARTED_SESSION_KIND, Summary, TIME_LOGGING_KIND, USER, VaultAsk,
-    WOKEN_BY_KIND, in_sight, is_hidden,
+    Activity, Block, COMPACTED_KIND, COMPACTION_FAILED_KIND, Call, CallState, Change,
+    ConnectionReview, Conversation, DiffLine, Ending, STARTED_SESSION_KIND, Summary,
+    TIME_LOGGING_KIND, USER, VaultAsk, WOKEN_BY_KIND, in_sight, is_hidden,
 };
 use crate::leaves::LeaveList;
 use crate::link::{Connect, Update};
@@ -3574,6 +3574,7 @@ impl ConversationView {
             // Waiting for the pilot, which the user may answer first.
             Block::Asked { moved, .. } => !moved && self.rows[at].read(cx).asking,
             Block::VaultAsk(ask) => ask.open,
+            Block::ConnectionReview(review) => review.open,
             _ => false,
         }
     }
@@ -6315,6 +6316,7 @@ impl Render for Row {
             } => self.render_question(*seq, questions, answers.as_deref(), window, cx),
             Block::Asked { moved, .. } => self.render_asked(*moved, cx),
             Block::VaultAsk(ask) => self.render_vault_ask(ask.clone(), cx),
+            Block::ConnectionReview(review) => self.render_connection_review(review.clone(), cx),
             Block::Answered { .. } => div().into_any_element(),
             // One line; a click opens the output in the panel the rail opens.
             Block::Command(result) => {
@@ -6496,6 +6498,21 @@ impl Row {
         let when = SharedString::from(self.when.map(clock).unwrap_or_default());
         let title = gpui_design_system::quoted_title(&self.title(cx));
         crate::vault_ask::card(self.at, &title, when, &ask, shell, cx)
+    }
+
+    /// The connection the agent's accepted request left waiting for the user's review: the card
+    /// says so, with the way into the review; it folds away once the review is done.
+    fn render_connection_review(
+        &mut self,
+        review: ConnectionReview,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some(shell) = self.page.upgrade().map(|page| page.read(cx).shell.clone()) else {
+            return div().into_any_element();
+        };
+        let when = SharedString::from(self.when.map(clock).unwrap_or_default());
+        let title = gpui_design_system::quoted_title(&self.title(cx));
+        crate::connection_review::card(self.at, &title, when, &review, shell, cx)
     }
 
     /// An ask of the agent to the user: while it waits, one line where it was asked, its card

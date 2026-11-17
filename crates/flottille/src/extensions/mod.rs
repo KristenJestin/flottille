@@ -65,6 +65,18 @@ pub fn family_waits(daemon: &Daemon, args: &Value) -> Option<String> {
     connections::requests::waits(daemon, args)
 }
 
+/// What became of the connection an accepted `connections` call wrote, for the answer to the
+/// user's Accept: `{name, state, review}`, `review` being whether it now waits for the user's
+/// review. A write that was `done` and leaves it so says it in the inbox and in the session of
+/// the agent that asked.
+pub fn family_settled(
+    daemon: &Arc<Daemon>,
+    request: &flottille_core::approval::Request,
+    done: bool,
+) -> Option<Value> {
+    connections::requests::settled(daemon, request, done)
+}
+
 /// Whether a root may propose what needs vault entries it then asks for: Connections is on.
 pub fn entries_proposed(daemon: &Daemon) -> bool {
     is_on(&daemon.paths, &connections::EXTENSION)
