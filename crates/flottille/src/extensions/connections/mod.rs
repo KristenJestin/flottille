@@ -2162,6 +2162,17 @@ pub fn names(daemon: &Daemon, name: &str, entry: &str) -> std::result::Result<bo
         .any(|declaration| declaration.name == name && declaration.entries().any(|e| e == entry)))
 }
 
+/// Whether the server of the connection `name` is given the vault entry `entry` when it starts
+/// (its declaration names it, or it holds the tokens of its OAuth sign-in): that server serves
+/// every project's agents, so it cannot check whose agent the secret is for.
+pub fn given_to_server(
+    daemon: &Daemon,
+    name: &str,
+    entry: &str,
+) -> std::result::Result<bool, String> {
+    Ok(entry == oauth::entry(name) || names(daemon, name, entry)?)
+}
+
 fn table_of(declaration: &Declaration) -> std::result::Result<toml_edit::Table, Failure> {
     let mut table = toml_edit::Table::new();
     for (key, value) in declaration.json().as_object().expect("an object") {
