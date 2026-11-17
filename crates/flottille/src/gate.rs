@@ -2940,20 +2940,6 @@ fn remote_writes(rest: &[String]) -> Line {
     }
 }
 
-/// Whether a line pushes with git, at any of its layers: the run checks its remote first.
-pub fn pushes(words: &[String]) -> bool {
-    lines(words).is_ok_and(|layers| {
-        layers.iter().any(|layer| {
-            suffixes(layer).iter().any(|(_, suffix)| {
-                base(&suffix[0]) == "git" && {
-                    let args = &suffix[1..];
-                    args.get(git_globals(args).0).is_some_and(|w| w == "push")
-                }
-            })
-        })
-    })
-}
-
 /// A git command a line runs (`gits`).
 #[derive(Debug, PartialEq)]
 pub struct Git {
@@ -5143,22 +5129,6 @@ mod tests {
                     "{tool} {action}"
                 );
             }
-        }
-    }
-
-    #[test]
-    fn a_push_is_found_past_git_s_options_and_its_wrappers() {
-        let words = |line: &str| flottille_core::command::split_line(line).unwrap();
-        for line in [
-            "git push",
-            "git -C app push origin x",
-            "env A=b git push",
-            "nice git push",
-        ] {
-            assert!(pushes(&words(line)), "{line}");
-        }
-        for line in ["git status", "git -C push status", "echo git push"] {
-            assert!(!pushes(&words(line)), "{line}");
         }
     }
 

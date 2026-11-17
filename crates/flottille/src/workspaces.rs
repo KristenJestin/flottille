@@ -1198,7 +1198,6 @@ async fn up_to_date_base(
     Ok(Base {
         branch: (*branch).clone(),
         remote: remote.to_owned(),
-        urls: forge::urls_of(main, remote).await,
         reference: tracking(branch),
         commit,
         fetched_now: true,
@@ -1236,7 +1235,6 @@ async fn tracked_base(main: &Path, remote: &str, rule: &[String]) -> Result<Opti
         return Ok(Some(Base {
             branch: branch.clone(),
             remote: remote.to_owned(),
-            urls: forge::urls_of(main, remote).await,
             reference,
             commit,
             fetched_now: false,
@@ -1283,7 +1281,6 @@ async fn local_base(
             return Ok(Base {
                 branch: branch.clone(),
                 remote: remote.to_owned(),
-                urls: forge::urls_of(main, remote).await,
                 reference,
                 commit,
                 fetched_now: false,
