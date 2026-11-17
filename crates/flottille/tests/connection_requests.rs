@@ -1822,3 +1822,162 @@ fn a_request_on_a_connection_awaiting_review_is_held_not_refused() {
         .clone();
     assert_eq!(search, "passes");
 }
+
+// ── Round 2 of #1031: what waits for a review, and what an agent is promised ─────────────────
+
+#[test]
+fn a_set_on_a_connection_that_is_off_or_disabled_is_not_held_for_a_review() {
+    let user = user();
+    project(&user, "app");
+    turn_on(&user);
+    declare(&user, "almanac", json!({}));
+    let (_, mcp) = root(&user);
+
+    // Connections off: the tool works all the same (docs/tools.md), the set is not held for a
+    // review nobody can make.
+    user.call(
+        "extension.set",
+        json!({"name": "connections", "enabled": false}),
+    )
+    .unwrap();
+    let number = held(&mcp.call(
+        "connections",
+        json!({"action": "set", "name": "almanac", "settings": {"search": "passes"}}),
+    ));
+    let proposed = user
+        .call("connection.proposed", json!({"number": number}))
+        .unwrap();
+    assert_eq!(proposed["waits"], Value::Null, "{proposed}");
+    assert_eq!(proposed["review"], false, "{proposed}");
+    approve(&user, number);
+
+    // The connection disabled by the user: the same, with its own state said.
+    turn_on(&user);
+    user.call("connection.edit", json!({"name": "almanac", "enabled": false}))
+        .unwrap();
+    let number = held(&mcp.call(
+        "connections",
+        json!({"action": "set", "name": "almanac", "settings": {"search": "asks"}}),
+    ));
+    let proposed = user
+        .call("connection.proposed", json!({"number": number}))
+        .unwrap();
+    assert_eq!(proposed["waits"], Value::Null, "{proposed}");
+    assert_eq!(proposed["review"], false, "{proposed}");
+    approve(&user, number);
+}
+
+/// The connection `almanac` given, then cut off: its server, started again, announces a changed
+/// action.
+fn cut_off_almanac(user: &User, mcp: &Mcp) {
+    declare(user, "almanac", json!({}));
+    user.call("connection.edit", json!({"name": "almanac", "enabled": false}))
+        .unwrap();
+    eventually("the server stops", || {
+        connection(user, "almanac").unwrap()["running"] == false
+    });
+    user.call("connection.edit", json!({"name": "almanac", "enabled": true}))
+        .unwrap();
+    let mut newer = almanac();
+    newer["tools"][0]["description"] = json!("Searches the notes, and mails them.");
+    std::fs::write(user.path("almanac-script.json"), newer.to_string()).unwrap();
+    let answer = mcp.call(
+        "conn_almanac",
+        json!({"action": "search", "arguments": {"query": "x"}}),
+    );
+    assert!(answer.error, "{}", answer.text);
+    assert_eq!(connection(user, "almanac").unwrap()["state"], "cut off");
+}
+
+#[test]
+fn an_agent_is_promised_a_review_delivery_only_when_a_review_waits() {
+    // Awaiting a review: the promise, and the delivery that keeps it.
+    let user = user();
+    project(&user, "app");
+    turn_on(&user);
+    let (_, mcp) = root(&user);
+    let number = edit_giving_a_new_action(&user, &mcp);
+    let first = approve(&user, number);
+    assert!(first.contains("a delivery tells you"), "{first}");
+
+    // Cut off: no review is made for it, no second delivery comes; the agent is told what is true.
+    let user = self::user();
+    project(&user, "app");
+    turn_on(&user);
+    let (_, mcp) = root(&user);
+    cut_off_almanac(&user, &mcp);
+    let line = line_of(&user, "almanac");
+    let number = held(&mcp.call(
+        "connections",
+        json!({"action": "edit", "name": "almanac", "command": format!("{line} --verbose")}),
+    ));
+    let said = approve(&user, number);
+    assert!(said.contains("almanac"), "{said}");
+    assert!(
+        !said.contains("a delivery tells you") && !said.contains("do not ask again"),
+        "no review will come: {said}"
+    );
+    assert!(said.contains("cut off"), "what is true: {said}");
+}
+
+/// A second edit of the agent's, held after the first was accepted and left the connection
+/// awaiting its review.
+fn second_edit(user: &User, mcp: &Mcp) -> u64 {
+    let line = line_of(user, "almanac");
+    held(&mcp.call(
+        "connections",
+        json!({"action": "edit", "name": "almanac", "command": format!("{line} --again")}),
+    ))
+}
+
+#[test]
+fn a_second_accepted_edit_keeps_one_review_card_and_one_delivery() {
+    let user = user();
+    project(&user, "app");
+    turn_on(&user);
+    let (agent, mcp) = root(&user);
+    let first = edit_giving_a_new_action(&user, &mcp);
+    approve(&user, first);
+    let second = second_edit(&user, &mcp);
+    approve(&user, second);
+
+    // One card open: every card the agent's session got is closed but the last.
+    let events = agent_events(&user, &agent);
+    let count = |name: &str| events.iter().filter(|event| *event == name).count();
+    assert_eq!(
+        count("connection.review_waits") - count("connection.review_done"),
+        1,
+        "{events:?}"
+    );
+    let inbox = user.call("inbox.list", json!({})).unwrap()["entries"].to_string();
+    assert_eq!(inbox.matches("waits for your review").count(), 1, "{inbox}");
+
+    // Reviewed: one delivery, for the request that stands.
+    user.call("connection.review", json!({"name": "almanac"}))
+        .unwrap();
+    user.call("connection.accept", json!({"name": "almanac"}))
+        .unwrap();
+    let said = delivery(&user, &format!("connection-review-{second}"));
+    assert!(said.contains("reviewed"), "{said}");
+    let count = |name: &str| {
+        agent_events(&user, &agent)
+            .iter()
+            .filter(|event| *event == name)
+            .count()
+    };
+    assert_eq!(
+        count("connection.review_waits"),
+        count("connection.review_done"),
+        "every card closed"
+    );
+    let store = store(&user);
+    let earlier: Option<String> = store
+        .query_row(
+            "SELECT body FROM deliveries WHERE id = ?1",
+            [format!("connection-review-{first}")],
+            |row| row.get(0),
+        )
+        .optional()
+        .unwrap();
+    assert_eq!(earlier, None, "one delivery, not two");
+}
