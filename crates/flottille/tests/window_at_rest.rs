@@ -1930,16 +1930,9 @@ fn the_services_page_is_at_rest_with_the_stop_dialog_open_then_closed(cx: &mut T
     );
 }
 
-/// #1019: an agent's request for a connection whose entry is one project's and has no address,
-/// its dialog open on the lines that offer to share and to bind it, at rest. Ignored until a
-/// session with a request pending rests: on dev already, such a session draws a frame about
-/// every other step of the window with no dialog open (seen with a plain `add` request), which
-/// this scenario cannot tell from the dialog's own. Issue #1036 takes that scenario on.
-#[gpui_kit::test]
-#[ignore = "#1036: a session page at rest draws frames on dev, request or not"]
-fn the_window_draws_no_frame_at_rest_on_a_connection_request_with_entries_to_widen(
-    cx: &mut TestAppContext,
-) {
+/// A project `app` with the connections extension on, a vault entry of its own, and a lead
+/// session whose turn ended (a session at work moves): the user, the lead's id and its MCP.
+fn lead_for_connections() -> (User, String, common::mcp::Mcp) {
     let user = User::with_fake_agent();
     user.fake_script(json!({"turns": [{"when": "", "do": [{"say": "ready"}]}]}));
     std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
@@ -1973,6 +1966,108 @@ fn the_window_draws_no_frame_at_rest_on_a_connection_request_with_entries_to_wid
     eventually("the first turn ends", || {
         user.call("agent.show", json!({"agent": lead})).unwrap()["agent"]["state"] == "idle"
     });
+    (user, lead, mcp)
+}
+
+/// The number of the request the daemon holds for the user, from the tool's answer.
+fn held_number(answer: &common::mcp::Answer) -> u64 {
+    answer
+        .text
+        .strip_prefix("Waiting for the user's approval, request #")
+        .and_then(|rest| rest.split_once('.'))
+        .map(|(number, _)| number.parse().unwrap())
+        .unwrap_or_else(|| panic!("not held: {}", answer.text))
+}
+
+/// Opens the session `lead` and waits for its request `number`'s card, then for the page to rest.
+fn open_with_request_card(
+    shell: &Entity<Shell>,
+    lead: &str,
+    number: u64,
+    cx: &mut VisualTestContext,
+) {
+    until(shell, cx, "the session is in the tree", |cx| {
+        cx.update(|window, _| window.try_find(session_id(lead)).is_some())
+    });
+    cx.update(|window, cx| window.click(session_id(lead), cx));
+    until(shell, cx, "the request's card", |cx| {
+        cx.update(|window, _| window.try_find(format!("open-request-{number}")).is_some())
+    });
+    settle(shell, cx);
+}
+
+/// #1036: a session page alone, its conversation shown, at rest.
+#[gpui_kit::test]
+fn a_session_page_at_rest_draws_no_frame(cx: &mut TestAppContext) {
+    let (user, lead, _mcp) = lead_for_connections();
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the session is in the tree", |cx| {
+        cx.update(|window, _| window.try_find(session_id(&lead)).is_some())
+    });
+    cx.update(|window, cx| window.click(session_id(&lead), cx));
+    until(&shell, cx, "the conversation", |cx| {
+        shell.read_with(cx, |s, cx| {
+            s.main()
+                .read(cx)
+                .session_page()
+                .is_some_and(|page| !page.read(cx).conversation().read(cx).rows().is_empty())
+        })
+    });
+    settle(&shell, cx);
+    assert_eq!(frames_at_rest(&shell, cx), (0, 0), "(drawn, asked)");
+}
+
+/// #1036: a plain request (no entry to widen), pending, no dialog open: the card is shown and
+/// nothing moves.
+#[gpui_kit::test]
+fn a_session_with_a_pending_connection_request_draws_no_frame_at_rest(cx: &mut TestAppContext) {
+    let (user, lead, mcp) = lead_for_connections();
+    let answer = mcp.call(
+        "connections",
+        json!({"action": "add", "name": "notes", "about": "The user's notes.",
+            "url": "http://127.0.0.1:7468/mcp"}),
+    );
+    let number = held_number(&answer);
+    let (shell, cx) = window(&user, cx);
+    open_with_request_card(&shell, &lead, number, cx);
+    assert_eq!(frames_at_rest(&shell, cx), (0, 0), "(drawn, asked)");
+}
+
+/// #1036: the reply box's caret blinks while its field has the focus and stops when it loses it:
+/// the focus leaves for the page, and the window rests.
+#[gpui_kit::test]
+fn the_caret_stops_when_its_field_loses_the_focus(cx: &mut TestAppContext) {
+    let (user, lead, _mcp) = lead_for_connections();
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the session is in the tree", |cx| {
+        cx.update(|window, _| window.try_find(session_id(&lead)).is_some())
+    });
+    cx.update(|window, cx| window.click(session_id(&lead), cx));
+    until(&shell, cx, "the reply box", |cx| {
+        cx.update(|window, _| window.try_find("reply-field").is_some())
+    });
+    settle(&shell, cx);
+    cx.update(|window, cx| window.click("reply-field", cx));
+    // Focused, the caret blinks: the window draws.
+    let (drawn, _) = frames_at_rest(&shell, cx);
+    assert!(drawn > 0, "the focused caret blinks");
+    let focus = shell.read_with(cx, |shell, _| shell.focus_handle());
+    cx.update(|window, cx| window.focus(&focus, cx));
+    settle(&shell, cx);
+    assert_eq!(
+        frames_at_rest(&shell, cx),
+        (0, 0),
+        "the field lost the focus: (drawn, asked)"
+    );
+}
+
+/// #1019: an agent's request for a connection whose entry is one project's and has no address,
+/// its dialog open on the lines that offer to share and to bind it, at rest.
+#[gpui_kit::test]
+fn the_window_draws_no_frame_at_rest_on_a_connection_request_with_entries_to_widen(
+    cx: &mut TestAppContext,
+) {
+    let (user, lead, mcp) = lead_for_connections();
     let answer = mcp.call(
         "connections",
         json!({"action": "add", "name": "hippocampe", "about": "The user's memory.",
@@ -1980,22 +2075,10 @@ fn the_window_draws_no_frame_at_rest_on_a_connection_request_with_entries_to_wid
             "secrets": [{"in": "header", "name": "Authorization", "prefix": "Bearer ",
                 "entry": "hippocampe-key"}]}),
     );
-    let number: u64 = answer
-        .text
-        .strip_prefix("Waiting for the user's approval, request #")
-        .and_then(|rest| rest.split_once('.'))
-        .map(|(number, _)| number.parse().unwrap())
-        .unwrap_or_else(|| panic!("not held: {}", answer.text));
+    let number = held_number(&answer);
 
     let (shell, cx) = window(&user, cx);
-    until(&shell, cx, "the session is in the tree", |cx| {
-        cx.update(|window, _| window.try_find(session_id(&lead)).is_some())
-    });
-    cx.update(|window, cx| window.click(session_id(&lead), cx));
-    until(&shell, cx, "the request's card", |cx| {
-        cx.update(|window, _| window.try_find(format!("open-request-{number}")).is_some())
-    });
-    settle(&shell, cx);
+    open_with_request_card(&shell, &lead, number, cx);
     cx.update(|window, cx| window.click(format!("open-request-{number}"), cx));
     until(&shell, cx, "the lines to share and bind", |cx| {
         cx.update(|window, _| {
