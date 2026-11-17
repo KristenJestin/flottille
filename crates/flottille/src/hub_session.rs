@@ -25,7 +25,7 @@ use std::time::Duration;
 use flottille_link::{
     Action, Ask, Asker, Change, ControlError, Device, HubUrl, Invitation, InvitationAsk, Joined,
     ListError, MachineKey, MemberList, Members, PublicKey, Pushed, Requested, Role, Session, Tls,
-    verification_words,
+    Token, verification_words,
 };
 use serde_json::{Value, json};
 
@@ -39,6 +39,8 @@ const LONGEST_WAIT: Duration = Duration::from_secs(30);
 const ROUND: Duration = Duration::from_secs(1);
 /// How long the hub may take to answer an ask before it is asked again.
 const ASK_WAIT: Duration = Duration::from_secs(10);
+/// How long an invitation is valid, in seconds (`docs/remote.md`, "Pairing").
+const FIVE_MINUTES: u64 = 5 * 60;
 
 /// How the daemon sees its hub.
 struct Seen {
@@ -46,6 +48,15 @@ struct Seen {
     /// Since when, in milliseconds since the Unix epoch.
     since: u64,
     reason: Option<String>,
+}
+
+/// An invitation this machine's member was given by the hub: only a join request for its token is
+/// shown, and its words are drawn from this token, never from one the hub pushes back, which a
+/// hub that lies could have searched so that the words match another key's.
+struct Issued {
+    token: Token,
+    /// Until when it is valid, in seconds since the Unix epoch.
+    until: u64,
 }
 
 /// A join this machine asked for, its session to the hub open.
@@ -68,6 +79,8 @@ pub struct Control {
     list: tokio::sync::watch::Sender<MemberList>,
     /// The join requests that wait for this machine's member, as the hub last told them.
     requests: Mutex<Vec<Requested>>,
+    /// The invitations given to this machine's member, while they are valid.
+    issued: Mutex<Vec<Issued>>,
     joining: tokio::sync::Mutex<Option<Joining>>,
     emit: Emit,
 }
@@ -86,6 +99,7 @@ impl Control {
             asker: tokio::sync::watch::Sender::new(None),
             list: tokio::sync::watch::Sender::new(MemberList::default()),
             requests: Mutex::new(Vec::new()),
+            issued: Mutex::new(Vec::new()),
             joining: tokio::sync::Mutex::new(None),
             emit,
         }
@@ -253,6 +267,12 @@ impl Control {
             .await
             .map_err(|_| format!("the hub did not answer in {} s", ASK_WAIT.as_secs()))?
             .map_err(|error| error.to_string())?;
+        let until = ask.at + FIVE_MINUTES;
+        {
+            let mut issued = self.issued.lock().unwrap();
+            issued.retain(|issued| issued.until > now() / 1000);
+            issued.push(Issued { token, until });
+        }
         let invitation = Invitation {
             hub_url: device.url.clone(),
             hub_key: device.hub,
@@ -266,7 +286,7 @@ impl Control {
             "hub": device.hub.fingerprint(),
             "inviter": name,
             "fingerprint": ask.member.fingerprint(),
-            "expires": (ask.at + 5 * 60) * 1000,
+            "expires": until * 1000,
         }))
     }
 
@@ -277,7 +297,7 @@ impl Control {
         let Some(this) = members.by_machine(&self.key.public()) else {
             return Ok(json!([]));
         };
-        let requests = self.requests.lock().unwrap().clone();
+        let requests = self.issued_requests(self.requests.lock().unwrap().clone());
         Ok(Value::Array(
             requests
                 .iter()
@@ -503,8 +523,28 @@ impl Control {
         }
     }
 
+    /// Of the join requests the hub told, those for an invitation this machine's member was given
+    /// and that is still valid, with the token it was given.
+    fn issued_requests(&self, requests: Vec<Requested>) -> Vec<Requested> {
+        let now = now() / 1000;
+        let issued = self.issued.lock().unwrap();
+        requests
+            .into_iter()
+            .filter_map(|request| {
+                let given = issued
+                    .iter()
+                    .find(|issued| issued.until > now && issued.token == request.token)?;
+                Some(Requested {
+                    token: given.token,
+                    key: request.key,
+                })
+            })
+            .collect()
+    }
+
     /// The join requests the hub told: kept, and each new one said as an event.
     fn told_requests(&self, requests: Vec<Requested>, members: Option<&Members>) {
+        let requests = self.issued_requests(requests);
         let mut kept = self.requests.lock().unwrap();
         let inviter = members.and_then(|members| members.by_machine(&self.key.public()));
         if let Some(inviter) = inviter {

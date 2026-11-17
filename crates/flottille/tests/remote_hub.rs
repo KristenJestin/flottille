@@ -16,7 +16,8 @@ use common::User;
 use flottille_hub::{Hub, Served, SystemClock};
 use flottille_link::{
     Action, Change, ChangeHash, Device, DeviceKey, Hello, HubKey, InvitationAsk, Keyring,
-    KeyringError, MachineKey, MemberList, PublicKey, Role, ToDevice,
+    KeyringError, MachineKey, MemberList, PublicKey, Requested, Role, ToDevice, Token,
+    verification_words,
 };
 use serde_json::{Value, json};
 use zeroize::Zeroizing;
@@ -497,6 +498,16 @@ struct FakeHub {
 
 impl FakeHub {
     fn new(list: MemberList, answer: fn(usize) -> Option<Option<String>>) -> FakeHub {
+        FakeHub::pushing(list, answer, |_| Vec::new())
+    }
+
+    /// A fake hub that answers an invitation's ask with a token of its own, `ISSUED`, then
+    /// pushes the join requests `requests` makes of it.
+    fn pushing(
+        list: MemberList,
+        answer: fn(usize) -> Option<Option<String>>,
+        requests: fn(Token) -> Vec<Requested>,
+    ) -> FakeHub {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
@@ -537,14 +548,21 @@ impl FakeHub {
                                 }
                                 _ => Some(None),
                             };
+                            let invited = matches!(asked.ask, flottille_link::Ask::Invite { .. });
                             if let Some(refused) = answer {
                                 let answer = ToDevice::Answer {
                                     id: asked.id,
                                     refused,
                                     proof: None,
-                                    token: None,
+                                    token: invited.then_some(ISSUED),
                                 };
                                 if session.send(&answer).await.is_err() {
+                                    return;
+                                }
+                            }
+                            if invited {
+                                let pushed = ToDevice::Requests(requests(ISSUED));
+                                if session.send(&pushed).await.is_err() {
                                     return;
                                 }
                             }
@@ -568,6 +586,9 @@ impl FakeHub {
             .load(std::sync::atomic::Ordering::SeqCst)
     }
 }
+
+/// The token a fake hub gives for an invitation.
+const ISSUED: Token = Token([7; 16]);
 
 /// The list a fake hub sends `machine`: its device the root, declaring its machine, and a laptop
 /// the root added, with a machine of its own.
@@ -641,6 +662,79 @@ fn the_daemon_takes_the_hub_s_news_while_its_ask_waits() {
             .any(|machine| machine["name"] == "laptop")
     });
     assert!(hub.asked() >= 1);
+    drop(hub.runtime);
+}
+
+/// The join requests a hub that lies pushes once the pc asked for an invitation: one for the
+/// token it issued, from a tablet, and one for a token it never issued, from a phone, which it
+/// searched so that the pc's words would match the phone's.
+fn lying_requests(issued: Token) -> Vec<Requested> {
+    vec![
+        Requested {
+            token: issued,
+            key: seeded(41).public(),
+        },
+        Requested {
+            token: Token([9; 16]),
+            key: seeded(42).public(),
+        },
+    ]
+}
+
+/// `pc`, pinned to a hub that pushes `lying_requests`, asks for an invitation; the requests it
+/// shows then.
+fn invited_by_a_lying_hub(pc: &Machine) -> (FakeHub, Vec<Value>) {
+    let hub = FakeHub::pushing(list_for(pc), |_| Some(None), lying_requests);
+    pin(pc, &hub);
+    pc.wait_until("the pc does not take the hub's list", |seen| {
+        seen["machines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|machine| machine["name"] == "laptop")
+    });
+    let invited = pc.user.run(&["remote", "invite", "--json"]);
+    assert!(
+        invited.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&invited.stderr),
+        pc.log()
+    );
+    pc.wait_until_requested();
+    // Both were pushed at once: what the first one shows, the second would by now.
+    let requests = pc.user.call("remote.requests", json!({})).unwrap();
+    (hub, requests.as_array().unwrap().clone())
+}
+
+#[test]
+fn a_request_for_a_token_this_member_never_issued_is_dropped() {
+    let pc = Machine::new(None);
+    let (hub, requests) = invited_by_a_lying_hub(&pc);
+    let phone = seeded(42).public();
+    assert_eq!(requests.len(), 1, "{requests:#?}");
+    assert_eq!(requests[0]["key"], json!(seeded(41).public()));
+    let told = pc.events("remote.join_requested");
+    assert!(
+        told.iter().all(|event| event["key"] != json!(phone)),
+        "{told:#?}"
+    );
+    assert!(
+        pc.user
+            .run(&["remote", "refuse", &phone.fingerprint()])
+            .status
+            .code()
+            != Some(0)
+    );
+    drop(hub.runtime);
+}
+
+#[test]
+fn the_inviters_words_come_from_the_token_it_issued() {
+    let pc = Machine::new(None);
+    let (hub, requests) = invited_by_a_lying_hub(&pc);
+    let tablet = seeded(41).public();
+    let words = verification_words(&tablet, &pc.device().public(), &ISSUED);
+    assert_eq!(requests[0]["words"], json!(words), "{requests:#?}");
     drop(hub.runtime);
 }
 
