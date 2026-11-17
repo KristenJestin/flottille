@@ -2278,8 +2278,10 @@ even with what would be lost (`docs/workspaces.md`, "Removal"). Answered `{"requ
 is decided; the call is then checked again, performed in the background, and its answer stored for
 the agent (`approval.settled`), except a `connections` write, which the call waits for (the user's
 own Save does the same, up to 30 seconds for a server's tools) and whose answer then also says what
-became of the connection: `{"request", "connection": {"name", "state", "review"}}`, `review` being
-`true` when it now waits for a review the user can make, which the window opens at once. An `action` is done only while what it `says` still holds (a
+became of the connection: `{"request", "outcome", "failure"?, "connection": {"name", "state", "review"}}`,
+`outcome` being how the write ended (`done`, or what it was not: `failed`, `refused`, `not_executed`,
+with `failure`, the sentence that says why), `review` being `true` when the connection now waits for a
+review the user can make, which the window opens at once, once the write is `done`. An `action` is done only while what it `says` still holds (a
 command edited meanwhile is not written). `not-found` when there is no such request; `refused` when it is held by an agent, or already
 decided.
 

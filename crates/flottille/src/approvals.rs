@@ -319,8 +319,15 @@ async fn decide(daemon: &Arc<Daemon>, number: u64, decision: Decision, discard: 
         // task is the daemon's, not the call's: a window that goes away does not cancel it.
         let settled = tokio::spawn(settle(daemon.clone(), request.clone(), discard)).await;
         let mut answer = json!({"request": request.to_json()});
-        if let Ok(Some(connection)) = settled {
-            answer["connection"] = connection;
+        if let Ok((outcome, body, connection)) = settled {
+            // What the write came to, said as it is: a write that failed is not "being saved".
+            answer["outcome"] = json!(outcome);
+            if outcome != "done" {
+                answer["failure"] = json!(body);
+            }
+            if let Some(connection) = connection {
+                answer["connection"] = connection;
+            }
         }
         return Ok(answer);
     } else {
@@ -343,14 +350,20 @@ fn already(request: &Request) -> Failure {
 
 /// Checks an allowed request again, performs it, and stores its answer.
 ///
-/// A connection's write answers what became of the connection (`family_settled`).
-async fn settle(daemon: Arc<Daemon>, request: Request, discard: bool) -> Option<Value> {
+/// A connection's write answers what became of the connection (`family_settled`), and how the
+/// write ended.
+async fn settle(
+    daemon: Arc<Daemon>,
+    request: Request,
+    discard: bool,
+) -> (&'static str, String, Option<Value>) {
     let (outcome, body, pictures) = performed(&daemon, &request, discard).await;
     store_answer_with(&daemon, &request, outcome, &body, &pictures);
-    match request.tool == "connections" {
+    let connection = match request.tool == "connections" {
         true => crate::extensions::family_settled(&daemon, &request, outcome == "done"),
         false => None,
-    }
+    };
+    (outcome, body, connection)
 }
 
 /// The agent of an allowed request, while it may still be performed: why not otherwise.
