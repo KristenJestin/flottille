@@ -201,11 +201,17 @@ The durations of the parts come from a monotonic clock (`Instant`), which a chan
 clock cannot bend; the timestamps beside them (`started_at`, `ended_at`, `created_at`, `ready_at`)
 are the wall clock's, and so is the total, which has to span a restart of the daemon.
 
+A fetch that failed is said to have failed (`failed after 3.0 s`), never to have reached the
+remote; the listing and the fetch are one measure, so a failure is not named for one of them.
+
 They are said where the steps are: `workspace show` (`pnpm install · 1 min 42 s`, and `Ready in
 2 min 10 s, from the request.`), the `workspace` tool's `show`, the `workspace.ready` event (the
-total and the three slowest parts, fetches included) and the window: the setup lines of a workspace being prepared say each step's time (one done its duration,
-one running its time so far, ticking only while it runs) and, once it is ready, the line under its
-name says `ready in 4.2s`, which fades in as the last step ends. The window says durations as it
+total and the three slowest parts, fetches included) and the window: the setup lines of a workspace
+being prepared say each step's time (one done its duration, one running its time so far, ticking
+only while it runs). Once it is ready, the setup block folds away and the line under its name says
+`ready in 4.2s`, which comes in with its separator as the last step ends; under it a folded line,
+`How long it took`, unfolds the fetch of each repository and every step, the checkouts included,
+each with its duration. The window says durations as it
 does elsewhere (`0.4s`, `38s`, `4m`).
 
 ### Resuming
