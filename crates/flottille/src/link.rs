@@ -183,10 +183,14 @@ pub struct Remote {
     writing: Mutex<()>,
     /// The control session to the hub.
     control: std::sync::OnceLock<Arc<crate::hub_session::Control>>,
-    /// Raised once the hub's list was taken at start, or the hub could not give one: until then,
-    /// no link is accepted or dialled, so that a machine off during a removal never links to the
-    /// removed machine by the list it kept.
-    heard: tokio::sync::watch::Sender<bool>,
+    /// `None` once the hub's list was taken, or the hub could not give one at start; since when
+    /// the daemon waits for one, at start and after the session to the hub was lost (a machine
+    /// that wakes from a suspend). Meanwhile, `first_list` at most, no link is accepted or
+    /// dialled, so that a machine off during a removal never links to the removed machine by the
+    /// list it kept.
+    heard: tokio::sync::watch::Sender<Option<tokio::time::Instant>>,
+    /// `FIRST_LIST`; shorter in a test.
+    first_list: Duration,
     emit: Emit,
 }
 
@@ -266,7 +270,8 @@ impl Remote {
             learning: Mutex::new(HashMap::new()),
             writing: Mutex::new(()),
             control: std::sync::OnceLock::new(),
-            heard: tokio::sync::watch::Sender::new(false),
+            heard: tokio::sync::watch::Sender::new(Some(tokio::time::Instant::now())),
+            first_list: FIRST_LIST,
             emit,
         }
     }
@@ -327,13 +332,34 @@ impl Remote {
 
     /// The hub's list was taken, or the hub cannot give one now: the links go on.
     pub(crate) fn heard_hub(&self) {
-        self.heard.send_replace(true);
+        self.heard.send_replace(None);
     }
 
-    /// Until the hub was heard, `FIRST_LIST` at most.
+    /// The session to the hub was lost: the links wait for the next list again.
+    pub(crate) fn lost_hub(&self) {
+        self.heard.send_replace(Some(tokio::time::Instant::now()));
+    }
+
+    /// Whether new links wait for the hub's list now.
+    fn holding(&self) -> bool {
+        self.heard
+            .borrow()
+            .is_some_and(|since| since.elapsed() < self.first_list)
+    }
+
+    /// Until the hub was heard, `first_list` at most from when the daemon started waiting.
     async fn hub_heard(&self) {
         let mut heard = self.heard.subscribe();
-        let _ = tokio::time::timeout(FIRST_LIST, heard.wait_for(|heard| *heard)).await;
+        loop {
+            let Some(since) = *heard.borrow_and_update() else {
+                return;
+            };
+            let until = since + self.first_list;
+            match tokio::time::timeout_at(until, heard.changed()).await {
+                Ok(Ok(())) => continue,
+                _ => return,
+            }
+        }
     }
 
     /// Closes every link, telling the other machines.
@@ -687,16 +713,17 @@ async fn accept(remote: Arc<Remote>) {
         .flatten()
         .and_then(|text| text.parse().ok())
         .map(Duration::from_millis);
-    remote.hub_heard().await;
     while let Some(accepting) = remote.endpoint.accept().await {
-        let key = accepting.peer();
-        let Some(peer) = remote.trusted(&key) else {
-            remote.say_refused(&key);
-            accepting.refuse(NOT_TRUSTED);
-            continue;
-        };
         let remote = remote.clone();
         tokio::spawn(async move {
+            // Judged by the hub's list, not by the one kept, while one is on its way.
+            remote.hub_heard().await;
+            let key = accepting.peer();
+            let Some(peer) = remote.trusted(&key) else {
+                remote.say_refused(&key);
+                accepting.refuse(NOT_TRUSTED);
+                return;
+            };
             let traffic = accepting.traffic();
             match accepting.handshake(&remote.hello, &peer.name).await {
                 Ok(link) if traffic == Traffic::Machine => {
@@ -752,15 +779,14 @@ async fn serve_clients(link: Link) {
 /// Every round: dials each machine trusted and not linked whose turn has come, and tells the
 /// linked ones the addresses of this machine that changed.
 async fn dial(remote: Arc<Remote>, mut stopping: tokio::sync::watch::Receiver<bool>) {
-    tokio::select! {
-        _ = remote.hub_heard() => {}
-        _ = stopping.wait_for(|stopping| *stopping) => return,
-    }
     let mut round = tokio::time::interval(ROUND);
     loop {
         tokio::select! {
             _ = round.tick() => {}
             _ = stopping.wait_for(|stopping| *stopping) => return,
+        }
+        if remote.holding() {
+            continue;
         }
         remote.tell_if_changed();
         for line in remote.refused_lines(None, Instant::now()) {

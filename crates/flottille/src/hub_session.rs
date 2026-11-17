@@ -630,6 +630,8 @@ pub async fn run(
     let mut wait = ROUND;
     // When the hub was last reached, to say since when it is not.
     let mut unreachable_since: Option<jiff::Zoned> = None;
+    // Whether a session to the hub was had and lost since the daemon started.
+    let mut lost = false;
     loop {
         let pinned = match control.pinned() {
             None => None,
@@ -658,7 +660,10 @@ pub async fn run(
                     control.set("connected", None);
                     let ended =
                         keep_session(&control, &remote, device, session, &mut stopping).await;
-                    remote.heard_hub();
+                    // Held until the next session's list, `FIRST_LIST` at most: a machine that
+                    // was asleep during a removal does not link by the list it kept meanwhile.
+                    remote.lost_hub();
+                    lost = true;
                     match ended {
                         Ended::Stopping => return,
                         Ended::Again => continue,
@@ -681,8 +686,11 @@ pub async fn run(
                     Some(why)
                 }
             };
-            // No list from the hub this time: the links go on with the one kept.
-            remote.heard_hub();
+            // No list from the hub at start: the links go on with the one kept. After a session
+            // was lost, they wait for the bound.
+            if !lost {
+                remote.heard_hub();
+            }
             if let Some(why) = why {
                 let since = unreachable_since.get_or_insert_with(jiff::Zoned::now);
                 control.set(
