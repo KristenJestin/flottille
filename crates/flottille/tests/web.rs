@@ -108,6 +108,7 @@ fn answer(addr: SocketAddr, path: &str) -> Vec<u8> {
             ));
         }
         "/bomb.pdf" => return pdf_response(bomb()),
+        "/piano.png" => return image_response(&piano()),
         "/html/" if path.contains("q=blocked") => (
             "202 Accepted",
             "text/html",
@@ -128,6 +129,31 @@ fn answer(addr: SocketAddr, path: &str) -> Vec<u8> {
         body.len()
     )
     .into_bytes()
+}
+
+/// A small picture of a piano's keys, as a PNG.
+fn piano() -> Vec<u8> {
+    let mut out = std::io::Cursor::new(Vec::new());
+    image::RgbImage::from_fn(60, 20, |x, _| {
+        if x % 8 < 5 {
+            image::Rgb([240, 240, 240])
+        } else {
+            image::Rgb([10, 10, 10])
+        }
+    })
+    .write_to(&mut out, image::ImageFormat::Png)
+    .unwrap();
+    out.into_inner()
+}
+
+fn image_response(body: &[u8]) -> Vec<u8> {
+    let mut out = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    )
+    .into_bytes();
+    out.extend_from_slice(body);
+    out
 }
 
 fn pdf_response(body: &[u8]) -> Vec<u8> {
@@ -315,6 +341,18 @@ fn held(answer: Answer) -> String {
     answer.text
 }
 
+fn size_of(data: &str) -> (u32, u32) {
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data)
+        .unwrap();
+    image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .unwrap()
+        .into_dimensions()
+        .unwrap()
+}
+
 fn read(url: &str) -> Value {
     json!({"action": "read", "url": url})
 }
@@ -333,6 +371,30 @@ fn read_of_an_html_page_returns_its_main_content_as_markdown_without_navigation(
     );
     assert!(text.contains("Title: The guide"), "{text}");
     assert!(!text.contains("Site menu"), "{text}");
+}
+
+#[test]
+fn a_web_page_that_is_an_image_is_read_as_an_image() {
+    let web = Web::start();
+    let user = user_of(&web, json!([]));
+    let (_, mcp) = session(
+        &user,
+        &format!("look at the piano at {}", web.url("/piano.png")),
+    );
+    let (answer, images) = mcp.call_with_images("web", read(&web.url("/piano.png")));
+    let text = done(answer);
+    assert_eq!(images.len(), 1, "{text}");
+    assert_eq!(images[0].0, "image/png");
+    assert_eq!(
+        size_of(&images[0].1),
+        (60, 20),
+        "the picture the page answered"
+    );
+    assert!(text.starts_with(UNTRUSTED), "still the web's: {text}");
+    assert!(
+        text.contains("/piano.png") && text.contains("60×20"),
+        "{text}"
+    );
 }
 
 #[test]
