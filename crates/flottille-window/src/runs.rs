@@ -175,6 +175,8 @@ pub struct CommandRow {
     pub url: Option<String>,
     /// A service's run: the daemon's, of no agent and no project; `name` is the service's.
     pub service: bool,
+    /// The services it needs that stopped while it runs.
+    pub needs_stopped: Vec<String>,
 }
 
 /// What the drawer follows: a command, or a step of a workspace's setup.
@@ -222,6 +224,12 @@ impl CommandRow {
             ready: value["ready"].as_str().map(str::to_owned),
             url: value["url"].as_str().map(str::to_owned),
             service: value["project"] == "" && value["agent"] == "",
+            needs_stopped: value["needs_stopped"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|name| name.as_str().map(str::to_owned))
+                .collect(),
         }
     }
 
@@ -256,6 +264,7 @@ impl CommandRow {
             ready: None,
             url: None,
             service: false,
+            needs_stopped: Vec::new(),
         }
     }
 
@@ -693,6 +702,11 @@ pub fn ready_mark(
         .into_any_element()
 }
 
+/// What a run's row says of the services it needs that stopped: `needs auth, stopped`.
+fn needs_said(stopped: &[String]) -> String {
+    format!("needs {}, stopped", stopped.join(", "))
+}
+
 /// An address as a row shows it: its host and path, without its scheme.
 pub fn address_shown(url: &str) -> String {
     let rest = url
@@ -1087,6 +1101,18 @@ impl CommandList {
                     // A server's address takes the place of its last line, which its output
                     // still shows; a run that wrote nothing has no line to show, not an empty one.
                     .child(presence(id("link-presence"), address.is_some(), link))
+                    // What it needs that stopped, while it runs: it goes on without it.
+                    .child(presence(
+                        id("needs-presence"),
+                        !ended && !row.needs_stopped.is_empty(),
+                        div()
+                            .id(id("needs"))
+                            .mono(11.)
+                            .text_color(p.wait)
+                            .aria_label(SharedString::from(needs_said(&row.needs_stopped)))
+                            .child(SharedString::from(needs_said(&row.needs_stopped)))
+                            .test_support(),
+                    ))
                     .child(presence(
                         id("last-presence"),
                         address.is_none() && !last.is_empty(),
@@ -2132,6 +2158,7 @@ mod tests {
             ready: None,
             url: None,
             service: false,
+            needs_stopped: Vec::new(),
         }
     }
 

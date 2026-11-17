@@ -1102,8 +1102,10 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   first message, and pictures taken as a session's composer does, which go with the first
   message; its place's menu ends with New workspace…; with no provider ready it says "No provider
   is ready. **Open Settings**", which opens Agents, Providers); then its tabs, **Work**, **Pull
-  requests** and **Tickets**, and **Specs** while Specs is on in the project (four at most, room
-  kept for a fifth), the chosen one alone below them (`reference/gpui.md`, rule 13). Creating a
+  requests** and **Tickets**, **Specs** while Specs is on in the project, and **Progress** while
+  the project declares a tracker (the fifth), the chosen one alone below them (`reference/gpui.md`,
+  rule 13). **Progress** is a project's milestones and their tickets (`tickets.md`, "Progress"),
+  read when the tab opens. Creating a
   workspace shows the preparation's progress and failure output, removing one asks first.
   **Work** is one column of the project's places: `main` first, then the workspaces from the
   newest to the oldest, in an order nothing changes (activity orders the sidebar, never this
@@ -1324,8 +1326,15 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   interleave: text, image, text); a message in the conversation, and one that waits, shows the
   chips in its text, a click on a picture's chip opening it as its thumbnail does. A draft keeps
   its chips (the composer of a session lives as long as the window), and a message taken back
-  comes back with them, its markers read back as chips. The same holds in the project page's
-  composer. A click on a picture, in a message or in the
+  comes back with them, its markers read back as chips. A long text pasted (more than 4,000
+  characters or more than 80 lines) is not put in the field: it is attached as a text file, a chip
+  `pasted-text.txt` with its size where it was pasted (removed as one, like the others), and a
+  toast says "Large paste attached as a file · Ctrl+Shift+V to paste it inline" the first time;
+  Ctrl+Shift+V always pastes inline. The daemon masks the text, writes it whole in the agent's
+  folder and the message names the file where the chip was (`[Pasted text 1: pasted-text.txt · N
+  bytes · read it at <path>]`), so that the agent reads it with its own read tool; the message in
+  the conversation shows the chip, and a click opens the text in the large modal, read-only. The
+  same holds in the project page's composer. A click on a picture, in a message or in the
   composer, opens it in the large modal: at its own size, scaled down to fit the window and never
   up, with the arrows (keys and buttons, "2 of 3") through the message's pictures; what the root does while a turn runs (`Thinking…`,
   `Writing…`, `Running <tool>…`) is said in the same bar, where the words cross-fade as they change,

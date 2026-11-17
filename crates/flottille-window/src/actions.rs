@@ -66,6 +66,20 @@ impl Picture {
     }
 }
 
+/// A large pasted text and its name, as the daemon takes it: it writes it as a file the message
+/// names (#848).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Pasted {
+    pub name: String,
+    pub text: String,
+}
+
+impl Pasted {
+    fn to_json(&self) -> Value {
+        json!({"name": self.name, "text": self.text})
+    }
+}
+
 /// Where the user ran a task from: the answer goes back there.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RunFrom {
@@ -123,6 +137,8 @@ pub enum Command {
         message: String,
         /// The pictures that go with the first message.
         images: Vec<Picture>,
+        /// The large pasted texts that go with it, as files.
+        texts: Vec<Pasted>,
         /// The mode the session starts in: `ask`, `auto` or `full`.
         mode: String,
     },
@@ -412,10 +428,12 @@ pub enum Command {
         method: &'static str,
         params: Value,
     },
-    /// Starts a service (and what it needs first), or stops it.
+    /// Starts a service (and what it needs first), or stops it; `force` stops it even though
+    /// something running needs it, which the user confirmed.
     ServiceAct {
         name: String,
         start: bool,
+        force: bool,
     },
     /// The output of a service's run, as a run's.
     ServiceOutput {
@@ -488,6 +506,8 @@ pub enum Command {
         message: String,
         /// Pasted or dropped pictures that go with it, as the clipboard gave them.
         images: Vec<Picture>,
+        /// The large pasted texts that go with it, as files.
+        texts: Vec<Pasted>,
         /// The composer's Compact before sending, while it shows: the agent's cache expired.
         compact: Option<bool>,
     },
@@ -1102,6 +1122,10 @@ pub enum Outcome {
         name: String,
         start: bool,
         answer: Result<Value, String>,
+        /// The stop was refused because something running needs the service (the code
+        /// `needed`), which started since the list was read: what needs it, as the daemon's
+        /// data says it.
+        needed: Option<Vec<String>>,
     },
     /// The output of a service's run.
     ServiceOutput {
@@ -1462,6 +1486,7 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
             pick,
             message,
             images,
+            texts,
             mode,
         } => {
             let workspace = match target {
@@ -1476,7 +1501,7 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
                     workspace.as_deref(),
                     &pick,
                     &message,
-                    &images,
+                    (&images, &texts),
                     &mode,
                 ),
                 bounds.quick,
@@ -2319,17 +2344,38 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
             };
             Outcome::ServiceWritten { refused }
         }
-        Command::ServiceAct { name, start } => {
+        Command::ServiceAct { name, start, force } => {
             // A start waits for what the service needs to be ready.
-            let (method, bound) = match start {
-                true => ("service.start", bounds.slow),
-                false => ("service.stop", bounds.quick),
+            let (method, params, bound) = match start {
+                true => ("service.start", json!({"name": name}), bounds.slow),
+                false => (
+                    "service.stop",
+                    json!({"name": name, "force": force}),
+                    bounds.quick,
+                ),
             };
-            let answer = ask_alone(connect, method, json!({"name": name}), bound).and_then(|a| a);
+            let asked = connected(connect)
+                .and_then(|mut conn| conn.ask_within_coded(method, params, bound));
+            let (answer, needed) = match asked {
+                Ok(Ok(answer)) => (Ok(answer), None),
+                Ok(Err(refused)) => {
+                    // A daemon that does not carry the data says nothing to list: its sentence is
+                    // what the toast shows.
+                    let needed = (refused.code == "needed")
+                        .then(|| {
+                            let data = refused.data.unwrap_or_default();
+                            crate::tasks::names_of(&data["needed_by"])
+                        })
+                        .filter(|needed| !needed.is_empty());
+                    (Err(refused.message), needed)
+                }
+                Err(why) => (Err(why), None),
+            };
             Outcome::ServiceActed {
                 name,
                 start,
                 answer,
+                needed,
             }
         }
         Command::ServiceOutput { run } => {
@@ -2412,10 +2458,14 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
             key,
             message,
             images,
+            texts,
             compact,
         } => {
             let mut params = json!({"agent": session, "message": message,
                 "images": images.iter().map(Picture::to_json).collect::<Vec<_>>()});
+            if !texts.is_empty() {
+                params["texts"] = texts.iter().map(Pasted::to_json).collect();
+            }
             if let Some(compact) = compact {
                 params["compact"] = json!(compact);
             }
@@ -2827,11 +2877,11 @@ fn start_params(
     workspace: Option<&str>,
     pick: &Pick,
     message: &str,
-    images: &[Picture],
+    (images, texts): (&[Picture], &[Pasted]),
     mode: &str,
 ) -> Value {
     // What is left out is sent as a null, which the daemon reads as absent: its to choose.
-    json!({
+    let mut params = json!({
         "project": project,
         "workspace": workspace,
         "provider": pick.provider,
@@ -2840,7 +2890,11 @@ fn start_params(
         "gate_mode": mode,
         "message": message,
         "images": images.iter().map(Picture::to_json).collect::<Vec<_>>(),
-    })
+    });
+    if !texts.is_empty() {
+        params["texts"] = texts.iter().map(Pasted::to_json).collect();
+    }
+    params
 }
 
 fn started_outcome(project: &str, started: &Value) -> Outcome {
@@ -3069,7 +3123,12 @@ mod tests {
                         "agent.start" => json!({"agent": {"id": "made-up-agent"}}),
                         _ => json!({}),
                     };
-                    let answer = json!({"id": request["id"], "result": result});
+                    // A daemon from before the refusal carried data: `needed` and a sentence only.
+                    let answer = match method {
+                        "service.stop" => json!({"id": request["id"], "error": {
+                            "code": "needed", "message": "db is needed by app's api"}}),
+                        _ => json!({"id": request["id"], "result": result}),
+                    };
                     writeln!(writer, "{answer}").unwrap();
                 }
             });
@@ -3095,6 +3154,7 @@ mod tests {
             pick: Pick::default(),
             message: "Fix the timeout".into(),
             images: Vec::new(),
+            texts: Vec::new(),
             mode: "auto".into(),
         }
     }
@@ -3134,6 +3194,26 @@ mod tests {
         };
         assert_eq!(project, "atlas");
         assert_eq!(why, "Flottille did not answer agent.start within 200 ms");
+    }
+
+    #[test]
+    fn a_stop_refused_as_needed_without_data_is_said_by_the_refusal() {
+        let (sender, mut updates) = unbounded();
+        let actions = Actions::spawn(daemon(&[]), sender);
+        actions.send(Command::ServiceAct {
+            name: "db".into(),
+            start: false,
+            force: false,
+        });
+
+        let Some(Outcome::ServiceActed { answer, needed, .. }) =
+            next(&mut updates, Duration::from_secs(5))
+        else {
+            panic!("no answer of the window's own");
+        };
+        // No empty list to ask a confirmation about: the toast says what the daemon said.
+        assert_eq!(needed, None);
+        assert_eq!(answer, Err("db is needed by app's api".to_owned()));
     }
 
     #[test]

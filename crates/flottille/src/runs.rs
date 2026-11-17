@@ -138,6 +138,11 @@ struct Going {
     readied: Notify,
     /// The agent folders of an agent's place as they were before it, put back once it ends.
     guarded: Mutex<Option<Guard>>,
+    /// The services its task needs, those they need included, followed while it runs
+    /// (`services::follow_needs`).
+    needs: Vec<String>,
+    /// Those of them that stopped while it runs, in the order they stopped.
+    needs_stopped: Mutex<Vec<String>>,
     /// Its runtime folder holding the session's Wayland socket alone, when its project lets its
     /// runs open windows: removed once it ends.
     display: Mutex<Option<crate::display::Folder>>,
@@ -490,18 +495,19 @@ pub async fn run(
         true => String::new(),
         false => format!("started the services it needs: {}\n", started.join(", ")),
     };
-    // Only a push the gate read, and that the user or the judge let through, goes out.
-    let lift = approved && gate::is_push(&words);
-    let env = match environment(daemon, place, &repository, lift) {
+    // Only a push the gate read, and that the user or the judge let through, goes out: outside
+    // the sandbox, as the user's own.
+    let lifted = (approved && gate::is_push(&words)).then(lifted);
+    let env = match environment(daemon, place, &repository) {
         Ok(env) => env,
         Err(why) => return Outcome::Failed(why),
     };
     // The project's checks of each commit the push sends, and its branch format on each branch
     // it makes, before it goes: however the commits were made, through a command the checks at
     // commit time read or not.
-    if lift {
+    if let Some(lifted) = &lifted {
         tokio::select! {
-            checked = crate::message_checks::push(&at, &words, &env) => {
+            checked = crate::message_checks::push(&at, &words, lifted) => {
                 if let Err(refusal) = checked {
                     return Outcome::Refused(refusal);
                 }
@@ -517,6 +523,7 @@ pub async fn run(
         ready.as_deref(),
         url.as_deref(),
         &names(place, &repository),
+        // A push's probes are not the push: they run in the sandbox.
         &env,
         &folder.path,
         &secret_values,
@@ -564,10 +571,12 @@ pub async fn run(
         run,
         words,
         env,
+        lifted,
         secret_values,
         Phase::Waited,
         Readying { probe, notify },
         guarded,
+        &needs,
     ) {
         return Outcome::Failed(why);
     }
@@ -632,7 +641,7 @@ pub async fn run_for_user(
     let words = split_line(&task.line)?;
     let (repository, base) = place.base_for(task.repository.as_deref(), Folder::Task)?;
     let folder = place.resolve(base, ".");
-    let env = environment(daemon, &place, repository, false)?;
+    let env = environment(daemon, &place, repository)?;
     let secret_values = place.secret_values();
     let (url, url_error, probe) = readied(
         daemon,
@@ -669,6 +678,7 @@ pub async fn run_for_user(
         run,
         words,
         env,
+        None,
         secret_values,
         Phase::Waited,
         Readying {
@@ -676,6 +686,7 @@ pub async fn run_for_user(
             notify: false,
         },
         None,
+        &task.needs,
     )?;
     Ok(id)
 }
@@ -725,13 +736,12 @@ pub(crate) fn wait_for_end(daemon: &Daemon, id: &str) -> impl Future<Output = ()
     }
 }
 
-/// The environment of a run in the place: the daemon's, the place's variables filled, the forges
-/// and the daemon kept out of reach, and pushes too unless `lift`.
+/// The environment of a run in the place: the daemon's, the place's variables filled, the forges,
+/// the daemon and pushes kept out of reach.
 pub(crate) fn environment(
     daemon: &Daemon,
     place: &Place,
     repository: &str,
-    lift: bool,
 ) -> Result<BTreeMap<OsString, OsString>, String> {
     let names = names(place, repository);
     let mut filled = BTreeMap::new();
@@ -741,7 +751,7 @@ pub(crate) fn environment(
     let mut env = variables::environment(std::env::vars_os(), &[&filled]);
     let empty = daemon.paths.state.join("empty");
     flottille_core::paths::ensure_private_dir(&empty).map_err(|e| e.to_string())?;
-    defend(&mut env, &empty, lift);
+    defend(&mut env, &empty);
     // Where the daemon's socket is: a client a run starts is refused anyway (`daemon.rs`).
     env.remove(&OsString::from("XDG_RUNTIME_DIR"));
     // The screen is the user's to give, by the project's setting (`start`), X11's key with it.
@@ -757,7 +767,7 @@ pub(crate) fn beside(daemon: &Daemon) -> Result<BTreeMap<OsString, OsString>, St
     let mut env: BTreeMap<OsString, OsString> = std::env::vars_os().collect();
     let empty = daemon.paths.state.join("empty");
     flottille_core::paths::ensure_private_dir(&empty).map_err(|e| e.to_string())?;
-    defend(&mut env, &empty, false);
+    defend(&mut env, &empty);
     env.remove(&OsString::from("XDG_RUNTIME_DIR"));
     // No screen either: a connection's browser that is shown gets its own (`adapters::display`).
     for name in ["WAYLAND_DISPLAY", "DISPLAY", "XAUTHORITY"] {
@@ -801,12 +811,12 @@ pub fn groups_of(daemon: &Daemon, agent: &str) -> Vec<u32> {
 }
 
 /// No forge token, the forge command lines' configuration in `empty` (`forge` is the way to
-/// the forge), and no hook: the hooks are files the agent writes, and a commit or a push the gate
-/// let through would run them where it does not look. Every push URL is rewritten to a path that
-/// is no remote (`url.<nowhere>.pushInsteadOf` of every URL), unless `lift`: the run is itself a
-/// `git push` the user or the judge let through. A harmless command cannot push from a script
-/// the gate never read (`docs/design.md` §7).
-fn defend(env: &mut BTreeMap<OsString, OsString>, empty: &Path, lift: bool) {
+/// the forge), no SSH agent, and no hook: the hooks are files the agent writes, and a commit or a
+/// push the gate let through would run them where it does not look. Every push URL is rewritten
+/// to a path that is no remote (`url.<nowhere>.pushInsteadOf` of every URL): a harmless command
+/// cannot push from a script the gate never read (`docs/design.md` §7). A push the gate let
+/// through runs with [`lifted`] instead.
+fn defend(env: &mut BTreeMap<OsString, OsString>, empty: &Path) {
     for name in FORGE_TOKENS {
         env.insert(name.into(), OsString::new());
     }
@@ -817,13 +827,24 @@ fn defend(env: &mut BTreeMap<OsString, OsString>, empty: &Path, lift: bool) {
     // The session bus leads to the keyring, where the vault is. The system bus's address is
     // kept: it holds no secret of the user's, and its socket is at a fixed path anyway.
     env.remove(&OsString::from("DBUS_SESSION_BUS_ADDRESS"));
-    if !lift {
-        configure(
-            env,
-            "url./dev/null/flottille-refused-push/.pushInsteadOf",
-            "",
-        );
-    }
+    env.remove(&OsString::from(crate::ssh_agent::VARIABLE));
+    configure(
+        env,
+        "url./dev/null/flottille-refused-push/.pushInsteadOf",
+        "",
+    );
+}
+
+/// The environment of a run that is itself a `git push` the user, the judge, a rule or Full mode
+/// let through: the daemon's own, as if the user had typed it (their credential helper, keyring,
+/// SSH agent, forge command line's sign-in), and no hook: the hooks are files the agent writes.
+/// The project's and the workspace's variables are not applied: they are a file a run may write,
+/// and one of them (`GIT_CONFIG_PARAMETERS`) would undo the hooks setting. It runs outside the
+/// sandbox (`start`).
+fn lifted() -> BTreeMap<OsString, OsString> {
+    let mut env = std::env::vars_os().collect();
+    configure(&mut env, "core.hooksPath", "/dev/null");
+    env
 }
 
 /// One more git setting through the environment, after those it already has: it wins over the
@@ -867,29 +888,41 @@ async fn remote_kept(
 
 /// Spawns the run, records it, and leaves a task of its own to follow it to its end. `phase` is
 /// what it is in from the start: a run that ends at once must find it already detached to have
-/// its end delivered.
+/// its end delivered. It runs in the sandbox with `env`, or outside it with `lifted`, the
+/// environment of a push the gate let through (`fn lifted`); its probes run in the sandbox with
+/// `env` either way.
 #[allow(clippy::too_many_arguments)]
 fn start(
     daemon: &Arc<Daemon>,
     run: Run,
     words: Vec<String>,
     mut env: BTreeMap<OsString, OsString>,
+    lifted: Option<BTreeMap<OsString, OsString>>,
     secrets: Vec<String>,
     phase: Phase,
     readying: Readying,
     guarded: Option<Guard>,
+    needs: &[String],
 ) -> Result<(), String> {
     crate::projects::refuse_removing(daemon, &run.project).map_err(|refused| refused.message)?;
-    let display = shown(daemon, &run).map(|shown| {
-        env.extend(shown.env);
-        shown.folder
-    });
+    // A lifted push has the daemon's own display already, and needs none.
+    let display = match lifted {
+        Some(_) => None,
+        None => shown(daemon, &run).map(|shown| {
+            env.extend(shown.env);
+            shown.folder
+        }),
+    };
+    let probed = env.clone();
+    let outside = lifted.is_some();
+    let env = lifted.unwrap_or(env);
     let (reader, writer) = std::io::pipe().map_err(|e| format!("cannot run it: {e}"))?;
     let mut command = tokio::process::Command::new(&words[0]);
     command
         .args(&words[1..])
         .env_clear()
         .envs(&env)
+        .env(crate::children::MARKER, &run.id)
         .current_dir(&run.folder)
         .stdin(Stdio::null())
         .stdout(
@@ -899,10 +932,11 @@ fn start(
         )
         .stderr(writer)
         .kill_on_drop(true);
-    let spawned = crate::children::spawn(crate::landlock::confined_but(
-        crate::children::in_own_session(&mut command),
-        display.as_ref(),
-    ));
+    crate::children::in_own_session(&mut command);
+    if !outside {
+        crate::landlock::confined_but(&mut command, display.as_ref());
+    }
+    let spawned = crate::children::spawn(&mut command);
     // The command holds the pipe's writing end: dropped, only the processes hold it.
     drop(command);
     let child = spawned.map_err(|e| format!("cannot run {}: {e}", words[0]))?;
@@ -915,7 +949,7 @@ fn start(
     let store = |store: &mut Store| {
         let event = store.create_run(&run, ("run.started", event))?;
         if let Some(started) = start_time(pid) {
-            store.add_run_process(pid, started, &run.id)?;
+            store.add_run_process(pid, started, &run.id, crate::children::boot())?;
         }
         Ok(((), event))
     };
@@ -947,6 +981,8 @@ fn start(
         notify: AtomicBool::new(readying.notify),
         readied: Notify::new(),
         guarded: Mutex::new(guarded),
+        needs: crate::services::reached(daemon, needs),
+        needs_stopped: Mutex::default(),
         display: Mutex::new(display),
     });
     daemon
@@ -956,8 +992,12 @@ fn start(
         .lock()
         .unwrap()
         .insert(going.run.id.clone(), going.clone());
+    if !going.needs.is_empty() {
+        needed(daemon, &going, true);
+        crate::services::follow_needs(daemon, &going.needs);
+    }
     if let Some(probe @ (Probe::Url(_) | Probe::Command(_))) = readying.probe {
-        tokio::spawn(probing(daemon.clone(), going.clone(), probe));
+        tokio::spawn(probing(daemon.clone(), going.clone(), probe, probed));
     }
     tokio::spawn(follow(daemon.clone(), going, child, pid, reader));
     Ok(())
@@ -1066,22 +1106,22 @@ fn starting(going: &Going) -> bool {
     *going.readiness.lock().unwrap() == Some(Readiness::Starting)
 }
 
-/// Probes the starting run once a second, one probe at a time, until it is ready or ends.
-async fn probing(daemon: Arc<Daemon>, going: Arc<Going>, probe: Probe) {
+/// Probes the starting run once a second, one probe at a time, until it is ready or ends, a
+/// command in the sandbox's environment `env`.
+async fn probing(
+    daemon: Arc<Daemon>,
+    going: Arc<Going>,
+    probe: Probe,
+    env: BTreeMap<OsString, OsString>,
+) {
     let mut end = going.end.subscribe();
     while starting(&going) {
         let passed = async {
             match &probe {
                 Probe::Url(address) => ready::answers(address).await,
                 Probe::Command(words) => {
-                    ready::command_passes(
-                        &daemon,
-                        &going.run.id,
-                        words,
-                        &going.env,
-                        &going.run.folder,
-                    )
-                    .await
+                    ready::command_passes(&daemon, &going.run.id, words, &env, &going.run.folder)
+                        .await
                 }
                 Probe::Line(_) => false,
             }
@@ -1288,6 +1328,9 @@ async fn follow(
         eprintln!("flottille daemon: run {}: {error}", run.id);
     }
     daemon.mcp.runs.runs.lock().unwrap().remove(&run.id);
+    if !going.needs.is_empty() {
+        needed(&daemon, &going, false);
+    }
     let detached =
         std::mem::replace(&mut *going.phase.lock().unwrap(), Phase::Over) == Phase::Detached;
     let by_user = going.stopped_by_user.load(Ordering::SeqCst);
@@ -1573,7 +1616,7 @@ pub async fn restart_by_user(
                 name.as_deref().unwrap_or_default()
             )
         })?;
-    let env = environment(daemon, &place, &repository, false)?;
+    let env = environment(daemon, &place, &repository)?;
     let secret_values = place.secret_values();
     let (url, url_error, probe) = readied(
         daemon,
@@ -1640,10 +1683,12 @@ pub async fn restart_by_user(
             run,
             words,
             env,
+            None,
             secret_values,
             phase,
             readying,
             guarded,
+            &needs,
         )
     }) {
         // The stop was the user's and its end was not told: the agent hears of both.
@@ -1840,6 +1885,9 @@ fn list(daemon: &Daemon, agent: &str) -> Outcome {
             state_text(end, false),
             crate::tree::ago(now.saturating_sub(run.started_at)),
         ));
+        if let Some(said) = needs_said(&needs_stopped(daemon, &run.id)) {
+            text.push_str(&format!(", {said}"));
+        }
         if run.agent.as_deref() != Some(agent)
             && let Some(starter) = run.agent.as_deref()
         {
@@ -1909,6 +1957,12 @@ fn describe(
         .as_ref()
         .is_some_and(|going| going.notify.load(Ordering::SeqCst));
     text.push_str(&readiness_text(&run, end.is_none(), told));
+    if end.is_none()
+        && let Some(going) = &going
+        && let Some(said) = needs_said(&going.needs_stopped.lock().unwrap())
+    {
+        text.push_str(&format!("\n{said}"));
+    }
     if end.is_none() && answer_of_run {
         text.push_str(&format!(
             "\nit keeps going: read it with run_status {{\"run\": \"{id}\"}}, stop it with \
@@ -2086,7 +2140,7 @@ pub(crate) async fn service_start(
     let mut env = variables::environment(std::env::vars_os(), &[]);
     let empty = daemon.paths.state.join("empty");
     flottille_core::paths::ensure_private_dir(&empty).map_err(|e| e.to_string())?;
-    defend(&mut env, &empty, false);
+    defend(&mut env, &empty);
     env.remove(&OsString::from("XDG_RUNTIME_DIR"));
     let mut secret_values = Vec::new();
     for entry in std::fs::read_dir(&folder).into_iter().flatten().flatten() {
@@ -2183,6 +2237,7 @@ pub(crate) fn start_service(
         run,
         start.words,
         start.env,
+        None,
         start.secrets,
         Phase::Waited,
         Readying {
@@ -2190,8 +2245,135 @@ pub(crate) fn start_service(
             notify: false,
         },
         None,
+        &[],
     )?;
     Ok(id)
+}
+
+// What a running task needs (`services::follow_needs`).
+
+/// A run that needs services started or ended: the services page says what running needs them.
+fn needed(daemon: &Daemon, going: &Going, running: bool) {
+    let _ = daemon.emit(
+        "service.needed",
+        json!({"run": going.run.id, "project": going.run.project, "name": going.run.name,
+            "services": going.needs, "running": running}),
+    );
+}
+
+/// A run going on that needs a service.
+pub(crate) struct Needing {
+    pub id: String,
+    pub project: String,
+    /// Its task.
+    pub name: String,
+    pub agent: Option<String>,
+}
+
+/// The runs going on that need the service, through what another service needs included.
+pub(crate) fn needing(daemon: &Daemon, service: &str) -> Vec<Needing> {
+    let mut found: Vec<Needing> = daemon
+        .mcp
+        .runs
+        .runs
+        .lock()
+        .unwrap()
+        .values()
+        .filter(|going| going.end.borrow().is_none() && going.needs.iter().any(|n| n == service))
+        .map(|going| Needing {
+            id: going.run.id.clone(),
+            project: going.run.project.clone(),
+            name: going.run.name.clone().unwrap_or_default(),
+            agent: going.run.agent.clone(),
+        })
+        .collect();
+    found.sort_by(|a, b| (&a.project, &a.name, &a.id).cmp(&(&b.project, &b.name, &b.id)));
+    found
+}
+
+/// The services a run needs that stopped while it runs.
+pub(crate) fn needs_stopped(daemon: &Daemon, id: &str) -> Vec<String> {
+    let going = daemon.mcp.runs.runs.lock().unwrap().get(id).cloned();
+    going.map_or_else(Vec::new, |going| {
+        going.needs_stopped.lock().unwrap().clone()
+    })
+}
+
+/// A service the run needs stopped (`how`, as the agent is told it: `stopped`, `was stopped by
+/// the user`), or runs again (`None`): its state says it, and the agent that started it is told
+/// of the stop, once.
+pub(crate) fn need_changed(daemon: &Arc<Daemon>, id: &str, service: &str, how: Option<&str>) {
+    let going = daemon.mcp.runs.runs.lock().unwrap().get(id).cloned();
+    let Some(going) = going else { return };
+    let changed = {
+        let mut stopped = going.needs_stopped.lock().unwrap();
+        let had = stopped.iter().any(|s| s == service);
+        match how {
+            Some(_) if !had => stopped.push(service.to_owned()),
+            None if had => stopped.retain(|s| s != service),
+            _ => {}
+        }
+        had != how.is_some()
+    };
+    if !changed {
+        return;
+    }
+    let run = &going.run;
+    let _ = daemon.emit(
+        "run.needs",
+        json!({"agent": run.agent, "project": run.project, "run": run.id,
+            "needs_stopped": going.needs_stopped.lock().unwrap().clone()}),
+    );
+    let Some(agent) = &run.agent else { return };
+    let task = run.name.as_deref().unwrap_or_default();
+    // What is told is the service's last state: a stop or a return still waiting for the agent
+    // (it is in a turn) gives way to this one. The service's name ends with `:` so that `db`
+    // does not take `db-replica`'s.
+    let id = |kind: &str| format!("service-{kind}-{}-{service}:", run.id);
+    let _ = daemon.write(|store| {
+        Ok((
+            (),
+            store.supersede_like(agent, &[&id("stopped"), &id("back")])?,
+        ))
+    });
+    let fresh = |kind: &str| Some(format!("{}{}", id(kind), new_id().unwrap_or_default()));
+    match how {
+        Some(how) => {
+            let body = format!(
+                "{service}, which {task} needs, {how}. Your run {} of {task} goes on without it: \
+                 services {{\"action\": \"start\", \"name\": \"{service}\"}} starts it again.",
+                run.id
+            );
+            deliveries::deliver(
+                daemon,
+                agent,
+                "service-stopped",
+                fresh("stopped"),
+                &body,
+                approval::URGENT,
+            );
+        }
+        // Told it stopped, it is told it is back; nothing is cut for it.
+        None => {
+            let body = format!(
+                "{service}, which {task} needs, runs again. Your run {} of {task} has it back.",
+                run.id
+            );
+            deliveries::deliver(
+                daemon,
+                agent,
+                "service-back",
+                fresh("back"),
+                &body,
+                approval::BETWEEN_TURNS,
+            );
+        }
+    }
+}
+
+/// What a run's state says of the services it needs that stopped: `needs auth, stopped`.
+fn needs_said(stopped: &[String]) -> Option<String> {
+    (!stopped.is_empty()).then(|| format!("needs {}, stopped", stopped.join(", ")))
 }
 
 /// Whether the run is going on.
@@ -2249,27 +2431,66 @@ pub fn tell_guarded_at_start(daemon: &Daemon) {
     }
 }
 
-/// At daemon start: kills the run process groups a previous daemon left running, each only when
-/// its leader is still the process it started, and marks their runs interrupted.
+/// At daemon start, before anything starts a run or tries a service: ends what the runs of a
+/// previous daemon left running, and marks them interrupted. A record of another boot is dropped
+/// and nothing is signalled: its pid and start time say nothing of this boot's processes. Of
+/// this boot, a record whose leader is still the process it started (same pid, same start time)
+/// has its process group and session ended whole: Linux gives a living leader's pid to nobody
+/// else. A record whose leader is gone has only the processes of that session ended that carry
+/// the run's marker (`FLOTTILLE_RUN=<run id>` in their environment, set on every line the daemon
+/// records) and started at or after the leader: a session of the user's own whose leader took
+/// that pid since, and also left, is never touched. A leader's pid taken by a living process
+/// since says nothing of ours is left, and nothing is signalled. The records are removed once
+/// this is done: a daemon killed meanwhile leaves them to the next.
 pub async fn settle_at_start(daemon: &Daemon) {
-    let mut left = Vec::new();
-    let result = daemon.read(|store| {
-        for (pid, started) in store.run_processes()? {
-            if start_time(pid) == Some(started) {
-                signal_group(pid, libc::SIGKILL);
-                left.push(pid);
-                eprintln!("flottille daemon: killed the run process {pid} that was left running");
+    let recorded = daemon
+        .read(|store| store.run_processes())
+        .unwrap_or_else(|error| {
+            eprintln!("flottille daemon: reading the runs' processes: {error}");
+            Vec::new()
+        });
+    let ending = recorded.clone();
+    // Outside the store: ending a session reads all of `/proc`.
+    let _ = tokio::task::spawn_blocking(move || {
+        let boot = crate::children::boot();
+        for process in ending {
+            if boot.is_empty() || process.boot != boot {
+                continue;
             }
-            store.remove_run_process(pid)?;
+            let pid = process.pid;
+            match start_time(pid) {
+                Some(started) if started == process.started => {
+                    if crate::children::end_session_led(pid, started) {
+                        eprintln!(
+                            "flottille daemon: ended the run process {pid} left running, and its \
+                             session"
+                        );
+                    }
+                }
+                Some(_) => {}
+                None => {
+                    let ended = crate::children::end_session_where(pid, |member| {
+                        crate::children::marked(member, &process.run, process.started)
+                    });
+                    if ended {
+                        eprintln!(
+                            "flottille daemon: ended what the run process {pid} left running in \
+                             its session"
+                        );
+                    }
+                }
+            }
+        }
+    })
+    .await;
+    let removed = daemon.read(|store| {
+        for process in &recorded {
+            store.remove_run_process(process.pid)?;
         }
         Ok(())
     });
-    if let Err(error) = result {
-        eprintln!("flottille daemon: reading the runs' processes: {error}");
-    }
-    // Outside the store: ending a session reads all of `/proc`, more than once.
-    for pid in left {
-        crate::children::end_session(pid).await;
+    if let Err(error) = removed {
+        eprintln!("flottille daemon: removing the runs' processes: {error}");
     }
     let runs = daemon.read(Store::running_runs).unwrap_or_default();
     for run in runs {
@@ -2326,21 +2547,35 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_run_s_pushes_are_walled_unless_it_is_a_push_that_passed_the_gate() {
-        for lift in [false, true] {
-            let mut env = BTreeMap::new();
-            defend(&mut env, Path::new("/state/empty"), lift);
-            let keys: Vec<&str> = (0..3)
-                .filter_map(|n| env.get(&OsString::from(format!("GIT_CONFIG_KEY_{n}"))))
-                .map(|key| key.to_str().unwrap())
-                .collect();
-            assert_eq!(
-                keys.contains(&"url./dev/null/flottille-refused-push/.pushInsteadOf"),
-                !lift,
-                "{keys:?}"
-            );
-            assert!(keys.contains(&"core.hooksPath"));
+    fn a_run_s_pushes_are_walled() {
+        let mut env = BTreeMap::new();
+        defend(&mut env, Path::new("/state/empty"));
+        let keys: Vec<&str> = (0..3)
+            .filter_map(|n| env.get(&OsString::from(format!("GIT_CONFIG_KEY_{n}"))))
+            .map(|key| key.to_str().unwrap())
+            .collect();
+        assert!(
+            keys.contains(&"url./dev/null/flottille-refused-push/.pushInsteadOf"),
+            "{keys:?}"
+        );
+        assert!(keys.contains(&"core.hooksPath"));
+    }
+
+    #[test]
+    fn a_lifted_push_keeps_the_daemon_s_environment_but_its_hooks() {
+        let env = lifted();
+        let daemon: BTreeMap<OsString, OsString> = std::env::vars_os().collect();
+        let count: usize = daemon
+            .get(&OsString::from("GIT_CONFIG_COUNT"))
+            .map_or(0, |count| count.to_str().unwrap().parse().unwrap());
+        for (name, value) in &daemon {
+            if !name.to_str().unwrap_or_default().starts_with("GIT_CONFIG_") {
+                assert_eq!(env.get(name), Some(value), "{name:?}");
+            }
         }
+        let get = |name: String| env[&OsString::from(name)].to_str().unwrap().to_owned();
+        assert_eq!(get(format!("GIT_CONFIG_KEY_{count}")), "core.hooksPath");
+        assert_eq!(get(format!("GIT_CONFIG_VALUE_{count}")), "/dev/null");
     }
 
     #[test]
@@ -2359,16 +2594,16 @@ mod tests {
         .map(|(k, v)| (k.into(), v.into()))
         .collect();
 
-        defend(&mut env, Path::new("/state/empty"), true);
+        defend(&mut env, Path::new("/state/empty"));
 
         let get = |name: &str| env[&OsString::from(name)].to_str().unwrap().to_owned();
         assert_eq!(get("GH_TOKEN"), "");
         assert_eq!(get("GITHUB_TOKEN"), "");
         assert_eq!(get("GH_CONFIG_DIR"), "/state/empty");
-        assert_eq!(get("GIT_CONFIG_COUNT"), "3");
+        assert_eq!(get("GIT_CONFIG_COUNT"), "4");
         assert_eq!(get("GIT_CONFIG_KEY_2"), "core.hooksPath");
         assert_eq!(get("GIT_CONFIG_VALUE_2"), "/dev/null");
-        assert!(!env.contains_key(&OsString::from("GIT_CONFIG_KEY_3")));
+        assert!(!env.contains_key(&OsString::from("GIT_CONFIG_KEY_4")));
         assert_eq!(get("PATH"), "/bin");
         assert!(!env.contains_key(&OsString::from("DBUS_SESSION_BUS_ADDRESS")));
         assert_eq!(

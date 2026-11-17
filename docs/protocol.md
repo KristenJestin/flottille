@@ -66,7 +66,9 @@ connection carries any number of requests; answers may come in any order and are
 ```
 
 Exactly one of `result` and `error`. A line that is not a request is answered with an error
-without an `id`.
+without an `id`. An error may carry `data`, what its sentence says as data a client draws, where
+its method says so (`service.stop`'s `needed`); a client that does not know it reads the
+sentence.
 
 | Error code | |
 |---|---|
@@ -387,7 +389,7 @@ is not taken or not read; it is not a refusal.
 #### `project.progress`
 
 `{"project"}`. The milestones of the project's tracker and their tickets, for the window's
-Progress page (`docs/tickets.md`, "Progress"): `{"project", "tracker" (github or jira),
+Progress tab of a project's page (`docs/tickets.md`, "Progress"): `{"project", "tracker" (github or jira),
 "milestones", "problem"}`. Each milestone is `{"id", "name", "source", "jira_project", "state"
 (open or closed), "due", "closed_at" (the day GitHub closed it, when it says so), "url", "read",
 "problem" (why a Jira version's tickets could not be read), "counts": {"done", "review", "progress", "todo", "other",
@@ -1396,7 +1398,8 @@ a result:
   "run": "5d2c0f1a9b3e",
   "address": "http://localhost:3001",
   "needs_stopped": [],
-  "needed_by": [{"project": "app", "tasks": ["api"]}]
+  "needed_by": [{"project": "app", "tasks": ["api", "web"], "running": ["api"]}],
+  "needed_now": ["app's api"]
 }
 ```
 
@@ -1407,7 +1410,9 @@ as the file says them. `state` is `stopped`, `starting`, `ready`, `running` (it 
 service's run has an empty `project` and is not listed by `run.list`. `address` is its run's
 address, or the file's. `needs_stopped` lists what it needs that does not run. `needed_by` lists
 the projects whose tasks need it, directly or through another service's `needs`, each with those
-tasks. `not-found` for a
+tasks and, in `running`, those of them that run now. `needed_now` says what runs now and needs it:
+each running task's (`app's api`) and each other service that runs and needs it, directly or not
+(`the service file`). `not-found` for a
 service the file does not hold, `invalid-config` when the file cannot be used, `refused` for a
 write the file would refuse (nothing is written).
 
@@ -1445,9 +1450,14 @@ started again (`started` is empty), nor one that answers already (its state is t
 
 #### `service.stop`
 
-`{"name"}`: `{"service": {...}}`, once it ended: its whole process group, as `run.stop` does.
-What it needs and what needs it go on. `refused` when it is not running, or runs outside
-Flottille, which does not stop it.
+`{"name", "force"?}`: `{"service": {...}}`, once it ended: its whole process group, as `run.stop`
+does. What it needs and what needs it go on. `needed` while something running needs it (its
+`needed_now`) and `force` is not `true`, with the sentence that says what goes on without it
+(`Stop auth? app's api needs it and is running: it goes on without it.`) and, in the error's
+`data`, `{"needed_by": ["app's api"]}`, what runs and needs it, as `needed_now` says each, for a
+client to draw: nothing is stopped.
+`refused` when it is not running, or runs outside Flottille, which does not stop it. The agent of
+each run that needs it is told it was stopped (`docs/tools.md`, "Tasks and runs").
 
 #### `service.output`
 
@@ -1566,7 +1576,7 @@ Each method answers `not-found` when the agent does not exist.
 
 #### `agent.start`
 
-`{"project", "workspace"?, "provider"?, "model"?, "effort"?, "mode"?, "gate_mode"?, "role"?, "message", "images"?}`.
+`{"project", "workspace"?, "provider"?, "model"?, "effort"?, "mode"?, "gate_mode"?, "role"?, "message", "images"?, "texts"?}`.
 Creates a root agent in the project folder or the workspace, and gives it its first message:
 `{"agent", "after"}`. `gate_mode` is the session's mode (`ask`, `auto` or `full`, `docs/design.md`
 §7.1), `auto` when left out: it is the root's before its first message is given, so that the
@@ -1597,7 +1607,7 @@ A message `/name rest`, where name is one of the project's commands, is sent as 
 
 #### `agent.send`
 
-`{"agent", "message", "images"?, "compact"?}`. Gives the agent a message (a `user` delivery), played after the turn that
+`{"agent", "message", "images"?, "texts"?, "compact"?}`. Gives the agent a message (a `user` delivery), played after the turn that
 runs if one does, starting its process again when it was released: `{"agent", "after",
 "delivery"}`. `delivery` is the id of the delivery stored for the message: its `delivery.queued`
 event (numbered after `after`), then `delivery.sent` when a prompt takes it (`docs/events.md`), name
@@ -1635,6 +1645,19 @@ agent turns out to take no images, none is sent and the text of the turn ends wi
 `[image <name> is missing]` in the text. Merged queued messages make one prompt of 20 images and
 10 MiB at most (the first message is always whole); the others wait for the next turn. The
 images of an agent go with it: when it ends for good, or 7 days after a root that can be resumed.
+
+`texts` is a list of `{"name", "text"}`: a long text pasted in the window's composer (more than
+4,000 characters or more than 80 lines), attached as a file instead of filling the message. The
+message marks each one by `[Pasted text N: <name>]`, `N` counted from 1 in the message (the k-th
+text takes the first marker numbered k; a text without one is marked after the text). The daemon
+masks the text as it masks every delivered text, writes it whole, never cut, as
+`<stamp>-text-<n>.txt` in the agent's folder beside its images, and says in the message, in the
+marker's place, where the agent reads it with its own read tool: `[Pasted text N: pasted-text.txt
+· <bytes> bytes · read it at <path>]` (the `delivery` and the `agent.prompted` event keep the
+message so). The name it says is always the daemon's, `pasted-text.txt`, whatever `name` holds.
+A message carries 20 texts at most, 5 MiB each (`refused` for more, an empty text, or one too
+big); a text with no marker is marked after the message; with texts, the message may be empty. The
+files go with the images of the agent. `agent.start` takes `texts` as it takes `images`.
 
 #### `agent.answer`
 
@@ -1677,7 +1700,8 @@ waiting messages, which stay queued in their order. Refused and not found as `ag
 #### `agent.image`
 
 `{"agent", "name"}`. An image of the agent's, by a name `agent.prompted` gave: `{"mime", "data"}`.
-`not-found` when there is none.
+`not-found` when there is none. A pasted text of the agent's (`agent.send`, `texts`) is given the
+same way, by the file name its marker ends in: `{"mime": "text/plain", "data"}`.
 
 #### `agent.cancel`
 
@@ -1899,7 +1923,8 @@ user ran, the one it runs in (`null` in the project folder). `state` is `running
 it was ready); `url` its address, `url_error` why it has none when its task's line for it failed
 (`docs/projects.md`, "Tasks"). `last_line` is the
 last line of its output with something on it, masked of secrets and as the program wrote it
-(colours included), cut at 300 characters. `tail` is the last 20 lines
+(colours included), cut at 300 characters. `needs_stopped` lists the services its task needs that
+stopped while it runs (`run.needs`). `tail` is the last 20 lines
 of its output (a list of texts, masked and as written, each cut at 300 characters), which a result
 card in the conversation shows folded, a running command's as well as one that ended.
 

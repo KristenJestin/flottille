@@ -199,6 +199,8 @@ fn listed(
     .into();
     shown["last_line"] = last_line.into();
     shown["tail"] = tail.into();
+    // What it needs that stopped while it runs.
+    shown["needs_stopped"] = runs::needs_stopped(daemon, &run.id).into();
     shown
 }
 

@@ -297,6 +297,10 @@ impl Render for QueuedMessages {
                         })
                     },
                 );
+                let sending = matches!(entry, Entry::Sending(_));
+                let pieces = crate::tokens::text_chips(pieces, |found| {
+                    crate::tokens::shown_chip(found, sending)
+                });
                 let shown = match crate::tokens::has_tokens(&pieces) {
                     false => text.clone().into_any_element(),
                     true => gpui_design_system::TokenText::new(

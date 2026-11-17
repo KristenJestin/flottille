@@ -686,6 +686,37 @@ has no workspace, so its templates fill only `{url}`, in `ready`'s `url` and `li
   agent the user allowed; when the daemon stops, its services stop with it, their process groups
   as a run's are. Stopping a service does not stop what it needs nor what needs it: the state of
   those that need it says what they need is not running.
+- **What runs and needs it is followed.** While a run of a task goes on, each service its `needs`
+  reaches (through the needs of a service too) is followed, Flottille's or `outside`: the end of
+  one Flottille runs is known at once, one that runs outside Flottille, or no longer runs, is
+  tried every 15 s at its `ready` address (a connection, 5 s at most; a `ready` command is never
+  run for this, no gate judged it), and nothing is followed once no run needs it. When one stops,
+  the run's state says it (`needs auth, stopped`, in `run_status`, `run.list` and the run's row in
+  the window), and the agent that started the run is told once, a delivery `service-stopped`:
+  `auth, which dev-api needs, stopped` (`was stopped by the user` when the user stopped it). When
+  it runs again (started again, or answering again at its address once the user started their
+  own: it is `outside` again), the run's state no longer says it, and the agent is told once, a
+  delivery `service-back`: `auth, which dev-api needs, runs again`. It says so again if it stops
+  and comes back again; the daemon's own stop tells nobody.
+- **Stopping what something running needs asks first.** A service that a run of a task needs, or
+  another service that runs and needs it, directly or through another, is not stopped in one
+  click: the window's Stop opens the confirmation `Stop auth?`, `app's dev-api needs it and is
+  running: it goes on without it.`, with Stop and Cancel; `flottille service stop` refuses with the
+  same sentence unless `--force`; an agent's `services stop`, held for the user every time,
+  says it in its request. Nothing running needs it: it stops at once, as before. The services
+  page marks, in a service's "Needed by", the tasks that run now.
+- **What a daemon that died left** is ended when the next one starts, before it resumes a
+  workspace's setup or starts anything. Each run's first process is recorded with its pid, its
+  start time and the machine's boot. A record of another boot is dropped, and nothing is
+  signalled. Of this boot: while that first process still runs (same pid, same start time), its
+  session and process group are ended whole; once it is gone, only the processes of its session
+  that carry the run's marker (`FLOTTILLE_RUN=<run id>` in their environment, which the daemon
+  sets on each run, service and probe line it records) and started after it are killed (a
+  package manager's server, still holding its port). Otherwise that leftover would answer the
+  next start of the service, which would take it for one started outside Flottille, and stop
+  answering later, unseen. A program of the user's own is never touched: one in a session whose
+  id is a recorded pid carries no marker, and a pid taken by a running program since says that
+  nothing of the run is left. A leftover that cleared its environment is not found.
 - **Its run** is a run of the daemon's, of no agent and no project (`project` is empty): its
   output is kept, masked and read as a run's is (`docs/tools.md`, "Tasks and runs"), in the
   environment of a run with no place's variables, its folder's `.env` files masked. Its state is

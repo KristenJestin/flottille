@@ -6285,6 +6285,28 @@ fn a_shown_browser_gets_the_display_variables() {
 }
 
 #[test]
+fn the_shown_browser_is_launched_with_its_own_class() {
+    let user = user_with_display();
+    let _wayland = wayland_socket(&user);
+    browser_declared(
+        &user,
+        &agent_browser("0.43.0"),
+        json!({"fail": true}),
+        &[],
+        json!({"headed": true}),
+    );
+    user.call("connection.review", json!({"name": "browser"}))
+        .unwrap();
+    // Chrome's app id on Wayland and its WM_CLASS on X11: the desktop's own rule can tell this
+    // browser from the user's.
+    let started = logged(&user, "browser", "start");
+    assert_eq!(
+        started.last().unwrap()["config"]["args"],
+        json!("--class=flottille-browser")
+    );
+}
+
+#[test]
 fn a_hidden_browser_gets_none() {
     let user = user_with_display();
     browser(&user, &agent_browser("0.43.0"), json!({"fail": true}));
@@ -6296,6 +6318,8 @@ fn a_hidden_browser_gets_none() {
     }
     let started = logged(&user, "browser", "start");
     assert_eq!(started.last().unwrap()["config"].get("headed"), None);
+    // A browser nobody sees has no window to name.
+    assert_eq!(started.last().unwrap()["config"].get("args"), None);
     assert_eq!(connection(&user, "browser")["headed"], Value::Null);
 }
 

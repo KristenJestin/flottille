@@ -42,6 +42,7 @@ mod replies;
 mod sprints;
 mod versions;
 mod worklog;
+mod worklogs;
 
 pub(crate) use events::item_of;
 pub use events::{EVENTS, offer, reference_of, target_named};
@@ -940,6 +941,10 @@ struct TicketsCall {
     /// its offset; the duration before now when left out).
     duration: Option<String>,
     started: Option<String>,
+    /// `worklogs`: the last day of the range (`from` is its first), and whose worklogs: an account
+    /// id, or a name found among the people; the token's own account when left out.
+    to: Option<String>,
+    author: Option<String>,
     /// A write at the user's gesture (`written_for_user`): its comment is recorded by the id the
     /// tracker gave, never by its words. Not a field of the tool: an agent cannot ask for it.
     #[serde(skip)]
@@ -1395,6 +1400,7 @@ pub async fn tickets(daemon: &Arc<Daemon>, agent: &str, place: &Place, args: Val
         "subscribe" => events::subscribe(daemon, agent, place, &project, &asked).await,
         "unsubscribe" => events::unsubscribe(daemon, agent, &project, &asked),
         "time_spent" => worklog::time_spent(daemon, agent),
+        "worklogs" => worklogs::worklogs(daemon, &project, &asked).await,
         "create" => {
             let created = create(daemon, &project, &asked).await;
             daemon.kept_tickets.drop_all();
@@ -1673,8 +1679,37 @@ async fn listed(daemon: &Daemon, project: &Project, asked: &TicketsCall) -> Outc
             "({nulls} answered by acli as null, with nothing of them, are left out)\n"
         ));
     }
+    // A worklog date alone matches the worklogs of anyone: the work items of others show too.
+    if let Some(jql) = asked_jql
+        && jql.to_lowercase().contains("worklogdate")
+        && !restricts_worklog_author(jql)
+    {
+        text.push_str(
+            "(the JQL uses worklogDate without a worklogAuthor = or in: it matched anyone's \
+             worklogs on those days, not only the user's; tickets worklogs gives the user's own \
+             time with its durations)\n",
+        );
+    }
     text.push_str("tickets {\"action\": \"show\", \"ticket\": …} reads one.");
     Outcome::Done(text)
+}
+
+/// Whether a JQL keeps to some worklog authors: `worklogAuthor` followed by `=` or `in`. Not `!=`
+/// nor `not in`, which leave everyone else's worklogs in.
+fn restricts_worklog_author(jql: &str) -> bool {
+    let lower = jql.to_lowercase();
+    let mut rest = lower.as_str();
+    while let Some(at) = rest.find("worklogauthor") {
+        rest = &rest[at + "worklogauthor".len()..];
+        let after = rest.trim_start();
+        let word_end = after
+            .find(|c: char| !c.is_ascii_alphabetic())
+            .unwrap_or(after.len());
+        if after.starts_with('=') || &after[..word_end] == "in" {
+            return true;
+        }
+    }
+    false
 }
 
 /// The tickets the items' rounds keep, as a list keeps them: by state, label and assignee, the

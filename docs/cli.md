@@ -1330,9 +1330,12 @@ Removes it from `services.toml`, refused while a service or a project's task nee
 Starts it, what it needs first and waited for: `Started mongo, auth.`, or `Nothing started: auth
 runs.`, then its line (`service.start`).
 
-### `flottille service stop <name>`
+### `flottille service stop <name> [--force]`
 
-Stops it and what it started; what it needs and what needs it go on (`service.stop`).
+Stops it and what it started; what it needs and what needs it go on (`service.stop`). While
+something running needs it (a project's task, another service), it is refused, saying what
+(`Stop auth? app's api needs it and is running: it goes on without it.`) and that `--force` stops
+it anyway.
 
 ### `flottille service output <name> [--tail N]`
 

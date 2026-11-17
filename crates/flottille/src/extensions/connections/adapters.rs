@@ -128,6 +128,8 @@ pub(super) const LOGIN: &str = "login";
 /// What Flottille is called in the configuration it writes for agent-browser.
 const PLUGIN: &str = "flottille";
 const PROTOCOL: &str = "agent-browser.plugin.v1";
+/// The launch argument that names a shown browser's window.
+const BROWSER_CLASS_ARG: &str = "--class=flottille-browser";
 /// The variable that gives a login's run its one-time token.
 pub const TOKEN_VARIABLE: &str = "FLOTTILLE_VAULT_TOKEN";
 /// How long a login has, as a call of the server has.
@@ -289,7 +291,7 @@ impl Adapter {
                 "its browser is shown on the screen: the server gets the session's display \
                  (WAYLAND_DISPLAY, or DISPLAY without Wayland) in a runtime folder of its own \
                  holding the Wayland socket alone, never the user's, and the configuration sets \
-                 headed; with X11 the browser can read the keys typed in other windows and type \
+                 headed and gives its window the class flottille-browser (args); with X11 the browser can read the keys typed in other windows and type \
                  into them (a terminal's included), and on some Wayland compositors a client can \
                  capture the screen and the clipboard"
                     .to_owned(),
@@ -589,6 +591,10 @@ pub fn start_options(folder: &Path, sites: &[String], headed: bool) -> Result<Ve
     }
     if headed {
         config["headed"] = json!(true);
+        // Chrome's `--class` is its app id on Wayland and its WM_CLASS on X11: the user's desktop
+        // can tell this browser from their own, which a rule that keeps it from taking the focus
+        // needs (`docs/extensions.md`, "Show the browser"). Only a shown browser has a window.
+        config["args"] = json!(BROWSER_CLASS_ARG);
     }
     let file = config_file(folder);
     written(&file, config.to_string().as_bytes())

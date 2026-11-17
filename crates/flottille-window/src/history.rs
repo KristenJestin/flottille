@@ -9,6 +9,8 @@ pub struct Visit {
     pub selection: Selection,
     /// The sub-agent whose conversation is shown, `None` for the session's own.
     pub agent: Option<String>,
+    /// For a project's page, whether its Progress tab was the one shown.
+    pub progress: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -36,6 +38,26 @@ impl History {
         self.push(Visit {
             selection,
             agent: None,
+            progress: false,
+        });
+    }
+
+    /// The project `project`'s page shows its Progress tab (`progress`), or leaves it: each is a
+    /// place of its own, so that back and forward return to the tab.
+    pub fn show_progress(&mut self, project: &str, progress: bool) {
+        let Some(current) = self.current() else {
+            return;
+        };
+        if current.selection != Selection::Project(project.to_owned())
+            || current.progress == progress
+        {
+            return;
+        }
+        let selection = current.selection.clone();
+        self.push(Visit {
+            selection,
+            agent: None,
+            progress,
         });
     }
 
@@ -49,7 +71,11 @@ impl History {
             return;
         }
         let selection = current.selection.clone();
-        self.push(Visit { selection, agent });
+        self.push(Visit {
+            selection,
+            agent,
+            progress: false,
+        });
     }
 
     fn push(&mut self, visit: Visit) {

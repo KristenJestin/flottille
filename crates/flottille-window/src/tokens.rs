@@ -2,6 +2,10 @@
 //! in the text (`Image 1`, its name and size) and a command `/name`. In a composer they are the
 //! chips of the kit's `TokenField`; in the conversation, the same chips in a `TokenText`.
 //!
+//! A pasted text (#848) is a third: a chip named `pasted-text.txt` with its size, sent as its
+//! marker (`[Pasted text 1: pasted-text.txt]`, `flottille_core::pasted`) with the text itself as a
+//! file the agent reads.
+//!
 //! A command's chip is its `/name` in the text, so the daemon reads the message as typed. A
 //! picture's is sent as its marker (`[Image 1: photo.png]`, `flottille_core::images::marker`),
 //! which the daemon cuts the prompt at, so that the agent reads each picture where it was put,
@@ -35,6 +39,89 @@ pub fn picture_look(number: usize, name: &str, bytes: Option<usize>) -> TokenLoo
         .detail(detail)
 }
 
+/// The id of a pasted text's chip in a composer: the text it stands for (#848).
+pub fn pasted_id(text: u64) -> SharedString {
+    format!("pasted-{text}").into()
+}
+
+/// The pasted text a chip's id stands for, when it is one's.
+pub fn pasted_of(id: &str) -> Option<u64> {
+    id.strip_prefix("pasted-")?.parse().ok()
+}
+
+/// How a pasted text's chip is drawn: its file glyph, its name and its size (none yet for a
+/// message the daemon did not record).
+pub fn pasted_look(name: &str, bytes: Option<usize>) -> TokenLook {
+    let look = TokenLook::new(name.to_owned()).glyph(glyphs::TEXT_FILE);
+    match bytes {
+        Some(bytes) => look.detail(size(bytes)),
+        None => look,
+    }
+}
+
+/// The id of the chip of a sent message's pasted text, by the file the daemon wrote: what opens it.
+pub fn sent_text_id(file: &str) -> String {
+    format!("text-{file}")
+}
+
+/// The file a sent message's chip stands for, when it is a pasted text's.
+pub fn sent_text_of(id: &str) -> Option<&str> {
+    id.strip_prefix("text-").filter(|file| !file.is_empty())
+}
+
+/// The pasted-text markers of a message's pieces, each made a chip by `chip` (given the marker),
+/// the others left as they are. A marker `chip` makes none of stays text.
+pub fn text_chips(
+    pieces: Vec<Piece>,
+    mut chip: impl FnMut(&flottille_core::pasted::Marker) -> Option<Token>,
+) -> Vec<Piece> {
+    let mut out = Vec::new();
+    for piece in pieces {
+        let Piece::Text(text) = piece else {
+            out.push(piece);
+            continue;
+        };
+        let mut at = 0;
+        for found in flottille_core::pasted::markers(&text) {
+            let Some(token) = chip(&found) else {
+                continue;
+            };
+            if found.range.start > at {
+                out.push(Piece::Text(text[at..found.range.start].to_owned().into()));
+            }
+            out.push(Piece::Token(token));
+            at = found.range.end;
+        }
+        if at < text.len() {
+            out.push(Piece::Text(text[at..].to_owned().into()));
+        }
+    }
+    out
+}
+
+/// The chip of a pasted text's marker in a message shown: one the daemon wrote its file for is
+/// opened by that file; one with no file is a chip with no size and nothing to open while the
+/// message is `pending` (still being sent), and text once the daemon has it: typed by hand.
+pub fn shown_chip(found: &flottille_core::pasted::Marker, pending: bool) -> Option<Token> {
+    match &found.file {
+        Some(file) => {
+            let name = file
+                .file_name()
+                .filter(|name| flottille_core::pasted::is_file_name(name))?;
+            Some(Token::new(
+                sent_text_id(name),
+                pasted_look(&found.name, Some(file.bytes)),
+            ))
+        }
+        None => pending.then(|| {
+            Token::new(
+                format!("pending-text-{}", found.number),
+                pasted_look(&found.name, None),
+            )
+        }),
+    }
+}
+
 /// A command's chip: its `/name`, which is also its text.
 pub fn command(name: &str) -> Token {
     Token::new(
@@ -54,12 +141,13 @@ pub fn size(bytes: usize) -> String {
 }
 
 /// The text of `pieces` as it is sent: a picture's chip as its marker (`marker` gives it, by id,
-/// with its number), any other chip as its label.
+/// with its number), any other chip as its label. A pasted text's marker typed by hand is sent
+/// as text: only a chip's takes its file's place.
 pub fn sent_text(pieces: &[Piece], mut marker: impl FnMut(&str) -> Option<String>) -> String {
     let mut text = String::new();
     for piece in pieces {
         match piece {
-            Piece::Text(part) => text.push_str(part),
+            Piece::Text(part) => text.push_str(&flottille_core::pasted::as_typed(part)),
             Piece::Token(token) => match marker(&token.id) {
                 Some(marker) => text.push_str(&marker),
                 None => text.push_str(&token.look.label),

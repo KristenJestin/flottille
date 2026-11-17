@@ -281,6 +281,9 @@ fn the_project_s_commit_checks_are_listed_proposed_and_saved(cx: &mut TestAppCon
         "{}",
         file(&user)
     );
+    until(&shell, cx, "the toast says it is saved", |cx| {
+        toasts(&shell, cx).contains(&"Commit checks of api saved".to_owned())
+    });
     assert!(toasts(&shell, cx).contains(&"Commit checks of api saved".to_owned()));
     settle(cx);
     cx.update(|window, _| {

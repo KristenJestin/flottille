@@ -676,7 +676,9 @@ impl Conn {
         method: &str,
         params: Value,
     ) -> Result<std::result::Result<Value, String>> {
-        self.ask_until(method, params, None)
+        Ok(self
+            .ask_until(method, params, None)?
+            .map_err(|error| error.message))
     }
 
     /// [`Conn::ask`], waiting at most `bound`: past it the daemon is taken as silent, an error of
@@ -688,6 +690,18 @@ impl Conn {
         params: Value,
         bound: Duration,
     ) -> Result<std::result::Result<Value, String>> {
+        Ok(self
+            .ask_until(method, params, Some(bound))?
+            .map_err(|error| error.message))
+    }
+
+    /// [`Conn::ask_within`], with the code of the daemon's error beside its sentence.
+    pub(crate) fn ask_within_coded(
+        &mut self,
+        method: &str,
+        params: Value,
+        bound: Duration,
+    ) -> Result<flottille_client::Answer> {
         self.ask_until(method, params, Some(bound))
     }
 
@@ -696,7 +710,7 @@ impl Conn {
         method: &str,
         params: Value,
         bound: Option<Duration>,
-    ) -> Result<std::result::Result<Value, String>> {
+    ) -> Result<flottille_client::Answer> {
         if let Some(asking) = &self.asking {
             asking.store(now_ms(), Ordering::SeqCst);
         }
@@ -712,7 +726,7 @@ impl Conn {
         method: &str,
         params: Value,
         bound: Option<Duration>,
-    ) -> Result<std::result::Result<Value, String>> {
+    ) -> Result<flottille_client::Answer> {
         let params = match params {
             Value::Object(mut map) => {
                 map.retain(|_, value| !value.is_null());
@@ -725,7 +739,7 @@ impl Conn {
             Some(bound) => self.link.ask_within(method, params, bound),
         };
         match answer {
-            Ok(answer) => Ok(answer.map_err(|error| error.message)),
+            Ok(answer) => Ok(answer),
             Err(flottille_client::Error::TimedOut) => Err(format!(
                 "Flottille did not answer {method} within {}",
                 spoken(bound.unwrap_or_default())

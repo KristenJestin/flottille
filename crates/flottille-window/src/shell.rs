@@ -40,7 +40,7 @@ use crate::link::{self, Connect, Seen, Update};
 use crate::model::{BellItem, Forged, LinkShown, News, Place, Preparation, Snapshot};
 use crate::open::Opener;
 use crate::page::{MainArea, Page};
-use crate::project::{NewWorkspace, PlaceData, ProjectData, SessionLine};
+use crate::project::{NewWorkspace, PageTab, PlaceData, ProjectData, SessionLine};
 use crate::project_settings::ProjectSettingsPage;
 use crate::providers::Providers;
 use crate::rename::RenameSession;
@@ -101,8 +101,6 @@ pub enum Selection {
     },
     /// The services of the machine.
     Services,
-    /// A project's progress: its milestones and their tickets.
-    Progress(String),
 }
 
 /// The links an agent shares in a row: the toast that says them is named by the agent and the
@@ -963,7 +961,7 @@ impl Shell {
             Update::Link(link) => self.linked(link, cx),
             Update::Prompted(agent) => self.spoke(&agent),
             Update::Items { project, item } => {
-                if let Some(page) = self.main.read(cx).progress_page().cloned()
+                if let Some(page) = self.main.read(cx).progress_page(cx)
                     && page.read(cx).project() == project
                 {
                     page.update(cx, |page, cx| page.changed(cx));
@@ -1482,6 +1480,11 @@ impl Shell {
                 {
                     self.open_project_settings_at(&project, at, window, cx);
                 }
+                // An entry made for an agent's request to write a connection: back to it.
+                if let Some(number) = section.update(cx, |section, _| section.take_request_return())
+                {
+                    self.open_connection_request(number, cx);
+                }
             }
             Outcome::Developer { written, shown } => {
                 self.settings
@@ -1748,7 +1751,7 @@ impl Shell {
                 asked,
                 read,
             } => {
-                if let Some(page) = self.main.read(cx).progress_page().cloned()
+                if let Some(page) = self.main.read(cx).progress_page(cx)
                     && page.read(cx).project() == project
                 {
                     page.update(cx, |page, cx| page.listed(asked, read, cx));
@@ -1826,9 +1829,10 @@ impl Shell {
                 name,
                 start,
                 answer,
+                needed,
             } => {
                 self.services
-                    .update(cx, |page, cx| page.acted(&name, start, answer, cx));
+                    .update(cx, |page, cx| page.acted(&name, start, answer, needed, cx));
             }
             Outcome::ServiceOutput { output } => {
                 self.services
@@ -2040,6 +2044,7 @@ impl Shell {
             folder: project.folder.clone(),
             repositories: project.repositories.clone(),
             places,
+            tracked: project.tracked,
         };
         page.update(cx, |page, cx| page.set(data, cx));
         let default = (project.provider.clone(), project.model.clone());
@@ -2324,9 +2329,6 @@ impl Shell {
             }
             if node.read(cx).commands() != project.commands {
                 node.update(cx, |node, cx| node.set_commands(project.commands, cx));
-            }
-            if node.read(cx).tracked() != project.tracked {
-                node.update(cx, |node, cx| node.set_tracked(project.tracked, cx));
             }
             project_nodes.push(node.clone());
             projects.insert(project.name.clone(), node);
@@ -2788,6 +2790,24 @@ impl Shell {
         });
     }
 
+    /// "New entry…" on the dialog of an agent's request to write a connection, which names the
+    /// entry `name` that is not made: Settings, Vault, on a new entry named so, its address the
+    /// `host` the request sends it to. Saved or closed, the request's dialog is back.
+    pub fn add_vault_entry_for_request(
+        &mut self,
+        number: u64,
+        name: &str,
+        host: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_settings_at(crate::settings::Reveal::Vault, window, cx);
+        let vault = self.settings.read(cx).vault().clone();
+        vault.update(cx, |vault, cx| {
+            vault.add_for_request(number, name, host, window, cx)
+        });
+    }
+
     /// Dismiss of the card of the request `ask` for a vault entry: sent once, Dismiss disabled
     /// until the daemon answers.
     pub fn dismiss_vault_ask(&mut self, ask: u64, cx: &mut Context<Self>) {
@@ -2876,6 +2896,20 @@ impl Shell {
             let agent = visit.agent.unwrap_or_else(|| id.clone());
             page.update(cx, |page, cx| page.show(&agent, cx));
         }
+        // A project's page shows the tab it was left on: Progress, or Work again.
+        if matches!(visit.selection, Selection::Project(_))
+            && let Some(page) = self.main.read(cx).project_page().cloned()
+        {
+            let tab = match (visit.progress, page.read(cx).tab()) {
+                (true, _) => Some(PageTab::Progress),
+                (false, PageTab::Progress) => Some(PageTab::Work),
+                (false, _) => None,
+            };
+            if let Some(tab) = tab {
+                page.update(cx, |page, cx| page.choose(tab, cx));
+                self.feed_progress(cx);
+            }
+        }
         self.left.update(cx, |drawer, cx| drawer.close(cx));
         self.set_bell(false, cx);
         // The page that held the focus is gone.
@@ -2897,16 +2931,6 @@ impl Shell {
             && let Some(row) = self.sessions.get(id)
         {
             row.update(cx, |row, cx| row.set_selected(true, cx));
-        }
-        if let Some(Selection::Progress(old)) = &self.selected
-            && let Some(node) = self.projects.get(old)
-        {
-            node.update(cx, |node, cx| node.set_progress_selected(false, cx));
-        }
-        if let Selection::Progress(name) = &selection
-            && let Some(node) = self.projects.get(name)
-        {
-            node.update(cx, |node, cx| node.set_progress_selected(true, cx));
         }
         // Opened, the session's changes are seen: its mark and its items in the bell go.
         if let Selection::Session(id) = &selection {
@@ -2947,9 +2971,16 @@ impl Shell {
         self.refresh_project(cx);
     }
 
+    /// The tab of the open project's page was chosen by the user: Progress is a place of the
+    /// history, and its page gets the sessions and workspaces of its project.
+    pub fn tab_chosen(&mut self, project: &str, progress: bool, cx: &mut Context<Self>) {
+        self.history.show_progress(project, progress);
+        self.feed_progress(cx);
+    }
+
     /// The Progress page open gets its project's sessions and workspaces as last read.
     fn feed_progress(&mut self, cx: &mut Context<Self>) {
-        let Some(page) = self.main.read(cx).progress_page().cloned() else {
+        let Some(page) = self.main.read(cx).progress_page(cx) else {
             return;
         };
         let project = page.read(cx).project().to_owned();
@@ -2988,14 +3019,6 @@ impl Shell {
                     }
                 } else {
                     Page::Empty
-                }
-            }
-            Selection::Progress(name) => {
-                match self.snapshot.projects.iter().find(|p| &p.name == name) {
-                    Some(project) => Page::Progress {
-                        name: project.name.clone(),
-                    },
-                    None => Page::Empty,
                 }
             }
             Selection::Project(name) => {
@@ -3040,7 +3063,6 @@ impl Shell {
             Some(Selection::Session(id)) => self.snapshot.session(id).map(|s| s.project.clone()),
             Some(Selection::ProjectSettings(name)) => Some(name.clone()),
             Some(Selection::Spec { project, .. }) => Some(project.clone()),
-            Some(Selection::Progress(name)) => Some(name.clone()),
             Some(Selection::Settings | Selection::Services) | None => None,
         }
         .or_else(|| self.snapshot.projects.first().map(|p| p.name.clone()));

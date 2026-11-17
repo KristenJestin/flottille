@@ -30,6 +30,8 @@ use crate::{tree, workspaces};
 pub struct Failure {
     pub code: &'static str,
     pub message: String,
+    /// What the message says, as data a client draws (`ErrorBody::data`).
+    pub data: Option<Value>,
 }
 
 impl Failure {
@@ -37,7 +39,20 @@ impl Failure {
         Failure {
             code,
             message: message.into(),
+            data: None,
         }
+    }
+
+    pub fn with_data(self, data: Value) -> Failure {
+        Failure {
+            data: Some(data),
+            ..self
+        }
+    }
+
+    /// The daemon's answer to the request `id`.
+    pub fn answer(self, id: Option<String>) -> flottille_protocol::Message {
+        flottille_protocol::Message::error_with(id, self.code, self.message, self.data)
     }
 
     pub fn refused(message: impl Into<String>) -> Failure {

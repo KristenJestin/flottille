@@ -302,8 +302,10 @@ efforts are read; the tree, the deliveries, the gate and the store know nothing 
 - **A death**: a process that ends without being let go is published (`agent.died`) and the
   agent goes on in its own session, as after a restart: the next process resumes or loads it
   ("A death", below).
-- **Orphans**: each process's pid and start time are kept in the store while it runs. A daemon
-  starting kills the process groups a previous one left behind (a crash), only when the group's
+- **Orphans**: each process's pid, start time and the machine's boot are kept in the store while
+  it runs. A daemon starting drops a row of another boot (a pid and a start time say nothing
+  after a reboot, nor when this boot's id cannot be read) and signals nothing for it; of this
+  boot, it kills the process groups a previous one left behind (a crash), only when the group's
   leader is alive with the start time recorded: never a stranger that took the pid since, and not
   the members of a group whose leader is gone (nothing says whose they are). Then it forgets all
   the rows. An agent that was starting or working when its daemon went is idle again

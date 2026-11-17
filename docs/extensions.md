@@ -1236,8 +1236,14 @@ your browser`, and a toast says how it ended (`Signed in to notes`, or why not),
 connection signed out or whose tokens were not saved.
 Adding or editing one is a form dialog: its name (not editable once made), what it is for, how it
 is reached (radios: a program, its command one line split as a task's, shell syntax refused under
-it; or a URL), its variables (headers for a URL), each a name and a vault entry picked among those
-every project sees and no other use is bound to, and its limits (an argument and its values,
+it; or a URL), its variables (a program's), each a name and a vault entry picked among those
+every project sees and no other use is bound to, or its **Secrets of its requests** (a URL's), one
+line each: where it goes (a header, a query parameter, a cookie or basic authentication), its name
+(not for basic), its prefix (a header's, as `Bearer `, kept as typed) and its vault entry (the name
+and the prefix fold away under a place that does not take them, and are emptied), the old
+header lines among them as header lines with no prefix; a save sends `headers` (the lines with no
+prefix, as they always were) and `secrets` (the others, in the form's order), so that one that
+changes nothing leaves the declaration and its digest as they were, and its limits (an argument and its values,
 separated by commas). The projects a connection excepts are not in the form yet: the command line
 sets them. **Review** opens the diff in a wide dialog (640 px, `Modal::wide`), its server and its
 version (`almanac 1.0.0 → 2.0.0`), a search field and filter chips under the title, a bar and the
@@ -1276,14 +1282,25 @@ server**, filled with what it would write and read-only, an edit's changed field
 value struck above the new one, a `set` its settings, **Where its secrets go**: one line per vault
 entry the declaration names, with the entry's host (its `url`, or "no address") and where it goes
 (the connection's host, or the program's environment), in the warning colour and tagged when they
-differ, under a warning, and **Accept**, **Edit** and **Refuse** (a quiet button that answers at
+differ, under a warning (an entry that names no address is said as such, `bound to no address`, and
+tagged `No address`, not as another host), and **Accept**, **Edit** and **Refuse** (a quiet button that answers at
 once, as the rail's Deny: it writes nothing, so nothing is confirmed). **Edit** opens the server's
-form with the agent's values; its Save writes the user's values and answers the request
-(`connection.add`/`.edit` with `request`), which it decides under the file's lock before it
-writes: a request accepted meanwhile is refused to the Save, and only one of them writes. A request whose declaration changed since it was asked says so, and Accept is not
+form with the agent's values, the secrets of its requests among them, and says it answers the
+request `#N`: its Save writes the user's values and answers the request, its Cancel leaves it
+waiting (`connection.add`/`.edit` with `request`), which it decides under the file's lock before it
+writes: a request accepted meanwhile is refused to the Save, and only one of them writes. That Save
+is held to Accept's rules for secrets, on what it writes and under the file's lock: it waits, as
+Accept does, while a vault entry the connection names is not made yet, and a secret line new to the
+connection goes only to its entry's own host (the user's own form, answering no request, binds
+freely). A request whose declaration changed since it was asked says so, and Accept is not
 offered; an entry that is not right yet is no such change: its line and its **Share** or **Bind**
-unfold under **Where its secrets go**, and fold away once the user mended it. Everything animates as the rest of the window does:
-the servers fold away and unfold with the switch, a row unfolds when it arrives and folds away
+unfold under **Where its secrets go**, and fold away once the user mended it. When Accept answers that the request names a vault entry that is not made yet, the dialog
+shows a **New entry…** button per missing entry beside that answer (only that one: no other
+failure offers them, and they fold away with their block when it goes): it opens the vault's own entry
+dialog on the entry's name and, as its address, the host the request sends it to, the secret left
+for the user to type there (the request's dialog never holds it); saved or closed, the request's
+dialog is back, and Accept goes through once the entry exists. Everything animates as the rest of
+the window does: the servers fold away and unfold with the switch, a row unfolds when it arrives and folds away
 when it leaves, a field that a radio or a switch needs unfolds under it, the dialogs rise and
 fade, the review crossfades from its skeleton; in it, the server, the adapter's sentence, the bar,
 the search and the chips come one after the other, a row that changes setting folds away in its
@@ -1545,6 +1562,47 @@ way in:
   options and variables are not judged** (`AGENT_BROWSER_SESSION`, `AGENT_BROWSER_NAMESPACE`,
   `--headers`, `--engine`…): they are the user's, passed as written. What is not covered: the
   variables of the daemon's own environment, which a run inherits.
+- **The shown browser takes neither the focus nor the pointer, when the desktop is told not to
+  give them.** An agent drives a browser for the user, who works in another window: a window that
+  comes to the front takes the keyboard and, on a compositor that moves the pointer to the focused
+  window (Hyprland with `misc:focus_on_activate` and cursor warps), the mouse. Flottille never
+  writes the user's desktop configuration, so it does two things and says the third:
+  - **The browser has a window identity of its own.** The configuration the adapter writes gives
+    the shown browser the launch argument `--class=flottille-browser` (`args`; a browser nobody
+    sees has no window to name). Read in Chromium's source: `--class` is the switch `class`, which
+    sets the window's `WM_CLASS` class on X11 and, for a browser window (not an app window), the
+    `app_id` Chrome gives `xdg_toplevel` on Wayland, so `--class` is the one flag, and the desktop
+    tells this browser from the user's own by that class or app id. It was not run on a real
+    compositor by Flottille's tests, which never open a window.
+  - **No action of agent-browser 0.43.x exists only to raise the window**: its tools (read from
+    the server's own list) have no `bring_to_front`, so there is none to keep off. Three actions
+    can ask Chrome to activate a window as a side effect (the binary holds the CDP calls
+    `Target.activateTarget` and `Page.bringToFront`, and the actions that reach them are `tab_new`,
+    `tab_switch`, `tab_close` and `window_new`, by their descriptions: not run to tell which does).
+    They stay as they are, since an agent that works in several tabs needs them, and **no Chrome
+    flag nor agent-browser option was found that stops the activation request**: what Chrome still
+    asks, the desktop's own rule below answers.
+  - **The user's own rule, which Flottille never writes** (the user's configuration, put where
+    they keep their window rules), matches the class `flottille-browser`:
+    - Hyprland 0.55 and later (Lua): `hl.window_rule({ match = { class = "^flottille-browser$" },
+      suppress_event = "activate activatefocus", no_initial_focus = true })`. Hyprland 0.53 and
+      0.54 (hyprlang): `windowrule = match:class ^(flottille-browser)$, suppress_event activate
+      activatefocus` and `windowrule = match:class ^(flottille-browser)$, no_initial_focus on`.
+      Before 0.53: `windowrule = suppressevent activate activatefocus, class:^(flottille-browser)$`
+      and `windowrule = noinitialfocus, class:^(flottille-browser)$`. `suppress_event` answers the
+      requests to activate the window (a tab switch, the page's own), and `no_initial_focus` the
+      first window's opening.
+    - Sway: `no_focus [app_id="flottille-browser"]`, which keeps a new window from being focused
+      (it has no effect on the first window of a workspace). `focus_on_window_activation` is a
+      global setting, which criteria do not scope: `none` would turn the activation off for every
+      window, so the docs do not advise it; without it, a window that asks to be activated is
+      marked urgent or focused by the compositor's own `focus_on_window_activation` default
+      (`urgent`).
+    - X11, and the other desktops: the class `flottille-browser` is the `WM_CLASS` class, for the
+      window manager's own rules.
+    The Hyprland lines are the wiki's forms for each version (the Lua one is the form of the
+    default `hyprland.lua` of 0.56), not run by Flottille's tests either. The window's switch *Show
+    the browser* says it, in a sentence that names this section.
 - **Its start** gains `--config $XDG_STATE_HOME/flottille/connections/<name>/agent-browser.json`,
   written by Flottille: one plugin, `flottille`, of capability `credential.read`, run as
   `flottille vault provide <socket>`. An explicit config replaces agent-browser's discovery of the

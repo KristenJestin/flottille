@@ -660,6 +660,7 @@ impl Composer {
             pick: self.asked(),
             message,
             images: self.attached.sending(),
+            texts: self.attached.texts(cx),
             mode: self.mode.read(cx).mode().unwrap_or("auto").to_owned(),
         };
         self.sending = Some(target);

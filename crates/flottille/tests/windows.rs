@@ -557,11 +557,9 @@ mod window {
         assert!(pending_frames(cx) > 0, "the switch moves");
         settle(cx);
         assert_eq!(pending_frames(cx), 0, "the switch moved, then stopped");
-        assert!(
-            toasts(&shell, cx).iter().any(|t| t == "Windows allowed"),
-            "{:?}",
-            toasts(&shell, cx)
-        );
+        until(&shell, cx, "the toast says it", |cx| {
+            toasts(&shell, cx).iter().any(|t| t == "Windows allowed")
+        });
 
         // Off again: the key leaves the file.
         cx.update(|window, cx| window.click("project-windows", cx));

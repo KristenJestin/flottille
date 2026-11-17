@@ -8,8 +8,8 @@
 //! whose Save answers it. The results are toasts.
 
 use gpui_design_system::{
-    Button, Confirm, Field, Modal, Skeleton, Tag, Toast, awaiting, palette, presence_of, space,
-    toast,
+    Button, Confirm, Field, Icon, Modal, Skeleton, Tag, Toast, awaiting, palette, presence_of,
+    space, toast,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -19,7 +19,7 @@ use gpui_kit::{
 };
 use serde_json::{Value, json};
 
-use super::connections::{Server, command_line};
+use super::connections::{Server, ServerSecret, command_line};
 use crate::actions::Command;
 use crate::commands::{perform_later, problem_line};
 use crate::shell::Shell;
@@ -94,6 +94,8 @@ pub struct Secret {
     pub entry_url: Option<String>,
     /// The connection's origin, the address a Bind gives the entry.
     pub origin: Option<String>,
+    /// The vault holds no entry of that name yet.
+    pub missing: bool,
 }
 
 impl Secret {
@@ -111,20 +113,34 @@ impl Secret {
             to_bind: value["to_bind"] == true,
             entry_url: value["entry_url"].as_str().map(str::to_owned),
             origin: value["origin"].as_str().map(str::to_owned),
+            missing: value["missing"] == true,
         }
+    }
+
+    /// Sent to a host by an entry that is bound to no address: nothing says it may go there, which
+    /// is not the same as an address that says it may not.
+    fn unbound(&self) -> bool {
+        self.host.is_some() && self.entry_host.is_none()
     }
 
     /// Its line on the card: the entry, its address, and where it goes.
     pub fn said(&self) -> String {
-        let address = self.entry_host.as_deref().unwrap_or("no address");
-        let goes = match &self.host {
-            Some(host) => format!("sent to {host}"),
-            None => "given to the program in its environment".to_owned(),
-        };
-        format!(
-            "{}: the vault entry {} ({address}), {goes}",
-            self.name, self.entry
-        )
+        match (&self.host, &self.entry_host) {
+            (Some(host), None) => format!(
+                "{}: the vault entry {} (bound to no address) will be sent to {host}",
+                self.name, self.entry
+            ),
+            (Some(host), Some(address)) => format!(
+                "{}: the vault entry {} ({address}), sent to {host}",
+                self.name, self.entry
+            ),
+            (None, address) => format!(
+                "{}: the vault entry {} ({}), given to the program in its environment",
+                self.name,
+                self.entry,
+                address.as_deref().unwrap_or("no address")
+            ),
+        }
     }
 }
 
@@ -212,6 +228,40 @@ pub struct ConnectionRequest {
     /// The lines of entries to mend shown since the dialog opened, `(id, sentence, action, what
     /// it gives)`: kept so that one mended folds away.
     lines: Vec<(String, String, SharedString, Widen)>,
+    /// The entries an Accept answered it waits for, one `entry\thost` line each: what the
+    /// **New entry…** buttons are made of, kept by their block while it folds away.
+    waits_for: Option<SharedString>,
+}
+
+/// The vault entries a request names that the vault does not hold yet, each once, with the host
+/// the request sends it to.
+fn missing_entries(proposal: &Proposal) -> Vec<(String, Option<String>)> {
+    let mut missing: Vec<(String, Option<String>)> = Vec::new();
+    for secret in proposal.secrets.iter().filter(|secret| secret.missing) {
+        if !missing.iter().any(|(entry, _)| *entry == secret.entry) {
+            missing.push((secret.entry.clone(), secret.host.clone()));
+        }
+    }
+    missing
+}
+
+/// The missing entries as one line each, `entry\thost`: what `presence_of` keeps while it folds.
+fn said_entries(missing: &[(String, Option<String>)]) -> SharedString {
+    let lines: Vec<String> = missing
+        .iter()
+        .map(|(entry, host)| format!("{entry}\t{}", host.as_deref().unwrap_or_default()))
+        .collect();
+    lines.join("\n").into()
+}
+
+fn entries_said(said: &str) -> Vec<(String, Option<String>)> {
+    said.lines()
+        .filter_map(|line| line.split_once('\t'))
+        .map(|(entry, host)| {
+            let host = (!host.is_empty()).then(|| host.to_owned());
+            (entry.to_owned(), host)
+        })
+        .collect()
 }
 
 impl ConnectionRequest {
@@ -227,11 +277,17 @@ impl ConnectionRequest {
             confirmed: None,
             widening: false,
             lines: Vec::new(),
+            waits_for: None,
         }
     }
 
     pub fn is_open(&self) -> bool {
         self.open
+    }
+
+    /// What the daemon answered to the last Accept or Refuse, when it refused it.
+    pub fn error(&self) -> Option<&str> {
+        self.error.as_deref()
     }
 
     fn ask(&self, method: &str, params: Value, then: Then, cx: &mut Context<Self>) {
@@ -253,6 +309,7 @@ impl ConnectionRequest {
         self.confirming = None;
         self.widening = false;
         self.lines.clear();
+        self.waits_for = None;
         self.ask(
             "connection.proposed",
             json!({"number": number}),
@@ -335,7 +392,17 @@ impl ConnectionRequest {
                         toast(said, cx);
                     }
                     Err(why) => match self.number == Some(number) && self.open {
-                        true => self.error = Some(why.into()),
+                        true => {
+                            self.error = Some(why.into());
+                            // Accept is refused for a missing entry before anything else.
+                            self.waits_for = self
+                                .proposal
+                                .as_ref()
+                                .and_then(|p| p.as_ref().ok())
+                                .map(missing_entries)
+                                .filter(|missing| accepted && !missing.is_empty())
+                                .map(|missing| said_entries(&missing));
+                        }
                         false => toast(
                             Toast::failure(format!("Request #{number} was not answered"))
                                 .detail(why),
@@ -354,6 +421,7 @@ impl ConnectionRequest {
         };
         self.deciding = true;
         self.error = None;
+        self.waits_for = None;
         self.ask(
             "approval.approve",
             json!({"number": number}),
@@ -372,6 +440,7 @@ impl ConnectionRequest {
         };
         self.deciding = true;
         self.error = None;
+        self.waits_for = None;
         self.ask(
             "approval.deny",
             json!({"number": number}),
@@ -381,6 +450,28 @@ impl ConnectionRequest {
             },
             cx,
         );
+        cx.notify();
+    }
+
+    /// "New entry…" beside the answer that waits for an entry: the vault's own dialog on `entry`,
+    /// its address the `host` the request sends it to. This dialog gives way to it and is back,
+    /// reading the request again, once the entry is saved or the dialog closed.
+    fn new_entry(
+        &mut self,
+        entry: String,
+        host: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(number) = self.number else {
+            return;
+        };
+        self.open = false;
+        self.shell
+            .update(cx, |shell, cx| {
+                shell.add_vault_entry_for_request(number, &entry, host, window, cx)
+            })
+            .ok();
         cx.notify();
     }
 
@@ -706,17 +797,28 @@ impl ConnectionRequest {
             None => "A program".to_owned(),
         };
         let entries = |s: &Server| {
-            let entries = match s.url {
-                Some(_) => &s.headers,
-                None => &s.env,
-            };
-            match entries.is_empty() {
-                true => "None".to_owned(),
-                false => entries
+            let lines: Vec<String> = match s.url {
+                Some(_) => s
+                    .headers
+                    .iter()
+                    .map(|(name, entry)| ServerSecret {
+                        place: "header".into(),
+                        name: name.clone(),
+                        prefix: String::new(),
+                        entry: entry.clone(),
+                    })
+                    .chain(s.secrets.clone())
+                    .map(|secret| secret.said())
+                    .collect(),
+                None => s
+                    .env
                     .iter()
                     .map(|(name, entry)| format!("{name} from the vault entry {entry}"))
-                    .collect::<Vec<_>>()
-                    .join("\n"),
+                    .collect(),
+            };
+            match lines.is_empty() {
+                true => "None".to_owned(),
+                false => lines.join("\n"),
             }
         };
         let mut body = div()
@@ -762,7 +864,7 @@ impl ConnectionRequest {
             )),
         };
         let (variables, key) = match server.url {
-            Some(_) => ("Headers of its requests", "headers"),
+            Some(_) => ("Secrets of its requests", "secrets"),
             None => ("Variables of its environment", "env"),
         };
         body = body.child(self.field(
@@ -872,9 +974,16 @@ impl ConnectionRequest {
             .children(proposal.secrets.iter().map(|secret| {
                 let id = format!("connection-request-secret-{}-{}", secret.key, secret.name);
                 let said = secret.said();
-                let elsewhere = match &secret.host {
-                    Some(_) => "Another host",
-                    None => "A program",
+                let tag = match (secret.differs, secret.unbound()) {
+                    (_, true) => Some(("unbound", "No address")),
+                    (true, false) => Some((
+                        "elsewhere",
+                        match &secret.host {
+                            Some(_) => "Another host",
+                            None => "A program",
+                        },
+                    )),
+                    (false, false) => None,
                 };
                 div()
                     .flex()
@@ -894,16 +1003,29 @@ impl ConnectionRequest {
                             .child(SharedString::from(said))
                             .test_support(),
                     )
-                    .children(secret.differs.then(|| {
-                        Tag::new(SharedString::from(format!("{id}-elsewhere")), elsewhere)
+                    .children(tag.map(|(part, said)| {
+                        Tag::new(SharedString::from(format!("{id}-{part}")), said)
                     }))
             }));
-        let warning = proposal.secrets.iter().any(|s| s.differs).then(|| {
-            SharedString::from(
+        // Each sentence says what is true of the lines it is about.
+        let elsewhere = proposal
+            .secrets
+            .iter()
+            .any(|s| s.differs && !s.unbound())
+            .then_some(
                 "A secret here goes elsewhere than the address its vault entry names: accept only \
                  if you meant to give it there.",
-            )
-        });
+            );
+        let unbound = proposal.secrets.iter().any(Secret::unbound).then_some(
+            "A vault entry here is bound to no address, so nothing says it may go to the host \
+             this request sends it to: accept only if you meant to give it there.",
+        );
+        let warning = match (elsewhere, unbound) {
+            (None, None) => None,
+            (a, b) => Some(SharedString::from(
+                [a, b].into_iter().flatten().collect::<Vec<_>>().join(" "),
+            )),
+        };
         Field::new(
             "connection-request-secrets-field",
             "Where its secrets go",
@@ -1012,7 +1134,45 @@ impl Render for ConnectionRequest {
             ))
             .test_support();
         let error = problem_line("connection-request-error", self.error.clone(), px(0.), cx);
-        modal = modal.child(body).kept(stale_line).kept(error);
+        // Beside the answer that waits for an entry: a button to make each one the request names.
+        let this = cx.entity().downgrade();
+        let new_entries = presence_of(
+            "connection-request-new-entries",
+            self.waits_for.clone(),
+            move |said| {
+                let missing = entries_said(&said);
+                let several = missing.len() > 1;
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap(space::SM)
+                    .children(missing.into_iter().map(|(entry, host)| {
+                        let label = match several {
+                            true => format!("New entry {entry}…"),
+                            false => "New entry…".to_owned(),
+                        };
+                        let this = this.clone();
+                        Button::secondary(
+                            SharedString::from(format!("connection-request-new-entry-{entry}")),
+                            SharedString::from(label),
+                        )
+                        .leading(Icon::Plus)
+                        .on_click(move |_, window, cx| {
+                            this.update(cx, |this, cx| {
+                                this.new_entry(entry.clone(), host.clone(), window, cx)
+                            })
+                            .ok();
+                        })
+                    }))
+                    .into_any_element()
+            },
+        )
+        .space(space::SM);
+        modal = modal
+            .child(body)
+            .kept(stale_line)
+            .kept(error)
+            .kept(new_entries);
         let decided = self.deciding;
         modal = modal.action(
             Button::quiet("connection-request-refuse", "Refuse")

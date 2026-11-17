@@ -12,8 +12,8 @@ use gpui_design_system::drawer::Closed;
 use gpui_design_system::motion::HOVER;
 use gpui_design_system::{
     Button, Confirm, Drawer, EmptyLine, Field, Icon, LabelledLine, ListCard, ListRow, Listing,
-    Menu, Modal, PageHeader, Placement, Section, Switch, Toast, Type, enter, fade, palette,
-    presence, presence_of, space, toast,
+    Menu, Modal, PageHeader, Palette, Placement, Section, Switch, Toast, Type, enter, fade,
+    palette, presence, presence_of, space, toast,
 };
 use gpui_kit::base::input::{Input, InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -62,6 +62,11 @@ pub struct ServiceInfo {
     pub needs_stopped: Vec<String>,
     /// The projects whose tasks need it, each with those tasks.
     pub needed_by: Vec<(String, Vec<String>)>,
+    /// Of those tasks, the ones that run now: their projects and names.
+    pub running: Vec<(String, String)>,
+    /// What runs now and needs it, in words (`app's api`, `the service file`): stopping it asks
+    /// first.
+    pub needed_now: Vec<String>,
 }
 
 impl ServiceInfo {
@@ -91,7 +96,42 @@ impl ServiceInfo {
                     (project, names_of(&needed["tasks"]))
                 })
                 .collect(),
+            running: value["needed_by"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .flat_map(|needed| {
+                    let project = needed["project"].as_str().unwrap_or_default().to_owned();
+                    names_of(&needed["running"])
+                        .into_iter()
+                        .map(move |task| (project.clone(), task))
+                })
+                .collect(),
+            needed_now: names_of(&value["needed_now"]),
         }
+    }
+
+    /// Whether the project's task runs now.
+    pub fn task_runs(&self, project: &str, task: &str) -> bool {
+        self.running.iter().any(|(p, t)| p == project && t == task)
+    }
+
+    /// The projects whose tasks need it, those that run marked: `app (api running, web)`.
+    pub fn needed_running_said(&self) -> String {
+        self.needed_by
+            .iter()
+            .map(|(project, tasks)| {
+                let tasks: Vec<String> = tasks
+                    .iter()
+                    .map(|task| match self.task_runs(project, task) {
+                        true => format!("{task} running"),
+                        false => task.clone(),
+                    })
+                    .collect();
+                format!("{project} ({})", tasks.join(", "))
+            })
+            .collect::<Vec<_>>()
+            .join("; ")
     }
 
     /// Whether Flottille runs it now: it can be stopped.
@@ -467,6 +507,11 @@ pub struct ServicesPage {
     writing: Option<Writing>,
     /// The service whose removal is asked.
     confirming: Option<String>,
+    /// The service whose stop is asked, since something running needs it.
+    stopping: Option<String>,
+    /// The service the stop's confirmation names and what runs and needs it, kept while it
+    /// fades away.
+    stop_asked: (String, Vec<String>),
     /// What the confirmation names, kept while it fades away.
     asked: String,
     /// The services being started or stopped: their buttons wait.
@@ -501,6 +546,8 @@ impl ServicesPage {
             writing: None,
             confirming: None,
             asked: String::new(),
+            stopping: None,
+            stop_asked: Default::default(),
             acting: HashSet::new(),
             panel,
             drawer,
@@ -660,32 +707,61 @@ impl ServicesPage {
 
     /// Starts the service, and what it needs first.
     pub fn start(&mut self, name: &str, cx: &mut Context<Self>) {
-        self.act(name, true, cx);
+        self.act(name, true, false, cx);
     }
 
-    /// Stops the service. It asks nothing: it is the user who clicks.
+    /// Stops the service. Something running needs it: a confirmation asks first, which says
+    /// what goes on without it; nothing does: it asks nothing, it is the user who clicks.
     pub fn stop(&mut self, name: &str, cx: &mut Context<Self>) {
-        self.act(name, false, cx);
+        let listed = self.listed.as_deref().unwrap_or_default();
+        let needed = listed
+            .iter()
+            .find(|s| s.name == name)
+            .map(|s| s.needed_now.clone())
+            .unwrap_or_default();
+        if !needed.is_empty() {
+            self.stopping = Some(name.to_owned());
+            self.stop_asked = (name.to_owned(), needed);
+            cx.notify();
+            return;
+        }
+        self.act(name, false, false, cx);
     }
 
-    fn act(&mut self, name: &str, start: bool, cx: &mut Context<Self>) {
+    /// The confirmation's Stop: stopped, whatever needs it.
+    fn stop_confirmed(&mut self, name: &str, cx: &mut Context<Self>) {
+        self.stopping = None;
+        self.act(name, false, true, cx);
+    }
+
+    fn act(&mut self, name: &str, start: bool, force: bool, cx: &mut Context<Self>) {
         if !self.acting.insert(name.to_owned()) {
             return;
         }
         let name = name.to_owned();
-        perform_later(&self.shell, Command::ServiceAct { name, start }, cx);
+        perform_later(&self.shell, Command::ServiceAct { name, start, force }, cx);
         cx.notify();
     }
 
-    /// The daemon started or stopped the service, or refused with why: a toast says it.
+    /// The daemon started or stopped the service, or refused with why: a toast says it. A stop
+    /// refused because something running needs it (`needed`), which started since the list was
+    /// read, is asked in the confirmation instead, with what needs it as the daemon's data says.
     pub fn acted(
         &mut self,
         name: &str,
         start: bool,
         answer: Result<Value, String>,
+        needed: Option<Vec<String>>,
         cx: &mut Context<Self>,
     ) {
         self.acting.remove(name);
+        if let (false, Some(needed)) = (start, needed) {
+            self.stopping = Some(name.to_owned());
+            self.stop_asked = (name.to_owned(), needed);
+            self.read(cx);
+            cx.notify();
+            return;
+        }
         let said = match (start, answer) {
             (true, Ok(answer)) => {
                 let started = names_of(&answer["started"]);
@@ -945,16 +1021,12 @@ impl ServicesPage {
             lines.push(needs_line(id("needs"), &info.needs).into_any_element());
         }
         if !info.needed_by.is_empty() {
-            let said = info.needed_said();
+            let said = info.needed_running_said();
+            let value = self.needed_value(info, &p, window, cx);
             lines.push(
-                LabelledLine::new(
-                    id("needed"),
-                    Icon::Repository,
-                    "Needed by",
-                    SharedString::from(said.clone()),
-                )
-                .child(SharedString::from(said))
-                .into_any_element(),
+                LabelledLine::new(id("needed"), Icon::Repository, "Needed by", said)
+                    .child(value)
+                    .into_any_element(),
             );
         }
         // What comes and goes with its state unfolds and folds away.
@@ -1085,6 +1157,118 @@ impl ServicesPage {
         }
         let edit = info.name.clone();
         row.on_click(cx.listener(move |this, _, window, cx| this.edit(Some(&edit), window, cx)))
+    }
+
+    /// The projects whose tasks need the service, a running mark fading in beside each task that
+    /// runs now and out once it ends.
+    fn needed_value(
+        &self,
+        info: &ServiceInfo,
+        p: &Palette,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let mut projects: Vec<AnyElement> = Vec::new();
+        for (at, (project, tasks)) in info.needed_by.iter().enumerate() {
+            let mut pieces: Vec<AnyElement> = Vec::new();
+            pieces.push(SharedString::from(format!("{project} (")).into_any_element());
+            for (n, task) in tasks.iter().enumerate() {
+                let key = format!("service-running-{}-{project}-{task}", info.name);
+                let t = fade(
+                    ElementId::Name(format!("{key}-fade").into()),
+                    info.task_runs(project, task),
+                    HOVER,
+                    window,
+                    cx,
+                );
+                pieces.push(SharedString::from(task.clone()).into_any_element());
+                if t > 0.0 {
+                    pieces.push(
+                        div()
+                            .id(ElementId::Name(key.into()))
+                            // It opens its place as it fades in, and closes it as it fades out.
+                            .ml(px(4. * t))
+                            .w(px(6. * t))
+                            .h(px(6.))
+                            .rounded_full()
+                            .bg(p.run)
+                            .opacity(t)
+                            .test_support()
+                            .into_any_element(),
+                    );
+                }
+                if n + 1 < tasks.len() {
+                    pieces.push(SharedString::from(", ").into_any_element());
+                }
+            }
+            pieces.push(SharedString::from(")").into_any_element());
+            if at + 1 < info.needed_by.len() {
+                pieces.push(SharedString::from(";").into_any_element());
+            }
+            projects.push(
+                div()
+                    .flex()
+                    .items_center()
+                    .children(pieces)
+                    .into_any_element(),
+            );
+        }
+        div()
+            .flex()
+            .items_center()
+            .gap(space::SM)
+            .children(projects)
+            .into_any_element()
+    }
+
+    /// The confirmation of a stop that something running needs: its sentence names the service,
+    /// and what goes on without it is said once, in the list under it.
+    fn confirm_stop(&self, cx: &mut Context<Self>) -> Confirm {
+        let p = palette(cx);
+        let (name, needed) = self.stop_asked.clone();
+        let said = format!("What runs and needs {name} goes on without it:");
+        let (this, again) = (cx.entity().downgrade(), cx.entity().downgrade());
+        let lines = needed.into_iter().enumerate().map(|(at, what)| {
+            let what = SharedString::from(what);
+            div()
+                .id(SharedString::from(format!("service-stopping-needed-{at}")))
+                .aria_label(what.clone())
+                .flex()
+                .items_center()
+                .gap(space::SM)
+                .child(div().size(px(6.)).rounded_full().bg(p.run))
+                .child(what)
+                .test_support()
+        });
+        Confirm::new("service-stopping", format!("Stop {name}?"))
+            .sentence(SharedString::from(said.clone()))
+            .action("Stop")
+            .child(
+                div()
+                    .id("service-stopping-needed")
+                    .aria_label(SharedString::from(said))
+                    .flex()
+                    .flex_col()
+                    .gap(space::XS)
+                    .text_size(px(12.5))
+                    .text_color(p.mute)
+                    .children(lines)
+                    .test_support(),
+            )
+            .open(self.stopping.is_some())
+            .on_confirm(move |_, cx| {
+                let name = name.clone();
+                this.update(cx, |this, cx| this.stop_confirmed(&name, cx))
+                    .ok();
+            })
+            .on_cancel(move |_, cx| {
+                again
+                    .update(cx, |this, cx| {
+                        this.stopping = None;
+                        cx.notify();
+                    })
+                    .ok();
+            })
     }
 
     /// The confirmation of a removal: one that tasks or services need cannot be done, and says
@@ -1221,6 +1405,7 @@ impl Render for ServicesPage {
             )
             .child(self.form.clone())
             .child(self.confirm(cx))
+            .child(self.confirm_stop(cx))
             // A service's output slides in over the page, which keeps its scroll beneath it.
             .child(self.drawer.clone())
     }

@@ -50,6 +50,7 @@ pub mod state;
 pub mod steps;
 pub mod subscriptions;
 pub mod tasks;
+pub mod text_viewer;
 pub mod to_end;
 pub mod tokens;
 pub mod tree;

@@ -690,6 +690,7 @@ fn posted_says(args: &Value) -> Vec<String> {
                 | "milestones"
                 | "progress"
                 | "time_spent"
+                | "worklogs"
         ) | None
     ) {
         return Vec::new();

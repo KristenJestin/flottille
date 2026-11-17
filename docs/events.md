@@ -558,7 +558,7 @@ A turn starts with this message.
 |---|---|
 | `agent` | |
 | `text` | The message. |
-| `images` | The names of the images that went with it, when some did (`agent.image` gives each back), in the order of their markers in `text` (`[Image N: <name>]`, `docs/protocol.md` `agent.send`): the agent read each one right after its marker. An image that did not go is said in `text` instead. |
+| `images` | The names of the images that went with it, when some did (`agent.image` gives each back), in the order of their markers in `text` (`[Image N: <name>]`, `docs/protocol.md` `agent.send`): the agent read each one right after its marker. An image that did not go is said in `text` instead. A long pasted text is a marker too (`[Pasted text N: <name> · <bytes> bytes · read it at <path>]`): the file is in the agent's folder, and `agent.image` gives it back by the name the path ends in. |
 | `deliveries` | The ids of the deliveries the message is made of, in order: one per delivery of `text` (the id `agent.send` answered for a message of the user). An event written before it was kept has none. A delivery that only gives a new session the conversation again after a compaction (its brief, the summary, the latest messages, or the handoff) has an id ending in `-replay` (`brief-<agent>-<epoch>-replay`): it is part of the compaction, not something anyone said, and a reader that shows what was sent leaves its section of `text` out. |
 | `typed` | When a delivery of the message used commands (`docs/commands.md`): one entry per delivery of `text`, in order, `{"text", "commands"}` for one that used commands (what was typed, masked, and the names of the commands in the order of their first use), `null` for the others. Left out when none did; an event written before it was kept has none. |
 
@@ -701,7 +701,7 @@ activity.
 | `link` | Only for a `forge` `run` that was done and whose answer gave the run's link: that link. |
 | `pictures` | Only when a connection's result carried images the agent was given: their names, in order, which `agent.image` gives back (`docs/extensions.md`, "Connections"). The bytes are in the agent's folder of images, never in the event. |
 | `cut` | Only when the result was cut at the source (`docs/tools.md`, "Long results"): `{"result", "chars", "left_out"}`, the id the whole text is read by, its length and how many characters the agent was not shown. |
-| `setup` | Only on a `tickets` `log_time` that was refused for want of the project's vault entry (none named, one the project does not see, or one with no username): `time_logging`. The window says it in the conversation, with a button to the project's Settings, Tracker (`docs/tickets.md`, "Logging time"). |
+| `setup` | Only on a `tickets` `log_time` or `worklogs` that was refused for want of the project's vault entry (none named, one the project does not see, or one with no username): `time_logging`. The window says it in the conversation, with a button to the project's Settings, Tracker (`docs/tickets.md`, "Logging time"). |
 
 #### `agent.link_shown`
 
@@ -1087,6 +1087,17 @@ ended.
 A restart (`run.restart`) is a `run.ended` with state `stopped` for the first run, if it ran, then a
 `run.started` for the new one, of the same `agent`, `project` and `name`.
 
+#### `run.needs`
+
+A service the run's task needs (`docs/projects.md`, "Services") stopped while it runs, or runs
+again: the agent that started it is told of a stop once (`service-stopped`, `docs/tools.md`), and
+of its return once (`service-back`).
+
+| Field | |
+|---|---|
+| `agent`, `project`, `run` | |
+| `needs_stopped` | The services it needs that do not run now, in the order they stopped. |
+
 #### `run.agent_folders_unchecked`
 
 An agent's run ended and the daemon could not check all the agent folders of its place after it
@@ -1165,6 +1176,12 @@ user allowed, or the daemon stopping) or `failed`, `why` the line that says why.
 
 `{"service", "change"}`: `added`, `edited` or `removed` in `services.toml` through Flottille, or
 `outside`: it answered before it was started, and Flottille started nothing.
+
+#### `service.needed`
+
+`{"run", "project", "name", "services", "running"}`: a run of the task `name`, which needs the
+`services` (those they need included), started (`running` true) or ended: what runs and needs
+them changed.
 
 ### The events of a subscription
 

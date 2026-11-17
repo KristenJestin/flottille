@@ -1759,6 +1759,7 @@ fn run_of(run: &str, agent: &str, task: Option<&str>, running: bool, at: u64) ->
         ready: None,
         url: None,
         service: false,
+        needs_stopped: Vec::new(),
     }
 }
 
