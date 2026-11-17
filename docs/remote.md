@@ -12,7 +12,9 @@ here is built but the keys, and the member list, the invitation code and the fou
 and their checks, and the link between two machines with its version check (`crates/flottille-link`,
 `crates/flottille/src/link.rs`), and the hub with its rules, served on the network, the control
 session every machine keeps to it and the first member's setup (`crates/flottille-hub`,
-`crates/flottille-link/src/control.rs`, `crates/flottille/src/hub_session.rs`). What is decided is said as such; the defaults taken are in "Defaults taken, to
+`crates/flottille-link/src/control.rs`, `crates/flottille/src/hub_session.rs`), and pairing
+through the hub: invitations, joining, the four words, adding, renaming and removing members
+from the command line (#812). What is decided is said as such; the defaults taken are in "Defaults taken, to
 confirm"; what is open is in "Open questions". It replaces the proposal of 2026-11-03 (a relay
 every device connects to, on a private network) and the review that put Tailscale and SSH at the
 centre: Flottille stays generic (`AGENTS.md`), and depends on no one network and no account of a
@@ -431,6 +433,25 @@ removing the device and adding it again.
 
 A device refuses a link from a key that is not in its list, and a list change not signed by a
 member.
+
+**Built (#812), from the command line**: `flottille remote invite` prints the code (the QR holds the
+same text); `flottille remote join <code>` makes the device key, prints the four words and waits
+until the member that invited accepts or refuses; `flottille remote requests` lists the requests
+that wait for this machine's member with their words; `flottille remote accept <request> --name
+<name> --role runner|controller|viewer` prints the words, then signs the addition; `flottille
+remote refuse <request>`; `flottille remote members`, `rename <name> <new name>` and `remove
+<name>`. A request is named by the new device's fingerprint. The clients sign, with the device key;
+the daemon carries what they signed (`remote.*`, `protocol.md`) and says what changed as events
+(`remote.*`, `events.md`). The window's and the phone's parts are not built.
+
+A machine that joins is no member yet: it reaches the hub with its machine key, pinning the hub's
+key the code holds, and says in its proof the invitation's token and the new device's key. The hub
+welcomes it while its request waits, sends it nothing and takes no ask from it, and tells the
+member that invited the requests that wait for it, over that member's own sessions. Once the
+addition is stored, the hub sends the joining machine the list; the machine checks it
+(`Invitation::check_list`), then the new device declares the machine through the same session, and
+the machine pins the hub (`remote/hub.json`) once the declaration came back. A refused or expired
+request ends the session, saying so.
 
 ## Roles
 
@@ -922,6 +943,30 @@ on a real phone, by hand, and reported.
   refusing adds nothing.
 - The hub takes an addition only as the answer to a join request to its signer: a device joins
   through an invitation, never by a change alone.
+- A machine that joins (#812) answers the invitation in its session's proof (`join`: the token
+  and the new device's key), so that a key with no token is still refused at the end of its
+  handshake. While its request waits, its session counts among the 64 places of keys that are no
+  member's, is sent nothing and may ask nothing; it ends with the request (refused, or 5 minutes
+  after the invitation was given). In one of the 8 places kept for members, it is refused before
+  its token is spent. A key removed from the list, or a member's, is refused at once
+  (`… was removed from the member list: a removed device joins again with a new key`).
+- The device that joined declares its machine at once, through the session it joined with: the
+  daemon never holds the device key, so `flottille remote join` waits for the acceptance and signs
+  the declaration then. `remote.join` is refused on a machine set up already: a machine joins one
+  hub.
+- The member that invited is sent the requests that wait for it (`{"requests": [{"token", "key"}]}`)
+  over every session of its device or its machine; the token travels back to the machine that
+  asked for it, so that its clients draw the same four words. A request is named by the new
+  device's fingerprint (`flottille remote accept 3f2a-91bc-0d4e-77a1`).
+- A removal is carried out by every daemon that takes the list holding it: the machines it trusts
+  are written again, and its link to the removed member's machine is cut at once
+  (`remote.disconnected`, `it was removed from the member list`). The removed machine's own session
+  to the hub is refused, so it never sees the removal itself; its links are cut by the others.
+- `remote.connected` and `remote.disconnected` are the machines' links, not the hub's session
+  (its state is `remote.machines`' `hub`).
+- The formats of #820 changed without a version of their own, nothing being released: the
+  device's proof has `join`, the asks `invite` and `refuse`, an answer `token`, and the hub sends
+  `requests`.
 - `flottille-hub setup-code --reset` is refused while a hub uses the state folder, rather than
   told to it: the running hub would keep the old code valid and undo the reset at its next write.
   It reads nothing of the state, so a list that does not check, or a damaged file, does not stop
