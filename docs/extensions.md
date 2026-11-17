@@ -1317,7 +1317,9 @@ off; it is never told to send the user looking for a menu. **A request on a conn
 review is not refused for that**: it is held like any other, and its card says first that the
 connection waits for its review, with **Review** beside it; a `set` is written to what the user
 read, so its Accept waits for that review (`approval.approve` answers why, the request still
-pending) and goes through once it is done.
+pending) and goes through once it is done; on a connection off, disabled, cut off or signed out, which
+has no review to wait for, it goes through as before. A second accepted edit while one waits
+replaces the first card and delivery of that agent: one card, one delivery.
 Everything animates as the rest of
 the window does: the servers fold away and unfold with the switch, a row unfolds when it arrives and folds away
 when it leaves, a field that a radio or a switch needs unfolds under it, the dialogs rise and

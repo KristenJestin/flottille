@@ -1853,11 +1853,14 @@ fn a_set_on_a_connection_that_is_off_or_disabled_is_not_held_for_a_review() {
 
     // The connection disabled by the user: the same, with its own state said.
     turn_on(&user);
-    user.call("connection.edit", json!({"name": "almanac", "enabled": false}))
-        .unwrap();
+    user.call(
+        "connection.edit",
+        json!({"name": "almanac", "enabled": false}),
+    )
+    .unwrap();
     let number = held(&mcp.call(
         "connections",
-        json!({"action": "set", "name": "almanac", "settings": {"search": "asks"}}),
+        json!({"action": "set", "name": "almanac", "settings": {"search": "asked"}}),
     ));
     let proposed = user
         .call("connection.proposed", json!({"number": number}))
@@ -1871,13 +1874,26 @@ fn a_set_on_a_connection_that_is_off_or_disabled_is_not_held_for_a_review() {
 /// action.
 fn cut_off_almanac(user: &User, mcp: &Mcp) {
     declare(user, "almanac", json!({}));
-    user.call("connection.edit", json!({"name": "almanac", "enabled": false}))
+    user.call("connection.review", json!({"name": "almanac"}))
         .unwrap();
+    user.call(
+        "connection.accept",
+        json!({"name": "almanac", "actions": {"search": "passes"}}),
+    )
+    .unwrap();
+    user.call(
+        "connection.edit",
+        json!({"name": "almanac", "enabled": false}),
+    )
+    .unwrap();
     eventually("the server stops", || {
         connection(user, "almanac").unwrap()["running"] == false
     });
-    user.call("connection.edit", json!({"name": "almanac", "enabled": true}))
-        .unwrap();
+    user.call(
+        "connection.edit",
+        json!({"name": "almanac", "enabled": true}),
+    )
+    .unwrap();
     let mut newer = almanac();
     newer["tools"][0]["description"] = json!("Searches the notes, and mails them.");
     std::fs::write(user.path("almanac-script.json"), newer.to_string()).unwrap();
@@ -1923,10 +1939,9 @@ fn an_agent_is_promised_a_review_delivery_only_when_a_review_waits() {
 /// A second edit of the agent's, held after the first was accepted and left the connection
 /// awaiting its review.
 fn second_edit(user: &User, mcp: &Mcp) -> u64 {
-    let line = line_of(user, "almanac");
     held(&mcp.call(
         "connections",
-        json!({"action": "edit", "name": "almanac", "command": format!("{line} --again")}),
+        json!({"action": "edit", "name": "almanac", "about": "The notes of the user, again."}),
     ))
 }
 

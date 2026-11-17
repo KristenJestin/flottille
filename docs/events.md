@@ -216,8 +216,9 @@ the connection's own event, is listed by the inbox (kind `connections`) as `conn
 is: `name`, `tool` and `actions` (the new or changed ones). `connection.review_waits`, an event of
 the agent that asked, opens the card of its session: `agent`, `name`, `request` (the number of the
 request) and `actions`. `connection.review_done`, of the same agent, closes it once the connection
-is reviewed, removed or turned off: the same fields and `outcome` (`reviewed` or `left`); the agent
-is then told, once, in a `connections` delivery.
+is reviewed, removed or turned off: the same fields and `outcome` (`reviewed`, `left`, or `superseded` when a newer accepted request of the
+same agent took its place: the connection has one card and one delivery per agent); the agent is then
+told, once, in a `connections` delivery (none for `superseded`).
 
 ### `connection.version_moved`
 
