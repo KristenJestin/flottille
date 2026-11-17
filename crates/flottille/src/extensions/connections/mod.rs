@@ -158,9 +158,6 @@ pub struct Declaration {
     pub except: Vec<String>,
     /// The OAuth client id the user registered with the server's authorization server, for a URL.
     pub client_id: Option<String>,
-    /// Hosts the user adds to the sites an adapter keeps the browser to, beside those of the
-    /// vault entries: a single sign-on's, which a sign-in goes through.
-    pub sites: Vec<String>,
     /// Whether an adapter's browser is shown: its server also gets the daemon's display
     /// variables, and the adapter writes `headed` in the configuration it writes.
     pub headed: bool,
@@ -502,6 +499,8 @@ const KEYS: &[&str] = &[
     "only",
     "except",
     "client_id",
+    // Read and ignored: it added hosts to a list of the browser's sites that is gone (#1041), and
+    // a declaration written while it existed still loads.
     "sites",
     "headed",
 ];
@@ -690,24 +689,6 @@ impl Declaration {
                 return Err(format!("{at}.client_id: must be a client id, on one line"));
             }
         }
-        let sites = match table.get("sites") {
-            None => Vec::new(),
-            Some(value) => value
-                .as_array()
-                .and_then(|hosts| {
-                    hosts
-                        .iter()
-                        .map(|host| host.as_str().map(str::to_owned))
-                        .collect::<Option<Vec<String>>>()
-                })
-                .ok_or_else(|| format!("{at}.sites: must be a list of hosts"))?,
-        };
-        if let Some(host) = sites.iter().find(|host| !adapters::is_site(host)) {
-            return Err(format!(
-                "{at}.sites: {host:?} is no host of a site: one host each, as \"sso.example.com\", \
-                 in lower case, with no scheme, port, path, comma, wildcard or space"
-            ));
-        }
         let headed = match table.get("headed") {
             None => false,
             Some(value) => value
@@ -724,7 +705,6 @@ impl Declaration {
             only,
             except,
             client_id,
-            sites,
             headed,
         })
     }
@@ -773,17 +753,14 @@ impl Declaration {
         if let Some(id) = &self.client_id {
             table["client_id"] = json!(id);
         }
-        if !self.sites.is_empty() {
-            table["sites"] = json!(self.sites);
-        }
         if self.headed {
             table["headed"] = json!(true);
         }
         table
     }
 
-    /// What trust is given to: how the server is reached, what it is given, the limits, and the
-    /// hosts an adapter adds to the browser's sites, and whether it is shown. An edit of any of them is another server as
+    /// What trust is given to: how the server is reached, what it is given, the limits, and
+    /// whether an adapter's browser is shown. An edit of any of them is another server as
     /// far as trust goes; the sentence, the switch and the projects left out are not.
     fn digest(&self) -> String {
         let reach = match &self.reach {
@@ -804,12 +781,7 @@ impl Declaration {
         if let Some(others) = json.get("secrets") {
             trusted["secrets"] = others.clone();
         }
-        // Only when there are some: the digest of a connection without sites, pinned before
-        // they existed, stays the one it was pinned for.
-        if !self.sites.is_empty() {
-            trusted["sites"] = json!(self.sites);
-        }
-        // As the sites: a connection that is not shown keeps the digest it was pinned for.
+        // Only when it is: a connection that is not shown keeps the digest it was pinned for.
         if self.headed {
             trusted["headed"] = json!(true);
         }
@@ -2477,16 +2449,8 @@ async fn review(daemon: &Arc<Daemon>, params: Value) -> std::result::Result<Valu
     changed_event(daemon, &name, None);
     let row = row(daemon, &name);
     let config = adapters::config_of(daemon, &name);
-    let sites = adapters::sites(daemon, &declaration);
     let in_clear = adapters::in_clear_entries(daemon, &declaration);
-    Ok(diff(
-        &declaration,
-        &row,
-        &listing,
-        &config,
-        &sites,
-        &in_clear,
-    ))
+    Ok(diff(&declaration, &row, &listing, &config, &in_clear))
 }
 
 /// The review: the pin against what the server announces now, each action whole where it is new,
@@ -2498,7 +2462,6 @@ fn diff(
     row: &Row,
     now: &Listing,
     config: &std::path::Path,
-    sites: &[String],
     in_clear: &[String],
 ) -> Value {
     let empty = Listing::default();
@@ -2556,7 +2519,7 @@ fn diff(
         "actions": actions,
         "refused": now.refused,
         "limits": limits,
-        "adapter": adapter_said(declaration, now, &proposed, config, sites, in_clear),
+        "adapter": adapter_said(declaration, now, &proposed, config, in_clear),
     })
 }
 
@@ -2568,7 +2531,6 @@ fn adapter_said(
     now: &Listing,
     proposed: &BTreeMap<String, String>,
     config: &std::path::Path,
-    sites: &[String],
     in_clear: &[String],
 ) -> Value {
     match adapters::of(&now.server) {
@@ -2593,8 +2555,7 @@ fn adapter_said(
             }
             if let Reach::Command(words) = &declaration.reach
                 && let Some(why) = adapter
-                    .drops_allowlist(words, &declaration.env)
-                    .or_else(|| adapter.own_config(words, &declaration.env))
+                    .own_config(words)
                     .or_else(|| adapter.sends_elsewhere(words, &declaration.env))
             {
                 said.push_str(&format!(" {why}."));
@@ -2604,7 +2565,7 @@ fn adapter_said(
             }
             json!({"name": adapter.server, "range": adapter.range, "applies": true,
                 "actions": adapter.actions.iter().map(|own| own.name).collect::<Vec<_>>(),
-                "changed": adapter.changed(config, sites, declaration.headed), "said": said})
+                "changed": adapter.changed(config, declaration.headed), "said": said})
         }
         adapters::Found::OtherVersion(adapter) => json!({"name": adapter.server,
         "range": adapter.range, "applies": false,
