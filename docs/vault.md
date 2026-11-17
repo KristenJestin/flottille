@@ -75,8 +75,9 @@ An entry made for one precise feature is that feature's alone. `for` names it:
   other project's agent lists it, and the `vault` tool never tells an agent the use of an entry.
 - **A connection's entry is any project's, unless its server is given it.** A use that reads the
   entry for the calling agent's project at the moment it reads the secret lets it be one
-  project's: a browser connection's `login` (`docs/extensions.md`, "Adapters"), so a project's own
-  account stays that project's. A connection's server is started once by the daemon for every
+  project's: a browser connection's `login` (`docs/extensions.md`, "Adapters"), so its secret is
+  never given to another project's agent (the browser's signed-in session is shared by every
+  project's agents of that connection, `docs/extensions.md`). A connection's server is started once by the daemon for every
   project's agents, and is given what its declaration names when it starts (a variable, a header,
   a query parameter, a cookie, basic authentication) and its OAuth tokens (`<name>.oauth`): it
   cannot tell whose agent a secret is for, so such an entry is every project's, and a project on

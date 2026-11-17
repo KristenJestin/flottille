@@ -1599,8 +1599,10 @@ way in:
   lists, never their values. **The entry may be one project's alone**: `login` reads it for the
   calling agent's project, both when the action is called and when agent-browser's credential
   provider asks for the secret, so an entry of one project is no entry for another project's
-  agent (`no entry <name>`, as if the vault did not hold it), and a project's own account is
-  never shared with every project. An entry bound to another use, or to none, is refused, naming
+  agent (`no entry <name>`, as if the vault did not hold it), and its secret is never given to
+  another project's agent. **The signed-in session is not one project's**: the connection's browser
+  is one for every project's agents, so once one project's agent has signed in, another project's
+  agent using the same connection browses signed in too. An entry bound to another use, or to none, is refused, naming
   its use. A name the vault does not hold (for this project) is refused with the call that asks the user to add it, `vault
   {action: "ask", name, why, url, username, for: "connection:<name>"}` (`vault.md`, "Asking the
   user for an entry").
