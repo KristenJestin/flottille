@@ -922,6 +922,9 @@ struct TicketsCall {
     link_kind: Option<String>,
     /// `reply`: the id of a comment. `comment_edit`, `comment_delete`: one an agent posted.
     comment: Option<String>,
+    /// `create`, `edit` on Jira: any field of the work item, keyed by its id or system key and
+    /// valued as Jira takes it, passed through to `acli` as its JSON's `additionalAttributes`.
+    fields: Option<serde_json::Map<String, Value>>,
     /// `create` on Jira: the open sprint to put the work item in, by its name or its id, and the
     /// work item it goes under.
     sprint: Option<String>,
@@ -971,6 +974,11 @@ impl TicketsCall {
     /// The assignee named, none for `null`.
     fn assigned_to(&self) -> Option<&str> {
         self.assignment().flatten()
+    }
+
+    /// The fields given, none when left out or empty.
+    fn fields_given(&self) -> Option<&serde_json::Map<String, Value>> {
+        self.fields.as_ref().filter(|fields| !fields.is_empty())
     }
 
     /// The milestone named, none when left out or blank.
@@ -1084,7 +1092,33 @@ pub fn unwritable(project: &Project, args: &Value) -> Option<String> {
     if let Some(why) = links::unwritable(project, action, args) {
         return Some(why);
     }
+    let fields = args["fields"]
+        .as_object()
+        .filter(|fields| !fields.is_empty());
+    if fields.is_some() && !["create", "edit"].contains(&action) {
+        return Some(format!(
+            "refused: tickets {action} takes no fields: fields is for create and edit"
+        ));
+    }
     let tracker = project.tracker.as_ref()?;
+    if fields.is_some() && matches!(tracker, ProjectTracker::Github { .. }) {
+        return Some(format!(
+            "refused: tickets {action} on GitHub takes no fields: they are Jira's"
+        ));
+    }
+    // A fix version is set once: by the milestone, or by the fields.
+    if action == "create"
+        && fields.is_some_and(|fields| fields.contains_key("fixVersions"))
+        && args["milestone"]
+            .as_str()
+            .is_some_and(|name| !name.trim().is_empty())
+    {
+        return Some(
+            "refused: fields.fixVersions and milestone both set the fix version: give one of \
+             them"
+                .into(),
+        );
+    }
     if let Some(Err(why)) = args["ticket"].as_str().map(|text| accepted(project, text)) {
         return Some(format!("refused: {why}"));
     }
@@ -1173,17 +1207,27 @@ fn unplannable(
             }
             let typed = given("type").is_some();
             // A GitHub issue's milestone is a flag of `gh`, with no type to give.
-            let placed = match (sprint.is_some(), jira && given("milestone").is_some()) {
-                (true, true) => "sprint and milestone",
-                (true, false) => "sprint",
-                (false, true) => "milestone",
-                (false, false) => return None,
-            };
+            let placed: Vec<&str> = [
+                ("sprint", sprint.is_some()),
+                ("milestone", jira && given("milestone").is_some()),
+                (
+                    "fields",
+                    jira && args["fields"].as_object().is_some_and(|f| !f.is_empty()),
+                ),
+            ]
+            .into_iter()
+            .filter(|(_, present)| *present)
+            .map(|(name, _)| name)
+            .collect();
+            if placed.is_empty() {
+                return None;
+            }
             (!typed).then(|| {
                 format!(
-                    "refused: tickets create with {placed} needs type: acli creates a work item \
-                     in a sprint or a version from a JSON definition, which takes no default \
-                     type; types lists them"
+                    "refused: tickets create with {} needs type: acli creates a work item in a \
+                     sprint or a version, or with fields, from a JSON definition, which takes no \
+                     default type; types lists them",
+                    and_listed(&placed)
                 )
             })
         }
@@ -1287,6 +1331,19 @@ fn types_said(types: &[WorkItemType]) -> String {
     and_listed(&names.iter().map(String::as_str).collect::<Vec<_>>())
 }
 
+/// What to do with a field a work item type requires: `acli` and Flottille list none of them, so
+/// it is Jira's refusal that names one, and `fields` that fills it. An id, not a name: Jira's
+/// REST takes no other key.
+const REQUIRED_FIELDS: &str = "give each required field in fields, keyed by its Jira id \
+    (customfield_10042; a system field by its key: priority, components) and valued as Jira \
+    takes it (a select: {\"value\": \"Major\"}, a user: {\"accountId\": \"...\"}), the values \
+    the refusal says it allows; ask the user for an id or a value not known";
+
+/// Whether the words of a refusal say a field is missing.
+fn required_said(refusal: &str) -> bool {
+    refusal.to_ascii_lowercase().contains("required")
+}
+
 /// Why a creation `acli` refused is, when the type named is not one of the project's, that type:
 /// Jira's own words say little of it, so the project's types are read and said.
 async fn refused_for_its_type(site: &str, project: &str, kind: &str, refusal: String) -> String {
@@ -1319,7 +1376,8 @@ async fn types(project: &Project, asked: &TicketsCall) -> Outcome {
             match work_item_types(site, in_project).await {
                 Ok(types) => Outcome::Done(format!(
                     "The work item types of {in_project} on {site} are {}. Give one of them, \
-                     spelled so, as type to create.",
+                     spelled so, as type to create. A type may require fields; acli lists no \
+                     type's required fields, so a creation refused for one names it: {REQUIRED_FIELDS}.",
                     types_said(&types)
                 )),
                 Err(why) => Outcome::Failed(why),
@@ -2314,14 +2372,16 @@ async fn write(daemon: &Daemon, project: &Project, asked: &TicketsCall, key: &Ke
             if flagged.iter().all(|(_, names)| names.is_empty())
                 && asked.milestone_named().is_none()
                 && !asked.remove_milestone
+                && asked.fields_given().is_none()
                 // `null` takes a Jira assignee away; GitHub's are `assignees`.
                 && !(matches!(key, Key::Jira(_)) && asked.assignment().is_some()) =>
         {
-            return Outcome::Refused(
-                "refused: tickets edit needs title, body, labels, assignees or milestone: what \
-                 changes"
-                    .into(),
-            );
+            // Fields are Jira's.
+            let what = match key {
+                Key::Jira(_) => "title, body, labels, assignees, milestone or fields",
+                Key::Issue(_) => "title, body, labels, assignees or milestone",
+            };
+            return Outcome::Refused(format!("refused: tickets edit needs {what}: what changes"));
         }
         _ => {}
     }
@@ -2626,10 +2686,12 @@ async fn create_work_item(
     let joined;
     // A sprint and a version are fields `acli` sets only from a JSON definition, which takes no
     // assignee of `@me`: it is set right after.
-    let from_json = sprint.is_some() || version.is_some();
+    let fields = asked.fields_given();
+    let from_json = sprint.is_some() || version.is_some() || fields.is_some();
     match from_json {
         true => {
-            let mut attributes = serde_json::Map::new();
+            // The fields as given first: what the dedicated arguments set is theirs.
+            let mut attributes = fields.cloned().unwrap_or_default();
             if let Some(sprint) = &sprint {
                 let field = match sprints::field_of(site, projects).await {
                     Ok(field) => field,
@@ -2690,7 +2752,7 @@ async fn create_work_item(
                 Some(kind) => refused_for_its_type(site, project, kind, why.clone()).await,
                 None => why.clone(),
             };
-            return Outcome::Failed(match (assignee, explained == why, from_json) {
+            let said = match (assignee, explained == why, from_json) {
                 // Its assignee is one reason acli may refuse it: said, and never left out to try
                 // again, which is the user's to decide.
                 (Some(who), true, false) => format!(
@@ -2700,6 +2762,10 @@ async fn create_work_item(
                     Value::from(masked(who))
                 ),
                 _ => explained,
+            };
+            return Outcome::Failed(match required_said(&why) {
+                true => format!("{said}; nothing was created; {REQUIRED_FIELDS}"),
+                false => said,
             });
         }
     };
@@ -2840,6 +2906,22 @@ async fn write_work_item(
         "edit" => args.extend(["edit", "--key", key]),
         _ => return transition(site, key, asked).await,
     }
+    // The fields go first, from a JSON definition of their own (`edit --from-json` takes no other
+    // flag): a refusal of them leaves the rest unwritten.
+    let mut fielded = false;
+    if let (true, Some(fields)) = (action == "edit", asked.fields_given()) {
+        if let Err(refusal) = edited_fields(daemon, key, fields).await {
+            return Outcome::Failed(refusal);
+        }
+        fielded = true;
+        let more = title.is_some()
+            || body.is_some()
+            || asked.assignment().is_some()
+            || labels.iter().any(|(_, names)| !names.is_empty());
+        if !more {
+            return Outcome::Done(format!("{key} was changed."));
+        }
+    }
     let file = match body.map(|body| AdfFile::of(daemon, body)).transpose() {
         Ok(file) => file,
         Err(why) => return Outcome::Failed(why),
@@ -2859,7 +2941,7 @@ async fn write_work_item(
     if action == "edit" {
         args.push("--yes");
     }
-    match acli_run(&args).await {
+    let outcome = match acli_run(&args).await {
         Ok(_) if action == "comment" => {
             if let Some(body) = body {
                 let posted = crate::adf::round_trip(body);
@@ -2895,6 +2977,51 @@ async fn write_work_item(
             Outcome::Done(format!("{key} was changed."))
         }
         Err(why) => Outcome::Failed(why),
+    };
+    match outcome {
+        // What the fields set stays set: said, so that the work item is not taken for untouched.
+        Outcome::Failed(why) if fielded => Outcome::Failed(format!(
+            "{why}; its fields were set before: they are changed, the rest is not"
+        )),
+        other => other,
+    }
+}
+
+/// `acli jira workitem edit --from-json`: the fields of a work item set as given, or why `acli`
+/// did not set them. Its JSON is assumed to be `{"issues": [key], "additionalAttributes": {...}}`,
+/// as a creation's is (`acli jira workitem edit --generate-json` shows it).
+async fn edited_fields(
+    daemon: &Daemon,
+    key: &str,
+    fields: &serde_json::Map<String, Value>,
+) -> Result<(), String> {
+    let definition = AdfFile::json(
+        daemon,
+        &json!({"issues": [key], "additionalAttributes": fields}),
+    )?;
+    let said = acli_run(&[
+        "jira",
+        "workitem",
+        "edit",
+        "--from-json",
+        definition.path(),
+        "--yes",
+    ])
+    .await
+    .map_err(|why| format!("{why}; nothing was written"))?;
+    // A bulk command: it ends with 0 on a work item it could not change.
+    match said.lines().find(|l| l.trim_start().starts_with('✗')) {
+        Some(failure) => {
+            let mut why = format!(
+                "acli did not change the fields of {key}: {}; nothing was written",
+                masked(failure.trim())
+            );
+            if required_said(failure) {
+                why = format!("{why}; {REQUIRED_FIELDS}");
+            }
+            Err(why)
+        }
+        None => Ok(()),
     }
 }
 

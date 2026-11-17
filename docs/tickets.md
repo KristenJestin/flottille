@@ -506,6 +506,26 @@ refused it, and the new work item went to the project's default assignee.
   answer is `"Tâche" is not a work item type of ABC: its types are Task, Bug and Story; nothing
   was written; …` with `acli`'s own line. If the type is one of them, `acli`'s line is the answer,
   as before: Flottille does not read an error's wording to find its cause.
+- **Required fields and `fields`** (#1042): seen in daily use, a Jira project whose Bug type
+  requires two select custom fields (a severity and a reproduction rate) refused every creation
+  of one, and the agent fell back to a Task. `create` and `edit` take `fields`, an object passed
+  to `acli` **as given**: a creation puts it in the `additionalAttributes` of its JSON definition
+  (`workitem create --from-json`, like a sprint's field and a version, with the type that JSON
+  needs), an edit in `{"issues": [<key>], "additionalAttributes": {…}}` of `workitem edit
+  --from-json <file> --yes` (**assumed** from the creation's shape: `acli` was not at hand to
+  measure `--generate-json`), run before the flags that set the title, the description, the
+  labels and the assignee. Keys are a field's id (`customfield_10042`) or a system field's key,
+  values are Jira's (a select `{"value": "Major"}`): there is no model of the fields' kinds, so
+  every field `acli` or Jira accepts is reachable. A name is not resolved to an id: Jira's REST
+  takes ids, and `acli` lists no create metadata cheaply (`project view` has `issueTypes` names
+  only), so **a type's required fields cannot be listed** and `types` says instead that a refusal
+  names them. A creation `acli` refuses with a message holding `required` answers `acli`'s own
+  words (the field's name, the values it allows, when Jira says them), `nothing was created`, and
+  how to fill each in `fields`; it is not tried again. An edit whose fields `acli` refuses
+  writes nothing; one whose fields were set and whose flags `acli` then refused says the fields
+  were set. The card says each field and its value. Refused before anything is asked: `fields`
+  on GitHub, on an action other than `create` and `edit`, with `fixVersions` beside `milestone`,
+  or on a `create` without `type`.
 - **`assignee`** on Jira `create` (`--assignee`) and `edit` (`--assignee`; `assignee: null` is
   `--remove-assignee`): `"me"`, an email or an account id, **as `acli` takes them**. `me` is the
   user the agent works for, sent as `acli`'s `@me` (`"@me"` is taken too), which `acli` resolves
