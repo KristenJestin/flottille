@@ -68,6 +68,9 @@ pub struct Proposal {
     /// Still what the request says: one that is not would not be done.
     pub current: bool,
     pub why: Option<String>,
+    /// The connection waits for the user's review (#1031): the review is the first thing the
+    /// dialog offers, and a `set` waits for it.
+    pub review: bool,
 }
 
 /// A vault entry a declaration names, as `connection.proposed` says where it goes.
@@ -174,6 +177,7 @@ impl Proposal {
                 .collect(),
             current: value["current"] == true,
             why: value["why"].as_str().map(str::to_owned),
+            review: value["review"] == true,
         }
     }
 
@@ -476,6 +480,15 @@ impl ConnectionRequest {
             .update(cx, |shell, cx| {
                 shell.add_vault_entry_for_request(number, &entry, host, window, cx)
             })
+            .ok();
+        cx.notify();
+    }
+
+    /// "Review": the connection's review opens over the page, first: the request stays held.
+    fn review(&mut self, name: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.open = false;
+        self.shell
+            .update(cx, |shell, cx| shell.review_connection(&name, window, cx))
             .ok();
         cx.notify();
     }
@@ -1173,7 +1186,46 @@ impl Render for ConnectionRequest {
             },
         )
         .space(space::SM);
+        // A connection that waits for the user's review: said first, with the way into it.
+        let this = cx.entity().downgrade();
+        let review_first = presence_of(
+            "connection-request-review-first",
+            ready
+                .filter(|p| p.review)
+                .map(|p| SharedString::from(p.name.clone())),
+            move |name| {
+                let (said, open) = (
+                    format!("{name} waits for your review of its actions first"),
+                    name.to_string(),
+                );
+                let this = this.clone();
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(space::SM)
+                    .child(
+                        div()
+                            .id("connection-request-review-said")
+                            .aria_label(SharedString::from(said.clone()))
+                            .child(SharedString::from(said))
+                            .test_support(),
+                    )
+                    .child(
+                        Button::secondary("connection-request-review", "Review").on_click(
+                            move |_, window, cx| {
+                                let open = open.clone();
+                                this.update(cx, |this, cx| this.review(open, window, cx))
+                                    .ok();
+                            },
+                        ),
+                    )
+                    .into_any_element()
+            },
+        )
+        .space(space::SM);
         modal = modal
+            .kept(review_first)
             .child(body)
             .kept(stale_line)
             .kept(error)

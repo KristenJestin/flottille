@@ -926,6 +926,9 @@ pub struct ConnectionsSection {
     url_fault: Option<SharedString>,
     review: Option<Review>,
     review_open: bool,
+    /// The review was opened by the user's Accept of an agent's request (#1031): closed without
+    /// being accepted, it says the connection still waits.
+    review_after_request: bool,
     confirming: Option<String>,
     /// The servers whose sign-in waits for the browser.
     signing: std::collections::HashSet<String>,
@@ -963,6 +966,7 @@ impl ConnectionsSection {
             url_fault: None,
             review: None,
             review_open: false,
+            review_after_request: false,
             confirming: None,
             signing: Default::default(),
             asked_name: String::new(),
@@ -1141,6 +1145,7 @@ impl ConnectionsSection {
                 match answer {
                     Ok(_) => {
                         self.review_open = false;
+                        self.review_after_request = false;
                         toast(
                             Toast::success(format!("Server {name} accepted"))
                                 .detail("Agents get its tool while it is on."),
@@ -1740,6 +1745,7 @@ impl ConnectionsSection {
 
     /// Opens the review of `name`: the daemon starts its server and says what it announces.
     pub fn open_review(&mut self, name: &str, cx: &mut Context<Self>) {
+        self.review_after_request = false;
         self.review = Some(Review {
             name: name.to_owned(),
             answer: None,
@@ -1774,10 +1780,38 @@ impl ConnectionsSection {
         cx.notify();
     }
 
+    /// The review the user's Accept of an agent's request leads into: closed without an Accept,
+    /// the connection still waits, and a toast says so with a way back.
+    pub fn open_review_after_request(&mut self, name: &str, cx: &mut Context<Self>) {
+        self.open_review(name, cx);
+        self.review_after_request = true;
+    }
+
+    /// The user closed the review without accepting it.
+    fn review_left(&mut self, cx: &mut Context<Self>) {
+        self.review_open = false;
+        if std::mem::take(&mut self.review_after_request)
+            && let Some(name) = self.review.as_ref().map(|review| review.name.clone())
+        {
+            let section = cx.weak_entity();
+            let again = name.clone();
+            let said = Toast::success(format!("The server {name} still waits for your review"))
+                .detail("Agents get none of its new actions until you review it.")
+                .action("Review", move |_, cx| {
+                    section
+                        .update(cx, |this, cx| this.open_review_after_request(&again, cx))
+                        .ok();
+                });
+            toast(said, cx);
+        }
+        cx.notify();
+    }
+
     /// "Edit entry": the review closes, and the vault's dialog opens on the entry, its secret to
     /// type again. The review is opened again from the row once it is replaced.
     fn edit_entry(&mut self, entry: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.review_open = false;
+        self.review_after_request = false;
         let entry = entry.to_owned();
         // After this update: the shell opens Settings, which holds this section.
         let shell = self.shell.clone();
@@ -3371,11 +3405,7 @@ impl ConnectionsSection {
             .takes_focus()
             .open(self.review_open)
             .on_close(move |_, cx| {
-                this.update(cx, |this, cx| {
-                    this.review_open = false;
-                    cx.notify();
-                })
-                .ok();
+                this.update(cx, |this, cx| this.review_left(cx)).ok();
             });
         let Some(mut review) = self.review.take() else {
             return modal;

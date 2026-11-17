@@ -1501,8 +1501,25 @@ impl Shell {
                 then: crate::extensions::Then::ConnectionRequest(then),
                 answer,
             } => {
+                // An accepted request whose write leaves the connection waiting for its review
+                // leads into that review at once (#1031): the daemon's answer says so, as the
+                // form's Save learns it.
+                let review = match (&then, &answer) {
+                    (
+                        crate::extensions::connection_request::Then::Decided {
+                            accepted: true, ..
+                        },
+                        Ok(answer),
+                    ) if answer["connection"]["review"] == true => {
+                        answer["connection"]["name"].as_str().map(str::to_owned)
+                    }
+                    _ => None,
+                };
                 self.connection_request
                     .update(cx, |dialog, cx| dialog.answered(then, answer, cx));
+                if let Some(name) = review {
+                    self.review_connection(&name, window, cx);
+                }
             }
             Outcome::Asked { then, answer } => {
                 let page = match &then {
@@ -2837,6 +2854,17 @@ impl Shell {
     pub fn open_connection_request(&mut self, number: u64, cx: &mut Context<Self>) {
         self.connection_request
             .update(cx, |dialog, cx| dialog.open(number, cx));
+    }
+
+    /// The review of the connection `name`, over the page the user is on: Connections' page,
+    /// where the review opens (the kit's modal, as the form's Save leads to it).
+    pub fn review_connection(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let at = crate::settings::Reveal::Feature(crate::extensions::connections::NAME.into());
+        self.open_settings_at(at, window, cx);
+        let section = self.settings.read(cx).connections().clone();
+        section.update(cx, |section, cx| {
+            section.open_review_after_request(name, cx)
+        });
     }
 
     /// The dialog of an agent's request to write a connection.
