@@ -1,5 +1,5 @@
 //! The hub's state and its rules (`docs/remote.md`, "The hub", "The first member", "Pairing"), as
-//! a library the server part will call: its key, the setup code, the member list it stores, the
+//! a library its server (`server.rs`) calls: its key, the setup code, the member list it stores, the
 //! invitations and their join requests, and the presence and addresses the members tell it.
 //!
 //! The hub signs nothing and cannot add, remove or rename a member: every change it stores is a
@@ -25,13 +25,23 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use flottille_link::{
-    Action, Change, HubKey, InvitationAsk, ListError, MemberList, Members, PublicKey, Role, Token,
+    Action, Change, ChangeHash, HubKey, InvitationAsk, ListError, MemberList, Members, PublicKey,
+    Role, SetupCode, Token,
 };
+
+mod server;
+
 use serde::{Deserialize, Serialize};
+pub use server::{KEPT_FOR_MEMBERS, LISTEN, MOST_ARRIVING, SETUP_IDLE, Served, serve, tls_server};
 use subtle::ConstantTimeEq;
 
 /// How long an invitation lasts, and how far an ask's time may be from the hub's.
 pub const FIVE_MINUTES: u64 = 5 * 60;
+
+/// The most changes of the list one member makes within an hour: a member's device, a viewer's
+/// too, cannot fill the list (`flottille_link::MOST_CHANGES`) in an afternoon.
+pub const CHANGES_AN_HOUR: usize = 30;
+const AN_HOUR: u64 = 60 * 60;
 
 /// The state's file in the hub's state folder.
 pub const STATE_FILE: &str = "hub.json";
@@ -40,7 +50,6 @@ pub const STATE_FILE: &str = "hub.json";
 pub const LOCK_FILE: &str = "hub.lock";
 
 const VERSION: u32 = 1;
-const ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
 /// The hub's time, in seconds since 1970: the system's, or one a test moves.
 pub trait Clock {
@@ -113,7 +122,8 @@ pub struct Hub<C: Clock = SystemClock> {
     /// Held for the hub's life: no other process writes its state meanwhile.
     _lock: File,
     file: PathBuf,
-    key: HubKey,
+    /// Shared with the sessions' handshakes, which sign with it while the hub is not locked.
+    key: std::sync::Arc<HubKey>,
     clock: C,
     stored: Stored,
     /// The stored list, checked; `None` while it is empty.
@@ -125,6 +135,8 @@ pub struct Hub<C: Clock = SystemClock> {
     asks: Vec<(PublicKey, [u8; 16], u64)>,
     presence: Vec<(PublicKey, Presence)>,
     addresses: Vec<(PublicKey, Vec<String>)>,
+    /// The changes stored within the last hour, by their signer, with their time.
+    recent: Vec<(PublicKey, u64)>,
 }
 
 impl<C: Clock> Hub<C> {
@@ -164,7 +176,7 @@ impl<C: Clock> Hub<C> {
         Ok(Hub {
             _lock: lock,
             file,
-            key,
+            key: std::sync::Arc::new(key),
             clock,
             stored,
             checked,
@@ -173,6 +185,7 @@ impl<C: Clock> Hub<C> {
             asks: Vec::new(),
             presence: Vec::new(),
             addresses: Vec::new(),
+            recent: Vec::new(),
         })
     }
 
@@ -195,29 +208,28 @@ impl<C: Clock> Hub<C> {
         }
     }
 
-    /// The first member: `from`, the device that presents `code`, with its own entry `root`, a
-    /// runner signed by itself. The code works once, only while no member exists.
-    pub fn setup(&mut self, code: &str, from: &PublicKey, root: Change) -> Result<(), HubError> {
+    /// The first member, with `code`: `changes`, its own entry as a runner signed by itself, then
+    /// what it signed after it (the declaration of its machine), stored in one write or not at
+    /// all. The code works once, only while no member exists.
+    pub fn setup(&mut self, code: &str, changes: Vec<Change>) -> Result<(), HubError> {
         let stored = self.setup_code()?;
-        let same = match (code_bytes(code), code_bytes(stored)) {
-            (Some(presented), Some(stored)) => bool::from(presented.ct_eq(&stored)),
+        let same = match (SetupCode::parse(code), SetupCode::parse(stored)) {
+            (Some(presented), Some(stored)) => bool::from(
+                presented
+                    .to_string()
+                    .as_bytes()
+                    .ct_eq(stored.to_string().as_bytes()),
+            ),
             _ => false,
         };
         if !same {
-            return Err(refused(
-                "this setup code is not the hub's: copy it again from the hub's log, or from \
-                 flottille-hub setup-code on the hub's machine",
-            ));
+            return Err(not_the_code());
         }
-        let own = matches!(&root.action, Action::Add { key, .. } if key == from);
-        if !own || root.signer != *from {
-            return Err(refused(
-                "the first member's entry is not the entry of the device that presents the setup \
-                 code",
-            ));
-        }
-        let members = MemberList::from_changes(vec![root]);
-        let checked = members.check(from).map_err(refuse_change)?;
+        let Some(root) = changes.first().map(|first| first.signer) else {
+            return Err(refused("a setup holds the first member's entry"));
+        };
+        let members = MemberList::from_changes(changes);
+        let checked = members.check(&root).map_err(refuse_change)?;
         self.store(
             Stored {
                 version: VERSION,
@@ -231,6 +243,43 @@ impl<C: Clock> Hub<C> {
     /// The member list, as the members signed it.
     pub fn list(&self) -> &MemberList {
         &self.stored.members
+    }
+
+    /// The members of the stored list, checked; `None` while it is empty.
+    pub fn members(&self) -> Option<&Members> {
+        self.checked.as_ref()
+    }
+
+    /// Whether a device that proved `key`, and said it pinned the list whose first change's hash
+    /// is `pinned`, may keep a session: one that pinned none while the list is empty (it comes to
+    /// set the hub up), then a member's device or the machine a member declared. A refusal says
+    /// why, and whether the list the device pinned was reset; nothing else of the list.
+    pub fn welcome(
+        &self,
+        key: &PublicKey,
+        pinned: Option<ChangeHash>,
+    ) -> Result<(), Box<(String, bool)>> {
+        let first = self.stored.members.changes().first().map(Change::hash);
+        let reset = pinned.is_some_and(|pinned| Some(pinned) != first);
+        let Some(members) = &self.checked else {
+            if reset {
+                return Err(Box::new((
+                    "this hub's member list was reset".to_owned(),
+                    true,
+                )));
+            }
+            return Ok(());
+        };
+        if members.get(key).is_some() || members.by_machine(key).is_some() {
+            return Ok(());
+        }
+        Err(Box::new((
+            format!(
+                "{} is not one of this hub's members, nor a member's machine",
+                key.fingerprint()
+            ),
+            reset,
+        )))
     }
 
     /// The token of a new invitation, for a member's signed ask: valid 5 minutes, once.
@@ -323,14 +372,26 @@ impl<C: Clock> Hub<C> {
     }
 
     /// A member's change of the list, stored once it checks after the list the hub holds. An
-    /// addition must answer a join request to its signer, which it ends.
+    /// addition must answer a join request to its signer, which it ends. A member makes at most
+    /// `CHANGES_AN_HOUR` changes within an hour.
     pub fn submit(&mut self, change: Change) -> Result<(), HubError> {
-        self.sweep();
+        let now = self.sweep();
         let Some(root) = self.stored.members.root() else {
             return Err(refused(
                 "the hub has no member yet: the first one joins with the setup code",
             ));
         };
+        let made = self
+            .recent
+            .iter()
+            .filter(|(signer, _)| *signer == change.signer)
+            .count();
+        if made >= CHANGES_AN_HOUR {
+            return Err(refused(format!(
+                "{} made {CHANGES_AN_HOUR} changes of the list within an hour: try again later",
+                change.signer.fingerprint()
+            )));
+        }
         let answered = match &change.action {
             Action::Add { key, .. } => {
                 let open = self
@@ -345,8 +406,9 @@ impl<C: Clock> Hub<C> {
                     })?;
                 Some(open.token)
             }
-            Action::Remove { .. } | Action::Rename { .. } => None,
+            Action::Remove { .. } | Action::Rename { .. } | Action::Machine { .. } => None,
         };
+        let signer = change.signer;
         let mut changes = self.stored.members.changes().to_vec();
         changes.push(change);
         let members = MemberList::from_changes(changes);
@@ -361,6 +423,7 @@ impl<C: Clock> Hub<C> {
         if let Some(token) = answered {
             self.open.retain(|open| open.token != token);
         }
+        self.recent.push((signer, now));
         Ok(())
     }
 
@@ -403,8 +466,10 @@ impl<C: Clock> Hub<C> {
     /// Writes `stored`, then holds it: a state that could not be written is not taken.
     fn store(&mut self, stored: Stored, checked: Members) -> Result<(), HubError> {
         write(&self.file, &stored)?;
-        // A member removed takes its presence and addresses with it.
-        let member = |key: &PublicKey| checked.get(key).is_some();
+        // A member removed takes its presence and addresses with it, and so does a machine no
+        // member declares any more.
+        let member =
+            |key: &PublicKey| checked.get(key).is_some() || checked.by_machine(key).is_some();
         self.presence.retain(|(key, _)| member(key));
         self.addresses.retain(|(key, _)| member(key));
         self.stored = stored;
@@ -412,10 +477,11 @@ impl<C: Clock> Hub<C> {
         Ok(())
     }
 
+    /// The member of `key`, a member's device key or the machine it declared.
     fn member(&self, key: &PublicKey) -> Result<&flottille_link::Member, HubError> {
         self.checked
             .as_ref()
-            .and_then(|members| members.get(key))
+            .and_then(|members| members.get(key).or_else(|| members.by_machine(key)))
             .ok_or_else(|| refused(format!("{} is not a member", key.fingerprint())))
     }
 
@@ -432,7 +498,27 @@ impl<C: Clock> Hub<C> {
         let now = self.clock.now();
         self.open.retain(|open| now < open.made + FIVE_MINUTES);
         self.asks.retain(|(_, _, at)| now < at + FIVE_MINUTES);
+        self.recent.retain(|(_, at)| now < at + AN_HOUR);
         now
+    }
+}
+
+/// `flottille-hub setup-code`: the setup code of the state `folder`, while no member exists. It
+/// reads a state that is there without taking the folder's lock, so that it serves while the hub runs: the
+/// state is written whole and renamed into place, never seen half written.
+pub fn setup_code(folder: &Path) -> Result<String, HubError> {
+    let file = folder.join(STATE_FILE);
+    match read(&file)? {
+        Some(Stored {
+            setup_code: Some(code),
+            members,
+            ..
+        }) if members.changes().is_empty() => Ok(code),
+        Some(_) => Err(has_members()),
+        // No state yet: made as a start makes it, and its code said.
+        None => Hub::open(folder, SystemClock)?
+            .setup_code()
+            .map(str::to_owned),
     }
 }
 
@@ -497,6 +583,14 @@ impl<C: Clock> fmt::Debug for Hub<C> {
     }
 }
 
+/// The refusal of a setup whose code, or proof of it, is not the hub's.
+pub(crate) fn not_the_code() -> HubError {
+    refused(
+        "this setup code is not the hub's: copy it again from the hub's log, or from \
+         flottille-hub setup-code on the hub's machine",
+    )
+}
+
 fn has_members() -> HubError {
     refused(
         "the hub has a member already: a setup code serves only before the first member joins \
@@ -528,48 +622,11 @@ fn random<const N: usize>() -> Result<[u8; N], HubError> {
     Ok(bytes)
 }
 
-/// A new setup code: 80 random bits in Crockford's base32, by groups of four
-/// (`7KQ2-M4XP-9TRW-H3CD`).
+/// A new setup code (`flottille_link::SetupCode`), as the state keeps it.
 fn new_code() -> Result<String, HubError> {
-    let bytes: [u8; 10] = random()?;
-    let mut value = [0u8; 16];
-    value[6..].copy_from_slice(&bytes);
-    let value = u128::from_be_bytes(value);
-    let mut code = String::with_capacity(19);
-    for at in 0..16 {
-        if at > 0 && at % 4 == 0 {
-            code.push('-');
-        }
-        code.push(ALPHABET[((value >> (75 - 5 * at)) & 31) as usize] as char);
-    }
-    Ok(code)
-}
-
-/// The 80 bits of a setup code as a person may type it: in any case, `O` as `0`, `I` and `L` as
-/// `1`, hyphens and spaces skipped. `None` when it is not 16 such symbols.
-fn code_bytes(code: &str) -> Option<[u8; 10]> {
-    let (mut value, mut symbols) = (0u128, 0);
-    for c in code.chars() {
-        if c == '-' || c.is_whitespace() {
-            continue;
-        }
-        let symbol = match c.to_ascii_uppercase() {
-            'O' => 0,
-            'I' | 'L' => 1,
-            upper => ALPHABET
-                .iter()
-                .position(|&letter| letter as char == upper)? as u128,
-        };
-        symbols += 1;
-        if symbols > 16 {
-            return None;
-        }
-        value = (value << 5) | symbol;
-    }
-    if symbols != 16 {
-        return None;
-    }
-    value.to_be_bytes()[6..].try_into().ok()
+    SetupCode::new()
+        .map(|code| code.to_string())
+        .map_err(HubError)
 }
 
 /// The state in `file`, `None` when there is none. A link, or a file others may read or write, is

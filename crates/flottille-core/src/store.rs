@@ -762,6 +762,11 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE run_processes ADD COLUMN boot TEXT NOT NULL DEFAULT '';
 ",
     "
+    -- The boot each agent process was recorded in, as a run process's: a record from before a
+    -- reboot, or from before this, is dropped unsignalled.
+    ALTER TABLE agent_processes ADD COLUMN boot TEXT NOT NULL DEFAULT '';
+",
+    "
     -- How long each step of a workspace's preparation took, from a monotonic clock, in
     -- milliseconds: the two timestamps beside it are the wall clock's and can jump (`docs/workspaces.md`,
     -- \"How long it took\").
@@ -1694,11 +1699,12 @@ impl Store {
         )?)
     }
 
-    /// An adapter process started for the agent: its pid and its start time.
-    pub fn add_process(&self, pid: u32, started: u64, agent: &str) -> Result<()> {
+    /// An adapter process started for the agent: its pid and its start time, in the boot `boot`.
+    pub fn add_process(&self, pid: u32, started: u64, agent: &str, boot: &str) -> Result<()> {
         self.connection.execute(
-            "INSERT OR REPLACE INTO agent_processes (pid, started, agent) VALUES (?1, ?2, ?3)",
-            params![pid, started, agent],
+            "INSERT OR REPLACE INTO agent_processes (pid, started, agent, boot) \
+             VALUES (?1, ?2, ?3, ?4)",
+            params![pid, started, agent, boot],
         )?;
         Ok(())
     }
@@ -1709,12 +1715,12 @@ impl Store {
         Ok(())
     }
 
-    /// Every process recorded, each `(pid, start time)`.
-    pub fn processes(&self) -> Result<Vec<(u32, u64)>> {
+    /// Every process recorded, each `(pid, start time, boot)`.
+    pub fn processes(&self) -> Result<Vec<(u32, u64, String)>> {
         let mut statement = self
             .connection
-            .prepare_cached("SELECT pid, started FROM agent_processes ORDER BY pid")?;
-        let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+            .prepare_cached("SELECT pid, started, boot FROM agent_processes ORDER BY pid")?;
+        let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
@@ -5204,10 +5210,10 @@ mod tests {
     #[test]
     fn processes_are_recorded_with_their_start_time_and_forgotten() {
         let store = Store::open_in_memory().unwrap();
-        store.add_process(4242, 77, "a").unwrap();
-        store.add_process(4343, 78, "b").unwrap();
+        store.add_process(4242, 77, "a", "b1").unwrap();
+        store.add_process(4343, 78, "b", "b1").unwrap();
         store.remove_process(4242).unwrap();
-        assert_eq!(store.processes().unwrap(), [(4343, 78)]);
+        assert_eq!(store.processes().unwrap(), [(4343, 78, "b1".to_owned())]);
     }
 
     #[test]

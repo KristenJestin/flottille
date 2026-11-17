@@ -432,7 +432,9 @@ pending requests.
   `run_status` says `needs auth, stopped` (in its list too), and a `service-stopped` delivery,
   urgent, tells the agent once: `auth, which dev-api needs, stopped. Your run <id> of dev-api goes
   on without it: services {"action": "start", "name": "auth"} starts it again.` (`was stopped by
-  the user` when the user stopped it).
+  the user` when the user stopped it). When it runs again, a `service-back` delivery, between
+  turns, tells it once: `auth, which dev-api needs, runs again. Your run <id> of dev-api has it
+  back.`
 - **Waiting**: the call waits `timeout` seconds (30 by default) for the end. A task
   that keeps running (`serve`) answers at once, and one already running for the agent is joined.
   A call stopped by its client stops its run.
@@ -514,9 +516,10 @@ pending requests.
     "The gaps");
   - no `DBUS_SESSION_BUS_ADDRESS`: the session bus leads to the keyring (`docs/vault.md`, "The
     runtime folder", which also says how the runtime folder itself is denied);
+  - no `SSH_AUTH_SOCK`, and from Landlock's ninth ABI no connecting to the user's SSH agent's
+    socket, wherever it is (`docs/vault.md`, "The runtime folder");
   - no push: `url./dev/null/flottille-refused-push/.pushInsteadOf` set the same way, which
-    rewrites every push URL to a path that is no remote, unless the run is itself a `git push`
-    (its own line, no wrapper) the user or the judge let through;
+    rewrites every push URL to a path that is no remote;
   - `FLOTTILLE_RUN` set to the run's id (to `address` for the line that prints a run's address),
     the marker a daemon started after a crash finds what the run left by ("Runs are records").
 - **A run may open windows on the user's screen** when its project says so: the setting *Agents may
@@ -565,7 +568,12 @@ pending requests.
   are the user's to skip, not the agent's. The hooks of the repository are never run.
 - **A push is the gate's**: `git push` is a call to judge, a forced one base, and only the push
   the gate read and let through goes out. A harmless command (a task, a test run)
-  cannot push from a script the gate never read. A push from a workspace is also refused, before
+  cannot push from a script the gate never read. A run that is itself a `git push` (its own
+  line, no wrapper) the user, the judge, a rule or Full mode let through does not get the
+  environment above: it runs outside the sandbox (no Landlock), with the daemon's own
+  environment and `core.hooksPath=/dev/null`, and none of the place's variables, as if the user
+  had typed it (`docs/commands.md`, "The environment"). Its task's `ready` and `url` commands
+  still run in the sandbox. A push from a workspace is also refused, before
   git runs, when a repository's remote no longer leads where it did when the workspace was made
   (`docs/commands.md`, "Where the remote leads").
 - **A stop ends the run's session, not every descendant.** A run starts in a session of its own
@@ -611,8 +619,16 @@ pending requests.
   marks their runs interrupted (`docs/projects.md`, "Services"): of the same boot only, a
   session and group whole while their leader is the process it started, else only the processes
   of that session that carry the run's marker, `FLOTTILLE_RUN=<run id>`, in their environment;
-  never a pid another program took since. A daemon that stops stops its runs,
-  interrupted. When a run's own process ends, what it left in its group is killed with it. The
+  never a pid another program took since. A long-lived helper that a run starts and that leaves
+  its session (a `tmux` server started detached makes a session of its own) is neither ended
+  with the run nor by this cleanup, and what it starts later, long after the run ended and at
+  anyone's request, still carries the run's marker: tmux hands the environment it started with
+  to every window it opens. The marker alone never makes a process the run's: one is ended
+  only if it is in the run's own session, carries the run's marker and started after the
+  recorded leader. The session check is strong, not absolute: a daemon that stayed down across a
+  pid wraparound may find that pid leading another session, and its members that carry the
+  marker (a tmux window's children, say) are then taken for the run's. A daemon that stops
+  stops its runs, interrupted. When a run's own process ends, what it left in its group is killed with it. The
   runs that ended go with their session, as its images do: when its root failed or ended and
   cannot be resumed, or 7 days after a root that can (`docs/protocol.md`, `agent.image`).
 
@@ -920,17 +936,22 @@ run follows its run and forge subscribe a pull request's checks.`
 **`vault {action: "list"}`** lists the entries of the user's vault the agent's project sees
 (`docs/vault.md`): each name with what it is for, its URL and its username, one field a line (the
 use an entry is bound to is not told: it could name another project). It is
-listed to an agent whose project sees at least one entry, misses one a feature names, or has a
-connection whose `login` takes one (a tool that could
+listed to an agent whose project sees at least one entry, misses one a feature names, has a
+connection whose `login` takes one, or is a root while Connections is on, which may propose a
+connection whose entries it then asks for (a tool that could
 only say the vault is empty and offer nothing to ask is not listed), and the agents of every project get or lose it when an entry is set or
 removed. No action returns a secret: any other action is refused, saying that a secret is never
 shown and that its name is given to the tool that needs it, which puts the secret where it goes
 itself. A read: the gate allows it in every mode.
 
-**`vault {action: "ask", name, why, url?, username?, for?, project?}`** asks the user to add a new
-entry (`docs/vault.md`, "Asking the user for an entry"): `url` where the secret goes, `username` the
-account, `for` its one use (`worklog`, or `connection:<name>` for a connection the user declared),
-`project` `this` or `every` (a connection's entry is every project's). The daemon reads `url` as a
+**`vault {action: "ask", name, why, url?, username?, for?, project?, connection?}`** asks the user
+to add a new entry (`docs/vault.md`, "Asking the user for an entry"): `url` where the secret goes,
+`username` the account, `for` its one use (`worklog`, or `connection:<name>` for a connection the
+user declared), `project` `this` or `every` (a connection's entry is every project's),
+`connection` the connection whose server is given it, declared or asked by a request waiting for
+the user, its declaration naming the entry (an ask for an entry such a request names is for it
+without saying so): every project's, its `url` the connection's origin unless one is given; a
+login's entry is asked with `for`, never through `connection`. The daemon reads `url` as a
 connection's `login` does and refuses one that is no `https` address (or `http` on this machine),
 plain `http` to another machine included. The user sees a card that opens Settings, Vault's form
 of a new entry prefilled with it, the host the daemon read (in ASCII) on a line of its own; an
@@ -948,7 +969,7 @@ has no field for a secret, and an argument it does not know is refused.
 
 | Tool | Arguments | |
 |---|---|---|
-| `connections` | `action list \| show \| add \| edit \| remove \| set \| on \| off`, `name?`, `about?`, `command?`, `url?`, `env?`, `headers?`, `only?`, `settings?` | The user's connections (`docs/extensions.md`, "Connections"), for every agent, whether Connections is on or off. `list` gives one line each: `- <name> (conn_<name>): <state>, <n> actions. <sentence>`, and why its server fails; `show` gives one with its command or URL, its variables and headers by vault entry name, its limits, the server's name and version as accepted and each action's setting. **Never a secret**: a variable is the name of its vault entry. **Every write is held for the user, in every mode, Full included** (a connection's command runs with the user's rights and its tool reaches every agent of every project): the call is answered at once that it is held, the result comes later as a delivery. `add` and `edit` take `command` as one line split without a shell (shell syntax refused, as a task's line), or `url` (`https://`, or `http://` on this machine); `env` (for a command) and `headers` (for a URL) map a name to a vault entry's name, which must exist and be every project's; a header's entry must have a `url` of the connection URL's own host (an entry with no `url`, or of another host, is refused, naming both hosts: the user binds it in their own form); `only` maps an argument to the values it may take; `env`, `headers` and `only` take `null` to remove them in an edit. The excepted projects, the OAuth client id and the switch are the user's (the switch through `on` and `off`). `set` takes `settings`, an action's name to `judged`, `passes`, `asked` or `off`, and is refused while the connection waits for the user's review. A declaration that does not fit is refused before the user is asked. The request's words are the declaration whole, an edit's changed fields with their old value; allowed, it is done only if those words are still what the declaration makes, by the path of the user's own Save (an add is given at once, every action judged). A child's write is refused, pointing it to `ask`. |
+| `connections` | `action list \| show \| add \| edit \| remove \| set \| on \| off`, `name?`, `about?`, `command?`, `url?`, `env?`, `headers?`, `only?`, `settings?` | The user's connections (`docs/extensions.md`, "Connections"), for every agent, whether Connections is on or off. `list` gives one line each: `- <name> (conn_<name>): <state>, <n> actions. <sentence>`, and why its server fails; `show` gives one with its command or URL, its variables and headers by vault entry name, its limits, the server's name and version as accepted and each action's setting. **Never a secret**: a variable is the name of its vault entry. **Every write is held for the user, in every mode, Full included** (a connection's command runs with the user's rights and its tool reaches every agent of every project): the call is answered at once that it is held, the result comes later as a delivery. `add` and `edit` take `command` as one line split without a shell (shell syntax refused, as a task's line), or `url` (`https://`, or `http://` on this machine); `env` (for a command) and `headers` (for a URL) map a name to a vault entry's name, which must exist (a URL's may be one the user is to make) and be every project's; a header's entry must have a `url` of the connection URL's own host; an entry another project holds alone is refused; one that is the agent's project's alone, bound to no `url` or to another host leaves the request held and its Accept waiting, naming both hosts, until the user shares or binds it from the request (the agent cannot), and the held answer says so, with the `vault` ask that names the connection; `only` maps an argument to the values it may take; `env`, `headers` and `only` take `null` to remove them in an edit. The excepted projects, the OAuth client id and the switch are the user's (the switch through `on` and `off`). `set` takes `settings`, an action's name to `judged`, `passes`, `asked` or `off`, and is refused while the connection waits for the user's review. A declaration that does not fit is refused before the user is asked. The request's words are the declaration whole, an edit's changed fields with their old value; allowed, it is done only if those words are still what the declaration makes, by the path of the user's own Save (an add is given at once, every action judged). A child's write is refused, pointing it to `ask`. |
 
 `conn_<name> {action, arguments?, for?}`: one tool per MCP server the user declared and reviewed
 (`docs/extensions.md`, "Connections"), given to every agent of every project but those its

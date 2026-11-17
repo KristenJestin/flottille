@@ -1,15 +1,17 @@
 //! Every method the daemon answers, with its class (`docs/remote.md`, "Roles"). The daemon
 //! answers no other: a method left out of it is unknown.
 
-use Class::{Drive, Read};
+use Class::{Drive, Local, Read};
 
 /// What a method does: `Read` changes nothing (a list, a show, a read, `events.watch`), `Drive`
 /// changes something. A device that may only view is allowed `Read` alone, so a method in doubt
-/// is `Drive`.
+/// is `Drive`. `Local` is answered only to a client of the machine itself, never over a link,
+/// whatever the caller's role.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Class {
     Read,
     Drive,
+    Local,
 }
 
 /// The catalogue, by family in the order of `docs/protocol.md`.
@@ -62,6 +64,9 @@ pub const METHODS: &[(&str, Class)] = &[
     ("connection.accept", Drive),
     ("connection.login", Drive),
     ("connection.proposed", Read),
+    // The user's Share and Bind of a vault entry an agent's request names.
+    ("connection.share_entry", Drive),
+    ("connection.bind_entry", Drive),
     ("spec.new", Drive),
     ("spec.from_ticket", Drive),
     ("spec.answer", Drive),
@@ -103,6 +108,8 @@ pub const METHODS: &[(&str, Class)] = &[
     ("remote.machines", Read),
     ("remote.address.add", Drive),
     ("remote.address.remove", Drive),
+    // It points this machine at a hub and a root of its own: the machine's user only.
+    ("remote.setup", Local),
     ("skill.list", Read),
     ("skill.show", Read),
     ("skill.add", Drive),

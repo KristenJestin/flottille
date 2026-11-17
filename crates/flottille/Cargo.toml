@@ -59,16 +59,22 @@ tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring
 tokio-util = "0.7.20"
 toml_edit = "0.25.17"
 url = "2.5.8"
+# The device key read from the session's keyring by `flottille remote setup`, wiped when dropped.
+zeroize = "1.9.1"
 
 [dev-dependencies]
+# The hub the remote scenarios serve in the test, on loopback.
+flottille-hub = { version = "0.1.0", path = "../flottille-hub" }
 flate2 = "1.1.10"
 # To make real pictures, and read the size of the one that was stored.
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 # The window's scenarios run on GPUI's test platform, in front of a real daemon.
-gpui-design-system = { git = "https://github.com/KristenJestin/gpui-design-system", tag = "v0.2.0-beta.17" }
+gpui-design-system = { git = "https://github.com/KristenJestin/gpui-design-system", tag = "v0.2.0-beta.18" }
 gpui-kit = { version = "=0.8.0", default-features = false, features = ["assets", "test-support"] }
 rmcp = { version = "3.7.0", default-features = false, features = ["client", "transport-streamable-http-client-reqwest", "reqwest-tls-no-provider"] }
 # Only to give reqwest, under rmcp's test client, the crypto provider it insists on even for http.
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std"] }
 # To take a store back to what an older version wrote (the scenarios of #519).
 rusqlite = { version = "0.41.0", features = ["bundled", "fallible_uint"] }
+# The hub of the remote scenarios runs on a runtime of the test's own.
+tokio = { version = "1.54.1", features = ["rt-multi-thread"] }

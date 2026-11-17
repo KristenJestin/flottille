@@ -143,7 +143,15 @@ pub fn ask(
     };
     match written {
         Ok(request) if request.held_by == approval::USER => {
-            (Outcome::Held(waiting(request.number)), Some(request.number))
+            let mut said = waiting(request.number);
+            // A connection's request is told up front what its vault entries must be.
+            if tool == "connections"
+                && let Some(note) = crate::extensions::family_held_note(args)
+            {
+                said.push(' ');
+                said.push_str(&note);
+            }
+            (Outcome::Held(said), Some(request.number))
         }
         Ok(request) => {
             tree::asks_parent(daemon, &request);

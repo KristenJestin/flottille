@@ -85,8 +85,7 @@ pub async fn commits(at: &Where<'_>, words: &[String]) -> Result<(), String> {
             Checked::Commit.nothing()
         )
     };
-    let env =
-        crate::runs::environment(at.daemon, at.place, at.repository, false).map_err(unknown)?;
+    let env = crate::runs::environment(at.daemon, at.place, at.repository).map_err(unknown)?;
     for git in gits {
         let words = unaliased(git.words, &git.folder, &env)
             .await
@@ -183,7 +182,8 @@ pub(crate) type Env = BTreeMap<OsString, OsString>;
 /// checks, run on each commit it sends, and its branch format, which each branch it makes on a
 /// remote must match (`docs/projects.md`). Git's dry run is read once for both. The refusal of the
 /// first that fails, naming it, or of a push that cannot be read; nothing when the project
-/// declares neither.
+/// declares neither. `env` is the push's own (`runs::lifted`): its dry run runs outside the
+/// sandbox, as the push does, and signs in the same way.
 pub async fn push(at: &Where<'_>, words: &[String], env: &Env) -> Result<(), String> {
     let nothing = Checked::Pushed.nothing();
     let project = crate::projects::load_project(at.daemon, &at.place.project).map_err(|failure| {
@@ -295,7 +295,8 @@ async fn dry_run(
     dry.extend_from_slice(&rest[..end]);
     dry.extend(["--dry-run", "--porcelain", "--no-quiet"].map(String::from));
     dry.extend_from_slice(&rest[end..]);
-    let tried = crate::git::run_in(folder, &dry, env, None).await?;
+    // Outside the sandbox, as the push: it signs in to the remote the same way.
+    let tried = crate::git::run_outside(folder, &dry, env).await?;
     let mut remotes: Vec<(String, Vec<Pushed>)> = Vec::new();
     for line in tried.stdout.lines() {
         if let Some(url) = line.strip_prefix("To ") {
@@ -635,8 +636,7 @@ pub(crate) async fn run_check(at: &Where<'_>, line: &str, check: &Check<'_>) -> 
             None => word.clone(),
         })
         .collect();
-    let env =
-        crate::runs::environment(at.daemon, at.place, at.repository, false).map_err(not_run)?;
+    let env = crate::runs::environment(at.daemon, at.place, at.repository).map_err(not_run)?;
     let program = match words[0].contains('/') {
         true => at.folder.join(&words[0]),
         false => PathBuf::from(&words[0]),

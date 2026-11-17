@@ -30,7 +30,7 @@ use flottille_protocol::{Class, class};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 
-use crate::serial::{from_hex_text, invisible, to_hex};
+use crate::serial::{from_hex_text, to_hex};
 use crate::{DeviceKey, KeyError, Member, Members, PublicKey, Role, Signature};
 
 /// The start of every request's signed bytes.
@@ -248,6 +248,12 @@ impl Requests {
                 shown(&signed.method)
             ));
         };
+        if class == Class::Local {
+            return refused(format!(
+                "{} is answered only on its own machine, never over a link",
+                signed.method
+            ));
+        }
         if member.role == Role::Viewer && class == Class::Drive {
             return refused(format!(
                 "{} may only view: a controller or a runner may call {}",
@@ -315,24 +321,9 @@ fn prefix(length: usize) -> Option<[u8; 4]> {
 /// The longest part of a text a refusal shows.
 const SHOWN: usize = 64;
 
-/// `text` as a refusal shows it, the sender's: its first 64 characters, a control or format
-/// character as `\u{fffd}`, so that it can neither forge lines of a log nor drive a terminal.
+/// `text` as a refusal shows it, the sender's: its first 64 characters (`serial::shown`).
 fn shown(text: &str) -> String {
-    let mut shown: String = text
-        .chars()
-        .take(SHOWN)
-        .map(|c| {
-            if c.is_control() || invisible(c) {
-                '\u{fffd}'
-            } else {
-                c
-            }
-        })
-        .collect();
-    if text.chars().nth(SHOWN).is_some() {
-        shown.push('…');
-    }
-    shown
+    crate::serial::shown(text, SHOWN)
 }
 
 #[cfg(test)]

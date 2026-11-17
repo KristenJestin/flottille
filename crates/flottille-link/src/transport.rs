@@ -451,3 +451,94 @@ fn verify(
         algorithms,
     )
 }
+
+/// TLS over a TCP stream to a hub (`control.rs`): TLS 1.3, the certificate checked against the
+/// system's roots, or against `roots` (certificates in DER) when given. Why it failed, otherwise.
+pub(crate) async fn tls_client(
+    stream: tokio::net::TcpStream,
+    host: &str,
+    roots: Option<&[Vec<u8>]>,
+) -> Result<Box<dyn crate::Stream>, String> {
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let mut store = rustls::RootCertStore::empty();
+    match roots {
+        None => {
+            for certificate in rustls_native_certs::load_native_certs().certs {
+                let _ = store.add(certificate);
+            }
+        }
+        Some(roots) => {
+            for certificate in roots {
+                let _ = store.add(CertificateDer::from(certificate.clone()));
+            }
+        }
+    }
+    let config = rustls::ClientConfig::builder_with_provider(provider)
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .map_err(|error| error.to_string())?
+        .with_root_certificates(store)
+        .with_no_client_auth();
+    let name = ServerName::try_from(host.to_owned())
+        .map_err(|_| format!("{host} is not a name TLS takes"))?;
+    let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
+    let secured = connector
+        .connect(name, stream)
+        .await
+        .map_err(|error| format!("its TLS failed: {error}"))?;
+    Ok(Box::new(secured))
+}
+
+/// TLS on a certificate the user gives, as the hub serves it: TLS 1.3.
+#[derive(Clone)]
+pub struct TlsServer(tokio_rustls::TlsAcceptor);
+
+impl TlsServer {
+    /// The certificate (its chain after it) and its private key, in PEM files. Why not, in a
+    /// sentence that names the files and never the key's bytes.
+    pub fn from_pem(
+        certificate: &std::path::Path,
+        key: &std::path::Path,
+    ) -> Result<TlsServer, String> {
+        use rustls::pki_types::pem::PemObject;
+        let certificates: Vec<CertificateDer<'static>> = CertificateDer::pem_file_iter(certificate)
+            .and_then(|found| found.collect::<Result<_, _>>())
+            .map_err(|error| {
+                format!(
+                    "{} is not a certificate in PEM: {error}",
+                    certificate.display()
+                )
+            })?;
+        if certificates.is_empty() {
+            return Err(format!("{} holds no certificate", certificate.display()));
+        }
+        let private = PrivateKeyDer::from_pem_file(key).map_err(|_| {
+            format!(
+                "{} is not a private key in PEM, or cannot be read",
+                key.display()
+            )
+        })?;
+        let config = rustls::ServerConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .map_err(|error| error.to_string())?
+        .with_no_client_auth()
+        .with_single_cert(certificates, private)
+        .map_err(|error| {
+            format!(
+                "the certificate {} and the key {} do not go together: {error}",
+                certificate.display(),
+                key.display()
+            )
+        })?;
+        Ok(TlsServer(tokio_rustls::TlsAcceptor::from(Arc::new(config))))
+    }
+
+    /// TLS over a stream that came in.
+    pub async fn accept(
+        &self,
+        stream: tokio::net::TcpStream,
+    ) -> std::io::Result<Box<dyn crate::Stream>> {
+        Ok(Box::new(self.0.accept(stream).await?))
+    }
+}

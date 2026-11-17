@@ -992,23 +992,48 @@ of 8 characters or more holds letters and three numbers or more apart (`Zq7Wx3Vp
 piece, where a name's word holds one number, at its end: `github-token-2`, `notion-api-v2`), and no
 masking rule takes it for a token, so that a token
 written where a name goes is refused unsaid instead of being shown to the user as a name to save.
-`connection.proposed` gives each secret line's `missing`, and `waits`, the sentence saying which
-entries are to be saved. The request stays held and **its Accept is refused while an entry it names
-is missing** (`approval.approve` answers why, the request still pending); once the user saved the
-entry, the checks of an entry apply to it as to any other, its host first, and an entry made on
-another host, or with no `url`, makes the accepted write refused. An entry deleted between the
-Accept and the write is refused where the write is decided, under the file's lock, which the
-vault's removal of an entry takes too: the write never lands with an entry whose host was not
-checked. An entry removed after the write fails the connection's start (each start looks its
-entries up again); its host is compared there with nothing, the user's own form binding any.
+`connection.proposed` gives each secret line's `missing`, `project` (the one project an entry is
+alone to), `share`, `to_bind`, `entry_url` and `origin` (below), and `waits`, the sentence saying what each entry still
+needs. **An entry problem never makes the request stale**: only a change of the declaration itself
+does (`current`). The request stays held and **its Accept is refused while an entry it names is
+not right for it** (`approval.approve` answers why, the request still pending): one missing, one
+project's alone (a connection is given to every project, so the entries it names are every
+project's), one bound to another use, or, for a URL's secret, one bound to no address or to
+another host (below). It becomes acceptable as soon as its entries are right, and the agent does
+not declare again. An entry that changed between the Accept and the write is refused where the
+write is decided, under the file's lock, which the vault's removal of an entry takes too: the write
+never lands with an entry whose scope and host were not checked. An entry removed after the write
+fails the connection's start (each start looks its entries up again); its host is compared there
+with nothing, the user's own form binding any.
 **An agent sends a vault entry only to the entry's own host**: a secret of a URL connection it
-proposes names an entry whose `url` has the connection URL's host (over `https://`, or `http://`
-on this machine); an entry with no `url`, or of another host, is refused before the user is asked,
-with a sentence naming both hosts and saying the user can bind it in their own form, which keeps
-its freedom. A secret the user bound already to the same host stays when an agent edits the
-rest; an edit that moves the URL elsewhere is refused the same way, since the entry would follow
-it. A command's variables may name any entry: they are the program's, and the card says each
-loudly. The words are compared once more where they are written, under the file's lock (a `set`
+proposes goes in its requests only once the entry's `url` has the connection URL's host (over
+`https://`, or `http://` on this machine). An entry with no `url`, or of another host, leaves the
+request waiting, with a sentence naming both hosts (`its url: https://…, or http:// on this
+machine`); a secret the user bound already to the same host stays when an agent edits the rest,
+and an edit that moves the URL elsewhere waits the same way, since the entry would follow it. A
+command's variables may name any entry: they are the program's, and the card says each loudly.
+An agent's `add` or `edit` naming an entry another project holds alone is refused at the call:
+only an entry of the agent's own project is offered for sharing.
+**The user mends an entry from the request, the agent never**: the request's dialog says, under
+**Where its secrets go**, `the vault entry <name> is <project>'s alone; a connection needs it for
+every project` with **Share with every project**, and `the vault entry <name> has no address; this
+connection would send it to <host>` (or `is for <other host>`) with **Bind it to <host>**. Each
+asks the window's one confirmation first, which says what it gives and to where (every project's
+agents see its metadata and every project's features may use it; its address now, or no
+address, and the origin it gets, where its secret will be sent; and that the change stays even if
+the request is then refused), then `connection.share_entry {number, entry}` or
+`connection.bind_entry {number, entry, host}`: the daemon takes only an entry the pending request
+names and can use (not one bound to another use, not one of another project than the asking
+agent's), only while the request is still current, and binds it to the origin it reads in the
+request's own declaration (`origin`: scheme, host and port), never to an address the window or an
+agent says, refusing when its host is not the `host` the confirmation showed. The dialog builds
+each line from its latest reading of the request, and shows none on a request that is no longer
+current. The line folds away, and Accept goes through on the same request. An entry made for a
+connection gets the connection's address (`docs/vault.md`, "Asking the user for an entry"), so a
+key the user types for it is bound by that alone. **The agent is told up front**: the `connections`
+tool's description, and its answer to an `add` or `edit` naming entries, say that a connection's
+entries are every project's and go to their own address, and that one the vault lacks is asked
+for with `vault {action: "ask", …, connection: "<name>"}`. The words are compared once more where they are written, under the file's lock (a `set`
 under the server's turn), so that no write of the user's lands between the comparison and the
 write. Its
 excepted projects, its OAuth client id and its switch (but through `on` and `off`) are the user's.
@@ -1211,8 +1236,14 @@ your browser`, and a toast says how it ended (`Signed in to notes`, or why not),
 connection signed out or whose tokens were not saved.
 Adding or editing one is a form dialog: its name (not editable once made), what it is for, how it
 is reached (radios: a program, its command one line split as a task's, shell syntax refused under
-it; or a URL), its variables (headers for a URL), each a name and a vault entry picked among those
-every project sees and no other use is bound to, and its limits (an argument and its values,
+it; or a URL), its variables (a program's), each a name and a vault entry picked among those
+every project sees and no other use is bound to, or its **Secrets of its requests** (a URL's), one
+line each: where it goes (a header, a query parameter, a cookie or basic authentication), its name
+(not for basic), its prefix (a header's, as `Bearer `, kept as typed) and its vault entry (the name
+and the prefix fold away under a place that does not take them, and are emptied), the old
+header lines among them as header lines with no prefix; a save sends `headers` (the lines with no
+prefix, as they always were) and `secrets` (the others, in the form's order), so that one that
+changes nothing leaves the declaration and its digest as they were, and its limits (an argument and its values,
 separated by commas). The projects a connection excepts are not in the form yet: the command line
 sets them. **Review** opens the diff in a wide dialog (640 px, `Modal::wide`), its server and its
 version (`almanac 1.0.0 → 2.0.0`), a search field and filter chips under the title, a bar and the
@@ -1251,13 +1282,25 @@ server**, filled with what it would write and read-only, an edit's changed field
 value struck above the new one, a `set` its settings, **Where its secrets go**: one line per vault
 entry the declaration names, with the entry's host (its `url`, or "no address") and where it goes
 (the connection's host, or the program's environment), in the warning colour and tagged when they
-differ, under a warning, and **Accept**, **Edit** and **Refuse** (a quiet button that answers at
+differ, under a warning (an entry that names no address is said as such, `bound to no address`, and
+tagged `No address`, not as another host), and **Accept**, **Edit** and **Refuse** (a quiet button that answers at
 once, as the rail's Deny: it writes nothing, so nothing is confirmed). **Edit** opens the server's
-form with the agent's values; its Save writes the user's values and answers the request
-(`connection.add`/`.edit` with `request`), which it decides under the file's lock before it
-writes: a request accepted meanwhile is refused to the Save, and only one of them writes. A request whose declaration changed since it was asked says so, and Accept is not
-offered. Everything animates as the rest of the window does:
-the servers fold away and unfold with the switch, a row unfolds when it arrives and folds away
+form with the agent's values, the secrets of its requests among them, and says it answers the
+request `#N`: its Save writes the user's values and answers the request, its Cancel leaves it
+waiting (`connection.add`/`.edit` with `request`), which it decides under the file's lock before it
+writes: a request accepted meanwhile is refused to the Save, and only one of them writes. That Save
+is held to Accept's rules for secrets, on what it writes and under the file's lock: it waits, as
+Accept does, while a vault entry the connection names is not made yet, and a secret line new to the
+connection goes only to its entry's own host (the user's own form, answering no request, binds
+freely). A request whose declaration changed since it was asked says so, and Accept is not
+offered; an entry that is not right yet is no such change: its line and its **Share** or **Bind**
+unfold under **Where its secrets go**, and fold away once the user mended it. When Accept answers that the request names a vault entry that is not made yet, the dialog
+shows a **New entry…** button per missing entry beside that answer (only that one: no other
+failure offers them, and they fold away with their block when it goes): it opens the vault's own entry
+dialog on the entry's name and, as its address, the host the request sends it to, the secret left
+for the user to type there (the request's dialog never holds it); saved or closed, the request's
+dialog is back, and Accept goes through once the entry exists. Everything animates as the rest of
+the window does: the servers fold away and unfold with the switch, a row unfolds when it arrives and folds away
 when it leaves, a field that a radio or a switch needs unfolds under it, the dialogs rise and
 fade, the review crossfades from its skeleton; in it, the server, the adapter's sentence, the bar,
 the search and the chips come one after the other, a row that changes setting folds away in its

@@ -16,7 +16,9 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 # Already built under ed25519-dalek: the setup code and the tokens compared in constant time.
 subtle = "2.6.1"
+tokio = { version = "1.54.1", features = ["rt", "net", "io-util", "sync", "time", "macros", "signal"] }
 
 [dev-dependencies]
 tempfile = "3.27.0"
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros"] }
 zeroize = "1.9.1"

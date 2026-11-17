@@ -172,36 +172,13 @@ pub fn end_session_where(leader: u32, ours: impl Fn(u32) -> bool) -> bool {
             if !in_session(pid, leader) {
                 continue;
             }
-            // SAFETY: pidfd_open takes a pid and flags and returns a descriptor or -1.
-            let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid as libc::pid_t, 0) };
-            if fd < 0 {
-                let error = io::Error::last_os_error();
-                // One that ended meanwhile is no failure; anything else (a kernel before 5.3, a
-                // seccomp filter) is, and no process is ever signalled by its bare pid instead.
-                if error.raw_os_error() != Some(libc::ESRCH) {
-                    PIDFD_FAILED.call_once(|| {
-                        eprintln!(
-                            "flottille daemon: cannot open a pidfd ({error}): what a run leaves \
-                             outside its process group is not ended with it"
-                        );
-                    });
-                }
+            let Some(fd) = pidfd(pid) else {
                 continue;
-            }
-            let fd = fd as libc::c_int;
+            };
             if in_session(pid, leader) && ours(pid) {
                 found = true;
                 any = true;
-                // SAFETY: the descriptor is the pidfd just opened; no siginfo is passed.
-                unsafe {
-                    libc::syscall(
-                        libc::SYS_pidfd_send_signal,
-                        fd,
-                        libc::SIGKILL,
-                        std::ptr::null::<libc::siginfo_t>(),
-                        0,
-                    );
-                }
+                kill_through(fd);
             }
             // SAFETY: the descriptor is ours and closed once.
             unsafe { libc::close(fd) };
@@ -211,6 +188,61 @@ pub fn end_session_where(leader: u32, ours: impl Fn(u32) -> bool) -> bool {
         }
     }
     any
+}
+
+/// Ends the session `leader` leads, and its process groups, when `leader` is still the process
+/// that started at `at`: whether it was. The leader is signalled through a pidfd opened before
+/// its start is read, so a process that took its pid meanwhile is never signalled; then the
+/// session's members, each through its own (`end_session_now`). Without a pidfd, nothing is.
+pub fn end_session_led(leader: u32, at: u64) -> bool {
+    let Some(fd) = pidfd(leader) else {
+        return false;
+    };
+    let same = start_time(leader) == Some(at);
+    if same {
+        kill_through(fd);
+    }
+    // SAFETY: the descriptor is ours and closed once.
+    unsafe { libc::close(fd) };
+    if same {
+        end_session_now(leader);
+    }
+    same
+}
+
+/// A pidfd of `pid`, `None` when it ended or none can be opened.
+fn pidfd(pid: u32) -> Option<libc::c_int> {
+    // SAFETY: pidfd_open takes a pid and flags and returns a descriptor or -1.
+    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid as libc::pid_t, 0) };
+    if fd < 0 {
+        let error = io::Error::last_os_error();
+        // One that ended meanwhile is no failure; anything else (a kernel before 5.3, a seccomp
+        // filter) is, and no process is ever signalled by its bare pid instead.
+        if error.raw_os_error() != Some(libc::ESRCH) {
+            PIDFD_FAILED.call_once(|| {
+                eprintln!(
+                    "flottille daemon: cannot open a pidfd ({error}): no process is signalled by \
+                     its bare pid, so the whole run is left running when it ends"
+                );
+            });
+        }
+        return None;
+    }
+    Some(fd as libc::c_int)
+}
+
+/// SIGKILL to the process of the pidfd: to nobody once it ended, whoever took its pid since.
+fn kill_through(fd: libc::c_int) {
+    // SAFETY: the descriptor is an open pidfd; no siginfo is passed.
+    unsafe {
+        libc::syscall(
+            libc::SYS_pidfd_send_signal,
+            fd,
+            libc::SIGKILL,
+            std::ptr::null::<libc::siginfo_t>(),
+            0,
+        );
+    }
 }
 
 /// How many times `end_session` reads `/proc` at most.

@@ -61,10 +61,11 @@ pub fn card(
         .bound
         .as_deref()
         .map(|bound| flottille_core::vault::use_said(bound).unwrap_or_else(|| bound.to_owned()));
-    let project = if ask.every {
-        EVERY_PROJECT
-    } else {
-        ask.project.as_str()
+    // An entry for a connection is every project's, and the card says why.
+    let project = match (&ask.connection, ask.every) {
+        (Some(connection), _) => format!("For the connection {connection} (every project)"),
+        (None, true) => EVERY_PROJECT.to_owned(),
+        (None, false) => ask.project.clone(),
     };
     let lines = div()
         .px(space::LG)
@@ -84,11 +85,11 @@ pub fn card(
                 .map(|what| line("vault-ask-what", "What it is for", what)),
         )
         .children(used.map(|used| line("vault-ask-for", "For", &used)))
-        .child(line("vault-ask-project", "Project", project))
+        .child(line("vault-ask-project", "Project", &project))
         .child(line("vault-ask-why", "Why", &ask.why));
     let number = ask.seq;
     let entry = prefilled(ask);
-    let (why, host) = (ask.why.clone(), ask.host.clone());
+    let (why, host, connection) = (ask.why.clone(), ask.host.clone(), ask.connection.clone());
     let dismiss_to = shell.clone();
     let dismissing = shell
         .upgrade()
@@ -111,9 +112,10 @@ pub fn card(
         .child(
             Button::primary(id("vault-ask-add"), "New entry").on_click(move |_, window, cx| {
                 let (entry, why, host) = (entry.clone(), why.clone(), host.clone());
+                let connection = connection.clone();
                 shell
                     .update(cx, |shell, cx| {
-                        shell.add_asked_vault_entry(entry, why, host, window, cx)
+                        shell.add_asked_vault_entry(entry, why, host, connection, window, cx)
                     })
                     .ok();
             }),

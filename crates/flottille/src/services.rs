@@ -654,12 +654,13 @@ fn flottille_runs(daemon: &Daemon, name: &str) -> bool {
 /// service being started is left to its start.
 async fn probed(daemon: &Arc<Daemon>, services: &BTreeMap<String, Service>) {
     for (name, service) in services {
-        tried_again(daemon, name, service).await;
+        tried_again(daemon, name, service, false).await;
     }
 }
 
-/// [`probed`], of one service.
-async fn tried_again(daemon: &Daemon, name: &str, service: &Service) {
+/// [`probed`], of one service. With `back`, for what follows it while a run needs it, one that
+/// Flottille does not run and that answers again is seen running outside Flottille again.
+async fn tried_again(daemon: &Daemon, name: &str, service: &Service, back: bool) {
     let Some(address) = runs::service_address(service) else {
         return;
     };
@@ -668,7 +669,7 @@ async fn tried_again(daemon: &Daemon, name: &str, service: &Service) {
         return;
     };
     let known = daemon.services.known(name);
-    if !known.outside
+    if !(known.outside || back)
         || known
             .run
             .as_ref()
@@ -676,11 +677,12 @@ async fn tried_again(daemon: &Daemon, name: &str, service: &Service) {
     {
         return;
     }
-    if !crate::ready::answers(&address).await {
+    let answers = crate::ready::answers(&address).await;
+    if answers != known.outside {
         daemon.services.set(
             name,
             Known {
-                outside: false,
+                outside: answers,
                 ..known
             },
         );
@@ -719,8 +721,9 @@ pub fn follow_needs(daemon: &Arc<Daemon>, needs: &[String]) {
 
 /// Follows a service while a run going on needs it, and says to each such run when it stops and
 /// when it runs again. The end of a run of Flottille's is known at once; a service running
-/// outside Flottille is tried every 15 s at its address (a connection, 5 s at most), never by its
-/// `ready` command, which no gate judged for this. What the daemon's stop interrupts is said to
+/// outside Flottille, or that does not run, is tried every 15 s at its address (a connection, 5 s
+/// at most): one that answers again runs outside Flottille, as the user started it by hand. Never
+/// by its `ready` command, which no gate judged for this. What the daemon's stop interrupts is said to
 /// nobody: what needs it stops with it.
 async fn follow_need(daemon: Arc<Daemon>, name: String) {
     loop {
@@ -762,7 +765,7 @@ async fn follow_need(daemon: Arc<Daemon>, name: String) {
                 if let Ok(services) = load(&daemon)
                     && let Some(service) = services.get(&name)
                 {
-                    tried_again(&daemon, &name, service).await;
+                    tried_again(&daemon, &name, service, true).await;
                 }
             }
         }
@@ -1117,7 +1120,12 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
                 && flottille_runs(&daemon, &name)
                 && let Some(said) = needed_now_said(&daemon, &name)
             {
-                return Err(Failure::new("needed", format!("Stop {name}? {said}")));
+                let needed_by: Vec<String> = needed_now(&daemon, &name)
+                    .into_iter()
+                    .map(|(said, _)| said)
+                    .collect();
+                return Err(Failure::new("needed", format!("Stop {name}? {said}"))
+                    .with_data(json!({ "needed_by": needed_by })));
             }
             stop(&daemon, &name).await?;
             let services = load(&daemon)?;

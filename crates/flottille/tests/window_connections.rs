@@ -732,6 +732,11 @@ fn new_server_declares_one_from_the_form_dialog(cx: &mut TestAppContext) {
     });
     // The daemon gave it to agents at once: the toast says so, every action judged, and its
     // button is the review.
+    until(&shell, cx, "the toast says it is given", |cx| {
+        toasts(&shell, cx)
+            .iter()
+            .any(|t| t == "Server almanac is given to agents")
+    });
     let said = toasts(&shell, cx);
     assert!(
         said.iter()
@@ -920,15 +925,32 @@ fn every_control_of_the_form_has_a_visible_label(cx: &mut TestAppContext) {
         );
         assert!(visible(cx, &format!("{field}-label")), "{field}-label");
     }
-    // A URL's requests carry headers, and say so.
+    // A URL's requests carry secrets, and say so.
     click(cx, "connection-reach-url");
     until(&shell, cx, "the URL's field unfolds", |cx| {
         visible(cx, "connection-url")
     });
+    click(cx, "connection-new-secret");
+    until(&shell, cx, "a secret's line unfolds", |cx| {
+        visible(cx, "connection-secret-0-name")
+    });
+    settle(cx);
     assert_eq!(
-        label(cx, "connection-variable-0-name-field-label").as_deref(),
-        Some("Header")
+        label(cx, "connection-secrets-field-label").as_deref(),
+        Some("Secrets of its requests")
     );
+    for (control, said) in [
+        ("place", "Place"),
+        ("name", "Name"),
+        ("prefix", "Prefix"),
+        ("entry", "Vault entry"),
+    ] {
+        assert!(visible(cx, &format!("connection-secret-0-{control}")));
+        assert_eq!(
+            label(cx, &format!("connection-secret-0-{control}-field-label")).as_deref(),
+            Some(said)
+        );
+    }
     assert_eq!(
         label(cx, "connection-url-field-label").as_deref(),
         Some("URL")
@@ -1243,7 +1265,7 @@ fn removing_the_last_header_of_a_url_clears_it_on_the_daemon(cx: &mut TestAppCon
     assert!(connection(&user, "remote").unwrap()["headers"].is_object());
     let (shell, cx) = window(&user, cx);
     open_page(&shell, cx);
-    save_without(&shell, cx, "remote", "connection-variable-0-remove");
+    save_without(&shell, cx, "remote", "connection-secret-0-remove");
     assert!(
         connection(&user, "remote")
             .unwrap()
@@ -1315,6 +1337,11 @@ fn an_edit_that_announces_a_change_says_a_review_is_needed(cx: &mut TestAppConte
         connection(&user, "almanac").unwrap()["state"],
         "awaiting review"
     );
+    until(&shell, cx, "the toast says it is saved", |cx| {
+        toasts(&shell, cx)
+            .iter()
+            .any(|t| t == "Server almanac saved")
+    });
     let said = toasts(&shell, cx);
     assert!(said.iter().any(|t| t == "Server almanac saved"), "{said:?}");
     let second = second_lines(&shell, cx);
@@ -1380,6 +1407,9 @@ fn the_form_says_it_is_saving_and_cannot_be_submitted_twice(cx: &mut TestAppCont
     click(cx, "save-connection");
     until(&shell, cx, "the dialog closes", |cx| {
         !visible(cx, "connection-modal")
+    });
+    until(&shell, cx, "the toast says it is given", |cx| {
+        toasts(&shell, cx) == ["Server almanac is given to agents"]
     });
     let said = toasts(&shell, cx);
     assert_eq!(said, ["Server almanac is given to agents"], "{said:?}");
@@ -3870,7 +3900,7 @@ fn a_review_whose_server_is_asked_shows_one_loading_state_then_fades_to_its_cont
 /// they unfold), by the keys the form gave them: only those that are drawn.
 fn form_rows(cx: &mut VisualTestContext) -> Vec<(String, f32)> {
     let mut rows = Vec::new();
-    for kind in ["variable", "limit", "site"] {
+    for kind in ["variable", "secret", "limit", "site"] {
         for key in 1..=16 {
             let id = format!("connection-{kind}-item-{key}");
             if present(cx, &id) {
@@ -3987,5 +4017,270 @@ fn a_row_that_moves_after_the_review_opened_still_unfolds(cx: &mut TestAppContex
     assert!(
         (rest - whole).abs() < 0.5,
         "{rest}px at rest, {whole}px before"
+    );
+}
+
+// ── The secrets of a URL's requests (#1015) ───────────────────────────────────────────────────
+
+/// The vault entries the secrets below name, none of them bound to an address.
+fn notes_entries(user: &User) {
+    for name in ["notes-plain", "notes-key", "notes-cookie", "notes-query"] {
+        user.call("vault.set", json!({"name": name, "secret": SECRET}))
+            .unwrap();
+    }
+    user.call(
+        "vault.set",
+        json!({"name": "notes-basic", "secret": SECRET, "username": "ana"}),
+    )
+    .unwrap();
+}
+
+/// The connection `remote` of the user with a plain header and one secret of each place.
+fn remote_with_every_secret(user: &User) -> Value {
+    notes_entries(user);
+    user.call(
+        "connection.add",
+        json!({"name": "remote", "about": "A notes server elsewhere.",
+        "url": "https://notes.example.com/mcp",
+        "headers": {"X-Plain": {"vault": "notes-plain"}},
+        "secrets": [
+            {"in": "header", "name": "X-Api-Auth", "prefix": "Bearer ", "entry": "notes-key"},
+            {"in": "query", "name": "workspace", "entry": "notes-query"},
+            {"in": "cookie", "name": "visit", "entry": "notes-cookie"},
+            {"in": "basic", "entry": "notes-basic"},
+        ]}),
+    )
+    .unwrap();
+    connection(user, "remote").unwrap()
+}
+
+/// Opens the form of `remote` and waits for the `lines` of its secrets.
+fn edit_remote(shell: &Entity<Shell>, cx: &mut VisualTestContext, lines: usize) {
+    until(shell, cx, "its row", |cx| visible(cx, "connection-remote"));
+    click(cx, "connection-more-remote");
+    click(cx, "edit-connection-remote");
+    until(shell, cx, "its secrets are in the form", |cx| {
+        (0..lines).all(|at| visible(cx, &format!("connection-secret-{at}-entry")))
+    });
+    settle(cx);
+}
+
+fn save_and_close(shell: &Entity<Shell>, cx: &mut VisualTestContext) {
+    click(cx, "save-connection");
+    until(shell, cx, "the dialog closes", |cx| {
+        !visible(cx, "connection-modal")
+    });
+}
+
+#[gpui_kit::test]
+fn a_connection_s_secrets_are_shown_and_kept_by_an_edit(cx: &mut TestAppContext) {
+    let user = user();
+    turn_on(&user);
+    let before = remote_with_every_secret(&user);
+    assert_eq!(before["secrets"].as_array().unwrap().len(), 4, "{before}");
+    let (shell, cx) = window(&user, cx);
+    open_page(&shell, cx);
+    edit_remote(&shell, cx, 5);
+
+    // The old header line first, as a header with no prefix, then each secret in its order.
+    let places: Vec<_> = (0..5)
+        .map(|at| label(cx, &format!("connection-secret-{at}-place")).unwrap_or_default())
+        .collect();
+    assert_eq!(
+        places,
+        [
+            "Header",
+            "Header",
+            "Query parameter",
+            "Cookie",
+            "Basic authentication"
+        ]
+    );
+    let entries: Vec<_> = (0..5)
+        .map(|at| label(cx, &format!("connection-secret-{at}-entry")).unwrap_or_default())
+        .collect();
+    assert_eq!(
+        entries,
+        [
+            "notes-plain",
+            "notes-key",
+            "notes-query",
+            "notes-cookie",
+            "notes-basic"
+        ]
+    );
+    let section = section(&shell, cx);
+    let (name, prefix) = section.read_with(cx, |s, _| s.secret_fields(1).unwrap());
+    assert_eq!(
+        name.read_with(cx, |f, _| f.value().to_string()),
+        "X-Api-Auth"
+    );
+    assert_eq!(
+        prefix.read_with(cx, |f, _| f.value().to_string()),
+        "Bearer "
+    );
+    assert!(!everything_said(cx).contains(SECRET));
+
+    // A save that changes nothing leaves the declaration, and so its digest, as it was.
+    save_and_close(&shell, cx);
+    assert_eq!(connection(&user, "remote").unwrap(), before);
+}
+
+#[gpui_kit::test]
+fn old_header_lines_are_written_back_as_they_were(cx: &mut TestAppContext) {
+    let user = user();
+    turn_on(&user);
+    user.call("vault.set", json!({"name": "notes-key", "secret": SECRET}))
+        .unwrap();
+    user.call(
+        "connection.add",
+        json!({"name": "remote", "about": "A notes server elsewhere.",
+            "url": "https://notes.example.com/mcp",
+            "headers": {"X-Notes-Key": {"vault": "notes-key"}}}),
+    )
+    .unwrap();
+    let before = connection(&user, "remote").unwrap();
+    assert!(before.get("secrets").is_none(), "{before}");
+    let (shell, cx) = window(&user, cx);
+    open_page(&shell, cx);
+    edit_remote(&shell, cx, 1);
+    assert_eq!(
+        label(cx, "connection-secret-0-place").as_deref(),
+        Some("Header")
+    );
+    save_and_close(&shell, cx);
+    let after = connection(&user, "remote").unwrap();
+    // Still `headers`, and no `secrets` of its own: what a pin's digest is made of.
+    assert_eq!(
+        after["headers"],
+        json!({"X-Notes-Key": {"vault": "notes-key"}})
+    );
+    assert!(after.get("secrets").is_none(), "{after}");
+    assert_eq!(after, before);
+}
+
+#[gpui_kit::test]
+fn a_secret_can_be_added_and_removed_in_the_form(cx: &mut TestAppContext) {
+    let user = user();
+    turn_on(&user);
+    remote_with_every_secret(&user);
+    let (shell, cx) = window(&user, cx);
+    open_page(&shell, cx);
+    edit_remote(&shell, cx, 5);
+    let section = section(&shell, cx);
+
+    // A new line unfolds, with every control labelled.
+    press(cx, "connection-new-secret");
+    a_third_later(cx);
+    let arriving: Vec<_> = form_rows(cx)
+        .into_iter()
+        .filter(|(id, _)| id.starts_with("connection-secret-item-"))
+        .collect();
+    assert_eq!(arriving.len(), 6, "{arriving:?}");
+    let (whole, moving) = (arriving[0].1, arriving[5].1);
+    assert!(
+        0. < moving && moving < whole,
+        "a line added unfolds: {moving}px of {whole}px a third in"
+    );
+    settle(cx);
+    for (control, field, said) in [
+        ("place", "place-field", "Place"),
+        ("name", "name-field", "Name"),
+        ("prefix", "prefix-field", "Prefix"),
+        ("entry", "entry-field", "Vault entry"),
+    ] {
+        let id = format!("connection-secret-5-{control}");
+        assert!(visible(cx, &id), "{id} is drawn");
+        assert_eq!(
+            label(cx, &format!("connection-secret-5-{field}-label")).as_deref(),
+            Some(said),
+            "{id}"
+        );
+    }
+    click(cx, "connection-secret-5-place");
+    click(cx, "connection-secret-5-place-query");
+    let (name, _) = section.read_with(cx, |s, _| s.secret_fields(5).unwrap());
+    type_in(&name, "team", cx);
+    click(cx, "connection-secret-5-entry");
+    click(cx, "connection-secret-5-entry-notes-key");
+
+    // A line removed folds away, and is not written.
+    click(cx, "connection-secret-1-remove");
+    until(&shell, cx, "the line is gone", |cx| {
+        !present(cx, "connection-secret-5-name")
+    });
+    save_and_close(&shell, cx);
+    let after = connection(&user, "remote").unwrap();
+    assert_eq!(
+        after["secrets"],
+        json!([
+            {"in": "query", "name": "workspace", "entry": "notes-query"},
+            {"in": "cookie", "name": "visit", "entry": "notes-cookie"},
+            {"in": "basic", "entry": "notes-basic"},
+            {"in": "query", "name": "team", "entry": "notes-key"},
+        ]),
+        "{after}"
+    );
+    assert_eq!(
+        after["headers"],
+        json!({"X-Plain": {"vault": "notes-plain"}})
+    );
+}
+
+#[gpui_kit::test]
+fn a_secret_s_name_and_prefix_fold_away_where_they_do_not_apply(cx: &mut TestAppContext) {
+    let user = user();
+    turn_on(&user);
+    remote_with_every_secret(&user);
+    let (shell, cx) = window(&user, cx);
+    open_page(&shell, cx);
+    edit_remote(&shell, cx, 5);
+    let section = section(&shell, cx);
+    // A basic line has no name; only a header has a prefix.
+    assert!(!visible(cx, "connection-secret-4-name"));
+    assert!(!visible(cx, "connection-secret-2-prefix"));
+    assert!(visible(cx, "connection-secret-1-prefix"));
+
+    // The bearer header moved to a query parameter: its prefix folds away, and is not kept.
+    let whole = height(cx, "connection-secret-1-prefix-block");
+    click(cx, "connection-secret-1-place");
+    press(cx, "connection-secret-1-place-query");
+    a_third_later(cx);
+    let folding = height(cx, "connection-secret-1-prefix-block");
+    assert!(
+        0. < folding && folding < whole,
+        "the prefix folds away: {folding}px of {whole}px a third in"
+    );
+    settle(cx);
+    assert!(!visible(cx, "connection-secret-1-prefix"));
+    assert!(visible(cx, "connection-secret-1-name"));
+    let (_, prefix) = section.read_with(cx, |s, _| s.secret_fields(1).unwrap());
+    assert_eq!(prefix.read_with(cx, |f, _| f.value().to_string()), "");
+
+    // A cookie made basic: its name folds away and is not kept; the basic line made a cookie
+    // unfolds a name to type.
+    click(cx, "connection-secret-3-place");
+    click(cx, "connection-secret-3-place-basic");
+    assert!(!visible(cx, "connection-secret-3-name"));
+    let (name, _) = section.read_with(cx, |s, _| s.secret_fields(3).unwrap());
+    assert_eq!(name.read_with(cx, |f, _| f.value().to_string()), "");
+    click(cx, "connection-secret-4-place");
+    click(cx, "connection-secret-4-place-cookie");
+    assert!(visible(cx, "connection-secret-4-name"));
+    assert!(!visible(cx, "connection-secret-4-prefix"));
+    let (name, _) = section.read_with(cx, |s, _| s.secret_fields(4).unwrap());
+    type_in(&name, "session", cx);
+
+    save_and_close(&shell, cx);
+    let after = connection(&user, "remote").unwrap();
+    assert_eq!(
+        after["secrets"],
+        json!([
+            {"in": "query", "name": "X-Api-Auth", "entry": "notes-key"},
+            {"in": "query", "name": "workspace", "entry": "notes-query"},
+            {"in": "basic", "entry": "notes-cookie"},
+            {"in": "cookie", "name": "session", "entry": "notes-basic"},
+        ]),
+        "{after}"
     );
 }

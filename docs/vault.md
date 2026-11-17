@@ -134,13 +134,25 @@ is missing (the tracker's `worklog_token`, a browser `login`'s entry), or the ta
 the vault does not hold. It may ask the user to add **any new entry**: the ask is a helper to add
 an entry to the vault, not a request with rules of its own.
 
-- **`vault {action: "ask", name, why, url?, username?, for?, project?}`.** `name` is the new
-  entry's name; `url` the address the secret is for, which the daemon reads as a connection's
-  `login` does (a backslash is a `/`, a domain is said in ASCII) and refuses when it is no `https`
-  address, or `http` on this machine; `username` the account; `for` the use it is bound to,
-  `worklog` (the agent's project's) or `connection:<name>` (a connection the user declared), or
-  none; `project` `this`
-  (the agent's project's alone) or `every`, a connection's entry being every project's. A name
+- **`vault {action: "ask", name, why, url?, username?, for?, project?, connection?}`.** `name` is
+  the new entry's name; `url` the address the secret is for, which the daemon reads as a
+  connection's `login` does (a backslash is a `/`, a domain is said in ASCII) and refuses when it
+  is no `https` address, or `http` on this machine; `username` the account; `for` the use it is
+  bound to, `worklog` (the agent's project's) or `connection:<name>` (a connection the user
+  declared), or none; `project` `this` (the agent's project's alone) or `every`, a connection's
+  entry being every project's.
+- **An ask for a connection's server is every project's.** `connection` names the connection the
+  entry is for: one the user declared, or one the asking agent's own request waiting for the
+  user asks to add (another agent's request never decides what this one's ask is for), whose declaration gives that entry to its server (a variable, a header, a query parameter,
+  a cookie, basic); one it does not name is refused, a login's entry being asked with `for`
+  instead and keeping the project asked. Left out, an ask for an entry such a request of its own
+  names is for that connection. Such an ask is every
+  project's (`project: "this"` is refused), its `url`, left out, is the connection's origin
+  (`http://127.0.0.1:7468` for a server on this machine), and its card says `For the connection
+  <name> (every project)`. The form it opens has "Seen by agents of" on **Every project** and
+  says why under it, and the URL prefilled and editable: the secret typed for that address is
+  what binds it, and the request then goes through at Accept (`docs/extensions.md`,
+  "Connections"). A name
   the vault already holds is refused, naming it: the agent uses it (when its project sees it) or
   asks under another name. An entry a feature of Flottille names and the project misses (today
   the tracker's `worklog_token`, `docs/tickets.md`, "Logging time") keeps the feature's prefill:
@@ -192,7 +204,13 @@ an entry without one goes in no request an agent chose; the user's own form bind
 card of the request says where each entry goes. An agent's connection may name an entry that does
 not exist yet, for the user to save (never one that looks like a secret): the request waits, its
 Accept refused while the entry is missing, and once saved the entry's host is checked as any
-other's. `vault::secret` and the connections' reading take the use asking, and refuse an entry bound to
+other's. An entry that is one project's, or bound to no address or another host, leaves the
+request waiting the same way, never refused, unless it is another project's than the asking
+agent's: that one is refused at the call, as no project's entry is offered to another's agent's
+connection. The user widens it from the request's dialog, the
+scope with **Share with every project**, the address with **Bind it to <host>**, each behind the
+window's confirmation, which says that the change stays even if the request is then refused,
+and the agent can do neither. `vault::secret` and the connections' reading take the use asking, and refuse an entry bound to
 another.
 
 ## The runtime folder
@@ -201,8 +219,8 @@ The keyring answers on the session bus, whose socket is in the user's runtime fo
 (`/run/user/<uid>/bus`), and any program can speak D-Bus: refusing `secret-tool` or `busctl` by
 name keeps nothing out. So what the daemon runs for an agent or a connection reaches no session
 bus: a run, a project's service and its readiness probe, a workspace's setup line, a commit's or
-a push's message checks and the git reads made for them (the push's dry run, with the line's own
-options and the remote's transport), a connection's server and its login:
+a push's message checks and the git reads made for them, a connection's server and its login. A
+push the gate let through, and its checks' dry run, are the exception (below):
 
 - its environment has no `DBUS_SESSION_BUS_ADDRESS`, and no `XDG_RUNTIME_DIR` either, so libdbus,
   sd-bus and GDBus find no bus by default. `DBUS_SYSTEM_BUS_ADDRESS` is kept: the system bus holds
@@ -217,6 +235,22 @@ options and the remote's transport), a connection's server and its login:
   `$XDG_RUNTIME_DIR/flottille/display/<connection>`, which holds a hard link of the Wayland socket
   alone (`docs/extensions.md`, "Adapters"), without the right to link or move a file out of it.
   The folder is the one the daemon made, never one a variable of the connection names.
+
+**The SSH agent stays out of every run.** What the daemon runs gets no `SSH_AUTH_SOCK`. The socket
+the daemon's own environment named when it started (resolved then, links followed) is also kept out
+by its path: inside the runtime folder it is denied with it; outside it (`/tmp/ssh-…/agent.…`, a
+password manager's under the home), from Landlock's ninth ABI, the folders on the way to it are
+ruled without the right to connect, their other entries with every right, and the socket itself
+gets no rule.
+
+**A push the gate let through runs outside the sandbox.** A run that is itself a `git push` (its own
+line, no wrapper) the user, the judge, a rule or Full mode let through, and the dry run the
+project's commit checks make of it, run with no Landlock and the daemon's own environment, as if
+the user had typed the push: the session bus (so the keyring), the SSH agent, the credential
+helper and the forge command line's sign-in are theirs. Only `core.hooksPath=/dev/null` is added,
+and the project's and the workspace's variables are not applied (`docs/commands.md`, "The
+environment"). The other git reads made for a push, and the probes of a push's task (its `ready`
+and `url` commands), run in the sandbox.
 
 The daemon's own runtime folder is denied with the rest: a `flottille daemon stop` run for an
 agent cannot read the daemon's lock, and refuses itself when the daemon does not answer, as a
@@ -244,10 +278,19 @@ The gaps, where the platform does not allow more:
   `LANDLOCK_ACCESS_FS_RESOLVE_UNIX`). Before it, the runtime folder cannot be listed and its files
   cannot be opened, but a process that guesses the bus's path can still connect to it;
 - from the ninth ABI on, connecting is denied to every socket of the runtime folder, not only the
-  bus: an `SSH_AUTH_SOCK` or a gpg-agent socket there cannot be reached either, so a `git push`
-  over SSH through an agent's keys, its dry run, or a commit signed through gpg-agent fails. A
-  known gap the other way: `SSH_AUTH_SOCK` is still passed to what the daemon runs, and below the
-  ninth ABI the SSH agent it names can be connected to;
+  bus: a gpg-agent socket there cannot be reached, so a commit signed through gpg-agent fails;
+- below the ninth ABI, connecting is not governed: a run gets no `SSH_AUTH_SOCK`, but one that
+  guesses the agent's path can still connect to it, as to the bus;
+- a push the gate let through runs with what the repository's settings say, as the user's own
+  push from that folder would: a script the gate never read may have changed them before
+  (`credential.helper`, `core.sshCommand`, `core.fsmonitor`, `url.*.insteadOf`), and that applies
+  to the push, outside the sandbox, with the user's credentials. So does what the user's
+  `~/.ssh/config` runs (`ProxyCommand`, `Match exec`), which a confined command can still write
+  until the private mount namespace (#976) mounts `~/.ssh` read-only. The gate judges the push's
+  line, not the repository it runs in: an accepted risk, decided so that a push the user allowed
+  signs in as theirs does;
+- from the ninth ABI, a socket made after a command started directly in a folder on the way to a
+  kept-out agent socket (`/tmp` for `/tmp/ssh-…/agent.…`) cannot be connected to by that command;
 - without Landlock (a kernel before 5.19, or one built without it), the process runs as before,
   with only the environment kept from it;
 - a bus listening on an abstract socket (`unix:abstract=…`, older setups) is not a path, and is

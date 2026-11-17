@@ -66,7 +66,9 @@ connection carries any number of requests; answers may come in any order and are
 ```
 
 Exactly one of `result` and `error`. A line that is not a request is answered with an error
-without an `id`.
+without an `id`. An error may carry `data`, what its sentence says as data a client draws, where
+its method says so (`service.stop`'s `needed`); a client that does not know it reads the
+sentence.
 
 | Error code | |
 |---|---|
@@ -92,7 +94,8 @@ Sent only on a connection that subscribed with `events.watch`. The event's field
 Every method the daemon answers is in the catalogue of `flottille-protocol`
 (`crates/flottille-protocol/src/catalogue.rs`), each with its class: `read` for one that changes
 nothing (a list, a show, a read, `events.watch`), `drive` for any other (`docs/remote.md`,
-"Roles"). A method the catalogue does not name is answered `unknown-method` before anything reads
+"Roles"), and `local` for one answered to the machine's own clients only, never over a link,
+whatever the caller's role (`remote.setup`). A method the catalogue does not name is answered `unknown-method` before anything reads
 it.
 
 ### `daemon.status`
@@ -616,10 +619,24 @@ setting}]`, `setting` being `judged`, `passes`, `asked` or `off`).
   `connection.list` gives them (`null` for an add's `before` and a removal's `after`), `changed` the
   keys an edit changes, `settings` those a `set` gives, `secrets` where each vault entry of the
   declaration shown goes (`{"key": "env" | "headers", "name", "entry", "entry_host", "host",
-  "differs"}`: the entry's host, `null` without a `url`; the connection's, `null` for a command;
-  `differs` when they differ or it goes to a program), and `current` whether it is still what the
-  request says: one that is not is not done once allowed (`why` says why, when it can no longer be
-  done at all).
+  "differs", "missing", "project", "share", "to_bind", "entry_url", "origin"}`: the entry's host,
+  `null` without a `url`; the connection's, `null` for a command; `differs` when they differ or it
+  goes to a program; `project` the one project the entry is alone to; `share` when the user may
+  share it from the request (the asking agent's own project's alone, usable for the connection);
+  `to_bind` when Accept waits for the entry, usable for the connection, to be bound to the
+  connection's host; `entry_url` the entry's `url`; `origin` the connection's scheme, host and
+  port),
+  `current` whether it is still what the request says: one that is not is not done once allowed
+  (`why` says why, when it can no longer be done at all; an entry that is not right yet is no such
+  change), and `waits`, why Accept waits, if it does.
+- `connection.share_entry {number, entry}` and `connection.bind_entry {number, entry, host}` are the
+  user's **Share with every project** and **Bind it to <host>** on an agent's pending `add` or
+  `edit`: the vault entry `entry`, which the request must name, is made every project's, or its
+  `url` set to the origin of the request's own connection (a URL's secret line only), whose host
+  must be `host`, the one the confirmation showed. `refused` for an entry the request does not
+  name, one bound to another use, one another project than the asking agent's holds alone, a
+  request already decided, no longer current or another tool's, a `host` that is not the one the
+  daemon reads, and a worklog's entry to share; the entry's metadata as `vault.list` gives it otherwise.
 - `connection.add` and `connection.edit` take `request`, the number of a pending `add` or `edit`
   of that very connection an agent asked: the user's own values are written instead of the
   agent's (the card's **Edit**), and the request is answered, the agent told what was written. It
@@ -939,7 +956,27 @@ with the reason. No method answers a private key.
   `state` `online`, `offline` or `needs an update`, `since` when it is so (milliseconds since the
   Unix epoch), `reason` why it is not online (`server refused the link: …`, the sentence of
   `docs/remote.md`, "The version"), or `null`, and `addresses` those it knows it at: given (by
-  the hub, by hand), then told by it.
+  the hub, by hand), then told by it. `hub` is the hub this machine pinned (`docs/remote.md`, "The
+  hub"), `null` until it is set up: `{"url", "key", "fingerprint", "state", "since", "reason"}`,
+  `state` being `connected`, `unreachable` (`reason`: `the hub at hub.example.net:443 is
+  unreachable since 22:14: …`), `reset` (`the hub's member list was reset: set this device up
+  again`), `refused` (the hub has another key than when this device joined, refused this device,
+  or sent a member list that does not check: the sentence says which), `needs an update`, or
+  `none` before the first try. Once set up, the machines it trusts are the members' machines of
+  the list as last checked.
+- `remote.setup {url, code, changes, replace?}` makes this machine the first member of the hub at
+  `url` (`docs/remote.md`, "The first member"), with the setup `code` the hub printed. `changes`
+  are what the client signed with the device key, which the daemon never holds: the device's own
+  entry as the root, a `runner`, after a new list id, then the declaration of this machine's key
+  (`flottille_link::Action`, `machine`), which the daemon claims with the machine's key. The
+  daemon reaches the hub, proves the code without sending it, pins the hub's key once the hub
+  proved it too, keeps the list once the hub sent it back holding the setup, and keeps the
+  session; it answers `{"url", "hub", "root"}` (the hub's URL as written, the fingerprints of the
+  hub's key and of the root). `refused` with the sentence: a code that is not the hub's, a hub
+  that has a member already, a hub that did not prove the code or withheld the setup, a machine
+  set up already without `replace: true`, a hub that cannot be reached (`the hub at
+  192.0.2.10:7448 is unreachable: tried 192.0.2.10:7448: Connection refused`). Its class is
+  `Local`: answered to this machine's own clients only, never over a link.
 - `remote.address.add {address}` declares an address of this machine: a host name or an IP
   address, and its port when it is not the link's own (`100.64.0.7`, `server.example.net:7447`).
   It answers `this` as above, and is told at once to the machines linked to this one.
@@ -1447,7 +1484,9 @@ started again (`started` is empty), nor one that answers already (its state is t
 `{"name", "force"?}`: `{"service": {...}}`, once it ended: its whole process group, as `run.stop`
 does. What it needs and what needs it go on. `needed` while something running needs it (its
 `needed_now`) and `force` is not `true`, with the sentence that says what goes on without it
-(`Stop auth? app's api needs it and is running: it goes on without it.`): nothing is stopped.
+(`Stop auth? app's api needs it and is running: it goes on without it.`) and, in the error's
+`data`, `{"needed_by": ["app's api"]}`, what runs and needs it, as `needed_now` says each, for a
+client to draw: nothing is stopped.
 `refused` when it is not running, or runs outside Flottille, which does not stop it. The agent of
 each run that needs it is told it was stopped (`docs/tools.md`, "Tasks and runs").
 

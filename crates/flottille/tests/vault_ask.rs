@@ -318,7 +318,16 @@ fn the_ask_for_an_entry_has_no_field_for_a_secret() {
     fields.sort();
     assert_eq!(
         fields,
-        ["action", "for", "name", "project", "url", "username", "why"],
+        [
+            "action",
+            "connection",
+            "for",
+            "name",
+            "project",
+            "url",
+            "username",
+            "why"
+        ],
         "{tool}"
     );
 
@@ -827,4 +836,160 @@ fn the_inbox_entry_says_the_host_and_every_project() {
     let own = inbox_text(&user, "app-login");
     assert!(own.contains("the project app"), "{own}");
     assert!(!own.contains("every project"), "{own}");
+}
+
+#[test]
+fn a_vault_ask_for_a_connection_is_every_project_s() {
+    let user = User::with_fake_agent().with_fake_acli();
+    project(&user, "jira-time");
+    user.call(
+        "extension.set",
+        json!({"name": "connections", "enabled": true}),
+    )
+    .unwrap();
+    let (mcp, _) = root_in(&user);
+    let proposed = mcp.call(
+        "connections",
+        json!({"action": "add", "name": "hippocampe", "about": "The user's memory.",
+            "url": "http://127.0.0.1:7468/mcp",
+            "secrets": [{"in": "header", "name": "Authorization", "prefix": "Bearer ",
+                "entry": "hippocampe-key"}]}),
+    );
+    assert!(
+        proposed.text.starts_with("Waiting for the user's approval"),
+        "{}",
+        proposed.text
+    );
+
+    // Named by the request waiting for it: the ask is that connection's, every project's, and
+    // the entry's address is the connection's.
+    let asked = ask(&mcp, "hippocampe-key", "the key of the memory server");
+    assert!(!asked.error, "{}", asked.text);
+    assert!(asked.text.contains("every project"), "{}", asked.text);
+    let open = asks(&user);
+    assert_eq!(open[0]["connection"], "hippocampe", "{open:?}");
+    assert_eq!(open[0]["every"], true, "{open:?}");
+    assert_eq!(open[0]["url"], "http://127.0.0.1:7468", "{open:?}");
+    assert_eq!(open[0]["host"], "127.0.0.1", "{open:?}");
+    assert!(
+        inbox_text(&user, "hippocampe-key").contains("every project"),
+        "{}",
+        inbox_text(&user, "hippocampe-key")
+    );
+
+    // Named by the argument too, for an entry the connection gives its server: never this
+    // project's alone, never a connection nobody asked.
+    let proposed = mcp.call(
+        "connections",
+        json!({"action": "add", "name": "recall", "about": "Another memory.",
+            "url": "https://recall.example.com/mcp",
+            "secrets": [{"in": "query", "name": "key", "entry": "recall-key"}]}),
+    );
+    assert!(
+        proposed.text.starts_with("Waiting for the user's approval"),
+        "{}",
+        proposed.text
+    );
+    let refused = mcp.call(
+        "vault",
+        json!({"action": "ask", "name": "recall-key", "why": "another key",
+            "connection": "recall", "project": "this"}),
+    );
+    assert!(refused.error, "{}", refused.text);
+    assert!(refused.text.contains("every project"), "{}", refused.text);
+    let unknown = mcp.call(
+        "vault",
+        json!({"action": "ask", "name": "other-key", "why": "another key",
+            "connection": "nowhere"}),
+    );
+    assert!(unknown.error, "{}", unknown.text);
+    assert!(unknown.text.contains("nowhere"), "{}", unknown.text);
+    // An entry the connection does not give its server (a login's) is not made every
+    // project's through it.
+    let unnamed = mcp.call(
+        "vault",
+        json!({"action": "ask", "name": "recall-login", "why": "a login",
+            "connection": "recall"}),
+    );
+    assert!(unnamed.error, "{}", unnamed.text);
+    assert!(
+        unnamed
+            .text
+            .contains("gives its server no vault entry recall-login"),
+        "{}",
+        unnamed.text
+    );
+    let named = mcp.call(
+        "vault",
+        json!({"action": "ask", "name": "recall-key", "why": "another key",
+            "connection": "recall"}),
+    );
+    assert!(!named.error, "{}", named.text);
+    let second = asks(&user)
+        .into_iter()
+        .find(|ask| ask["name"] == "recall-key")
+        .unwrap();
+    assert_eq!(second["every"], true, "{second}");
+    assert_eq!(second["connection"], "recall", "{second}");
+    assert_eq!(second["url"], "https://recall.example.com", "{second}");
+    assert!(
+        !asks(&user).iter().any(|ask| ask["name"] == "recall-login"),
+        "nothing asked for the login"
+    );
+}
+
+#[test]
+fn a_vault_ask_is_never_tied_to_another_agents_pending_connection() {
+    let user = User::with_fake_agent().with_fake_acli();
+    project(&user, "jira-time");
+    other_project(&user);
+    user.call(
+        "extension.set",
+        json!({"name": "connections", "enabled": true}),
+    )
+    .unwrap();
+    let (app, _) = root_in(&user);
+    let (other, _) = root_of(&user, "other");
+    // Another project's agent proposes a connection of its own naming the entry.
+    let proposed = other.call(
+        "connections",
+        json!({"action": "add", "name": "evil", "about": "Somewhere else.",
+            "url": "https://evil.example/mcp",
+            "secrets": [{"in": "header", "name": "Authorization", "prefix": "Bearer ",
+                "entry": "jira-token"}]}),
+    );
+    assert!(
+        proposed.text.starts_with("Waiting for the user's approval"),
+        "{}",
+        proposed.text
+    );
+
+    // The ask of app's agent is its own: not every project's, no url filled, no connection.
+    let asked = ask(&app, "jira-token", "to log time");
+    assert!(!asked.error, "{}", asked.text);
+    assert!(!asked.text.contains("evil"), "{}", asked.text);
+    assert!(!asked.text.contains("every project"), "{}", asked.text);
+    let open = asks(&user);
+    assert_eq!(open.len(), 1, "{open:?}");
+    assert_eq!(open[0]["connection"], Value::Null, "{open:?}");
+    assert_eq!(open[0]["every"], false, "{open:?}");
+    assert_eq!(open[0]["url"], Value::Null, "{open:?}");
+    let card = inbox_text(&user, "jira-token");
+    assert!(!card.contains("evil"), "{card}");
+    assert!(!card.contains("every project"), "{card}");
+
+    // Nor may it name that connection itself, for the very entry it names: it is no request of
+    // its own.
+    let named = app.call(
+        "vault",
+        json!({"action": "ask", "name": "jira-token", "why": "a key", "connection": "evil"}),
+    );
+    assert!(named.error, "{}", named.text);
+    assert!(!named.text.contains("evil.example"), "{}", named.text);
+    let open = asks(&user);
+    assert_eq!(open.len(), 1, "{open:?}");
+    assert!(
+        !open.iter().any(|ask| ask["connection"] == "evil"),
+        "nothing asked through another agent's connection: {open:?}"
+    );
 }

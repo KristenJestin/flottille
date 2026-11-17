@@ -186,7 +186,7 @@ fn both_sides_draw_the_same_four_words() {
 #[test]
 fn an_entry_not_signed_by_the_invitation_s_fingerprint_is_refused_by_the_new_device() {
     let (pc, pixel, laptop) = (key(1), key(2), key(4));
-    let mut list = MemberList::start("pc", &pc);
+    let mut list = MemberList::start("pc", &pc).unwrap();
     list.sign(
         Action::Add {
             key: pixel.public(),

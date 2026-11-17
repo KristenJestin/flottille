@@ -134,7 +134,26 @@ pub fn confined_but<'a>(
     open: Option<&crate::display::Folder>,
 ) -> &'a mut tokio::process::Command {
     let abi = abi();
-    let denied = runtime_folders();
+    let mut denied = runtime_folders();
+    let rights = rights(abi);
+    // The user's SSH agent's socket outside the runtime folders: denied by its own path, and each
+    // folder on the way to it ruled without the right to connect, so that the command still makes
+    // its own files there. One inside them is denied with them. Below the ninth ABI connecting is
+    // not governed: only the run's environment, which does not name the agent, keeps it out
+    // (`runs::defend`).
+    let mut ways = Vec::new();
+    let kept = crate::ssh_agent::socket()
+        .filter(|_| rights & RESOLVE_UNIX != 0)
+        .filter(|socket| !denied.iter().any(|folder| socket.starts_with(folder)));
+    if let Some(socket) = kept {
+        ways = socket
+            .ancestors()
+            .skip(1)
+            .filter(|way| !denied.iter().any(|folder| folder.starts_with(way)))
+            .filter_map(|way| CString::new(way.as_os_str().as_bytes()).ok())
+            .collect();
+        denied.push(socket.to_owned());
+    }
     // X11's abstract sockets too, unless given, where the kernel has the scope.
     let given_x11 = open.is_some_and(crate::display::Folder::x11);
     let scoped = match !given_x11 && abi >= 6 {
@@ -144,18 +163,24 @@ pub fn confined_but<'a>(
     if abi < 2 || (denied.is_empty() && scoped == 0) {
         return command;
     }
-    let rights = rights(abi);
     let mut paths = Vec::new();
     allowed(Path::new("/"), &denied, &mut paths);
     let open = open.and_then(|folder| CString::new(folder.path().as_os_str().as_bytes()).ok());
     // SAFETY: the closure allocates nothing and only makes system calls (open, fstat,
     // landlock_*, prctl, close), all async-signal-safe.
-    unsafe { command.pre_exec(move || restrict(rights, &paths, open.as_deref(), scoped)) }
+    unsafe { command.pre_exec(move || restrict(rights, &paths, open.as_deref(), scoped, &ways)) }
 }
 
-/// In the child: every path a rule with every right, `open` one without `REFER`, then the child
-/// bound to them and to the `scoped` scopes.
-fn restrict(rights: u64, paths: &[CString], open: Option<&CStr>, scoped: u64) -> io::Result<()> {
+/// In the child: every path a rule with every right, `open` one without `REFER`, the `ways` to
+/// the SSH agent's socket without the right to connect, then the child bound to them and to the
+/// `scoped` scopes.
+fn restrict(
+    rights: u64,
+    paths: &[CString],
+    open: Option<&CStr>,
+    scoped: u64,
+    ways: &[CString],
+) -> io::Result<()> {
     // The attribute's fields: the handled rights of files, of the network (none), the scopes.
     let handled = [rights, 0, scoped];
     // A kernel older than the scopes refuses a longer attribute: the rights' field alone then.
@@ -174,7 +199,11 @@ fn restrict(rights: u64, paths: &[CString], open: Option<&CStr>, scoped: u64) ->
     let ruled = paths
         .iter()
         .map(|path| (path.as_c_str(), rights))
-        .chain(open.map(|path| (path, rights & !REFER)));
+        .chain(open.map(|path| (path, rights & !REFER)))
+        .chain(
+            ways.iter()
+                .map(|way| (way.as_c_str(), rights & !RESOLVE_UNIX)),
+        );
     for (path, granted) in ruled {
         // SAFETY: a valid C string; O_PATH opens nothing but a handle.
         let fd = unsafe {

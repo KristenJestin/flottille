@@ -41,6 +41,14 @@ pub const KEEP_SECRET_HINT: &str = "Leave empty to keep the current secret";
 pub const EVERY_PROJECT_NOTE: &str = "This entry is every project's: changing it changes it \
                                       for all of them.";
 
+/// What the form says of a new entry an agent asked for a connection: why it is every project's.
+pub fn connection_note(connection: &str) -> String {
+    format!(
+        "For the connection {connection}: a connection is given to every project, so the entries \
+         it names are every project's."
+    )
+}
+
 /// What the project select calls no project.
 pub const EVERY_PROJECT: &str = "Every project";
 
@@ -114,6 +122,8 @@ pub struct VaultSection {
     /// The host the request's URL sends the secret to, as the daemon read it, and that URL: the
     /// host is said while the URL is the one asked.
     host: Option<(String, String)>,
+    /// The connection an agent asked the new entry for: the form says why it is every project's.
+    connection: Option<String>,
     saving: bool,
     writing: Option<Writing>,
     form_error: Option<SharedString>,
@@ -121,6 +131,9 @@ pub struct VaultSection {
     /// The project page the dialog was opened from (its Tracker, or its Vault tab): once it is
     /// closed, the window goes back there.
     come_back: Option<(String, ProjectReveal)>,
+    /// The agent's request to write a connection the dialog was opened from, its missing entry:
+    /// once it is saved or closed, the request's dialog is back.
+    request_back: Option<u64>,
     /// The entry opened from a project's Vault tab is every project's: the form says so.
     every_project: bool,
     /// The entry the confirmation names, kept while it fades away.
@@ -193,11 +206,13 @@ impl VaultSection {
             bound: None,
             why: None,
             host: None,
+            connection: None,
             saving: false,
             writing: None,
             form_error: None,
             confirming: None,
             come_back: None,
+            request_back: None,
             every_project: false,
             asked: String::new(),
             _subscriptions: Vec::new(),
@@ -356,18 +371,49 @@ impl VaultSection {
     }
 
     /// "New entry" from an agent's request (`vault_ask.rs`): `entry` prefilled, `why` under what it
-    /// is for, and `host`, where the daemon reads its URL sends the secret; the user may change
-    /// every field before Add, remove the binding, or close it.
+    /// is for, and `host`, where the daemon reads its URL sends the secret; for a `connection`,
+    /// every project's, and the form says why. The user may change every field before Add,
+    /// remove the binding, or close it.
     pub fn add_asked(
         &mut self,
         entry: &VaultEntry,
         why: String,
         host: Option<String>,
+        connection: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.add_prefilled(entry, Some(why), None, window, cx);
         self.host = host.zip(entry.url.clone());
+        self.connection = connection;
+    }
+
+    /// "New entry…" on an agent's request to write a connection that names `entry`, not made yet:
+    /// its name and, as its address, the `host` the request sends it to; the secret is typed here.
+    pub fn add_for_request(
+        &mut self,
+        number: u64,
+        entry: &str,
+        host: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let prefill = VaultEntry {
+            name: entry.to_owned(),
+            url: host.clone(),
+            ..VaultEntry::default()
+        };
+        self.add_prefilled(&prefill, None, None, window, cx);
+        self.host = host.zip(prefill.url);
+        self.request_back = Some(number);
+    }
+
+    /// The request whose dialog to open again, once the entry made for it is saved.
+    pub fn take_request_return(&mut self) -> Option<u64> {
+        match self.form {
+            Form::Closed => self.request_back.take(),
+            Form::Editing(_) => None,
+        }
     }
 
     /// The project page to go back to, once the dialog it was opened for is closed (an entry set).
@@ -393,10 +439,12 @@ impl VaultSection {
 
     fn fill(&mut self, entry: Option<&VaultEntry>, window: &mut Window, cx: &mut Context<Self>) {
         self.come_back = None;
+        self.request_back = None;
         self.every_project = false;
         self.bound = None;
         self.why = None;
         self.host = None;
+        self.connection = None;
         let fields = self.fields(window, cx);
         let (name, secret, description, url, username) = (
             fields.name.clone(),
@@ -441,6 +489,11 @@ impl VaultSection {
                 .update(cx, |shell, cx| {
                     shell.open_project_settings_at(&project, at, window, cx)
                 })
+                .ok();
+        }
+        if let Some(number) = self.request_back.take() {
+            self.shell
+                .update(cx, |shell, cx| shell.open_connection_request(number, cx))
                 .ok();
         }
     }
@@ -823,6 +876,25 @@ impl VaultSection {
                         "Seen by agents of",
                         select,
                     ))
+                    .child(
+                        presence_of(
+                            "vault-connection-note-block",
+                            self.connection
+                                .as_deref()
+                                .map(|connection| SharedString::from(connection_note(connection))),
+                            move |note| {
+                                div()
+                                    .id("vault-connection-note")
+                                    .aria_label(note.clone())
+                                    .text_size(px(12.5))
+                                    .text_color(p.mute)
+                                    .child(note)
+                                    .test_support()
+                                    .into_any_element()
+                            },
+                        )
+                        .space(space::XS),
+                    )
                     .child(
                         presence_of(
                             "vault-every-project-note-block",

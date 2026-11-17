@@ -1480,6 +1480,11 @@ impl Shell {
                 {
                     self.open_project_settings_at(&project, at, window, cx);
                 }
+                // An entry made for an agent's request to write a connection: back to it.
+                if let Some(number) = section.update(cx, |section, _| section.take_request_return())
+                {
+                    self.open_connection_request(number, cx);
+                }
             }
             Outcome::Developer { written, shown } => {
                 self.settings
@@ -2776,13 +2781,32 @@ impl Shell {
         entry: crate::vault::VaultEntry,
         why: String,
         host: Option<String>,
+        connection: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.open_settings_at(crate::settings::Reveal::Vault, window, cx);
         let vault = self.settings.read(cx).vault().clone();
         vault.update(cx, |vault, cx| {
-            vault.add_asked(&entry, why, host, window, cx)
+            vault.add_asked(&entry, why, host, connection, window, cx)
+        });
+    }
+
+    /// "New entry…" on the dialog of an agent's request to write a connection, which names the
+    /// entry `name` that is not made: Settings, Vault, on a new entry named so, its address the
+    /// `host` the request sends it to. Saved or closed, the request's dialog is back.
+    pub fn add_vault_entry_for_request(
+        &mut self,
+        number: u64,
+        name: &str,
+        host: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_settings_at(crate::settings::Reveal::Vault, window, cx);
+        let vault = self.settings.read(cx).vault().clone();
+        vault.update(cx, |vault, cx| {
+            vault.add_for_request(number, name, host, window, cx)
         });
     }
 

@@ -4881,8 +4881,17 @@ fn a_connection_without_login_does_not_list_the_vault() {
     project(&user, "app");
     connect(&user, "almanac", &almanac(), json!({}));
     let (_, mcp) = session(&user, "app");
-    // No login of its own takes an entry: nothing it does may ask for one.
+    // No login of its own takes an entry: nothing it does may ask for one. The vault a root gets
+    // while Connections is on is for the entries of a connection it proposes (#1019): with
+    // Connections off, it has none to propose and is not given it.
     assert!(has(&mcp, "conn_almanac"));
+    assert!(has(&mcp, "vault"), "{:?}", mcp.names());
+    user.call(
+        "extension.set",
+        json!({"name": "connections", "enabled": false}),
+    )
+    .unwrap();
+    let (_, mcp) = session(&user, "app");
     assert!(!has(&mcp, "vault"), "{:?}", mcp.names());
 }
 
