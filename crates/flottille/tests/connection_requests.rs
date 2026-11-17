@@ -1938,7 +1938,7 @@ fn an_agent_is_promised_a_review_delivery_only_when_a_review_waits() {
 
 /// A second edit of the agent's, held after the first was accepted and left the connection
 /// awaiting its review.
-fn second_edit(user: &User, mcp: &Mcp) -> u64 {
+fn second_edit(mcp: &Mcp) -> u64 {
     held(&mcp.call(
         "connections",
         json!({"action": "edit", "name": "almanac", "about": "The notes of the user, again."}),
@@ -1953,7 +1953,7 @@ fn a_second_accepted_edit_keeps_one_review_card_and_one_delivery() {
     let (agent, mcp) = root(&user);
     let first = edit_giving_a_new_action(&user, &mcp);
     approve(&user, first);
-    let second = second_edit(&user, &mcp);
+    let second = second_edit(&mcp);
     approve(&user, second);
 
     // One card open: every card the agent's session got is closed but the last.
