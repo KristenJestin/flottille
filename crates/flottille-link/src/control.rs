@@ -15,11 +15,19 @@
 //! ```text
 //! device → hub   {"key": K, "nonce": Nd, "hello": {…}}
 //! hub → device   {"hub": H, "nonce": Nh, "hello": {…}, "proof": sign_H(session, 1, K, Nd, Nh)}
-//! device → hub   {"proof": sign_K(session, 2, H, Nh, Nd), "pinned": P | null}
+//! device → hub   {"proof": sign_K(session, 2, H, Nh, Nd), "pinned": P | null, "join"?: J}
 //! hub → device   {"welcome": {}}  or  {"refused": {"reason": "…", "reset": true | false}}
 //! then           device → hub {"ask": {"id": n, …}}; hub → device {"answer": {"id": n, …}},
-//!                {"list": […]}, {"addresses": […]}, {"presence": […]}
+//!                {"list": […]}, {"addresses": […]}, {"presence": […]}, {"requests": […]}
 //! ```
+//!
+//! A machine that joins through an invitation (`docs/remote.md`, "Pairing") is no member yet: its
+//! proof carries `join`, `{"token": T, "key": K}`, the invitation's token and the new device's key.
+//! The hub welcomes it while the join request waits, and sends it nothing; once the member that
+//! invited added K, it sends the list, which the device checks against the invitation
+//! (`Invitation::check_list`), and takes the declaration of its machine. A refused or expired
+//! request ends the session. The member that invited is sent the requests that wait for it,
+//! `{"requests": [{"token": T, "key": K}]}`, at once and whenever they change.
 //!
 //! `session` is `flottille-hub-session-v1` and a zero byte: nothing else a key signs starts so.
 //! Each side signs the other's fresh nonce and the other's key, so that a proof cannot be played
@@ -56,8 +64,8 @@ use sha2::Sha256;
 use crate::members::Signature;
 use crate::serial::{from_hex_text, invisible, shown, to_hex};
 use crate::{
-    Change, ChangeHash, Hello, HubKey, ListError, MachineKey, MemberList, Members, NeedsUpdate,
-    PublicKey, choose,
+    Change, ChangeHash, Hello, HubKey, Invitation, InvitationAsk, ListError, MachineKey,
+    MemberList, Members, NeedsUpdate, PublicKey, Token, choose,
 };
 
 /// The port a hub listens on unless told otherwise.
@@ -422,6 +430,26 @@ struct DeviceProof {
     /// The hash of the first change of the list the device checked, when it has one.
     #[serde(default)]
     pinned: Option<ChangeHash>,
+    /// The invitation a machine that is no member yet answers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    join: Option<Joining>,
+}
+
+/// What a machine that joins says in its proof: the invitation's token, and the key of the new
+/// device, which the member that invited adds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Joining {
+    pub token: Token,
+    pub key: PublicKey,
+}
+
+/// A join request that waits for the member it is sent to: the token of its invitation, and the
+/// new device's key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Requested {
+    pub token: Token,
+    pub key: PublicKey,
 }
 
 /// What a device asks the hub, once in a session.
@@ -439,6 +467,10 @@ pub enum Ask {
     },
     /// A member's change of the list.
     Submit { change: Change },
+    /// A member's signed ask for an invitation: answered with its token.
+    Invite { ask: InvitationAsk },
+    /// The member that invited refuses the join request of this token.
+    Refuse { token: Token },
     /// Every address this machine may be reached at now, in place of those told before.
     Addresses { addresses: Vec<String> },
     /// Whether a client of this device is active, and when its last input was.
@@ -488,6 +520,9 @@ pub enum ToDevice {
         /// The hub's proof that it holds the setup code, in the answer to a setup.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         proof: Option<SetupProof>,
+        /// The invitation's token, in the answer to an invitation's ask.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        token: Option<Token>,
     },
     /// The member list, whole, as the members signed it.
     List(MemberList),
@@ -495,6 +530,8 @@ pub enum ToDevice {
     Addresses(Vec<Told>),
     /// The presence of the members' clients, for a runner.
     Presence(Vec<PresenceOf>),
+    /// The join requests that wait for the member of this device, in place of those sent before.
+    Requests(Vec<Requested>),
 }
 
 /// What the hub pushes to a device, as the session hands it over.
@@ -503,6 +540,14 @@ pub enum Pushed {
     List(MemberList),
     Addresses(Vec<Told>),
     Presence(Vec<PresenceOf>),
+    Requests(Vec<Requested>),
+}
+
+/// What an answer carries besides a yes.
+#[derive(Clone, Copy, Debug, Default)]
+struct Extra {
+    proof: Option<SetupProof>,
+    token: Option<Token>,
 }
 
 /// What one side signs: the domain, whose proof it is, the other's key, then the other's nonce
@@ -647,7 +692,7 @@ impl Device {
         let list = MemberList::from_changes(changes.clone());
         list.check(&root)
             .map_err(|error| refused(&error.to_string()))?;
-        let mut session = Session::open(&parsed, None, &machine.0, hello, tls, None).await?;
+        let mut session = Session::open(&parsed, None, &machine.0, hello, tls, None, None).await?;
         if let Some((reason, _)) = &session.refused {
             return Err(refused(reason));
         }
@@ -660,7 +705,10 @@ impl Device {
                 changes,
             })
             .await?;
-        if !answer.is_some_and(|proof| transcript.proves(&code, 1, &head, &proof)) {
+        if !answer
+            .proof
+            .is_some_and(|proof| transcript.proves(&code, 1, &head, &proof))
+        {
             return Err(refused(
                 "it did not prove it knows the setup code: it is not the hub that printed it",
             ));
@@ -745,7 +793,8 @@ impl Device {
             reason: why,
         })?;
         let pinned = self.list.changes().first().map(Change::hash);
-        let session = Session::open(&url, Some(&self.hub), &machine.0, hello, tls, pinned).await?;
+        let session =
+            Session::open(&url, Some(&self.hub), &machine.0, hello, tls, pinned, None).await?;
         match session.refused {
             Some((_, true)) => Err(ControlError::Reset),
             Some((reason, false)) => Err(ControlError::Refused {
@@ -755,9 +804,103 @@ impl Device {
             None => Ok(session),
         }
     }
+
+    /// The new device's side of a pairing (`docs/remote.md`, "Pairing", 2): `machine` reaches the
+    /// hub of `invitation`, pinning the key the invitation holds, and asks to join with the token
+    /// and the new device's key, `key`. The hub holds the request until the member that invited
+    /// accepts or refuses it (`Joined::accepted`).
+    pub async fn join(
+        invitation: &Invitation,
+        key: &PublicKey,
+        machine: &MachineKey,
+        hello: &Hello,
+        tls: &Tls,
+    ) -> Result<Joined, ControlError> {
+        let url = HubUrl::parse(&invitation.hub_url).map_err(|why| ControlError::Refused {
+            hub: invitation.hub_url.clone(),
+            reason: why,
+        })?;
+        let joining = Joining {
+            token: invitation.token,
+            key: *key,
+        };
+        let session = Session::open(
+            &url,
+            Some(&invitation.hub_key),
+            &machine.0,
+            hello,
+            tls,
+            None,
+            Some(joining),
+        )
+        .await?;
+        if let Some((reason, _)) = &session.refused {
+            return Err(ControlError::Refused {
+                hub: url.authority(),
+                reason: reason.clone(),
+            });
+        }
+        Ok(Joined {
+            invitation: invitation.clone(),
+            key: *key,
+            url: url.to_string(),
+            session,
+        })
+    }
 }
 
-type Answered = oneshot::Sender<Result<Option<SetupProof>, String>>;
+/// A join request the hub holds, its session open.
+#[derive(Debug)]
+pub struct Joined {
+    invitation: Invitation,
+    key: PublicKey,
+    url: String,
+    pub session: Session,
+}
+
+impl Joined {
+    /// Waits until the member that invited accepted the request: the hub's key pinned, and the
+    /// first list, which checks back to its own root and holds this device's entry, signed by the
+    /// member of the invitation (`Invitation::check_list`). A list that does not is refused, and
+    /// so is the pairing; a refused or expired request ends the session, said.
+    pub async fn accepted(&mut self) -> Result<(Device, Members), ControlError> {
+        let authority = self.session.authority.clone();
+        let refused = |reason: String| ControlError::Refused {
+            hub: authority.clone(),
+            reason,
+        };
+        // The hub ends the request with its invitation, 5 minutes at most: this is in case it
+        // does not.
+        let waited = tokio::time::timeout(Duration::from_secs(6 * 60), async {
+            loop {
+                let Some(pushed) = self.session.next().await else {
+                    return Err(refused(self.session.ended_why()));
+                };
+                let Pushed::List(list) = pushed else {
+                    continue;
+                };
+                let members = self
+                    .invitation
+                    .check_list(&list, &self.key)
+                    .map_err(|error| refused(error.to_string()))?;
+                let device = Device {
+                    url: self.url.clone(),
+                    hub: self.invitation.hub_key,
+                    root: members.root(),
+                    list,
+                };
+                return Ok((device, members));
+            }
+        });
+        waited.await.unwrap_or_else(|_| {
+            Err(refused(
+                "the join request was not answered in 6 minutes".to_owned(),
+            ))
+        })
+    }
+}
+
+type Answered = oneshot::Sender<Result<Extra, String>>;
 
 /// A session to the hub, its handshake done.
 pub struct Session {
@@ -798,14 +941,25 @@ impl Asker {
         self.answer(ask).await.map(|_| ())
     }
 
-    /// Asks the hub, and waits for its answer, with the proof it may carry.
-    async fn answer(&self, ask: Ask) -> Result<Option<SetupProof>, ControlError> {
+    /// Asks the hub for an invitation, with a member's signed ask: its token.
+    pub async fn invite(&self, ask: InvitationAsk) -> Result<Token, ControlError> {
+        self.answer(Ask::Invite { ask })
+            .await?
+            .token
+            .ok_or_else(|| ControlError::Lost {
+                hub: self.authority.clone(),
+                why: "it answered an invitation's ask without a token".to_owned(),
+            })
+    }
+
+    /// Asks the hub, and waits for its answer, with what it may carry.
+    async fn answer(&self, ask: Ask) -> Result<Extra, ControlError> {
         let (answer, answered) = oneshot::channel();
         if self.asks.send((ask, answer)).is_err() {
             return Err(lost(&self.authority, &self.ended));
         }
         match answered.await {
-            Ok(Ok(proof)) => Ok(proof),
+            Ok(Ok(extra)) => Ok(extra),
             Ok(Err(reason)) => Err(ControlError::Refused {
                 hub: self.authority.clone(),
                 reason,
@@ -834,6 +988,7 @@ impl Session {
         hello: &Hello,
         tls: &Tls,
         pinned_list: Option<ChangeHash>,
+        join: Option<Joining>,
     ) -> Result<Session, ControlError> {
         let authority = url.authority();
         let stream = reach(url, tls).await?;
@@ -890,6 +1045,7 @@ impl Session {
                 &DeviceProof {
                     proof,
                     pinned: pinned_list,
+                    join,
                 },
             )
             .await
@@ -970,6 +1126,15 @@ impl Session {
     /// Why the session ended.
     pub fn ended(&self) -> String {
         lost(&self.authority, &self.ended).to_string()
+    }
+
+    /// Why the session ended, as the hub or the connection said it.
+    fn ended_why(&self) -> String {
+        let why = self.ended.lock().unwrap().clone();
+        let why = why.unwrap_or_else(|| "the hub closed it".to_owned());
+        why.strip_prefix("it refused: ")
+            .map(str::to_owned)
+            .unwrap_or(why)
     }
 }
 
@@ -1120,15 +1285,16 @@ async fn drive(
             }
             line = lines.recv() => {
                 match line {
-                    Some(Ok(ToDevice::Answer { id, refused, proof })) => {
+                    Some(Ok(ToDevice::Answer { id, refused, proof, token })) => {
                         if let Some(at) = waiting.iter().position(|(waits, _)| *waits == id) {
                             let (_, answer) = waiting.swap_remove(at);
                             let _ = answer.send(match refused {
                                 Some(reason) => Err(shown(&reason, SHOWN)),
-                                None => Ok(proof),
+                                None => Ok(Extra { proof, token }),
                             });
                         }
                     }
+                    Some(Ok(ToDevice::Requests(requests))) => { let _ = pushing.send(Pushed::Requests(requests)); }
                     Some(Ok(ToDevice::List(list))) => { let _ = pushing.send(Pushed::List(list)); }
                     Some(Ok(ToDevice::Addresses(told))) => { let _ = pushing.send(Pushed::Addresses(told)); }
                     Some(Ok(ToDevice::Presence(presence))) => { let _ = pushing.send(Pushed::Presence(presence)); }
@@ -1154,6 +1320,7 @@ async fn drive(
 pub struct Arriving {
     transcript: Transcript,
     pinned: Option<ChangeHash>,
+    join: Option<Joining>,
     protocol: u32,
     reader: Reader,
     writer: Writer,
@@ -1163,6 +1330,11 @@ impl Arriving {
     /// The key the device proved it holds.
     pub fn device(&self) -> PublicKey {
         self.transcript.device
+    }
+
+    /// The invitation a machine that is no member yet answers, as it said it.
+    pub fn joining(&self) -> Option<Joining> {
+        self.join
     }
 
     /// The hash of the first change of the list the device checked, as it said it.
@@ -1346,14 +1518,15 @@ pub async fn arrive(
             device_nonce: theirs.nonce,
             hub_nonce: nonce,
         };
-        Ok((transcript, proved.pinned, protocol))
+        Ok((transcript, proved.pinned, proved.join, protocol))
     };
-    let (transcript, pinned, protocol) = tokio::time::timeout(WAIT, handshake)
+    let (transcript, pinned, join, protocol) = tokio::time::timeout(WAIT, handshake)
         .await
         .map_err(|_| "the handshake did not finish in time".to_owned())??;
     Ok(Arriving {
         transcript,
         pinned,
+        join,
         protocol,
         reader,
         writer,

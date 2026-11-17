@@ -156,6 +156,12 @@ impl Seen {
     }
 }
 
+/// Emits an event of the daemon's (`docs/events.md`), from the link and the hub's session.
+pub(crate) type Emit = Arc<dyn Fn(&str, Value) + Send + Sync>;
+
+/// Why a link to a machine removed from the member list is closed.
+const REMOVED: &str = "it was removed from the member list";
+
 /// The daemon's side of the link.
 pub struct Remote {
     endpoint: Endpoint,
@@ -175,6 +181,7 @@ pub struct Remote {
     writing: Mutex<()>,
     /// The control session to the hub.
     control: std::sync::OnceLock<Arc<crate::hub_session::Control>>,
+    emit: Emit,
 }
 
 /// Starts the link: the endpoint, the loop that accepts and the one that dials. A link that
@@ -183,6 +190,7 @@ pub fn start(
     paths: &Paths,
     key: MachineKey,
     stopping: tokio::sync::watch::Receiver<bool>,
+    emit: Emit,
 ) -> Result<Arc<Remote>, String> {
     let endpoint = match crate::remote::listen(paths)? {
         Some(listen) => Endpoint::bind(&key, listen),
@@ -195,12 +203,17 @@ pub fn start(
             "flottille daemon: the link listens nowhere ([remote] listen in daemon.toml); it dials"
         ),
     }
-    let remote = Arc::new(Remote::new(endpoint, crate::remote::folder(paths)));
+    let remote = Arc::new(Remote::new(
+        endpoint,
+        crate::remote::folder(paths),
+        emit.clone(),
+    ));
     // Read before the first link comes in, which is judged by the file as last read.
     remote.peers();
     let control = Arc::new(crate::hub_session::Control::new(
         key,
         crate::remote::folder(paths),
+        emit,
     ));
     let _ = remote.control.set(control.clone());
     tokio::spawn(accept(remote.clone()));
@@ -230,7 +243,7 @@ fn now() -> u64 {
 }
 
 impl Remote {
-    fn new(endpoint: Endpoint, folder: PathBuf) -> Remote {
+    fn new(endpoint: Endpoint, folder: PathBuf, emit: Emit) -> Remote {
         Remote {
             endpoint,
             folder,
@@ -247,6 +260,7 @@ impl Remote {
             learning: Mutex::new(HashMap::new()),
             writing: Mutex::new(()),
             control: std::sync::OnceLock::new(),
+            emit,
         }
     }
 
@@ -257,9 +271,12 @@ impl Remote {
 
     /// The machines the member list says this one trusts: `(name, key, addresses)`, the addresses
     /// those the hub told, or, when it told none, those kept. Written over the peers' file, the
-    /// addresses each machine told kept beside; a machine no longer there is let go at the next
+    /// addresses each machine told kept beside; the link to a machine no longer there is cut at
+    /// once, and it is let go at the next
     /// round.
     pub(crate) fn trust_machines(&self, machines: Vec<(String, PublicKey, Option<Vec<String>>)>) {
+        let trusted: HashSet<[u8; 32]> =
+            machines.iter().map(|(_, key, _)| *key.as_bytes()).collect();
         let file = self.folder.join(PEERS_FILE);
         {
             let _writing = self.writing.lock().unwrap();
@@ -291,6 +308,14 @@ impl Remote {
             }
         }
         self.peers();
+        // A machine removed from the list: its link is cut now, not when it next says something.
+        for (key, seen) in self.seen.lock().unwrap().iter() {
+            if !trusted.contains(key)
+                && let Some((_, link, _)) = &seen.link
+            {
+                link.close(REMOVED);
+            }
+        }
     }
 
     /// Closes every link, telling the other machines.
@@ -495,6 +520,10 @@ impl Remote {
             "flottille daemon: linked to {name} (protocol {})",
             link.protocol()
         );
+        (self.emit)(
+            "remote.connected",
+            json!({"name": name, "fingerprint": link.peer().fingerprint()}),
+        );
         tokio::spawn(tell(link.clone(), self.told_addresses()));
         tokio::spawn(serve(self.clone(), link, name, generation));
     }
@@ -684,6 +713,10 @@ async fn serve(remote: Arc<Remote>, link: Link, name: String, generation: u64) {
             .is_some_and(|(at, _, _)| *at == generation)
     {
         eprintln!("flottille daemon: the link to {name} ended: {why}");
+        (remote.emit)(
+            "remote.disconnected",
+            json!({"name": name, "fingerprint": link.peer().fingerprint(), "reason": why}),
+        );
         seen.link = None;
         seen.set(PeerState::Offline, Some(why));
         seen.next_try = Instant::now();
@@ -852,6 +885,44 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Result<Va
                 .await
                 .map_err(Failure::refused)
         }
+        "remote.members" => control_of(&remote)?.members().map_err(Failure::refused),
+        "remote.requests" => control_of(&remote)?.requests().map_err(Failure::refused),
+        "remote.invite" => {
+            let ask: flottille_link::InvitationAsk = param(&params, "ask")?;
+            control_of(&remote)?
+                .invite(ask)
+                .await
+                .map_err(Failure::refused)
+        }
+        "remote.refuse" => {
+            let request: String = param(&params, "request")?;
+            control_of(&remote)?
+                .refuse(&request)
+                .await
+                .map_err(Failure::refused)
+        }
+        "remote.change" => {
+            let change: flottille_link::Change = param(&params, "change")?;
+            control_of(&remote)?
+                .change(change)
+                .await
+                .map_err(Failure::refused)
+        }
+        "remote.join" => {
+            let code: String = param(&params, "code")?;
+            let key: PublicKey = param(&params, "key")?;
+            control_of(&remote)?
+                .join(&code, key)
+                .await
+                .map_err(Failure::refused)
+        }
+        "remote.declare" => {
+            let change: flottille_link::Change = param(&params, "change")?;
+            control_of(&remote)?
+                .declare(change)
+                .await
+                .map_err(Failure::refused)
+        }
         "remote.address.add" | "remote.address.remove" => {
             let text = params["address"].as_str().unwrap_or_default();
             let address = Address::parse(text)
@@ -894,6 +965,24 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Result<Va
             format!("unknown method `{method}`"),
         )),
     }
+}
+
+/// The parameter `name` of a method, as `T`.
+fn param<T: for<'de> Deserialize<'de>>(params: &Value, name: &str) -> Result<T, Failure> {
+    serde_json::from_value(params.get(name).cloned().unwrap_or(Value::Null)).map_err(|error| {
+        Failure::new(
+            flottille_protocol::code::INVALID_PARAMS,
+            format!("{name}: {error}"),
+        )
+    })
+}
+
+fn control_of(remote: &Remote) -> Result<Arc<crate::hub_session::Control>, Failure> {
+    remote
+        .control
+        .get()
+        .cloned()
+        .ok_or_else(|| Failure::new(flottille_protocol::code::UNAVAILABLE, "the link is not up"))
 }
 
 fn remote_of(daemon: &Daemon) -> Result<Arc<Remote>, Failure> {
@@ -974,7 +1063,10 @@ mod tests {
         };
         write_json(&folder.join(PEERS_FILE), &peers).unwrap();
         let endpoint = Endpoint::dialler(&key).unwrap();
-        (Remote::new(endpoint, folder.to_owned()), keys)
+        (
+            Remote::new(endpoint, folder.to_owned(), Arc::new(|_: &str, _| {})),
+            keys,
+        )
     }
 
     fn told(folder: &Path, key: &PublicKey) -> Vec<String> {

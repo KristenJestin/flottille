@@ -99,6 +99,17 @@ pub struct JoinRequest {
     pub inviter: PublicKey,
 }
 
+/// Where the join request of a joining machine stands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Standing {
+    /// It waits for the member that invited, `left` seconds more at most.
+    Waiting { left: u64 },
+    /// The new device is a member.
+    Added,
+    /// It was refused, or its invitation expired.
+    Over,
+}
+
 /// An invitation given and not yet over.
 struct Open {
     token: Token,
@@ -326,6 +337,21 @@ impl<C: Clock> Hub<C> {
     /// member that invited.
     pub fn join(&mut self, token: &Token, key: PublicKey) -> Result<(), HubError> {
         self.sweep();
+        if let Some(members) = &self.checked {
+            if members.was_removed(&key) {
+                return Err(refused(format!(
+                    "{} was removed from the member list: a removed device joins again with a \
+                     new key",
+                    key.fingerprint()
+                )));
+            }
+            if members.get(&key).is_some() || members.by_machine(&key).is_some() {
+                return Err(refused(format!(
+                    "{} is a member already",
+                    key.fingerprint()
+                )));
+            }
+        }
         let open = self
             .find(token)
             .ok_or_else(|| refused("this invitation is unknown or expired: ask for a new one"))?;
@@ -352,6 +378,41 @@ impl<C: Clock> Hub<C> {
                 })
             })
             .collect()
+    }
+
+    /// The join requests that wait for `inviter`, as they are at the hub's time: what a session
+    /// sends the member that invited, without ending what is over (`requests` does).
+    pub fn pending(&self, inviter: &PublicKey) -> Vec<JoinRequest> {
+        let now = self.clock.now();
+        self.open
+            .iter()
+            .filter(|open| open.inviter == *inviter && now < open.made + FIVE_MINUTES)
+            .filter_map(|open| {
+                Some(JoinRequest {
+                    token: open.token,
+                    key: open.joining?,
+                    inviter: open.inviter,
+                })
+            })
+            .collect()
+    }
+
+    /// Where the join request of `key`, answering the invitation of `token`, stands.
+    pub fn joined(&mut self, token: &Token, key: &PublicKey) -> Standing {
+        let now = self.sweep();
+        if self
+            .checked
+            .as_ref()
+            .is_some_and(|members| members.get(key).is_some())
+        {
+            return Standing::Added;
+        }
+        match self.find(token) {
+            Some(open) if open.joining == Some(*key) => Standing::Waiting {
+                left: (open.made + FIVE_MINUTES).saturating_sub(now),
+            },
+            _ => Standing::Over,
+        }
     }
 
     /// `by`, the member that invited, refuses the join request of `token`: the invitation ends.
