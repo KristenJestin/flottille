@@ -732,6 +732,11 @@ fn new_server_declares_one_from_the_form_dialog(cx: &mut TestAppContext) {
     });
     // The daemon gave it to agents at once: the toast says so, every action judged, and its
     // button is the review.
+    until(&shell, cx, "the toast says it is given", |cx| {
+        toasts(&shell, cx)
+            .iter()
+            .any(|t| t == "Server almanac is given to agents")
+    });
     let said = toasts(&shell, cx);
     assert!(
         said.iter()
@@ -1332,6 +1337,11 @@ fn an_edit_that_announces_a_change_says_a_review_is_needed(cx: &mut TestAppConte
         connection(&user, "almanac").unwrap()["state"],
         "awaiting review"
     );
+    until(&shell, cx, "the toast says it is saved", |cx| {
+        toasts(&shell, cx)
+            .iter()
+            .any(|t| t == "Server almanac saved")
+    });
     let said = toasts(&shell, cx);
     assert!(said.iter().any(|t| t == "Server almanac saved"), "{said:?}");
     let second = second_lines(&shell, cx);
@@ -1397,6 +1407,9 @@ fn the_form_says_it_is_saving_and_cannot_be_submitted_twice(cx: &mut TestAppCont
     click(cx, "save-connection");
     until(&shell, cx, "the dialog closes", |cx| {
         !visible(cx, "connection-modal")
+    });
+    until(&shell, cx, "the toast says it is given", |cx| {
+        toasts(&shell, cx) == ["Server almanac is given to agents"]
     });
     let said = toasts(&shell, cx);
     assert_eq!(said, ["Server almanac is given to agents"], "{said:?}");

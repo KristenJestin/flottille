@@ -257,6 +257,18 @@ fn the_project_s_settings_list_its_repositories_and_add_remove_and_detect_them(
     });
     settle(cx);
     // The toast says what happens in the window's words: no worktree.
+    until(&shell, cx, "a toast says it is added", |cx| {
+        shell.read_with(cx, |s, cx| {
+            s.toasts()
+                .read(cx)
+                .toasts()
+                .find(|toast| toast.title().contains("added"))
+                .is_some_and(|toast| {
+                    toast.second_line().unwrap_or_default()
+                        == "Each new workspace gets its own copy of it."
+                })
+        })
+    });
     let said = shell.read_with(cx, |s, cx| {
         s.toasts()
             .read(cx)
@@ -295,6 +307,15 @@ fn the_project_s_settings_list_its_repositories_and_add_remove_and_detect_them(
         !paths(&section, cx).contains(&"lib".to_owned())
     });
     settle(cx);
+    until(&shell, cx, "a toast says it is removed", |cx| {
+        shell.read_with(cx, |s, cx| {
+            s.toasts()
+                .read(cx)
+                .toasts()
+                .find(|toast| toast.title().contains("removed"))
+                .is_some()
+        })
+    });
     let said = shell.read_with(cx, |s, cx| {
         s.toasts()
             .read(cx)

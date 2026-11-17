@@ -163,6 +163,9 @@ fn the_vault_page_adds_replaces_and_removes_an_entry_and_never_shows_its_secret(
         section.read_with(cx, |s, _| s.entries().is_some_and(|e| e.len() == 1))
     });
     assert_eq!(listed(&user)[0]["description"], "Logs time on Jira");
+    until(&shell, cx, "the toast says it is added", |cx| {
+        toasts(&shell, cx).contains(&"Entry jira added".to_owned())
+    });
     assert!(toasts(&shell, cx).contains(&"Entry jira added".to_owned()));
     // The row unfolds into the list, and the empty line folds away.
     cx.executor().advance_clock(Duration::from_millis(60));
@@ -236,6 +239,9 @@ fn the_vault_page_adds_replaces_and_removes_an_entry_and_never_shows_its_secret(
         section.read_with(cx, |s, _| s.entries().is_some_and(<[_]>::is_empty))
     });
     assert_eq!(listed(&user), json!([]));
+    until(&shell, cx, "the toast says it is removed", |cx| {
+        toasts(&shell, cx).contains(&"Entry jira removed".to_owned())
+    });
     assert!(toasts(&shell, cx).contains(&"Entry jira removed".to_owned()));
     // The row folds away before it is gone.
     assert!(shown("vault-item-jira", cx), "still folding");
