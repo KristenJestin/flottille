@@ -797,7 +797,6 @@ fn a_push_to_a_remote_rewritten_for_reads_on_the_line_is_refused() {
 #[test]
 fn a_push_to_a_remote_rewritten_for_reads_in_the_repository_is_refused() {
     let user = User::with_fake_agent();
-    // From before the workspace, so that the remote still leads where it led.
     prepared(&user, |folder| {
         for key in rewrites(&user) {
             user.git(folder, &["config", &key, &remote(&user)]);

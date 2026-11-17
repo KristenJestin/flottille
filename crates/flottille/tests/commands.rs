@@ -751,19 +751,10 @@ fn an_allowed_commit_push_or_rebase_runs_none_of_the_hooks_the_agent_can_write()
 }
 
 #[test]
-fn pointing_a_remote_elsewhere_is_to_judge_and_a_push_to_a_remote_changed_since_the_workspace_was_created_is_refused()
- {
+fn pointing_a_remote_elsewhere_is_to_judge() {
     let user = User::with_fake_agent();
-    let (folder, remote) = fixture(&user);
+    fixture(&user);
     let evil = bare(&user, "evil");
-    let shown = user
-        .call("workspace.show", json!({"project": "app", "name": "login"}))
-        .unwrap();
-    assert_eq!(
-        shown["repositories"][0]["base"]["urls"],
-        json!([remote.to_str().unwrap()]),
-        "{shown}"
-    );
     let mcp = plain_agent(&user);
 
     let evil_url = evil.to_str().unwrap();
@@ -779,48 +770,87 @@ fn pointing_a_remote_elsewhere_is_to_judge_and_a_push_to_a_remote_changed_since_
             answer.text
         );
     }
-    // Moved anyway, by a way the gate does not see: the push the user allows is refused before
-    // git runs, since neither the user nor the judge reads where the remote leads now.
+}
+
+#[test]
+fn a_push_goes_through_after_the_user_changed_the_remote() {
+    let user = User::with_fake_agent();
+    let (folder, remote) = fixture(&user);
+    let moved = bare(&user, "moved");
+    let mcp = plain_agent(&user);
+    // The user's own change, in their own clone, after the workspace was made.
     user.git(
         &folder,
-        &["remote", "set-url", "--push", "origin", evil_url],
+        &["remote", "set-url", "origin", moved.to_str().unwrap()],
     );
+
     let answer = allowed_line(&user, &mcp, "git push origin app/login");
 
-    assert!(answer.error, "{}", answer.text);
     assert!(
-        answer.text.contains("no longer leads where it led"),
+        !answer.error && answer.text.contains("exited with code 0"),
         "{}",
         answer.text
     );
-    assert!(!remote_branches(&user, &evil).contains("app/login"));
+    assert!(remote_branches(&user, &moved).contains("app/login"));
     assert!(!remote_branches(&user, &remote).contains("app/login"));
 }
 
 #[test]
-fn forge_write_refuses_a_remote_changed_since_the_workspace_was_created() {
+fn a_workspace_without_recorded_urls_pushes() {
+    let user = User::with_fake_agent();
+    let (_, remote) = fixture(&user);
+    // A workspace made before the URLs were recorded: its base says none.
+    let store = rusqlite::Connection::open(user.path("state/flottille/flottille.db")).unwrap();
+    let changed = store
+        .execute(
+            "UPDATE workspaces SET repositories = json_remove(repositories, '$[0].base.urls')",
+            [],
+        )
+        .unwrap();
+    assert_eq!(changed, 1);
+    drop(store);
+    let mcp = plain_agent(&user);
+
+    let answer = allowed_line(&user, &mcp, "git push origin app/login");
+
+    assert!(
+        !answer.error && answer.text.contains("exited with code 0"),
+        "{}",
+        answer.text
+    );
+    assert!(remote_branches(&user, &remote).contains("app/login"));
+}
+
+#[test]
+fn a_pull_request_opens_after_the_user_changed_the_remote() {
     let user = User::with_fake_agent().with_fake_gh();
     let folder = on_github(&user);
-    command(&user, "open");
-    let (_, open) = run(&user, "open");
+    user.gh_script(json!({"created": 12}));
+    let mcp = plain_agent(&user);
+    // SSH to HTTPS, the same repository: the user's own change.
     user.git(
         &folder,
-        &["remote", "set-url", "origin", "git@github.com:evil/app.git"],
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            "https://github.com/acme/app.git",
+        ],
     );
 
     let answer = write(
         &user,
-        &open,
+        &mcp,
         json!({"action": "create", "repository": ".", "title": "Add the login page"}),
     );
 
-    assert!(answer.error, "{}", answer.text);
+    assert!(!answer.error, "{}", answer.text);
     assert!(
-        answer.text.contains("no longer leads where it led"),
+        answer.text.contains("https://github.com/acme/app/pull/12"),
         "{}",
         answer.text
     );
-    assert_eq!(creates(&user), 0);
+    assert_eq!(creates(&user), 1);
 }
 
 #[test]
@@ -1822,37 +1852,6 @@ fn a_data_center_repository_has_no_pipeline_bkt_can_run() {
         answer.text
     );
     assert_eq!(bkt_calls_starting(&user, "pipeline"), 0);
-}
-
-#[test]
-fn a_bitbucket_write_is_refused_when_the_remote_leads_elsewhere_than_when_the_workspace_was_made() {
-    let user = User::with_fake_agent().with_fake_bkt();
-    let folder = on_bitbucket(&user, "git@bitbucket.org:acme/app.git");
-    command(&user, "open");
-    let (_, open) = run(&user, "open");
-    user.git(
-        &folder,
-        &[
-            "remote",
-            "set-url",
-            "origin",
-            "git@bitbucket.org:evil/app.git",
-        ],
-    );
-
-    let answer = write(
-        &user,
-        &open,
-        json!({"action": "create", "repository": ".", "title": "Login"}),
-    );
-
-    assert!(answer.error, "{}", answer.text);
-    assert!(
-        answer.text.contains("no longer leads where it led"),
-        "{}",
-        answer.text
-    );
-    assert!(user.bkt_received().is_empty());
 }
 
 /// `[pull_requests] reviewers` in the project's file.

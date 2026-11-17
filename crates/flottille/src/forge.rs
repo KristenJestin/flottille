@@ -22,7 +22,7 @@ use flottille_core::project::Project;
 use flottille_core::protocol::WorkspaceForge;
 use flottille_core::secrets;
 use flottille_core::store::now_ms;
-use flottille_core::workspace::{Base, Workspace};
+use flottille_core::workspace::Workspace;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -229,9 +229,8 @@ async fn ssh_host(host: &str) -> Result<String, String> {
     }
 }
 
-/// Where a repository's remote leads, as a workspace records it and a push and `forge`'s writes
-/// check it: its fetch and push URLs as git uses them (`insteadOf` applied), credentials taken
-/// out, sorted; empty when git names none.
+/// Where a repository's remote leads: its fetch and push URLs as git uses them (`insteadOf`
+/// applied), credentials taken out, sorted; empty when git names none.
 pub async fn urls_of(folder: &Path, remote: &str) -> Vec<String> {
     let mut urls = Vec::new();
     for push in [&[][..], &["--push"][..]] {
@@ -252,35 +251,6 @@ pub async fn urls_of(folder: &Path, remote: &str) -> Vec<String> {
 }
 
 pub(crate) use flottille_core::declared::without_credentials;
-
-/// Refuses unless the repository's remote leads where it led when the workspace was created: an
-/// agent never changes it, and a push or a forge write an agent makes goes nowhere else.
-pub async fn remote_kept(folder: &Path, base: &Base) -> Result<(), String> {
-    if base.urls.is_empty() {
-        return Err(format!(
-            "refused: this workspace was created before Flottille recorded where its remote {} \
-             leads, and an agent's push or forge write goes only where that is known: say \
-             what should be done, and the user does it",
-            base.remote
-        ));
-    }
-    let now = urls_of(folder, &base.remote).await;
-    if now != base.urls {
-        return Err(format!(
-            "refused: the remote {} no longer leads where it led when the workspace was created \
-             ({}): it leads to {}; nothing was sent: say so, and the user checks the \
-             repository's remotes",
-            base.remote,
-            masked(&base.urls.join(", ")),
-            if now.is_empty() {
-                "nothing".to_owned()
-            } else {
-                masked(&now.join(", "))
-            }
-        ));
-    }
-    Ok(())
-}
 
 /// A commit a forge said, kept only as a hash: it is given to git as a revision, never anything
 /// that could read as an option.
@@ -3110,9 +3080,6 @@ async fn forge_write(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcom
             "refused: {asked_repository} is on no branch (detached at {hash}): switch to a \
              branch first"
         ));
-    }
-    if let Err(refusal) = remote_kept(&checkout.folder, &repository.base).await {
-        return Outcome::Refused(refusal);
     }
     let forge = match declared_forge(checkout).await {
         Ok(forge) => forge,
