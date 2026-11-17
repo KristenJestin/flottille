@@ -367,7 +367,9 @@ fn entry_problems(
         if let Some(project) = &entry.project {
             problems.push(format!(
                 "the vault entry {name} is {project}'s alone; a connection needs it for every \
-                 project: the user shares it with every project (Share, on this request)"
+                 project: the user shares it with every project (Share, on this request, when \
+                 the entry is the asking agent's project's; else Every project, in its dialog in \
+                 Settings, Vault)"
             ));
         }
         if let Err(why) = entry.usable_for(&this) {
