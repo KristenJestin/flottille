@@ -2654,10 +2654,10 @@ pub fn kill_orphans(store: &Store) {
 }
 
 /// Kills the process group of `pid` when it is still the process started at `started`, then
-/// forgets it.
+/// forgets it. Through pidfds (`children::end_group_led`): never by the bare pid, which a
+/// program of the user's may have taken since.
 fn kill_left(store: &Store, pid: u32, started: u64) {
-    if start_time(pid) == Some(started) {
-        signal_group(pid, libc::SIGKILL);
+    if crate::children::end_group_led(pid, started) {
         eprintln!("flottille daemon: killed the agent process {pid} that was left running");
     }
     let _ = store.remove_process(pid);

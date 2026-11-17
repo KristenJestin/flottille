@@ -1254,7 +1254,8 @@ async fn follow(
     // What it left in the background holds the pipe and would keep running unseen: it ends with
     // the run, even in a group of its own, and what is already in the pipe is read without
     // waiting for it.
-    signal_group(pid, libc::SIGKILL);
+    // Through the session's members' pidfds: the leader is reaped, so its pid, and its group's
+    // number, may be a stranger's by now.
     crate::children::end_session(pid).await;
     // Its display goes with it.
     going.display.lock().unwrap().take();
