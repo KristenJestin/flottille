@@ -604,9 +604,9 @@ pub fn start_options(folder: &Path, sites: &[String], headed: bool) -> Result<Ve
 
 /// The display of the browser of `declaration` when the user shows it: a runtime folder of its
 /// own holding the session's Wayland socket alone (`display.rs`), kept while the `owner` that
-/// uses it runs. When it cannot be made the browser runs headless, never with the user's real
-/// runtime folder: the daemon says why on its stderr and the reason is returned, for the server's
-/// record to keep (the window says it under the switch).
+/// uses it runs, and while the browser started with it does. When it cannot be made the browser
+/// runs headless, never with the user's real runtime folder: the daemon says why on its stderr and
+/// the reason is returned, for the server's record to keep (the window says it under the switch).
 pub fn shown(
     daemon: &Daemon,
     declaration: &Declaration,
@@ -614,6 +614,12 @@ pub fn shown(
 ) -> (Option<crate::display::Shown>, Option<String>) {
     if !declaration.headed {
         return (None, None);
+    }
+    // The browser that runs was confined with its folder, which Landlock holds by its inode: one
+    // made again at the same path is out of its reach, and the Chrome it relaunches is refused
+    // the Wayland socket (#1040).
+    if let Some(held) = super::client::browser_display(daemon, &declaration.name) {
+        return (Some(held), None);
     }
     match crate::display::share(&daemon.paths, owner) {
         Ok(shown) => (Some(shown), None),
@@ -657,18 +663,25 @@ pub fn display(
 }
 
 /// How the browser agent-browser's daemon runs for a connection is closed: its command line and
-/// the socket folder the daemon answers on.
+/// the socket folder the daemon answers on; and the display folder it was started with, kept
+/// until it is closed.
 #[derive(Clone, Debug)]
 pub struct Browser {
     program: Vec<String>,
     folder: PathBuf,
+    pub(super) shown: Option<crate::display::Shown>,
 }
 
-/// The browser of `declaration`, when it runs `agent-browser mcp`.
-pub fn browser(daemon: &Daemon, declaration: &Declaration) -> Option<Browser> {
+/// The browser of `declaration`, when it runs `agent-browser mcp`, started with `shown`.
+pub fn browser(
+    daemon: &Daemon,
+    declaration: &Declaration,
+    shown: Option<&crate::display::Shown>,
+) -> Option<Browser> {
     Some(Browser {
         program: command_line(declaration)?,
         folder: folder(daemon, &declaration.name),
+        shown: shown.cloned(),
     })
 }
 
@@ -921,7 +934,7 @@ async fn run(
         None => shown(daemon, declaration, &declaration.name).0,
     };
     let options = start_options(&folder, &sites, shown.is_some())?;
-    if let Some(browser) = browser(daemon, declaration) {
+    if let Some(browser) = browser(daemon, declaration, shown.as_ref()) {
         super::client::browser_started(daemon, &declaration.name, browser);
     }
     let token = super::oauth::random(32)?;

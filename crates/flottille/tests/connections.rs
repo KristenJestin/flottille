@@ -6660,6 +6660,158 @@ fn a_browser_the_login_started_follows_the_switch_at_the_next_start() {
     );
 }
 
+/// The display folder of the connection `browser`, as an inode: a folder made again at the same
+/// path is another inode, out of the reach of a browser confined with the first (`landlock.rs`).
+fn display_folder(user: &User) -> Option<u64> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(user.path("runtime/flottille/display/browser"))
+        .ok()
+        .map(|folder| folder.ino())
+}
+
+#[test]
+fn a_browser_a_login_started_keeps_its_display_folder() {
+    // agent-browser's daemon outlives the login that started it, confined with the folder the
+    // login was given: the server's next start must give the same folder, never one made again,
+    // or the browser it relaunches is refused the Wayland socket.
+    let user = user_with_display();
+    let _wayland = wayland_socket(&user);
+    browser_declared(
+        &user,
+        &agent_browser("0.43.0"),
+        json!({}),
+        &[],
+        json!({"headed": true}),
+    );
+    let (_, mcp) = signed_up(&user);
+    user.call(
+        "connection.accept",
+        json!({"name": "browser", "actions": {"agent_browser_click": "passes"}}),
+    )
+    .unwrap();
+    done(mcp.call(
+        "conn_browser",
+        json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+    ));
+    assert!(browser_running(&user).is_some());
+    let folder = display_folder(&user);
+    assert!(folder.is_some(), "the browser runs, its folder is gone");
+    done(mcp.call(
+        "conn_browser",
+        json!({"action": "agent_browser_click", "arguments": {"name": "buy"}}),
+    ));
+    let last = logged(&user, "browser", "browser").last().unwrap().clone();
+    assert_eq!(last["started"], false, "{last}");
+    assert_eq!(display_folder(&user), folder);
+}
+
+#[test]
+fn a_browser_that_outlives_its_idle_server_keeps_its_display_folder() {
+    let user = user_with_display().with_env("FLOTTILLE_CONNECTION_LINGER_MS", "1000");
+    let _wayland = wayland_socket(&user);
+    browser_declared(
+        &user,
+        &agent_browser("0.43.0"),
+        json!({}),
+        &[],
+        json!({"headed": true}),
+    );
+    let (id, mcp) = signed_up(&user);
+    user.call(
+        "connection.accept",
+        json!({"name": "browser", "actions": {"agent_browser_click": "passes"}}),
+    )
+    .unwrap();
+    done(mcp.call(
+        "conn_browser",
+        json!({"action": "agent_browser_click", "arguments": {"name": "cart"}}),
+    ));
+    let folder = display_folder(&user);
+    assert!(folder.is_some());
+    // No session runs: the server stops when it has idled; the browser is not closed.
+    user.call("agent.stop", json!({"agent": id})).unwrap();
+    eventually("the idle server stops", || {
+        connection(&user, "browser")["running"] == false
+    });
+    assert!(browser_running(&user).is_some());
+    assert_eq!(
+        display_folder(&user),
+        folder,
+        "the browser runs, its folder is gone"
+    );
+    // The next server reaches the same browser, in the same folder.
+    let (id, mcp) = session(&user, "app");
+    set_mode(&user, &id, "full");
+    done(mcp.call(
+        "conn_browser",
+        json!({"action": "agent_browser_click", "arguments": {"name": "buy"}}),
+    ));
+    let last = logged(&user, "browser", "browser").last().unwrap().clone();
+    assert_eq!(last["started"], false, "{last}");
+    assert_eq!(display_folder(&user), folder);
+    assert_eq!(
+        display_of(&user, "browser")["runtime_files"],
+        json!(["wayland-test"])
+    );
+}
+
+#[test]
+fn a_browser_left_by_a_daemon_that_stopped_is_closed_before_its_display_is_made_again() {
+    // A daemon that dies (an update that kills it, a crash) leaves agent-browser's daemon
+    // running, confined with a display folder the next daemon removes and makes again: out of its
+    // reach. The next daemon closes it before any start of the connection.
+    let user = user_with_display();
+    let _wayland = wayland_socket(&user);
+    browser_declared(
+        &user,
+        &agent_browser("0.43.0"),
+        json!({}),
+        &[],
+        json!({"headed": true}),
+    );
+    let (_, mcp) = signed_up(&user);
+    user.call(
+        "connection.accept",
+        json!({"name": "browser", "actions": {"agent_browser_click": "passes"}}),
+    )
+    .unwrap();
+    done(mcp.call(
+        "conn_browser",
+        json!({"action": "agent_browser_click", "arguments": {"name": "cart"}}),
+    ));
+    assert!(browser_running(&user).is_some());
+
+    let daemon = user.status()["pid"].as_u64().unwrap() as i32;
+    // SAFETY: kill has no memory precondition.
+    unsafe { libc::kill(daemon, libc::SIGKILL) };
+    eventually("the daemon is gone", || {
+        // SAFETY: signal 0 only asks whether the process is there.
+        let alive = unsafe { libc::kill(daemon, 0) } == 0;
+        !alive
+    });
+    assert!(browser_running(&user).is_some(), "the browser outlives it");
+    assert!(logged(&user, "browser", "close").is_empty());
+
+    // The next daemon, once it answers: the browser is closed, by its socket folder.
+    user.status();
+    assert_eq!(browser_running(&user), None);
+    let closed = logged(&user, "browser", "close");
+    assert_eq!(closed.len(), 1, "{closed:?}");
+    // The next start gets a browser of its own, in the folder made for it.
+    let (id, mcp) = session(&user, "app");
+    set_mode(&user, &id, "full");
+    done(mcp.call(
+        "conn_browser",
+        json!({"action": "agent_browser_click", "arguments": {"name": "buy"}}),
+    ));
+    let last = logged(&user, "browser", "browser").last().unwrap().clone();
+    assert_eq!(last["started"], true, "{last}");
+    assert_eq!(
+        display_of(&user, "browser")["runtime_files"],
+        json!(["wayland-test"])
+    );
+}
+
 #[test]
 fn the_reason_a_browser_is_not_shown_stays_said_during_a_call() {
     // No Wayland socket to share: the browser runs headless, and says why while a call holds the

@@ -559,6 +559,8 @@ async fn serve(
     crate::subscriptions::resume_at_start(&daemon);
     approvals::settle_at_start(&daemon);
     projects::migrate_files(&daemon);
+    // Before the agents' tools are served: a call would start a connection's server.
+    extensions::close_left_at_start(&daemon).await;
     let picking = daemon.clone();
     // Files written: off the daemon's workers.
     let _ = tokio::task::spawn_blocking(move || providers::pick_judge(&picking)).await;
