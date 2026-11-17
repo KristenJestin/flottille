@@ -32,7 +32,7 @@ use flottille_link::{
 mod server;
 
 use serde::{Deserialize, Serialize};
-pub use server::{LISTEN, MOST_ARRIVING, SETUP_IDLE, Served, serve, tls_server};
+pub use server::{KEPT_FOR_MEMBERS, LISTEN, MOST_ARRIVING, SETUP_IDLE, Served, serve, tls_server};
 use subtle::ConstantTimeEq;
 
 /// How long an invitation lasts, and how far an ask's time may be from the hub's.

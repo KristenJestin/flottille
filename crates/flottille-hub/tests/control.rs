@@ -1215,7 +1215,7 @@ async fn connections_that_have_not_proved_a_member_are_capped() {
     let place = Place::new();
     let served = place.serve("127.0.0.1:0").await;
     let mut idle = Vec::new();
-    for _ in 0..64 {
+    for _ in 0..flottille_hub::MOST_ARRIVING + flottille_hub::KEPT_FOR_MEMBERS {
         idle.push(
             tokio::net::TcpStream::connect(served.address())
                 .await
@@ -1231,7 +1231,7 @@ async fn connections_that_have_not_proved_a_member_are_capped() {
     let closed = tokio::time::timeout(Duration::from_secs(3), over.read(&mut byte)).await;
     assert!(
         matches!(closed, Ok(Ok(0)) | Ok(Err(_))),
-        "a connection past the 64 that wait is still held: {closed:?}"
+        "a connection past the places that wait is still held: {closed:?}"
     );
     // Once they are gone, a device is served again.
     drop(idle);
@@ -1262,6 +1262,87 @@ async fn a_session_opened_before_setup_that_sets_nothing_up_is_closed() {
     .await;
     assert!(ended.is_ok(), "the session is still open after 25 s");
     assert!(session.ended().contains("no setup"), "{}", session.ended());
+    served.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_session_that_keeps_asking_before_setup_is_still_closed() {
+    let place = Place::new();
+    let served = place.serve("127.0.0.1:0").await;
+    let mut session = stranger_at(&served, &device_key(7))
+        .connect(&place.machine("stranger"), &hello(), &Tls::System)
+        .await
+        .unwrap();
+    // It asks every 2 s, within the 10 s a session that asks nothing is given: still closed.
+    let asker = session.asker();
+    let asking = tokio::spawn(async move {
+        loop {
+            let _ = asker
+                .ask(flottille_link::Ask::Addresses {
+                    addresses: Vec::new(),
+                })
+                .await;
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+    });
+    let ended = tokio::time::timeout(Duration::from_secs(15), async {
+        while session.next().await.is_some() {}
+    })
+    .await;
+    asking.abort();
+    assert!(
+        ended.is_ok(),
+        "the session that keeps asking is still open after 15 s"
+    );
+    assert!(session.ended().contains("no setup"), "{}", session.ended());
+    served.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn members_still_connect_while_strangers_hold_the_unauthenticated_places() {
+    let place = Place::new();
+    let served = place.serve("127.0.0.1:0").await;
+    let (pc, pc_machine) = (device_key(1), place.machine("pc"));
+    let (pc_device, pc_session) =
+        setup(served.address(), &code_of(&served), &pc, &pc_machine, "pc")
+            .await
+            .unwrap();
+    drop(pc_session);
+    // Strangers open connections and say nothing: every place for those that have not proved a
+    // member's key is held.
+    let mut idle = Vec::new();
+    for _ in 0..flottille_hub::MOST_ARRIVING {
+        idle.push(
+            tokio::net::TcpStream::connect(served.address())
+                .await
+                .unwrap(),
+        );
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let mut session = pc_device
+        .connect(&pc_machine, &hello(), &Tls::System)
+        .await
+        .expect("a member connects while strangers hold the places");
+    let list = next_list(&mut session).await;
+    assert_eq!(list.changes().len(), 2);
+    drop(idle);
+    served.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_connection_that_says_nothing_is_let_go_within_a_few_seconds() {
+    use tokio::io::AsyncReadExt;
+    let place = Place::new();
+    let served = place.serve("127.0.0.1:0").await;
+    let mut stream = tokio::net::TcpStream::connect(served.address())
+        .await
+        .unwrap();
+    let mut byte = [0u8; 1];
+    let closed = tokio::time::timeout(Duration::from_secs(8), stream.read(&mut byte)).await;
+    assert!(
+        matches!(closed, Ok(Ok(0)) | Ok(Err(_))),
+        "a connection that says nothing is still held after 8 s: {closed:?}"
+    );
     served.stop().await;
 }
 

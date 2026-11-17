@@ -10,9 +10,11 @@
 //! list, the addresses and the presence.
 //!
 //! What someone with no key may hold of the hub is bounded: at most `MOST_ARRIVING` connections
-//! that have not proved a member's key at once (a setup's session among them), a few KiB a
-//! handshake line, 10 s a handshake, and `SETUP_IDLE` a session opened to set the hub up that asks
-//! nothing. When the process runs out of file descriptors, it waits before it accepts again.
+//! that have not proved a member's key at once (a setup's session among them), then
+//! `KEPT_FOR_MEMBERS` more that are let go unless they prove one, a few KiB a handshake line,
+//! `ARRIVAL_WAIT` for the TLS handshake and the hub's, and `SETUP_IDLE` from its start a session
+//! opened to set the hub up. When the process runs out of file descriptors, it waits before it
+//! accepts again.
 
 use std::net::SocketAddr;
 use std::path::Path;
@@ -36,15 +38,19 @@ pub const LISTEN: &str = "127.0.0.1:7448";
 /// The most connections that have not proved a member's key the hub holds at once: one more is
 /// let go as soon as it is accepted.
 pub const MOST_ARRIVING: usize = 64;
-/// How long a session opened to set the hub up may ask nothing before it is closed.
+/// The places kept, past `MOST_ARRIVING`, for connections that prove a member's key: one that
+/// does not is let go at the end of its handshake.
+pub const KEPT_FOR_MEMBERS: usize = 8;
+/// How long a session opened to set the hub up lasts, however much it asks, before it is closed.
 pub const SETUP_IDLE: Duration = Duration::from_secs(10);
 /// How long the hub waits after a failed accept (no file descriptor left, mostly), at first and
 /// at most: twice longer each time it fails again.
 const ACCEPT_WAIT: Duration = Duration::from_millis(50);
 const LONGEST_ACCEPT_WAIT: Duration = Duration::from_secs(1);
 
-/// How long a TLS handshake that came in may take.
-const TLS_WAIT: Duration = Duration::from_secs(10);
+/// How long a connection that came in may take for its TLS handshake and the hub's together: a
+/// device needs a few round trips, a stranger that says nothing holds its place no longer.
+const ARRIVAL_WAIT: Duration = Duration::from_secs(5);
 /// The most addresses one machine may tell, and the longest one.
 const MOST_ADDRESSES: usize = 64;
 const LONGEST_ADDRESS: usize = 300;
@@ -123,6 +129,7 @@ async fn accept<C: Clock + Send + 'static>(
 ) {
     let mut sessions = JoinSet::new();
     let places = Arc::new(Semaphore::new(MOST_ARRIVING));
+    let kept = Arc::new(Semaphore::new(KEPT_FOR_MEMBERS));
     let mut wait = ACCEPT_WAIT;
     loop {
         let accepted = tokio::select! {
@@ -150,26 +157,34 @@ async fn accept<C: Clock + Send + 'static>(
                 continue;
             }
         };
-        let Ok(permit) = places.clone().try_acquire_owned() else {
-            // Dropped: the connection is closed at once.
-            continue;
+        let (permit, members_only) = match places.clone().try_acquire_owned() {
+            Ok(permit) => (permit, false),
+            Err(_) => match kept.clone().try_acquire_owned() {
+                Ok(permit) => (permit, true),
+                // Dropped: the connection is closed at once.
+                Err(_) => continue,
+            },
         };
         let (shared, tls) = (shared.clone(), tls.clone());
         let stopping = stopping.clone();
         sessions.spawn(async move {
-            let stream: Box<dyn flottille_link::Stream> = match tls {
-                Some(tls) => match tokio::time::timeout(TLS_WAIT, tls.accept(stream)).await {
-                    Ok(Ok(secured)) => secured,
-                    _ => return,
-                },
-                None => Box::new(stream),
+            let arrival = async {
+                let stream: Box<dyn flottille_link::Stream> = match tls {
+                    Some(tls) => tls
+                        .accept(stream)
+                        .await
+                        .map_err(|error| error.to_string())?,
+                    None => Box::new(stream),
+                };
+                arrive(stream, &shared.key, &shared.hello).await
             };
-            let arriving = match arrive(stream, &shared.key, &shared.hello).await {
-                Ok(arriving) => arriving,
-                Err(why) => {
+            let arriving = match tokio::time::timeout(ARRIVAL_WAIT, arrival).await {
+                Ok(Ok(arriving)) => arriving,
+                Ok(Err(why)) => {
                     eprintln!("flottille-hub: a connection from {from} was not taken: {why}");
                     return;
                 }
+                Err(_) => return,
             };
             let device = arriving.device();
             let (welcome, setting_up) = {
@@ -186,6 +201,13 @@ async fn accept<C: Clock + Send + 'static>(
                     device.fingerprint()
                 );
                 arriving.refuse(&reason, reset).await;
+                return;
+            }
+            // `welcome` takes anyone while no member exists: a setup is no member's.
+            if members_only && setting_up {
+                arriving
+                    .refuse("the hub is busy: try again in a moment", false)
+                    .await;
                 return;
             }
             // A member's session is not counted; a setup's is, while it lasts.
@@ -222,6 +244,8 @@ async fn run<C: Clock + Send + 'static>(
     let pinned = session.pinned();
     let mut changed = shared.changed.subscribe();
     let mut sent = Sent::default();
+    // Set once: a session that keeps asking is closed as one that asks nothing.
+    let setup_ends = tokio::time::Instant::now() + SETUP_IDLE;
     loop {
         let frames = {
             let hub = shared.hub.lock().unwrap();
@@ -244,7 +268,7 @@ async fn run<C: Clock + Send + 'static>(
         }
         let idle = async {
             if setting_up {
-                tokio::time::sleep(SETUP_IDLE).await;
+                tokio::time::sleep_until(setup_ends).await;
             } else {
                 std::future::pending::<()>().await;
             }
