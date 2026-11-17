@@ -1459,8 +1459,8 @@ way in:
   the server the session's display, **never the user's real `XDG_RUNTIME_DIR`** (it holds the
   session bus, hence the keyring, and the user's other sockets): the daemon makes a runtime folder
   of the connection's own, `$XDG_RUNTIME_DIR/flottille/display/<connection>` (mode 0700, removed
-  when the server stops), holding a hard link of the session's Wayland socket alone, and the
-  server's `XDG_RUNTIME_DIR` is that folder, with `WAYLAND_DISPLAY`; `DISPLAY` is given only when
+  when the browser started with it is closed), holding a hard link of the session's Wayland
+  socket alone, and the server's `XDG_RUNTIME_DIR` is that folder, with `WAYLAND_DISPLAY`; `DISPLAY` is given only when
   the session has no Wayland, and `DBUS_SESSION_BUS_ADDRESS` never. That folder is the one part of
   the user's runtime folder Landlock leaves within the server's and its login's reach
   (`docs/vault.md`, "The runtime folder"); the bus's address is not given, and the rest of the
@@ -1476,8 +1476,10 @@ way in:
   connection, in the mode the switch says: a login uses the server's display folder (the running
   server's own, else made under the connection's name for the time of the login), and the browser
   agent-browser's daemon runs, which outlives the command that started it (a login's or the
-  server's), is closed (`agent-browser close`, on that socket folder) when the server is stopped
-  (an edit of what trust is given to, the switch included, turning it off, removing it) and when
+  server's, an idle server's included), keeps the folder it was started with: the next server or
+  login is given that folder again, never one made again at its path, which Landlock, holding a
+  folder by its inode, would keep out of the browser's reach (#1040). It is closed (`agent-browser close`, on
+  that socket folder) when the server is stopped (an edit of what trust is given to, the switch included, turning it off, removing it) and when
   the daemon stops; the next start, of the server or of a login, starts a browser in the mode the
   switch says. **Showing the browser has a risk, said beside the switch and in the review**: with
   X11 the browser can read the keys typed in other windows and type into them (a terminal's
