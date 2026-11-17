@@ -303,7 +303,7 @@ impl AskDock {
             && self
                 .last
                 .as_ref()
-                .is_some_and(|card| card.read(cx).several());
+                .is_some_and(|card| card.read(cx).several() && !card.read(cx).is_folded());
         // The steps move with their card's page: the next card's come in as it does.
         let steps = match &self.last {
             Some(card) => {
