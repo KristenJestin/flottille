@@ -1614,3 +1614,211 @@ fn share_or_bind_is_refused_for_an_entry_bound_to_another_use() {
     assert_eq!(entry["url"], "https://site.example", "{entry}");
     assert_eq!(entry["for"], "connection:browser", "{entry}");
 }
+
+// ── An accepted edit that gives new actions waits for the user's review (#1031) ──────────────
+
+/// The connection `almanac` given to agents, its server then announcing one more action
+/// (`link`): the agent's edit, an argument added to its command, is held for the user.
+fn edit_giving_a_new_action(user: &User, mcp: &Mcp) -> u64 {
+    declare(user, "almanac", json!({}));
+    let line = line_of(user, "almanac");
+    let mut newer = almanac();
+    newer["tools"].as_array_mut().unwrap().push(json!({
+        "name": "link", "description": "Links two notes.", "inputSchema": {"type": "object"}}));
+    std::fs::write(user.path("almanac-script.json"), newer.to_string()).unwrap();
+    held(&mcp.call(
+        "connections",
+        json!({"action": "edit", "name": "almanac", "command": format!("{line} --verbose")}),
+    ))
+}
+
+/// The store, opened read-only (see `delivered`).
+fn store(user: &User) -> rusqlite::Connection {
+    let store = rusqlite::Connection::open_with_flags(
+        user.path("state/flottille/flottille.db"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    store.busy_timeout(Duration::from_secs(10)).unwrap();
+    store
+}
+
+/// The names of the events of `agent`, oldest first.
+fn agent_events(user: &User, agent: &str) -> Vec<String> {
+    let store = store(user);
+    let mut statement = store
+        .prepare(
+            "SELECT e.name FROM agent_events a JOIN events e ON e.seq = a.seq \
+             WHERE a.agent = ?1 ORDER BY a.seq",
+        )
+        .unwrap();
+    statement
+        .query_map([agent], |row| row.get::<_, String>(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+}
+
+/// The delivery `id`, once it is stored.
+fn delivery(user: &User, id: &str) -> String {
+    let store = store(user);
+    let body = || {
+        store
+            .query_row("SELECT body FROM deliveries WHERE id = ?1", [id], |row| {
+                row.get::<_, String>(0)
+            })
+            .optional()
+            .unwrap()
+    };
+    eventually(&format!("the delivery {id}"), || body().is_some());
+    body().unwrap()
+}
+
+#[test]
+fn the_answer_to_an_accept_says_the_connection_waits_for_its_review() {
+    let user = user();
+    project(&user, "app");
+    turn_on(&user);
+    let (_, mcp) = root(&user);
+    let number = edit_giving_a_new_action(&user, &mcp);
+
+    // The window learns it as the form's Save does, from the answer to its own call.
+    let answer = user
+        .call("approval.approve", json!({"number": number}))
+        .unwrap();
+    assert_eq!(answer["connection"]["name"], "almanac", "{answer}");
+    assert_eq!(answer["connection"]["state"], "awaiting review", "{answer}");
+    assert_eq!(answer["connection"]["review"], true, "{answer}");
+    assert_eq!(
+        connection(&user, "almanac").unwrap()["state"],
+        "awaiting review"
+    );
+}
+
+#[test]
+fn a_connection_awaiting_review_after_an_accepted_request_waits_for_the_user() {
+    let user = user();
+    project(&user, "app");
+    turn_on(&user);
+    let (agent, mcp) = root(&user);
+    let number = edit_giving_a_new_action(&user, &mcp);
+    user.call("approval.approve", json!({"number": number}))
+        .unwrap();
+
+    // In "Waiting for you": the inbox says it, as it does for a connection cut off.
+    let inbox = user.call("inbox.list", json!({})).unwrap()["entries"].to_string();
+    assert!(inbox.contains("almanac"), "{inbox}");
+    assert!(inbox.contains("waits for your review"), "{inbox}");
+    assert!(inbox.contains("link"), "the new action, named: {inbox}");
+    // In the session of the agent that asked: its card.
+    assert!(
+        agent_events(&user, &agent).contains(&"connection.review_waits".to_owned()),
+        "{:?}",
+        agent_events(&user, &agent)
+    );
+
+    // Reviewed, the card goes.
+    user.call("connection.review", json!({"name": "almanac"}))
+        .unwrap();
+    user.call("connection.accept", json!({"name": "almanac"}))
+        .unwrap();
+    assert!(
+        agent_events(&user, &agent).contains(&"connection.review_done".to_owned()),
+        "{:?}",
+        agent_events(&user, &agent)
+    );
+}
+
+#[test]
+fn the_agent_is_told_its_accepted_edit_waits_for_the_users_review_and_then_that_it_was_reviewed() {
+    let user = user();
+    project(&user, "app");
+    turn_on(&user);
+    let (_, mcp) = root(&user);
+    let number = edit_giving_a_new_action(&user, &mcp);
+
+    let first = approve(&user, number);
+    assert!(first.contains("almanac"), "{first}");
+    assert!(first.contains("link"), "the new action, named: {first}");
+    assert!(first.contains("review"), "{first}");
+    assert!(
+        !first.contains("Settings") && !first.contains("menu"),
+        "never sent looking for a menu: {first}"
+    );
+
+    user.call("connection.review", json!({"name": "almanac"}))
+        .unwrap();
+    user.call("connection.accept", json!({"name": "almanac"}))
+        .unwrap();
+    let second = delivery(&user, &format!("connection-review-{number}"));
+    assert!(second.contains("almanac"), "{second}");
+    assert!(second.contains("reviewed"), "{second}");
+    assert!(second.contains("link"), "{second}");
+
+    // The connection is given: the agent can use what it asked for.
+    assert_eq!(connection(&user, "almanac").unwrap()["state"], "ready");
+}
+
+#[test]
+fn a_connection_removed_while_it_waits_for_its_review_tells_the_agent_it_was_left_off() {
+    let user = user();
+    project(&user, "app");
+    turn_on(&user);
+    let (_, mcp) = root(&user);
+    let number = edit_giving_a_new_action(&user, &mcp);
+    approve(&user, number);
+
+    user.call("connection.remove", json!({"name": "almanac"}))
+        .unwrap();
+    let second = delivery(&user, &format!("connection-review-{number}"));
+    assert!(second.contains("left"), "{second}");
+}
+
+#[test]
+fn a_request_on_a_connection_awaiting_review_is_held_not_refused() {
+    let user = user();
+    project(&user, "app");
+    turn_on(&user);
+    let (_, mcp) = root(&user);
+    let number = edit_giving_a_new_action(&user, &mcp);
+    approve(&user, number);
+    assert_eq!(
+        connection(&user, "almanac").unwrap()["state"],
+        "awaiting review"
+    );
+
+    // The agent's next request is held like any other: nothing for it to relay.
+    let next = held(&mcp.call(
+        "connections",
+        json!({"action": "set", "name": "almanac", "settings": {"search": "passes"}}),
+    ));
+    // The review is the first thing the user is shown: the card says so, and Accept waits for it.
+    let proposed = user
+        .call("connection.proposed", json!({"number": next}))
+        .unwrap();
+    assert_eq!(proposed["review"], true, "{proposed}");
+    assert!(
+        proposed["waits"].as_str().unwrap().contains("review"),
+        "{proposed}"
+    );
+    let early = user
+        .call("approval.approve", json!({"number": next}))
+        .unwrap_err();
+    assert!(early.1.contains("review"), "{early:?}");
+    assert_eq!(pending(&user), 1, "still held");
+
+    // Reviewed, the same request goes through.
+    user.call("connection.review", json!({"name": "almanac"}))
+        .unwrap();
+    user.call("connection.accept", json!({"name": "almanac"}))
+        .unwrap();
+    approve(&user, next);
+    let search = connection(&user, "almanac").unwrap()["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["name"] == "search")
+        .unwrap()["setting"]
+        .clone();
+    assert_eq!(search, "passes");
+}
