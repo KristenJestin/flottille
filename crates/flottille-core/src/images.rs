@@ -524,6 +524,17 @@ mod tests {
     }
 
     #[test]
+    fn a_picture_with_a_side_too_long_is_not_decoded() {
+        // Within the pixel bound, yet scaling one row of 64 million pixels asks gigabytes of
+        // buffer: each side is bounded too, and the line says which bound.
+        for (width, height) in [(64_000_000, 1), (1, 64_000_000), (16_385, 1)] {
+            let declared = png_declaring(width, height);
+            let error = fit_under("image/png", &declared, 1 << 20).unwrap_err();
+            assert!(error.contains("px on a side"), "{width}x{height}: {error}");
+        }
+    }
+
+    #[test]
     fn a_gif_over_the_side_the_providers_read_is_not_to_be_sent() {
         let mut out = Cursor::new(Vec::new());
         DynamicImage::ImageRgba8(image::RgbaImage::new(MAX_PROVIDER_SIDE + 1, 1))

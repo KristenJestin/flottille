@@ -195,6 +195,29 @@ fn an_image_too_large_to_decode_is_left_out() {
 }
 
 #[test]
+fn a_very_wide_image_is_left_out() {
+    let user = user();
+    let folder = project(&user);
+    // 64 million pixels on one row: within the pixel bound, about 64 KB on disk, and scaling it
+    // would ask a gigabyte of buffer a time.
+    let wide = black(64_000_000, 1);
+    assert!(wide.len() < 2 * 1024 * 1024, "the file is small");
+    std::fs::write(folder.join("wide.png"), &wide).unwrap();
+    let mcp = session(&user);
+
+    let text = left_out(&mcp, "wide.png");
+    assert!(text.contains("px on a side"), "{text}");
+    // The daemon is alive: the next read is answered.
+    std::fs::write(
+        folder.join("piano.png"),
+        picture(40, 30, image::ImageFormat::Png),
+    )
+    .unwrap();
+    let (_, images) = read(&mcp, "piano.png");
+    assert_eq!(images.len(), 1);
+}
+
+#[test]
 fn a_truncated_image_is_left_out() {
     let user = user();
     let folder = project(&user);
