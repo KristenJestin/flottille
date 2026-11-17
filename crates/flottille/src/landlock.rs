@@ -293,4 +293,100 @@ mod tests {
         let at = |sub: &str| root.path().join(sub).to_string_lossy().into_owned();
         assert_eq!(paths, [at("home"), at("run/lock")]);
     }
+
+    /// Whether a child confined out of `runtime`, `open` left within its reach, connects to the
+    /// socket at `path`.
+    fn connects(runtime: &Path, open: &Path, path: &Path) -> bool {
+        use std::os::unix::process::CommandExt;
+        let mut paths = Vec::new();
+        allowed(
+            Path::new("/"),
+            &[runtime.canonicalize().unwrap()],
+            &mut paths,
+        );
+        let open = CString::new(open.as_os_str().as_bytes()).unwrap();
+        let rights = rights(abi());
+        let mut command = std::process::Command::new("python3");
+        command.args([
+            "-c",
+            "import socket, sys\ns = socket.socket(socket.AF_UNIX)\ns.connect(sys.argv[1])",
+        ]);
+        command.arg(path).stderr(std::process::Stdio::null());
+        // SAFETY: as in `confined_but`.
+        unsafe { command.pre_exec(move || restrict(rights, &paths, Some(&open), 0, &[])) };
+        command.status().unwrap().success()
+    }
+
+    #[test]
+    fn a_shown_browser_reaches_the_wayland_socket() {
+        if abi() < 2 {
+            eprintln!(
+                "skipped: this kernel's Landlock (ABI {}) is not used",
+                abi()
+            );
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = temp.path().join("runtime");
+        let folder = runtime.join("flottille/display/browser");
+        std::fs::create_dir_all(&folder).unwrap();
+        let _socket = std::os::unix::net::UnixListener::bind(runtime.join("wayland-9")).unwrap();
+        std::fs::hard_link(runtime.join("wayland-9"), folder.join("wayland-9")).unwrap();
+
+        assert!(connects(&runtime, &folder, &folder.join("wayland-9")));
+        // The session's own socket, by its own path, stays out of reach where connecting is ruled.
+        if abi() >= 9 {
+            assert!(!connects(&runtime, &folder, &runtime.join("wayland-9")));
+        }
+    }
+
+    #[test]
+    fn a_display_folder_made_again_is_out_of_reach_of_a_browser_confined_before() {
+        // Landlock's rules hold the folder's inode, not its path: agent-browser's daemon, which
+        // outlives its server, cannot reach the socket in a folder made again at the same path.
+        use std::os::unix::process::CommandExt;
+        if abi() < 9 {
+            eprintln!(
+                "skipped: this kernel's Landlock (ABI {}) does not rule connecting",
+                abi()
+            );
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = temp.path().join("runtime");
+        let folder = runtime.join("flottille/display/browser");
+        std::fs::create_dir_all(&folder).unwrap();
+        let _socket = std::os::unix::net::UnixListener::bind(runtime.join("wayland-9")).unwrap();
+        std::fs::hard_link(runtime.join("wayland-9"), folder.join("wayland-9")).unwrap();
+        let go = temp.path().join("go");
+
+        let mut paths = Vec::new();
+        allowed(
+            Path::new("/"),
+            &[runtime.canonicalize().unwrap()],
+            &mut paths,
+        );
+        let open = CString::new(folder.as_os_str().as_bytes()).unwrap();
+        let rights = rights(abi());
+        let mut command = std::process::Command::new("python3");
+        command.args([
+            "-c",
+            "import os, socket, sys, time\n\
+             while not os.path.exists(sys.argv[2]): time.sleep(0.01)\n\
+             s = socket.socket(socket.AF_UNIX)\ns.connect(sys.argv[1])",
+        ]);
+        command
+            .arg(folder.join("wayland-9"))
+            .arg(&go)
+            .stderr(std::process::Stdio::null());
+        // SAFETY: as in `confined_but`.
+        unsafe { command.pre_exec(move || restrict(rights, &paths, Some(&open), 0, &[])) };
+        let mut child = command.spawn().unwrap();
+        // The folder made again, as `display::share` does at the next start.
+        std::fs::remove_dir_all(&folder).unwrap();
+        std::fs::create_dir(&folder).unwrap();
+        std::fs::hard_link(runtime.join("wayland-9"), folder.join("wayland-9")).unwrap();
+        std::fs::write(&go, "").unwrap();
+        assert!(!child.wait().unwrap().success());
+    }
 }
