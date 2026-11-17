@@ -656,7 +656,8 @@ pub async fn run(
                     unreachable_since = None;
                     wait = ROUND;
                     control.set("connected", None);
-                    let ended = keep_session(&control, &remote, device, session, &mut stopping).await;
+                    let ended =
+                        keep_session(&control, &remote, device, session, &mut stopping).await;
                     remote.heard_hub();
                     match ended {
                         Ended::Stopping => return,

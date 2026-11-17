@@ -681,9 +681,6 @@ async fn a_removed_members_invitations_are_closed() {
     )
     .await
     .unwrap_err();
-    assert!(
-        late.to_string().contains("unknown or expired"),
-        "{late}"
-    );
+    assert!(late.to_string().contains("unknown or expired"), "{late}");
     place.served.stop().await;
 }
