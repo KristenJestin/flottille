@@ -2014,3 +2014,171 @@ fn a_github_user_list_is_read_past_its_first_page() {
         answer.text
     );
 }
+
+// After a change that may start checks, the answer says what the forge shows (#1045,
+// `docs/tools.md`, "The forge"): the checks that started since it, or that none did. The wait
+// before the read is `FLOTTILLE_CHECKS_WAIT_MS`, none in these tests.
+
+/// A running check run of GitHub's rollup.
+fn running_check(name: &str) -> Value {
+    json!({"__typename": "CheckRun", "name": name, "status": "IN_PROGRESS", "conclusion": "",
+        "startedAt": "2030-01-01T00:00:10Z"})
+}
+
+#[test]
+fn an_edit_says_no_check_started() {
+    let user = User::with_fake_agent().with_fake_gh();
+    on_github(&user, "", "");
+    // The repository's workflows ignore a title edit: nothing new in the rollup, where a check of
+    // the old head, already passing, shows.
+    user.gh_script(github_pulls());
+    let mcp = agent(&user);
+
+    let answer = write(
+        &user,
+        &mcp,
+        json!({"action": "edit", "number": 12, "title": "feat: login"}),
+    );
+
+    assert!(!answer.error, "{}", answer.text);
+    for said in [
+        "Pull request #12 of acme/app was changed.",
+        "No check started since the change",
+        "do not wait for one",
+    ] {
+        assert!(answer.text.contains(said), "{said:?} in {}", answer.text);
+    }
+    assert!(!answer.text.contains("Checks started"), "{}", answer.text);
+}
+
+#[test]
+fn an_edit_says_the_checks_that_started() {
+    let user = User::with_fake_agent().with_fake_gh();
+    on_github(&user, "", "");
+    let mut script = github_pulls();
+    script["edit_starts"] = json!({"acme/app": {"12": [running_check("test")]}});
+    user.gh_script(script);
+    let mcp = agent(&user);
+
+    let answer = write(
+        &user,
+        &mcp,
+        json!({"action": "edit", "number": 12, "base": "main", "title": "feat: login"}),
+    );
+
+    assert!(!answer.error, "{}", answer.text);
+    assert!(
+        answer
+            .text
+            .contains("Checks started since the change: test (running)."),
+        "{}",
+        answer.text
+    );
+    // `build` passed for the old head: it did not start since.
+    assert!(!answer.text.contains("build"), "{}", answer.text);
+    assert!(!answer.text.contains("No check started"), "{}", answer.text);
+}
+
+#[test]
+fn an_edit_on_bitbucket_says_whether_checks_started() {
+    let user = User::with_fake_agent().with_fake_bkt();
+    on_bitbucket(&user, "", "");
+    user.bkt_script(cloud_script());
+    let mcp = agent(&user);
+    let answer = write(
+        &user,
+        &mcp,
+        json!({"action": "edit", "number": 12, "title": "feat: login"}),
+    );
+    assert!(!answer.error, "{}", answer.text);
+    assert!(
+        answer.text.contains("No check started since the change"),
+        "{}",
+        answer.text
+    );
+
+    let user = User::with_fake_agent().with_fake_bkt();
+    on_bitbucket(&user, "", "");
+    let mut script = cloud_script();
+    script["edit_starts"] =
+        json!({"acme/app": {"12": [{"state": "INPROGRESS", "name": "deploy"}]}});
+    user.bkt_script(script);
+    let mcp = agent(&user);
+    let answer = write(
+        &user,
+        &mcp,
+        json!({"action": "edit", "number": 12, "title": "feat: login"}),
+    );
+    assert!(!answer.error, "{}", answer.text);
+    assert!(
+        answer
+            .text
+            .contains("Checks started since the change: deploy (running)."),
+        "{}",
+        answer.text
+    );
+}
+
+#[test]
+fn a_reopen_says_the_checks_that_started_or_that_none_did() {
+    let closed = |starts: Value| {
+        let user = User::with_fake_agent().with_fake_gh();
+        on_github(&user, "", "");
+        let mut script = github_pulls();
+        script["pulls"]["acme/app"]["app/login"]["state"] = json!("CLOSED");
+        script["edit_starts"] = starts;
+        user.gh_script(script);
+        let mcp = agent(&user);
+        write(&user, &mcp, json!({"action": "reopen", "number": 12}))
+    };
+
+    let none = closed(json!({}));
+    assert!(none.text.contains("was reopened"), "{}", none.text);
+    assert!(
+        none.text.contains("No check started since the change"),
+        "{}",
+        none.text
+    );
+
+    let started = closed(json!({"acme/app": {"12": [running_check("test")]}}));
+    assert!(
+        started
+            .text
+            .contains("Checks started since the change: test (running)."),
+        "{}",
+        started.text
+    );
+}
+
+#[test]
+fn a_change_whose_checks_cannot_be_read_says_so_and_is_still_done() {
+    let user = User::with_fake_agent().with_fake_gh();
+    on_github(&user, "", "");
+    let mut script = github_pulls();
+    // The state is read before the change, then the checks: the second read fails.
+    script["view_fail_after_write"] = json!({"acme/app": "HTTP 502: Bad Gateway"});
+    user.gh_script(script);
+    let mcp = agent(&user);
+
+    let answer = write(
+        &user,
+        &mcp,
+        json!({"action": "edit", "number": 12, "title": "feat: login"}),
+    );
+
+    assert!(!answer.error, "{}", answer.text);
+    assert!(
+        answer
+            .text
+            .contains("Pull request #12 of acme/app was changed."),
+        "{}",
+        answer.text
+    );
+    assert!(
+        answer
+            .text
+            .contains("Whether checks started could not be read"),
+        "{}",
+        answer.text
+    );
+}
