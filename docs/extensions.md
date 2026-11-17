@@ -1304,7 +1304,7 @@ read (a new one, or one that changed) is written and then waits **awaiting revie
 answer to the Accept says so (`approval.approve` waits for a connection's write, as the user's own
 Save does, and answers `connection: {name, state, review}`), and the window opens the review of the
 connection at once, over the page the user is on (the page of Connections, where the review is; the
-kit's modal host will open it in place). **Accept** in the review gives the agent its actions.
+kit's modal host will open it in place). The toast of the Accept says how the write ended (`The server almanac was saved`, or `was not written` with why), and the review opens only when the write succeeded. **Accept** in the review gives the agent its actions.
 Closing it leaves the connection awaiting review, and a toast says so with **Review**. **A
 connection awaiting review is something that waits for the user**: the inbox lists it
 (`connection.awaiting_review`, as a connection cut off is), and the session of the agent whose

@@ -1501,16 +1501,16 @@ impl Shell {
                 then: crate::extensions::Then::ConnectionRequest(then),
                 answer,
             } => {
-                // An accepted request whose write leaves the connection waiting for its review
-                // leads into that review at once (#1031): the daemon's answer says so, as the
-                // form's Save learns it.
+                // An accepted request whose write succeeded and leaves the connection waiting for
+                // its review leads into that review at once (#1031): the daemon's answer says so,
+                // as the form's Save learns it. A write that failed opens nothing.
                 let review = match (&then, &answer) {
                     (
                         crate::extensions::connection_request::Then::Decided {
                             accepted: true, ..
                         },
                         Ok(answer),
-                    ) if answer["connection"]["review"] == true => {
+                    ) if answer["connection"]["review"] == true && answer["outcome"] == "done" => {
                         answer["connection"]["name"].as_str().map(str::to_owned)
                     }
                     _ => None,

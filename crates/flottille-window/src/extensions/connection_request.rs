@@ -375,27 +375,37 @@ impl ConnectionRequest {
                     .filter(|_| self.number == Some(number))
                     .map(|p| (p.name.clone(), p.action.clone()));
                 match answer {
-                    Ok(_) => {
+                    Ok(answer) => {
                         if self.number == Some(number) {
                             self.open = false;
                         }
-                        let said = match (accepted, name) {
-                            (true, Some((name, action))) => {
-                                let doing = match action.as_str() {
-                                    "add" => "is being added",
-                                    "edit" => "is being saved",
-                                    "remove" => "is being removed",
-                                    "on" => "is being turned on",
-                                    "off" => "is being turned off",
-                                    _ => "is being set",
+                        // The daemon waited for the write: the toast says how it ended.
+                        let failure = (accepted && answer["outcome"].as_str() != Some("done"))
+                            .then(|| answer["failure"].as_str().map(str::to_owned))
+                            .flatten();
+                        let said = match (accepted, name, failure) {
+                            (true, Some((name, _)), Some(why)) => {
+                                Toast::failure(format!("The server {name} was not written"))
+                                    .detail(why)
+                            }
+                            (true, Some((name, action)), None) => {
+                                let done = match action.as_str() {
+                                    "add" => "was added",
+                                    "edit" => "was saved",
+                                    "remove" => "was removed",
+                                    "on" => "was turned on",
+                                    "off" => "was turned off",
+                                    _ => "was set",
                                 };
                                 Toast::success(format!(
-                                    "Request accepted: the server {name} {doing}"
+                                    "Request accepted: the server {name} {done}"
                                 ))
                                 .detail("The agent is told how it went.")
                             }
-                            (true, None) => Toast::success(format!("Request #{number} accepted")),
-                            (false, _) => Toast::success("Request refused: nothing was written")
+                            (true, None, _) => {
+                                Toast::success(format!("Request #{number} accepted"))
+                            }
+                            (false, ..) => Toast::success("Request refused: nothing was written")
                                 .detail("The agent is told you refused it."),
                         };
                         toast(said, cx);
