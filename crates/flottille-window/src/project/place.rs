@@ -17,8 +17,8 @@ use flottille_core::workspace::StepState;
 use gpui_design_system::color::mix;
 use gpui_design_system::motion::PANEL;
 use gpui_design_system::{
-    Button, Chip, Confirm, Field, FlatRow, Icon, Item, Listing, Menu, Modal, Placement, Skeleton,
-    Toast, Type, awaiting, caption, changed, enter, fade, hoverable, icon, palette, presence,
+    Button, Chip, Confirm, Disclosure, Field, FlatRow, Icon, Item, Listing, Menu, Modal, Placement,
+    Skeleton, Toast, Type, awaiting, caption, enter, fade, hoverable, icon, palette, presence,
     presence_of, space, toast,
 };
 use gpui_kit::base::input::{InputEvent, InputState};
@@ -170,6 +170,8 @@ pub struct PlaceBlock {
     /// The steps, the sessions and the runs as last drawn: a row that comes unfolds, one that
     /// goes folds away. The order never changes but by what the daemon says.
     step_rows: Listing<SetupLine>,
+    /// A ready workspace's "How long it took" is unfolded.
+    times_open: bool,
     session_rows: Listing<SessionLine>,
     run_rows: Listing<CommandRow>,
     /// Each session row's "⋯" menu, made when the row is first drawn.
@@ -228,6 +230,7 @@ impl PlaceBlock {
             marks: HashMap::new(),
             spinners: HashMap::new(),
             step_rows: Listing::default(),
+            times_open: false,
             session_rows: Listing::default(),
             run_rows: Listing::default(),
             session_menus: HashMap::new(),
@@ -792,6 +795,47 @@ impl PlaceBlock {
         )
     }
 
+    /// A ready workspace's making, folded under a labelled line: the reach of each remote and
+    /// every step with how long it took, which the setup block, folded away by then, said while
+    /// it ran.
+    fn made_block(&self, name: &str, now: u64, cx: &mut Context<Self>) -> AnyElement {
+        let rows = self.data.made.iter().enumerate().map(|(i, line)| {
+            let tone = match line.state {
+                StepState::Failed => StepTone::Failed,
+                _ => StepTone::Done,
+            };
+            let mut row = StepRow::new(
+                ElementId::Name(format!("made-step-{name}-{i}").into()),
+                div(),
+                SharedString::from(line.verb.clone()),
+                tone,
+                ElementId::Name(format!("made-time-{name}-{i}").into()),
+            );
+            if let Some(object) = &line.object {
+                row = row.object(SharedString::from(object.clone()));
+            }
+            if let Some(time) = step_time(line, now) {
+                row = row.time(SharedString::from(time));
+            }
+            row
+        });
+        let this = cx.entity().downgrade();
+        Disclosure::new(
+            ElementId::Name(format!("place-times-{name}").into()),
+            "How long it took",
+            self.times_open,
+        )
+        .body(div().flex().flex_col().children(rows))
+        .on_toggle(move |open, _, cx| {
+            this.update(cx, |this, cx| {
+                this.times_open = open;
+                cx.notify();
+            })
+            .ok();
+        })
+        .into_any_element()
+    }
+
     fn link_modal(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) -> Modal {
         if self.linking && self.ticket_field.is_none() {
             let field =
@@ -984,12 +1028,7 @@ impl PlaceBlock {
 
     /// A workspace's faint line, in labelled values: where it starts from, and where each
     /// repository stands (a project of one repository does not name it).
-    fn facts_line(
-        &self,
-        name: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
+    fn facts_line(&self, name: &str, cx: &mut Context<Self>) -> Option<AnyElement> {
         let meta = self.data.meta.clone()?;
         let p = palette(cx);
         let mut values: Vec<(Option<String>, String)> = vec![(None, meta)];
@@ -1012,26 +1051,22 @@ impl PlaceBlock {
             .collect::<Vec<_>>()
             .join(" · ");
         let count = values.len();
-        // How long it took to be ready, from the request: it fades in when the last step ends (the
-        // setup block, which says each step's time, folds away then). Asked on every frame, with no
-        // text before, so that the first text is a change.
-        let total = self
-            .data
-            .total_ms
-            .map(|ms| SharedString::from(format!("ready in {}", seconds(ms))))
-            .unwrap_or_default();
-        let total_id = ElementId::Name(format!("place-total-{name}").into());
-        let faded = changed(&total_id, &total, window, cx);
-        let total = (!total.is_empty()).then(|| {
-            div()
-                .id(total_id)
-                .aria_label(total.clone())
-                .flex()
-                .gap(space::XS)
-                .opacity(faded)
-                .child("·")
-                .child(div().text_color(p.mute).child(total))
-                .test_support()
+        // How long it took to be ready, from the request: it comes in, with its separator, when
+        // the last step ends (the times of the steps are one folded line below).
+        let total = self.data.total_ms.map(|ms| {
+            let said = SharedString::from(format!("ready in {}", seconds(ms)));
+            enter(
+                ElementId::Name(format!("place-total-enter-{name}").into()),
+                0,
+                div()
+                    .id(ElementId::Name(format!("place-total-{name}").into()))
+                    .aria_label(said.clone())
+                    .flex()
+                    .gap(space::XS)
+                    .child("·")
+                    .child(div().text_color(p.mute).child(said))
+                    .test_support(),
+            )
         });
         Some(
             div()
@@ -1437,12 +1472,18 @@ impl Render for PlaceBlock {
         });
         let highlight = fade(id("place-highlight"), self.highlighted, PANEL, window, cx);
 
-        let facts = self.facts_line(&name, window, cx);
+        let facts = self.facts_line(&name, cx);
         let steps = self.setup(&name, now, cx);
         let setup = presence(
             id("place-setup"),
             !ready && steps.is_some(),
             div().pl(space::MD).children(steps),
+        );
+        let made = self.made_block(&name, now, cx);
+        let made = presence(
+            id("place-times-presence"),
+            ready && !self.data.made.is_empty(),
+            div().pl(space::MD).pb(space::SM).child(made),
         );
         let sessions = self.sessions(now, cx);
         let runs = self.run_rows(now, window, cx);
@@ -1495,6 +1536,7 @@ impl Render for PlaceBlock {
             .child(row)
             .children(facts)
             .child(setup)
+            .child(made)
             .children(sessions)
             .children(runs)
             .test_support()

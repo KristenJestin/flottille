@@ -276,6 +276,17 @@ fn the_window_draws_no_frame_at_rest_on_a_prepared_workspace_s_page_with_its_tim
         "{:?}",
         said("place-total-login", cx)
     );
+    // It comes in through an entrance (with its separator), and its steps' times are one folded,
+    // labelled line away.
+    assert!(
+        said("place-total-enter-login", cx).is_some()
+            || cx.update(|window, _| window.try_find("place-total-enter-login").is_some()),
+        "the total enters"
+    );
+    assert_eq!(
+        said("place-times-login", cx).as_deref(),
+        Some("How long it took")
+    );
     assert_eq!(
         frames_at_rest(&shell, cx),
         (0, 0),

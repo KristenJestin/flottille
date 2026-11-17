@@ -4,7 +4,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::state::AgentState;
-use flottille_core::workspace::{Action, Step, StepState, Workspace as Record};
+use flottille_core::workspace::{Action, FetchOutcome, Step, StepState, Workspace as Record};
 use serde_json::Value;
 
 /// Everything the shell draws, as one fresh read of the daemon gives it.
@@ -63,6 +63,9 @@ pub struct Workspace {
     /// From its creation to the end of its last step, once it is ready: what the setup block
     /// says it took (the wall clock's timestamps, the daemon's own total being the same span).
     pub total_ms: Option<u64>,
+    /// What its making took, for a ready workspace to unfold: the reach of each repository's
+    /// remote, then every step with its time, the checkouts the setup's list drops included.
+    pub made: Vec<SetupLine>,
 }
 
 /// One step of a workspace's preparation, as its place lists it: "Run `pnpm install`".
@@ -107,6 +110,33 @@ impl SetupLine {
             duration_ms: step.duration_ms,
         }
     }
+}
+
+/// What a workspace's making took, line by line: the reach of each repository's remote when it
+/// was timed, then every step. A fetch that failed says so; a workspace made before the times
+/// were kept has no fetch line and steps without a time.
+fn made(record: &Record) -> Vec<SetupLine> {
+    let fetches = record.repositories.iter().filter_map(|worktree| {
+        let fetch = worktree.base.fetch.as_ref()?;
+        let failed = fetch.outcome == FetchOutcome::Failed;
+        Some(SetupLine {
+            position: 0,
+            verb: if failed { "Fetch failed" } else { "Fetch" }.to_owned(),
+            runs: false,
+            object: Some(worktree.path.clone()),
+            state: if failed {
+                StepState::Failed
+            } else {
+                StepState::Done
+            },
+            started_at: Some(fetch.started_at),
+            ended_at: None,
+            duration_ms: Some(fetch.duration_ms),
+        })
+    });
+    fetches
+        .chain(record.steps.iter().map(SetupLine::of))
+        .collect()
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -164,14 +194,15 @@ impl Workspace {
             },
             (None, None) => Preparation::Ready,
         };
-        let total_ms = match preparation {
-            Preparation::Ready => record
+        let ready = preparation == Preparation::Ready;
+        let total_ms = match ready {
+            true => record
                 .steps
                 .iter()
                 .filter_map(|step| step.ended_at)
                 .max()
                 .map(|ended| ended.saturating_sub(record.created_at)),
-            _ => None,
+            false => None,
         };
         Workspace {
             project: record.project.clone(),
@@ -197,6 +228,7 @@ impl Workspace {
                 .collect(),
             created_at: record.created_at,
             total_ms,
+            made: if ready { made(record) } else { Vec::new() },
         }
     }
 }
@@ -1489,6 +1521,60 @@ mod tests {
             preparing.total_ms, None,
             "a workspace being prepared has no total"
         );
+    }
+
+    #[test]
+    fn a_ready_workspace_lists_each_fetch_and_every_step_with_its_time_the_checkouts_too() {
+        let mut shown = workspace_json(json!([
+            {"position": 0, "repository": "api", "kind": "worktree", "state": "done",
+                "started_at": 1_000, "ended_at": 1_400, "duration_ms": 380},
+            {"position": 1, "repository": "web", "kind": "worktree", "state": "done",
+                "started_at": 1_400, "ended_at": 1_500, "duration_ms": 90},
+            {"position": 2, "repository": "api", "kind": "run", "line": "pnpm install",
+                "time_limit": 60, "state": "done", "started_at": 1_500, "ended_at": 8_500,
+                "duration_ms": 6_900}]));
+        shown["state"] = "ready".into();
+        shown["repositories"][0]["base"]["fetch"] =
+            json!({"started_at": 900, "duration_ms": 1_250, "outcome": "fetched"});
+        shown["repositories"][1]["base"]["fetch"] =
+            json!({"started_at": 900, "duration_ms": 3_000, "outcome": "failed"});
+        let snapshot = Snapshot::build(Answers {
+            projects: &json!({"projects": []}),
+            workspaces: &json!({"workspaces": [shown]}),
+            agents: &json!({"agents": []}),
+            approvals: &json!({"requests": []}),
+            needs_user: &HashSet::new(),
+            questions: &HashMap::new(),
+            briefs: &HashMap::new(),
+            commands: &json!({"commands": []}),
+            subscriptions: &json!({"subscriptions": []}),
+        });
+        let ready = &snapshot.workspaces[0];
+        let made: Vec<_> = ready
+            .made
+            .iter()
+            .map(|line| {
+                (
+                    line.verb.as_str(),
+                    line.object.as_deref().unwrap_or(""),
+                    line.state,
+                    line.duration_ms,
+                )
+            })
+            .collect();
+
+        assert_eq!(
+            made,
+            [
+                ("Fetch", "api", StepState::Done, Some(1_250)),
+                ("Fetch failed", "web", StepState::Failed, Some(3_000)),
+                ("Check out", "api", StepState::Done, Some(380)),
+                ("Check out", "web", StepState::Done, Some(90)),
+                ("Run", "pnpm install", StepState::Done, Some(6_900)),
+            ],
+            "the setup's list drops a checkout done, this one keeps it"
+        );
+        assert_eq!(ready.steps.len(), 1, "the setup block is unchanged");
     }
 
     #[test]
