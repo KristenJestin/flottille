@@ -144,6 +144,10 @@ impl Status {
 pub const SPIN_TURN: Duration = Duration::from_millis(800);
 /// One pulse of the waiting ring.
 pub const PULSE_PERIOD: Duration = Duration::from_millis(1800);
+/// How long a wait for the user pulses before the dot rests, still: it says "look here" while
+/// the wait is new, then a page with a request left open draws no frame (#1036). A cycle ends
+/// with its halo gone, so the dot stops without a jump.
+pub const PULSE_SPAN: Duration = Duration::from_millis(5400);
 /// The spinner turns at a low frame rate: the cost of an animation is the frames it asks for.
 const SPIN_FRAME: Duration = Duration::from_millis(40);
 const PULSE_FRAME: Duration = Duration::from_millis(66);
@@ -218,14 +222,29 @@ impl Shown {
             self.ticker = None;
             return;
         }
+        let ends = (self.state == AgentState::NeedsYou).then(|| self.since + PULSE_SPAN);
         self.ticker = Some(cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(frame).await;
                 if this.update(cx, |_, cx| cx.notify()).is_err() {
                     break;
                 }
+                // The tick that finds the pulse over drew its last frame: a ticker never runs
+                // for a mark that no longer moves.
+                if ends.is_some_and(|ends| cx.background_executor().now() >= ends) {
+                    break;
+                }
             }
         }));
+    }
+
+    /// How far into its pulse the dot of a wait for the user is, 0 to 1: 1 once it rested.
+    fn pulse(&self, cx: &App) -> f32 {
+        let elapsed = cx
+            .background_executor()
+            .now()
+            .saturating_duration_since(self.since);
+        pulse_at(elapsed)
     }
 
     /// How far into its cycle a moving mark is, 0 to 1.
@@ -235,6 +254,15 @@ impl Shown {
             .now()
             .saturating_duration_since(self.since);
         (elapsed.as_secs_f32() / period.as_secs_f32()).fract()
+    }
+}
+
+/// The phase of the dot's halo `elapsed` after the wait began: its cycle for `PULSE_SPAN`, then 1,
+/// where the halo is gone.
+fn pulse_at(elapsed: Duration) -> f32 {
+    match elapsed >= PULSE_SPAN {
+        true => 1.0,
+        false => (elapsed.as_secs_f32() / PULSE_PERIOD.as_secs_f32()).fract(),
     }
 }
 
@@ -300,11 +328,7 @@ impl Render for StateIcon {
                 spinner(p.run, turn).size(size(12.)).into_any_element()
             }
             Mark::Pulse => {
-                let t = if still {
-                    0.0
-                } else {
-                    self.shown.phase(PULSE_PERIOD, cx)
-                };
+                let t = if still { 0.0 } else { self.shown.pulse(cx) };
                 let ease = 1.0 - (1.0 - t).powi(2);
                 let halo = 8.0 + 14.0 * ease;
                 div()
@@ -508,6 +532,18 @@ pub fn views(status: &Entity<Status>, cx: &mut App) -> (Entity<StateIcon>, Entit
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_wait_pulses_for_a_few_cycles_then_rests_without_a_jump() {
+        assert!(pulse_at(Duration::from_millis(900)) > 0.4);
+        let last = pulse_at(PULSE_SPAN - Duration::from_millis(1));
+        assert!(
+            last > 0.99,
+            "the last cycle ends with its halo gone: {last}"
+        );
+        assert_eq!(pulse_at(PULSE_SPAN), 1.0);
+        assert_eq!(pulse_at(PULSE_SPAN * 100), 1.0);
+    }
 
     #[test]
     fn waiting_for_the_user_beats_running() {

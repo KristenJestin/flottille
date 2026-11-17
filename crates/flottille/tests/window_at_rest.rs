@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use common::User;
 use flottille_window::Shell;
 use flottille_window::shell::Selection;
+use flottille_window::state::PULSE_SPAN;
 use flottille_window::tree::session_id;
 use gpui_design_system::omarchy::Environment;
 use gpui_design_system::toggle_id;
@@ -112,6 +113,14 @@ fn settle(shell: &Entity<Shell>, cx: &mut VisualTestContext) {
         }
         std::thread::sleep(Duration::from_millis(5));
     }
+}
+
+/// Lets the pulse of a wait for the user end (`PULSE_SPAN`): it moves, by design, while the wait
+/// is new and draws no animation frame, so `settle` does not wait for it; the window's clock is
+/// moved past it, and the page settles on the still dot.
+fn past_the_pulse(shell: &Entity<Shell>, cx: &mut VisualTestContext) {
+    step(shell, PULSE_SPAN, cx);
+    settle(shell, cx);
 }
 
 /// What the window drew and asked for over ten seconds of its clock (and a few of the daemon's):
@@ -1125,8 +1134,8 @@ fn the_window_draws_no_frame_at_rest_on_a_question_card_open_with_three_question
     let (with_card, asked) = frames_at_rest(&shell, cx);
     assert_eq!(asked, 0, "no animation frame asked");
 
-    // The row of a session that needs the user pulses, by design, on every page: the card adds
-    // nothing to what the pulse alone draws.
+    // The row of a session that needs the user pulses, by design, while the wait is new, on every
+    // page: the card adds nothing to what the pulse alone draws.
     shell.update_in(cx, |s, window, cx| {
         s.open(Selection::Project("app".into()), window, cx)
     });
@@ -1994,6 +2003,7 @@ fn open_with_request_card(
         cx.update(|window, _| window.try_find(format!("open-request-{number}")).is_some())
     });
     settle(shell, cx);
+    past_the_pulse(shell, cx);
 }
 
 /// #1036: a session page alone, its conversation shown, at rest.
