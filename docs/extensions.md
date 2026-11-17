@@ -1480,7 +1480,9 @@ way in:
   login is given that folder again, never one made again at its path, which Landlock, holding a
   folder by its inode, would keep out of the browser's reach (#1040). It is closed (`agent-browser close`, on
   that socket folder) when the server is stopped (an edit of what trust is given to, the switch included, turning it off, removing it) and when
-  the daemon stops; the next start, of the server or of a login, starts a browser in the mode the
+  the daemon stops; one a daemon that died left (an update that killed it, a crash) is closed the
+  same way when the next daemon starts, before it serves any tool call, since the folder it was
+  confined with is made again out of its reach; the next start, of the server or of a login, starts a browser in the mode the
   switch says. **Showing the browser has a risk, said beside the switch and in the review**: with
   X11 the browser can read the keys typed in other windows and type into them (a terminal's
   included), and on some Wayland compositors a client can capture the screen and the clipboard. The daemon
