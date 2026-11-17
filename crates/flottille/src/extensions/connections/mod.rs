@@ -34,6 +34,24 @@ use crate::projects::Failure;
 
 pub use adapters::{in_clear, provide, site};
 pub use client::{Live, stop_all};
+
+/// The browsers a daemon that died left shown, closed before any server or login of theirs
+/// starts: agent-browser's daemon outlives the daemon that started it, confined with the display
+/// folder this daemon removed (`display::clean`) and makes again, a folder out of its reach
+/// (#1040). Each is closed the way a stop closes it, by its socket folder; one that does not
+/// answer is no error.
+pub async fn close_left_at_start(daemon: &Daemon) {
+    let Ok(declared) = declarations(&daemon.paths) else {
+        return;
+    };
+    let left: Vec<adapters::Browser> = declared
+        .iter()
+        .filter(|declaration| declaration.headed)
+        .filter_map(|declaration| adapters::browser(daemon, declaration, None))
+        .collect();
+    // At once, as `stop_all` does: each close is bounded.
+    futures::future::join_all(left.iter().map(|browser| adapters::close(daemon, browser))).await;
+}
 pub use oauth::secrets_in;
 
 pub const EXTENSION: Extension = Extension {
