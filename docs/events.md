@@ -208,6 +208,17 @@ version alone is `connection.version_moved`), found as it started or when it sai
 | `name`, `tool` | The connection's name and its tool (`conn_almanac`). |
 | `changed` | What changed, a sentence each (`the server is now almanac 1.1.0, not almanac 1.0.0`). |
 
+### `connection.awaiting_review`, `connection.review_waits`, `connection.review_done`
+
+An accepted request of an agent (`docs/extensions.md`, "Connections") left a connection waiting for
+the user's review of actions its server announces and nobody read. `connection.awaiting_review`,
+the connection's own event, is listed by the inbox (kind `connections`) as `connection.cut_off`
+is: `name`, `tool` and `actions` (the new or changed ones). `connection.review_waits`, an event of
+the agent that asked, opens the card of its session: `agent`, `name`, `request` (the number of the
+request) and `actions`. `connection.review_done`, of the same agent, closes it once the connection
+is reviewed, removed or turned off: the same fields and `outcome` (`reviewed` or `left`); the agent
+is then told, once, in a `connections` delivery.
+
 ### `connection.version_moved`
 
 The server started as another version, and nothing agents read changed (its `serverInfo` differs
