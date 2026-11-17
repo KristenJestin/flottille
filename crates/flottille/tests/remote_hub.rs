@@ -737,6 +737,36 @@ fn a_request_for_a_token_this_member_never_issued_is_dropped() {
 }
 
 #[test]
+fn a_request_for_an_expired_invitation_is_dropped() {
+    let pc = Machine::new(None);
+    let hub = FakeHub::pushing(list_for(&pc), |_| Some(None), lying_requests);
+    pin(&pc, &hub);
+    pc.wait_until("the pc does not take the hub's list", |seen| {
+        seen["machines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|machine| machine["name"] == "laptop")
+    });
+    // An invitation asked 295 s ago: valid 5 s more.
+    let ask = InvitationAsk::sign(&hub.key, unix_now() - 295, &pc.device()).unwrap();
+    pc.user.call("remote.invite", json!({"ask": ask})).unwrap();
+    let request = pc.wait_until_requested();
+    assert_eq!(request["key"], json!(seeded(41).public()));
+
+    // Past its 5 minutes, the request for it is no longer shown, though the hub still tells it.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while pc.user.call("remote.requests", json!({})).unwrap() != json!([]) {
+        assert!(
+            Instant::now() < deadline,
+            "the expired request is still shown"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    drop(hub.runtime);
+}
+
+#[test]
 fn the_inviters_words_come_from_the_token_it_issued() {
     let pc = Machine::new(None);
     let (hub, requests) = invited_by_a_lying_hub(&pc);
