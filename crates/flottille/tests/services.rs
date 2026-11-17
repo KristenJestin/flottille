@@ -1280,13 +1280,30 @@ fn alive(pid: u32) -> bool {
     }
 }
 
-/// Kills what a failing test would leave running.
-struct Left(Vec<u32>);
+/// When the process started, in clock ticks since boot (field 22 of `/proc/<pid>/stat`): what a
+/// pid taken by another program later does not share.
+fn started_at(pid: u32) -> Option<u64> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    stat.rsplit_once(')')?
+        .1
+        .split_whitespace()
+        .nth(19)?
+        .parse()
+        .ok()
+}
+
+/// Kills what a failing test would leave running: a process that is still the one it was, never
+/// one that took its pid after it ended.
+struct Left(Vec<(u32, Option<u64>)>);
+
+fn left(pids: &[u32]) -> Left {
+    Left(pids.iter().map(|pid| (*pid, started_at(*pid))).collect())
+}
 
 impl Drop for Left {
     fn drop(&mut self) {
-        for pid in &self.0 {
-            if alive(*pid) {
+        for (pid, started) in &self.0 {
+            if started.is_some() && started_at(*pid) == *started && alive(*pid) {
                 kill(*pid);
             }
         }
@@ -1367,7 +1384,7 @@ fn a_service_left_by_a_daemon_that_was_killed_is_ended_and_started_again() {
         printed_pid(&user, "db", "leader"),
         printed_pid(&user, "db", "child"),
     );
-    let _left = Left(vec![leader, child]);
+    let _left = left(&[leader, child]);
     let address = format!("http://127.0.0.1:{port}");
     eventually("db answers", || answers(&address));
 
@@ -1463,7 +1480,7 @@ fn a_session_with_a_recorded_sid_that_is_not_ours_stays_alive() {
         .read_line(&mut line)
         .unwrap();
     let program: u32 = line.trim().parse().unwrap();
-    let _left = Left(vec![program]);
+    let _left = left(&[program]);
     leader.wait().unwrap();
     assert!(alive(program));
 
@@ -1480,13 +1497,58 @@ fn records_of_another_boot_are_dropped_unsignalled() {
     // Everything of a leftover run, its marker and start included, but its boot.
     let mut process = in_a_session("exec sleep 60", &[("FLOTTILLE_RUN", "r1")]);
     let pid = process.id();
-    let _left = Left(vec![pid]);
+    let _left = left(&[pid]);
 
     started_again_with_a_record(&user, pid, start_ticks(pid), "r1", "another-boot");
 
     assert!(alive(pid), "a process of another boot's record was killed");
     let _ = process.kill();
     let _ = process.wait();
+}
+
+/// A process left alone in a session of its own, with `env`, the session's leader gone: the
+/// session's id, the leader's start, and the process's pid.
+fn left_in_a_session(env: &[(&str, &str)]) -> (u32, u64, u32) {
+    let mut leader = in_a_session("sleep 60 & echo $!", env);
+    let session = leader.id();
+    let started = start_ticks(session);
+    let mut line = String::new();
+    BufReader::new(leader.stdout.take().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    leader.wait().unwrap();
+    (session, started, line.trim().parse().unwrap())
+}
+
+#[test]
+fn a_member_marked_with_another_run_is_not_ended() {
+    let user = User::new();
+    user.status();
+    // Started by the run r2, in a session whose leader had the pid r1's leader had.
+    let (session, started, member) = left_in_a_session(&[("FLOTTILLE_RUN", "r2")]);
+    let _left = left(&[member]);
+    assert!(alive(member));
+
+    started_again_with_a_record(&user, session, started, "r1", &this_boot());
+
+    assert!(alive(member), "a process of another run was killed");
+}
+
+#[test]
+fn a_marked_member_started_before_the_recorded_leader_is_not_ended() {
+    let user = User::new();
+    user.status();
+    let (session, _, member) = left_in_a_session(&[("FLOTTILLE_RUN", "r1")]);
+    let _left = left(&[member]);
+    assert!(alive(member));
+
+    // The recorded leader started after it: it is not what that leader started.
+    started_again_with_a_record(&user, session, start_ticks(member) + 1, "r1", &this_boot());
+
+    assert!(
+        alive(member),
+        "a process older than the recorded leader was killed"
+    );
 }
 
 #[test]
@@ -1512,7 +1574,7 @@ fn a_resumed_setup_step_starts_its_services_after_the_leftovers_are_ended() {
         printed_pid(&user, "db", "leader"),
         printed_pid(&user, "db", "child"),
     );
-    let _left = Left(vec![leader, child]);
+    let _left = left(&[leader, child]);
     eventually("db answers", || {
         answers(&format!("http://127.0.0.1:{port}"))
     });
@@ -1547,7 +1609,7 @@ fn a_task_s_agent_is_told_when_a_service_it_needs_stops() {
         printed_pid(&user, "db", "leader"),
         printed_pid(&user, "db", "child"),
     );
-    let _left = Left(vec![leader, child]);
+    let _left = left(&[leader, child]);
 
     // The service ends on its own, not by the user's hand.
     kill(leader);
@@ -1614,6 +1676,137 @@ fn an_outside_service_that_stops_answering_is_said_to_what_needs_it() {
 }
 
 #[test]
+fn an_outside_service_that_answers_again_is_said_back() {
+    let user = User::with_fake_agent().with_env("FLOTTILLE_TEST_FOLLOW_MS", "200");
+    // Ended with the test, whatever fails before it is killed by hand.
+    let (outside, address) = by_hand();
+    let mut outside = Ended(outside);
+    services_file(
+        &user,
+        &format!(
+            "[services.db]\nfolder = \"{}\"\nline = \"{}\"\nready = {{ url = \"{address}\" }}\n",
+            folder(&user, "db").display(),
+            server(0)
+        ),
+    );
+    project(&user, &[]);
+    serving_api(&user, &["db"]);
+    let (agent, mcp) = root(&user, None);
+    set_mode(&user, &agent, "full");
+    let run = run_of(&done(mcp.call("run", json!({"task": "api"}))));
+    let _ = outside.0.kill();
+    let _ = outside.0.wait();
+    prompted_within(&user, 5, &["[flottille:service-stopped]"]);
+
+    // The user starts their own again, at the same address.
+    let port = address.rsplit_once(':').unwrap().1;
+    let _again = Ended(
+        Command::new(common::fake_server())
+            .args(["--listen", port])
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+
+    let told = prompted_within(
+        &user,
+        5,
+        &[
+            "[flottille:service-back]",
+            "db, which api needs, runs again",
+        ],
+    );
+    assert!(told[0].contains(&run), "{told:?}");
+    assert_eq!(show(&user, "db")["state"], "outside");
+    let status = done(mcp.call("run_status", json!({"run": run})));
+    assert!(!status.contains("needs db, stopped"), "{status}");
+    std::thread::sleep(Duration::from_secs(2));
+    let all = prompted_within(&user, 1, &["[flottille:service-back]"]);
+    assert_eq!(all.len(), 1, "{all:?}");
+}
+
+#[test]
+fn a_service_that_flaps_leaves_the_agent_told_its_last_state() {
+    let user = User::with_fake_agent().with_env("FLOTTILLE_TEST_FOLLOW_MS", "200");
+    // The agent's turn lasts until the test says so: nothing it is told is read before.
+    user.fake_script(json!({"turns": [
+        {"when": "hello", "times": 1, "do": [{"hold": "release"}]}
+    ]}));
+    let (outside, address) = by_hand();
+    let mut outside = Ended(outside);
+    services_file(
+        &user,
+        &format!(
+            "[services.db]\nfolder = \"{}\"\nline = \"{}\"\nready = {{ url = \"{address}\" }}\n",
+            folder(&user, "db").display(),
+            server(0)
+        ),
+    );
+    project(&user, &[]);
+    serving_api(&user, &["db"]);
+    let (agent, mcp) = root(&user, None);
+    set_mode(&user, &agent, "full");
+    let run = run_of(&done(mcp.call("run", json!({"task": "api"}))));
+    // Asked of the daemon, not of the agent's tools: a tool's answer would carry what waits.
+    let stopped = || {
+        user.call("run.list", json!({"tree": agent}))
+            .unwrap()
+            .to_string()
+            .contains("\"needs_stopped\":[\"db\"]")
+    };
+
+    // Stopped, back, stopped again, all in the one turn.
+    let _ = outside.0.kill();
+    let _ = outside.0.wait();
+    eventually("db seen stopped", stopped);
+    let port = address.rsplit_once(':').unwrap().1;
+    let mut again = Ended(
+        Command::new(common::fake_server())
+            .args(["--listen", port])
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    eventually("db seen back", || !stopped());
+    let _ = again.0.kill();
+    let _ = again.0.wait();
+    eventually("db seen stopped again", stopped);
+
+    std::fs::write(user.path("fake/release"), "").unwrap();
+    let told = prompted_within(&user, 10, &["[flottille:service-stopped]"]);
+    assert!(told[0].contains(&run), "{told:?}");
+    std::thread::sleep(Duration::from_secs(2));
+    let all = prompts(&user).join("\n");
+    assert_eq!(
+        all.matches("[flottille:service-stopped]").count(),
+        1,
+        "{all}"
+    );
+    assert_eq!(all.matches("[flottille:service-back]").count(), 0, "{all}");
+}
+
+/// A child of the test's, killed and waited for when the test ends, passed or not.
+struct Ended(std::process::Child);
+
+impl Drop for Ended {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// The error the daemon answers `method` with, whole.
+fn error_of(user: &User, method: &str, params: Value) -> Value {
+    let mut stream =
+        std::os::unix::net::UnixStream::connect(user.path("runtime/flottille/daemon.sock"))
+            .unwrap();
+    let request = json!({"id": "1", "method": method, "params": params});
+    std::io::Write::write_all(&mut stream, format!("{request}\n").as_bytes()).unwrap();
+    let answer: Value = serde_json::from_str(&common::read_line_patiently(stream)).unwrap();
+    answer["error"].clone()
+}
+
+#[test]
 fn a_need_through_another_service_counts() {
     let user = User::new();
     services_file(
@@ -1636,6 +1829,13 @@ fn a_need_through_another_service_counts() {
     assert_eq!(code, "needed", "{why}");
     assert!(why.contains("app's api"), "{why}");
     assert!(why.contains("the service file"), "{why}");
+    // What needs it, as data too: a client draws it without reading the sentence.
+    let error = error_of(&user, "service.stop", json!({"name": "mongo"}));
+    assert_eq!(
+        error["data"]["needed_by"],
+        json!(["app's api", "the service file"]),
+        "{error}"
+    );
     assert_eq!(show(&user, "mongo")["state"], "ready");
     let now = show(&user, "mongo")["needed_now"].to_string();
     assert!(now.contains("app's api"), "{now}");

@@ -1545,7 +1545,8 @@ async fn process(
     };
     if let Some(started) = start_time(pid) {
         daemon.agents.processes.lock().unwrap().insert(pid, started);
-        let _ = daemon.read(|store| store.add_process(pid, started, &agent.id));
+        let _ = daemon
+            .read(|store| store.add_process(pid, started, &agent.id, crate::children::boot()));
     }
     // What Flottille set (a password) is masked too, wherever the agent would say it.
     let env: BTreeMap<OsString, OsString> = std::env::vars_os()
@@ -2629,7 +2630,9 @@ pub fn start_time(pid: u32) -> Option<u64> {
 }
 
 /// At daemon start: kills the process groups a previous daemon left running, each only when the
-/// process is still the one it started, then forgets them all.
+/// process is still the one it started, then forgets them all. A record of another boot (or when
+/// this boot's id cannot be read) is forgotten unsignalled: its pid and start time say nothing
+/// of this boot's processes.
 pub fn kill_orphans(store: &Store) {
     let processes = match store.processes() {
         Ok(processes) => processes,
@@ -2638,7 +2641,12 @@ pub fn kill_orphans(store: &Store) {
             return;
         }
     };
-    for (pid, started) in processes {
+    let boot = crate::children::boot();
+    for (pid, started, recorded) in processes {
+        if boot.is_empty() || recorded != boot {
+            let _ = store.remove_process(pid);
+            continue;
+        }
         kill_left(store, pid, started);
     }
 }
@@ -2768,11 +2776,21 @@ mod tests {
         let mut orphan = sleeper();
         let mut other = sleeper();
         store
-            .add_process(orphan.id(), start_time(orphan.id()).unwrap(), "a")
+            .add_process(
+                orphan.id(),
+                start_time(orphan.id()).unwrap(),
+                "a",
+                crate::children::boot(),
+            )
             .unwrap();
         // The pid of a process that started at another time: not the one Flottille started.
         store
-            .add_process(other.id(), start_time(other.id()).unwrap() + 1, "b")
+            .add_process(
+                other.id(),
+                start_time(other.id()).unwrap() + 1,
+                "b",
+                crate::children::boot(),
+            )
             .unwrap();
 
         kill_orphans(&store);
@@ -2786,6 +2804,24 @@ mod tests {
         assert!(store.processes().unwrap().is_empty());
         let _ = other.kill();
         let _ = other.wait();
+    }
+
+    #[test]
+    fn agent_records_of_another_boot_are_dropped_unsignalled() {
+        let store = Store::open_in_memory().unwrap();
+        // Everything of an agent's process left running, its start included, but its boot.
+        let mut process = sleeper();
+        let pid = process.id();
+        store
+            .add_process(pid, start_time(pid).unwrap(), "a", "another-boot")
+            .unwrap();
+
+        kill_orphans(&store);
+
+        assert!(alive(pid), "a process of another boot's record was killed");
+        assert!(store.processes().unwrap().is_empty());
+        let _ = process.kill();
+        let _ = process.wait();
     }
 
     #[test]

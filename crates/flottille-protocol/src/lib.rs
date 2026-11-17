@@ -42,6 +42,9 @@ pub struct Message {
 pub struct ErrorBody {
     pub code: String,
     pub message: String,
+    /// What the sentence says, as data a client draws, for the codes that carry it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<Value>,
 }
 
 /// The codes of an error answer (`docs/protocol.md`, "Answer").
@@ -375,11 +378,22 @@ impl Message {
     }
 
     pub fn error(id: Option<String>, code: &str, message: impl Into<String>) -> Message {
+        Message::error_with(id, code, message, None)
+    }
+
+    /// [`Message::error`], with what its sentence says as data.
+    pub fn error_with(
+        id: Option<String>,
+        code: &str,
+        message: impl Into<String>,
+        data: Option<Value>,
+    ) -> Message {
         Message {
             id,
             error: Some(ErrorBody {
                 code: code.into(),
                 message: message.into(),
+                data,
             }),
             ..Message::default()
         }

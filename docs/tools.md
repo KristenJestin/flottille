@@ -432,7 +432,9 @@ pending requests.
   `run_status` says `needs auth, stopped` (in its list too), and a `service-stopped` delivery,
   urgent, tells the agent once: `auth, which dev-api needs, stopped. Your run <id> of dev-api goes
   on without it: services {"action": "start", "name": "auth"} starts it again.` (`was stopped by
-  the user` when the user stopped it).
+  the user` when the user stopped it). When it runs again, a `service-back` delivery, between
+  turns, tells it once: `auth, which dev-api needs, runs again. Your run <id> of dev-api has it
+  back.`
 - **Waiting**: the call waits `timeout` seconds (30 by default) for the end. A task
   that keeps running (`serve`) answers at once, and one already running for the agent is joined.
   A call stopped by its client stops its run.
@@ -617,8 +619,16 @@ pending requests.
   marks their runs interrupted (`docs/projects.md`, "Services"): of the same boot only, a
   session and group whole while their leader is the process it started, else only the processes
   of that session that carry the run's marker, `FLOTTILLE_RUN=<run id>`, in their environment;
-  never a pid another program took since. A daemon that stops stops its runs,
-  interrupted. When a run's own process ends, what it left in its group is killed with it. The
+  never a pid another program took since. A long-lived helper that a run starts and that leaves
+  its session (a `tmux` server started detached makes a session of its own) is neither ended
+  with the run nor by this cleanup, and what it starts later, long after the run ended and at
+  anyone's request, still carries the run's marker: tmux hands the environment it started with
+  to every window it opens. The marker alone never makes a process the run's: one is ended
+  only if it is in the run's own session, carries the run's marker and started after the
+  recorded leader. The session check is strong, not absolute: a daemon that stayed down across a
+  pid wraparound may find that pid leading another session, and its members that carry the
+  marker (a tmux window's children, say) are then taken for the run's. A daemon that stops
+  stops its runs, interrupted. When a run's own process ends, what it left in its group is killed with it. The
   runs that ended go with their session, as its images do: when its root failed or ended and
   cannot be resumed, or 7 days after a root that can (`docs/protocol.md`, `agent.image`).
 

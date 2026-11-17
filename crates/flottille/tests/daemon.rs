@@ -451,6 +451,14 @@ fn start_time(pid: u32) -> u64 {
     rest.split_whitespace().nth(19).unwrap().parse().unwrap()
 }
 
+/// This machine's boot, as the daemon records it with each agent process.
+fn this_boot() -> String {
+    std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
+        .unwrap()
+        .trim()
+        .to_owned()
+}
+
 #[test]
 fn a_daemon_stopping_kills_only_the_processes_it_started_never_another_s_of_the_table() {
     let user = User::with_fake_agent();
@@ -467,7 +475,7 @@ fn a_daemon_stopping_kills_only_the_processes_it_started_never_another_s_of_the_
     // which the daemon under test must find in its table and leave alone.
     flottille_core::store::Store::open(&user.path("state/flottille/flottille.db"))
         .unwrap()
-        .add_process(other.id(), start_time(other.id()), &held)
+        .add_process(other.id(), start_time(other.id()), &held, &this_boot())
         .unwrap();
 
     user.run(&["daemon", "stop"]);

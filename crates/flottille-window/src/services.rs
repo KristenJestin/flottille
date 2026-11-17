@@ -134,21 +134,6 @@ impl ServiceInfo {
             .join("; ")
     }
 
-    /// What stopping it means for what runs and needs it, in one sentence; `None` when nothing
-    /// running needs it.
-    pub fn stop_said(&self) -> Option<String> {
-        match self.needed_now.as_slice() {
-            [] => None,
-            [one] => Some(format!(
-                "{one} needs it and is running: it goes on without it."
-            )),
-            [first @ .., last] => Some(format!(
-                "{} and {last} need it and are running: they go on without it.",
-                first.join(", ")
-            )),
-        }
-    }
-
     /// Whether Flottille runs it now: it can be stopped.
     pub fn runs(&self) -> bool {
         matches!(self.state.as_str(), "starting" | "ready" | "running")
@@ -524,8 +509,9 @@ pub struct ServicesPage {
     confirming: Option<String>,
     /// The service whose stop is asked, since something running needs it.
     stopping: Option<String>,
-    /// What the stop's confirmation names and says, kept while it fades away.
-    stop_asked: (String, String, Vec<String>),
+    /// The service the stop's confirmation names and what runs and needs it, kept while it
+    /// fades away.
+    stop_asked: (String, Vec<String>),
     /// What the confirmation names, kept while it fades away.
     asked: String,
     /// The services being started or stopped: their buttons wait.
@@ -728,11 +714,14 @@ impl ServicesPage {
     /// what goes on without it; nothing does: it asks nothing, it is the user who clicks.
     pub fn stop(&mut self, name: &str, cx: &mut Context<Self>) {
         let listed = self.listed.as_deref().unwrap_or_default();
-        let info = listed.iter().find(|s| s.name == name);
-        if let Some(said) = info.and_then(ServiceInfo::stop_said) {
-            let needed = info.map(|s| s.needed_now.clone()).unwrap_or_default();
+        let needed = listed
+            .iter()
+            .find(|s| s.name == name)
+            .map(|s| s.needed_now.clone())
+            .unwrap_or_default();
+        if !needed.is_empty() {
             self.stopping = Some(name.to_owned());
-            self.stop_asked = (name.to_owned(), said, needed);
+            self.stop_asked = (name.to_owned(), needed);
             cx.notify();
             return;
         }
@@ -756,23 +745,19 @@ impl ServicesPage {
 
     /// The daemon started or stopped the service, or refused with why: a toast says it. A stop
     /// refused because something running needs it (`needed`), which started since the list was
-    /// read, is asked in the confirmation instead, with the daemon's sentence.
+    /// read, is asked in the confirmation instead, with what needs it as the daemon's data says.
     pub fn acted(
         &mut self,
         name: &str,
         start: bool,
         answer: Result<Value, String>,
-        needed: bool,
+        needed: Option<Vec<String>>,
         cx: &mut Context<Self>,
     ) {
         self.acting.remove(name);
-        if let (false, true, Err(why)) = (start, needed, &answer) {
-            let said = why
-                .strip_prefix(&format!("Stop {name}? "))
-                .unwrap_or(why)
-                .to_owned();
+        if let (false, Some(needed)) = (start, needed) {
             self.stopping = Some(name.to_owned());
-            self.stop_asked = (name.to_owned(), said, Vec::new());
+            self.stop_asked = (name.to_owned(), needed);
             self.read(cx);
             cx.notify();
             return;
@@ -1236,19 +1221,24 @@ impl ServicesPage {
             .into_any_element()
     }
 
-    /// The confirmation of a stop that something running needs: it names what goes on without
-    /// the service.
+    /// The confirmation of a stop that something running needs: its sentence names the service,
+    /// and what goes on without it is said once, in the list under it.
     fn confirm_stop(&self, cx: &mut Context<Self>) -> Confirm {
         let p = palette(cx);
-        let (name, said, needed) = self.stop_asked.clone();
+        let (name, needed) = self.stop_asked.clone();
+        let said = format!("What runs and needs {name} goes on without it:");
         let (this, again) = (cx.entity().downgrade(), cx.entity().downgrade());
-        let lines = needed.into_iter().map(|what| {
+        let lines = needed.into_iter().enumerate().map(|(at, what)| {
+            let what = SharedString::from(what);
             div()
+                .id(SharedString::from(format!("service-stopping-needed-{at}")))
+                .aria_label(what.clone())
                 .flex()
                 .items_center()
                 .gap(space::SM)
                 .child(div().size(px(6.)).rounded_full().bg(p.run))
-                .child(SharedString::from(what))
+                .child(what)
+                .test_support()
         });
         Confirm::new("service-stopping", format!("Stop {name}?"))
             .sentence(SharedString::from(said.clone()))

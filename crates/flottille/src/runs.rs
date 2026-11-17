@@ -2324,21 +2324,50 @@ pub(crate) fn need_changed(daemon: &Arc<Daemon>, id: &str, service: &str, how: O
         json!({"agent": run.agent, "project": run.project, "run": run.id,
             "needs_stopped": going.needs_stopped.lock().unwrap().clone()}),
     );
-    if let (Some(how), Some(agent)) = (how, &run.agent) {
-        let task = run.name.as_deref().unwrap_or_default();
-        let body = format!(
-            "{service}, which {task} needs, {how}. Your run {} of {task} goes on without it: \
-             services {{\"action\": \"start\", \"name\": \"{service}\"}} starts it again.",
-            run.id
-        );
-        deliveries::deliver(
-            daemon,
-            agent,
-            "service-stopped",
-            None,
-            &body,
-            approval::URGENT,
-        );
+    let Some(agent) = &run.agent else { return };
+    let task = run.name.as_deref().unwrap_or_default();
+    // What is told is the service's last state: a stop or a return still waiting for the agent
+    // (it is in a turn) gives way to this one. The service's name ends with `:` so that `db`
+    // does not take `db-replica`'s.
+    let id = |kind: &str| format!("service-{kind}-{}-{service}:", run.id);
+    let _ = daemon.write(|store| {
+        Ok((
+            (),
+            store.supersede_like(agent, &[&id("stopped"), &id("back")])?,
+        ))
+    });
+    let fresh = |kind: &str| Some(format!("{}{}", id(kind), new_id().unwrap_or_default()));
+    match how {
+        Some(how) => {
+            let body = format!(
+                "{service}, which {task} needs, {how}. Your run {} of {task} goes on without it: \
+                 services {{\"action\": \"start\", \"name\": \"{service}\"}} starts it again.",
+                run.id
+            );
+            deliveries::deliver(
+                daemon,
+                agent,
+                "service-stopped",
+                fresh("stopped"),
+                &body,
+                approval::URGENT,
+            );
+        }
+        // Told it stopped, it is told it is back; nothing is cut for it.
+        None => {
+            let body = format!(
+                "{service}, which {task} needs, runs again. Your run {} of {task} has it back.",
+                run.id
+            );
+            deliveries::deliver(
+                daemon,
+                agent,
+                "service-back",
+                fresh("back"),
+                &body,
+                approval::BETWEEN_TURNS,
+            );
+        }
     }
 }
 
@@ -2431,12 +2460,12 @@ pub async fn settle_at_start(daemon: &Daemon) {
             let pid = process.pid;
             match start_time(pid) {
                 Some(started) if started == process.started => {
-                    signal_group(pid, libc::SIGKILL);
-                    crate::children::end_session_now(pid);
-                    eprintln!(
-                        "flottille daemon: ended the run process {pid} left running, and its \
-                         session"
-                    );
+                    if crate::children::end_session_led(pid, started) {
+                        eprintln!(
+                            "flottille daemon: ended the run process {pid} left running, and its \
+                             session"
+                        );
+                    }
                 }
                 Some(_) => {}
                 None => {

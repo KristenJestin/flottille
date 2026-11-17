@@ -66,7 +66,9 @@ connection carries any number of requests; answers may come in any order and are
 ```
 
 Exactly one of `result` and `error`. A line that is not a request is answered with an error
-without an `id`.
+without an `id`. An error may carry `data`, what its sentence says as data a client draws, where
+its method says so (`service.stop`'s `needed`); a client that does not know it reads the
+sentence.
 
 | Error code | |
 |---|---|
@@ -1437,7 +1439,9 @@ started again (`started` is empty), nor one that answers already (its state is t
 `{"name", "force"?}`: `{"service": {...}}`, once it ended: its whole process group, as `run.stop`
 does. What it needs and what needs it go on. `needed` while something running needs it (its
 `needed_now`) and `force` is not `true`, with the sentence that says what goes on without it
-(`Stop auth? app's api needs it and is running: it goes on without it.`): nothing is stopped.
+(`Stop auth? app's api needs it and is running: it goes on without it.`) and, in the error's
+`data`, `{"needed_by": ["app's api"]}`, what runs and needs it, as `needed_now` says each, for a
+client to draw: nothing is stopped.
 `refused` when it is not running, or runs outside Flottille, which does not stop it. The agent of
 each run that needs it is told it was stopped (`docs/tools.md`, "Tasks and runs").
 

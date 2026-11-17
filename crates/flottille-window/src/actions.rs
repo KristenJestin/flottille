@@ -1123,8 +1123,9 @@ pub enum Outcome {
         start: bool,
         answer: Result<Value, String>,
         /// The stop was refused because something running needs the service (the code
-        /// `needed`): what started since the list was read.
-        needed: bool,
+        /// `needed`), which started since the list was read: what needs it, as the daemon's
+        /// data says it.
+        needed: Option<Vec<String>>,
     },
     /// The output of a service's run.
     ServiceOutput {
@@ -2356,9 +2357,19 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
             let asked = connected(connect)
                 .and_then(|mut conn| conn.ask_within_coded(method, params, bound));
             let (answer, needed) = match asked {
-                Ok(Ok(answer)) => (Ok(answer), false),
-                Ok(Err(refused)) => (Err(refused.message), refused.code == "needed"),
-                Err(why) => (Err(why), false),
+                Ok(Ok(answer)) => (Ok(answer), None),
+                Ok(Err(refused)) => {
+                    // A daemon that does not carry the data says nothing to list: its sentence is
+                    // what the toast shows.
+                    let needed = (refused.code == "needed")
+                        .then(|| {
+                            let data = refused.data.unwrap_or_default();
+                            crate::tasks::names_of(&data["needed_by"])
+                        })
+                        .filter(|needed| !needed.is_empty());
+                    (Err(refused.message), needed)
+                }
+                Err(why) => (Err(why), None),
             };
             Outcome::ServiceActed {
                 name,
@@ -3112,7 +3123,12 @@ mod tests {
                         "agent.start" => json!({"agent": {"id": "made-up-agent"}}),
                         _ => json!({}),
                     };
-                    let answer = json!({"id": request["id"], "result": result});
+                    // A daemon from before the refusal carried data: `needed` and a sentence only.
+                    let answer = match method {
+                        "service.stop" => json!({"id": request["id"], "error": {
+                            "code": "needed", "message": "db is needed by app's api"}}),
+                        _ => json!({"id": request["id"], "result": result}),
+                    };
                     writeln!(writer, "{answer}").unwrap();
                 }
             });
@@ -3178,6 +3194,26 @@ mod tests {
         };
         assert_eq!(project, "atlas");
         assert_eq!(why, "Flottille did not answer agent.start within 200 ms");
+    }
+
+    #[test]
+    fn a_stop_refused_as_needed_without_data_is_said_by_the_refusal() {
+        let (sender, mut updates) = unbounded();
+        let actions = Actions::spawn(daemon(&[]), sender);
+        actions.send(Command::ServiceAct {
+            name: "db".into(),
+            start: false,
+            force: false,
+        });
+
+        let Some(Outcome::ServiceActed { answer, needed, .. }) =
+            next(&mut updates, Duration::from_secs(5))
+        else {
+            panic!("no answer of the window's own");
+        };
+        // No empty list to ask a confirmation about: the toast says what the daemon said.
+        assert_eq!(needed, None);
+        assert_eq!(answer, Err("db is needed by app's api".to_owned()));
     }
 
     #[test]

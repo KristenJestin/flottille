@@ -688,13 +688,16 @@ has no workspace, so its templates fill only `{url}`, in `ready`'s `url` and `li
   those that need it says what they need is not running.
 - **What runs and needs it is followed.** While a run of a task goes on, each service its `needs`
   reaches (through the needs of a service too) is followed, Flottille's or `outside`: the end of
-  one Flottille runs is known at once, one that runs outside Flottille is tried every 15 s at its
-  `ready` address (a connection, 5 s at most; a `ready` command is never run for this, no gate
-  judged it), and nothing is followed once no run needs it. When one stops, the run's state says
-  it (`needs auth, stopped`, in `run_status`, `run.list` and the run's row in the window), and the
-  agent that started the run is told once, a delivery `service-stopped`: `auth, which dev-api
-  needs, stopped` (`was stopped by the user` when the user stopped it). It says so again if it
-  runs, then stops, again; the daemon's own stop tells nobody.
+  one Flottille runs is known at once, one that runs outside Flottille, or no longer runs, is
+  tried every 15 s at its `ready` address (a connection, 5 s at most; a `ready` command is never
+  run for this, no gate judged it), and nothing is followed once no run needs it. When one stops,
+  the run's state says it (`needs auth, stopped`, in `run_status`, `run.list` and the run's row in
+  the window), and the agent that started the run is told once, a delivery `service-stopped`:
+  `auth, which dev-api needs, stopped` (`was stopped by the user` when the user stopped it). When
+  it runs again (started again, or answering again at its address once the user started their
+  own: it is `outside` again), the run's state no longer says it, and the agent is told once, a
+  delivery `service-back`: `auth, which dev-api needs, runs again`. It says so again if it stops
+  and comes back again; the daemon's own stop tells nobody.
 - **Stopping what something running needs asks first.** A service that a run of a task needs, or
   another service that runs and needs it, directly or through another, is not stopped in one
   click: the window's Stop opens the confirmation `Stop auth?`, `app's dev-api needs it and is
