@@ -6747,6 +6747,63 @@ fn a_browser_that_outlives_its_idle_server_keeps_its_display_folder() {
 }
 
 #[test]
+fn a_browser_left_by_a_daemon_that_stopped_is_closed_before_its_display_is_made_again() {
+    // A daemon that dies (an update that kills it, a crash) leaves agent-browser's daemon
+    // running, confined with a display folder the next daemon removes and makes again: out of its
+    // reach. The next daemon closes it before any start of the connection.
+    let user = user_with_display();
+    let _wayland = wayland_socket(&user);
+    browser_declared(
+        &user,
+        &agent_browser("0.43.0"),
+        json!({}),
+        &[],
+        json!({"headed": true}),
+    );
+    let (_, mcp) = signed_up(&user);
+    user.call(
+        "connection.accept",
+        json!({"name": "browser", "actions": {"agent_browser_click": "passes"}}),
+    )
+    .unwrap();
+    done(mcp.call(
+        "conn_browser",
+        json!({"action": "agent_browser_click", "arguments": {"name": "cart"}}),
+    ));
+    assert!(browser_running(&user).is_some());
+
+    let daemon = user.status()["pid"].as_u64().unwrap() as i32;
+    // SAFETY: kill has no memory precondition.
+    unsafe { libc::kill(daemon, libc::SIGKILL) };
+    eventually("the daemon is gone", || {
+        // SAFETY: signal 0 only asks whether the process is there.
+        let alive = unsafe { libc::kill(daemon, 0) } == 0;
+        !alive
+    });
+    assert!(browser_running(&user).is_some(), "the browser outlives it");
+    assert!(logged(&user, "browser", "close").is_empty());
+
+    // The next daemon, once it answers: the browser is closed, by its socket folder.
+    user.status();
+    assert_eq!(browser_running(&user), None);
+    let closed = logged(&user, "browser", "close");
+    assert_eq!(closed.len(), 1, "{closed:?}");
+    // The next start gets a browser of its own, in the folder made for it.
+    let (id, mcp) = session(&user, "app");
+    set_mode(&user, &id, "full");
+    done(mcp.call(
+        "conn_browser",
+        json!({"action": "agent_browser_click", "arguments": {"name": "buy"}}),
+    ));
+    let last = logged(&user, "browser", "browser").last().unwrap().clone();
+    assert_eq!(last["started"], true, "{last}");
+    assert_eq!(
+        display_of(&user, "browser")["runtime_files"],
+        json!(["wayland-test"])
+    );
+}
+
+#[test]
 fn the_reason_a_browser_is_not_shown_stays_said_during_a_call() {
     // No Wayland socket to share: the browser runs headless, and says why while a call holds the
     // server's turn too.
