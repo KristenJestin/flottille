@@ -511,7 +511,11 @@ pub fn urls_in(text: &str) -> Vec<String> {
 }
 
 /// Performs a call the gate let through.
-pub async fn web(daemon: &crate::daemon::Daemon, agent: &str, args: Value) -> Outcome {
+pub async fn web(
+    daemon: &std::sync::Arc<crate::daemon::Daemon>,
+    agent: &str,
+    args: Value,
+) -> Outcome {
     match asked(&args) {
         Err(why) => Outcome::Refused(why),
         Ok(Asked::Read(url)) => {
@@ -519,7 +523,25 @@ pub async fn web(daemon: &crate::daemon::Daemon, agent: &str, args: Value) -> Ou
             match fetched(&net, url).await {
                 Err(outcome) => outcome,
                 Ok(page) => match image_of(&page) {
-                    Some(mime) => Outcome::Done(image_answer(&page, mime, daemon, agent)),
+                    Some(mime) => {
+                        // Decoded, scaled and stored off the async runtime, as `fs_read` does it.
+                        let (daemon, agent) = (daemon.clone(), agent.to_owned());
+                        let done = tokio::task::spawn_blocking(move || {
+                            crate::mcp::with_pictures_blocking(|| {
+                                image_answer(&page, mime, &daemon, &agent)
+                            })
+                        })
+                        .await;
+                        match done {
+                            Ok((text, pictures)) => {
+                                for name in &pictures {
+                                    crate::mcp::picture_served(name);
+                                }
+                                Outcome::Done(text)
+                            }
+                            Err(error) => Outcome::Failed(error.to_string()),
+                        }
+                    }
                     None => text_of(&net, page).await,
                 },
             }
