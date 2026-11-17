@@ -1247,6 +1247,52 @@ fn the_window_draws_no_frame_at_rest_on_a_question_card_open_with_three_question
 }
 
 #[gpui_kit::test]
+fn the_window_draws_no_frame_at_rest_on_a_question_card_folded_to_its_header(
+    cx: &mut TestAppContext,
+) {
+    let (user, id, shell, cx) = asked_three(cx);
+    cx.update(|window, cx| window.click(session_id(&id), cx));
+    let seq = asked_seq(&user, &id);
+    until(&shell, cx, "the card of the questions is there", |cx| {
+        cx.update(|window, _| {
+            window
+                .try_find(format!("ask-{seq}-question-0-option-1"))
+                .is_some()
+        })
+    });
+    settle(&shell, cx);
+    cx.update(|window, cx| window.click(format!("ask-{seq}-question-fold"), cx));
+    until(&shell, cx, "the card folds to its header", |cx| {
+        cx.update(|window, _| {
+            window
+                .try_find(format!("ask-{seq}-question-0-option-1"))
+                .is_none()
+                && window
+                    .try_find(format!("ask-{seq}-question-fold"))
+                    .is_some()
+        })
+    });
+    settle(&shell, cx);
+    let (with_card, asked) = frames_at_rest(&shell, cx);
+    assert_eq!(asked, 0, "no animation frame asked");
+
+    // The row of a session that needs the user pulses, by design, on every page: the folded
+    // card adds nothing to what the pulse alone draws.
+    shell.update_in(cx, |s, window, cx| {
+        s.open(Selection::Project("app".into()), window, cx)
+    });
+    until(&shell, cx, "the project's page is shown", |cx| {
+        shell.read_with(cx, |s, cx| s.main().read(cx).project_page().is_some())
+    });
+    settle(&shell, cx);
+    let (pulse, _) = frames_at_rest(&shell, cx);
+    assert!(
+        with_card <= pulse + 5,
+        "the folded card adds no frame to the pulse of the row: {with_card} against {pulse}"
+    );
+}
+
+#[gpui_kit::test]
 fn the_window_draws_no_frame_at_rest_on_a_question_card_folded_to_its_answers(
     cx: &mut TestAppContext,
 ) {
