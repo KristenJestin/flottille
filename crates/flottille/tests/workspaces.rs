@@ -4021,6 +4021,44 @@ fn a_fetch_that_failed_says_so_and_an_offline_creation_has_none() {
 }
 
 #[test]
+fn a_failed_fetch_is_said_to_have_failed_never_to_have_reached_the_remote() {
+    let fixture = Fixture::new(false);
+    fixture.configure("");
+    std::fs::remove_dir_all(fixture.remote("web")).unwrap();
+    fixture.create(json!({"repositories": ["web"]})).unwrap();
+    let workspace = fixture.settled("login");
+    assert_eq!(workspace["state"], "ready", "{workspace}");
+
+    let output = fixture.user.run(&["workspace", "show", "app", "login"]);
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{text}");
+    let line = text
+        .lines()
+        .find(|line| line.trim_start().starts_with("web:"))
+        .unwrap_or_else(|| panic!("the repository's line: {text}"));
+    assert!(line.contains("(failed after "), "{line}");
+    assert!(!line.contains("to reach"), "{line}");
+
+    let watch = fixture.user.watch(&["--after", "0"]);
+    let ready = loop {
+        let event = watch.next_event();
+        if event["name"] == "workspace.ready" {
+            break event;
+        }
+    };
+    let slowest = ready["data"]["slowest"].as_array().unwrap();
+    let reach = slowest
+        .iter()
+        .find(|part| part["kind"] == "fetch")
+        .unwrap_or_else(|| panic!("the failed reach is timed: {ready}"));
+    assert_eq!(reach["outcome"], "failed", "{reach}");
+    assert!(
+        !reach["doing"].as_str().unwrap().contains("git fetch"),
+        "a listing that failed is not a fetch: {reach}"
+    );
+}
+
+#[test]
 fn workspace_show_gives_the_total_from_request_to_ready() {
     let fixture = Fixture::new(false);
     let slow = fixture.script("slow.sh", "sleep 0.4\n");

@@ -1598,10 +1598,17 @@ pub fn took_said(ms: u64) -> String {
 fn slowest(workspace: &Workspace) -> Vec<Value> {
     let fetches = workspace.repositories.iter().filter_map(|worktree| {
         let fetch = worktree.base.fetch.as_ref()?;
+        let (remote, path) = (&worktree.base.remote, &worktree.path);
+        // A failure may come from the listing as well as from the fetch: it is not called one.
+        let (doing, outcome) = match fetch.outcome {
+            FetchOutcome::Fetched => (format!("git fetch {remote} (in {path})"), "fetched"),
+            FetchOutcome::Failed => (format!("reaching {remote} failed (in {path})"), "failed"),
+        };
         Some(json!({
             "kind": "fetch",
-            "repository": worktree.path,
-            "doing": format!("git fetch {} (in {})", worktree.base.remote, worktree.path),
+            "repository": path,
+            "doing": doing,
+            "outcome": outcome,
             "duration_ms": fetch.duration_ms,
         }))
     });

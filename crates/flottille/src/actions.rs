@@ -1684,8 +1684,7 @@ async fn performed(
                     let workspace = named_workspace(daemon, grant, call.name.as_deref())?;
                     let ready_at = daemon
                         .read(|store| store.workspace_ready_at(workspace.id))
-                        .ok()
-                        .flatten()
+                        .map_err(|error| Outcome::Failed(error.to_string()))?
                         .filter(|_| workspace.state() == State::Ready);
                     Ok(workspace_text(&workspace, ready_at))
                 }

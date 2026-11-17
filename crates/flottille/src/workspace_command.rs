@@ -279,13 +279,17 @@ fn repositories_text(workspace: &Value) -> String {
             };
             format!("offline: the tracking ref as of {age}, {commit}")
         };
-        let freshness = match base["fetch"]["duration_ms"].as_u64() {
-            Some(took) => format!(
+        let freshness = match (
+            base["fetch"]["duration_ms"].as_u64(),
+            base["fetch"]["outcome"] == "failed",
+        ) {
+            (Some(took), true) => format!("{freshness} (failed after {})", took_said(took)),
+            (Some(took), false) => format!(
                 "{freshness} ({} to reach {})",
                 took_said(took),
                 text(base, "remote")
             ),
-            None => freshness,
+            (None, _) => freshness,
         };
         shown.push_str(&format!(
             "  {}: {}, {freshness}\n",
