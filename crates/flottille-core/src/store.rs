@@ -766,6 +766,12 @@ const MIGRATIONS: &[&str] = &[
     -- reboot, or from before this, is dropped unsignalled.
     ALTER TABLE agent_processes ADD COLUMN boot TEXT NOT NULL DEFAULT '';
 ",
+    "
+    -- How long each step of a workspace's preparation took, from a monotonic clock, in
+    -- milliseconds: the two timestamps beside it are the wall clock's and can jump (`docs/workspaces.md`,
+    -- \"How long it took\").
+    ALTER TABLE workspace_steps ADD COLUMN duration_ms INTEGER;
+",
 ];
 
 /// How many of each extension's own migrations were applied (`docs/extensions.md`, "Data"): its
@@ -1035,7 +1041,8 @@ impl Store {
         )?;
         let mut statement = self.connection.prepare_cached(
             "SELECT position, repository, action, state, failed_doing, failed_output, \
-             started_at, ended_at FROM workspace_steps WHERE workspace = ?1 ORDER BY position",
+             started_at, ended_at, duration_ms FROM workspace_steps WHERE workspace = ?1 \
+             ORDER BY position",
         )?;
         let rows = statement.query_map(params![id], |row| {
             Ok((
@@ -1047,11 +1054,22 @@ impl Store {
                 row.get::<_, Option<String>>(5)?,
                 row.get::<_, Option<u64>>(6)?,
                 row.get::<_, Option<u64>>(7)?,
+                row.get::<_, Option<u64>>(8)?,
             ))
         })?;
         let mut steps = Vec::new();
         for row in rows {
-            let (position, repository, action, state, doing, output, started_at, ended_at) = row?;
+            let (
+                position,
+                repository,
+                action,
+                state,
+                doing,
+                output,
+                started_at,
+                ended_at,
+                duration_ms,
+            ) = row?;
             steps.push(Step {
                 position,
                 repository,
@@ -1067,6 +1085,7 @@ impl Store {
                 }),
                 started_at,
                 ended_at,
+                duration_ms,
             });
         }
         Ok(Workspace {
@@ -1115,6 +1134,15 @@ impl Store {
         Ok(event)
     }
 
+    /// Keeps how long a step took, once it ended (a monotonic clock's, in milliseconds).
+    pub fn set_step_duration(&mut self, workspace: i64, position: u32, took: u64) -> Result<()> {
+        self.connection.execute(
+            "UPDATE workspace_steps SET duration_ms = ?3 WHERE workspace = ?1 AND position = ?2",
+            params![workspace, position, took],
+        )?;
+        Ok(())
+    }
+
     /// Keeps what a step wrote, masked, once it ended.
     pub fn set_step_output(&mut self, workspace: i64, position: u32, output: &str) -> Result<()> {
         self.connection.execute(
@@ -1149,7 +1177,8 @@ impl Store {
         for position in positions {
             transaction.execute(
                 "UPDATE workspace_steps SET state = 'pending', failed_doing = NULL, \
-                 failed_output = NULL, output = NULL, started_at = NULL, ended_at = NULL \
+                 failed_output = NULL, output = NULL, started_at = NULL, ended_at = NULL, \
+                 duration_ms = NULL \
                  WHERE workspace = ?1 AND position = ?2",
                 params![workspace, position],
             )?;
@@ -4298,6 +4327,7 @@ mod tests {
                     fetched_now: true,
                     fetched_at: Some(1_792_843_730_000),
                     note: None,
+                    fetch: None,
                 },
                 resumed: false,
                 resumed_branch: None,
@@ -4311,6 +4341,7 @@ mod tests {
                     failure: None,
                     started_at: None,
                     ended_at: None,
+                    duration_ms: None,
                 },
                 Step {
                     position: 1,
@@ -4324,6 +4355,7 @@ mod tests {
                     failure: None,
                     started_at: None,
                     ended_at: None,
+                    duration_ms: None,
                 },
             ],
             ticket: None,
@@ -4681,6 +4713,25 @@ mod tests {
             (reset.steps[0].started_at, reset.steps[0].ended_at),
             (None, None)
         );
+    }
+
+    #[test]
+    fn a_step_keeps_how_long_it_took_and_forgets_it_when_it_goes_back_to_pending() {
+        let mut store = Store::open_in_memory().unwrap();
+        let (id, _) = store
+            .create_workspace(&a_workspace(), ("workspace.created", json!({})))
+            .unwrap();
+
+        store.set_step_duration(id, 0, 1_234).unwrap();
+        let timed = store.workspace_by_id(id).unwrap();
+        store
+            .reset_steps(id, &[0], ("workspace.resumed", json!({})))
+            .unwrap();
+        let reset = store.workspace_by_id(id).unwrap();
+
+        assert_eq!(timed.steps[0].duration_ms, Some(1_234));
+        assert_eq!(timed.steps[1].duration_ms, None, "a step that did not end");
+        assert_eq!(reset.steps[0].duration_ms, None);
     }
 
     #[test]

@@ -12,7 +12,7 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use flottille_core::command::split_line;
 use flottille_core::glob;
@@ -24,7 +24,8 @@ use flottille_core::secrets;
 use flottille_core::store::{Store, now_ms};
 use flottille_core::variables::{self, Names};
 use flottille_core::workspace::{
-    Action, Base, Failure as StepFailure, State, Step, StepState, Workspace, Worktree,
+    Action, Base, Failure as StepFailure, Fetch, FetchOutcome, State, Step, StepState, Workspace,
+    Worktree,
 };
 use serde_json::{Value, json};
 use tokio::io::AsyncReadExt;
@@ -232,12 +233,16 @@ async fn show(daemon: &Daemon, asked: WorkspaceName) -> Answer {
             });
         }
     }
-    shown["ready_at"] = match shown["state"] == "ready" {
-        true => daemon
-            .read(|store| store.workspace_ready_at(workspace.id))?
-            .map_or(Value::Null, Value::from),
-        false => Value::Null,
+    let ready_at = match shown["state"] == "ready" {
+        true => daemon.read(|store| store.workspace_ready_at(workspace.id))?,
+        false => None,
     };
+    shown["ready_at"] = ready_at.map_or(Value::Null, Value::from);
+    // From the request to its readiness, both read off the wall clock: a monotonic clock would not
+    // span a restart of the daemon, and a preparation resumed after a failure counts the wait.
+    shown["total_ms"] = ready_at.map_or(Value::Null, |at| {
+        at.saturating_sub(workspace.created_at).into()
+    });
     Ok(shown)
 }
 
@@ -704,6 +709,8 @@ async fn rename_branch(daemon: &Daemon, asked: WorkspaceRenameBranch) -> Answer 
 // Creation.
 
 async fn create(daemon: Arc<Daemon>, asked: WorkspaceCreate) -> Answer {
+    // The request's own time: the fetches below are part of what the workspace took to be ready.
+    let requested_at = now_ms();
     let project = projects::load_project(&daemon, &asked.project)?;
     projects::refuse_removing(&daemon, &project.name)?;
     if !valid_name(&asked.name) {
@@ -849,7 +856,7 @@ async fn create(daemon: Arc<Daemon>, asked: WorkspaceCreate) -> Answer {
         branch,
         folder,
         project_folder: project.folder.clone(),
-        created_at: now_ms(),
+        created_at: requested_at,
         variables: project.variables.clone(),
         steps: snapshot(&project, &taken),
         repositories,
@@ -1123,6 +1130,49 @@ async fn up_to_date_base(
     rule: &[String],
     offline: bool,
 ) -> Result<Base, Failure> {
+    let mut reach = Reach::default();
+    let mut base = reaching_base(main, path, remote, rule, offline, &mut reach).await?;
+    base.fetch = reach.timed(base.fetched_now);
+    Ok(base)
+}
+
+/// The time spent on the network to read a repository's remote: from the listing of its
+/// branches to the end of its fetch, whatever the answer, and not the lookups after a failure.
+#[derive(Default)]
+struct Reach(Option<(u64, Instant, Option<Duration>)>);
+
+impl Reach {
+    fn start(&mut self) {
+        self.0 = Some((now_ms(), Instant::now(), None));
+    }
+
+    fn stop(&mut self) {
+        if let Some((_, since, took)) = &mut self.0 {
+            took.get_or_insert_with(|| since.elapsed());
+        }
+    }
+
+    fn timed(&self, fetched: bool) -> Option<Fetch> {
+        let (started_at, _, took) = self.0.as_ref()?;
+        Some(Fetch {
+            started_at: *started_at,
+            duration_ms: took.unwrap_or_default().as_millis() as u64,
+            outcome: match fetched {
+                true => FetchOutcome::Fetched,
+                false => FetchOutcome::Failed,
+            },
+        })
+    }
+}
+
+async fn reaching_base(
+    main: &Path,
+    path: &str,
+    remote: &str,
+    rule: &[String],
+    offline: bool,
+    reach: &mut Reach,
+) -> Result<Base, Failure> {
     let tracking = |branch: &str| format!("refs/remotes/{remote}/{branch}");
     let has_remote = git::run(
         main,
@@ -1153,6 +1203,7 @@ async fn up_to_date_base(
             reason.split_whitespace().collect::<Vec<_>>().join(" ")
         )
     };
+    reach.start();
     let heads = match git::output(
         main,
         &["ls-remote", "--heads", "--end-of-options", remote],
@@ -1162,6 +1213,7 @@ async fn up_to_date_base(
     {
         Ok(heads) => heads,
         Err(reason) => {
+            reach.stop();
             return after_failed_fetch(main, path, remote, rule, cannot_fetch(reason)).await;
         }
     };
@@ -1174,6 +1226,7 @@ async fn up_to_date_base(
         })
         .collect();
     let Some(branch) = on_remote.first() else {
+        reach.stop();
         let why = format!("none of {} is on {remote}", rule.join(", "));
         return local_base(main, path, remote, rule, why).await;
     };
@@ -1186,7 +1239,9 @@ async fn up_to_date_base(
             .iter()
             .map(|branch| format!("+refs/heads/{branch}:{}", tracking(branch))),
     );
-    if let Err(reason) = git::output(main, &fetch, Class::Read).await {
+    let fetched = git::output(main, &fetch, Class::Read).await;
+    reach.stop();
+    if let Err(reason) = fetched {
         return after_failed_fetch(main, path, remote, rule, cannot_fetch(reason)).await;
     }
     let commit = commit_of(main, &tracking(branch)).await?.ok_or_else(|| {
@@ -1203,6 +1258,7 @@ async fn up_to_date_base(
         fetched_now: true,
         fetched_at: Some(now_ms()),
         note: None,
+        fetch: None,
     })
 }
 
@@ -1240,6 +1296,7 @@ async fn tracked_base(main: &Path, remote: &str, rule: &[String]) -> Result<Opti
             fetched_now: false,
             fetched_at,
             note: None,
+            fetch: None,
         }));
     }
     Ok(None)
@@ -1286,6 +1343,7 @@ async fn local_base(
                 fetched_now: false,
                 fetched_at: None,
                 note: Some(format!("{why}: started from the local {branch}")),
+                fetch: None,
             });
         }
     }
@@ -1332,6 +1390,7 @@ fn snapshot(project: &Project, taken: &[String]) -> Vec<Step> {
             failure: None,
             started_at: None,
             ended_at: None,
+            duration_ms: None,
         })
         .collect()
 }
@@ -1401,9 +1460,14 @@ async fn prepare_steps(
             .find(|step| step.state == StepState::Pending)
             .cloned()
         else {
+            let total = now_ms().saturating_sub(workspace.created_at);
+            let said = with(
+                about(&workspace),
+                json!({"total_ms": total, "slowest": slowest(&workspace)}),
+            );
             daemon.write(|store| {
                 store
-                    .workspace_ready(id, Value::Object(about(&workspace)))
+                    .workspace_ready(id, said.clone())
                     .map(|event| ((), event))
             })?;
             return Ok(());
@@ -1422,6 +1486,9 @@ async fn prepare_steps(
                 "doing": step.doing(),
             }),
         );
+        // The measure starts with the step: what it waits for before running (its services, the
+        // agent folders put back after) is what it costs.
+        let started = Instant::now();
         daemon.write(|store| {
             store
                 .set_step(
@@ -1482,7 +1549,9 @@ async fn prepare_steps(
             Ok(_) => (StepState::Done, None, "workspace.step_done"),
             Err(failure) => (StepState::Failed, Some(failure), "workspace.step_failed"),
         };
+        let took = started.elapsed().as_millis() as u64;
         let mut data = described.clone();
+        data["duration_ms"] = took.into();
         if let Some(failure) = &failure {
             data["output"] = failure.output.clone().into();
         }
@@ -1495,6 +1564,7 @@ async fn prepare_steps(
         let (written, _) = live.masked();
         let result = daemon.write(|store| {
             store.set_step_output(id, step.position, &written)?;
+            store.set_step_duration(id, step.position, took)?;
             store
                 .set_step(id, step.position, state, failure.as_ref(), (name, data))
                 .map(|event| ((), event))
@@ -1509,6 +1579,49 @@ async fn prepare_steps(
             return Ok(());
         }
     }
+}
+
+/// How long a part of a workspace's making took, as people say it: `0.4 s`, `42 s`,
+/// `1 min 42 s`. Under ten seconds the tenths still tell a fetch from a copy.
+pub fn took_said(ms: u64) -> String {
+    match ms {
+        0..10_000 => format!("{:.1} s", ms as f64 / 1000.0),
+        _ => crate::forge::events::lasted(ms / 1000),
+    }
+}
+
+/// The three parts of a workspace's making that took longest, longest first: the repositories'
+/// fetches and the steps, each as the show says it.
+fn slowest(workspace: &Workspace) -> Vec<Value> {
+    let fetches = workspace.repositories.iter().filter_map(|worktree| {
+        let fetch = worktree.base.fetch.as_ref()?;
+        let (remote, path) = (&worktree.base.remote, &worktree.path);
+        // A failure may come from the listing as well as from the fetch: it is not called one.
+        let (doing, outcome) = match fetch.outcome {
+            FetchOutcome::Fetched => (format!("git fetch {remote} (in {path})"), "fetched"),
+            FetchOutcome::Failed => (format!("reaching {remote} failed (in {path})"), "failed"),
+        };
+        Some(json!({
+            "kind": "fetch",
+            "repository": path,
+            "doing": doing,
+            "outcome": outcome,
+            "duration_ms": fetch.duration_ms,
+        }))
+    });
+    let steps = workspace.steps.iter().filter_map(|step| {
+        Some(json!({
+            "position": step.position,
+            "kind": kind_name(&step.action),
+            "repository": step.repository,
+            "doing": step.doing(),
+            "duration_ms": step.duration_ms?,
+        }))
+    });
+    let mut parts: Vec<Value> = fetches.chain(steps).collect();
+    parts.sort_by_key(|part| std::cmp::Reverse(part["duration_ms"].as_u64()));
+    parts.truncate(3);
+    parts
 }
 
 fn kind_name(action: &Action) -> &'static str {

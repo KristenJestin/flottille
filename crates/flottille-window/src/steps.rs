@@ -4,7 +4,7 @@
 use std::rc::Rc;
 
 use gpui_design_system::motion::PANEL;
-use gpui_design_system::{Type, hoverable, palette, tint, tipped_when_cut};
+use gpui_design_system::{Type, changed, hoverable, palette, tint, tipped_when_cut};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, ClickEvent, ElementId, InteractiveElement, IntoElement, ParentElement,
@@ -32,6 +32,8 @@ pub struct StepRow {
     verb: SharedString,
     object: Option<SharedString>,
     time: Option<SharedString>,
+    /// The time is a count going up: it fades in when it first shows, not at each tick.
+    ticking: bool,
     time_id: ElementId,
     tone: StepTone,
     on_click: Option<OnClick>,
@@ -52,6 +54,7 @@ impl StepRow {
             verb: verb.into(),
             object: None,
             time: None,
+            ticking: false,
             time_id: time_id.into(),
             tone,
             on_click: None,
@@ -65,6 +68,12 @@ impl StepRow {
 
     pub fn time(mut self, time: impl Into<SharedString>) -> Self {
         self.time = Some(time.into());
+        self
+    }
+
+    /// The time is still counting (the step runs): its text changes every tick without fading.
+    pub fn ticking(mut self, ticking: bool) -> Self {
+        self.ticking = ticking;
         self
     }
 
@@ -89,6 +98,15 @@ impl RenderOnce for StepRow {
             Some(object) => format!("{} {object}", self.verb),
             None => self.verb.to_string(),
         };
+        // The time fades in when the step's state brings it (it starts to run, it ends with its
+        // duration) and not at each tick: the state of the fade is kept from the row's first
+        // frame, with no time yet, so that the first one fades in too.
+        let said_time = match (&self.time, self.ticking) {
+            (None, _) => SharedString::default(),
+            (Some(_), true) => "running".into(),
+            (Some(time), false) => time.clone(),
+        };
+        let faded = changed(&self.time_id, &said_time, window, cx);
         let time = self.time.map(|time| {
             div()
                 .id(self.time_id)
@@ -96,6 +114,7 @@ impl RenderOnce for StepRow {
                 .flex_none()
                 .mono(11.)
                 .text_color(p.faint)
+                .opacity(faded)
                 .child(time)
                 .test_support()
         });

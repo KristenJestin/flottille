@@ -38,7 +38,7 @@ mod bitbucket;
 mod ci;
 mod closing;
 mod ending;
-mod events;
+pub(crate) mod events;
 pub(crate) mod followed;
 mod logs;
 pub(crate) mod people;

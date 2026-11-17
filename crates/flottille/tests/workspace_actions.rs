@@ -184,6 +184,14 @@ fn the_workspaces_are_listed_and_shown_at_once() {
     let shown = done(mcp.call("workspace", json!({"action": "show", "name": "login"})));
     assert!(shown.contains("Workspace login: ready"), "{shown}");
     assert!(shown.contains("copy .env"), "{shown}");
+    assert!(
+        shown.contains(": done · "),
+        "a step done says how long it took: {shown}"
+    );
+    assert!(
+        shown.contains("Ready in "),
+        "and the workspace its total: {shown}"
+    );
     let unknown = refused(mcp.call("workspace", json!({"action": "show", "name": "nope"})));
     assert!(unknown.contains("login"), "{unknown}");
     assert!(no_request(&user));

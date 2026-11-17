@@ -223,6 +223,11 @@ pub struct Live {
     connections: connections::Live,
 }
 
+/// Closes what a daemon that died left running for the extensions, before anything starts them.
+pub async fn close_left_at_start(daemon: &Daemon) {
+    connections::close_left_at_start(daemon).await;
+}
+
 /// Stops what the extensions keep running, as the daemon stops.
 pub async fn stop_all(daemon: &Arc<Daemon>) {
     connections::stop_all(daemon).await;
