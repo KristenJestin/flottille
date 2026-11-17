@@ -800,7 +800,9 @@ shop     login  shop/login  ready
 
 The workspace's repositories, where its preparation stands, its ticket (title, state,
 description, comments, or why it cannot be read, [`tickets.md`](tickets.md)), and each
-repository's pull request with its checks ([`forges.md`](forges.md)). `--json` prints the
+repository's pull request with its checks ([`forges.md`](forges.md)). Each repository says how long
+reaching its remote took, each step that ended how long it took, and a workspace that is ready the
+time from the request to then (`workspaces.md`, "How long it took"). `--json` prints the
 workspace, with its ticket's reference under `ticket`, what the tracker said of it
 (`workspace.ticket`, `docs/protocol.md`) under `ticket_read` and the forge state
 (`workspace.forge`) under `forge`.
@@ -811,9 +813,11 @@ login, branch shop/login, ready
   project: shop
   folder: ~/.local/share/flottille/workspaces/shop/login
 Repositories:
-  .: main, c9eba53c33ef, fetched
+  .: main, c9eba53c33ef, fetched (0.4 s to reach origin)
 Steps:
-   1. done     git worktree add .
+   1. done     git worktree add . · 0.4 s
+   2. done     pnpm install (in .) · 1 min 42 s
+Ready in 1 min 44 s, from the request.
 Ticket #7, open: The login fails
   https://github.com/acme/shop/issues/7
   Description:

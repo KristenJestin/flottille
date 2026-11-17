@@ -372,8 +372,8 @@ A step of the preparation started.
 ### `workspace.step_done`, `workspace.step_skipped`, `workspace.step_failed`
 
 The step ended: done, skipped (its repository is not in the workspace), or failed. The same fields
-as `workspace.step_started`, and, for a failure, `output`: its last lines, masked. A failure stops
-the preparation.
+as `workspace.step_started`, and `duration_ms`, how long the step took (a monotonic clock's), and,
+for a failure, `output`: its last lines, masked. A failure stops the preparation.
 
 ### `workspace.ready`
 
@@ -382,6 +382,8 @@ Every step is done or skipped.
 | Field | |
 |---|---|
 | `project`, `workspace` | |
+| `total_ms` | From the request that made the workspace to now, in milliseconds. |
+| `slowest` | The three parts of the making that took longest, longest first: `{"kind", "repository", "doing", "duration_ms"}`, with `position` for a step. `kind` is a step's, or `fetch` for a repository's fetch (`docs/workspaces.md`, "How long it took"). |
 
 ### `workspace.resumed`
 

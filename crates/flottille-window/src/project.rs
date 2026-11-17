@@ -71,6 +71,9 @@ pub struct PlaceData {
     pub preparation: Preparation,
     /// Each step of its preparation; none for `main`.
     pub steps: Vec<crate::model::SetupLine>,
+    /// How long it took to be ready, from the request; none before, and for `main`.
+    pub total_ms: Option<u64>,
+    pub made: Vec<crate::model::SetupLine>,
     pub sessions: Vec<SessionLine>,
 }
 
