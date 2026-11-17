@@ -290,8 +290,10 @@ picture pasted in the conversation. The same gate and places apply as to any `fs
   as a JPEG at each size (a JPEG of a phone's camera becomes a JPEG of 2000 px). A GIF and a WebP
   are never scaled: past 2 MiB, or over 8000 px on a side (what the providers read), they are
   left out. A file over 32 MiB is not opened. The size is read from the header before anything is
-  decoded: a PNG or a JPEG that declares more than 64 megapixels (8000 × 8000) is left out, as a
-  small file can declare gigabytes, and what is decoded is given at most 320 MiB.
+  decoded: a PNG or a JPEG that declares more than 64 megapixels (8000 × 8000), or more than
+  16384 px on a side, is left out, as a small file can declare gigabytes (and scaling one row of
+  64 million pixels asks a gigabyte of buffer a time), and what is decoded is given at most
+  320 MiB.
 - **When it is not shown** the line says why, in place of "is attached" (`[image: photo.gif,
   8.0 MB GIF, left out: over 2 MiB]`): a file over a limit, one that cannot be read (its header
   is unreadable, or a PNG is cut short or damaged, which the provider would refuse and keep in
@@ -1935,8 +1937,8 @@ turn it runs anyway, and costs no quota.
   which kinds are read. The image is decoded by the daemon, not by the reader's process: the
   bytes of a page are at most the web's download cap, and the decoding runs in a blocking thread,
   never on the async runtime. What it decodes is bounded by the header, read before a byte is
-  decoded: a PNG or a JPEG declaring more than 64 megapixels is left out ("Files", "Images"), and
-  the decoder is given at most 320 MiB.
+  decoded: a PNG or a JPEG declaring more than 64 megapixels, or more than 16384 px on a side,
+  is left out ("Files", "Images"), and the decoder is given at most 320 MiB.
 - **A page is read apart from the daemon**: HTML and PDF are made into text by a child process,
   the daemon's own program run again (`flottille read-page`, hidden), the page on its standard
   input, with no environment, no way to gain a privilege (`no_new_privs`), at most 512 MiB of
