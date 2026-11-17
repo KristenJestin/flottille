@@ -824,6 +824,42 @@ fn the_window_draws_no_frame_at_rest_on_the_vault(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn the_window_draws_no_frame_at_rest_on_the_vault_form_opened_from_an_ask(cx: &mut TestAppContext) {
+    let user = User::new();
+    let (shell, cx) = window(&user, cx);
+    // As the card of an ask opens it: for a connection's server, whose entry is every project's,
+    // the line under "Seen by agents of" says why.
+    let entry = flottille_window::vault::VaultEntry {
+        name: "notes-key".to_owned(),
+        bound: Some("connection:notes".to_owned()),
+        ..Default::default()
+    };
+    shell.update_in(cx, |shell, window, cx| {
+        shell.add_asked_vault_entry(
+            entry,
+            "to read the notes".to_owned(),
+            None,
+            Some("notes".to_owned()),
+            window,
+            cx,
+        )
+    });
+    until(&shell, cx, "the form says why", |cx| {
+        cx.update(|window, _| window.try_find("vault-connection-note").is_some())
+    });
+    settle(&shell, cx);
+    assert_eq!(frames_at_rest(&shell, cx), (0, 0), "opened");
+
+    // A refused Add: its error, at rest too.
+    cx.update(|window, cx| window.click("save-vault-entry", cx));
+    until(&shell, cx, "the refusal is said", |cx| {
+        cx.update(|window, _| window.try_find("vault-error").is_some())
+    });
+    settle(&shell, cx);
+    assert_eq!(frames_at_rest(&shell, cx), (0, 0), "refused");
+}
+
+#[gpui_kit::test]
 fn the_window_draws_no_frame_at_rest_on_a_session_with_a_leave(cx: &mut TestAppContext) {
     let user = User::with_fake_agent();
     let x = idle_session(&user);
