@@ -573,9 +573,8 @@ pending requests.
   environment above: it runs outside the sandbox (no Landlock), with the daemon's own
   environment and `core.hooksPath=/dev/null`, and none of the place's variables, as if the user
   had typed it (`docs/commands.md`, "The environment"). Its task's `ready` and `url` commands
-  still run in the sandbox. A push from a workspace is also refused, before
-  git runs, when a repository's remote no longer leads where it did when the workspace was made
-  (`docs/commands.md`, "Where the remote leads").
+  still run in the sandbox. A push goes where the repository's remote leads now: the remote is
+  the user's to change (`docs/commands.md`, "Where the remote leads").
 - **A stop ends the run's session, not every descendant.** A run starts in a session of its own
   (`docs/reference/processes.md`). `run_status` with `action stop`, a timeout of the call's client
   and the daemon's stop signal the run's process group (`SIGTERM`, then `SIGKILL` after 5 s), and

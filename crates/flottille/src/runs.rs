@@ -423,11 +423,6 @@ pub async fn run(
     if !approved && let Verdict::Deny(why) = gate::contained(std::slice::from_ref(&folder)) {
         return Outcome::Refused(why);
     }
-    if gate::pushes(&words)
-        && let Err(refusal) = remote_kept(daemon, place, &repository, &folder.path).await
-    {
-        return Outcome::Refused(refusal);
-    }
     // A server already running for the agent is joined, not started twice.
     let serving = match (serve, name.as_deref()) {
         (true, Some(task)) => Some(daemon.mcp.runs.serving(Some(agent), &place.project, task)),
@@ -857,33 +852,6 @@ fn configure(env: &mut BTreeMap<OsString, OsString>, key: &str, value: &str) {
     env.insert(format!("GIT_CONFIG_KEY_{count}").into(), key.into());
     env.insert(format!("GIT_CONFIG_VALUE_{count}").into(), value.into());
     env.insert("GIT_CONFIG_COUNT".into(), (count + 1).to_string().into());
-}
-
-/// Refuses a push from a workspace unless the repository's remote leads where it led when the
-/// workspace was created (`forge::remote_kept`): neither the judge nor the user reads where a
-/// remote leads now. A push from the project folder has nothing to compare with.
-async fn remote_kept(
-    daemon: &Daemon,
-    place: &Place,
-    repository: &str,
-    folder: &Path,
-) -> Result<(), String> {
-    let Some(name) = &place.workspace else {
-        return Ok(());
-    };
-    let workspace = daemon
-        .read(|store| store.workspace(&place.project, name))
-        .ok()
-        .flatten();
-    let base = workspace
-        .iter()
-        .flat_map(|workspace| &workspace.repositories)
-        .find(|r| r.path == repository)
-        .map(|r| &r.base)
-        .ok_or_else(|| {
-            format!("refused: {repository} is not a repository of this agent's workspace")
-        })?;
-    crate::forge::remote_kept(folder, base).await
 }
 
 /// Spawns the run, records it, and leaves a task of its own to follow it to its end. `phase` is

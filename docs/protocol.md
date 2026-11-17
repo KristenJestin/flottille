@@ -1059,7 +1059,7 @@ A workspace is one worktree per repository, on one branch, prepared by the proje
   "variables": {"STORE": "{workspace.path}/.store"},
   "repositories": [
     {"path": "api", "base": {"branch": "develop", "remote": "origin", "ref": "refs/remotes/origin/develop",
-      "urls": ["git@git.example.com:acme/api.git"], "commit": "503144c9654d6762b17fd670ddc9f88aa39ecfaf",
+      "commit": "503144c9654d6762b17fd670ddc9f88aa39ecfaf",
       "fetched_now": true, "fetched_at": 1792843730790,
       "fetch": {"started_at": 1792843729905, "duration_ms": 885, "outcome": "fetched"}}},
     {"path": "lib", "base": {"branch": "main", "remote": "origin", "ref": "refs/heads/main",
@@ -1086,8 +1086,7 @@ creation, not yet filled. A base's `fetched_now` is false when the workspace was
 says why in one line (`no remote origin: started from the local main`, `origin could not be
 fetched (…): started from origin/develop as last fetched`, `…: started from the local main`);
 `fetched_at` (milliseconds since the Unix epoch) is when its tracking ref was last updated, `null`
-when unknown. Its `urls` are where its remote led at creation, fetch and push, credentials taken
-out (`docs/commands.md`); absent for a workspace created before they were recorded. A step's `kind` is `worktree`, `copy` (`globs`), `link` (`path`), `root_entries`
+when unknown. A step's `kind` is `worktree`, `copy` (`globs`), `link` (`path`), `root_entries`
 (`except`: the top-level names of the project's repositories) or `run` (`line`, `time_limit` in
 seconds, and `task` when it is one of the project's tasks); its `state` is `pending`, `running`, `done`, `skipped` or
 `failed`, and `failure` is there only on a failed step. `repository` is `null` for a step done in
