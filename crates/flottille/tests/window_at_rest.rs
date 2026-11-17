@@ -1463,6 +1463,66 @@ fn the_window_draws_no_frame_at_rest_on_connections_page_and_its_review(cx: &mut
     assert_eq!(frames_at_rest(&shell, cx), (0, 0), "the review");
 }
 
+/// #1015: the form of a URL connection with a plain header and a secret of each place, open.
+#[gpui_kit::test]
+fn the_window_draws_no_frame_at_rest_on_the_connection_form_with_secrets(cx: &mut TestAppContext) {
+    let user = User::with_fake_agent();
+    std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
+    user.call(
+        "extension.set",
+        json!({"name": "connections", "enabled": true}),
+    )
+    .unwrap();
+    for name in ["notes-plain", "notes-key", "notes-query"] {
+        user.call(
+            "vault.set",
+            json!({"name": name, "secret": "s3cret-at-rest"}),
+        )
+        .unwrap();
+    }
+    user.call(
+        "connection.add",
+        json!({"name": "remote", "about": "A notes server elsewhere.",
+        "url": "https://notes.example.com/mcp",
+        "headers": {"X-Plain": {"vault": "notes-plain"}},
+        "secrets": [
+            {"in": "header", "name": "Authorization", "prefix": "Bearer ", "entry": "notes-key"},
+            {"in": "query", "name": "workspace", "entry": "notes-query"},
+        ]}),
+    )
+    .unwrap();
+    let (shell, cx) = window(&user, cx);
+    cx.update(|window, cx| window.click("settings", cx));
+    until(&shell, cx, "the settings page is shown", |cx| {
+        cx.update(|window, _| window.try_find("settings-tabs-features").is_some())
+    });
+    cx.update(|window, cx| window.click("settings-tabs-features", cx));
+    until(&shell, cx, "Connections is a row", |cx| {
+        cx.update(|window, _| window.try_find("features-connections").is_some())
+    });
+    settle(&shell, cx);
+    cx.update(|window, cx| window.click("features-connections", cx));
+    until(&shell, cx, "the server is listed", |cx| {
+        cx.update(|window, _| window.try_find("connection-remote").is_some())
+    });
+    settle(&shell, cx);
+    cx.update(|window, cx| window.click("connection-more-remote", cx));
+    settle(&shell, cx);
+    cx.update(|window, cx| window.click("edit-connection-remote", cx));
+    until(&shell, cx, "its secrets are in the form", |cx| {
+        cx.update(|window, _| window.try_find("connection-secret-2-name").is_some())
+    });
+    settle(&shell, cx);
+    // The caret blinks in a field that has the focus: the form at rest has none.
+    cx.update(|window, cx| window.blur(cx));
+    settle(&shell, cx);
+    assert_eq!(
+        frames_at_rest(&shell, cx),
+        (0, 0),
+        "(frames drawn, frames asked)"
+    );
+}
+
 /// #773 and #846: the composer holding a picture's chip and a command's, and a message that shows
 /// its chips in the conversation, at rest.
 #[gpui_kit::test]
@@ -1551,6 +1611,101 @@ fn the_window_draws_no_frame_at_rest_with_chips_in_the_composer_and_a_message(
     );
 }
 
+/// #1000: a message's pictures opened in the viewer, zoomed and back, at rest each time.
+#[gpui_kit::test]
+fn the_window_draws_no_frame_at_rest_on_the_picture_viewer_open_zoomed_and_back(
+    cx: &mut TestAppContext,
+) {
+    let user = User::with_fake_agent();
+    user.fake_script(json!({"images": true}));
+    let id = idle_session(&user);
+    let pictures: Vec<_> = [(900, 600), (300, 200)]
+        .into_iter()
+        .map(|(w, h)| {
+            let mut out = std::io::Cursor::new(Vec::new());
+            image::RgbImage::from_pixel(w, h, image::Rgb([200, 80, 40]))
+                .write_to(&mut out, image::ImageFormat::Png)
+                .unwrap();
+            use base64::Engine as _;
+            let data = base64::engine::general_purpose::STANDARD.encode(out.into_inner());
+            json!({"mime": "image/png", "data": data})
+        })
+        .collect();
+    user.call(
+        "agent.send",
+        json!({"agent": id, "message": "look at these", "images": pictures}),
+    )
+    .unwrap();
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the session is in the tree", |cx| {
+        cx.update(|window, _| window.try_find(session_id(&id)).is_some())
+    });
+    settle(&shell, cx);
+    cx.update(|window, cx| window.click(session_id(&id), cx));
+    let message = |shell: &Entity<Shell>, cx: &mut VisualTestContext| {
+        shell.read_with(cx, |s, cx| {
+            s.main().read(cx).session_page().and_then(|page| {
+                page.read(cx)
+                    .conversation()
+                    .read(cx)
+                    .blocks()
+                    .iter()
+                    .position(|b| {
+                        matches!(b, flottille_window::conversation::Block::Message { images, .. }
+                        if images.len() == 2)
+                    })
+            })
+        })
+    };
+    until(&shell, cx, "the message shows with its pictures", |cx| {
+        message(&shell, cx).is_some()
+    });
+    settle(&shell, cx);
+    let at = message(&shell, cx).unwrap();
+    cx.update(|window, cx| window.blur(cx));
+    cx.update(|window, cx| window.click(format!("row-{at}-image-0"), cx));
+    settle(&shell, cx);
+    assert!(cx.update(|window, _| window.try_find("picture-modal").is_some()));
+    assert_eq!(
+        frames_at_rest(&shell, cx),
+        (0, 0),
+        "open: (frames drawn, frames asked)"
+    );
+
+    cx.simulate_keystrokes("+ +");
+    settle(&shell, cx);
+    assert_eq!(
+        frames_at_rest(&shell, cx),
+        (0, 0),
+        "zoomed: (frames drawn, frames asked)"
+    );
+
+    cx.simulate_keystrokes("right");
+    settle(&shell, cx);
+    assert_eq!(
+        frames_at_rest(&shell, cx),
+        (0, 0),
+        "on the next picture: (frames drawn, frames asked)"
+    );
+
+    cx.simulate_keystrokes("0");
+    settle(&shell, cx);
+    assert_eq!(
+        frames_at_rest(&shell, cx),
+        (0, 0),
+        "back to fit: (frames drawn, frames asked)"
+    );
+
+    cx.simulate_keystrokes("escape");
+    settle(&shell, cx);
+    assert!(cx.update(|window, _| window.try_find("picture-modal").is_none()));
+    assert_eq!(
+        frames_at_rest(&shell, cx),
+        (0, 0),
+        "closed: (frames drawn, frames asked)"
+    );
+}
+
 #[gpui_kit::test]
 fn the_window_draws_no_frame_at_rest_on_a_project_page_s_progress_tab(cx: &mut TestAppContext) {
     let user = User::with_fake_agent().with_fake_gh();
@@ -1602,6 +1757,108 @@ fn the_window_draws_no_frame_at_rest_on_a_project_page_s_progress_tab(cx: &mut T
         cx.update(|window, _| window.try_find("progress-github-1-0-1").is_some())
     });
     cx.update(|window, cx| window.blur(cx));
+    settle(&shell, cx);
+
+    assert_eq!(
+        frames_at_rest(&shell, cx),
+        (0, 0),
+        "(frames drawn, frames asked)"
+    );
+}
+
+#[gpui_kit::test]
+fn the_window_draws_no_frame_at_rest_on_the_session_page_with_a_pasted_text(
+    cx: &mut TestAppContext,
+) {
+    let user = User::with_fake_agent();
+    std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
+    let folder = user.path("work/app");
+    user.git_init(&folder);
+    std::fs::write(folder.join("README.md"), "app\n").unwrap();
+    user.git(&folder, &["add", "README.md"]);
+    user.git(&folder, &["commit", "--quiet", "-m", "start"]);
+    user.call("project.add", json!({"folder": folder, "name": "app"}))
+        .unwrap();
+    let log: String = (1..=120)
+        .map(|n| format!("2026-11-15 INFO request {n} served\n"))
+        .collect();
+    // The first message carries a pasted text: the conversation shows its chip.
+    let id = user
+        .call(
+            "agent.start",
+            json!({"project": "app", "message": "see [Pasted text 1: pasted-text.txt]",
+                "texts": [{"name": "pasted-text.txt", "text": log}]}),
+        )
+        .unwrap()["agent"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    eventually("the first turn ends", || {
+        user.call("agent.show", json!({"agent": id})).unwrap()["agent"]["state"] == "idle"
+    });
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the session is in the tree", |cx| {
+        cx.update(|window, _| window.try_find(session_id(&id)).is_some())
+    });
+    settle(&shell, cx);
+    cx.update(|window, cx| window.click(session_id(&id), cx));
+    let message = |cx: &mut VisualTestContext| {
+        shell.read_with(cx, |s, cx| {
+            s.main().read(cx).session_page().and_then(|page| {
+                page.read(cx)
+                    .conversation()
+                    .read(cx)
+                    .blocks()
+                    .iter()
+                    .position(|b| {
+                        matches!(b, flottille_window::conversation::Block::Message { text, .. }
+                        if text.contains("read it at"))
+                    })
+            })
+        })
+    };
+    until(&shell, cx, "the message is shown", |cx| {
+        message(cx).is_some()
+    });
+    let at = message(cx).unwrap();
+    let chip =
+        gpui_kit::ElementId::NamedInteger(format!("row-{at}-message-tokens-token").into(), 0);
+    until(&shell, cx, "the message shows its chip", |cx| {
+        cx.update(|window, _| window.try_find(chip.clone()).is_some())
+    });
+    settle(&shell, cx);
+
+    // The viewer opened, then closed.
+    cx.update(|window, cx| window.click(chip.clone(), cx));
+    until(&shell, cx, "the text is opened", |cx| {
+        cx.update(|window, _| window.try_find("pasted-text-modal").is_some())
+    });
+    settle(&shell, cx);
+    cx.simulate_keystrokes("escape");
+    until(&shell, cx, "the viewer is closed", |cx| {
+        cx.update(|window, _| window.try_find("pasted-text-modal").is_none())
+    });
+    // A large paste in the reply field: a chip there too. Attached as a paste attaches it,
+    // without the field's focus, whose caret blinks.
+    let reply = shell
+        .read_with(cx, |s, _| s.reply_of(&id).cloned())
+        .expect("the session has a reply field");
+    reply.update_in(cx, |reply, _, cx| reply.attach_text(log, cx));
+    until(&shell, cx, "the reply holds the chip", |cx| {
+        reply.read_with(cx, |r, cx| {
+            r.tokens()
+                .read(cx)
+                .value(cx)
+                .iter()
+                .any(|piece| matches!(piece, gpui_design_system::Piece::Token(_)))
+        })
+    });
+    // The toast that says it once goes away on its own: the rest is after it.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while shell.read_with(cx, |s, cx| s.toasts().read(cx).toasts().count() > 0) {
+        assert!(Instant::now() < deadline, "the toast never went");
+        step(&shell, Duration::from_millis(100), cx);
+    }
     settle(&shell, cx);
 
     assert_eq!(

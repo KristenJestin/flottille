@@ -310,3 +310,79 @@ fn the_cli_sends_a_waiting_message_now() {
     eventually("the message to be read next", || prompts(&user).len() == 3);
     assert!(prompts(&user)[1].contains("SECOND"));
 }
+
+/// The file a message's first pasted text was written to, as its marker says.
+fn pasted_file(text: &str) -> std::path::PathBuf {
+    let marker = &text[text.find("[Pasted text 1: ").unwrap()..];
+    let path = &marker[marker.find("read it at ").unwrap() + "read it at ".len()..];
+    std::path::PathBuf::from(&path[..path.find(']').unwrap()])
+}
+
+/// Writes to the root a message with a pasted text; the delivery and the text's file.
+fn write_pasted(user: &User, root: &str) -> (String, std::path::PathBuf) {
+    let delivery = user
+        .call(
+            "agent.send",
+            json!({"agent": root, "message": "see [Pasted text 1: pasted-text.txt]",
+                "texts": [{"name": "pasted-text.txt", "text": "a long log\n"}]}),
+        )
+        .unwrap()["delivery"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let tree = user.call("agent.tree", json!({"agent": root})).unwrap();
+    let text = tree["agents"][0]["queued"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|queued| queued["delivery"] == delivery.as_str())
+        .unwrap()["text"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let file = pasted_file(&text);
+    assert!(file.exists(), "{file:?}");
+    (delivery, file)
+}
+
+#[test]
+fn cancelling_a_waiting_message_removes_its_pasted_texts_and_editing_it_keeps_them() {
+    let user = User::with_fake_agent();
+    let root = busy_root(&user);
+    // A file a marker typed by hand names: it is not the message's, it stays.
+    let elsewhere = user.path("notes.txt");
+    std::fs::write(&elsewhere, "mine").unwrap();
+    let (cancelled, gone) = write_pasted(&user, &root);
+    let (edited, kept) = write_pasted(&user, &root);
+    let typed = write(
+        &user,
+        &root,
+        &format!(
+            "[Pasted text 1: notes.txt · 4 bytes · read it at {}]",
+            elsewhere.display()
+        ),
+    );
+
+    user.call(
+        "agent.unqueue",
+        json!({"agent": root, "delivery": cancelled, "images": false}),
+    )
+    .unwrap();
+    user.call(
+        "agent.unqueue",
+        json!({"agent": root, "delivery": edited, "images": true}),
+    )
+    .unwrap();
+    user.call(
+        "agent.unqueue",
+        json!({"agent": root, "delivery": typed, "images": false}),
+    )
+    .unwrap();
+
+    assert!(!gone.exists(), "a cancelled message's pasted text goes");
+    assert!(
+        kept.exists(),
+        "an edited one's stays, for the message sent again"
+    );
+    assert!(elsewhere.exists(), "a file the message did not write stays");
+}

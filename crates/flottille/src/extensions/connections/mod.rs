@@ -2231,6 +2231,7 @@ async fn add_if(
         // that decided it first is the one that writes, and this Save writes nothing.
         still()?;
         if let Some(number) = request {
+            requests::saved_checked(daemon, None, &declaration)?;
             claimed = Some(requests::claimed(daemon, number)?);
         }
         servers(table)?.push(new);
@@ -2358,6 +2359,7 @@ async fn edit_if(
         still()?;
         // Decided under the file's lock, as an add's.
         if let Some(number) = request {
+            requests::saved_checked(daemon, Some(&old), &new)?;
             claimed = Some(requests::claimed(daemon, number)?);
         }
         *servers.get_mut(at).expect("found") = written;

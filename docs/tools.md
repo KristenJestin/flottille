@@ -432,7 +432,9 @@ pending requests.
   `run_status` says `needs auth, stopped` (in its list too), and a `service-stopped` delivery,
   urgent, tells the agent once: `auth, which dev-api needs, stopped. Your run <id> of dev-api goes
   on without it: services {"action": "start", "name": "auth"} starts it again.` (`was stopped by
-  the user` when the user stopped it).
+  the user` when the user stopped it). When it runs again, a `service-back` delivery, between
+  turns, tells it once: `auth, which dev-api needs, runs again. Your run <id> of dev-api has it
+  back.`
 - **Waiting**: the call waits `timeout` seconds (30 by default) for the end. A task
   that keeps running (`serve`) answers at once, and one already running for the agent is joined.
   A call stopped by its client stops its run.
@@ -514,9 +516,10 @@ pending requests.
     "The gaps");
   - no `DBUS_SESSION_BUS_ADDRESS`: the session bus leads to the keyring (`docs/vault.md`, "The
     runtime folder", which also says how the runtime folder itself is denied);
+  - no `SSH_AUTH_SOCK`, and from Landlock's ninth ABI no connecting to the user's SSH agent's
+    socket, wherever it is (`docs/vault.md`, "The runtime folder");
   - no push: `url./dev/null/flottille-refused-push/.pushInsteadOf` set the same way, which
-    rewrites every push URL to a path that is no remote, unless the run is itself a `git push`
-    (its own line, no wrapper) the user or the judge let through;
+    rewrites every push URL to a path that is no remote;
   - `FLOTTILLE_RUN` set to the run's id (to `address` for the line that prints a run's address),
     the marker a daemon started after a crash finds what the run left by ("Runs are records").
 - **A run may open windows on the user's screen** when its project says so: the setting *Agents may
@@ -565,7 +568,12 @@ pending requests.
   are the user's to skip, not the agent's. The hooks of the repository are never run.
 - **A push is the gate's**: `git push` is a call to judge, a forced one base, and only the push
   the gate read and let through goes out. A harmless command (a task, a test run)
-  cannot push from a script the gate never read. A push from a workspace is also refused, before
+  cannot push from a script the gate never read. A run that is itself a `git push` (its own
+  line, no wrapper) the user, the judge, a rule or Full mode let through does not get the
+  environment above: it runs outside the sandbox (no Landlock), with the daemon's own
+  environment and `core.hooksPath=/dev/null`, and none of the place's variables, as if the user
+  had typed it (`docs/commands.md`, "The environment"). Its task's `ready` and `url` commands
+  still run in the sandbox. A push from a workspace is also refused, before
   git runs, when a repository's remote no longer leads where it did when the workspace was made
   (`docs/commands.md`, "Where the remote leads").
 - **A stop ends the run's session, not every descendant.** A run starts in a session of its own
@@ -611,8 +619,16 @@ pending requests.
   marks their runs interrupted (`docs/projects.md`, "Services"): of the same boot only, a
   session and group whole while their leader is the process it started, else only the processes
   of that session that carry the run's marker, `FLOTTILLE_RUN=<run id>`, in their environment;
-  never a pid another program took since. A daemon that stops stops its runs,
-  interrupted. When a run's own process ends, what it left in its group is killed with it. The
+  never a pid another program took since. A long-lived helper that a run starts and that leaves
+  its session (a `tmux` server started detached makes a session of its own) is neither ended
+  with the run nor by this cleanup, and what it starts later, long after the run ended and at
+  anyone's request, still carries the run's marker: tmux hands the environment it started with
+  to every window it opens. The marker alone never makes a process the run's: one is ended
+  only if it is in the run's own session, carries the run's marker and started after the
+  recorded leader. The session check is strong, not absolute: a daemon that stayed down across a
+  pid wraparound may find that pid leading another session, and its members that carry the
+  marker (a tmux window's children, say) are then taken for the run's. A daemon that stops
+  stops its runs, interrupted. When a run's own process ends, what it left in its group is killed with it. The
   runs that ended go with their session, as its images do: when its root failed or ended and
   cannot be resumed, or 7 days after a root that can (`docs/protocol.md`, `agent.image`).
 
@@ -2109,7 +2125,11 @@ says who answers a call to judge (`docs/design.md` §7.1).
      `.local/share/opencode` wherever they sit along the path, the agents' folders of the home
      (`~/.claude`, `~/.claude.json`, `~/.codex`), `/etc/shadow`, `/etc/sudoers`, `/etc/sudoers.d`
      (all refused above, read or written), and Flottille's own folders (data, configuration, state, runtime), which are
-     base to read and refused to write. Inside the place only what sits below it counts. A path
+     base to read and refused to write. One file of them is harmless to read: an agent's own
+     pasted text (#848), `<data>/images/<that agent>/<stamp>-text-<n>.txt`, which its message
+     tells it to read, by `fs_read` alone, the path as written and where it leads both right in
+     that folder (no link, no `..` out of it); another agent's, a picture of the folder and any
+     other file of the data folder stay base. Inside the place only what sits below it counts. A path
      outside is checked as written and where it leads (a link anyone made, a configuration
      folder that is a link, a `..` after a link), against Flottille's folders as named and
      resolved;

@@ -81,6 +81,8 @@ pub fn run(paths: &Paths) -> Result<()> {
     // What a daemon that died left: the display folders it made, which only a daemon holding the
     // lock makes, so none is this daemon's; it makes its own again.
     crate::display::clean(paths);
+    // Before anything runs: where the SSH agent's socket is, which every run is kept from.
+    crate::ssh_agent::find();
     let machine_key = crate::remote::machine_key(paths)?;
     children::say_sessions_in(paths.sessions())?;
     let _store_lock = hold_store(paths)?;
@@ -823,7 +825,7 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
                 };
                 let answer = match answer {
                     Ok(result) => Message::result(request.id, result),
-                    Err(failure) => Message::error(Some(request.id), failure.code, failure.message),
+                    Err(failure) => failure.answer(Some(request.id)),
                 };
                 let _ = out.send(answer).await;
             });
@@ -893,126 +895,126 @@ fn handle(daemon: &Arc<Daemon>, request: Request) -> (Message, Option<Subscripti
         method if method.starts_with("subscription.") => (
             match crate::subscriptions::call(daemon, method, request.params) {
                 Ok(result) => Message::result(id, result),
-                Err(failure) => Message::error(Some(id), failure.code, failure.message),
+                Err(failure) => failure.answer(Some(id)),
             },
             None,
         ),
         method if method.starts_with("leave.") => (
             match crate::leaves::call(daemon, method, request.params) {
                 Ok(result) => Message::result(id, result),
-                Err(failure) => Message::error(Some(id), failure.code, failure.message),
+                Err(failure) => failure.answer(Some(id)),
             },
             None,
         ),
         method if method.starts_with("inbox.") => (
             match inbox::call(daemon, method, request.params) {
                 Ok(result) => Message::result(id, result),
-                Err(failure) => Message::error(Some(id), failure.code, failure.message),
+                Err(failure) => failure.answer(Some(id)),
             },
             None,
         ),
         method if method.starts_with("appearance.") => (
             match crate::appearance::call(daemon, method, request.params) {
                 Ok(result) => Message::result(id, result),
-                Err(failure) => Message::error(Some(id), failure.code, failure.message),
+                Err(failure) => failure.answer(Some(id)),
             },
             None,
         ),
         method if method.starts_with("sessions.") => (
             match crate::inactive::call(daemon, method, request.params) {
                 Ok(result) => Message::result(id, result),
-                Err(failure) => Message::error(Some(id), failure.code, failure.message),
+                Err(failure) => failure.answer(Some(id)),
             },
             None,
         ),
         method if method.starts_with("tool_results.") => (
             match crate::results::call(daemon, method, request.params) {
                 Ok(result) => Message::result(id, result),
-                Err(failure) => Message::error(Some(id), failure.code, failure.message),
+                Err(failure) => failure.answer(Some(id)),
             },
             None,
         ),
         method if method.starts_with("workspaces_folder.") => (
             match crate::workspaces_folder::call(daemon, method, request.params) {
                 Ok(result) => Message::result(id, result),
-                Err(failure) => Message::error(Some(id), failure.code, failure.message),
+                Err(failure) => failure.answer(Some(id)),
             },
             None,
         ),
         method if method.starts_with("developer.") => (
             match developer::call(daemon, method, request.params) {
                 Ok(result) => Message::result(id, result),
-                Err(failure) => Message::error(Some(id), failure.code, failure.message),
+                Err(failure) => failure.answer(Some(id)),
             },
             None,
         ),
         method if method.starts_with("compaction.") => (
             match crate::compaction::call(daemon, method, request.params) {
                 Ok(result) => Message::result(id, result),
-                Err(failure) => Message::error(Some(id), failure.code, failure.message),
+                Err(failure) => failure.answer(Some(id)),
             },
             None,
         ),
         method if method.starts_with("judge.") => (
             match judge::call(daemon, method, request.params) {
                 Ok(result) => Message::result(id, result),
-                Err(failure) => Message::error(Some(id), failure.code, failure.message),
+                Err(failure) => failure.answer(Some(id)),
             },
             None,
         ),
         method if method.starts_with("rules.") => (
             match rules::call(daemon, method, request.params) {
                 Ok(result) => Message::result(id, result),
-                Err(failure) => Message::error(Some(id), failure.code, failure.message),
+                Err(failure) => failure.answer(Some(id)),
             },
             None,
         ),
         "project.set_conventions" => (
             match projects::set_conventions(daemon, request.params) {
                 Ok(result) => Message::result(id, result),
-                Err(failure) => Message::error(Some(id), failure.code, failure.message),
+                Err(failure) => failure.answer(Some(id)),
             },
             None,
         ),
         "project.set_message_checks" => (
             match projects::set_message_checks(daemon, request.params) {
                 Ok(result) => Message::result(id, result),
-                Err(failure) => Message::error(Some(id), failure.code, failure.message),
+                Err(failure) => failure.answer(Some(id)),
             },
             None,
         ),
         method if method.starts_with("project.") => (
             match projects::call(daemon, method, request.params) {
                 Ok(result) => Message::result(id, result),
-                Err(failure) => Message::error(Some(id), failure.code, failure.message),
+                Err(failure) => failure.answer(Some(id)),
             },
             None,
         ),
         method if method.starts_with("skill.") => (
             match skills::call(daemon, method, request.params) {
                 Ok(result) => Message::result(id, result),
-                Err(failure) => Message::error(Some(id), failure.code, failure.message),
+                Err(failure) => failure.answer(Some(id)),
             },
             None,
         ),
         method if method.starts_with("command.") => (
             match commands::call(daemon, method, request.params) {
                 Ok(result) => Message::result(id, result),
-                Err(failure) => Message::error(Some(id), failure.code, failure.message),
+                Err(failure) => failure.answer(Some(id)),
             },
             None,
         ),
         method if method.starts_with("task.") => (
             match tasks::call(daemon, method, request.params) {
                 Ok(result) => Message::result(id, result),
-                Err(failure) => Message::error(Some(id), failure.code, failure.message),
+                Err(failure) => failure.answer(Some(id)),
             },
             None,
         ),
         method if method.starts_with("setup.") => (
             match setup::call(daemon, method, request.params) {
                 Ok(result) => Message::result(id, result),
-                Err(failure) => Message::error(Some(id), failure.code, failure.message),
+                Err(failure) => failure.answer(Some(id)),
             },
             None,
         ),

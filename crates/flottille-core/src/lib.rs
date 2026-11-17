@@ -12,6 +12,7 @@ pub mod error;
 pub mod glob;
 pub mod images;
 pub mod item;
+pub mod pasted;
 pub mod paths;
 pub mod place;
 pub mod project;

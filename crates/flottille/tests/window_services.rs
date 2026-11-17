@@ -735,10 +735,8 @@ fn stopping_a_service_a_running_task_needs_asks_first(cx: &mut TestAppContext) {
     click("service-stop-db", cx);
     settle(cx);
     assert!(has("service-stopping", cx));
-    assert_eq!(
-        label_of("service-stopping-needed", cx).as_deref(),
-        Some("app's api needs it and is running: it goes on without it.")
-    );
+    // The sentence names the service; what needs it is said once, in the list.
+    assert_said_once(cx);
     click("service-stopping-cancel", cx);
     settle(cx);
     assert!(!has("service-stopping", cx));
@@ -753,6 +751,20 @@ fn stopping_a_service_a_running_task_needs_asks_first(cx: &mut TestAppContext) {
     settle(cx);
     assert!(!has("service-stopping", cx));
     assert_eq!(pending_frames(cx), 0);
+}
+
+/// The stop confirmation of `db` says what needs it once: its sentence names the service only,
+/// its list the task that runs.
+fn assert_said_once(cx: &mut VisualTestContext) {
+    assert_eq!(
+        label_of("service-stopping-needed", cx).as_deref(),
+        Some("What runs and needs db goes on without it:")
+    );
+    assert_eq!(
+        label_of("service-stopping-needed-0", cx).as_deref(),
+        Some("app's api")
+    );
+    assert!(!has("service-stopping-needed-1", cx));
 }
 
 #[gpui_kit::test]
@@ -788,10 +800,8 @@ fn a_stop_refused_for_a_task_started_since_the_list_asks_first(cx: &mut TestAppC
     });
     settle(cx);
     assert!(has("service-stopping", cx));
-    assert_eq!(
-        label_of("service-stopping-needed", cx).as_deref(),
-        Some("app's api needs it and is running: it goes on without it.")
-    );
+    // Drawn from the daemon's data, not from its sentence.
+    assert_said_once(cx);
     assert_eq!(state_of("db", cx).as_deref(), Some("ready"));
 
     click("service-stopping-action", cx);

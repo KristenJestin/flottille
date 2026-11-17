@@ -1895,7 +1895,7 @@ async fn run_line(
         words.push(variables::fill(&word, &names)?);
     }
     let place = Place::of_workspace(workspace, workspace.folder.clone());
-    let env = crate::runs::environment(daemon, &place, repository, false)?;
+    let env = crate::runs::environment(daemon, &place, repository)?;
     live.env.lock().unwrap().clone_from(&env);
 
     let (reader, writer) = std::io::pipe().map_err(|error| format!("cannot run it: {error}"))?;

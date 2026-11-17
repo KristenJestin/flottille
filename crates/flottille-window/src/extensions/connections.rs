@@ -52,6 +52,12 @@ pub const FORM_SENTENCE: &str = "Flottille starts it and talks to it; agents onl
 pub const VARIABLES_HINT: &str = "Each one's value is a vault entry every project sees, put \
                                   where it goes when the server starts. Agents never see it.";
 
+/// What the secrets' field says: where their values come from and go.
+pub const SECRETS_HINT: &str = "Each one's value is a vault entry every project sees, put in a \
+                                header (after its prefix, such as \"Bearer \"), a query parameter, \
+                                a cookie or basic authentication of every request. Agents never \
+                                see it.";
+
 /// What the limits' field says.
 pub const LIMITS_HINT: &str = "An argument of that name may take only these values, in every \
                                action that has it.";
@@ -114,6 +120,44 @@ const GROUPS: [(&str, &str, &str); 4] = [
     ("judged", "Judged", "The judge decides in Auto, you in Ask."),
 ];
 
+/// Where a secret goes in a URL's requests: the words of `secrets = [{in, ..}]`, with the labels
+/// the form's select says them in.
+const PLACES: [(&str, &str); 4] = [
+    ("header", "Header"),
+    ("query", "Query parameter"),
+    ("cookie", "Cookie"),
+    ("basic", "Basic authentication"),
+];
+
+/// A line of a connection's `secrets`: the vault entry, never its value.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ServerSecret {
+    /// `header`, `query`, `cookie` or `basic`.
+    pub place: String,
+    /// The header's, the query parameter's or the cookie's name; empty for basic.
+    pub name: String,
+    /// Written before the secret in a header (`Bearer `).
+    pub prefix: String,
+    pub entry: String,
+}
+
+impl ServerSecret {
+    /// The line a card says it in: where it goes, its prefix, and the entry it is read from.
+    pub fn said(&self) -> String {
+        let place = match self.place.as_str() {
+            "header" => format!("the header {}", self.name),
+            "query" => format!("the query parameter {}", self.name),
+            "cookie" => format!("the cookie {}", self.name),
+            _ => "basic authentication".to_owned(),
+        };
+        let prefix = match self.prefix.is_empty() {
+            true => String::new(),
+            false => format!(" after {:?}", self.prefix),
+        };
+        format!("{place}{prefix} from the vault entry {}", self.entry)
+    }
+}
+
 /// A connection, as `connection.list` says it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Server {
@@ -125,8 +169,9 @@ pub struct Server {
     /// Each variable (or header, for a URL) and the vault entry it names.
     pub env: BTreeMap<String, String>,
     pub headers: BTreeMap<String, String>,
-    /// The vault entries of its other secrets: a query parameter, a cookie, basic authentication.
-    pub secrets: Vec<String>,
+    /// The other secrets of its requests, each with where it goes: a header with a prefix, a
+    /// query parameter, a cookie, basic authentication.
+    pub secrets: Vec<ServerSecret>,
     pub only: BTreeMap<String, Vec<String>>,
     /// The hosts a sign-in also needs.
     pub sites: Vec<String>,
@@ -175,7 +220,12 @@ impl Server {
                 .as_array()
                 .into_iter()
                 .flatten()
-                .map(|secret| text(&secret["entry"]))
+                .map(|secret| ServerSecret {
+                    place: text(&secret["in"]),
+                    name: text(&secret["name"]),
+                    prefix: text(&secret["prefix"]),
+                    entry: text(&secret["entry"]),
+                })
                 .collect(),
             only: value["only"]
                 .as_object()
@@ -614,6 +664,18 @@ struct Variable {
     entry: Option<String>,
 }
 
+/// A secret of a URL's requests in the form: where it goes, its name and prefix typed, its entry
+/// picked.
+struct SecretLine {
+    key: String,
+    /// One of `PLACES`' words.
+    place: &'static str,
+    name: Entity<InputState>,
+    /// Typed as it is: `Bearer ` ends with a space.
+    prefix: Entity<InputState>,
+    entry: Option<String>,
+}
+
 /// A limit of the form: an argument and the values it may take, separated by commas.
 struct Limit {
     key: String,
@@ -823,6 +885,38 @@ fn eased(id: ElementId, target: f32, window: &mut Window, cx: &mut gpui_kit::App
     motion.value(now)
 }
 
+/// The entries a line of the form may be given and the options of the select that picks among
+/// them: "Pick an entry" first, then each entry with what it is for. An entry the declaration
+/// names that is no longer offered still says itself. `chosen` is the option's index.
+fn entry_options(
+    offered: &[VaultEntry],
+    own: Option<&String>,
+) -> (Vec<String>, Vec<SelectOption>, usize) {
+    let mut entries: Vec<String> = offered.iter().map(|e| e.name.clone()).collect();
+    if let Some(own) = own
+        && !entries.contains(own)
+    {
+        entries.push(own.clone());
+    }
+    let mut options = vec![SelectOption::new("none", "Pick an entry")];
+    options.extend(entries.iter().map(|name| {
+        let line = offered
+            .iter()
+            .find(|e| &e.name == name)
+            .and_then(|e| e.description.clone())
+            .unwrap_or_default();
+        SelectOption::new(
+            SharedString::from(name.clone()),
+            SharedString::from(name.clone()),
+        )
+        .line(SharedString::from(line))
+    }));
+    let chosen = own
+        .and_then(|own| entries.iter().position(|e| e == own))
+        .map_or(0, |at| at + 1);
+    (entries, options, chosen)
+}
+
 pub struct ConnectionsSection {
     shell: WeakEntity<Shell>,
     vault: Entity<VaultSection>,
@@ -838,6 +932,8 @@ pub struct ConnectionsSection {
     reach: Reach,
     variables: Vec<Variable>,
     variable_rows: Listing<String>,
+    secrets: Vec<SecretLine>,
+    secret_rows: Listing<String>,
     limits: Vec<Limit>,
     limit_rows: Listing<String>,
     sites: Vec<Site>,
@@ -878,6 +974,8 @@ impl ConnectionsSection {
             reach: Reach::Command,
             variables: Vec::new(),
             variable_rows: Listing::default(),
+            secrets: Vec::new(),
+            secret_rows: Listing::default(),
             limits: Vec::new(),
             limit_rows: Listing::default(),
             sites: Vec::new(),
@@ -916,6 +1014,13 @@ impl ConnectionsSection {
     /// The name field of the variable at `at` of the form.
     pub fn variable_field(&self, at: usize) -> Option<Entity<InputState>> {
         self.variables.get(at).map(|v| v.name.clone())
+    }
+
+    /// The name and prefix fields of the secret's line at `at` of the form.
+    pub fn secret_fields(&self, at: usize) -> Option<(Entity<InputState>, Entity<InputState>)> {
+        self.secrets
+            .get(at)
+            .map(|line| (line.name.clone(), line.prefix.clone()))
     }
 
     /// The argument and values fields of the limit at `at` of the form.
@@ -1306,16 +1411,24 @@ impl ConnectionsSection {
             false => Reach::Command,
         };
         self.variables.clear();
+        self.secrets.clear();
         self.limits.clear();
         self.sites.clear();
         self.headed = server.is_some_and(|s| s.headed);
         if let Some(server) = server {
-            let entries = match self.reach {
-                Reach::Command => &server.env,
-                Reach::Url => &server.headers,
-            };
-            for (name, entry) in entries.clone() {
+            for (name, entry) in server.env.clone() {
                 self.new_variable(Some((name, entry)), window, cx);
+            }
+            // The old header lines are header secrets with no prefix, first: the order they are
+            // written back in.
+            let headers = server.headers.iter().map(|(name, entry)| ServerSecret {
+                place: "header".into(),
+                name: name.clone(),
+                prefix: String::new(),
+                entry: entry.clone(),
+            });
+            for secret in headers.chain(server.secrets.clone()) {
+                self.new_secret(Some(secret), window, cx);
             }
             for (argument, values) in server.only.clone() {
                 self.new_limit(Some((argument, values.join(", "))), window, cx);
@@ -1327,6 +1440,7 @@ impl ConnectionsSection {
         // The rows the dialog opens with are there at once, at rest: a plain list plays the
         // entrance of every row on its first sync. Rows added afterwards still unfold.
         self.variable_rows = Listing::default().at_rest();
+        self.secret_rows = Listing::default().at_rest();
         self.limit_rows = Listing::default().at_rest();
         self.site_rows = Listing::default().at_rest();
         self.form = Form::Editing(server.map(|s| s.name.clone()));
@@ -1385,6 +1499,41 @@ impl ConnectionsSection {
         self.watch(&name, cx);
         let key = self.next_key();
         self.variables.push(Variable { key, name, entry });
+        cx.notify();
+    }
+
+    fn new_secret(
+        &mut self,
+        given: Option<ServerSecret>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let name = line_field("Authorization", window, cx);
+        let prefix = line_field("Bearer ", window, cx);
+        let given = given.unwrap_or_else(|| ServerSecret {
+            place: "header".into(),
+            name: String::new(),
+            prefix: String::new(),
+            entry: String::new(),
+        });
+        let (typed, before) = (given.name.clone(), given.prefix.clone());
+        name.update(cx, |f, cx| f.set_value(typed, window, cx));
+        prefix.update(cx, |f, cx| f.set_value(before, window, cx));
+        self.watch(&name, cx);
+        self.watch(&prefix, cx);
+        let place = PLACES
+            .iter()
+            .map(|(word, _)| *word)
+            .find(|word| *word == given.place)
+            .unwrap_or("header");
+        let key = self.next_key();
+        self.secrets.push(SecretLine {
+            key,
+            place,
+            name,
+            prefix,
+            entry: Some(given.entry).filter(|entry| !entry.is_empty()),
+        });
         cx.notify();
     }
 
@@ -1466,18 +1615,6 @@ impl ConnectionsSection {
         if name.is_empty() || about.is_empty() {
             return Err("A server needs a name and a sentence on what it is for.".into());
         }
-        let mut entries = Map::new();
-        for variable in &self.variables {
-            let typed = value(&variable.name);
-            match (&variable.entry, typed.is_empty()) {
-                (None, true) => {}
-                (Some(entry), false) => {
-                    entries.insert(typed, json!({"vault": entry}));
-                }
-                (None, false) => return Err(format!("Pick the vault entry {typed} is given.")),
-                (Some(_), true) => return Err("Name each variable its entry is given as.".into()),
-            }
-        }
         let mut only = Map::new();
         for limit in &self.limits {
             let argument = value(&limit.argument);
@@ -1512,6 +1649,22 @@ impl ConnectionsSection {
                     return Err("Say the command that starts the server.".into());
                 }
                 let words = flottille_core::command::split_line(&line)?;
+                let mut entries = Map::new();
+                for variable in &self.variables {
+                    let typed = value(&variable.name);
+                    match (&variable.entry, typed.is_empty()) {
+                        (None, true) => {}
+                        (Some(entry), false) => {
+                            entries.insert(typed, json!({"vault": entry}));
+                        }
+                        (None, false) => {
+                            return Err(format!("Pick the vault entry {typed} is given."));
+                        }
+                        (Some(_), true) => {
+                            return Err("Name each variable its entry is given as.".into());
+                        }
+                    }
+                }
                 params["command"] = json!(words);
                 params["env"] = Value::Object(entries);
                 // An empty list in an edit takes the sites away: the window's link leaves a
@@ -1533,7 +1686,11 @@ impl ConnectionsSection {
                     return Err("Say the URL of the server.".into());
                 }
                 params["url"] = json!(url);
-                params["headers"] = Value::Object(entries);
+                // Both are always sent: an edit that gave `headers` alone would leave `secrets`
+                // as they were, and one that gave `secrets` alone would drop the header lines.
+                let (headers, secrets) = self.secret_lines(cx)?;
+                params["headers"] = Value::Object(headers);
+                params["secrets"] = json!(secrets);
                 if editing {
                     params["env"] = json!({});
                     params["sites"] = json!([]);
@@ -1548,12 +1705,62 @@ impl ConnectionsSection {
                     params.as_object_mut().unwrap().remove(key);
                 }
             }
+            if params["secrets"].as_array().is_some_and(Vec::is_empty) {
+                params.as_object_mut().unwrap().remove("secrets");
+            }
         }
         let writing = match original {
             Some(_) => Writing::Edited(name),
             None => Writing::Added(name),
         };
         Ok((params, writing))
+    }
+
+    /// The lines of a URL's secrets as the daemon takes them: the header lines with no prefix as
+    /// the old `headers` always were, the others as `secrets`, each in the order of the form.
+    fn secret_lines(&self, cx: &Context<Self>) -> Result<(Map<String, Value>, Vec<Value>), String> {
+        let mut headers = Map::new();
+        let mut others = Vec::new();
+        for line in &self.secrets {
+            let name = line.name.read(cx).value().trim().to_owned();
+            // As typed: a prefix such as `Bearer ` ends with the space.
+            let prefix = line.prefix.read(cx).value().to_string();
+            let Some(entry) = &line.entry else {
+                if name.is_empty() && prefix.is_empty() {
+                    continue;
+                }
+                return Err(format!(
+                    "Pick the vault entry {} is read from.",
+                    if name.is_empty() {
+                        "each secret"
+                    } else {
+                        &name
+                    }
+                ));
+            };
+            if name.is_empty() && line.place != "basic" {
+                return Err("Name each secret's header, query parameter or cookie.".into());
+            }
+            if line.place == "header" && prefix.is_empty() {
+                if headers
+                    .insert(name.clone(), json!({"vault": entry}))
+                    .is_some()
+                {
+                    return Err(format!("The header {name} is given twice."));
+                }
+                continue;
+            }
+            let mut secret = json!({"in": line.place});
+            if !name.is_empty() {
+                secret["name"] = json!(name);
+            }
+            if !prefix.is_empty() {
+                secret["prefix"] = json!(prefix);
+            }
+            secret["entry"] = json!(entry);
+            others.push(secret);
+        }
+        Ok((headers, others))
     }
 
     // ── A row's gestures ─────────────────────────────────────────────────────────────────────
@@ -1807,31 +2014,7 @@ impl ConnectionsSection {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let id = format!("connection-variable-{at}");
-        let mut entries: Vec<String> = offered.iter().map(|e| e.name.clone()).collect();
-        // An entry the declaration names that is no longer offered still says itself.
-        if let Some(own) = &variable.entry
-            && !entries.contains(own)
-        {
-            entries.push(own.clone());
-        }
-        let mut options = vec![SelectOption::new("none", "Pick an entry")];
-        options.extend(entries.iter().map(|name| {
-            let line = offered
-                .iter()
-                .find(|e| &e.name == name)
-                .and_then(|e| e.description.clone())
-                .unwrap_or_default();
-            SelectOption::new(
-                SharedString::from(name.clone()),
-                SharedString::from(name.clone()),
-            )
-            .line(SharedString::from(line))
-        }));
-        let chosen = variable
-            .entry
-            .as_ref()
-            .and_then(|own| entries.iter().position(|e| e == own))
-            .map_or(0, |at| at + 1);
+        let (entries, options, chosen) = entry_options(offered, variable.entry.as_ref());
         let key = variable.key.clone();
         let this = cx.entity().downgrade();
         let select = Select::new(SharedString::from(format!("{id}-entry")), options, chosen)
@@ -1857,10 +2040,6 @@ impl ConnectionsSection {
             this.variables.retain(|v| v.key != key);
             cx.notify();
         }));
-        let (name, entry) = match self.reach {
-            Reach::Command => ("Variable", "Vault entry"),
-            Reach::Url => ("Header", "Vault entry"),
-        };
         div()
             .id(SharedString::from(id.clone()))
             .flex()
@@ -1868,15 +2047,131 @@ impl ConnectionsSection {
             .gap(space::SM)
             .child(div().flex_1().min_w_0().child(Field::new(
                 SharedString::from(format!("{id}-name-field")),
-                name,
+                "Variable",
                 boxed(format!("{id}-name"), Input::new(&variable.name), cx),
             )))
             .child(div().flex_1().min_w_0().child(Field::new(
                 SharedString::from(format!("{id}-entry-field")),
-                entry,
+                "Vault entry",
                 select,
             )))
             .child(remove)
+            .into_any_element()
+    }
+
+    /// A secret of a URL's requests: where it goes, its name, its prefix (a header's), its entry.
+    fn secret_row(
+        &self,
+        at: usize,
+        line: &SecretLine,
+        offered: &[VaultEntry],
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let id = format!("connection-secret-{at}");
+        let this = cx.entity().downgrade();
+        let key = line.key.clone();
+        let place = Select::new(
+            SharedString::from(format!("{id}-place")),
+            PLACES
+                .iter()
+                .map(|(word, said)| SelectOption::new(*word, *said))
+                .collect::<Vec<_>>(),
+            PLACES
+                .iter()
+                .position(|(word, _)| *word == line.place)
+                .unwrap_or(0),
+        )
+        .on_choose(move |index, window, cx| {
+            let Some((word, _)) = PLACES.get(index) else {
+                return;
+            };
+            let key = key.clone();
+            this.update(cx, |this, cx| {
+                if let Some(line) = this.secrets.iter_mut().find(|l| l.key == key) {
+                    line.place = *word;
+                    // What the place takes no more is not kept: the daemon would refuse it.
+                    let mut gone = Vec::new();
+                    if *word == "basic" {
+                        gone.push(line.name.clone());
+                    }
+                    if *word != "header" {
+                        gone.push(line.prefix.clone());
+                    }
+                    for field in gone {
+                        field.update(cx, |f, cx| f.set_value("", window, cx));
+                    }
+                }
+                this.form_error = None;
+                cx.notify();
+            })
+            .ok();
+        });
+        let (entries, options, chosen) = entry_options(offered, line.entry.as_ref());
+        let this = cx.entity().downgrade();
+        let key = line.key.clone();
+        let entry = Select::new(SharedString::from(format!("{id}-entry")), options, chosen)
+            .on_choose(move |index, _, cx| {
+                let entry = index.checked_sub(1).and_then(|i| entries.get(i).cloned());
+                let key = key.clone();
+                this.update(cx, |this, cx| {
+                    if let Some(line) = this.secrets.iter_mut().find(|l| l.key == key) {
+                        line.entry = entry;
+                    }
+                    this.form_error = None;
+                    cx.notify();
+                })
+                .ok();
+            });
+        let key = line.key.clone();
+        let remove = Button::icon(
+            SharedString::from(format!("{id}-remove")),
+            Icon::Close,
+            "Remove this secret",
+        )
+        .on_click(cx.listener(move |this, _, _, cx| {
+            this.secrets.retain(|l| l.key != key);
+            cx.notify();
+        }));
+        // A basic line has no name, and only a header takes a prefix: each folds away where it
+        // does not apply.
+        let name = div().child(Field::new(
+            SharedString::from(format!("{id}-name-field")),
+            "Name",
+            boxed(format!("{id}-name"), Input::new(&line.name), cx),
+        ));
+        let prefix = div().w(px(260.)).child(Field::new(
+            SharedString::from(format!("{id}-prefix-field")),
+            "Prefix",
+            boxed(format!("{id}-prefix"), Input::new(&line.prefix), cx),
+        ));
+        div()
+            .id(SharedString::from(id.clone()))
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .flex()
+                    .items_end()
+                    .gap(space::SM)
+                    .child(div().w(px(150.)).child(Field::new(
+                        SharedString::from(format!("{id}-place-field")),
+                        "Place",
+                        place,
+                    )))
+                    .child(div().flex_1().min_w_0().child(Field::new(
+                        SharedString::from(format!("{id}-entry-field")),
+                        "Vault entry",
+                        entry,
+                    )))
+                    .child(remove),
+            )
+            .child(
+                presence(format!("{id}-name-block"), line.place != "basic", name).space(space::SM),
+            )
+            .child(
+                presence(format!("{id}-prefix-block"), line.place == "header", prefix)
+                    .space(space::SM),
+            )
             .into_any_element()
     }
 
@@ -1943,6 +2238,17 @@ impl ConnectionsSection {
             Form::Editing(Some(name)) => format!("Edit {name}"),
             _ => "New server".to_owned(),
         };
+        // A form that answers an agent's request says so, and what Save and Cancel do to it.
+        let (title, sentence) = match self.request {
+            Some(number) => (
+                format!("Request #{number}: {title}"),
+                format!(
+                    "This answers the agent's request #{number}: Save writes your values and \
+                     answers it, Cancel leaves it waiting for you."
+                ),
+            ),
+            None => (title, FORM_SENTENCE.to_owned()),
+        };
         let modal = Modal::new("connection-modal", title)
             .wide()
             .open(self.form != Form::Closed)
@@ -1963,6 +2269,12 @@ impl ConnectionsSection {
             .map(|v| (v.key.clone(), v.key.clone()))
             .collect();
         self.variable_rows.sync(keys, now, reduce);
+        let keys: Vec<(String, String)> = self
+            .secrets
+            .iter()
+            .map(|l| (l.key.clone(), l.key.clone()))
+            .collect();
+        self.secret_rows.sync(keys, now, reduce);
         let keys: Vec<(String, String)> = self
             .limits
             .iter()
@@ -2065,6 +2377,27 @@ impl ConnectionsSection {
                 .gap(space::SM),
             );
         }
+        let mut secrets = div().flex().flex_col();
+        for (key, placement) in self
+            .secret_rows
+            .rows()
+            .map(|r| (r.key.to_owned(), r.placement))
+            .collect::<Vec<_>>()
+        {
+            let at = self.secrets.iter().position(|l| l.key == key);
+            let content = match at {
+                Some(at) => self.secret_row(at, &self.secrets[at], &offered, cx),
+                None => div().into_any_element(),
+            };
+            secrets = secrets.child(
+                gpui_design_system::Item::new(
+                    ElementId::Name(format!("connection-secret-item-{key}").into()),
+                    placement,
+                    content,
+                )
+                .gap(space::SM),
+            );
+        }
         let mut limits = div().flex().flex_col();
         for (key, placement) in self
             .limit_rows
@@ -2108,13 +2441,12 @@ impl ConnectionsSection {
                 .gap(space::SM),
             );
         }
-        let (variables_label, add_label) = match self.reach {
-            Reach::Command => ("Variables of its environment", "New variable"),
-            Reach::Url => ("Headers of its requests", "New header"),
-        };
-        let new_variable = Button::secondary("connection-new-variable", add_label)
+        let new_variable = Button::secondary("connection-new-variable", "New variable")
             .leading(Icon::Plus)
             .on_click(cx.listener(|this, _, window, cx| this.new_variable(None, window, cx)));
+        let new_secret = Button::secondary("connection-new-secret", "New secret")
+            .leading(Icon::Plus)
+            .on_click(cx.listener(|this, _, window, cx| this.new_secret(None, window, cx)));
         let new_limit = Button::secondary("connection-new-limit", "New limit")
             .leading(Icon::Plus)
             .on_click(cx.listener(|this, _, window, cx| this.new_limit(None, window, cx)));
@@ -2139,6 +2471,42 @@ impl ConnectionsSection {
                 this.headed = !this.headed;
                 cx.notify();
             }));
+        let variables_field = Field::new(
+            "connection-variables-field",
+            "Variables of its environment",
+            div()
+                .flex()
+                .flex_col()
+                .items_start()
+                .child(div().w_full().child(variables))
+                .child(div().pt(space::SM).child(new_variable)),
+        )
+        .optional()
+        .hint(VARIABLES_HINT);
+        let secrets_field = Field::new(
+            "connection-secrets-field",
+            "Secrets of its requests",
+            div()
+                .flex()
+                .flex_col()
+                .items_start()
+                .child(div().w_full().child(secrets))
+                .child(div().pt(space::SM).child(new_secret)),
+        )
+        .optional()
+        .hint(SECRETS_HINT);
+        let limits_field = Field::new(
+            "connection-limits-field",
+            "Limits on arguments",
+            div()
+                .flex()
+                .flex_col()
+                .items_start()
+                .child(div().w_full().child(limits))
+                .child(div().pt(space::SM).child(new_limit)),
+        )
+        .optional()
+        .hint(LIMITS_HINT);
         let why_headless = self.headless_said().map(SharedString::from);
         let body = div()
             .id("connection-form")
@@ -2176,41 +2544,23 @@ impl ConnectionsSection {
                 .space(space::LG),
             )
             .child(presence("connection-url-block", self.reach == Reach::Url, url).space(space::LG))
-            .child(spaced(
-                space::LG,
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(space::LG)
-                    .child(
-                        Field::new(
-                            "connection-variables-field",
-                            variables_label,
-                            div()
-                                .flex()
-                                .flex_col()
-                                .items_start()
-                                .child(div().w_full().child(variables))
-                                .child(div().pt(space::SM).child(new_variable)),
-                        )
-                        .optional()
-                        .hint(VARIABLES_HINT),
-                    )
-                    .child(
-                        Field::new(
-                            "connection-limits-field",
-                            "Limits on arguments",
-                            div()
-                                .flex()
-                                .flex_col()
-                                .items_start()
-                                .child(div().w_full().child(limits))
-                                .child(div().pt(space::SM).child(new_limit)),
-                        )
-                        .optional()
-                        .hint(LIMITS_HINT),
-                    ),
-            ))
+            .child(
+                presence(
+                    "connection-variables-block",
+                    self.reach == Reach::Command,
+                    variables_field,
+                )
+                .space(space::LG),
+            )
+            .child(
+                presence(
+                    "connection-secrets-block",
+                    self.reach == Reach::Url,
+                    secrets_field,
+                )
+                .space(space::LG),
+            )
+            .child(spaced(space::LG, limits_field))
             .child(
                 presence(
                     "connection-sites-block",
@@ -2236,23 +2586,19 @@ impl ConnectionsSection {
             .test_support();
         // What a modal keeps in sight is a column without a gap: nothing to fold but the line.
         let error = problem_line("connection-error", self.form_error.clone(), px(0.), cx);
-        modal
-            .sentence(FORM_SENTENCE)
-            .child(body)
-            .kept(error)
-            .action(
-                Button::primary(
-                    "save-connection",
-                    match (self.saving, original.is_some()) {
-                        (true, true) => "Saving…",
-                        (true, false) => "Adding…",
-                        (false, true) => "Save",
-                        (false, false) => "Add",
-                    },
-                )
-                .disabled(self.saving)
-                .on_click(cx.listener(|this, _, _, cx| this.save(cx))),
+        modal.sentence(sentence).child(body).kept(error).action(
+            Button::primary(
+                "save-connection",
+                match (self.saving, original.is_some()) {
+                    (true, true) => "Saving…",
+                    (true, false) => "Adding…",
+                    (false, true) => "Save",
+                    (false, false) => "Add",
+                },
             )
+            .disabled(self.saving)
+            .on_click(cx.listener(|this, _, _, cx| this.save(cx))),
+        )
     }
 
     // ── The review dialog ────────────────────────────────────────────────────────────────────
@@ -3328,7 +3674,9 @@ impl ConnectionsSection {
                     .server(&review.name)
                     .map(|server| {
                         let headers = server.headers.values().cloned();
-                        headers.chain(server.secrets.clone()).collect::<Vec<_>>()
+                        headers
+                            .chain(server.secrets.iter().map(|secret| secret.entry.clone()))
+                            .collect::<Vec<_>>()
                     })
                     .unwrap_or_default()
                 {

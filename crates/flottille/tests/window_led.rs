@@ -239,6 +239,14 @@ fn the_window_offers_detach_and_moves_the_session_under_its_workspace(cx: &mut T
     // Back among the project's sessions, its own: no longer under its pilot.
     let rows = listed(&shell, cx);
     assert!(rows.contains(&led) && rows.contains(&lead), "{rows:?}");
+    until(&shell, cx, "a toast says it was detached", |cx| {
+        shell.read_with(cx, |s, cx| {
+            s.toasts()
+                .read(cx)
+                .toasts()
+                .any(|toast| toast.title() == "Detached from begin the docs session")
+        })
+    });
     assert_eq!(
         shell.read_with(cx, |s, cx| s
             .toasts()

@@ -279,7 +279,8 @@ mod tests {
             refused,
             Err(ErrorBody {
                 code: "not-found".into(),
-                message: "no".into()
+                message: "no".into(),
+                data: None
             })
         );
         answering.join().unwrap();

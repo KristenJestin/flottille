@@ -16,7 +16,7 @@ use common::mcp::{Mcp, server_of};
 use flottille_window::Shell;
 use gpui_design_system::motion::PANEL;
 use gpui_design_system::omarchy::Environment;
-use gpui_kit::test::TestWindowExt;
+use gpui_kit::test::{TestQueryExt as _, TestWindowExt};
 use gpui_kit::{Entity, TestAppContext, VisualTestContext, px, size};
 use serde_json::{Value, json};
 
@@ -548,4 +548,331 @@ fn a_request_changed_since_it_was_asked_offers_no_accept(cx: &mut TestAppContext
     let said = label(cx, "connection-request-stale").unwrap_or_default();
     assert!(said.contains("changed since"), "{said}");
     assert!(!present(cx, "connection-request-accept"));
+}
+
+// ── The secrets of a request, and the entry it names (#1015) ──────────────────────────────────
+
+/// The secret of the vault entries below, which no window ever shows.
+const SECRET: &str = "s3cret-notes-w1ndow";
+
+fn connections_section(
+    shell: &Entity<Shell>,
+    cx: &mut VisualTestContext,
+) -> Entity<flottille_window::extensions::connections::ConnectionsSection> {
+    shell.read_with(cx, |s, cx| {
+        let page = s.main().read(cx).settings_page().cloned().unwrap();
+        page.read(cx).connections().clone()
+    })
+}
+
+/// The agent's request to add `notes`, whose requests carry a bearer secret from `notes-key`.
+fn a_bearer_request(mcp: &Mcp) -> u64 {
+    held(
+        mcp,
+        json!({"action": "add", "name": "notes", "about": "Notes elsewhere.",
+            "url": "https://notes.example.com/mcp",
+            "secrets": [{"in": "header", "name": "Authorization", "prefix": "Bearer ",
+                "entry": "notes-key"}]}),
+    )
+}
+
+#[gpui_kit::test]
+fn editing_an_agent_s_request_keeps_its_secrets(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, mcp) = a_root(&user);
+    user.call(
+        "vault.set",
+        json!({"name": "notes-key", "secret": SECRET, "url": "https://notes.example.com"}),
+    )
+    .unwrap();
+    let number = a_bearer_request(&mcp);
+
+    let (shell, cx) = window(&user, cx);
+    open_card(&shell, cx, &lead, number);
+    open_dialog(&shell, cx, number);
+    click(cx, "connection-request-edit");
+    until(&shell, cx, "the form opens with its secret", |cx| {
+        visible(cx, "connection-modal") && visible(cx, "connection-secret-0-name")
+    });
+    settle(cx);
+    assert_eq!(
+        label(cx, "connection-secret-0-place").as_deref(),
+        Some("Header")
+    );
+    assert_eq!(
+        label(cx, "connection-secret-0-entry").as_deref(),
+        Some("notes-key")
+    );
+    let section = connections_section(&shell, cx);
+    let (name, prefix) = section.read_with(cx, |s, _| s.secret_fields(0).unwrap());
+    assert_eq!(
+        name.read_with(cx, |f, _| f.value().to_string()),
+        "Authorization"
+    );
+    assert_eq!(
+        prefix.read_with(cx, |f, _| f.value().to_string()),
+        "Bearer "
+    );
+
+    click(cx, "save-connection");
+    until(&shell, cx, "the form closes", |cx| {
+        !visible(cx, "connection-modal")
+    });
+    assert_eq!(pending(&user), 0, "the request is answered");
+    let written = connection(&user, "notes").unwrap();
+    assert_eq!(
+        written["secrets"],
+        json!([{"in": "header", "name": "Authorization", "prefix": "Bearer ",
+            "entry": "notes-key"}]),
+        "{written}"
+    );
+    assert!(written.get("headers").is_none(), "{written}");
+}
+
+#[gpui_kit::test]
+fn the_form_opened_from_a_request_says_it_answers_it_and_cancel_leaves_it_waiting(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    let (lead, mcp) = a_root(&user);
+    let line = line_of(&user, "almanac");
+    let number = held(
+        &mcp,
+        json!({"action": "add", "name": "almanac", "about": "Notes.", "command": line}),
+    );
+
+    let (shell, cx) = window(&user, cx);
+    open_card(&shell, cx, &lead, number);
+    open_dialog(&shell, cx, number);
+    click(cx, "connection-request-edit");
+    until(&shell, cx, "the form opens", |cx| {
+        visible(cx, "connection-modal")
+    });
+    settle(cx);
+    let title = label(cx, "connection-modal-title").unwrap_or_default();
+    assert!(title.contains(&format!("#{number}")), "{title}");
+    let said = label(cx, "connection-modal-sentence").unwrap_or_default();
+    assert!(
+        said.contains(&format!("request #{number}"))
+            && said.contains("Save writes your values and answers it")
+            && said.contains("Cancel leaves it waiting"),
+        "{said}"
+    );
+
+    click(cx, "connection-modal-cancel");
+    until(&shell, cx, "the form closes", |cx| {
+        !visible(cx, "connection-modal")
+    });
+    assert_eq!(pending(&user), 1, "the request is still waiting");
+    assert!(connection(&user, "almanac").is_none());
+    // A form opened on its own is not said to answer anything.
+    click(cx, "new-connection");
+    until(&shell, cx, "the form opens", |cx| {
+        visible(cx, "connection-modal")
+    });
+    let own = label(cx, "connection-modal-title").unwrap_or_default();
+    assert!(!own.contains('#'), "{own}");
+    click(cx, "connection-modal-cancel");
+    until(&shell, cx, "the form closes", |cx| {
+        !visible(cx, "connection-modal")
+    });
+
+    // Back on the session, the request still waits under "Waiting for you", to be opened again.
+    open_card(&shell, cx, &lead, number);
+    assert_eq!(
+        label(cx, "rail-waiting-title").as_deref(),
+        Some("Waiting for you")
+    );
+    assert!(visible(cx, &format!("open-request-{number}")));
+}
+
+#[gpui_kit::test]
+fn an_entry_without_an_address_is_not_said_to_go_to_another_host(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, mcp) = a_root(&user);
+    // The entry the agent names is not made yet: it is bound to no address.
+    let number = a_bearer_request(&mcp);
+
+    let (shell, cx) = window(&user, cx);
+    open_card(&shell, cx, &lead, number);
+    open_dialog(&shell, cx, number);
+    let line = label(cx, "connection-request-secret-headers-Authorization").unwrap_or_default();
+    assert_eq!(
+        line,
+        "Authorization: the vault entry notes-key (bound to no address) will be sent to \
+         notes.example.com"
+    );
+    assert!(
+        !present(
+            cx,
+            "connection-request-secret-headers-Authorization-elsewhere"
+        ),
+        "not another host"
+    );
+    assert!(visible(
+        cx,
+        "connection-request-secret-headers-Authorization-unbound"
+    ));
+    let warning = label(cx, "connection-request-secrets-field-warning").unwrap_or_default();
+    assert!(warning.contains("bound to no address"), "{warning}");
+    assert!(!warning.contains("elsewhere than"), "{warning}");
+}
+
+#[gpui_kit::test]
+fn a_missing_entry_is_made_from_the_request_s_dialog_then_accept_goes_through(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    let (lead, mcp) = a_root(&user);
+    let number = a_bearer_request(&mcp);
+
+    let (shell, cx) = window(&user, cx);
+    open_card(&shell, cx, &lead, number);
+    open_dialog(&shell, cx, number);
+    assert!(!present(cx, "connection-request-new-entry-notes-key"));
+    click(cx, "connection-request-accept");
+    until(&shell, cx, "Accept says it waits for the entry", |cx| {
+        shell.read_with(cx, |s, cx| {
+            s.connection_request()
+                .read(cx)
+                .error()
+                .is_some_and(|said| said.contains("Accept waits for the vault entry notes-key"))
+        })
+    });
+    assert_eq!(pending(&user), 1, "nothing was answered");
+    until(&shell, cx, "the button for the entry", |cx| {
+        visible(cx, "connection-request-new-entry-notes-key")
+    });
+    settle(cx);
+
+    // The vault's own dialog, on the entry's name and the host the request sends it to.
+    click(cx, "connection-request-new-entry-notes-key");
+    until(&shell, cx, "Settings is shown", |cx| {
+        shell.read_with(cx, |s, cx| s.main().read(cx).settings_page().is_some())
+    });
+    let vault = shell.read_with(cx, |s, cx| {
+        let page = s.main().read(cx).settings_page().cloned().unwrap();
+        page.read(cx).vault().clone()
+    });
+    until(&shell, cx, "the vault's dialog opens", |cx| {
+        vault.read_with(cx, |v, _| v.is_open())
+    });
+    settle(cx);
+    assert!(
+        !visible(cx, "connection-request"),
+        "no dialog over a dialog"
+    );
+    let (name, url, secret) = vault.read_with(cx, |v, _| {
+        (
+            v.name_field().unwrap().clone(),
+            v.url_field().unwrap().clone(),
+            v.secret_field().unwrap().clone(),
+        )
+    });
+    assert_eq!(
+        name.read_with(cx, |f, _| f.value().to_string()),
+        "notes-key"
+    );
+    assert_eq!(
+        url.read_with(cx, |f, _| f.value().to_string()),
+        "notes.example.com"
+    );
+    assert_eq!(
+        secret.read_with(cx, |f, _| f.value().to_string()),
+        "",
+        "the secret is left for the user to type"
+    );
+    cx.update(|window, cx| secret.update(cx, |f, cx| f.set_value(SECRET, window, cx)));
+    click(cx, "save-vault-entry");
+    until(&shell, cx, "the request's dialog is back", |cx| {
+        visible(cx, "connection-request") && !vault.read_with(cx, |v, _| v.is_open())
+    });
+    until(&shell, cx, "the declaration is read again", |cx| {
+        visible(cx, "connection-request-accept")
+            && !present(cx, "connection-request-new-entry-notes-key")
+    });
+    settle(cx);
+
+    click(cx, "connection-request-accept");
+    until(&shell, cx, "the dialog closes", |cx| {
+        !visible(cx, "connection-request")
+    });
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while connection(&user, "notes").is_none() {
+        assert!(Instant::now() < deadline, "never written");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(pending(&user), 0);
+    // The secret was typed in the vault's dialog alone.
+    let said = cx.update(|window, _| {
+        window
+            .elements()
+            .into_iter()
+            .filter_map(|found| found.label().map(str::to_owned))
+            .collect::<Vec<_>>()
+            .join("\n")
+    });
+    assert!(!said.contains(SECRET));
+}
+
+/// The dialog of a request whose entry is not made yet, Accept answered that it waits for it, the
+/// button to make it shown.
+fn waiting_for_its_entry(
+    shell: &Entity<Shell>,
+    cx: &mut VisualTestContext,
+    lead: &str,
+    number: u64,
+) {
+    open_card(shell, cx, lead, number);
+    open_dialog(shell, cx, number);
+    click(cx, "connection-request-accept");
+    until(shell, cx, "the button for the entry", |cx| {
+        visible(cx, "connection-request-new-entry-notes-key")
+    });
+    settle(cx);
+}
+
+#[gpui_kit::test]
+fn the_new_entry_buttons_fold_away_with_their_block(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, mcp) = a_root(&user);
+    let number = a_bearer_request(&mcp);
+    let (shell, cx) = window(&user, cx);
+    waiting_for_its_entry(&shell, cx, &lead, number);
+
+    // Accept again: the answer is cleared, and the block folds away with its button in it.
+    press(cx, "connection-request-accept");
+    a_third_later(cx);
+    assert!(
+        visible(cx, "connection-request-new-entry-notes-key"),
+        "the button folds away with its block, it does not vanish first"
+    );
+}
+
+#[gpui_kit::test]
+fn the_new_entry_buttons_answer_only_an_accept_that_waits(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, mcp) = a_root(&user);
+    let number = a_bearer_request(&mcp);
+    let (shell, cx) = window(&user, cx);
+    open_card(&shell, cx, &lead, number);
+    open_dialog(&shell, cx, number);
+
+    // A Refuse that failed names no entry to make, though the request names a missing one.
+    let request = shell.read_with(cx, |s, _| s.connection_request().clone());
+    request.update(cx, |r, cx| {
+        r.answered(
+            flottille_window::extensions::connection_request::Then::Decided {
+                number,
+                accepted: false,
+            },
+            Err(format!(
+                "request #{number} is already decided: it was denied"
+            )),
+            cx,
+        )
+    });
+    settle(cx);
+    assert!(visible(cx, "connection-request-error"));
+    assert!(!present(cx, "connection-request-new-entry-notes-key"));
 }
