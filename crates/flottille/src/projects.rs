@@ -1670,8 +1670,20 @@ struct Plan {
     repositories: Vec<String>,
 }
 
+/// A folder typed as `~` or `~/…` is the home of the user the daemon runs for. `~other` is not
+/// expanded: it stays relative and is refused like any relative path.
+fn home_expanded(typed: &str) -> Option<PathBuf> {
+    let rest = typed.strip_prefix('~')?;
+    if !(rest.is_empty() || rest.starts_with('/')) {
+        return None;
+    }
+    let home = PathBuf::from(std::env::var_os("HOME")?);
+    Some(home.join(rest.trim_start_matches('/')))
+}
+
 fn plan(projects: &Projects, asked: ProjectFolder) -> std::result::Result<Plan, Failure> {
-    let typed = Path::new(&asked.folder);
+    let expanded = home_expanded(&asked.folder);
+    let typed = expanded.as_deref().unwrap_or(Path::new(&asked.folder));
     if !typed.is_absolute() {
         return Err(Failure::refused(format!(
             "the folder must be an absolute path, not {}",
