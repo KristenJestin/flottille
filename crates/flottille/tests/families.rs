@@ -1908,6 +1908,228 @@ fn a_create_refused_for_its_type_answers_with_the_types() {
     assert_eq!(calls.last().unwrap(), "jira project view --key ABC --json");
 }
 
+/// Jira's ABC, whose Bug type requires two select fields (#1042): a severity and a rate.
+fn jira_requiring_fields(user: &User) {
+    let todo = in_status(
+        work_item("ABC-1", "The login fails", "example.atlassian.net"),
+        "To Do",
+        "new",
+    );
+    user.acli_script(json!({
+        "items": {"ABC-1": todo},
+        "created": "ABC-12",
+        "types": {"ABC": ["Task", "Bug"]},
+        "required": {"ABC": {"Bug": {
+            "customfield_10100": {"name": "Severity", "allowed": ["Minor", "Major"]},
+            "customfield_10101": {"name": "Reproduction rate", "allowed": ["Sometimes", "Always"]}
+        }}},
+    }));
+}
+
+#[test]
+fn a_work_item_is_created_with_its_custom_fields() {
+    let user = user();
+    on_jira(&user);
+    jira_requiring_fields(&user);
+    let (_, mcp) = root_in(&user, None);
+    let fields = json!({"customfield_10100": {"value": "Major"},
+        "customfield_10101": {"value": "Always"}, "priority": {"name": "High"}});
+
+    let number = held(&mcp.call(
+        "tickets",
+        json!({"action": "create", "project": "ABC", "title": "The form loses its input",
+            "body": "It happens after a reload.", "type": "Bug", "labels": ["form"],
+            "fields": fields}),
+    ));
+    // The user reads what is set, field by field.
+    let card = last_card(&user);
+    assert!(
+        card.contains("It sets the field customfield_10100: {\\\"value\\\":\\\"Major\\\"}"),
+        "{card}"
+    );
+    let done = allow(&user, number);
+
+    assert!(
+        done.contains(
+            "The ticket ABC-12 was opened in ABC: https://example.atlassian.net/browse/ABC-12"
+        ),
+        "{done}"
+    );
+    let created: Vec<Value> = user
+        .acli_received()
+        .into_iter()
+        .filter(|call| call["args"][2] == "create")
+        .collect();
+    // One call: the fields reach acli as given, beside what the creation says already.
+    assert_eq!(created.len(), 1, "{created:?}");
+    assert_eq!(created[0]["args"][3], "--from-json");
+    let item = &created[0]["files"][0]["json"];
+    assert_eq!(item["projectKey"], "ABC");
+    assert_eq!(item["summary"], "The form loses its input");
+    assert_eq!(item["type"], "Bug");
+    assert_eq!(item["labels"], json!(["form"]));
+    assert_eq!(item["additionalAttributes"], fields);
+}
+
+#[test]
+fn a_missing_required_field_is_named_in_the_refusal() {
+    let user = user();
+    on_jira(&user);
+    jira_requiring_fields(&user);
+
+    let (answer, calls) = jira_asked(
+        &user,
+        json!({"action": "create", "project": "ABC", "title": "The form loses its input",
+            "type": "Bug"}),
+    );
+
+    // Jira's own words, with the values it allows, and what to do with them.
+    assert!(
+        answer.contains("Severity is required (allowed values: Minor, Major)"),
+        "{answer}"
+    );
+    assert!(
+        answer.contains("Reproduction rate is required (allowed values: Sometimes, Always)"),
+        "{answer}"
+    );
+    assert!(answer.contains("fields"), "{answer}");
+    assert!(answer.contains("customfield_"), "{answer}");
+    assert!(answer.contains("{\"value\": \"Major\"}"), "{answer}");
+    // Nothing was tried with another type.
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|call| call.starts_with("jira workitem create"))
+            .count(),
+        1,
+        "{calls:?}"
+    );
+}
+
+#[test]
+fn a_work_item_is_edited_with_its_custom_fields() {
+    let user = user();
+    on_jira(&user);
+    jira_requiring_fields(&user);
+    let (_, mcp) = root_in(&user, None);
+
+    let number = held(&mcp.call(
+        "tickets",
+        json!({"action": "edit", "ticket": "ABC-1", "title": "A new title",
+            "fields": {"customfield_10100": {"value": "Minor"}}}),
+    ));
+    let done = allow(&user, number);
+
+    assert!(done.contains("ABC-1 was changed."), "{done}");
+    let edits: Vec<Value> = user
+        .acli_received()
+        .into_iter()
+        .filter(|call| call["args"][2] == "edit")
+        .collect();
+    // The fields first, so that a refusal of them leaves the rest unwritten.
+    assert_eq!(edits.len(), 2, "{edits:?}");
+    assert_eq!(edits[0]["args"][3], "--from-json");
+    assert_eq!(edits[0]["args"][5], "--yes");
+    assert_eq!(
+        edits[0]["files"][0]["json"],
+        json!({"issues": ["ABC-1"],
+            "additionalAttributes": {"customfield_10100": {"value": "Minor"}}})
+    );
+    assert_eq!(
+        words(vec![edits[1].clone()])[0],
+        "jira workitem edit --key ABC-1 --summary A new title --yes"
+    );
+    // Fields alone are an edit: one call.
+    let alone = held(&mcp.call(
+        "tickets",
+        json!({"action": "edit", "ticket": "ABC-1",
+            "fields": {"customfield_10101": {"value": "Always"}}}),
+    ));
+    allow(&user, alone);
+    let edits = words(user.acli_received())
+        .into_iter()
+        .filter(|call| call.starts_with("jira workitem edit"))
+        .count();
+    assert_eq!(edits, 3);
+}
+
+#[test]
+fn fields_are_refused_where_they_cannot_go_before_anything_is_asked() {
+    let user = user();
+    on_jira(&user);
+    jira_requiring_fields(&user);
+    let (_, mcp) = root_in(&user, None);
+    for (args, why) in [
+        (
+            json!({"action": "comment", "ticket": "ABC-1", "body": "x",
+                "fields": {"priority": {"name": "High"}}}),
+            "refused: tickets comment takes no fields: fields is for create and edit",
+        ),
+        (
+            json!({"action": "create", "project": "ABC", "title": "t", "type": "Bug",
+                "milestone": "v1", "fields": {"fixVersions": [{"name": "v2"}]}}),
+            "refused: fields.fixVersions and milestone both set the fix version",
+        ),
+        (
+            json!({"action": "create", "project": "ABC", "title": "t",
+                "fields": {"priority": {"name": "High"}}}),
+            "refused: tickets create with fields needs type: acli creates a work item from a \
+             JSON definition, which takes no default type; types lists them",
+        ),
+    ] {
+        let answer = mcp.call("tickets", args);
+        assert!(answer.error, "{}", answer.text);
+        assert!(answer.text.contains(why), "{}", answer.text);
+    }
+    assert!(
+        words(user.acli_received())
+            .iter()
+            .all(|call| call == "jira auth status"),
+        "{:?}",
+        user.acli_received()
+    );
+
+    // GitHub's issues have no such fields.
+    let user = self::user();
+    on_github(&user);
+    many_issues(&user);
+    let (_, mcp) = root_in(&user, None);
+    let answer = mcp.call(
+        "tickets",
+        json!({"action": "create", "title": "t", "fields": {"priority": {"name": "High"}}}),
+    );
+    assert!(answer.error, "{}", answer.text);
+    assert!(
+        answer
+            .text
+            .contains("refused: tickets create on GitHub takes no fields: they are Jira's"),
+        "{}",
+        answer.text
+    );
+}
+
+#[test]
+fn a_types_required_fields_are_said() {
+    let user = user();
+    on_jira(&user);
+    jira_requiring_fields(&user);
+    let (_, mcp) = root_in(&user, None);
+
+    let said = read(
+        &user,
+        mcp.call("tickets", json!({"action": "types", "project": "ABC"})),
+    );
+
+    // acli lists no required field of a type (nor does Flottille call Jira's REST API): what is
+    // said is how a creation says them, and how to give them.
+    assert!(
+        said.contains("requires fields that acli does not list"),
+        "{said}"
+    );
+    assert!(said.contains("fields"), "{said}");
+    assert!(said.contains("customfield_"), "{said}");
+}
+
 #[test]
 fn create_assigns_a_jira_work_item_to_the_user() {
     let (done, asked) = jira_written(

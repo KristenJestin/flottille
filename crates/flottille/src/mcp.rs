@@ -3536,6 +3536,51 @@ mod tests {
     }
 
     #[test]
+    fn the_tickets_tool_says_how_to_fill_the_fields_of_a_jira_work_item() {
+        let tickets = SERVED.iter().find(|d| d.name == "tickets").unwrap();
+        let schema = (tickets.schema)();
+        let fields = &schema["properties"]["fields"];
+
+        assert_eq!(fields["type"], "object");
+        let said = fields["description"].as_str().unwrap();
+        for word in [
+            "create, edit on Jira",
+            "customfield_",
+            "{\"value\": \"Major\"}",
+            "as Jira takes it",
+        ] {
+            assert!(said.contains(word), "{word}: {said}");
+        }
+        assert!(
+            tickets.description.contains("fields"),
+            "{}",
+            tickets.description
+        );
+    }
+
+    #[test]
+    fn the_forge_tool_says_reviewers_are_asked_when_a_pull_request_is_opened_on_either_forge() {
+        let forge = SERVED.iter().find(|d| d.name == "forge").unwrap();
+        let schema = (forge.schema)();
+        let said = schema["properties"]["reviewers"]["description"]
+            .as_str()
+            .unwrap();
+
+        for word in [
+            "GitHub and Bitbucket",
+            "when it is opened",
+            "no edit afterwards",
+        ] {
+            assert!(said.contains(word), "{word}: {said}");
+        }
+        assert!(
+            forge.description.contains("reviewers"),
+            "{}",
+            forge.description
+        );
+    }
+
+    #[test]
     fn every_tool_is_described_for_a_new_colleague() {
         for definition in &SERVED {
             let tool = serde_json::to_value(tool_of(definition, true)).unwrap();

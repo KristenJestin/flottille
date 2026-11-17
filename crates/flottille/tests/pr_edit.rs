@@ -509,6 +509,57 @@ fn create_refuses_delete_branch_on_merge_for_a_branch_it_would_not_delete() {
 }
 
 #[test]
+fn a_pull_request_is_opened_with_its_reviewers_on_bitbucket() {
+    // Asked at creation, not by an edit afterwards: one `bkt pr create`, no `pr edit` (#1042).
+    let user = User::with_fake_agent().with_fake_bkt();
+    on_bitbucket(&user, "", "");
+    user.bkt_script(cloud_script());
+    let mcp = agent(&user);
+
+    let answer = write(
+        &user,
+        &mcp,
+        json!({"action": "create", "repository": ".", "title": "Login",
+            "reviewers": ["carol", "bob"]}),
+    );
+
+    assert!(!answer.error, "{}", answer.text);
+    assert!(bkt_starting(&user, "pr edit").is_empty());
+    assert_eq!(
+        bkt_starting(&user, "pr create"),
+        [
+            "pr create --context cloud --workspace acme --repo app --source app/login --target \
+             main --title Login --description  --reviewer carol --reviewer bob"
+        ]
+    );
+}
+
+#[test]
+fn a_pull_request_is_opened_with_its_reviewers_on_github() {
+    let user = User::with_fake_agent().with_fake_gh();
+    on_github(&user, "", "");
+    user.gh_script(github_pulls());
+    let mcp = agent(&user);
+
+    let answer = write(
+        &user,
+        &mcp,
+        json!({"action": "create", "repository": ".", "title": "Login",
+            "reviewers": ["carol", "bob"]}),
+    );
+
+    assert!(!answer.error, "{}", answer.text);
+    assert!(gh_starting(&user, "pr edit").is_empty());
+    assert_eq!(
+        gh_starting(&user, "pr create"),
+        [
+            "pr create -R github.com/acme/app --head app/login --base main --title Login \
+             --body  --reviewer carol --reviewer bob"
+        ]
+    );
+}
+
+#[test]
 fn create_sets_bitbucket_close_source_branch() {
     let user = User::with_fake_agent().with_fake_bkt();
     on_bitbucket(&user, "", "[pull_requests]\nreviewers = [\"alice\"]\n");

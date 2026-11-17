@@ -149,6 +149,14 @@
 //! `*all` gives every field of the script, and a search's `sprint is not EMPTY` finds the work
 //! items with a field holding sprints (`[{"id", "name", "state", "boardId"}]`).
 //!
+//! Required fields (#1042): the script's `required` maps a project to its types, each to the
+//! fields it requires, `{"ABC": {"Bug": {"customfield_10100": {"name": "Severity", "allowed":
+//! ["Minor", "Major"]}}}}`. A `create` of such a type that does not carry each of them in the
+//! JSON's `additionalAttributes` (a creation by flags carries none) ends with 1 saying every
+//! missing one by name (`✗ Error: Severity is required (allowed values: Minor, Major)`). `workitem
+//! edit --from-json F --yes` reads `{"issues": [K, …], "additionalAttributes": {…}}` from F
+//! (recorded under `files` as `json`) and ends with 0 saying `✓ Work item K updated` for each.
+//!
 //! A transition that ends with 0 moves the work item: a later `view` shows the status as the
 //! script spells it in `transitions` (kept in `moved.json`). Three more script keys, each a list
 //! of work item keys (`die` a map of key to `"before"` or `"after"`), play what a real `acli` does:
@@ -528,6 +536,15 @@ fn answer(dir: &Path, script: &Value, args: &[String]) -> i32 {
                 return 1;
             }
             let project = item["projectKey"].as_str().unwrap_or("X");
+            if let Some(refused) = missing_required(
+                script,
+                project,
+                item["type"].as_str().unwrap_or_default(),
+                &item["additionalAttributes"],
+            ) {
+                eprintln!("{refused}");
+                return 1;
+            }
             for held in item["additionalAttributes"]["fixVersions"]
                 .as_array()
                 .into_iter()
@@ -577,6 +594,15 @@ fn answer(dir: &Path, script: &Value, args: &[String]) -> i32 {
                 eprintln!(
                     "✗ Error: the work item type {kind:?} is not valid for project {project}"
                 );
+                return 1;
+            }
+            if let Some(refused) = missing_required(
+                script,
+                project,
+                value(rest, "--type").unwrap_or_default(),
+                &Value::Null,
+            ) {
+                eprintln!("{refused}");
                 return 1;
             }
             let key = script["created"]
@@ -754,6 +780,22 @@ fn answer(dir: &Path, script: &Value, args: &[String]) -> i32 {
                 post(dir, key, body);
             }
             done
+        }
+        ["jira", "workitem", "edit", rest @ ..]
+            if rest.contains(&"--yes") && rest.contains(&"--from-json") =>
+        {
+            let Some(item) = value(rest, "--from-json").and_then(file_text) else {
+                return not_run(&words);
+            };
+            for key in item["issues"].as_array().into_iter().flatten() {
+                let key = key.as_str().unwrap_or_default();
+                if script["items"].get(key).is_none() && script["created"] != key {
+                    println!("✗ Failure: {key} can't be edited: work item does not exist");
+                    return 0;
+                }
+                println!("✓ Work item {key} updated");
+            }
+            0
         }
         ["jira", "workitem", "edit", rest @ ..] if rest.contains(&"--yes") => {
             // As the real bulk command does: it ends with 0 and says its failure on its output.
@@ -1305,6 +1347,36 @@ fn value<'a>(args: &[&'a str], flag: &str) -> Option<&'a str> {
 
 /// A write to the work item of `--key`: done when the script holds it, or it is the one a
 /// creation answers (`created`).
+/// Why a creation of `kind` in `project` is refused for the fields the script requires of that
+/// type and `attributes` (the JSON's `additionalAttributes`) lacks, every one said by name.
+fn missing_required(
+    script: &Value,
+    project: &str,
+    kind: &str,
+    attributes: &Value,
+) -> Option<String> {
+    let required = script["required"][project][kind].as_object()?;
+    let missing: Vec<String> = required
+        .iter()
+        .filter(|(id, _)| attributes.get(id.as_str()).is_none())
+        .map(|(id, field)| {
+            let name = field["name"].as_str().unwrap_or(id);
+            match field["allowed"].as_array() {
+                Some(allowed) => format!(
+                    "{name} is required (allowed values: {})",
+                    allowed
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                None => format!("{name} is required"),
+            }
+        })
+        .collect();
+    (!missing.is_empty()).then(|| format!("✗ Error: {}", missing.join("; ")))
+}
+
 fn known(script: &Value, args: &[&str]) -> i32 {
     match value(args, "--key") {
         Some(key) if script["items"].get(key).is_some() || script["created"] == key => {
