@@ -41,11 +41,11 @@ pub const KEEP_SECRET_HINT: &str = "Leave empty to keep the current secret";
 pub const EVERY_PROJECT_NOTE: &str = "This entry is every project's: changing it changes it \
                                       for all of them.";
 
-/// What the form says of a new entry an agent asked for a connection: why it is every project's.
+/// What the form says of an entry a connection's server is given: why it is every project's.
 pub fn connection_note(connection: &str) -> String {
     format!(
-        "For the connection {connection}: a connection is given to every project, so the entries \
-         it names are every project's."
+        "For the connection {connection}: its server is given this entry when it starts and \
+         serves every project's agents, so the entry is every project's."
     )
 }
 
@@ -62,6 +62,9 @@ pub struct VaultEntry {
     pub project: Option<String>,
     /// The one use that reads it (`docs/vault.md`, "Bound to one use").
     pub bound: Option<String>,
+    /// Its connection's server is given it, which serves every project's agents: the daemon
+    /// would refuse it a project.
+    pub every_project_only: bool,
 }
 
 impl VaultEntry {
@@ -74,6 +77,7 @@ impl VaultEntry {
             username: text("username"),
             project: text("project"),
             bound: text("for"),
+            every_project_only: value["every_project_only"] == true,
         }
     }
 }
@@ -122,9 +126,13 @@ pub struct VaultSection {
     /// The host the request's URL sends the secret to, as the daemon read it, and that URL: the
     /// host is said while the URL is the one asked.
     host: Option<(String, String)>,
-    /// The connection an agent asked the new entry for: the form says why it is every project's.
+    /// The connection whose server is given the entry: it is every project's, the form offers no
+    /// project and says why.
     connection: Option<String>,
     saving: bool,
+    /// The secret of a save the daemon has not answered yet, out of the field: back in it if the
+    /// save is refused, so the user does not type it again. Never stored or shown elsewhere.
+    sent_secret: Option<String>,
     writing: Option<Writing>,
     form_error: Option<SharedString>,
     confirming: Option<String>,
@@ -208,6 +216,7 @@ impl VaultSection {
             host: None,
             connection: None,
             saving: false,
+            sent_secret: None,
             writing: None,
             form_error: None,
             confirming: None,
@@ -445,6 +454,7 @@ impl VaultSection {
         self.why = None;
         self.host = None;
         self.connection = None;
+        self.sent_secret = None;
         let fields = self.fields(window, cx);
         let (name, secret, description, url, username) = (
             fields.name.clone(),
@@ -464,7 +474,14 @@ impl VaultSection {
         ] {
             field.update(cx, |f, cx| f.set_value(value, window, cx));
         }
-        self.project = entry.and_then(|entry| entry.project.clone());
+        // An entry its connection's server is given is every project's: no project to offer.
+        self.connection = entry
+            .filter(|entry| entry.every_project_only)
+            .and_then(|entry| entry.bound.as_deref()?.strip_prefix("connection:"))
+            .map(str::to_owned);
+        self.project = entry
+            .filter(|entry| !entry.every_project_only)
+            .and_then(|entry| entry.project.clone());
         self.form = Form::Editing(entry.map(|entry| entry.name.clone()));
         self.form_error = None;
         self.saving = false;
@@ -482,6 +499,7 @@ impl VaultSection {
     pub fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.form = Form::Closed;
         self.form_error = None;
+        self.sent_secret = None;
         self.clear_secret(window, cx);
         cx.notify();
         if let Some((project, at)) = self.come_back.take() {
@@ -551,6 +569,9 @@ impl VaultSection {
             None => Writing::Added(name),
         };
         self.clear_secret(window, cx);
+        if let VaultWrite::Set { secret, .. } = &write {
+            self.sent_secret = secret.clone();
+        }
         self.write(write, writing, cx);
     }
 
@@ -574,10 +595,16 @@ impl VaultSection {
     }
 
     /// The daemon's answer to a write: a toast says it, and the list is read again; a refusal of
-    /// the dialog's stays in it.
-    pub fn written(&mut self, refused: Option<String>, cx: &mut Context<Self>) {
+    /// the dialog's stays in it, every field as typed, the secret back in its field.
+    pub fn written(
+        &mut self,
+        refused: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.saving = false;
         let writing = self.writing.take();
+        let sent = self.sent_secret.take();
         match refused {
             None => {
                 self.form = Form::Closed;
@@ -596,7 +623,14 @@ impl VaultSection {
             Some(why) if self.form == Form::Closed => {
                 toast(Toast::failure("The entry was not removed").detail(why), cx)
             }
-            Some(why) => self.form_error = Some(why.into()),
+            Some(why) => {
+                if let (Some(secret), Some(fields)) = (sent, &self.fields) {
+                    fields
+                        .secret
+                        .update(cx, |f, cx| f.set_value(secret, window, cx));
+                }
+                self.form_error = Some(why.into());
+            }
         }
         cx.notify();
     }
@@ -696,7 +730,10 @@ impl VaultSection {
             names.push(own.clone());
         }
         let mut choices: Vec<Option<String>> = vec![None];
-        choices.extend(names.into_iter().map(Some));
+        // Its connection's server is given the entry: a project would be refused at Add.
+        if self.connection.is_none() {
+            choices.extend(names.into_iter().map(Some));
+        }
         let options = choices.iter().map(|choice| match choice {
             None => {
                 SelectOption::new("every", EVERY_PROJECT).line("Every project's agents see it.")

@@ -73,6 +73,19 @@ An entry made for one precise feature is that feature's alone. `for` names it:
 - **A worklog's entry is its project's.** Bound to `worklog:<project>`, an entry is that project's
   (its `project` is set to it when it names none; an entry of another project is refused), so no
   other project's agent lists it, and the `vault` tool never tells an agent the use of an entry.
+- **A connection's entry is any project's, unless its server is given it.** A use that reads the
+  entry for the calling agent's project at the moment it reads the secret lets it be one
+  project's: a browser connection's `login` (`docs/extensions.md`, "Adapters"), so its secret is
+  never given to another project's agent (the browser's signed-in session is shared by every
+  project's agents of that connection, `docs/extensions.md`). A connection's server is started once by the daemon for every
+  project's agents, and is given what its declaration names when it starts (a variable, a header,
+  a query parameter, a cookie, basic authentication) and its OAuth tokens (`<name>.oauth`): it
+  cannot tell whose agent a secret is for, so such an entry is every project's, and a project on
+  it is refused at Save (`the server of the connection notes is given the entry notes-key when it
+  starts, and serves every project's agents: …`). `vault.list` says it of each entry
+  (`every_project_only`), and the window's form never offers what Save would refuse: for such an
+  entry, "Seen by agents of" holds **Every project** alone, with one line under it saying why,
+  before anything is typed.
 - **Not removed as simply as another.** Removing a bound entry while its feature names it is
   refused, naming the feature and what stops working: its feature's own screen names another
   entry first (the entry then goes as any), or the removal is confirmed
@@ -139,14 +152,15 @@ an entry to the vault, not a request with rules of its own.
   connection's `login` does (a backslash is a `/`, a domain is said in ASCII) and refuses when it
   is no `https` address, or `http` on this machine; `username` the account; `for` the use it is
   bound to, `worklog` (the agent's project's) or `connection:<name>` (a connection the user
-  declared), or none; `project` `this` (the agent's project's alone) or `every`, a connection's
-  entry being every project's.
+  declared), or none; `project` `this` (the agent's project's alone, the default) or `every`, the
+  entry a connection's server is given being every project's.
 - **An ask for a connection's server is every project's.** `connection` names the connection the
   entry is for: one the user declared, or one the asking agent's own request waiting for the
   user asks to add (another agent's request never decides what this one's ask is for), whose declaration gives that entry to its server (a variable, a header, a query parameter,
   a cookie, basic); one it does not name is refused, a login's entry being asked with `for`
   instead and keeping the project asked. Left out, an ask for an entry such a request of its own
-  names is for that connection. Such an ask is every
+  names, or asked with `for: "connection:<name>"` for an entry that connection's declaration gives
+  its server, is for that connection. Such an ask is every
   project's (`project: "this"` is refused), its `url`, left out, is the connection's origin
   (`http://127.0.0.1:7468` for a server on this machine), and its card says `For the connection
   <name> (every project)`. The form it opens has "Seen by agents of" on **Every project** and
@@ -163,7 +177,8 @@ an entry to the vault, not a request with rules of its own.
   (`docs/extensions.md`, "Connections"). The ask answers at once: nothing waits for the user.
 - **A way in to the vault's own form.** The user sees one card in the session of the agent that
   asked (and an inbox entry, which names the host and whose entry it is, the project's or every
-  project's): the entry's name, the host of its URL **on a line of its own** (where the secret
+  project's, as the form will save it: a login's is the project's unless asked `every`): the
+  entry's name, the host of its URL **on a line of its own** (where the secret
   will go: the agent chose it; the daemon's reading, never the window's), what it is for, its use,
   its project and the agent's reason, with **New entry** and **Dismiss** (disabled while
   its call runs). New entry opens Settings, Vault's form of a new entry, prefilled with all
@@ -172,8 +187,10 @@ an entry to the vault, not a request with rules of its own.
   one asked) and **Remove the binding**: the user changes any field, types the secret and saves,
   with the checks of that form (a connection's entry refused for a URL login cannot read, in the
   words of the ask's refusal, or plain `http` to another machine; the username required when the
-  feature that asked reads it, the worklog's), or closes it and nothing is stored. There is no
-  second form.
+  feature that asked reads it, the worklog's), or closes it and nothing is stored. A save the
+  daemon refuses keeps every field as typed, **the secret included**, back in its masked field
+  (held in the window's memory alone while the save runs, never stored, logged or shown), and the
+  refusal folds away once a field changes. There is no second form.
 - **One request a name.** While a request for a name is open, another ask for it joins it when it
   is the same project's or the request is every project's; another project's agent is refused
   (`ask under another name`). Entry names are shared across projects, so an agent of another

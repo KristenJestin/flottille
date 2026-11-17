@@ -65,6 +65,18 @@ pub fn family_waits(daemon: &Daemon, args: &Value) -> Option<String> {
     connections::requests::waits(daemon, args)
 }
 
+/// What became of the connection an accepted `connections` call wrote, for the answer to the
+/// user's Accept: `{name, state, review}`, `review` being whether it now waits for the user's
+/// review. A write that was `done` and leaves it so says it in the inbox and in the session of
+/// the agent that asked.
+pub fn family_settled(
+    daemon: &Arc<Daemon>,
+    request: &flottille_core::approval::Request,
+    done: bool,
+) -> Option<Value> {
+    connections::requests::settled(daemon, request, done)
+}
+
 /// Whether a root may propose what needs vault entries it then asks for: Connections is on.
 pub fn entries_proposed(daemon: &Daemon) -> bool {
     is_on(&daemon.paths, &connections::EXTENSION)
@@ -723,6 +735,16 @@ fn active_in(paths: &Paths, extension: &Extension, project: &Project) -> bool {
 pub fn bound_names(daemon: &Daemon, bound: &str, entry: &str) -> Result<bool, String> {
     match bound.split_once(':') {
         Some(("connection", name)) => connections::names(daemon, name, entry),
+        _ => Ok(false),
+    }
+}
+
+/// Whether the use `bound` hands the vault entry `entry` to a server that serves every project's
+/// agents (a connection's, at its start), so the entry must be every project's; why it cannot be
+/// told when the declarations cannot be read.
+pub fn bound_given_to_server(daemon: &Daemon, bound: &str, entry: &str) -> Result<bool, String> {
+    match bound.split_once(':') {
+        Some(("connection", name)) => connections::given_to_server(daemon, name, entry),
         _ => Ok(false),
     }
 }

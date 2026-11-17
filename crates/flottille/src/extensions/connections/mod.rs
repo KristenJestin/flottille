@@ -117,6 +117,7 @@ pub const EXTENSION: Extension = Extension {
     }),
     needs_you: &[
         ("connection.cut_off", cut_off_text),
+        ("connection.awaiting_review", awaiting_review_text),
         ("connection.version_moved", version_moved_text),
         ("connection.signed_out", signed_out_text),
         ("connection.tokens_unsaved", tokens_unsaved_text),
@@ -1902,6 +1903,27 @@ fn cut_off(daemon: &Daemon, name: &str, changed: &[String]) {
     changed_event(daemon, name, Some(&why));
 }
 
+/// An edit an agent asked for was accepted and its server now announces actions nobody read: the
+/// connection gives agents none of them until the user reviews it (#1031).
+fn awaiting_review_text(data: &Value) -> String {
+    let name = data["name"].as_str().unwrap_or_default();
+    let actions: Vec<&str> = data["actions"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    let what = match actions.is_empty() {
+        true => "its change".to_owned(),
+        false => format!("its new actions ({})", actions.join(", ")),
+    };
+    format!(
+        "The connection {name} waits for your review of {what}: until then agents get none of \
+         them. Review it (`flottille connection review {name}`), or in Settings, Features, \
+         Connections."
+    )
+}
+
 fn cut_off_text(data: &Value) -> String {
     let name = data["name"].as_str().unwrap_or_default();
     let changed: Vec<&str> = data["changed"]
@@ -2032,7 +2054,8 @@ fn call(daemon: Arc<Daemon>, method: String, params: Value) -> super::Answered {
             Value::Null => json!({}),
             params => params,
         };
-        match method.as_str() {
+        let name = params["name"].as_str().map(str::to_owned);
+        let answered = match method.as_str() {
             "connection.list" => list(&daemon),
             "connection.add" => add(&daemon, params).await,
             "connection.edit" => edit(&daemon, params).await,
@@ -2048,7 +2071,19 @@ fn call(daemon: Arc<Daemon>, method: String, params: Value) -> super::Answered {
                 "unknown-method",
                 format!("unknown method `{method}`"),
             )),
+        };
+        // A connection that waited for a review an agent's request led to, and is now reviewed,
+        // removed or turned off: the agent is told.
+        if answered.is_ok()
+            && matches!(
+                method.as_str(),
+                "connection.add" | "connection.edit" | "connection.remove" | "connection.accept"
+            )
+            && let Some(name) = name
+        {
+            requests::review_closed(&daemon, &name);
         }
+        answered
     })
 }
 
@@ -2160,6 +2195,17 @@ pub fn names(daemon: &Daemon, name: &str, entry: &str) -> std::result::Result<bo
     Ok(declarations(&daemon.paths)?
         .iter()
         .any(|declaration| declaration.name == name && declaration.entries().any(|e| e == entry)))
+}
+
+/// Whether the server of the connection `name` is given the vault entry `entry` when it starts
+/// (its declaration names it, or it holds the tokens of its OAuth sign-in): that server serves
+/// every project's agents, so it cannot check whose agent the secret is for.
+pub fn given_to_server(
+    daemon: &Daemon,
+    name: &str,
+    entry: &str,
+) -> std::result::Result<bool, String> {
+    Ok(entry == oauth::entry(name) || names(daemon, name, entry)?)
 }
 
 fn table_of(declaration: &Declaration) -> std::result::Result<toml_edit::Table, Failure> {

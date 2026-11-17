@@ -92,7 +92,7 @@ fn vault_list_shows_metadata_only() {
         listed["entries"],
         json!([{"name": "jira", "description": "Logs time on Jira",
             "url": "https://tracker.example.com", "username": "dev@example.com",
-            "project": null, "for": null}]),
+            "project": null, "for": null, "every_project_only": false}]),
         "{listed}"
     );
 
@@ -654,11 +654,12 @@ fn setting_a_bound_entry_again_checks_its_binding() {
     .unwrap();
     user.call(
         "vault.set",
-        json!({"name": "almanac-token", "secret": SECRET, "for": "connection:almanac"}),
+        json!({"name": "almanac.oauth", "secret": SECRET, "for": "connection:almanac"}),
     )
     .unwrap();
 
-    // Another project, without naming the use again: the binding is checked, not kept as is.
+    // Another project, without naming the use again: the binding is checked, not kept as is (the
+    // OAuth tokens of a connection are given to its server, which serves every project).
     let (_, refused) = user
         .call(
             "vault.set",
@@ -669,7 +670,7 @@ fn setting_a_bound_entry_again_checks_its_binding() {
     let (_, refused) = user
         .call(
             "vault.set",
-            json!({"name": "almanac-token", "secret": SECRET, "project": "alpha"}),
+            json!({"name": "almanac.oauth", "secret": SECRET, "project": "alpha"}),
         )
         .unwrap_err();
     assert!(refused.contains("the connection almanac"), "{refused}");
@@ -685,7 +686,7 @@ fn setting_a_bound_entry_again_checks_its_binding() {
             .unwrap()
     };
     assert_eq!(project_of("jira-time"), "alpha", "{listed}");
-    assert_eq!(project_of("almanac-token"), Value::Null, "{listed}");
+    assert_eq!(project_of("almanac.oauth"), Value::Null, "{listed}");
 }
 
 #[test]

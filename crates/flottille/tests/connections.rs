@@ -4848,6 +4848,130 @@ fn a_login_entry_of_another_use_is_refused() {
 }
 
 #[test]
+fn a_browser_login_entry_can_be_one_projects_and_another_project_cannot_sign_in_with_it() {
+    let user = user();
+    browser(&user, &agent_browser("0.43.0"), json!({}));
+    project(&user, "app");
+    project(&user, "other");
+    // The login reads the entry for the calling agent's project: it may be that project's alone.
+    user.call(
+        "vault.set",
+        json!({"name": "shop-test", "secret": PASSWORD, "username": "tester@example.com",
+            "url": "https://shop.example.com/login", "for": "connection:browser",
+            "project": "app"}),
+    )
+    .unwrap();
+    let listed = user.call("vault.list", json!({})).unwrap()["entries"][0].clone();
+    assert_eq!(listed["project"], "app", "{listed}");
+    assert_eq!(listed["every_project_only"], false, "{listed}");
+
+    let (id, mcp) = session(&user, "app");
+    set_mode(&user, &id, "full");
+    let said = done(mcp.call(
+        "conn_browser",
+        json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+    ));
+    assert!(said.contains("shop-test"), "{said}");
+    assert_eq!(
+        form(&user).expect("the form was filled")["password"],
+        PASSWORD
+    );
+    std::fs::remove_file(form_file(&user)).unwrap();
+
+    // Another project's agent is told the vault has no such entry, as if it did not exist.
+    let (id, mcp) = session(&user, "other");
+    set_mode(&user, &id, "full");
+    let answer = refused(mcp.call(
+        "conn_browser",
+        json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+    ));
+    assert!(answer.contains("no entry shop-test"), "{answer}");
+    assert!(!answer.contains(PASSWORD), "{answer}");
+    assert!(
+        form(&user).is_none(),
+        "nothing was filled for the other project"
+    );
+    assert_eq!(logged(&user, "browser", "login").len(), 1);
+}
+
+#[test]
+fn an_entry_given_to_a_connections_server_keeps_the_every_project_rule() {
+    let user = user();
+    project(&user, "app");
+    turn_on(&user);
+    // The server is started once for every project's agents, with the entry in its environment.
+    declare(
+        &user,
+        "almanac",
+        &almanac(),
+        json!({"env": {"TOKEN": {"vault": "almanac-token"}}}),
+    );
+    // An entry the project sees lists the vault tool to its agents.
+    user.call(
+        "vault.set",
+        json!({"name": "loose", "secret": "s3cret-of-no-use-at-all", "project": "app"}),
+    )
+    .unwrap();
+    let (_, mcp) = session(&user, "app");
+
+    // The ask for it is every project's, as the connection's own, even when asked with `for`.
+    let mine = mcp.call(
+        "vault",
+        json!({"action": "ask", "name": "almanac-token", "why": "the notes' token",
+            "for": "connection:almanac", "project": "this"}),
+    );
+    assert!(mine.error, "{}", mine.text);
+    assert!(mine.text.contains("every project"), "{}", mine.text);
+    let asked = mcp.call(
+        "vault",
+        json!({"action": "ask", "name": "almanac-token", "why": "the notes' token",
+            "for": "connection:almanac"}),
+    );
+    assert!(!asked.error, "{}", asked.text);
+    let open = user.call("vault.asks", json!({})).unwrap()["asks"][0].clone();
+    assert_eq!(open["every"], true, "{open}");
+    assert_eq!(open["connection"], "almanac", "{open}");
+
+    for name in ["almanac-token", "almanac.oauth"] {
+        let refused = user
+            .call(
+                "vault.set",
+                json!({"name": name, "secret": SECRET, "for": "connection:almanac",
+                    "project": "app"}),
+            )
+            .unwrap_err();
+        assert!(refused.1.contains("server"), "{name}: {refused:?}");
+        assert!(refused.1.contains("every project"), "{name}: {refused:?}");
+        assert!(!refused.1.contains(SECRET), "{refused:?}");
+    }
+    user.call(
+        "vault.set",
+        json!({"name": "almanac-token", "secret": SECRET, "for": "connection:almanac"}),
+    )
+    .unwrap();
+    // An entry of the connection its server is not given may be one project's.
+    user.call(
+        "vault.set",
+        json!({"name": "almanac-login", "secret": SECRET, "for": "connection:almanac",
+            "project": "app"}),
+    )
+    .unwrap();
+    let listed = user.call("vault.list", json!({})).unwrap()["entries"].clone();
+    let of = |name: &str| {
+        listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["name"] == name)
+            .cloned()
+            .unwrap()
+    };
+    // The window offers no project for the server's entry: it would be refused.
+    assert_eq!(of("almanac-token")["every_project_only"], true, "{listed}");
+    assert_eq!(of("almanac-login")["every_project_only"], false, "{listed}");
+}
+
+#[test]
 fn a_browser_login_without_an_entry_offers_the_ask() {
     let user = user();
     browser(&user, &agent_browser("0.43.0"), json!({}));

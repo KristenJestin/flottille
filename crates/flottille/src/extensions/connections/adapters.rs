@@ -651,17 +651,19 @@ pub async fn perform(
 ) -> Outcome {
     let name = &declaration.name;
     let entry = arguments["entry"].as_str().unwrap_or_default().to_owned();
+    // Only an entry the calling agent's project sees: another project's is no entry for it, so
+    // an entry of one project's alone is never read for another project's agent.
     let found = daemon
         .read(|store| store.vault_entries())
         .ok()
-        .and_then(|entries| entries.into_iter().find(|e| e.name == entry));
+        .and_then(|entries| {
+            entries
+                .into_iter()
+                .find(|e| e.name == entry && e.seen_by(&grant.place.project))
+        });
     let this = uses::connection(name);
     let entry_of = match found {
-        Some(found)
-            if found.bound.as_deref() == Some(&this) && found.seen_by(&grant.place.project) =>
-        {
-            found
-        }
+        Some(found) if found.bound.as_deref() == Some(&this) => found,
         Some(found) if found.bound.is_some() => {
             let own = found.bound.unwrap_or_default();
             return Outcome::Refused(format!(

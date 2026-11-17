@@ -1298,7 +1298,29 @@ shows a **New entry…** button per missing entry beside that answer (only that 
 failure offers them, and they fold away with their block when it goes): it opens the vault's own entry
 dialog on the entry's name and, as its address, the host the request sends it to, the secret left
 for the user to type there (the request's dialog never holds it); saved or closed, the request's
-dialog is back, and Accept goes through once the entry exists. Everything animates as the rest of
+dialog is back, and Accept goes through once the entry exists. **Accepting a request whose write needs a review leads into that review** (#1031). The edit is
+pinned only once read, so an accepted `add` or `edit` whose server now announces an action nobody
+read (a new one, or one that changed) is written and then waits **awaiting review**. The daemon's
+answer to the Accept says so (`approval.approve` waits for a connection's write, as the user's own
+Save does, and answers `connection: {name, state, review}`), and the window opens the review of the
+connection at once, over the page the user is on (the page of Connections, where the review is; the
+kit's modal host will open it in place). The toast of the Accept says how the write ended (`The server almanac was saved`, or `was not written` with why), and the review opens only when the write succeeded. **Accept** in the review gives the agent its actions.
+Closing it leaves the connection awaiting review, and a toast says so with **Review**. **A
+connection awaiting review is something that waits for the user**: the inbox lists it
+(`connection.awaiting_review`, as a connection cut off is), and the session of the agent whose
+request led to it shows a card, "<connection> waits for your review of its new actions", with
+**Review** (it unfolds when the connection starts to wait and folds away once it is reviewed,
+removed or turned off). **The agent is told what is happening**: the delivery that answers its
+request says it was accepted and that the connection waits for the user's review of the actions it
+names, and a second delivery says whether the user reviewed it (its actions are given) or left it
+off; it is never told to send the user looking for a menu. **A request on a connection awaiting
+review is not refused for that**: it is held like any other, and its card says first that the
+connection waits for its review, with **Review** beside it; a `set` is written to what the user
+read, so its Accept waits for that review (`approval.approve` answers why, the request still
+pending) and goes through once it is done; on a connection off, disabled, cut off or signed out, which
+has no review to wait for, it goes through as before. A second accepted edit while one waits
+replaces the first card and delivery of that agent: one card, one delivery.
+Everything animates as the rest of
 the window does: the servers fold away and unfold with the switch, a row unfolds when it arrives and folds away
 when it leaves, a field that a radio or a switch needs unfolds under it, the dialogs rise and
 fade, the review crossfades from its skeleton; in it, the server, the adapter's sentence, the bar,
@@ -1596,8 +1618,14 @@ way in:
   the server starts as before.
 - **`login {entry}`**, Flottille's own action: the agent names a vault entry **bound to this
   connection** (`for = "connection:<name>"`, `vault.md`), whose names `help` with `for: "login"`
-  lists, never their values. An entry bound to another use, or to none, is refused, naming its use.
-  A name the vault does not hold is refused with the call that asks the user to add it, `vault
+  lists, never their values. **The entry may be one project's alone**: `login` reads it for the
+  calling agent's project, both when the action is called and when agent-browser's credential
+  provider asks for the secret, so an entry of one project is no entry for another project's
+  agent (`no entry <name>`, as if the vault did not hold it), and its secret is never given to
+  another project's agent. **The signed-in session is not one project's**: the connection's browser
+  is one for every project's agents, so once one project's agent has signed in, another project's
+  agent using the same connection browses signed in too. An entry bound to another use, or to none, is refused, naming
+  its use. A name the vault does not hold (for this project) is refused with the call that asks the user to add it, `vault
   {action: "ask", name, why, url, username, for: "connection:<name>"}` (`vault.md`, "Asking the
   user for an entry").
   **The login always opens the entry's own URL**, and takes no URL of the agent's: a page of its
