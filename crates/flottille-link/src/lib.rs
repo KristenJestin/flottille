@@ -41,8 +41,8 @@ pub use link::{
     Accepting, Endpoint, FRAME_LIMIT, Link, LinkError, MachineMessage, Message, Received, Traffic,
 };
 pub use members::{
-    Action, Change, ChangeHash, ListError, MOST_CHANGES, Member, MemberList, Members, Role,
-    Signature,
+    Action, Change, ChangeHash, ListError, MANAGING_HEADROOM, MOST_CHANGES, Member, MemberList,
+    Members, Role, Signature,
 };
 pub use request::{
     Accepted, NONCES_PER_DEVICE, Nonce, REQUEST_WINDOW, Request, RequestError, Requests, Signed,

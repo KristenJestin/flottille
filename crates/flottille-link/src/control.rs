@@ -68,7 +68,8 @@ const UPGRADE: &str = "flottille-hub";
 const SESSION: &[u8] = b"flottille-hub-session-v1\0";
 /// The start of what each side of a setup proves with the setup code.
 const SETUP: &[u8] = b"flottille-hub-setup-v1\0";
-/// The longest line a device takes from its hub: a list of `MOST_CHANGES` changes fits.
+/// The longest line a device takes from its hub: a list of `MOST_CHANGES + MANAGING_HEADROOM`
+/// changes fits.
 pub const LINE_LIMIT: usize = 4 << 20;
 /// The longest line of a handshake, either side's: some hundred bytes each.
 pub const HANDSHAKE_LIMIT: usize = 4 << 10;

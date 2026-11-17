@@ -4,8 +4,8 @@
 use std::path::Path;
 
 use flottille_link::{
-    Action, Change, ChangeHash, DeviceKey, Keyring, KeyringError, ListError, MachineKey,
-    MemberList, Role,
+    Action, Change, ChangeHash, DeviceKey, Keyring, KeyringError, ListError, MANAGING_HEADROOM,
+    MOST_CHANGES, MachineKey, MemberList, Role,
 };
 use zeroize::Zeroizing;
 
@@ -618,9 +618,9 @@ fn two_setups_by_the_same_device_never_make_the_same_list() {
 fn a_list_longer_than_a_device_takes_is_refused_before_it_is_checked() {
     let pc = key(1);
     let root = MemberList::start("pc", &pc).unwrap().changes()[0].clone();
-    let long = MemberList::from_changes(vec![root; 1001]);
+    let long = MemberList::from_changes(vec![root; MOST_CHANGES + MANAGING_HEADROOM + 1]);
     let said = refused(&long, &pc);
-    assert!(said.contains("more than 1000 changes"), "{said}");
+    assert!(said.contains("more than 1100 changes"), "{said}");
 }
 
 #[test]

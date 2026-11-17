@@ -54,10 +54,15 @@ const DOMAIN: &[u8] = b"flottille-member-change-v1\0";
 /// The start of what a machine signs when a member declares it.
 const CLAIM: &[u8] = b"flottille-machine-claim-v1\0";
 
-/// The most changes a list holds: a device refuses a longer one before it checks a change of it,
-/// and the hub refuses a change past it, so that the list always fits the line it travels in
-/// (`control::LINE_LIMIT`, a change being at most some 1.3 KB of JSON).
+/// The most changes a list holds of any member's (`MANAGING_HEADROOM` more of a controller's or
+/// a runner's): a device refuses a longer one before it checks a change of it, and the hub refuses
+/// a change past it, so that the list always fits the line it travels in (`control::LINE_LIMIT`,
+/// a change being at most some 1.3 KB of JSON).
 pub const MOST_CHANGES: usize = 1000;
+/// The changes a list takes past `MOST_CHANGES`, each a controller's or a runner's change of
+/// another member (a removal, mostly): a list a member filled with its own changes can still be
+/// cleaned. A device takes a list of `MOST_CHANGES + MANAGING_HEADROOM` changes at most.
+pub const MANAGING_HEADROOM: usize = 100;
 
 /// The longest name a member may have, in characters.
 const NAME_LIMIT: usize = 64;
@@ -343,9 +348,10 @@ impl MemberList {
         if first.action.key() != root {
             return Err(ListError::Reset);
         }
-        if self.0.len() > MOST_CHANGES {
+        let most = MOST_CHANGES + MANAGING_HEADROOM;
+        if self.0.len() > most {
             return Err(ListError::Refused(format!(
-                "it holds {} changes, more than {MOST_CHANGES} changes, the most a device takes",
+                "it holds {} changes, more than {most} changes, the most a device takes",
                 self.0.len()
             )));
         }
@@ -358,7 +364,7 @@ impl MemberList {
         };
         for (at, change) in self.0.iter().enumerate() {
             members
-                .apply(change, at == 0)
+                .apply(change, at == 0, at >= MOST_CHANGES)
                 .map_err(|why| ListError::Refused(format!("change {} {why}", at + 1)))?;
         }
         Ok(members)
@@ -430,8 +436,9 @@ impl Members {
             .find(|member| member.machine.as_ref() == Some(machine))
     }
 
-    /// Applies one change, or says why it is refused, after its number.
-    fn apply(&mut self, change: &Change, first: bool) -> Result<(), String> {
+    /// Applies one change, or says why it is refused, after its number. Past `MOST_CHANGES`, only
+    /// a managing member's change of another member is taken.
+    fn apply(&mut self, change: &Change, first: bool, past: bool) -> Result<(), String> {
         if change.previous != self.head {
             return Err("does not follow the change before it".to_owned());
         }
@@ -467,6 +474,12 @@ impl Members {
                         only"
                     .to_owned(),
             );
+        }
+        if past && (!signer.role.manages() || change.action.key() == &signer.key) {
+            return Err(format!(
+                "would make more than {MOST_CHANGES} changes: past them, a list takes only a \
+                 controller's or a runner's change of another member"
+            ));
         }
         if !signer.role.manages() && !own {
             return Err(format!(

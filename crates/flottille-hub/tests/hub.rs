@@ -696,6 +696,60 @@ fn the_hub_refuses_a_change_past_the_most_a_device_takes() {
 }
 
 #[test]
+fn a_full_list_still_removes_a_member() {
+    let (_dir, folder) = folder();
+    let time = Time::new();
+    drop(open(&folder, &time));
+    // A list filled to 1000 changes, as a viewer re-declaring its own machine 30 times an hour
+    // could fill it in a day and a half.
+    let (pc, phone, tablet) = (key(1), key(2), key(3));
+    let mut list = MemberList::start("pc", &pc).unwrap();
+    list.sign(add(&phone, "phone", Role::Controller), &pc);
+    list.sign(add(&tablet, "tablet", Role::Viewer), &pc);
+    while list.changes().len() < 1000 {
+        let name = format!("pc {}", list.changes().len());
+        list.sign(
+            Action::Rename {
+                key: pc.public(),
+                name,
+            },
+            &pc,
+        );
+    }
+    let state = serde_json::json!({"version": 1, "members": list});
+    std::fs::write(folder.join("hub.json"), state.to_string()).unwrap();
+    let mut hub = open(&folder, &time);
+    // The viewer's own change stays refused...
+    let own = next(
+        &hub,
+        Action::Remove {
+            key: tablet.public(),
+        },
+        &tablet,
+    );
+    let refused = error(hub.submit(own));
+    assert!(refused.contains("more than 1000 changes"), "{refused}");
+    // ...while a controller still removes it, and the root still removes the controller.
+    let removal = next(
+        &hub,
+        Action::Remove {
+            key: tablet.public(),
+        },
+        &phone,
+    );
+    hub.submit(removal).unwrap();
+    let removal = next(
+        &hub,
+        Action::Remove {
+            key: phone.public(),
+        },
+        &pc,
+    );
+    hub.submit(removal).unwrap();
+    assert_eq!(members(&hub, &pc).len(), 1);
+}
+
+#[test]
 fn a_setup_is_stored_whole_or_not_at_all() {
     let (_dir, folder) = folder();
     let time = Time::new();
