@@ -113,10 +113,6 @@ pub struct Given {
     /// The OAuth client id you registered with the server's authorization server, for a URL
     #[arg(long = "client-id", value_name = "ID")]
     client_id: Option<String>,
-    /// A host a sign-in also needs, such as a single sign-on's, added to the browser's sites by
-    /// an adapter; again for each
-    #[arg(long = "site", value_name = "HOST")]
-    sites: Vec<String>,
 }
 
 fn pairs(given: &[String], what: &str) -> Result<Vec<(String, String)>> {
@@ -194,9 +190,6 @@ fn declared(params: &mut Map<String, Value>, reach: Reach, given: Given) -> Resu
     }
     if let Some(id) = given.client_id {
         params.insert("client_id".into(), json!(id));
-    }
-    if !given.sites.is_empty() {
-        params.insert("sites".into(), json!(given.sites));
     }
     Ok(())
 }

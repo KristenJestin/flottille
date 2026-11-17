@@ -960,7 +960,6 @@ command = ["almanac", "mcp"]
 env     = { ALMANAC_TOKEN = { vault = "almanac-token" } }
 only    = { }                        # limits on arguments, below
 except  = ["client-site"]            # projects whose agents do not get it
-sites   = [ ]                        # hosts an adapter adds to the browser's sites ("Adapters")
 headed  = false                      # an adapter's browser shown on the screen ("Adapters")
 ```
 
@@ -1199,7 +1198,7 @@ read**:
   review of a connection that nothing cut off shows no change, its actions folded away, and is the
   place to set them.
 - **A declaration the user edits** (the command, its arguments, the URL, the variables, the limits,
-  the sites an adapter adds) is a different server as far as trust goes: what it announces is
+  whether an adapter's browser is shown) is a different server as far as trust goes: what it announces is
   pinned again at once, as when it was added, against the last pin: the settings of the actions
   that did not change are kept.
   **But never a change nobody read**: a connection that has a pin is pinned at once only if what
@@ -1410,7 +1409,7 @@ A line of Flottille's own (not the server's) is added to what `help` with `for: 
 gives. The review (`connection.review`, its `adapter`) says that the adapter applies, what it
 changed, what Accept would pin, and, for each action it keeps off, why (`locked`); the window
 shows that sentence under the server's version, above the bar of what is left to the judge, so
-that the user reads why `login` would be refused (a command that sets the browser's sites, an
+that the user reads why `login` would be refused (a command that names its own `--config`, an
 entry on plain `http`) before Accept, and what the adapter changed unfolds under it. A kept-off action has its pill disabled (`Off`), no box to tick it with, so that the
 bar never sets it, and the line saying why in its unfolded row instead of the four choices. The
 user can still change every other setting.
@@ -1429,12 +1428,11 @@ way in:
   plugins `agent_browser_plugin_add`, `_plugin_list`, `_plugin_run`, `_plugin_show` (they run
   commands with its credential providers) and `agent_browser_with_login`, whatever the user set.
   So are `agent_browser_connect` and `agent_browser_state_load`: they bring a browser, or a
-  session, that someone else controls, and a login would type into it (the start options `--cdp`
-  and `--state` already make `login` refused, below).
+  session, that someone else controls, and a login would type into it.
 - **`login` is offered beside every other action**, as agent-browser's own login restricts
   nothing after it: what keeps the secret is that it never reaches the model's context (Flottille's
-  own `auth login` run fills it), the masking of the outputs, and the session kept to the entries'
-  sites (below). The actions that run a script in the page, which no gate can judge, are **off at
+  own `auth login` run fills it), the masking of the outputs, and the secret given only to a page of
+  its entry's own site (below). The actions that run a script in the page, which no gate can judge, are **off at
   the first pin**: `eval`, `wait_for_function`, `add_init_script`, `batch` and `flow_run` (which
   run or replay the others), `network_route` (which serves a body of its own for the page's
   requests) and `chat` (agent-browser's own model, through an external gateway). So are those that
@@ -1464,36 +1462,27 @@ way in:
   trace the user turned on) is not masked: Flottille masks what the tools answer, not the files
   the browser writes. Each call of these actions is judged by the gate, which is what stands
   against them; the user turns off what they do not want.
-- **The session is kept to the entries' sites.** While the adapter applies and the connection has
-  an entry bound with a usable web address, the configuration Flottille writes holds
-  `"allowedDomains": [<hosts>]`: the exact hosts of the entries bound to this connection, sorted,
-  from their URLs (a port and a path are left out; an entry on plain `http` to another machine has
-  none, below). agent-browser then blocks page loads, sub-resources, WebSocket, EventSource and
-  `sendBeacon` to any other domain and turns WebRTC off, and keeps the restriction on the
-  navigation of `auth login`. So a page that redirects the login
-  elsewhere, or another tab that navigates the login tab to another domain, no longer reaches a
-  form of another site. **It is the file and not the flag `--allowed-domains`**: agent-browser's
-  MCP tool calls run in child processes that load only the `--config` file (the flags after `mcp`
-  are not theirs), and an agent's own `allowedDomains` argument is refused only when the
-  environment or that file already sets the list (otherwise it could replace it, or clear it with
-  `""`); a flag that differed from the file would also relaunch the browser. Flottille's own runs
-  (`auth login`, the reload after a failed login) pass the same file, so one list serves the
-  server's tools and them. It is **not an operating system firewall**, and agent-browser calls its
-  blocking of WebSocket and EventSource best effort. A login that redirects to another domain to
-  sign in (a single sign-on) fails, and so does a login page whose scripts or styles come from
-  another domain: those are not the entries'. **The user adds such hosts** in the connection's
-  declaration, `sites = ["sso.example.com"]` (`flottille connection add|edit --site HOST`): one
-  host each, written as a URL's host is (lower case, no scheme, port, path, comma, wildcard or
-  space; anything else is refused, saying what a host is), added to the entries' hosts in the
-  list, which the review shows where it shows the entries' sites. They are the user's alone (an
-  agent's request sets no `sites`), and **part of what trust is given to**, as the command and
-  the variables are: the user's own edit (`connection edit`, the window) stops the running server
-  at once and is given again at once by the rule of an edit, the next start writing the new list,
-  while an edit of `sites` made in the file waits for its review. **One list serves every entry
-  bound to the connection**, the entries' hosts and the `sites` alike: a host one entry's sign-in
-  needs is allowed in the login of every other, so the password of an entry whose site redirects
-  to another entry's sign-on host reaches that host. Entries whose sign-ins must not share their
-  hosts go in connections of their own.
+- **The browser is open; the secret is kept to its site.** Flottille keeps the browser to no list
+  of sites: the configuration it writes holds no `allowedDomains`, so an agent opens any page, an
+  administration console on another host than the entry's included, as agent-browser does by
+  default. What is kept is the secret: **the vault gives an entry's secret only to a page of that
+  entry's own site**, in two places. `login` first loads the entry's own URL itself (`open`, on
+  the server's session), then runs `auth login --no-navigate --url <the entry's URL>`: in that
+  mode agent-browser checks, before it fills the username, before it fills the password and
+  before it clicks submit, that the page open is of that URL's origin (scheme, host and port),
+  and fails otherwise, so a page that redirects the login elsewhere (an open redirect, a single
+  sign-on on another host) gets no secret. Its normal mode, which navigates itself, checks
+  nothing after the navigation. And the daemon answers the plugin's request only for a page of
+  the entry's host: agent-browser 0.43.0 sends the plugin the URL of the login (`request.url`,
+  the command's `--url`), **not the address of the page open** (it asks before it navigates), so
+  that check holds the request to the entry's site and the page itself is agent-browser's check
+  above. A sign-in whose form lives on another host than the entry's URL (a single sign-on's)
+  fails: the user binds the entry to the URL of the form itself.
+  **What the open browser accepts** (the risks the list answered): a page of the entry's site
+  can send what is in it, the session's cookies included, to any host (the list blocked the
+  sub-resources, WebSocket, EventSource, `sendBeacon` and WebRTC to other domains); a page an
+  agent opens on any host can try to make the browser act against the entry's site with the
+  signed-in session. The secret itself is typed only into a page of its site.
 - **The browser can be shown.** A connection's server runs with the environment of a run, without
   `XDG_RUNTIME_DIR` nor the display variables, so its browser is headless and `--headed` fails
   (no runtime folder, no Wayland display). `headed = true` (`flottille connection edit --headed`
@@ -1534,24 +1523,7 @@ way in:
   made by one function (`display.rs`), which a run that opens windows reuses. It is the user's
   alone (an agent's request sets no `headed`), **part of what trust is given to** and said in the
   review, and the user's own edit stops the running server at once, the next start applying it,
-  as an edit of `sites` does; an edit made in the file waits for its review. The file is written when
-  a login runs, and tool calls read it when they run: an entry bound after the server started is
-  in the list from the next of either. **An entry whose URL host holds a comma, a `*`, a space or
-  starts with `-` is no usable site** (agent-browser reads the list by commas and `*` as a
-  wildcard): `login` with it is refused, saying why, and its host is not in the list. agent-browser
-  refuses a domain list together with `--cdp`, `--auto-connect`, `--profile`, `--state`,
-  `--restore`, `-p`/`--provider` and `--args` (and `--session-name`, the legacy name of
-  `--restore`'s key): **if the server's own command uses one, or sets `--allowed-domains` itself,
-  `login` is refused**, saying why (the command already sets the browser's sites, which Flottille
-  sets from the entries), and the server starts as the user wrote it, with no list of
-  Flottille's. The review says it, in its sentence and in what the adapter changed. **The same
-  options set in the connection's environment** (`env`), as the variables agent-browser reads
-  above its configuration file (`AGENT_BROWSER_ALLOWED_DOMAINS`, `AGENT_BROWSER_PROFILE`,
-  `AGENT_BROWSER_STATE`, `AGENT_BROWSER_CDP`, `AGENT_BROWSER_AUTO_CONNECT`,
-  `AGENT_BROWSER_PROVIDER`, `AGENT_BROWSER_ARGS`, `AGENT_BROWSER_RESTORE`,
-  `AGENT_BROWSER_SESSION_NAME`), **are the adapter's too**: `login` is refused the same way, naming
-  the variable (never its value, a vault entry's) and saying to take it out of the connection's
-  `env`, and the server starts with it and no list of Flottille's. **The options that can send a
+  as an edit of the command does; an edit made in the file waits for its review. **The options that can send a
   signed-in session, and the password a login types, elsewhere** are refused too, in the server's
   command or as their variables in the connection's `env`: a proxy (`--proxy`,
   `AGENT_BROWSER_PROXY`, and `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` in either case, which
@@ -1560,9 +1532,13 @@ way in:
   `AGENT_BROWSER_CA_CERT`), which let a proxy read the traffic, an extension (`--extension`,
   `AGENT_BROWSER_EXTENSIONS`), another browser binary (`--executable-path`,
   `AGENT_BROWSER_EXECUTABLE_PATH`) and a script run in every page (`--init-script`,
-  `AGENT_BROWSER_INIT_SCRIPTS`). The allowed sites do not keep the session from them: while one is
-  set, `login` is refused, naming the option or the variable alone and saying to take it out, and
-  the review says it; the server starts as the user wrote it, with Flottille's list. **Its other
+  `AGENT_BROWSER_INIT_SCRIPTS`): through them the password would reach more than the entry's site.
+  While one is set, `login` is refused, naming the option or the variable alone and saying to take
+  it out, and the review says it; the server starts as the user wrote it. The options agent-browser
+  refuses beside a domain list (`--cdp`, `--auto-connect`, `--profile`, `--state`, `--restore`,
+  `-p`/`--provider`, `--args`, `--session-name`, `--allowed-domains`, and their variables) no
+  longer refuse `login`: with no list of Flottille's they are the user's, and `login` types into
+  the browser the user's command chose. **Its other
   options and variables are not judged** (`AGENT_BROWSER_SESSION`, `AGENT_BROWSER_NAMESPACE`,
   `--headers`, `--engine`…): they are the user's, passed as written. What is not covered: the
   variables of the daemon's own environment, which a run inherits.
@@ -1610,13 +1586,14 @@ way in:
 - **Its start** gains `--config $XDG_STATE_HOME/flottille/connections/<name>/agent-browser.json`,
   written by Flottille: one plugin, `flottille`, of capability `credential.read`, run as
   `flottille vault provide <socket>`. An explicit config replaces agent-browser's discovery of the
-  user's own, and the sites of the entries (below). **A configuration file of the user's** that
-  the server's command names (`--config`, or `AGENT_BROWSER_CONFIG` in the connection's `env`) is
-  not read either: Flottille's replaces it whole, its `allowedDomains` included, and Flottille does
-  not open the user's file to merge them (it is the user's, and may hold a secret). So while one is
-  named, `login` is refused, saying that the adapter sets the allowed sites itself and that a
-  site a sign-in needs goes in the connection's `sites` (below); the review says it too, and the
-  server starts as before.
+  user's own. agent-browser reads **the first `--config`** of a command line (and never the form
+  `--config=<file>`), and `AGENT_BROWSER_CONFIG` only when no `--config` is given: a configuration
+  file of the user's named by `AGENT_BROWSER_CONFIG` in the connection's `env` is not read, as
+  Flottille's flag comes first, and Flottille does not open it to merge them (it is the user's,
+  and may hold a secret). **A `--config <file>` in the server's own command** would be read
+  instead of Flottille's, whose credential provider would then be missing: while one is there,
+  `login` is refused, saying why and to take it out of the command; the review says it too, and
+  the server starts as before.
 - **`login {entry}`**, Flottille's own action: the agent names a vault entry **bound to this
   connection** (`for = "connection:<name>"`, `vault.md`), whose names `help` with `for: "login"`
   lists, never their values. An entry bound to another use, or to none, is refused, naming its use.
@@ -1635,8 +1612,9 @@ way in:
   version moved after the call was routed) is refused. Flottille runs agent-browser's
   command line itself, without a shell, under the connection's one-call-at-a-time turn: the words
   of the server's command before its `mcp` (global options kept), then `--config <the file>
-  auth login <entry> --credential-provider flottille --item <entry> --url <url>` (two words, as
-  agent-browser's own help shows them; a web address never starts with `-`), in the
+  auth login <entry> --credential-provider flottille --item <entry> --no-navigate --url <url>`
+  (two words, as agent-browser's own help shows them; a web address never starts with `-`), after
+  its own `open <url>` on the same command line ("The browser is open", above), in the
   server's folder and with its environment, so on the **same browser session and namespace** as
   the server (`AGENT_BROWSER_SESSION`, `AGENT_BROWSER_NAMESPACE`). A connection reached by a URL,
   or whose command has no `mcp`, refuses `login`. It has 120 seconds, as a call has. **A login that
@@ -1650,8 +1628,9 @@ way in:
   `connections/<name>/vault.sock` (in a folder of the user's alone, removed when the run ends)
   and gives the run a **one-time token** in `FLOTTILLE_VAULT_TOKEN`. `flottille vault provide` (hidden, needs no
   folder of Flottille's) reads agent-browser's request on its standard input, sends the token and
-  the item to that socket, and writes the answer on its standard output. The daemon answers
-  **only** the token of the run it started, **once**, and only for the entry that run is for, bound
+  the item and the URL agent-browser asks for to that socket, and writes the answer on its
+  standard output. The daemon answers **only** the token of the run it started, **once**, only
+  for a URL of the entry's own host, and only for the entry that run is for, bound
   to this connection; without the token the plugin is refused before anything is asked. The
   secret goes from the keyring to the page's form: never to an agent, an event, a log, an error or
   the store, and what agent-browser prints is masked and framed as a third party's.

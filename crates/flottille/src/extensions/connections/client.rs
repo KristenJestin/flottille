@@ -589,8 +589,7 @@ async fn start_with(
             flottille_core::paths::ensure_private_dir(&folder)
                 .map_err(|error| error.to_string())?;
             let options = match adapter {
-                Some(adapter) => {
-                    let sites = super::adapters::kept_to(daemon, adapter, declaration);
+                Some(_) => {
                     (display, headless) =
                         super::adapters::shown(daemon, declaration, &declaration.name);
                     if let Some(browser) =
@@ -598,7 +597,7 @@ async fn start_with(
                     {
                         browser_started(daemon, &declaration.name, browser);
                     }
-                    super::adapters::start_options(&folder, &sites, display.is_some())?
+                    super::adapters::start_options(&folder, display.is_some())?
                 }
                 None => Vec::new(),
             };

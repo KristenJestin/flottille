@@ -70,11 +70,6 @@ pub const HEADED_HINT: &str = "Shows the browser an agent drives on your screen.
      browser from taking your focus, by the window class flottille-browser: docs/extensions.md \
      (Show the browser) gives the rule.";
 
-/// What the sites' field says: what a sign-in's extra hosts are for.
-pub const SITES_HINT: &str = "Hosts a sign-in goes through besides the sites of its entries, such \
-                              as a single sign-on's. The browser Flottille signs in with may \
-                              reach them. One host each, in lower case, with no scheme or port.";
-
 /// The radio's label of what happens when an agent calls an action.
 pub const WHEN_CALLED: &str = "When an agent calls it";
 
@@ -173,8 +168,6 @@ pub struct Server {
     /// query parameter, a cookie, basic authentication.
     pub secrets: Vec<ServerSecret>,
     pub only: BTreeMap<String, Vec<String>>,
-    /// The hosts a sign-in also needs.
-    pub sites: Vec<String>,
     /// Whether an adapter's browser is shown on the screen.
     pub headed: bool,
     /// Why the browser of its running server is not shown though it is meant to be.
@@ -235,12 +228,6 @@ impl Server {
                     let values = values.as_array().into_iter().flatten().map(text).collect();
                     (argument.clone(), values)
                 })
-                .collect(),
-            sites: value["sites"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .map(text)
                 .collect(),
             headed: value["headed"] == true,
             headless: value["headless"].as_str().map(str::to_owned),
@@ -683,13 +670,6 @@ struct Limit {
     values: Entity<InputState>,
 }
 
-/// A site of the form: the host a sign-in also needs.
-#[derive(Clone)]
-struct Site {
-    key: String,
-    host: Entity<InputState>,
-}
-
 /// The review open, or the last one while it fades out.
 struct Review {
     name: String,
@@ -936,8 +916,6 @@ pub struct ConnectionsSection {
     secret_rows: Listing<String>,
     limits: Vec<Limit>,
     limit_rows: Listing<String>,
-    sites: Vec<Site>,
-    site_rows: Listing<Site>,
     /// The form's *Show the browser*.
     headed: bool,
     made: u64,
@@ -978,8 +956,6 @@ impl ConnectionsSection {
             secret_rows: Listing::default(),
             limits: Vec::new(),
             limit_rows: Listing::default(),
-            sites: Vec::new(),
-            site_rows: Listing::default(),
             headed: false,
             made: 0,
             saving: false,
@@ -1028,11 +1004,6 @@ impl ConnectionsSection {
         self.limits
             .get(at)
             .map(|l| (l.argument.clone(), l.values.clone()))
-    }
-
-    /// The host field of the site at `at` of the form.
-    pub fn site_field(&self, at: usize) -> Option<Entity<InputState>> {
-        self.sites.get(at).map(|s| s.host.clone())
     }
 
     /// What the form says is wrong, under its fields.
@@ -1413,7 +1384,6 @@ impl ConnectionsSection {
         self.variables.clear();
         self.secrets.clear();
         self.limits.clear();
-        self.sites.clear();
         self.headed = server.is_some_and(|s| s.headed);
         if let Some(server) = server {
             for (name, entry) in server.env.clone() {
@@ -1433,16 +1403,12 @@ impl ConnectionsSection {
             for (argument, values) in server.only.clone() {
                 self.new_limit(Some((argument, values.join(", "))), window, cx);
             }
-            for host in server.sites.clone() {
-                self.new_site(Some(host), window, cx);
-            }
         }
         // The rows the dialog opens with are there at once, at rest: a plain list plays the
         // entrance of every row on its first sync. Rows added afterwards still unfold.
         self.variable_rows = Listing::default().at_rest();
         self.secret_rows = Listing::default().at_rest();
         self.limit_rows = Listing::default().at_rest();
-        self.site_rows = Listing::default().at_rest();
         self.form = Form::Editing(server.map(|s| s.name.clone()));
         self.form_error = None;
         self.url_fault = server
@@ -1559,17 +1525,6 @@ impl ConnectionsSection {
         cx.notify();
     }
 
-    fn new_site(&mut self, given: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
-        let host = line_field("sso.example.com", window, cx);
-        host.update(cx, |f, cx| {
-            f.set_value(given.unwrap_or_default(), window, cx)
-        });
-        self.watch(&host, cx);
-        let key = self.next_key();
-        self.sites.push(Site { key, host });
-        cx.notify();
-    }
-
     pub fn close(&mut self, cx: &mut Context<Self>) {
         self.form = Form::Closed;
         self.form_error = None;
@@ -1631,13 +1586,6 @@ impl ConnectionsSection {
                 _ => return Err("A limit needs an argument and the values it may take.".into()),
             }
         }
-        // The daemon says why a host is not one: nothing is checked here.
-        let sites: Vec<String> = self
-            .sites
-            .iter()
-            .map(|site| value(&site.host))
-            .filter(|host| !host.is_empty())
-            .collect();
         let editing = original.is_some();
         // In an edit, an empty table removes what was there: the link drops a `null`, so `{}` is
         // what says "none".
@@ -1667,11 +1615,6 @@ impl ConnectionsSection {
                 }
                 params["command"] = json!(words);
                 params["env"] = Value::Object(entries);
-                // An empty list in an edit takes the sites away: the window's link leaves a
-                // `null` out of the request, so the list is what says it.
-                if editing || !sites.is_empty() {
-                    params["sites"] = json!(sites);
-                }
                 if editing || self.headed {
                     params["headed"] = json!(self.headed);
                 }
@@ -1693,7 +1636,6 @@ impl ConnectionsSection {
                 params["secrets"] = json!(secrets);
                 if editing {
                     params["env"] = json!({});
-                    params["sites"] = json!([]);
                     params["headed"] = json!(false);
                 }
             }
@@ -2206,31 +2148,6 @@ impl ConnectionsSection {
             .into_any_element()
     }
 
-    fn site_row(&self, id: String, site: &Site, cx: &mut Context<Self>) -> AnyElement {
-        let key = site.key.clone();
-        let remove = Button::icon(
-            SharedString::from(format!("{id}-remove")),
-            Icon::Close,
-            "Remove this site",
-        )
-        .on_click(cx.listener(move |this, _, _, cx| {
-            this.sites.retain(|s| s.key != key);
-            cx.notify();
-        }));
-        div()
-            .id(SharedString::from(id.clone()))
-            .flex()
-            .items_end()
-            .gap(space::SM)
-            .child(div().flex_1().min_w_0().child(Field::new(
-                SharedString::from(format!("{id}-host-field")),
-                "Host",
-                boxed(format!("{id}-host"), Input::new(&site.host), cx),
-            )))
-            .child(remove)
-            .into_any_element()
-    }
-
     fn modal(&mut self, window: &Window, cx: &mut Context<Self>) -> Modal {
         let p = palette(cx);
         let this = cx.entity().downgrade();
@@ -2281,12 +2198,6 @@ impl ConnectionsSection {
             .map(|l| (l.key.clone(), l.key.clone()))
             .collect();
         self.limit_rows.sync(keys, now, reduce);
-        let keys: Vec<(String, Site)> = self
-            .sites
-            .iter()
-            .map(|s| (s.key.clone(), s.clone()))
-            .collect();
-        self.site_rows.sync(keys, now, reduce);
 
         let name = match &original {
             Some(name) => div()
@@ -2419,28 +2330,6 @@ impl ConnectionsSection {
                 .gap(space::SM),
             );
         }
-        let mut sites = div().flex().flex_col();
-        for (key, site, placement) in self
-            .site_rows
-            .rows()
-            .map(|r| (r.key.to_owned(), r.value.clone(), r.placement))
-            .collect::<Vec<_>>()
-        {
-            // A row that left keeps its text while it folds away.
-            let id = match self.sites.iter().position(|s| s.key == key) {
-                Some(at) => format!("connection-site-{at}"),
-                None => format!("connection-site-gone-{key}"),
-            };
-            let content = self.site_row(id, &site, cx);
-            sites = sites.child(
-                gpui_design_system::Item::new(
-                    ElementId::Name(format!("connection-site-item-{key}").into()),
-                    placement,
-                    content,
-                )
-                .gap(space::SM),
-            );
-        }
         let new_variable = Button::secondary("connection-new-variable", "New variable")
             .leading(Icon::Plus)
             .on_click(cx.listener(|this, _, window, cx| this.new_variable(None, window, cx)));
@@ -2450,21 +2339,6 @@ impl ConnectionsSection {
         let new_limit = Button::secondary("connection-new-limit", "New limit")
             .leading(Icon::Plus)
             .on_click(cx.listener(|this, _, window, cx| this.new_limit(None, window, cx)));
-        let new_site = Button::secondary("connection-new-site", "New site")
-            .leading(Icon::Plus)
-            .on_click(cx.listener(|this, _, window, cx| this.new_site(None, window, cx)));
-        let sites = Field::new(
-            "connection-sites-field",
-            "Sites a sign-in also needs",
-            div()
-                .flex()
-                .flex_col()
-                .items_start()
-                .child(div().w_full().child(sites))
-                .child(div().pt(space::SM).child(new_site)),
-        )
-        .optional()
-        .hint(SITES_HINT);
         let headed = Switch::new("connection-headed", self.headed, "Show the browser")
             .hint(HEADED_HINT)
             .on_click(cx.listener(|this, _, _, cx| {
@@ -2561,14 +2435,6 @@ impl ConnectionsSection {
                 .space(space::LG),
             )
             .child(spaced(space::LG, limits_field))
-            .child(
-                presence(
-                    "connection-sites-block",
-                    self.reach == Reach::Command,
-                    sites,
-                )
-                .space(space::LG),
-            )
             .child(
                 presence(
                     "connection-headed-block",

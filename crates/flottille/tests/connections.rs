@@ -4788,9 +4788,20 @@ fn agent_browser_logs_in_with_a_vault_entry() {
         "\"--credential-provider\",\"flottille\"",
         "\"--item\",\"shop-test\"",
         "\"--url\",\"https://shop.example.com/login\"",
+        "\"--no-navigate\"",
     ] {
         assert!(args.contains(word), "{word}: {args}");
     }
+    // The entry's page loaded by Flottille first, on the same session: agent-browser fills it
+    // only while it is of the entry's origin.
+    let opened = logged(&user, "browser", "open");
+    assert_eq!(opened.len(), 1, "{opened:?}");
+    assert!(
+        opened[0]["args"]
+            .to_string()
+            .contains("\"open\",\"https://shop.example.com/login\""),
+        "{opened:?}"
+    );
     let started = logged(&user, "browser", "start");
     assert_eq!(
         login[0]["cwd"],
@@ -5514,17 +5525,17 @@ fn a_failed_login_reloads_the_entrys_page() {
     ));
     assert!(said.contains("failed"), "{said}");
     // Flottille loaded the entry's page afresh on the same session: the secret left in the form
-    // is gone.
+    // is gone. The first load is the one the login fills.
     let opened = logged(&user, "browser", "open");
-    assert_eq!(opened.len(), 1, "{opened:?}");
-    let args = opened[0]["args"].to_string();
+    assert_eq!(opened.len(), 2, "{opened:?}");
+    let args = opened[1]["args"].to_string();
     assert!(
         args.contains("\"open\",\"https://shop.example.com/login\""),
         "{args}"
     );
     assert!(args.contains("\"--config\""), "{args}");
     let login = logged(&user, "browser", "login");
-    assert_eq!(opened[0]["cwd"], login[0]["cwd"], "not the login's folder");
+    assert_eq!(opened[1]["cwd"], login[0]["cwd"], "not the login's folder");
     assert!(form(&user).is_none(), "the secret stayed in the form");
 
     // A load that fails too: the login's error is still said, masked, and why the page stays.
@@ -5544,7 +5555,7 @@ fn a_failed_login_reloads_the_entrys_page() {
     assert!(!said.contains(PASSWORD), "{said}");
     assert_eq!(logged(&user, "browser", "open").len(), 1);
 
-    // A login that succeeds loads nothing again.
+    // A login that succeeds loads nothing again: the one load is the page it filled.
     let user = self::user();
     browser(&user, &agent_browser("0.43.0"), json!({}));
     let (_, mcp) = signed_up(&user);
@@ -5552,7 +5563,7 @@ fn a_failed_login_reloads_the_entrys_page() {
         "conn_browser",
         json!({"action": "login", "arguments": {"entry": "shop-test"}}),
     ));
-    assert!(logged(&user, "browser", "open").is_empty());
+    assert_eq!(logged(&user, "browser", "open").len(), 1);
 }
 
 /// The words of a logged command line.
@@ -5572,40 +5583,22 @@ fn allowed(line: &Value) -> Option<Value> {
 }
 
 #[test]
-fn the_browser_is_kept_to_the_entries_sites() {
+fn the_browser_is_not_kept_to_a_list_of_sites() {
     let user = user();
     browser(&user, &agent_browser("0.43.0"), json!({"fail": true}));
-    // No entry is bound yet: nothing to keep the session to, the server starts as it did.
-    assert_eq!(allowed(&logged(&user, "browser", "start")[0]), None);
     let (_, mcp) = signed_up(&user);
-    // A second entry of the connection, with a port and a path; one bound to another connection
-    // and one bound to none, whose sites are not this connection's.
-    for (name, url, to) in [
-        (
-            "portal-test",
-            "https://portal.example.net:8443/signin",
-            "connection:browser",
-        ),
-        (
-            "notes-test",
-            "https://notes.example.org/login",
-            "connection:notes",
-        ),
-        ("loose-test", "https://loose.example.io/login", ""),
-    ] {
-        let mut params = json!({"name": name, "secret": "s3cret-of-the-site", "url": url});
-        if !to.is_empty() {
-            params["for"] = json!(to);
-        }
-        user.call("vault.set", params).unwrap();
-    }
+    user.call(
+        "vault.set",
+        json!({"name": "portal-test", "secret": "s3cret-of-the-site",
+            "url": "https://portal.example.net:8443/signin", "for": "connection:browser"}),
+    )
+    .unwrap();
     user.call(
         "connection.accept",
         json!({"name": "browser", "actions": {"agent_browser_click": "passes"}}),
     )
     .unwrap();
     restart(&user, "browser");
-    // A call of the server's own starts it again.
     done(mcp.call(
         "conn_browser",
         json!({"action": "agent_browser_click", "arguments": {"name": "buy"}}),
@@ -5614,19 +5607,13 @@ fn the_browser_is_kept_to_the_entries_sites() {
         "conn_browser",
         json!({"action": "login", "arguments": {"entry": "shop-test"}}),
     ));
-    // The server's start, the login and the page's reload after its failure: the hosts of the
-    // entries bound to the connection, exactly, and no others.
-    let sites = Some(json!(["portal.example.net", "shop.example.com"]));
-    assert_eq!(
-        allowed(logged(&user, "browser", "start").last().unwrap()),
-        sites
-    );
-    assert_eq!(allowed(&logged(&user, "browser", "login")[0]), sites);
-    assert_eq!(allowed(&logged(&user, "browser", "open")[0]), sites);
-    // In the file and never as a flag: the tool calls of the server do not read the flags after
-    // `mcp`, and a flag that differed from the file would relaunch the browser.
+    // The server's start, the login and Flottille's own loads of the entry's page: the browser
+    // goes wherever the agent takes it, an entry bound to the connection or not.
     for event in ["start", "login", "open"] {
-        for line in logged(&user, "browser", event) {
+        let lines = logged(&user, "browser", event);
+        assert!(!lines.is_empty(), "{event}");
+        for line in lines {
+            assert_eq!(allowed(&line), None, "{event}: {line}");
             assert!(
                 !words(&line)
                     .iter()
@@ -5635,13 +5622,74 @@ fn the_browser_is_kept_to_the_entries_sites() {
             );
         }
     }
+    // Nor does the review say it is.
+    let review = user
+        .call("connection.review", json!({"name": "browser"}))
+        .unwrap();
+    let changed = review["adapter"]["changed"].to_string();
+    assert!(!changed.contains("allowedDomains"), "{changed}");
+    assert!(!changed.contains("kept to"), "{changed}");
 }
 
 #[test]
-fn login_is_refused_when_the_command_uses_a_flag_that_drops_the_allowlist() {
-    for options in [
+fn a_secret_is_given_only_to_its_entrys_site() {
+    // agent-browser asks the plugin for another host's page than the entry's: refused.
+    let user = user();
+    browser(
+        &user,
+        &agent_browser("0.43.0"),
+        json!({"asks_for": "https://console.example.org/login"}),
+    );
+    let (_, mcp) = signed_up(&user);
+    let said = refused(mcp.call(
+        "conn_browser",
+        json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+    ));
+    assert!(said.contains("console.example.org"), "{said}");
+    assert!(said.contains("shop.example.com"), "{said}");
+    assert!(!said.contains(PASSWORD), "{said}");
+    assert!(form(&user).is_none(), "the secret reached another site");
+    let login = logged(&user, "browser", "login");
+    assert_eq!(login[0]["plugin"]["success"], false, "{login:?}");
+
+    // The entry's page redirects to another host: the form there is not filled. Flottille loads
+    // the entry's page itself, then agent-browser fills only a page of the entry's origin.
+    let user = self::user();
+    browser(
+        &user,
+        &agent_browser("0.43.0"),
+        json!({"lands_on": "https://console.example.org/login"}),
+    );
+    let (_, mcp) = signed_up(&user);
+    let said = refused(mcp.call(
+        "conn_browser",
+        json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+    ));
+    assert!(said.contains("does not match"), "{said}");
+    assert!(form(&user).is_none(), "the secret reached another site");
+
+    // Its own site, another path and the same origin: given.
+    let user = self::user();
+    browser(
+        &user,
+        &agent_browser("0.43.0"),
+        json!({"asks_for": "https://shop.example.com/account/login"}),
+    );
+    let (_, mcp) = signed_up(&user);
+    done(mcp.call(
+        "conn_browser",
+        json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+    ));
+    assert_eq!(
+        form(&user).expect("the form was filled")["password"],
+        PASSWORD
+    );
+}
+
+#[test]
+fn login_runs_beside_the_options_a_domain_list_refused() {
+    let mut cases: Vec<(Vec<&str>, Option<&str>)> = [
         vec!["--cdp", "9222"],
-        vec!["--cdp=ws://127.0.0.1:9222"],
         vec!["--auto-connect"],
         vec!["--profile", "Default"],
         vec!["--state=auth.json"],
@@ -5650,123 +5698,87 @@ fn login_is_refused_when_the_command_uses_a_flag_that_drops_the_allowlist() {
         vec!["-p", "ios"],
         vec!["--provider=browserbase"],
         vec!["--args", "--no-sandbox"],
+        vec!["--allowed-domains", "example.com"],
+        // Not read by agent-browser, which reads `--config <file>` alone.
+        vec!["--config=my-agent-browser.json"],
+    ]
+    .into_iter()
+    .map(|options| (options, None))
+    .collect();
+    for variable in [
+        "AGENT_BROWSER_ALLOWED_DOMAINS",
+        "AGENT_BROWSER_PROFILE",
+        "AGENT_BROWSER_CDP",
+        "AGENT_BROWSER_CONFIG",
     ] {
+        cases.push((Vec::new(), Some(variable)));
+    }
+    for (options, variable) in cases {
         let user = user();
-        browser_run_with(&user, &agent_browser("0.43.0"), json!({}), &options);
+        let mut more = json!({});
+        if let Some(variable) = variable {
+            user.call(
+                "vault.set",
+                json!({"name": "browser-setting", "secret": SETTING}),
+            )
+            .unwrap();
+            more = json!({"env": {variable: {"vault": "browser-setting"}}});
+        }
+        browser_declared(&user, &agent_browser("0.43.0"), json!({}), &options, more);
         let (_, mcp) = signed_up(&user);
-        let said = refused(mcp.call(
+        done(mcp.call(
             "conn_browser",
             json!({"action": "login", "arguments": {"entry": "shop-test"}}),
         ));
-        assert!(said.contains("allowed domains"), "{options:?}: {said}");
-        assert!(
-            said.contains(options[0].split('=').next().unwrap()),
-            "{options:?}: {said}"
+        assert_eq!(
+            logged(&user, "browser", "login").len(),
+            1,
+            "{options:?} {variable:?}"
         );
-        assert!(logged(&user, "browser", "login").is_empty(), "{options:?}");
-        assert!(form(&user).is_none(), "{options:?}");
-        // The server still starts as the user's command says: only login is refused.
-        let started = logged(&user, "browser", "start");
-        assert_eq!(allowed(started.last().unwrap()), None, "{options:?}");
+        assert!(form(&user).is_some(), "{options:?} {variable:?}");
         let review = user
             .call("connection.review", json!({"name": "browser"}))
             .unwrap();
         let said = review["adapter"]["said"].as_str().unwrap();
-        assert!(said.contains("allowed domains"), "{options:?}: {review}");
+        assert!(
+            !said.contains("refused"),
+            "{options:?} {variable:?}: {said}"
+        );
     }
 }
 
 #[test]
-fn login_is_refused_when_the_command_already_sets_the_browsers_sites() {
-    for options in [
-        vec!["--allowed-domains", "example.com"],
-        vec!["--allowed-domains=example.com"],
-    ] {
-        let user = user();
-        browser_run_with(&user, &agent_browser("0.43.0"), json!({}), &options);
-        let (_, mcp) = signed_up(&user);
-        let said = refused(mcp.call(
-            "conn_browser",
-            json!({"action": "login", "arguments": {"entry": "shop-test"}}),
-        ));
-        assert!(
-            said.contains("already sets the browser's sites"),
-            "{options:?}: {said}"
-        );
-        assert!(logged(&user, "browser", "login").is_empty(), "{options:?}");
-        // Flottille sets nothing of its own beside the user's list.
-        let started = logged(&user, "browser", "start");
-        assert_eq!(allowed(started.last().unwrap()), None, "{options:?}");
-        let review = user
-            .call("connection.review", json!({"name": "browser"}))
-            .unwrap();
-        let said = review["adapter"]["said"].as_str().unwrap();
-        assert!(
-            said.contains("already sets the browser's sites"),
-            "{options:?}: {review}"
-        );
+fn login_is_refused_when_the_users_own_config_comes_first() {
+    let user = user();
+    let file = user.path("my-agent-browser.json");
+    std::fs::write(&file, r#"{"headed": false}"#).unwrap();
+    let file = file.display().to_string();
+    browser_run_with(
+        &user,
+        &agent_browser("0.43.0"),
+        json!({}),
+        &["--config", &file],
+    );
+    let (_, mcp) = signed_up(&user);
+    let said = refused(mcp.call(
+        "conn_browser",
+        json!({"action": "login", "arguments": {"entry": "shop-test"}}),
+    ));
+    // agent-browser reads the first `--config`: Flottille's, after it, would never be read.
+    for words in ["--config", "first", "credential provider"] {
+        assert!(said.contains(words), "{words}: {said}");
     }
+    assert!(logged(&user, "browser", "login").is_empty());
+    assert!(form(&user).is_none());
+    let review = user
+        .call("connection.review", json!({"name": "browser"}))
+        .unwrap();
+    let said = review["adapter"]["said"].as_str().unwrap();
+    assert!(said.contains("--config"), "{review}");
 }
 
 /// The value of the vault entry the tests put in agent-browser's own variables.
 const SETTING: &str = "value-of-the-users-setting";
-
-#[test]
-fn login_is_refused_when_the_environment_sets_a_variable_the_adapter_owns() {
-    for (variable, said_too) in [
-        (
-            "AGENT_BROWSER_ALLOWED_DOMAINS",
-            "already sets the browser's sites",
-        ),
-        ("AGENT_BROWSER_PROFILE", "allowed domains"),
-        ("AGENT_BROWSER_STATE", "allowed domains"),
-        ("AGENT_BROWSER_CDP", "allowed domains"),
-        ("AGENT_BROWSER_AUTO_CONNECT", "allowed domains"),
-        ("AGENT_BROWSER_PROVIDER", "allowed domains"),
-        ("AGENT_BROWSER_ARGS", "allowed domains"),
-        ("AGENT_BROWSER_RESTORE", "allowed domains"),
-        ("AGENT_BROWSER_SESSION_NAME", "allowed domains"),
-    ] {
-        let user = user();
-        user.call(
-            "vault.set",
-            json!({"name": "browser-setting", "secret": SETTING}),
-        )
-        .unwrap();
-        browser_declared(
-            &user,
-            &agent_browser("0.43.0"),
-            json!({}),
-            &[],
-            json!({"env": {variable: {"vault": "browser-setting"}}}),
-        );
-        let (_, mcp) = signed_up(&user);
-        let said = refused(mcp.call(
-            "conn_browser",
-            json!({"action": "login", "arguments": {"entry": "shop-test"}}),
-        ));
-        // The variable by its name, why the adapter owns it, and never its value.
-        assert!(said.contains(variable), "{variable}: {said}");
-        assert!(said.contains(said_too), "{variable}: {said}");
-        assert!(said.contains("environment"), "{variable}: {said}");
-        assert!(!said.contains(SETTING), "{variable}: {said}");
-        assert!(logged(&user, "browser", "login").is_empty(), "{variable}");
-        assert!(form(&user).is_none(), "{variable}");
-        // The server starts with the user's variable and no list of Flottille's, which
-        // agent-browser would refuse beside it.
-        let started = logged(&user, "browser", "start");
-        assert_eq!(allowed(started.last().unwrap()), None, "{variable}");
-        let review = user
-            .call("connection.review", json!({"name": "browser"}))
-            .unwrap();
-        let said = review["adapter"]["said"].as_str().unwrap();
-        assert!(said.contains(variable), "{variable}: {review}");
-        assert!(
-            !review.to_string().contains(SETTING),
-            "{variable}: {review}"
-        );
-    }
-}
 
 #[test]
 fn login_is_refused_while_an_option_could_send_the_session_elsewhere() {
@@ -5864,193 +5876,15 @@ fn a_harmless_variable_of_agent_browsers_is_accepted() {
 }
 
 #[test]
-fn login_is_refused_when_the_users_own_config_would_be_ignored() {
-    let user_config = |user: &User| user.path("my-agent-browser.json");
-    for (options, variable) in [
-        (vec!["--config", "<file>"], None),
-        (vec!["--config=<file>"], None),
-        (vec![], Some("AGENT_BROWSER_CONFIG")),
-    ] {
-        let user = user();
-        let file = user_config(&user);
-        std::fs::write(&file, r#"{"allowedDomains": ["intranet.example.org"]}"#).unwrap();
-        let options: Vec<String> = options
-            .iter()
-            .map(|o| o.replace("<file>", &file.display().to_string()))
-            .collect();
-        let options: Vec<&str> = options.iter().map(String::as_str).collect();
-        let mut more = json!({});
-        if let Some(variable) = variable {
-            user.call(
-                "vault.set",
-                json!({"name": "browser-setting", "secret": file.display().to_string()}),
-            )
-            .unwrap();
-            more = json!({"env": {variable: {"vault": "browser-setting"}}});
-        }
-        browser_declared(&user, &agent_browser("0.43.0"), json!({}), &options, more);
-        let (_, mcp) = signed_up(&user);
-        let said = refused(mcp.call(
-            "conn_browser",
-            json!({"action": "login", "arguments": {"entry": "shop-test"}}),
-        ));
-        let named = variable.unwrap_or("--config");
-        // Why, and how to add a site to a sign-in instead.
-        for words in [named, "allowedDomains", "sites"] {
-            assert!(said.contains(words), "{options:?} {variable:?}: {said}");
-        }
-        assert!(logged(&user, "browser", "login").is_empty(), "{options:?}");
-        assert!(form(&user).is_none(), "{options:?}");
-        let review = user
-            .call("connection.review", json!({"name": "browser"}))
-            .unwrap();
-        let said = review["adapter"]["said"].as_str().unwrap();
-        assert!(said.contains(named), "{options:?}: {review}");
-        assert!(said.contains("allowedDomains"), "{options:?}: {review}");
-    }
-}
-
-#[test]
-fn a_sign_in_gets_the_extra_hosts_the_user_adds() {
-    let user = user();
-    browser_declared(
-        &user,
-        &agent_browser("0.43.0"),
-        json!({"fail": true}),
-        &[],
-        json!({"sites": ["sso.example.net", "id.example.org"]}),
-    );
-    let (_, mcp) = signed_up(&user);
-    refused(mcp.call(
-        "conn_browser",
-        json!({"action": "login", "arguments": {"entry": "shop-test"}}),
-    ));
-    // The entry's host and the hosts of the single sign-on, sorted, for the login and the
-    // page's reload after its failure.
-    let sites = Some(json!([
-        "id.example.org",
-        "shop.example.com",
-        "sso.example.net"
-    ]));
-    assert_eq!(allowed(&logged(&user, "browser", "login")[0]), sites);
-    assert_eq!(allowed(&logged(&user, "browser", "open")[0]), sites);
-    // Where the review says the sites today.
-    let review = user
-        .call("connection.review", json!({"name": "browser"}))
-        .unwrap();
-    let changed = review["adapter"]["changed"].to_string();
-    assert!(
-        changed.contains("id.example.org, shop.example.com, sso.example.net"),
-        "{changed}"
-    );
-    // Kept in the declaration, and taken out with null.
-    let listed = connection(&user, "browser");
-    assert_eq!(
-        listed["sites"],
-        json!(["sso.example.net", "id.example.org"])
-    );
-    user.call("connection.edit", json!({"name": "browser", "sites": null}))
-        .unwrap();
-    assert_eq!(connection(&user, "browser")["sites"], Value::Null);
-    // What is no host of a site is refused, saying what one is.
-    for odd in [
-        "https://sso.example.net",
-        "sso.example.net:8443",
-        "sso.example.net/login",
-        "*.example.net",
-        "a,b.example.net",
-        "-sso.example.net",
-        "SSO.example.net",
-        "",
-    ] {
-        let (_, error) = user
-            .call(
-                "connection.edit",
-                json!({"name": "browser", "sites": [odd]}),
-            )
-            .unwrap_err();
-        assert!(error.contains("sites"), "{odd}: {error}");
-    }
-    // The command line adds them too.
-    let output = user.run(&["connection", "edit", "browser", "--site", "sso.example.net"]);
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert_eq!(
-        connection(&user, "browser")["sites"],
-        json!(["sso.example.net"])
-    );
-}
-
-#[test]
-fn removing_a_site_stops_the_running_server_and_its_next_start_lacks_it() {
-    let user = user();
-    browser_declared(
-        &user,
-        &agent_browser("0.43.0"),
-        json!({}),
-        &[],
-        json!({"sites": ["sso.example.net", "id.example.org"]}),
-    );
-    let (_, mcp) = signed_up(&user);
-    user.call(
-        "connection.accept",
-        json!({"name": "browser", "actions": {"agent_browser_click": "passes"}}),
-    )
-    .unwrap();
-    restart(&user, "browser");
-    done(mcp.call(
-        "conn_browser",
-        json!({"action": "agent_browser_click", "arguments": {"name": "buy"}}),
-    ));
-    let started = logged(&user, "browser", "start");
-    let first = started.last().unwrap().clone();
-    assert_eq!(
-        allowed(&first),
-        Some(json!([
-            "id.example.org",
-            "shop.example.com",
-            "sso.example.net"
-        ]))
-    );
-    let pid = first["pid"].as_u64().unwrap();
-    // The user takes out a host that was wrong: the server that reaches it stops at once, and
-    // the user's own edit is given again at once, as an edit of the command is.
-    let edited = user
-        .call(
-            "connection.edit",
-            json!({"name": "browser", "sites": ["id.example.org"]}),
-        )
-        .unwrap();
-    assert_eq!(edited["state"], "ready", "{edited}");
-    eventually("the server that reached it stops", || !pid_alive(pid));
-    done(mcp.call(
-        "conn_browser",
-        json!({"action": "agent_browser_click", "arguments": {"name": "buy"}}),
-    ));
-    let started = logged(&user, "browser", "start");
-    assert!(started.len() > 1, "{started:?}");
-    let sites = Some(json!(["id.example.org", "shop.example.com"]));
-    assert_eq!(allowed(started.last().unwrap()), sites);
-    // The file the running server's tool calls read lacks it too.
-    let config = std::fs::read_to_string(
-        user.path("state/flottille/connections/browser/agent-browser.json"),
-    )
-    .unwrap();
-    assert!(!config.contains("sso.example.net"), "{config}");
-}
-
-#[test]
-fn a_site_added_in_the_file_waits_for_a_review() {
+fn a_declaration_that_still_holds_sites_loads() {
     let user = user();
     browser(&user, &agent_browser("0.43.0"), json!({}));
     let (_, mcp) = signed_up(&user);
-    assert_eq!(connection(&user, "browser")["state"], "ready");
     let path = user.path("config/flottille/extensions.toml");
     let file = std::fs::read_to_string(&path).unwrap();
     assert!(file.contains("name = \"browser\"\n"), "{file}");
+    // `sites` widened a list of the browser's sites that is gone: a declaration written while it
+    // existed is read, the key ignored.
     std::fs::write(
         &path,
         file.replace(
@@ -6059,13 +5893,13 @@ fn a_site_added_in_the_file_waits_for_a_review() {
         ),
     )
     .unwrap();
-    // Not read by anyone yet: the connection waits, and no login reaches the new host.
-    assert_eq!(connection(&user, "browser")["state"], "awaiting review");
-    refused(mcp.call(
+    let listed = connection(&user, "browser");
+    assert_eq!(listed["state"], "ready", "{listed}");
+    assert_eq!(listed.get("sites"), None, "{listed}");
+    done(mcp.call(
         "conn_browser",
         json!({"action": "login", "arguments": {"entry": "shop-test"}}),
     ));
-    assert!(logged(&user, "browser", "login").is_empty());
 }
 
 #[test]
@@ -6117,21 +5951,16 @@ fn an_entry_bound_to_plain_http_on_another_host_is_refused_for_a_sign_in() {
         assert!(said.contains(word), "{word}: {review}");
     }
     assert!(!review.to_string().contains("s3cret"), "{review}");
-    // Its host is none of the browser's sites; the https entry still signs in.
+    // The https entry still signs in.
     done(mcp.call(
         "conn_browser",
         json!({"action": "login", "arguments": {"entry": "shop-test"}}),
     ));
-    let login = logged(&user, "browser", "login");
-    assert_eq!(allowed(&login[0]), Some(json!(["shop.example.com"])));
 }
 
 #[test]
 fn an_entry_bound_to_plain_http_on_this_machine_signs_in() {
-    for (url, host) in [
-        ("http://localhost:3000/login", "localhost"),
-        ("http://127.0.0.1:3000/login", "127.0.0.1"),
-    ] {
+    for url in ["http://localhost:3000/login", "http://127.0.0.1:3000/login"] {
         let user = user();
         browser(&user, &agent_browser("0.43.0"), json!({}));
         let (_, mcp) = signed_up(&user);
@@ -6151,11 +5980,6 @@ fn an_entry_bound_to_plain_http_on_this_machine_signs_in() {
             args.contains(&format!("\"--url\",\"{url}\"")),
             "{url}: {args}"
         );
-        assert_eq!(
-            allowed(&login[0]),
-            Some(json!([host, "shop.example.com"])),
-            "{url}"
-        );
         let review = user
             .call("connection.review", json!({"name": "browser"}))
             .unwrap();
@@ -6165,59 +5989,6 @@ fn an_entry_bound_to_plain_http_on_this_machine_signs_in() {
                 .unwrap()
                 .contains("in clear"),
             "{url}: {review}"
-        );
-    }
-}
-
-#[test]
-fn an_entry_whose_host_is_no_usable_site_is_refused() {
-    for url in [
-        "https://shop.example.com,evil.example.net/login",
-        "https://*.example.com/login",
-        "https://-shop.example.com/login",
-    ] {
-        let user = user();
-        browser(&user, &agent_browser("0.43.0"), json!({}));
-        let (_, mcp) = signed_up(&user);
-        let (_, refusal) = user
-            .call(
-                "vault.set",
-                json!({"name": "odd-test", "secret": "s3cret-of-the-odd-site", "url": url,
-                    "for": "connection:browser"}),
-            )
-            .unwrap_err();
-        assert!(
-            refusal.contains(&format!("{url} is no web address")),
-            "{url}: {refusal}"
-        );
-        // An entry saved before that refusal held this URL: it was saved with a readable one, and
-        // the store now holds the odd one, which login must refuse.
-        user.call(
-            "vault.set",
-            json!({"name": "odd-test", "secret": "s3cret-of-the-odd-site",
-                "url": "https://shop.example.com/login", "for": "connection:browser"}),
-        )
-        .unwrap();
-        url_as_stored_before(&user, "odd-test", url);
-        let said = refused(mcp.call(
-            "conn_browser",
-            json!({"action": "login", "arguments": {"entry": "odd-test"}}),
-        ));
-        assert!(
-            said.contains("cannot be one of the browser's sites"),
-            "{url}: {said}"
-        );
-        assert!(logged(&user, "browser", "login").is_empty(), "{url}");
-        // The other entry still signs in, and the list holds its host alone.
-        done(mcp.call(
-            "conn_browser",
-            json!({"action": "login", "arguments": {"entry": "shop-test"}}),
-        ));
-        let login = logged(&user, "browser", "login");
-        assert_eq!(
-            allowed(&login[0]),
-            Some(json!(["shop.example.com"])),
-            "{url}"
         );
     }
 }
@@ -6541,12 +6312,14 @@ fn a_connection_variable_cannot_choose_the_landlock_exception() {
         json!({"action": "login", "arguments": {"entry": "shop-test"}}),
     ));
     assert!(said.contains("failed"), "{said}");
-    // The reload ran with the variable, and could read nothing of the folder it names.
+    // The loads of the page ran with the variable, and could read nothing of the folder it names.
     let opened = logged(&user, "browser", "open");
-    assert_eq!(opened.len(), 1, "{opened:?}");
-    let seen = &opened[0]["display"];
-    assert_eq!(seen["XDG_RUNTIME_DIR"], runtime.to_str().unwrap(), "{seen}");
-    assert_eq!(seen["runtime_files"], Value::Null, "{seen}");
+    assert_eq!(opened.len(), 2, "{opened:?}");
+    for line in &opened {
+        let seen = &line["display"];
+        assert_eq!(seen["XDG_RUNTIME_DIR"], runtime.to_str().unwrap(), "{seen}");
+        assert_eq!(seen["runtime_files"], Value::Null, "{seen}");
+    }
 }
 
 #[test]
