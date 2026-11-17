@@ -270,11 +270,34 @@ Paths are shown relative to the place's top.
 
 | Tool | Arguments | |
 |---|---|---|
-| `fs_read` | `path`, `repository?`, `range? {offset?, length? 1..32768}`, `again?` | A page of a file, lines numbered `%6d\t`, then `(bytes a-b of N; the next page starts at offset M)` or `(…, the end of the file)`, then `{"offset", "end", "size", "next"}`. A page holds at most 32 KiB and ends after its last newline (else on a character); an offset inside a character starts at the next one. A page is cut shorter to keep the result under the limit (a file of empty lines). A page the session already read, whose file has not changed since and with no compaction of the session since, is answered in one line (see "Unchanged files"). |
+| `fs_read` | `path`, `repository?`, `range? {offset?, length? 1..32768}`, `again?` | A page of a file, lines numbered `%6d\t`, then `(bytes a-b of N; the next page starts at offset M)` or `(…, the end of the file)`, then `{"offset", "end", "size", "next"}`. A page holds at most 32 KiB and ends after its last newline (else on a character); an offset inside a character starts at the next one. A page is cut shorter to keep the result under the limit (a file of empty lines). A page the session already read, whose file has not changed since and with no compaction of the session since, is answered in one line (see "Unchanged files"). A file that is a PNG, a JPEG, a GIF or a WebP is answered as an image (see "Images"). |
 | `fs_list` | `path`, `repository?`, `depth? 1..5` | The entries, sorted, a folder's after it: `path  file  size`, `path/  folder`, `path  link  -> target`. `.git` is left out. It stops at 1000 entries, or shorter to stay under the limit, and says so. |
 | `search` | `pattern`, `repository?`, `glob?`, `cursor?` | A case-insensitive substring, not a pattern. A sorted, depth-first walk that never enters `.git` or `node_modules` nor follows a link; the top `.gitignore` applies (simple patterns: no `!`, a pattern with a `/` is anchored, a trailing `/` is a folder). A file `fs_read` refuses, a login's place (The gate, 1), is never searched. `glob` keeps to the files it matches (on the name alone without a `/`; `**` for any folders). A file with a NUL byte in its first 64 KiB is skipped and named (20 at most). Hits are `path:line: text`, trimmed and cut at 200 characters. It stops at 100 matches, 1 MiB read or the size limit, with a cursor `path:line` that resumes it. The head says the count, the stop and its cursor, the limits, the skipped files. |
 | `fs_write` | `path`, `content`, `repository?`, `why?` | The whole file, made with its folders when new. |
 | `fs_edit` | `path`, `edits [1..50] {old, new}`, `repository?`, `why?` | Each `old` must appear exactly once (overlapping occurrences count) when its turn comes, else `refused: the anchor of edit N appears K time(s) in X; it must appear exactly once. Nothing was changed`. Edits apply in order, spliced (never as a pattern: `$&` is text), all or none. |
+
+**Images.** A file whose first bytes are those of a PNG, a JPEG, a GIF or a WebP (its
+name does not matter: a text file named `.png` is read as text) is answered as the image itself, as
+the MCP `image` content of the result, beside one text line that names it: `[image: photo.jpg,
+3.1 MB JPEG, 4032×3024; scaled to 410 KB JPEG, 2000×1500, is attached]`, or `[image: piano.png,
+12 KB PNG, 800×600, is attached]` when it was sent as it is. The agent sees it as it sees a
+picture pasted in the conversation. The same gate and places apply as to any `fs_read`.
+
+- **The bound** is the one of a connection's images (`docs/extensions.md`, "Connections", "A
+  result"): at most 2 MiB sent (about 2.8 MB in base64), whatever the result's text limit says, which
+  is about text. One larger than 2000 px on its long side is scaled down, as a message's picture
+  is; one still over 2 MiB is scaled again, its long side halved down to 500 px, a PNG being tried
+  as a JPEG at each size (a JPEG of a phone's camera becomes a JPEG of 2000 px). A GIF and a WebP
+  are never scaled: past 2 MiB they are left out. A file over 32 MiB is not opened.
+- **When it is not shown** the line says why, in place of "is attached" (`[image: photo.gif,
+  8.0 MB GIF, left out: over 2 MiB]`): a file over a limit, and an agent whose provider reads no
+  image in the result of a tool (OpenCode). Nothing is refused that `fs_read` allowed. Claude
+  and Codex pass the image of a tool's result to their model.
+- **Only the start of the file is read** (`range.offset` 0, the default): a `range` that starts
+  further reads bytes as text, as it always did. Any other file, binary or not, is read as before.
+- The image is kept as a connection's is (a file of the agent's folder of images, its name in
+  `pictures` of the call's `agent.tool_served`, `docs/events.md`). **It is not scanned for
+  secrets**: masking reads text.
 
 **Unchanged files.** `fs_read` of the same range of a file (the same `range.offset` and
 `range.length`), by the same session, whose fingerprint (its SHA-256) is the one of that read, and
@@ -1898,8 +1921,13 @@ turn it runs anyway, and costs no quota.
   text (`pdf_oxide`), plain text, JSON and XML as they are. At most 30,000
   characters of text, under the result's limit, then up to 60 of the page's links, absolute;
   a longer text is cut and says so (`(cut: the text has N characters, the first 30000 are
-  shown)`). The answer names the final URL and the page's title. Another kind of content
-  (an image, an archive) fails, saying which kinds are read.
+  shown)`). The answer names the final URL and the page's title. A page that is a PNG, a JPEG,
+  a GIF or a WebP is answered as the image, as `fs_read` answers an image file ("Files",
+  "Images": the same bound, scaling and line), inside the web's own frame: `[image: <url>, 12 KB
+  PNG, 60×20, is attached]`. Another kind of content (an archive, an SVG's like) fails, saying
+  which kinds are read. The image is decoded by the daemon, not by the reader's process: the
+  bytes of a page are at most the web's download cap, and the decoder allocates no more than
+  512 MiB.
 - **A page is read apart from the daemon**: HTML and PDF are made into text by a child process,
   the daemon's own program run again (`flottille read-page`, hidden), the page on its standard
   input, with no environment, no way to gain a privilege (`no_new_privs`), at most 512 MiB of
