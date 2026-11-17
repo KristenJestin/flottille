@@ -51,6 +51,8 @@ const SAID_AGAIN: Duration = Duration::from_secs(60);
 const MOST_SAID: usize = 16;
 /// How often the addresses one machine told are written, at most: the latest told is kept.
 const LEARN_EVERY: Duration = Duration::from_secs(2);
+/// How long the links wait at start for the hub's list, before they go on with the one kept.
+const FIRST_LIST: Duration = Duration::from_secs(10);
 /// What a client's request over a link is answered, until they are served (#813).
 const NOT_SERVED: &str = "requests from another machine's clients are not served yet";
 
@@ -181,6 +183,10 @@ pub struct Remote {
     writing: Mutex<()>,
     /// The control session to the hub.
     control: std::sync::OnceLock<Arc<crate::hub_session::Control>>,
+    /// Raised once the hub's list was taken at start, or the hub could not give one: until then,
+    /// no link is accepted or dialled, so that a machine off during a removal never links to the
+    /// removed machine by the list it kept.
+    heard: tokio::sync::watch::Sender<bool>,
     emit: Emit,
 }
 
@@ -260,6 +266,7 @@ impl Remote {
             learning: Mutex::new(HashMap::new()),
             writing: Mutex::new(()),
             control: std::sync::OnceLock::new(),
+            heard: tokio::sync::watch::Sender::new(false),
             emit,
         }
     }
@@ -316,6 +323,17 @@ impl Remote {
                 link.close(REMOVED);
             }
         }
+    }
+
+    /// The hub's list was taken, or the hub cannot give one now: the links go on.
+    pub(crate) fn heard_hub(&self) {
+        self.heard.send_replace(true);
+    }
+
+    /// Until the hub was heard, `FIRST_LIST` at most.
+    async fn hub_heard(&self) {
+        let mut heard = self.heard.subscribe();
+        let _ = tokio::time::timeout(FIRST_LIST, heard.wait_for(|heard| *heard)).await;
     }
 
     /// Closes every link, telling the other machines.
@@ -669,6 +687,7 @@ async fn accept(remote: Arc<Remote>) {
         .flatten()
         .and_then(|text| text.parse().ok())
         .map(Duration::from_millis);
+    remote.hub_heard().await;
     while let Some(accepting) = remote.endpoint.accept().await {
         let key = accepting.peer();
         let Some(peer) = remote.trusted(&key) else {
@@ -733,6 +752,10 @@ async fn serve_clients(link: Link) {
 /// Every round: dials each machine trusted and not linked whose turn has come, and tells the
 /// linked ones the addresses of this machine that changed.
 async fn dial(remote: Arc<Remote>, mut stopping: tokio::sync::watch::Receiver<bool>) {
+    tokio::select! {
+        _ = remote.hub_heard() => {}
+        _ = stopping.wait_for(|stopping| *stopping) => return,
+    }
     let mut round = tokio::time::interval(ROUND);
     loop {
         tokio::select! {

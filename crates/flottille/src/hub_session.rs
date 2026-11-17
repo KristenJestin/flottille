@@ -639,6 +639,9 @@ pub async fn run(
                 None
             }
         };
+        if pinned.is_none() {
+            remote.heard_hub();
+        }
         if let Some(device) = pinned {
             let authority = HubUrl::parse(&device.url)
                 .map(|url| url.authority())
@@ -653,7 +656,9 @@ pub async fn run(
                     unreachable_since = None;
                     wait = ROUND;
                     control.set("connected", None);
-                    match keep_session(&control, &remote, device, session, &mut stopping).await {
+                    let ended = keep_session(&control, &remote, device, session, &mut stopping).await;
+                    remote.heard_hub();
+                    match ended {
                         Ended::Stopping => return,
                         Ended::Again => continue,
                         Ended::Lost(why) => Some(why),
@@ -675,6 +680,8 @@ pub async fn run(
                     Some(why)
                 }
             };
+            // No list from the hub this time: the links go on with the one kept.
+            remote.heard_hub();
             if let Some(why) = why {
                 let since = unreachable_since.get_or_insert_with(jiff::Zoned::now);
                 control.set(
@@ -753,6 +760,7 @@ async fn keep_session(
                                 ListError::Refused(_) => "refused",
                             };
                             control.set(state, Some(refused.to_string()));
+                            remote.heard_hub();
                             continue;
                         }
                     },
@@ -771,6 +779,7 @@ async fn keep_session(
                 }
                 if let Some(members) = &members {
                     trust(remote, &control.key.public(), members, &addresses);
+                    remote.heard_hub();
                 }
             }
             _ = round.tick() => {

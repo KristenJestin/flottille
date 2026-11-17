@@ -1131,3 +1131,46 @@ fn opened(mut watcher: &std::fs::File) -> Vec<String> {
         }
     }
 }
+
+#[test]
+fn a_machine_off_during_a_removal_never_links_to_the_removed_machine() {
+    let hub = TestHub::new();
+    let (pc, server, laptop) = (
+        Machine::new(Some("127.0.0.1:0")),
+        Machine::new(Some("127.0.0.1:0")),
+        Machine::new(Some("127.0.0.1:0")),
+    );
+    members(&hub, &pc, &server);
+    pair(&pc, &laptop, "laptop", "runner");
+    server.wait_for("laptop", "online");
+    laptop.wait_for("server", "online");
+    let linked_to_laptop = |events: Vec<Value>| {
+        events
+            .iter()
+            .filter(|event| event["name"] == "laptop")
+            .count()
+    };
+
+    // The server is off while the laptop is removed; the laptop, which the hub now refuses, still
+    // trusts the server by the list it kept, and dials it.
+    let before = linked_to_laptop(server.events("remote.connected"));
+    assert!(server.user.run(&["daemon", "stop"]).status.success());
+    let removed = pc.user.run(&["remote", "remove", "laptop"]);
+    assert!(
+        removed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&removed.stderr)
+    );
+    pc.wait_for_member("laptop", false);
+
+    // On again, with the hub reachable: it hears the removal before it links to anything.
+    server.user.status();
+    server.wait_for_member("laptop", false);
+    server.wait_for("pc", "online");
+    assert_eq!(
+        linked_to_laptop(server.events("remote.connected")),
+        before,
+        "the server linked to the removed laptop\n{}",
+        server.log()
+    );
+}
