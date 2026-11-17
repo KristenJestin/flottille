@@ -188,26 +188,60 @@ impl DeviceKey {
     /// in `folder` as the machine key is (`device.key`, 600). A keyring that is there but fails is
     /// said: a file instead would give the same device a second identity.
     pub fn load_or_make(keyring: &impl Keyring, folder: &Path) -> Result<DeviceKey, KeyError> {
-        let failed = |why: String| KeyError(format!("the device key's keyring failed: {why}"));
+        if let Some(key) = DeviceKey::load(keyring, folder)? {
+            return Ok(key);
+        }
+        DeviceKey::make()?.keep(keyring, folder)
+    }
+
+    /// The key kept in the session's keyring, or with no keyring in `folder`; `None` when there
+    /// is none yet.
+    pub fn load(keyring: &impl Keyring, folder: &Path) -> Result<Option<DeviceKey>, KeyError> {
+        match keyring.read(&DEVICE_ATTRIBUTES) {
+            Ok(Some(seed)) => from_seed(&seed)
+                .map(DeviceKey)
+                .map(Some)
+                .ok_or_else(|| KeyError(format!("the keyring's item {DEVICE_LABEL} is not a key"))),
+            Ok(None) => Ok(None),
+            Err(KeyringError::Absent) => {
+                private_folder(folder)?;
+                read_file(&folder.join(DEVICE_FILE)).map(|key| key.map(DeviceKey))
+            }
+            Err(KeyringError::Failed(why)) => Err(keyring_failed(why)),
+        }
+    }
+
+    /// A new key, in memory only until it is kept: a device that joins keeps its key once the
+    /// join succeeded, so that a join that did not makes a new one (`docs/remote.md`, "Pairing").
+    pub fn make() -> Result<DeviceKey, KeyError> {
+        generate().map(DeviceKey)
+    }
+
+    /// Keeps this key where `load` reads it, when no key is kept there yet; the key kept then,
+    /// which is another one when another client kept its own at the same moment.
+    pub fn keep(self, keyring: &impl Keyring, folder: &Path) -> Result<DeviceKey, KeyError> {
         match keyring.read(&DEVICE_ATTRIBUTES) {
             Ok(Some(seed)) => from_seed(&seed)
                 .map(DeviceKey)
                 .ok_or_else(|| KeyError(format!("the keyring's item {DEVICE_LABEL} is not a key"))),
-            Ok(None) => {
-                let key = generate()?;
-                match keyring.store(DEVICE_LABEL, &DEVICE_ATTRIBUTES, key.as_bytes()) {
-                    Ok(()) => Ok(DeviceKey(key)),
-                    Err(KeyringError::Failed(why)) => Err(failed(why)),
-                    Err(KeyringError::Absent) => {
-                        Err(failed("it was there, then was not".to_owned()))
-                    }
+            Ok(None) => match keyring.store(DEVICE_LABEL, &DEVICE_ATTRIBUTES, self.0.as_bytes()) {
+                Ok(()) => Ok(self),
+                Err(KeyringError::Failed(why)) => Err(keyring_failed(why)),
+                Err(KeyringError::Absent) => {
+                    Err(keyring_failed("it was there, then was not".to_owned()))
                 }
-            }
+            },
+            Err(KeyringError::Failed(why)) => Err(keyring_failed(why)),
             Err(KeyringError::Absent) => {
                 private_folder(folder)?;
-                load_or_make_file(&folder.join(DEVICE_FILE)).map(DeviceKey)
+                let file = folder.join(DEVICE_FILE);
+                remove_left_behind(&file);
+                // Linked into place, never over a key that is there.
+                write_new(&file, self.0.as_bytes())?;
+                read_file(&file)?
+                    .map(DeviceKey)
+                    .ok_or_else(|| KeyError(format!("{} was made, then was gone", file.display())))
             }
-            Err(KeyringError::Failed(why)) => Err(failed(why)),
         }
     }
 
@@ -222,6 +256,10 @@ impl fmt::Debug for DeviceKey {
             .field(&self.public().fingerprint())
             .finish()
     }
+}
+
+fn keyring_failed(why: String) -> KeyError {
+    KeyError(format!("the device key's keyring failed: {why}"))
 }
 
 /// `N` bytes from the operating system's random generator.

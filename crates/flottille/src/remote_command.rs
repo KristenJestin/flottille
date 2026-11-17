@@ -146,13 +146,13 @@ pub fn run(paths: &Paths, action: RemoteAction) -> Result<ExitCode> {
     let action = match action {
         RemoteAction::Address { action } => action,
         RemoteAction::Invite { json } => {
-            let device = device_key(paths)?;
             let hub: flottille_link::PublicKey =
                 serde_json::from_value(ask("remote.machines", json!({}))?["hub"]["key"].clone())
                     .map_err(|_| {
                         "this machine is not set up with a hub: flottille remote setup, or \
                          flottille remote join"
                     })?;
+            let device = device_key(paths)?;
             let ask_ = flottille_link::InvitationAsk::sign(&hub, unix_now(), &device)?;
             let invited = ask("remote.invite", json!({"ask": ask_}))?;
             if json {
@@ -173,7 +173,7 @@ pub fn run(paths: &Paths, action: RemoteAction) -> Result<ExitCode> {
         RemoteAction::Join { json } => {
             let code = read_code("The invitation's code: ", "no invitation code")?;
             let invitation = flottille_link::Invitation::from_code(&code)?;
-            let device = device_key(paths)?;
+            let (mut device, new) = device_key_to_join(paths)?;
             let words = invitation.words(&device.public());
             if json {
                 println!("{}", json!({"words": words}));
@@ -191,6 +191,9 @@ pub fn run(paths: &Paths, action: RemoteAction) -> Result<ExitCode> {
                 "remote.join",
                 json!({"code": code.as_str(), "key": device.public()}),
             )?;
+            if new {
+                device = keep_new(paths, device)?;
+            }
             let head: flottille_link::ChangeHash =
                 serde_json::from_value(accepted["head"].clone())?;
             // Claimed by the machine's daemon, which holds its key.
@@ -353,7 +356,7 @@ pub fn run(paths: &Paths, action: RemoteAction) -> Result<ExitCode> {
                 None => host_name()?,
             };
             let code = read_code("The hub's setup code: ", "no setup code")?;
-            let device = device_key(paths)?;
+            let (device, new) = device_key_to_join(paths)?;
             let machine: flottille_link::PublicKey =
                 serde_json::from_value(ask("remote.machines", json!({}))?["this"]["key"].clone())?;
             let mut list = flottille_link::MemberList::start(&name, &device)?;
@@ -374,6 +377,9 @@ pub fn run(paths: &Paths, action: RemoteAction) -> Result<ExitCode> {
                     "replace": replace,
                 }),
             )?;
+            if new {
+                keep_new(paths, device)?;
+            }
             if json {
                 println!("{set}");
             } else {
@@ -469,16 +475,53 @@ fn read_code(prompt: &str, none: &str) -> Result<zeroize::Zeroizing<String>> {
     Ok(trimmed)
 }
 
-/// The device key of this user session's clients: in the session's keyring, or, with none,
-/// `remote/device.key`, made there the first time.
+/// The device key of this user session's clients, a member's: in the session's keyring, or, with
+/// none, `remote/device.key`. Only a setup or a join that succeeded keeps one.
 fn device_key(paths: &Paths) -> Result<flottille_link::DeviceKey> {
+    kept_device_key(paths)?.ok_or_else(|| {
+        "this device holds no key of a member: flottille remote setup, or flottille remote join"
+            .into()
+    })
+}
+
+fn kept_device_key(paths: &Paths) -> Result<Option<flottille_link::DeviceKey>> {
     let folder = crate::remote::folder(paths);
     let key = if crate::vault::memory_chosen(paths) {
-        flottille_link::DeviceKey::load_or_make(&NoKeyring, &folder)
+        flottille_link::DeviceKey::load(&NoKeyring, &folder)
     } else {
-        flottille_link::DeviceKey::load_or_make(&SessionKeyring, &folder)
+        flottille_link::DeviceKey::load(&SessionKeyring, &folder)
     };
     Ok(key?)
+}
+
+/// The device key a setup or a join is made with: the one kept, or a new one, kept only once the
+/// hub took it (`keep_new`). A join that did not succeed leaves no key behind, so the next one
+/// sends a key the hub never saw, whose words it could not have searched a token for
+/// (`docs/remote.md`, "Pairing").
+fn device_key_to_join(paths: &Paths) -> Result<(flottille_link::DeviceKey, bool)> {
+    Ok(match kept_device_key(paths)? {
+        Some(key) => (key, false),
+        None => (flottille_link::DeviceKey::make()?, true),
+    })
+}
+
+/// Keeps `key`, the new key a setup or a join succeeded with.
+fn keep_new(paths: &Paths, key: flottille_link::DeviceKey) -> Result<flottille_link::DeviceKey> {
+    let folder = crate::remote::folder(paths);
+    let public = key.public();
+    let kept = if crate::vault::memory_chosen(paths) {
+        key.keep(&NoKeyring, &folder)
+    } else {
+        key.keep(&SessionKeyring, &folder)
+    }?;
+    if kept.public() != public {
+        return Err(
+            "another client kept a device key at the same moment: run flottille remote \
+                    members to see which one is a member"
+                .into(),
+        );
+    }
+    Ok(kept)
 }
 
 /// No keyring: a test build whose configuration keeps the daemon's secrets in its memory.
