@@ -228,6 +228,73 @@ fn the_window_draws_no_frame_at_rest_on_each_tab_of_the_project_page(cx: &mut Te
 }
 
 #[gpui_kit::test]
+fn the_window_draws_no_frame_at_rest_on_a_prepared_workspace_s_page_with_its_time_to_ready(
+    cx: &mut TestAppContext,
+) {
+    let user = User::with_fake_agent();
+    idle_session(&user);
+    // A step that takes a little time, so that the workspace has a total to say.
+    let script = user.path("tools/slow.sh");
+    std::fs::create_dir_all(script.parent().unwrap()).unwrap();
+    std::fs::write(&script, "sleep 0.3\n").unwrap();
+    let file = user.project_file("app");
+    let mut text = std::fs::read_to_string(&file).unwrap();
+    text.push_str(&format!("\n[[setup]]\nrun = \"sh {}\"\n", script.display()));
+    std::fs::write(file, text).unwrap();
+    user.call(
+        "workspace.create",
+        json!({"project": "app", "name": "login"}),
+    )
+    .unwrap();
+    eventually("the workspace is ready", || {
+        user.call("workspace.show", json!({"project": "app", "name": "login"}))
+            .unwrap()["state"]
+            == "ready"
+    });
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the project is known", |cx| {
+        shell.read_with(cx, |s, _| !s.snapshot().projects.is_empty())
+    });
+    shell.update_in(cx, |s, window, cx| {
+        s.open(Selection::Project("app".into()), window, cx)
+    });
+    let said = |id: &str, cx: &mut VisualTestContext| {
+        let id = id.to_owned();
+        cx.update(|window, _| {
+            window
+                .try_find(id)
+                .and_then(|found| found.label().map(str::to_owned))
+        })
+    };
+    until(&shell, cx, "the place says how long it took", |cx| {
+        said("place-total-login", cx).is_some()
+    });
+    settle(&shell, cx);
+
+    assert!(
+        said("place-total-login", cx).is_some_and(|total| total.starts_with("ready in ")),
+        "{:?}",
+        said("place-total-login", cx)
+    );
+    // It comes in through an entrance (with its separator), and its steps' times are one folded,
+    // labelled line away.
+    assert!(
+        said("place-total-enter-login", cx).is_some()
+            || cx.update(|window, _| window.try_find("place-total-enter-login").is_some()),
+        "the total enters"
+    );
+    assert_eq!(
+        said("place-times-login", cx).as_deref(),
+        Some("How long it took")
+    );
+    assert_eq!(
+        frames_at_rest(&shell, cx),
+        (0, 0),
+        "(frames drawn, frames asked)"
+    );
+}
+
+#[gpui_kit::test]
 fn the_window_draws_no_frame_at_rest_on_add_a_project_with_its_folder_detected(
     cx: &mut TestAppContext,
 ) {

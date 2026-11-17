@@ -278,6 +278,13 @@ pub(super) fn browser_started(daemon: &Daemon, name: &str, browser: super::adapt
     *server_of(daemon, name).browser.lock().unwrap() = Some(browser);
 }
 
+/// The display folder of the browser that may run for the connection, while it is not closed.
+pub(super) fn browser_display(daemon: &Daemon, name: &str) -> Option<crate::display::Shown> {
+    let server = existing(daemon, name)?;
+    let browser = server.browser.lock().unwrap();
+    browser.as_ref()?.shown.clone()
+}
+
 /// Whether the connection's server runs.
 pub fn running(daemon: &Daemon, name: &str) -> bool {
     existing(daemon, name)
@@ -585,7 +592,9 @@ async fn start_with(
                 Some(_) => {
                     (display, headless) =
                         super::adapters::shown(daemon, declaration, &declaration.name);
-                    if let Some(browser) = super::adapters::browser(daemon, declaration) {
+                    if let Some(browser) =
+                        super::adapters::browser(daemon, declaration, display.as_ref())
+                    {
                         browser_started(daemon, &declaration.name, browser);
                     }
                     super::adapters::start_options(&folder, display.is_some())?

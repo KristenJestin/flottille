@@ -25,6 +25,7 @@ use crate::mcp::{Grant, Outcome, arguments, workspace_named};
 use crate::place::{Place, Resolved};
 use crate::projects::{self, Failure};
 use crate::tree::Relation;
+use crate::workspaces::took_said;
 
 /// The tools of this module.
 pub const TOOLS: [&str; 6] = [
@@ -713,6 +714,10 @@ fn posted_says(args: &Value) -> Vec<String> {
     }
     if let Some(parent) = args["parent"].as_str() {
         says.push(format!("It puts it under {}", parent.trim().to_uppercase()));
+    }
+    // Each field a Jira work item is given, with its value as it is sent.
+    for (field, value) in args["fields"].as_object().into_iter().flatten() {
+        says.push(format!("It sets the field {field}: {value}"));
     }
     // A `null` assignee is how an edit takes the assignee away.
     if args["action"] == "edit" && args["assignee"].is_null() && args.get("assignee").is_some() {
@@ -1679,11 +1684,14 @@ async fn performed(
             };
             match call.action.as_str() {
                 "list" => workspaces_text(daemon, &project),
-                "show" => Ok(workspace_text(&named_workspace(
-                    daemon,
-                    grant,
-                    call.name.as_deref(),
-                )?)),
+                "show" => {
+                    let workspace = named_workspace(daemon, grant, call.name.as_deref())?;
+                    let ready_at = daemon
+                        .read(|store| store.workspace_ready_at(workspace.id))
+                        .map_err(|error| Outcome::Failed(error.to_string()))?
+                        .filter(|_| workspace.state() == State::Ready);
+                    Ok(workspace_text(&workspace, ready_at))
+                }
                 "create" => {
                     let bases = match call.base.clone() {
                         Some(base) => base
@@ -2325,7 +2333,7 @@ fn workspace_line(workspace: &Workspace) -> String {
 }
 
 /// A workspace whole: its line, its folder, and each step of its preparation with its state.
-fn workspace_text(workspace: &Workspace) -> String {
+fn workspace_text(workspace: &Workspace, ready_at: Option<u64>) -> String {
     let mut text = format!(
         "Workspace {}\nFolder: {}\nIts preparation:\n",
         workspace_line(workspace),
@@ -2336,7 +2344,14 @@ fn workspace_text(workspace: &Workspace) -> String {
             Some(set) => step_said(&set),
             None => format!("the copy of {}", step.repository.as_deref().unwrap_or(".")),
         };
-        text.push_str(&format!("{}. {what}: {}\n", at + 1, step.state.as_str()));
+        let took = step
+            .duration_ms
+            .map_or(String::new(), |took| format!(" · {}", took_said(took)));
+        text.push_str(&format!(
+            "{}. {what}: {}{took}\n",
+            at + 1,
+            step.state.as_str()
+        ));
         if let Some(failure) = &step.failure {
             text.push_str(&format!(
                 "   {}: {}\n",
@@ -2344,6 +2359,12 @@ fn workspace_text(workspace: &Workspace) -> String {
                 failure.output.trim_end()
             ));
         }
+    }
+    if let Some(at) = ready_at {
+        text.push_str(&format!(
+            "Ready in {}, from the request.\n",
+            took_said(at.saturating_sub(workspace.created_at))
+        ));
     }
     if workspace.state() == State::Failed {
         text.push_str(&format!(

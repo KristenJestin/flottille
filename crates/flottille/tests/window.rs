@@ -12287,6 +12287,84 @@ fn a_preparing_workspace_lists_its_steps_and_their_states_change_with_motion(
 }
 
 #[gpui_kit::test]
+fn a_ready_workspace_keeps_each_step_s_time_folded_and_unfolds_it_with_motion(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    project(&user, "atlas");
+    recipe(&user, "atlas", "sleep 0.2\n");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    cx.simulate_resize(size(px(1280.), px(1400.)));
+    open_project(&shell, "atlas", cx);
+    user.call(
+        "workspace.create",
+        json!({"project": "atlas", "name": "onboarding"}),
+    )
+    .unwrap();
+    until(&shell, cx, "the workspace is ready", |cx| {
+        card_of(&shell, Some("onboarding"), cx).is_some_and(|card| {
+            card.read_with(cx, |c, _| c.data().preparation == Preparation::Ready)
+        })
+    });
+    settle(cx);
+    let gone = |id: &str, cx: &mut VisualTestContext| {
+        let id = id.to_owned();
+        cx.update(|window, _| window.try_find(id).is_none())
+    };
+
+    // Ready: its setup is folded away, and a labelled line offers its times, folded.
+    assert!(gone("setup-onboarding", cx), "no setup block any more");
+    assert_eq!(
+        text_of("place-times-onboarding", cx).as_deref(),
+        Some("How long it took")
+    );
+    assert!(
+        gone("place-times-onboarding-body", cx),
+        "folded, its steps are not drawn"
+    );
+    assert_eq!(cx.update(|window, cx| window.simulate_next_frame(cx)), 0);
+
+    cx.update(|window, cx| window.click("place-times-onboarding", cx));
+    assert!(
+        cx.update(|window, cx| window.simulate_next_frame(cx)) > 0,
+        "it unfolds with motion"
+    );
+    run_for(Duration::from_secs(1), cx);
+    // The reach of the remote, then every step, the checkout too, each with its time.
+    assert_eq!(
+        text_of("made-step-onboarding-0", cx).as_deref(),
+        Some("Fetch .")
+    );
+    assert_eq!(
+        text_of("made-step-onboarding-1", cx).as_deref(),
+        Some("Check out .")
+    );
+    let steps = card_of(&shell, Some("onboarding"), cx)
+        .unwrap()
+        .read_with(cx, |c, _| c.data().made.len());
+    assert!(
+        steps >= 3,
+        "the fetch, the checkout and the recipe: {steps}"
+    );
+    for at in 0..steps {
+        assert!(
+            text_of(&format!("made-time-onboarding-{at}"), cx).is_some_and(|t| t.ends_with('s')),
+            "row {at} says how long it took: {:?}",
+            text_of(&format!("made-time-onboarding-{at}"), cx)
+        );
+    }
+    assert_eq!(cx.update(|window, cx| window.simulate_next_frame(cx)), 0);
+
+    cx.update(|window, cx| window.click("place-times-onboarding", cx));
+    assert!(
+        cx.update(|window, cx| window.simulate_next_frame(cx)) > 0,
+        "it folds away with motion"
+    );
+    run_for(Duration::from_secs(1), cx);
+    assert!(gone("place-times-onboarding-body", cx));
+}
+
+#[gpui_kit::test]
 fn a_run_row_opens_the_run_drawer_and_escape_closes_it(cx: &mut TestAppContext) {
     let user = user().with_fake_escalation();
     let folder = project(&user, "atlas");
