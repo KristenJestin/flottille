@@ -2654,10 +2654,10 @@ pub fn kill_orphans(store: &Store) {
 }
 
 /// Kills the process group of `pid` when it is still the process started at `started`, then
-/// forgets it.
+/// forgets it. Through pidfds (`children::end_group_led`): never by the bare pid, which a
+/// program of the user's may have taken since.
 fn kill_left(store: &Store, pid: u32, started: u64) {
-    if start_time(pid) == Some(started) {
-        signal_group(pid, libc::SIGKILL);
+    if crate::children::end_group_led(pid, started) {
         eprintln!("flottille daemon: killed the agent process {pid} that was left running");
     }
     let _ = store.remove_process(pid);
@@ -2806,6 +2806,61 @@ mod tests {
         assert!(store.processes().unwrap().is_empty());
         let _ = other.kill();
         let _ = other.wait();
+    }
+
+    /// The body of the function `name` in the daemon's code: from its signature to the closing
+    /// brace at the margin.
+    fn body_of(source: &'static str, name: &str) -> &'static str {
+        let from = source.find(name).unwrap_or_else(|| panic!("no {name}"));
+        let rest = &source[from..];
+        &rest[..rest.find("\n}\n").unwrap()]
+    }
+
+    #[test]
+    fn an_orphan_agent_whose_pid_was_reused_is_not_signalled() {
+        use std::io::BufRead;
+        use std::os::unix::process::CommandExt;
+        let store = Store::open_in_memory().unwrap();
+        // A leader and a member of its group, which no process that merely took the leader's pid
+        // owns: both are left alone when the record's start time is not theirs.
+        let mut leader = std::process::Command::new("sh")
+            .args(["-c", "sleep 30 & echo $!; wait"])
+            .process_group(0)
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut line = String::new();
+        std::io::BufReader::new(leader.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        let member: u32 = line.trim().parse().unwrap();
+        store
+            .add_process(
+                leader.id(),
+                start_time(leader.id()).unwrap() + 1,
+                "a",
+                crate::children::boot(),
+            )
+            .unwrap();
+
+        kill_orphans(&store);
+
+        assert!(
+            alive(leader.id()) && alive(member),
+            "a reused pid was signalled"
+        );
+        assert!(store.processes().unwrap().is_empty());
+        // The orphan is ended through a pidfd, never by its bare pid or its group's.
+        let source = include_str!("agents.rs");
+        let left = body_of(source, "fn kill_left(");
+        assert!(
+            !left.contains("signal_group") && !left.contains("killpg"),
+            "kill_left signals by bare pid:\n{left}"
+        );
+        let _ = leader.kill();
+        let _ = leader.wait();
+        // SAFETY: the member is the sleep this test started; its pid is held by the leader's group.
+        unsafe { libc::kill(member as i32, libc::SIGKILL) };
     }
 
     #[test]

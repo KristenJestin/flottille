@@ -1254,7 +1254,8 @@ async fn follow(
     // What it left in the background holds the pipe and would keep running unseen: it ends with
     // the run, even in a group of its own, and what is already in the pipe is read without
     // waiting for it.
-    signal_group(pid, libc::SIGKILL);
+    // Through the session's members' pidfds: the leader is reaped, so its pid, and its group's
+    // number, may be a stranger's by now.
     crate::children::end_session(pid).await;
     // Its display goes with it.
     going.display.lock().unwrap().take();
@@ -2545,6 +2546,73 @@ pub async fn stop_all(daemon: &Daemon) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_run_whose_leader_was_reaped_signals_only_its_own_members() {
+        use std::io::BufRead;
+        use std::os::unix::process::CommandExt;
+        // A run's session: its leader ends at once, a member of it goes on.
+        let mut leader = std::process::Command::new("sh");
+        leader
+            .args(["-c", "sleep 30 & echo $!"])
+            .stdout(std::process::Stdio::piped());
+        // SAFETY: setsid is async-signal-safe, which is all a pre_exec closure may call.
+        unsafe {
+            leader.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            })
+        };
+        let mut leader = leader.spawn().unwrap();
+        let pid = leader.id();
+        let mut line = String::new();
+        std::io::BufReader::new(leader.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        let member: u32 = line.trim().parse().unwrap();
+        let mut stranger = std::process::Command::new("sleep")
+            .arg("30")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        leader.wait().unwrap();
+
+        crate::children::end_session_now(pid);
+
+        let mut waited = 0;
+        while crate::agents::start_time(member).is_some() && waited < 100 {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            waited += 1;
+        }
+        let stat = std::fs::read_to_string(format!("/proc/{member}/stat")).unwrap_or_default();
+        assert!(
+            stat.is_empty()
+                || stat
+                    .rsplit_once(')')
+                    .unwrap()
+                    .1
+                    .trim_start()
+                    .starts_with('Z'),
+            "the run's member still runs"
+        );
+        assert!(
+            crate::agents::start_time(stranger.id()).is_some(),
+            "a process that is not the run's was signalled"
+        );
+        let _ = stranger.kill();
+        let _ = stranger.wait();
+        // What follows the leader's reaping signals through pidfds, never by the leader's pid.
+        let source = include_str!("runs.rs");
+        let follow = &source[source.find("async fn follow(").unwrap()..];
+        let ending = &follow[follow.find("What it left in the background").unwrap()..];
+        let ending = &ending[..ending.find("going.display").unwrap()];
+        assert!(
+            !ending.contains("signal_group"),
+            "follow signals a reaped leader's group by its pid:\n{ending}"
+        );
+    }
 
     #[test]
     fn a_run_s_pushes_are_walled() {

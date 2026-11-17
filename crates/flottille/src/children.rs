@@ -162,6 +162,20 @@ pub fn end_session_now(leader: u32) {
 /// while one is found, up to `ROUNDS` times, after a pause that grows: a process may start
 /// another as it is killed, and a killed one takes a moment to leave.
 pub fn end_session_where(leader: u32, ours: impl Fn(u32) -> bool) -> bool {
+    end_where(Scope::Session, leader, ours)
+}
+
+/// What `leader` leads, and what `end_where` reads of each process to tell it is in it.
+#[derive(Clone, Copy)]
+enum Scope {
+    /// The session of a `setsid` leader (`in_own_session`).
+    Session,
+    /// The process group of a `process_group(0)` leader: an agent's.
+    Group,
+}
+
+/// `end_session_where`, for the session or the group `leader` leads.
+fn end_where(scope: Scope, leader: u32, ours: impl Fn(u32) -> bool) -> bool {
     let mut any = false;
     for round in 0..ROUNDS {
         if round > 0 {
@@ -169,13 +183,13 @@ pub fn end_session_where(leader: u32, ours: impl Fn(u32) -> bool) -> bool {
         }
         let mut found = false;
         for pid in processes() {
-            if !in_session(pid, leader) {
+            if !led(pid, scope, leader) {
                 continue;
             }
             let Some(fd) = pidfd(pid) else {
                 continue;
             };
-            if in_session(pid, leader) && ours(pid) {
+            if led(pid, scope, leader) && ours(pid) {
                 found = true;
                 any = true;
                 kill_through(fd);
@@ -206,6 +220,27 @@ pub fn end_session_led(leader: u32, at: u64) -> bool {
     unsafe { libc::close(fd) };
     if same {
         end_session_now(leader);
+    }
+    same
+}
+
+/// Ends the process group `leader` leads (an agent's: `process_group(0)`, not a session), when
+/// `leader` is still the process that started at `at`: whether it was. As `end_session_led`: the
+/// leader through a pidfd opened before its start is read, then the group's members, each through
+/// its own. Without a pidfd, nothing is signalled, and never a group by its bare number: it may
+/// be empty by then, and its number a stranger's.
+pub fn end_group_led(leader: u32, at: u64) -> bool {
+    let Some(fd) = pidfd(leader) else {
+        return false;
+    };
+    let same = start_time(leader) == Some(at);
+    if same {
+        kill_through(fd);
+    }
+    // SAFETY: the descriptor is ours and closed once.
+    unsafe { libc::close(fd) };
+    if same {
+        end_where(Scope::Group, leader, |_| true);
     }
     same
 }
@@ -253,7 +288,18 @@ static PIDFD_FAILED: Once = Once::new();
 
 /// Whether the process runs in the session `leader` leads; one that ended runs nothing.
 fn in_session(pid: u32, leader: u32) -> bool {
-    stat(pid).is_some_and(|stat| stat.session == leader && !matches!(stat.state, 'Z' | 'X'))
+    led(pid, Scope::Session, leader)
+}
+
+/// Whether the process runs in what `leader` leads; one that ended runs nothing.
+fn led(pid: u32, scope: Scope, leader: u32) -> bool {
+    stat(pid).is_some_and(|stat| {
+        let number = match scope {
+            Scope::Session => stat.session,
+            Scope::Group => stat.group,
+        };
+        number == leader && !matches!(stat.state, 'Z' | 'X')
+    })
 }
 
 fn processes() -> Vec<u32> {
@@ -301,6 +347,7 @@ pub fn reap_strays() {
 struct Stat {
     state: char,
     parent: u32,
+    group: u32,
     session: u32,
     /// In clock ticks after boot.
     started: u64,
@@ -313,6 +360,7 @@ fn stat(pid: u32) -> Option<Stat> {
     Some(Stat {
         state: fields.first()?.chars().next()?,
         parent: fields.get(1)?.parse().ok()?,
+        group: fields.get(2)?.parse().ok()?,
         session: fields.get(3)?.parse().ok()?,
         started: fields.get(19)?.parse().ok()?,
     })
@@ -362,6 +410,55 @@ mod tests {
         // No such process: refused rather than guessed.
         assert!(descends_from(u32::MAX, own));
         assert!(descends_from(0, own));
+    }
+
+    fn gone(pid: u32) -> bool {
+        for _ in 0..100 {
+            if stat(pid).is_none_or(|stat| matches!(stat.state, 'Z' | 'X')) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        false
+    }
+
+    #[test]
+    fn a_group_led_is_ended_with_its_members_and_never_a_stranger() {
+        use std::io::BufRead;
+        use std::os::unix::process::CommandExt;
+        let mut leader = std::process::Command::new("sh")
+            .args(["-c", "sleep 30 & echo $!; wait"])
+            .process_group(0)
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut line = String::new();
+        std::io::BufReader::new(leader.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        let member: u32 = line.trim().parse().unwrap();
+        let mut stranger = std::process::Command::new("sleep")
+            .arg("30")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let at = start_time(leader.id()).unwrap();
+
+        // Not the process it was recorded as: nothing is signalled.
+        assert!(!end_group_led(leader.id(), at + 1));
+        assert!(!gone(leader.id()) && !gone(member));
+
+        assert!(end_group_led(leader.id(), at));
+        let _ = leader.wait();
+        assert!(gone(member), "a member of the group still runs");
+        assert!(
+            !gone(stranger.id()),
+            "a process of another group was killed"
+        );
+        // The group is empty now: its number is nobody's, and nothing answers to it.
+        assert!(!end_group_led(leader.id(), at));
+        let _ = stranger.kill();
+        let _ = stranger.wait();
     }
 
     /// The code of the daemon's, before its tests: what the daemon runs.
