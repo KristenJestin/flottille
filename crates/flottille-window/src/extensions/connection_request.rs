@@ -351,6 +351,11 @@ impl ConnectionRequest {
                     {
                         self.confirming = None;
                     }
+                    // A request no longer current offers nothing to mend: its New entry… block
+                    // folds away with the rest.
+                    if proposal.as_ref().is_ok_and(|p| !p.current) {
+                        self.waits_for = None;
+                    }
                     self.proposal = Some(proposal);
                 }
             }
