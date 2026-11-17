@@ -201,6 +201,46 @@ fn a_folder_that_cannot_be_registered_is_refused_in_a_sentence() {
 }
 
 #[test]
+fn a_folder_typed_with_a_tilde_is_the_home_s() {
+    let user = User::new();
+    let app = user.path("home/Projects/kit");
+    user.git_init(&app);
+    let home = user.path("home");
+    user.git_init(&home);
+
+    let found = user
+        .call("project.detect", folder(Path::new("~/Projects/kit")))
+        .unwrap();
+    let project = user
+        .call("project.add", folder(Path::new("~/Projects/kit")))
+        .unwrap();
+    let home_itself = user.call("project.detect", folder(Path::new("~"))).unwrap();
+
+    assert_eq!(found["folder"], app.to_str().unwrap());
+    assert_eq!(project["folder"], app.to_str().unwrap());
+    assert_eq!(home_itself["folder"], home.to_str().unwrap());
+    let file = std::fs::read_to_string(user.project_file("kit")).unwrap();
+    assert!(file.contains(app.to_str().unwrap()), "{file}");
+    assert!(!file.contains('~'), "{file}");
+}
+
+#[test]
+fn a_folder_typed_with_another_user_s_tilde_is_refused() {
+    let user = User::new();
+    user.git_init(&user.path("home/other/x"));
+
+    for typed in ["~other/x", "~other", "~x"] {
+        let (code, message) = user
+            .call("project.add", folder(Path::new(typed)))
+            .unwrap_err();
+
+        assert_eq!(code, "refused", "{typed}");
+        assert!(message.contains("must be an absolute path"), "{message}");
+        assert!(message.contains(typed), "{message}");
+    }
+}
+
+#[test]
 fn a_name_or_a_folder_cannot_be_registered_twice() {
     let user = User::new();
     let app = user.path("work/app");
