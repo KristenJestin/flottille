@@ -102,7 +102,9 @@ impl<'a> Pictures<'a> {
             bytes: bytes.len(),
             size: flottille_core::images::dimensions(mime, &bytes),
         };
-        let fitted = flottille_core::images::fit_under(mime, &bytes, MAX_PICTURE_BYTES);
+        // What cannot be decoded, or is too large to be, is left out: sent as it is, the provider
+        // would refuse it, and it would stay in the history.
+        let fitted = flottille_core::images::fit_under(mime, &bytes, MAX_PICTURE_BYTES)?;
         let (bytes, extension, mime, size, scaled_from) = match fitted {
             Some(fitted) => {
                 // A PNG that became a JPEG is stored as one: its name says what it is.

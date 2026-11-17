@@ -46,6 +46,7 @@ pub fn scaled_down(mime: &str, bytes: Vec<u8>) -> Vec<u8> {
 pub const MIN_SIDE: u32 = 500;
 
 /// A picture made to fit a byte cap.
+#[derive(Debug)]
 pub struct Fitted {
     pub mime: &'static str,
     pub bytes: Vec<u8>,
@@ -53,21 +54,50 @@ pub struct Fitted {
     pub height: u32,
 }
 
+/// The longest side the providers read: past it they refuse the picture, and it stays in the
+/// history, breaking every later turn.
+pub const MAX_PROVIDER_SIDE: u32 = 8000;
+/// The most pixels `fit_under` decodes (8000 x 8000), read from the header before a byte is
+/// decoded: a small file can declare a picture of gigabytes, and scaling takes more memory still.
+pub const MAX_DECODE_PIXELS: u64 = 64_000_000;
+/// The most memory decoding a picture for `fit_under` may take, in bytes: `MAX_DECODE_PIXELS` at
+/// four bytes each, with room.
+const MAX_FIT_DECODE_BYTES: u64 = 320 * 1024 * 1024;
+
 /// The picture made to weigh `cap` bytes at most, for one that is neither a message's nor stored
 /// at its own size (a connection's result). It is scaled down to `MAX_SIDE` as `scaled_down` does;
 /// still over the cap, its long side is halved down to `MIN_SIDE`, and a PNG that does not fit at
 /// one size is tried as a JPEG (a PNG with transparency loses it) before the next, smaller one.
-/// `None` when nothing is to be done: a GIF or a WebP, a picture that cannot be read, one that
-/// already fits as it is, and one that fits at no size (the caller leaves it out).
-pub fn fit_under(mime: &str, bytes: &[u8], cap: usize) -> Option<Fitted> {
-    let format = scaled_format(mime)?;
+/// `Ok(None)` when nothing is to be done: a GIF or a WebP that is readable, a picture that already
+/// fits as it is, and one that fits at no size (the caller leaves it out). `Err` says why the
+/// picture is not to be sent at all: its header cannot be read, it declares more than
+/// `MAX_DECODE_PIXELS` (a PNG or a JPEG), it cannot be decoded (cut short, damaged), or it is a
+/// GIF or a WebP over `MAX_PROVIDER_SIDE`, which are never scaled.
+pub fn fit_under(mime: &str, bytes: &[u8], cap: usize) -> Result<Option<Fitted>, String> {
+    let Some(format) = scaled_format(mime) else {
+        let (width, height) = dimensions(mime, bytes).ok_or("its header cannot be read")?;
+        return match width.max(height) > MAX_PROVIDER_SIDE {
+            true => Err(format!("over {MAX_PROVIDER_SIDE} px on a side")),
+            false => Ok(None),
+        };
+    };
     let reader = || ImageReader::with_format(Cursor::new(bytes), format);
-    let (width, height) = reader().into_dimensions().ok()?;
-    let long = width.max(height);
-    if long <= MAX_SIDE && bytes.len() <= cap {
-        return None;
+    let (width, height) = reader()
+        .into_dimensions()
+        .map_err(|_| "its header cannot be read")?;
+    if u64::from(width) * u64::from(height) > MAX_DECODE_PIXELS {
+        return Err(format!("over {} megapixels", MAX_DECODE_PIXELS / 1_000_000));
     }
-    let picture = reader().decode().ok()?;
+    let long = width.max(height);
+    // Decoded even when it fits: a picture cut short or damaged is refused by the provider.
+    let mut limited = reader();
+    let mut limits = image::Limits::default();
+    limits.max_alloc = Some(MAX_FIT_DECODE_BYTES);
+    limited.limits(limits);
+    let picture = limited.decode().map_err(|_| "it cannot be decoded")?;
+    if long <= MAX_SIDE && bytes.len() <= cap {
+        return Ok(None);
+    }
     let mut side = long.min(MAX_SIDE);
     loop {
         let resized;
@@ -86,7 +116,7 @@ pub fn fit_under(mime: &str, bytes: &[u8], cap: usize) -> Option<Fitted> {
                 continue;
             };
             if encoded.len() <= cap {
-                return Some(Fitted {
+                return Ok(Some(Fitted {
                     mime: if candidate == ImageFormat::Png {
                         "image/png"
                     } else {
@@ -95,11 +125,11 @@ pub fn fit_under(mime: &str, bytes: &[u8], cap: usize) -> Option<Fitted> {
                     bytes: encoded,
                     width: shown.width(),
                     height: shown.height(),
-                });
+                }));
             }
         }
         if side <= MIN_SIDE {
-            return None;
+            return Ok(None);
         }
         side = (side / 2).max(MIN_SIDE);
     }
@@ -461,17 +491,56 @@ mod tests {
     #[test]
     fn a_picture_that_fits_is_left_to_the_caller() {
         let png = picture(300, 200, ImageFormat::Png);
-        assert!(fit_under("image/png", &png, png.len()).is_none());
-        assert!(fit_under("image/gif", b"GIF89a", 1).is_none());
-        assert!(fit_under("image/png", b"junk", 1).is_none());
+        assert!(fit_under("image/png", &png, png.len()).unwrap().is_none());
+        let gif = {
+            let mut out = Cursor::new(Vec::new());
+            DynamicImage::ImageRgba8(image::RgbaImage::new(30, 20))
+                .write_to(&mut out, ImageFormat::Gif)
+                .unwrap();
+            out.into_inner()
+        };
+        assert!(fit_under("image/gif", &gif, 1).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_picture_that_cannot_be_read_is_not_to_be_sent() {
+        assert!(fit_under("image/png", b"junk", 1).is_err());
+        assert!(fit_under("image/gif", b"GIF89a", 1).is_err());
+        let png = picture(300, 200, ImageFormat::Png);
+        assert!(fit_under("image/png", &png[..png.len() / 2], png.len()).is_err());
+    }
+
+    #[test]
+    fn a_picture_declaring_more_than_it_may_is_not_decoded() {
+        // Whatever refuses them, the header or the pixel count, no byte of data is decoded (there
+        // is none to decode).
+        for (width, height) in [(1 << 28, 1), (9000, 8000), (8000, 8001)] {
+            let declared = png_declaring(width, height);
+            assert!(
+                fit_under("image/png", &declared, 1 << 20).is_err(),
+                "{width}x{height}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_gif_over_the_side_the_providers_read_is_not_to_be_sent() {
+        let mut out = Cursor::new(Vec::new());
+        DynamicImage::ImageRgba8(image::RgbaImage::new(MAX_PROVIDER_SIDE + 1, 1))
+            .write_to(&mut out, ImageFormat::Gif)
+            .unwrap();
+        let error = fit_under("image/gif", &out.into_inner(), 1 << 20).unwrap_err();
+        assert!(error.contains("8000"), "{error}");
     }
 
     #[test]
     fn a_picture_over_the_cap_is_halved_until_it_fits_or_reaches_the_least() {
         let png = noisy(1600, 800);
         // Over any size: nothing fits, down to the least side.
-        assert!(fit_under("image/png", &png, 10).is_none());
-        let fitted = fit_under("image/png", &png, png.len() / 3).unwrap();
+        assert!(fit_under("image/png", &png, 10).unwrap().is_none());
+        let fitted = fit_under("image/png", &png, png.len() / 3)
+            .unwrap()
+            .unwrap();
         assert!(fitted.bytes.len() <= png.len() / 3);
         assert!(fitted.width.max(fitted.height) >= MIN_SIDE);
     }
@@ -481,7 +550,7 @@ mod tests {
         let png = noisy(1200, 600);
         let jpeg = encode(&image::load_from_memory(&png).unwrap(), ImageFormat::Jpeg).unwrap();
         assert!(jpeg.len() < png.len());
-        let fitted = fit_under("image/png", &png, jpeg.len()).unwrap();
+        let fitted = fit_under("image/png", &png, jpeg.len()).unwrap().unwrap();
         assert_eq!(fitted.mime, "image/jpeg");
         assert_eq!((fitted.width, fitted.height), (1200, 600));
     }
