@@ -282,6 +282,8 @@ struct Paired {
     accepted: String,
     /// The four words of the request, as `remote.requests` on the inviter said them.
     words: Vec<String>,
+    /// The new device's key, as the request carried it.
+    key: PublicKey,
 }
 
 /// `joiner` joins the hub of `inviter` as the user pairs them: `flottille remote invite` on the
@@ -319,6 +321,7 @@ fn pair(inviter: &Machine, joiner: &Machine, name: &str, role: &str) -> Paired {
         .iter()
         .map(|word| word.as_str().unwrap().to_owned())
         .collect();
+    let key = serde_json::from_value(request["key"].clone()).unwrap();
     let id = request["request"].as_str().unwrap();
     let accepted = inviter
         .user
@@ -342,6 +345,7 @@ fn pair(inviter: &Machine, joiner: &Machine, name: &str, role: &str) -> Paired {
         joined: first + &rest,
         accepted: String::from_utf8_lossy(&accepted.stdout).into_owned(),
         words,
+        key,
     }
 }
 
@@ -929,6 +933,58 @@ fn a_headless_machine_joins_with_the_code_and_is_in_every_list() {
     // And the two link, through what the hub told.
     pc.wait_for("server", "online");
     server.wait_for("pc", "online");
+}
+
+#[test]
+fn a_second_join_from_the_same_machine_uses_a_new_device_key() {
+    let hub = TestHub::new();
+    let (pc, server) = (Machine::new(None), Machine::new(None));
+    set_up(&hub, &pc);
+
+    // A first join that does not succeed: refused here, as a hub that dropped it would leave it.
+    let invited = pc.user.run(&["remote", "invite", "--json"]);
+    assert!(invited.status.success());
+    let invited: Value = serde_json::from_slice(&invited.stdout).unwrap();
+    let joining = server
+        .user
+        .command(&["remote", "join"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    {
+        let mut input = joining.stdin.as_ref().unwrap();
+        std::io::Write::write_all(
+            &mut input,
+            format!("{}\n", invited["code"].as_str().unwrap()).as_bytes(),
+        )
+        .unwrap();
+    }
+    let request = pc.wait_until_requested();
+    let first: PublicKey = serde_json::from_value(request["key"].clone()).unwrap();
+    let refused = pc
+        .user
+        .run(&["remote", "refuse", request["request"].as_str().unwrap()]);
+    assert!(
+        refused.status.success(),
+        "{}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    let ended = joining.wait_with_output().unwrap();
+    assert!(!ended.status.success());
+    // The key of a join that failed is not kept.
+    assert!(!server.folder().join("device.key").exists());
+    let deadline = Instant::now() + WAIT;
+    while pc.user.call("remote.requests", json!({})).unwrap() != json!([]) {
+        assert!(Instant::now() < deadline, "the refused request stays");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    // The next join sends a key the hub never saw, and that one is kept.
+    let paired = pair(&pc, &server, "server", "runner");
+    assert_ne!(paired.key, first);
+    assert_eq!(server.device().public(), paired.key);
 }
 
 #[test]
