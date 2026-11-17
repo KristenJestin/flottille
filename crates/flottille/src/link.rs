@@ -7,8 +7,9 @@
 //! reach each other (a LAN, a VPN, a public address, a tunnel) is the user's; a machine dials what
 //! it is told.
 //!
-//! The machines it trusts, and their addresses, are in `remote/peers.json`, which the hub will keep
-//! (#820); until then a test writes it. The addresses declared by hand are in
+//! The machines it trusts, and their addresses, are in `remote/peers.json`, which the control
+//! session to the hub writes from the member list once the machine is set up (`hub_session.rs`);
+//! without a hub, a test writes it. The addresses declared by hand are in
 //! `remote/addresses.json`. Both are in the key folder, which no agent reaches (`gate::keys`).
 
 use std::collections::{HashMap, HashSet};
@@ -172,6 +173,8 @@ pub struct Remote {
     /// Held while the peers' file is read and written again: apart from `peers`, so that a link
     /// coming in is not judged after a write to the disk.
     writing: Mutex<()>,
+    /// The control session to the hub.
+    control: std::sync::OnceLock<Arc<crate::hub_session::Control>>,
 }
 
 /// Starts the link: the endpoint, the loop that accepts and the one that dials. A link that
@@ -195,13 +198,23 @@ pub fn start(
     let remote = Arc::new(Remote::new(endpoint, crate::remote::folder(paths)));
     // Read before the first link comes in, which is judged by the file as last read.
     remote.peers();
+    let control = Arc::new(crate::hub_session::Control::new(
+        key,
+        crate::remote::folder(paths),
+    ));
+    let _ = remote.control.set(control.clone());
     tokio::spawn(accept(remote.clone()));
+    tokio::spawn(crate::hub_session::run(
+        control,
+        remote.clone(),
+        stopping.clone(),
+    ));
     tokio::spawn(dial(remote.clone(), stopping));
     Ok(remote)
 }
 
 /// This build's hello; a test build may make it another's.
-fn hello() -> Hello {
+pub(crate) fn hello() -> Hello {
     cfg!(debug_assertions)
         .then(|| std::env::var("FLOTTILLE_TEST_LINK_HELLO").ok())
         .flatten()
@@ -233,7 +246,51 @@ impl Remote {
             refused: Mutex::new(Refused::new(Instant::now())),
             learning: Mutex::new(HashMap::new()),
             writing: Mutex::new(()),
+            control: std::sync::OnceLock::new(),
         }
+    }
+
+    /// This machine's name among the user's, as the member list says it.
+    pub(crate) fn name_as(&self, name: &str) {
+        self.endpoint.name_as(name);
+    }
+
+    /// The machines the member list says this one trusts: `(name, key, addresses)`, the addresses
+    /// those the hub told, or, when it told none, those kept. Written over the peers' file, the
+    /// addresses each machine told kept beside; a machine no longer there is let go at the next
+    /// round.
+    pub(crate) fn trust_machines(&self, machines: Vec<(String, PublicKey, Option<Vec<String>>)>) {
+        let file = self.folder.join(PEERS_FILE);
+        {
+            let _writing = self.writing.lock().unwrap();
+            // A file broken by hand is written over: the list is what says whom to trust.
+            let before = read_json::<Peers>(&file).unwrap_or_default();
+            let peers = Peers {
+                machines: machines
+                    .into_iter()
+                    .map(|(name, key, addresses)| {
+                        let kept = before.machines.iter().find(|peer| peer.key == key);
+                        Peer {
+                            name,
+                            key,
+                            addresses: addresses
+                                .or_else(|| kept.map(|peer| peer.addresses.clone()))
+                                .unwrap_or_default(),
+                            told: kept.map(|peer| peer.told.clone()).unwrap_or_default(),
+                        }
+                    })
+                    .collect(),
+            };
+            let same = serde_json::to_value(&peers).ok() == serde_json::to_value(&before).ok();
+            if !same && let Err(error) = write_json(&file, &peers) {
+                eprintln!(
+                    "flottille daemon: the machines the hub's list trusts were not kept in {}: \
+                     {error}",
+                    file.display()
+                );
+            }
+        }
+        self.peers();
     }
 
     /// Closes every link, telling the other machines.
@@ -304,7 +361,7 @@ impl Remote {
         addresses
     }
 
-    fn told_addresses(&self) -> Vec<String> {
+    pub(crate) fn told_addresses(&self) -> Vec<String> {
         self.addresses()
             .into_iter()
             .map(|(address, _)| address)
@@ -559,7 +616,11 @@ impl Remote {
                 })
             })
             .collect();
-        json!({"this": this, "machines": machines})
+        let hub = self
+            .control
+            .get()
+            .map_or(Value::Null, |control| control.seen());
+        json!({"this": this, "machines": machines, "hub": hub})
     }
 }
 
@@ -722,7 +783,7 @@ fn read_json<T: Default + for<'de> Deserialize<'de>>(file: &Path) -> Result<T, S
 
 /// Writes a JSON file of the key folder whole: a temporary file, the user's only, renamed into
 /// place.
-fn write_json(file: &Path, value: &impl Serialize) -> std::io::Result<()> {
+pub(crate) fn write_json(file: &Path, value: &impl Serialize) -> std::io::Result<()> {
     write_json_unless(file, value, || false).map(|_| ())
 }
 
@@ -769,6 +830,28 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Result<Va
     let params = if params.is_null() { json!({}) } else { params };
     match method {
         "remote.machines" => Ok(remote.machines()),
+        "remote.setup" => {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Setup {
+                url: String,
+                code: String,
+                changes: Vec<flottille_link::Change>,
+                /// Set up again on a machine that pinned a hub already.
+                #[serde(default)]
+                replace: bool,
+            }
+            let setup: Setup = serde_json::from_value(params).map_err(|error| {
+                Failure::new(flottille_protocol::code::INVALID_PARAMS, error.to_string())
+            })?;
+            let control = remote.control.get().cloned().ok_or_else(|| {
+                Failure::new(flottille_protocol::code::UNAVAILABLE, "the link is not up")
+            })?;
+            control
+                .setup(&setup.url, &setup.code, setup.changes, setup.replace)
+                .await
+                .map_err(Failure::refused)
+        }
         "remote.address.add" | "remote.address.remove" => {
             let text = params["address"].as_str().unwrap_or_default();
             let address = Address::parse(text)

@@ -137,7 +137,7 @@ impl fmt::Display for LinkError {
         match self {
             LinkError::Listen(why) => f.write_str(why),
             LinkError::NoAddress(peer) => write!(f, "{peer} has no address this machine knows"),
-            LinkError::Unreachable { peer, why } => write!(f, "{peer} cannot be reached: {why}"),
+            LinkError::Unreachable { peer, why } => write!(f, "{peer} is unreachable: {why}"),
             LinkError::Refused { peer, reason } => write!(f, "{peer} refused the link: {reason}"),
             LinkError::NeedsUpdate(refusal) => refusal.fmt(f),
             LinkError::Declined { peer, reason } => write!(f, "{peer} refused: {reason}"),
@@ -157,6 +157,8 @@ pub struct Endpoint {
     accepted: Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<Accepting>>>,
     /// The addresses of the machines this one trusts.
     known: Known,
+    /// This machine's name, as a failure to reach another says where it was tried from.
+    name: Arc<std::sync::RwLock<String>>,
 }
 
 /// The addresses of the machines an endpoint trusts, which may take the places kept for them.
@@ -193,7 +195,14 @@ impl Endpoint {
             key,
             accepted: Arc::new(tokio::sync::Mutex::new(accepted)),
             known,
+            name: Arc::new(std::sync::RwLock::new(key.fingerprint())),
         }
+    }
+
+    /// The name this machine has among the user's: a failure to reach another says it
+    /// (`tried 192.0.2.10:7447 from pc`). Its key's fingerprint until it is named.
+    pub fn name_as(&self, name: &str) {
+        name.clone_into(&mut self.name.write().unwrap());
     }
 
     /// The addresses of the machines this one trusts, in place of those it was told before: a
@@ -239,7 +248,9 @@ impl Endpoint {
         ours: &Hello,
         name: &str,
     ) -> Result<Link, LinkError> {
-        let mut why = None;
+        let from = self.name.read().unwrap().clone();
+        // Every address tried, and how it failed: the fix is the user's network, so all is said.
+        let mut tried: Vec<String> = Vec::new();
         for address in addresses {
             let dialled = tokio::time::timeout(
                 WAIT,
@@ -250,18 +261,21 @@ impl Endpoint {
             match dialled {
                 Ok(Ok(conn)) => return dialler_handshake(conn, peer, traffic, ours, name).await,
                 Ok(Err(Failure::Closed(reason) | Failure::Lost(reason))) => {
-                    why = Some(format!("{address}: {reason}"));
+                    tried.push(format!("tried {address} from {from}: {reason}"));
                 }
-                Err(_) => why = Some(format!("{address} did not answer")),
+                Err(_) => tried.push(format!(
+                    "tried {address} from {from}, no answer in {} s",
+                    WAIT.as_secs()
+                )),
             }
         }
-        match why {
-            None => Err(LinkError::NoAddress(name.to_owned())),
-            Some(why) => Err(LinkError::Unreachable {
-                peer: name.to_owned(),
-                why,
-            }),
+        if tried.is_empty() {
+            return Err(LinkError::NoAddress(name.to_owned()));
         }
+        Err(LinkError::Unreachable {
+            peer: name.to_owned(),
+            why: tried.join("; "),
+        })
     }
 
     /// The next machine that dials this one, its key proved; `None` once the endpoint is closed,

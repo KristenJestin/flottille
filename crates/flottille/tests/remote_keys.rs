@@ -168,10 +168,17 @@ fn the_daemon_never_reads_the_device_key() {
     // Nor does any of the daemon's code name what reaches the device key: its loader, its file,
     // its keyring item. Its limit: it reads names, not what the code does; a name built from
     // parts, or a crate the daemon links that loads the key itself, escapes it, which the watch
-    // above is for. The command line shares these sources: when a client of it loads the device
-    // key, this narrows to the daemon's modules.
+    // above is for. The command line shares these sources: its command that loads the device key
+    // (`flottille remote setup`) is a client's, and left out.
+    let clients = ["remote_command.rs"];
     let sources = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     for file in rust_files(&sources) {
+        if file
+            .file_name()
+            .is_some_and(|name| clients.iter().any(|client| name == *client))
+        {
+            continue;
+        }
         let text = std::fs::read_to_string(&file).unwrap();
         for name in [
             "DeviceKey",

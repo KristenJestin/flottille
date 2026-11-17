@@ -62,6 +62,27 @@ pub(crate) fn from_hex_text<'de, D: Deserializer<'de>, const N: usize>(
         .ok_or_else(|| serde::de::Error::custom(format!("{what} is {N} bytes in hexadecimal")))
 }
 
+/// `text` as Flottille shows what another machine or the hub said: its first `limit` characters,
+/// a control or format character as `\u{fffd}`, so that it can neither forge lines of a log nor
+/// drive a terminal.
+pub(crate) fn shown(text: &str, limit: usize) -> String {
+    let mut shown: String = text
+        .chars()
+        .take(limit)
+        .map(|c| {
+            if c.is_control() || invisible(c) {
+                '\u{fffd}'
+            } else {
+                c
+            }
+        })
+        .collect();
+    if text.chars().nth(limit).is_some() {
+        shown.push('…');
+    }
+    shown
+}
+
 /// Whether `c` is a format character (Unicode's category `Cf`, as of Unicode 15.1): it shows
 /// nothing, or turns the text around it (zero-width spaces and joiners, bidirectional overrides
 /// and isolates, the byte order mark, tags), so that two texts that look the same are not.
