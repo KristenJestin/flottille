@@ -448,7 +448,9 @@ kind of signed change, by any member that may add one: every device that hears i
 member and cuts its links at once; one that was off hears it from the hub when it connects again,
 before anything else is exchanged: at start, a machine accepts and dials no link until it has the
 hub's list, 10 s at most, and goes on with the list it kept only when the hub cannot give it one
-by then. A removed member's open invitations close with it, and the joins that wait on them end,
+by then. The same holds once its session to the hub is lost (a machine that wakes from a suspend,
+or was offline): no new link is accepted or dialled until the next session's list, 10 s at most
+from the loss, a hub unreachable meanwhile included; the links up already go on. A removed member's open invitations close with it, and the joins that wait on them end,
 refused. A removed device key cannot join again; the hub refuses removed device keys, not machine
 keys, so a removed member's machine may join again with a new device key, through an invitation
 and its four words like any other. **Renaming** is the same kind of
