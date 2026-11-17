@@ -1474,7 +1474,7 @@ impl Shell {
             }
             Outcome::VaultWritten { refused } => {
                 let section = self.settings.read(cx).vault().clone();
-                section.update(cx, |section, cx| section.written(refused, cx));
+                section.update(cx, |section, cx| section.written(refused, window, cx));
                 // An entry made from a project's Tracker or Vault tab: back to it.
                 if let Some((project, at)) = section.update(cx, |section, _| section.take_return())
                 {

@@ -28,6 +28,7 @@ const WHY: &str = "to log the two hours spent on ABC-1";
 const STAGING: &str = "to sign in to staging";
 const BANK: &str = "to sign in to the bank";
 const SHOP: &str = "to sign in to the shop";
+const NOTES: &str = "to read the notes";
 
 fn user() -> User {
     let user = User::with_fake_agent().with_fake_acli();
@@ -55,6 +56,12 @@ fn user() -> User {
                 {"action": "ask", "name": "shop-test", "why": SHOP,
                  "url": "https://shop.example.com/login", "for": "connection:browser"}}},
             {"say": "Asked for the shop."},
+            {"hold": "release"}]},
+        {"when": "read the notes", "do": [
+            {"mcp": {"tool": "vault", "arguments":
+                {"action": "ask", "name": "notes-key", "why": NOTES,
+                 "for": "connection:notes"}}},
+            {"say": "Asked for the notes."},
             {"hold": "release"}]}
     ]}));
     std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
@@ -74,6 +81,15 @@ fn eventually(what: &str, check: impl Fn() -> bool) {
 fn session(user: &User, message: &str) -> String {
     if message.contains("shop") {
         connection(user, "browser");
+    }
+    if message.contains("notes") {
+        connection(user, "notes");
+        // Its server is given the entry when it starts, once for every project's agents.
+        user.call(
+            "connection.edit",
+            json!({"name": "notes", "env": {"NOTES_KEY": {"vault": "notes-key"}}}),
+        )
+        .unwrap();
     }
     let folder = user.path("work/app");
     user.git_init(&folder);
@@ -453,10 +469,21 @@ fn the_vault_form_shows_the_binding_and_its_host(cx: &mut TestAppContext) {
     let (shell, cx) = window(&user, cx);
     let (_, at) = card(&shell, &id, cx);
 
+    // A login's entry: the login reads it for the agent's project, so it is that project's.
+    assert_eq!(
+        label(format!("row-{at}-vault-ask-project"), cx).as_deref(),
+        Some("Project: app")
+    );
     cx.update(|window, cx| window.click(format!("row-{at}-vault-ask-add"), cx));
     settle(cx);
     let vault = vault_form(&shell, cx);
     assert!(vault.read_with(cx, |v, _| v.is_open()), "the form is open");
+    assert_eq!(
+        vault.read_with(cx, |v, _| v.project().map(str::to_owned)),
+        Some("app".to_owned()),
+        "Seen by agents of: the project, as the card says"
+    );
+    assert!(!has("vault-connection-note", cx), "no rule to explain");
     // What the entry will be bound to, and where its secret goes, said in the form itself.
     assert_eq!(
         label("vault-binding-for", cx).as_deref(),
@@ -607,4 +634,63 @@ fn dismiss_is_disabled_while_its_call_runs(cx: &mut TestAppContext) {
         "a second dismissal was sent: {toasts:?}"
     );
     std::fs::write(user.path("fake/release"), "").unwrap();
+}
+
+#[gpui_kit::test]
+fn the_new_entry_form_does_not_offer_a_project_it_would_refuse(cx: &mut TestAppContext) {
+    let user = user();
+    let id = session(&user, "read the notes");
+    let (shell, cx) = window(&user, cx);
+    let (_, at) = card(&shell, &id, cx);
+    // The card says whose entry it will be, as the form saves it.
+    assert_eq!(
+        label(format!("row-{at}-vault-ask-project"), cx).as_deref(),
+        Some("Project: For the connection notes (every project)")
+    );
+
+    cx.update(|window, cx| window.click(format!("row-{at}-vault-ask-add"), cx));
+    settle(cx);
+    let vault = vault_form(&shell, cx);
+    assert_eq!(
+        vault.read_with(cx, |v, _| v.project().map(str::to_owned)),
+        None
+    );
+    let why = label("vault-connection-note", cx).unwrap_or_default();
+    assert!(
+        why.contains("notes") && why.contains("every project"),
+        "said under the field before anything is typed: {why}"
+    );
+    // The project's choice, which Add would refuse, is not offered.
+    cx.update(|window, cx| window.click("vault-project", cx));
+    settle(cx);
+    assert!(has("vault-project-every", cx), "every project is offered");
+    assert!(!has("vault-project-app", cx), "the project is offered");
+    cx.update(|window, cx| window.click("vault-project-every", cx));
+    settle(cx);
+    save(&user, &shell, &vault, (&id, at), cx);
+    std::fs::write(user.path("fake/release"), "").unwrap();
+    let set = user.call("vault.list", json!({})).unwrap()["entries"][0].clone();
+    assert_eq!(set["name"], "notes-key");
+    assert_eq!(set["project"], serde_json::Value::Null, "{set}");
+
+    // Edited later from Settings, Vault: still not offered, and said why.
+    cx.update(|window, cx| window.click("settings", cx));
+    settle(cx);
+    cx.update(|window, cx| window.click("settings-tabs-vault", cx));
+    until(&shell, cx, "the entry is listed", |cx| {
+        has("vault-notes-key", cx)
+    });
+    settle(cx);
+    cx.update(|window, cx| window.click("vault-notes-key", cx));
+    settle(cx);
+    assert!(vault.read_with(cx, |v, _| v.is_open()), "the form is open");
+    let why = label("vault-connection-note", cx).unwrap_or_default();
+    assert!(why.contains("notes"), "{why}");
+    cx.update(|window, cx| window.click("vault-project", cx));
+    settle(cx);
+    assert!(has("vault-project-every", cx));
+    assert!(
+        !has("vault-project-app", cx),
+        "the project is offered on edit"
+    );
 }

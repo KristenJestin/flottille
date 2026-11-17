@@ -675,7 +675,7 @@ const SERVED: [Definition; 33] = [
                 "url": {"type": "string", "description": "ask: where the secret goes (a login page)."},
                 "username": {"type": "string", "description": "ask: the account, if known."},
                 "for": {"type": "string", "description": "ask: its one use: worklog, or connection:<name> (a login)."},
-                "project": {"type": "string", "enum": ["this", "every"], "description": "ask: whose it is; a connection's is every project's."},
+                "project": {"type": "string", "enum": ["this", "every"], "description": "ask: whose it is, this project's when left out; an entry a connection's server is given is every project's."},
                 "connection": {"type": "string", "description": "ask: the connection it is for, declared or that your request asks to add: the entry is every project's, at the connection's address."}
             }, "required": ["action"], "additionalProperties": false})
         },

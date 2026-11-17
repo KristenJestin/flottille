@@ -727,6 +727,16 @@ pub fn bound_names(daemon: &Daemon, bound: &str, entry: &str) -> Result<bool, St
     }
 }
 
+/// Whether the use `bound` hands the vault entry `entry` to a server that serves every project's
+/// agents (a connection's, at its start), so the entry must be every project's; why it cannot be
+/// told when the declarations cannot be read.
+pub fn bound_given_to_server(daemon: &Daemon, bound: &str, entry: &str) -> Result<bool, String> {
+    match bound.split_once(':') {
+        Some(("connection", name)) => connections::given_to_server(daemon, name, entry),
+        _ => Ok(false),
+    }
+}
+
 /// The secrets a vault entry's value holds besides itself: a connection's sign-in keeps its
 /// tokens in one value, each masked alone.
 pub fn secrets_in(value: &str) -> Vec<String> {
