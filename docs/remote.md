@@ -245,7 +245,8 @@ link.
   `flottille-entry`, a vault entry's: one may be named `device`); on
   a machine with no Secret Service (a headless server), `$XDG_STATE_HOME/flottille/remote/device.key`,
   mode 600, read by the clients only. The daemon never reads it. It signs the user's actions, the
-  member list's changes included.
+  member list's changes included. It is kept once `flottille remote setup` or `join` succeeded with
+  it, never before ("What a compromised hub can still do").
 - **The phone's device key** is made by the app, kept encrypted under a key of the Android Keystore,
   and never leaves the phone.
 - **The hub's key** is made at its first start, in its own state folder. Devices pin it when they
@@ -394,14 +395,20 @@ they differ: not built (a follow-up issue).
 
 A hub can also try to **slip its own key into a pairing**. The member that invited draws the four
 words from the token it was given itself, and shows only a join request for a token it was given
-and that is still valid: a request the hub pushes for a token of its own making is dropped, so the
-hub cannot search a token that makes another key's words match the new device's. What is left is
-to search a key: the words are 44 bits and nothing commits the new device to its key before the hub
-sees it, so a hub that sees the new device's key and the token may make keys until one gives the
-same four words with them, and put it in the request in place of the new device's. That is about
-2^44 keys made and hashed (about 1.8 × 10^13), within the 5 minutes the invitation is valid: out of
-reach of a machine, not of a large fleet rented for it. A commitment of the new device to its key
-would close it: not built.
+and that is still valid: a request the hub pushes for a token it never issued is dropped. That does
+not stop the hub from choosing the token it issues; what makes the choice useless is that it does
+not know the new device's key yet. A device that is not a member makes a new key for each join and
+keeps it only once the join succeeded (`crates/flottille/src/remote_command.rs`), so a hub that
+drops a join on purpose, to be asked a new invitation, has seen a key the next join no longer
+sends. Once it sees the new key, the token is issued already, and what is left is to search a key:
+the words are 44 bits and nothing commits the new device to its key before the hub sees it, so a
+hub may make keys until one gives the same four words with the token and the inviter's key, and
+put it in the request in place of the new device's. That is about 2^44 keys made and hashed (about
+1.8 × 10^13) within the 5 minutes the invitation is valid: out of reach of a machine, not of a
+large fleet rented for it. A device that joins with a key it kept already (a member's, one that
+joins again) sends a key the hub knows: the hub can search a token for it ahead, with no 5 minutes
+to bound it, about 2^44 hashes too, a GPU-hour. A commitment of the new device to its key would
+close both: not built.
 
 ## Pairing
 
@@ -414,8 +421,8 @@ each other.
    5 minutes of the hub's time, taken once). The hub answers with a token, valid **5 minutes,
    once**. The member shows a QR and the same as a code to copy, holding the hub URL with the hub's
    key, the token, and the inviting member's key fingerprint.
-2. **The new device reads it** (the phone scans the QR; a computer is given the code), makes its key,
-   and connects **to the hub**, not to the inviting member, with the token and its new public key.
+2. **The new device reads it** (the phone scans the QR; a computer is given the code), makes its key
+   (a new one for each join, kept only once one succeeded), and connects **to the hub**, not to the inviting member, with the token and its new public key.
 3. **The hub holds the request** and notifies the inviting member. Both screens show the same **four
    verification words**, drawn from the new device's key, the inviting member's key and the token
    (`maple orbit violet canyon`).
