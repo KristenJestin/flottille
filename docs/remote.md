@@ -311,13 +311,18 @@ change. Text the hub or anything at its address says is shown with its control a
 characters replaced.
 
 **Its limits.** Someone with no key holds little of it: 64 connections at most that have not proved
-a member's key (one more is closed as soon as it is accepted; a setup's session counts while it
-lasts), 4 KiB a line of the handshake, 10 s a handshake, 10 s for a session opened to set the hub
-up that asks nothing, and 64 KiB an ask. When the process runs out of file descriptors it waits
+a member's key (a setup's session counts while it lasts), 4 KiB a line of the handshake, 5 s for
+the TLS handshake and the hub's handshake together, 10 s from its start for a session opened to
+set the hub up, however much it asks, and 64 KiB an ask. When the 64 are taken, 8 more places are
+kept for members: a connection in one of them that does not prove a member's key is let go at the
+end of its handshake, and one past them is closed as soon as it is accepted. This raises the bar,
+it does not remove it: strangers that keep 72 connections open, opened again every 5 s, still keep
+members out while they do. When the process runs out of file descriptors it waits
 before it accepts again (50 ms, then twice longer each time, 1 s at most), instead of trying again
-at once. A list holds 1000 changes at most: a device refuses a longer one before it checks a change
-of it, and the hub refuses the change past it, so that the list always fits the 4 MiB line a
-device takes. A member makes at most 30 changes of the list within an hour (a viewer declaring
+at once. A list holds 1000 changes at most of any member's, then 100 more, each a controller's or a
+runner's change of another member (a removal, mostly), so that a list a member filled with its own
+changes can still be cleaned: a device refuses a longer one before it checks a change of it, and
+the hub refuses the change past it, so that the list always fits the 4 MiB line a device takes. A member makes at most 30 changes of the list within an hour (a viewer declaring
 its machine again and again, mostly): past them, the hub refuses, saying when to try again.
 A machine's daemon keeps the session with its machine key; what it pinned is
 `remote/hub.json` (the hub's URL and key, the list's root and the list as last checked), and it
