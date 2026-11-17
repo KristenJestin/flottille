@@ -392,6 +392,17 @@ up, or submits a change, keeps the list only once the hub sent it back holding i
 rest needs the members to compare the heads of their lists over their links, and to say so when
 they differ: not built (a follow-up issue).
 
+A hub can also try to **slip its own key into a pairing**. The member that invited draws the four
+words from the token it was given itself, and shows only a join request for a token it was given
+and that is still valid: a request the hub pushes for a token of its own making is dropped, so the
+hub cannot search a token that makes another key's words match the new device's. What is left is
+to search a key: the words are 44 bits and nothing commits the new device to its key before the hub
+sees it, so a hub that sees the new device's key and the token may make keys until one gives the
+same four words with them, and put it in the request in place of the new device's. That is about
+2^44 keys made and hashed (about 1.8 × 10^13), within the 5 minutes the invitation is valid: out of
+reach of a machine, not of a large fleet rented for it. A commitment of the new device to its key
+would close it: not built.
+
 ## Pairing
 
 A device is added by a member, through the hub, the user checking on both screens that they talk to
@@ -420,22 +431,29 @@ each other.
    added at 18:42 from pc`, with Remove beside it, so that an addition behind the user's back is
    seen at once.
 
-**A headless machine** joins with `flottille remote join <code>`, the code coming from an
-invitation opened on a human device: it prints the four words, and the user accepts on the device
+**A headless machine** joins with `flottille remote join`, given the code on its standard input (or
+at its prompt), never on the command line, which other users' `ps` and the shell's history keep;
+the code comes from an invitation opened on a human device. It prints the four words, and the user accepts on the device
 that invited it, with the role `runner` chosen there.
 
 **Removing** (Settings, Machines, the row's Remove, `flottille remote remove <name>`) is the same
 kind of signed change, by any member that may add one: every device that hears it removes the
 member and cuts its links at once; one that was off hears it from the hub when it connects again,
-before anything else is exchanged. A removed key cannot join again. **Renaming** is the same kind of
+before anything else is exchanged: at start, a machine accepts and dials no link until it has the
+hub's list, 10 s at most, and goes on with the list it kept only when the hub cannot give it one
+by then. A removed member's open invitations close with it, and the joins that wait on them end,
+refused. A removed device key cannot join again; the hub refuses removed device keys, not machine
+keys, so a removed member's machine may join again with a new device key, through an invitation
+and its four words like any other. **Renaming** is the same kind of
 signed change. A device that wants to leave removes itself the same way. A role is changed by
 removing the device and adding it again.
 
 A device refuses a link from a key that is not in its list, and a list change not signed by a
 member.
 
-**Built (#812), from the command line**: `flottille remote invite` prints the code (the QR holds the
-same text); `flottille remote join <code>` makes the device key, prints the four words and waits
+**Built (#812), from the command line**: `flottille remote invite` prints the code on a line of its
+own (the QR holds the same text); `flottille remote join`, given the code on its standard input,
+makes the device key, prints the four words and waits
 until the member that invited accepts or refuses; `flottille remote requests` lists the requests
 that wait for this machine's member with their words; `flottille remote accept <request> --name
 <name> --role runner|controller|viewer` prints the words, then signs the addition; `flottille
@@ -451,7 +469,8 @@ member that invited the requests that wait for it, over that member's own sessio
 addition is stored, the hub sends the joining machine the list; the machine checks it
 (`Invitation::check_list`), then the new device declares the machine through the same session, and
 the machine pins the hub (`remote/hub.json`) once the declaration came back. A refused or expired
-request ends the session, saying so.
+request ends the session, saying so. A join the hub recorded spends the token, even when the
+connection then drops before the request is accepted: the member asks a new invitation.
 
 ## Roles
 
