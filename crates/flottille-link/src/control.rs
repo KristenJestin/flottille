@@ -1114,6 +1114,8 @@ async fn drive(
                     let _ = answer.send(Err(error.to_string()));
                     break error.to_string();
                 }
+                // An ask whose asker gave up waiting (a timeout) is answered to no one.
+                waiting.retain(|(_, answer)| !answer.is_closed());
                 waiting.push((id, answer));
             }
             line = lines.recv() => {
