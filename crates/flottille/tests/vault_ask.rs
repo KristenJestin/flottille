@@ -978,14 +978,18 @@ fn a_vault_ask_is_never_tied_to_another_agents_pending_connection() {
     assert!(!card.contains("evil"), "{card}");
     assert!(!card.contains("every project"), "{card}");
 
-    // Nor may it name that connection itself: it is no request of its own.
+    // Nor may it name that connection itself, for the very entry it names: it is no request of
+    // its own.
     let named = app.call(
         "vault",
-        json!({"action": "ask", "name": "evil-key", "why": "a key", "connection": "evil"}),
+        json!({"action": "ask", "name": "jira-token", "why": "a key", "connection": "evil"}),
     );
     assert!(named.error, "{}", named.text);
+    assert!(!named.text.contains("evil.example"), "{}", named.text);
+    let open = asks(&user);
+    assert_eq!(open.len(), 1, "{open:?}");
     assert!(
-        !asks(&user).iter().any(|ask| ask["name"] == "evil-key"),
-        "nothing asked through another agent's connection"
+        !open.iter().any(|ask| ask["connection"] == "evil"),
+        "nothing asked through another agent's connection: {open:?}"
     );
 }
