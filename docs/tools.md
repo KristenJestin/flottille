@@ -580,7 +580,9 @@ pending requests.
   (`docs/reference/processes.md`). `run_status` with `action stop`, a timeout of the call's client
   and the daemon's stop signal the run's process group (`SIGTERM`, then `SIGKILL` after 5 s), and
   what the run left in its session is killed when its own process ends, even in a process group
-  of its own (what pnpm starts). A process that left the session (`setsid`, a daemon that forks
+  of its own (what pnpm starts), each process through a pidfd of its own: once the run's process
+  is reaped its pid, and its group's number, may be a stranger's, so nothing is signalled by
+  them. A process that left the session (`setsid`, a daemon that forks
   and detaches) escapes all of this and keeps running; Flottille does not stop it. It stays the
   daemon's descendant, though: the daemon is the subreaper of what it starts, so a process
   orphaned there is taken in by the daemon rather than by init, waited for when it ends, and

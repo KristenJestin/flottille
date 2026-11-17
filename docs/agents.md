@@ -307,7 +307,11 @@ efforts are read; the tree, the deliveries, the gate and the store know nothing 
   after a reboot, nor when this boot's id cannot be read) and signals nothing for it; of this
   boot, it kills the process groups a previous one left behind (a crash), only when the group's
   leader is alive with the start time recorded: never a stranger that took the pid since, and not
-  the members of a group whose leader is gone (nothing says whose they are). Then it forgets all
+  the members of a group whose leader is gone (nothing says whose they are). A pidfd of the leader
+  is opened first, its start time read after, and the leader and then each member of its group
+  are signalled through their own pidfds, never by a bare pid or the group's number, which a
+  program of the user's may have taken between the check and the signal; where no pidfd can be
+  opened (a kernel before 5.3, a seccomp filter), nothing is signalled. Then it forgets all
   the rows. An agent that was starting or working when its daemon went is idle again
   (`agent.released`, reason `restart`). Its session is kept. A working agent's prompt was sent
   and is in that session's history: its deliveries are taken as sent, never sent again, and it
