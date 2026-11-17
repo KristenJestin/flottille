@@ -131,6 +131,90 @@ fn a_large_image_is_scaled_down_before_it_is_sent() {
     );
 }
 
+/// A greyscale PNG of `width` by `height` whose pixels are all black, deflated as it is written:
+/// a few hundred KB for hundreds of MB once decoded.
+fn black(width: u32, height: u32) -> Vec<u8> {
+    use std::io::Write as _;
+    let chunk = |kind: &[u8; 4], body: &[u8]| {
+        let mut crc = flate2::Crc::new();
+        crc.update(kind);
+        crc.update(body);
+        let mut out = (body.len() as u32).to_be_bytes().to_vec();
+        out.extend_from_slice(kind);
+        out.extend_from_slice(body);
+        out.extend_from_slice(&crc.sum().to_be_bytes());
+        out
+    };
+    let mut header = width.to_be_bytes().to_vec();
+    header.extend_from_slice(&height.to_be_bytes());
+    header.extend_from_slice(&[8, 0, 0, 0, 0]);
+    let mut deflated = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::best());
+    let row = vec![0u8; width as usize + 1];
+    for _ in 0..height {
+        deflated.write_all(&row).unwrap();
+    }
+    let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+    png.extend(chunk(b"IHDR", &header));
+    png.extend(chunk(b"IDAT", &deflated.finish().unwrap()));
+    png.extend(chunk(b"IEND", &[]));
+    png
+}
+
+/// What `fs_read` answers for a file that is left out: no image, a line that says so.
+fn left_out(mcp: &Mcp, path: &str) -> String {
+    let (text, images) = read(mcp, path);
+    assert!(images.is_empty(), "{path}: no image goes: {text}");
+    assert!(text.contains("left out"), "{path}: {text}");
+    text
+}
+
+#[test]
+fn an_image_too_large_to_decode_is_left_out() {
+    let user = user();
+    let folder = project(&user);
+    // 2^28 pixels on one row: about 260 KB on disk, 256 MiB decoded, gigabytes to scale.
+    let bomb = black(1 << 28, 1);
+    assert!(bomb.len() < 2 * 1024 * 1024, "the file is small");
+    std::fs::write(folder.join("bomb.png"), &bomb).unwrap();
+    // The same, with no pixels behind its header.
+    let mut header_only = picture(40, 30, image::ImageFormat::Png);
+    header_only[16..20].copy_from_slice(&(1u32 << 28).to_be_bytes());
+    std::fs::write(folder.join("header.png"), &header_only).unwrap();
+    let mcp = session(&user);
+
+    left_out(&mcp, "bomb.png");
+    left_out(&mcp, "header.png");
+    // The daemon is alive: the next read is answered.
+    std::fs::write(
+        folder.join("piano.png"),
+        picture(40, 30, image::ImageFormat::Png),
+    )
+    .unwrap();
+    let (_, images) = read(&mcp, "piano.png");
+    assert_eq!(images.len(), 1);
+}
+
+#[test]
+fn a_truncated_image_is_left_out() {
+    let user = user();
+    let folder = project(&user);
+    // A valid signature and header, the data cut short: the provider cannot read it and keeps
+    // it in the history.
+    let png = picture(300, 200, image::ImageFormat::Png);
+    std::fs::write(folder.join("cut.png"), &png[..png.len() / 2]).unwrap();
+    // A signature and nothing else.
+    std::fs::write(
+        folder.join("bare.png"),
+        b"\x89PNG\r\n\x1a\nbut nothing more",
+    )
+    .unwrap();
+    let mcp = session(&user);
+
+    for path in ["cut.png", "bare.png"] {
+        left_out(&mcp, path);
+    }
+}
+
 #[test]
 fn a_binary_file_that_is_not_an_image_is_read_as_before() {
     let user = user();

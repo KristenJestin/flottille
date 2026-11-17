@@ -109,6 +109,7 @@ fn answer(addr: SocketAddr, path: &str) -> Vec<u8> {
         }
         "/bomb.pdf" => return pdf_response(bomb()),
         "/piano.png" => return image_response(&piano()),
+        "/cut.png" => return image_response(&piano()[..60]),
         "/html/" if path.contains("q=blocked") => (
             "202 Accepted",
             "text/html",
@@ -395,6 +396,17 @@ fn a_web_page_that_is_an_image_is_read_as_an_image() {
         text.contains("/piano.png") && text.contains("60×20"),
         "{text}"
     );
+}
+
+#[test]
+fn a_web_image_cut_short_is_left_out() {
+    let web = Web::start();
+    let user = user_of(&web, json!([]));
+    let (_, mcp) = session(&user, &format!("look at {}", web.url("/cut.png")));
+    let (answer, images) = mcp.call_with_images("web", read(&web.url("/cut.png")));
+    let text = done(answer);
+    assert!(images.is_empty(), "{text}");
+    assert!(text.contains("left out"), "{text}");
 }
 
 #[test]
