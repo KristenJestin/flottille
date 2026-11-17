@@ -703,7 +703,7 @@ pending requests.
   30 min: …` when nothing did) and the subscription ends; without it there is none. The answer
   carries the line `show` gives about how long the repository's CI runs take, as information
   ([`forges.md`](forges.md), "How long CI takes"). It also says the pull request's checks running as it subscribed
-  (`Its checks running as you subscribed: test.`, or that none was), that `checks` is the end of
+  (`Its checks running as you subscribed: test.`, or `No check runs on it now; you will be told if one starts.` when none runs or waits), that `checks` is the end of
   those and that a run started on its branch outside them is followed by `run` or `follow_run`, not by the
   subscription, and each run the agent already follows on that branch (`You already follow the
   run #43 of api (custom: nightly on app/login): its end wakes you on its own.`): a short
@@ -813,6 +813,18 @@ pending requests.
   anything is written (`refused: the pull request #7 of acme/app is merged, not open; nothing was
   written: …`). A `title` on `comment` is refused before anything is asked (`refused: forge
   comment takes no title: title is for edit and create`).
+- **After a change, the answer says whether checks started (#1045).** `edit` and `reopen` read the
+  pull request's checks before the change, then after it (a first read 3 s later, a second 3 s
+  after if nothing new came; the whole is cut at 12 s, `FLOTTILLE_CHECKS_WAIT_MS` shortens the
+  wait in tests), and say what the forge shows: `Checks started since the change: test (running).`,
+  or `No check started since the change: a repository's workflows may not run on a change of this
+  kind, so do not wait for one.` (with those that were already running before it), or that the
+  checks could not be read. A check is new when its name and start time were not among those read
+  before, so a check of the old head that passed is not told as started. It is information
+  only: nothing is refused and nothing waits for a human. When none started, each other agent that
+  follows the pull request's `checks` is told once (a delivery, its subscription going on); the
+  agent that made the change has it in its answer. On Bitbucket the same through `bkt pr checks`;
+  a push is not read yet: `forge show` reads the checks again.
 - **Review threads** ([`forges.md`](forges.md), "Review threads"): `show` with `detail full`
   gives each comment on a line of the diff with its replies as a thread: its id, file, line (or
   range), side (`new` or `old`), whether it is resolved or outdated, then its comments in order
