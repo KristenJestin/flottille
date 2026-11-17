@@ -60,6 +60,11 @@ pub const MAX_PROVIDER_SIDE: u32 = 8000;
 /// The most pixels `fit_under` decodes (8000 x 8000), read from the header before a byte is
 /// decoded: a small file can declare a picture of gigabytes, and scaling takes more memory still.
 pub const MAX_DECODE_PIXELS: u64 = 64_000_000;
+/// The longest side `fit_under` decodes, read from the header as the pixel count is: scaling
+/// samples one axis first into a buffer of 16 bytes a pixel, so a picture of 64 million pixels on
+/// one row asks a gigabyte a time. Every camera's picture fits, and with `MAX_DECODE_PIXELS` the
+/// buffer stays near 256 MiB.
+pub const MAX_DECODE_SIDE: u32 = 16384;
 /// The most memory decoding a picture for `fit_under` may take, in bytes: `MAX_DECODE_PIXELS` at
 /// four bytes each, with room.
 const MAX_FIT_DECODE_BYTES: u64 = 320 * 1024 * 1024;
@@ -71,7 +76,7 @@ const MAX_FIT_DECODE_BYTES: u64 = 320 * 1024 * 1024;
 /// `Ok(None)` when nothing is to be done: a GIF or a WebP that is readable, a picture that already
 /// fits as it is, and one that fits at no size (the caller leaves it out). `Err` says why the
 /// picture is not to be sent at all: its header cannot be read, it declares more than
-/// `MAX_DECODE_PIXELS` (a PNG or a JPEG), it cannot be decoded (cut short, damaged), or it is a
+/// `MAX_DECODE_PIXELS` or a side over `MAX_DECODE_SIDE` (a PNG or a JPEG), it cannot be decoded (cut short, damaged), or it is a
 /// GIF or a WebP over `MAX_PROVIDER_SIDE`, which are never scaled.
 pub fn fit_under(mime: &str, bytes: &[u8], cap: usize) -> Result<Option<Fitted>, String> {
     let Some(format) = scaled_format(mime) else {
@@ -85,6 +90,9 @@ pub fn fit_under(mime: &str, bytes: &[u8], cap: usize) -> Result<Option<Fitted>,
     let (width, height) = reader()
         .into_dimensions()
         .map_err(|_| "its header cannot be read")?;
+    if width.max(height) > MAX_DECODE_SIDE {
+        return Err(format!("over {MAX_DECODE_SIDE} px on a side"));
+    }
     if u64::from(width) * u64::from(height) > MAX_DECODE_PIXELS {
         return Err(format!("over {} megapixels", MAX_DECODE_PIXELS / 1_000_000));
     }
