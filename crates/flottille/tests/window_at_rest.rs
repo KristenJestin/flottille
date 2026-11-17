@@ -2044,11 +2044,13 @@ fn a_session_with_a_pending_connection_request_draws_no_frame_at_rest(cx: &mut T
 }
 
 /// #1036: the reply box's caret blinks while its field has the focus and stops when it loses it:
-/// the focus leaves for the page, and the window rests.
+/// the focus leaves for the page, and the window rests. The window is active, as a window in use
+/// is: an inactive one is sent no focus event, and so no blur.
 #[gpui_kit::test]
 fn the_caret_stops_when_its_field_loses_the_focus(cx: &mut TestAppContext) {
     let (user, lead, _mcp) = lead_for_connections();
     let (shell, cx) = window(&user, cx);
+    cx.update(|window, _| window.activate_window());
     until(&shell, cx, "the session is in the tree", |cx| {
         cx.update(|window, _| window.try_find(session_id(&lead)).is_some())
     });
@@ -2058,7 +2060,6 @@ fn the_caret_stops_when_its_field_loses_the_focus(cx: &mut TestAppContext) {
     });
     settle(&shell, cx);
     cx.update(|window, cx| window.click("reply-field", cx));
-    // Focused, the caret blinks: the window draws.
     let (drawn, _) = frames_at_rest(&shell, cx);
     assert!(drawn > 0, "the focused caret blinks");
     let focus = shell.read_with(cx, |shell, _| shell.focus_handle());
