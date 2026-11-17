@@ -1103,6 +1103,55 @@ mod tests {
         peer.told.clone()
     }
 
+    /// Whether `remote` would let a link go on within `within`.
+    async fn released(remote: &Remote, within: Duration) -> bool {
+        tokio::time::timeout(within, remote.hub_heard())
+            .await
+            .is_ok()
+    }
+
+    #[tokio::test]
+    async fn after_the_hub_session_is_lost_links_wait_for_the_next_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let (remote, _) = remote_in(dir.path(), 1);
+        let remote = Arc::new(remote);
+        remote.heard_hub();
+        assert!(released(&remote, Duration::from_millis(100)).await);
+
+        // The session is lost, as on a machine that wakes from a suspend: no link is accepted or
+        // dialled by the list kept until the hub sends one.
+        remote.lost_hub();
+        assert!(remote.holding());
+        assert!(!released(&remote, Duration::from_millis(500)).await);
+        let waiting = tokio::spawn({
+            let remote = remote.clone();
+            async move { remote.hub_heard().await }
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!waiting.is_finished());
+        remote.heard_hub();
+        tokio::time::timeout(Duration::from_millis(500), waiting)
+            .await
+            .expect("the list releases the links at once")
+            .unwrap();
+        assert!(!remote.holding());
+    }
+
+    #[tokio::test]
+    async fn links_are_released_when_the_hub_sends_no_list_within_the_bound() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut remote, _) = remote_in(dir.path(), 1);
+        remote.first_list = Duration::from_millis(400);
+        // At start, and after a session lost: held until the bound, then released with no list.
+        for _ in 0..2 {
+            assert!(remote.holding());
+            assert!(!released(&remote, Duration::from_millis(100)).await);
+            assert!(released(&remote, Duration::from_secs(2)).await);
+            assert!(!remote.holding());
+            remote.lost_hub();
+        }
+    }
+
     #[tokio::test]
     async fn a_machine_telling_many_addresses_has_64_kept() {
         let dir = tempfile::tempdir().unwrap();
