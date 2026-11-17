@@ -308,25 +308,24 @@ back as it was.
 Your connections (`docs/extensions.md`, "Connections"): whether Connections is on, and each
 connection with its tool, its state, why it is cut off or failing, and the setting of each action.
 
-### `flottille connection add <name> --about S (--command W... | --url U) [--env V=E]... [--header H=E]... [--only A=v1,v2]... [--except P]... [--client-id ID] [--site HOST]...`
+### `flottille connection add <name> --about S (--command W... | --url U) [--env V=E]... [--header H=E]... [--only A=v1,v2]... [--except P]... [--client-id ID]`
 
 Declares a connection under `[[connections.server]]` of `extensions.toml`: a command spawned
 without a shell (its words given after `--command`), or an `https://` URL (`http://` on this
 machine alone). `--env` and `--header` name vault entries of every project, `--only` limits the
 values of an argument, `--except` leaves a project out, `--client-id` is the OAuth client id you
 registered with the server's authorization server, when it registers none by itself (`connection
-login`), `--site` adds a host a sign-in also needs (a single sign-on's) to the sites the
-agent-browser adapter keeps the browser to (`extensions.md`, "Adapters"). With Connections on, the daemon starts the server, lists what it announces and pins it at
+login`). With Connections on, the daemon starts the server, lists what it announces and pins it at
 once, every action judged: the connection is given to agents as `add` returns (`state` is `ready`),
 and `connection review` is there to turn actions off or set them. A server that does not start
 leaves it waiting for its first review, `failing` saying why; one added while Connections or the
 connection is off is given when it is turned on (`flottille connection edit <name> --on`, or the
 extension's switch).
 
-### `flottille connection edit <name> [--about S] [--command W... | --url U] [--env…] [--header…] [--only…] [--except…] [--client-id ID] [--site…] [--headed | --headless] [--on | --off]`
+### `flottille connection edit <name> [--about S] [--command W... | --url U] [--env…] [--header…] [--only…] [--except…] [--client-id ID] [--headed | --headless] [--on | --off]`
 
 Replaces what is given. A change of the command, the URL, the variables, the headers, the
-limits, the sites or whether the browser is shown (`--headed` gives an adapter's browser the
+limits or whether the browser is shown (`--headed` gives an adapter's browser the
 daemon's display, `--headless` takes it away) is another server as far as trust goes: the daemon lists what it announces
 and pins it again at once, the settings of its actions kept. A connection that was cut off is not
 pinned by an edit, nor one whose server now announces more than another version (changed
