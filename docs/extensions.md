@@ -1596,8 +1596,12 @@ way in:
   the server starts as before.
 - **`login {entry}`**, Flottille's own action: the agent names a vault entry **bound to this
   connection** (`for = "connection:<name>"`, `vault.md`), whose names `help` with `for: "login"`
-  lists, never their values. An entry bound to another use, or to none, is refused, naming its use.
-  A name the vault does not hold is refused with the call that asks the user to add it, `vault
+  lists, never their values. **The entry may be one project's alone**: `login` reads it for the
+  calling agent's project, both when the action is called and when agent-browser's credential
+  provider asks for the secret, so an entry of one project is no entry for another project's
+  agent (`no entry <name>`, as if the vault did not hold it), and a project's own account is
+  never shared with every project. An entry bound to another use, or to none, is refused, naming
+  its use. A name the vault does not hold (for this project) is refused with the call that asks the user to add it, `vault
   {action: "ask", name, why, url, username, for: "connection:<name>"}` (`vault.md`, "Asking the
   user for an entry").
   **The login always opens the entry's own URL**, and takes no URL of the agent's: a page of its
