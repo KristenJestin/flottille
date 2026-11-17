@@ -629,3 +629,61 @@ async fn a_removed_device_is_cut_at_once_and_cannot_join_again() {
     );
     place.served.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_removed_members_invitations_are_closed() {
+    let mut place = Place::new().await;
+    let (laptop, machine, device) = joined_as(&mut place, Role::Runner).await;
+    let session = device
+        .connect(&machine, &hello(), &Tls::System)
+        .await
+        .unwrap();
+    // The laptop invites a phone, whose request waits for it; and another invitation of the
+    // laptop's no device answered yet.
+    let invitation = place.invite_by(&laptop, &session).await;
+    let phone = device_key(5);
+    let mut joined = join(&invitation, &phone, &place.machine("phone")).await;
+    let unanswered = place.invite_by(&laptop, &session).await;
+    let waiting = |place: &Place| {
+        place
+            .served
+            .with_hub(|hub| hub.pending(&laptop.public()).len())
+    };
+    assert_eq!(waiting(&place), 1);
+
+    let removal = Change::sign(
+        place.served.with_hub(|hub| hub.list().head()),
+        Action::Remove {
+            key: laptop.public(),
+        },
+        &place.pc,
+    );
+    place
+        .pc_device
+        .submit(&mut place.pc_session, removal)
+        .await
+        .unwrap();
+
+    // The waiting join ends, refused, and the invitation no device answered is closed too.
+    let over = outcome(&mut joined).await.unwrap_err();
+    assert!(
+        over.to_string()
+            .contains("this join request was refused, or its invitation expired"),
+        "{over}"
+    );
+    assert_eq!(waiting(&place), 0);
+    let late = Device::join(
+        &unanswered,
+        &device_key(6).public(),
+        &place.machine("tablet"),
+        &hello(),
+        &Tls::System,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        late.to_string().contains("unknown or expired"),
+        "{late}"
+    );
+    place.served.stop().await;
+}

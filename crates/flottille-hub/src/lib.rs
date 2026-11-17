@@ -533,6 +533,8 @@ impl<C: Clock> Hub<C> {
             |key: &PublicKey| checked.get(key).is_some() || checked.by_machine(key).is_some();
         self.presence.retain(|(key, _)| member(key));
         self.addresses.retain(|(key, _)| member(key));
+        // A removed member's invitations close with it: their waiting joins end, refused.
+        self.open.retain(|open| checked.get(&open.inviter).is_some());
         self.stored = stored;
         self.checked = Some(checked);
         Ok(())
