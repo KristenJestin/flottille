@@ -285,7 +285,7 @@ struct Paired {
 }
 
 /// `joiner` joins the hub of `inviter` as the user pairs them: `flottille remote invite` on the
-/// inviter, `flottille remote join <code>` on the new machine, which waits, and `flottille remote
+/// inviter, `flottille remote join` given the code on the new machine, which waits, and `flottille remote
 /// accept` on the inviter once its request is there, as `name` with `role`.
 fn pair(inviter: &Machine, joiner: &Machine, name: &str, role: &str) -> Paired {
     let invited = inviter.user.run(&["remote", "invite", "--json"]);
@@ -299,12 +299,16 @@ fn pair(inviter: &Machine, joiner: &Machine, name: &str, role: &str) -> Paired {
     let code = invited["code"].as_str().unwrap().to_owned();
     let mut joining = joiner
         .user
-        .command(&["remote", "join", &code])
-        .stdin(Stdio::null())
+        .command(&["remote", "join"])
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
+    {
+        let mut input = joining.stdin.take().unwrap();
+        std::io::Write::write_all(&mut input, format!("{code}\n").as_bytes()).unwrap();
+    }
     let mut out = BufReader::new(joining.stdout.take().unwrap());
     let mut first = String::new();
     out.read_line(&mut first).unwrap();
@@ -822,6 +826,59 @@ fn the_setup_code_is_read_from_the_standard_input_never_from_the_command_line() 
     );
 }
 
+#[test]
+fn the_invitation_code_is_read_from_the_standard_input_never_from_the_command_line() {
+    let hub = TestHub::new();
+    let (pc, server) = (Machine::new(None), Machine::new(None));
+    set_up(&hub, &pc);
+    // The invitation prints its code on a line of its own, never in a command to copy.
+    let invited = pc.user.run(&["remote", "invite"]);
+    assert!(invited.status.success());
+    let said = String::from_utf8_lossy(&invited.stdout);
+    let code = said
+        .lines()
+        .map(str::trim)
+        .find(|line| line.len() > 100 && !line.contains(' '))
+        .unwrap_or_else(|| panic!("no code on a line of its own: {said}"))
+        .to_owned();
+    assert!(
+        said.lines()
+            .filter(|line| line.contains("flottille remote join"))
+            .all(|line| !line.contains(&code)),
+        "{said}"
+    );
+    let output = server.user.run(&["remote", "join", &code]);
+    assert!(
+        !output.status.success(),
+        "an invitation code was taken from the command line"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("unexpected argument"),
+        "the refusal does not say the argument is not one"
+    );
+    // From the standard input, the join goes as far as the hub, where it waits for pc.
+    let mut joining = server
+        .user
+        .command(&["remote", "join"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    {
+        let mut input = joining.stdin.take().unwrap();
+        std::io::Write::write_all(&mut input, format!("{code}\n").as_bytes()).unwrap();
+    }
+    let mut first = String::new();
+    BufReader::new(joining.stdout.take().unwrap())
+        .read_line(&mut first)
+        .unwrap();
+    assert!(first.starts_with("Verification words: "), "{first}");
+    pc.wait_until_requested();
+    let _ = joining.kill();
+    let _ = joining.wait();
+}
+
 /// A port nobody uses now on loopback: the system's choice, let go at once.
 fn free_port() -> u16 {
     std::net::UdpSocket::bind("127.0.0.1:0")
@@ -979,9 +1036,10 @@ fn a_removed_device_is_cut_at_once_and_cannot_join_again() {
     assert!(invited.status.success());
     let invited: Value = serde_json::from_slice(&invited.stdout).unwrap();
     std::fs::remove_file(server.folder().join("hub.json")).unwrap();
-    let again = server
-        .user
-        .run(&["remote", "join", invited["code"].as_str().unwrap()]);
+    let again = server.user.run_with_input(
+        &["remote", "join"],
+        &format!("{}\n", invited["code"].as_str().unwrap()),
+    );
     assert!(!again.status.success());
     let said = String::from_utf8_lossy(&again.stderr);
     assert!(said.contains("was removed from the member list"), "{said}");

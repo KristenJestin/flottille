@@ -40,11 +40,10 @@ pub enum RemoteAction {
         #[arg(long)]
         json: bool,
     },
-    /// Join the user's hub with an invitation's code: this machine's device prints the four words
-    /// to compare, then waits until the member that invited accepts it
+    /// Join the user's hub with an invitation's code, read on the standard input (asked for on a
+    /// terminal), never on the command line: this machine's device prints the four words to
+    /// compare, then waits until the member that invited accepts it
     Join {
-        /// The invitation's code, as the inviting device shows it
-        code: String,
         #[arg(long)]
         json: bool,
     },
@@ -162,7 +161,8 @@ pub fn run(paths: &Paths, action: RemoteAction) -> Result<ExitCode> {
                 let code = invited["code"].as_str().unwrap_or_default();
                 println!(
                     "An invitation to the hub at {}, valid 5 minutes, once, from {} ({}):\n\n{code}\n\n\
-                     The QR holds the same text. On the new device: flottille remote join {code}",
+                     The QR holds the same text. On the new device: flottille remote join, then \
+                     give it the code",
                     invited["url"].as_str().unwrap_or_default(),
                     invited["inviter"].as_str().unwrap_or_default(),
                     invited["fingerprint"].as_str().unwrap_or_default(),
@@ -170,7 +170,8 @@ pub fn run(paths: &Paths, action: RemoteAction) -> Result<ExitCode> {
             }
             return Ok(ExitCode::SUCCESS);
         }
-        RemoteAction::Join { code, json } => {
+        RemoteAction::Join { json } => {
+            let code = read_code("The invitation's code: ", "no invitation code")?;
             let invitation = flottille_link::Invitation::from_code(&code)?;
             let device = device_key(paths)?;
             let words = invitation.words(&device.public());
@@ -186,7 +187,10 @@ pub fn run(paths: &Paths, action: RemoteAction) -> Result<ExitCode> {
             std::io::Write::flush(&mut std::io::stdout())?;
             let machine: flottille_link::PublicKey =
                 serde_json::from_value(ask("remote.machines", json!({}))?["this"]["key"].clone())?;
-            let accepted = ask("remote.join", json!({"code": code, "key": device.public()}))?;
+            let accepted = ask(
+                "remote.join",
+                json!({"code": code.as_str(), "key": device.public()}),
+            )?;
             let head: flottille_link::ChangeHash =
                 serde_json::from_value(accepted["head"].clone())?;
             // Claimed by the machine's daemon, which holds its key.
@@ -348,7 +352,7 @@ pub fn run(paths: &Paths, action: RemoteAction) -> Result<ExitCode> {
                 Some(name) => name,
                 None => host_name()?,
             };
-            let code = setup_code()?;
+            let code = read_code("The hub's setup code: ", "no setup code")?;
             let device = device_key(paths)?;
             let machine: flottille_link::PublicKey =
                 serde_json::from_value(ask("remote.machines", json!({}))?["this"]["key"].clone())?;
@@ -447,19 +451,20 @@ fn unix_now() -> u64 {
         .unwrap_or_default()
 }
 
-/// The setup code, from the standard input: asked for when it is a terminal. Never an argument,
-/// which other users of the machine and the shell's history would see.
-fn setup_code() -> Result<zeroize::Zeroizing<String>> {
+/// A code (the hub's setup code, an invitation's), from the standard input: asked for when it is
+/// a terminal. Never an argument, which other users of the machine and the shell's history would
+/// see.
+fn read_code(prompt: &str, none: &str) -> Result<zeroize::Zeroizing<String>> {
     use std::io::{BufRead, IsTerminal, Write};
     if std::io::stdin().is_terminal() {
-        eprint!("The hub's setup code: ");
+        eprint!("{prompt}");
         std::io::stderr().flush()?;
     }
     let mut code = zeroize::Zeroizing::new(String::new());
     std::io::stdin().lock().read_line(&mut code)?;
     let trimmed = zeroize::Zeroizing::new(code.trim().to_owned());
     if trimmed.is_empty() {
-        return Err("no setup code was given: type it, or give it on the standard input".into());
+        return Err(format!("{none} was given: type it, or give it on the standard input").into());
     }
     Ok(trimmed)
 }
