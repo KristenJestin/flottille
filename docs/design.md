@@ -1079,7 +1079,9 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   (`Needs you: a permission`, `Waiting: checks of #1`, `Running`, `New since you looked: opened a
   pull request`); the dot is cleared when the session is opened and lives as long as the window.
   A state is drawn by its shape as well as its colour: a spinner for running, a pulsing dot for
-  waits for the user, a **clock** in the palette's `pend` colour for waiting (between turns for
+  waits for the user (it pulses for three cycles, 5.4 s, while the wait is new, then rests as a
+  still dot: a page that waits for the user draws no frame at rest), a **clock** in the palette's
+  `pend` colour for waiting (between turns for
   something outside: a pull request's checks or a review, a session it leads, a wake, its quota's
   reset), and the quiet ring, in the faint grey, only for rest (idle, denied, stopped). `pend`
   is a violet of its own in both themes, neither the orange of "needs you" nor the blue of
