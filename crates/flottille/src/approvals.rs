@@ -251,11 +251,11 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
         }
         "approval.approve" => {
             let asked: Approve = serde_json::from_value(params)?;
-            decide(&daemon, asked.number, Decision::Once, asked.discard)
+            decide(&daemon, asked.number, Decision::Once, asked.discard).await
         }
         "approval.deny" => {
             let asked: Deny = serde_json::from_value(params)?;
-            decide(&daemon, asked.number, Decision::Deny, false)
+            decide(&daemon, asked.number, Decision::Deny, false).await
         }
         method => Err(Failure::new(
             "unknown-method",
@@ -267,7 +267,7 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
 /// The user's decision: refused for a request they do not hold, and one already decided. A denial is answered to the agent now; an allowed
 /// request is performed in the background, and the user is answered once it is decided. `discard`
 /// answers only a workspace's removal.
-fn decide(daemon: &Arc<Daemon>, number: u64, decision: Decision, discard: bool) -> Answer {
+async fn decide(daemon: &Arc<Daemon>, number: u64, decision: Decision, discard: bool) -> Answer {
     let request = daemon
         .read(|store| store.request(number))?
         .ok_or_else(|| Failure::new("not-found", format!("there is no request #{number}")))?;
@@ -313,6 +313,16 @@ fn decide(daemon: &Arc<Daemon>, number: u64, decision: Decision, discard: bool) 
             request.tool
         );
         store_answer(daemon, &request, "refused", &body);
+    } else if request.tool == "connections" {
+        // A connection's write is waited for, as the user's own Save is: the answer says whether
+        // the connection now waits for the user's review, so that the window leads into it. The
+        // task is the daemon's, not the call's: a window that goes away does not cancel it.
+        let settled = tokio::spawn(settle(daemon.clone(), request.clone(), discard)).await;
+        let mut answer = json!({"request": request.to_json()});
+        if let Ok(Some(connection)) = settled {
+            answer["connection"] = connection;
+        }
+        return Ok(answer);
     } else {
         tokio::spawn(settle(daemon.clone(), request.clone(), discard));
     }
@@ -332,9 +342,15 @@ fn already(request: &Request) -> Failure {
 }
 
 /// Checks an allowed request again, performs it, and stores its answer.
-async fn settle(daemon: Arc<Daemon>, request: Request, discard: bool) {
+///
+/// A connection's write answers what became of the connection (`family_settled`).
+async fn settle(daemon: Arc<Daemon>, request: Request, discard: bool) -> Option<Value> {
     let (outcome, body, pictures) = performed(&daemon, &request, discard).await;
     store_answer_with(&daemon, &request, outcome, &body, &pictures);
+    match request.tool == "connections" {
+        true => crate::extensions::family_settled(&daemon, &request, outcome == "done"),
+        false => None,
+    }
 }
 
 /// The agent of an allowed request, while it may still be performed: why not otherwise.
