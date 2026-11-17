@@ -741,7 +741,10 @@ pending requests.
   gate with another method, `refused: forge merge by merge takes no message: …`, or on another
   action), or re-runs the failed jobs of its last
   commit's pipelines (`docs/commands.md`, "`forge`"). **`create`** also takes `reviewers`
-  (each a person as the agent knows them, "People" below; added to the project's, none twice), `labels` (GitHub only: Bitbucket has no labels on pull
+  (each a person as the agent knows them, "People" below; added to the project's, none twice,
+  and asked **when the pull request is opened, on GitHub (`gh pr create --reviewer`) and on
+  Bitbucket (`bkt pr create --reviewer`) alike**: an agent adds none afterwards with `edit`,
+  whose `reviewers_add` is for a pull request already open; the tool's schema says so), `labels` (GitHub only: Bitbucket has no labels on pull
   requests, and the call is refused saying so, before anything is opened),
   `subscribe: false` (opened without the automatic subscription a session gets, which its answer
   says otherwise: `You are subscribed to it until it is merged or closed: …`, `docs/extensions.md`,
@@ -1099,7 +1102,7 @@ Jira: their account id, else their e-mail). The card shows the names as given.
 
 | Tool | |
 |---|---|
-| `tickets {action, ticket?, workspace?, query?, updated_within?, in_comments?, jql?, state?, label?, assignee?, detail?, fresh?, title?, body?, labels?, reason?, remove_labels?, assignees?, remove_assignees?, status?, other?, kind?, comment?, sprint?, parent?, board?, milestone?, remove_milestone?, due?, description?, project?, type?, events?, from?, to?, author?, minutes?}` | The tickets of the project's tracker, through the user's own `gh` or `acli`, run by the daemon; an agent has no tracker sign-in of its own. Every agent of a project that declares a tracker has it, in `main` as in a workspace, whether a ticket is linked or not. |
+| `tickets {action, ticket?, workspace?, query?, updated_within?, in_comments?, jql?, state?, label?, assignee?, detail?, fresh?, title?, body?, labels?, reason?, remove_labels?, assignees?, remove_assignees?, status?, other?, kind?, comment?, sprint?, parent?, board?, milestone?, remove_milestone?, due?, description?, project?, type?, fields?, events?, from?, to?, author?, minutes?}` | The tickets of the project's tracker, through the user's own `gh` or `acli`, run by the daemon; an agent has no tracker sign-in of its own. Every agent of a project that declares a tracker has it, in `main` as in a workspace, whether a ticket is linked or not. |
 
 - **`people {query?}`** (a read): who can be named as an assignee, each as `- Anne Example
   (anne@example.org)`: GitHub the tracker repository's assignable users and collaborators, as
@@ -1221,7 +1224,29 @@ Jira: their account id, else their e-mail). The card shows the names as given.
   <P> --json`, its `issueTypes`), kept five minutes; `project` is left out when the tracker has
   one. On GitHub it answers that issues have no type. A Jira `create` that `acli` refuses for its
   `type` answers with the project's types, nothing written, so that a type is never guessed
-  twice ([`tickets.md`](tickets.md), "Types and assignment").
+  twice ([`tickets.md`](tickets.md), "Types and assignment"). Its answer also says what to do
+  for a required field: `acli` lists no type's required fields (`project view` has only
+  names), and Flottille does not call Jira's REST API to read them, so a field a type requires
+  is named by the refusal of a creation that lacks it, and filled with `fields` (below).
+- **`fields` on Jira (#1042)**: `create` and `edit` take `fields`, an object of any field of the
+  work item, passed through **as given**, with no model of the fields' kinds: its keys are
+  Jira's own, a field's id (`customfield_10042`, found in the site's field settings) or a system
+  field's key (`priority`, `components`), its values as Jira takes them (a select
+  `{"value": "Major"}`, a user `{"accountId": "…"}`, a list of them for a multi-select). A name
+  is no key: Jira's REST takes none, and `acli` exposes no create metadata to resolve one
+  cheaply. A **creation** with `fields` is made from a JSON definition (`acli jira workitem create
+  --from-json`, as for a sprint or a version) whose `additionalAttributes` are the fields, so it
+  needs `type` (`refused: tickets create with fields needs type: …`, before anything is asked);
+  `fixVersions` in `fields` and `milestone` together are refused (both set the fix version). An
+  **edit** sets them first, by `acli jira workitem edit --from-json` (`{"issues": [<key>],
+  "additionalAttributes": {…}}`, **assumed** like the creation's shape, as `acli` was not
+  available to measure it), then the title, the description, the labels and the assignee by the
+  flags above; a refusal of the fields leaves the rest unwritten, and a refusal of the rest says
+  the fields were set. A creation `acli` refuses with a field *required* in Jira's words (`Severity
+  is required (allowed values: Minor, Major)`) answers those words, `nothing was created`, and how
+  to give each required field in `fields`, never trying it again by itself. The card shows each
+  field (`It sets the field customfield_10042: {"value":"Major"}`). On GitHub, and on any action
+  but create and edit, `fields` is refused before anything is asked.
 - **`assignee` on Jira**: `create` and `edit` take `"me"` (the user the agent works for: `acli`'s
   `@me`, the user it is signed in as, which `acli` resolves itself; `"@me"` is taken too), an email
   or an account id, as `acli` takes them, or a person by display name, nickname or e-mail found
