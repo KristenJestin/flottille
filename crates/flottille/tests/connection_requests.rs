@@ -1574,6 +1574,13 @@ fn an_agent_cannot_get_another_projects_entry_offered_for_sharing() {
     let entry = vault_entry(&user, "app-token");
     assert_eq!(entry["project"], "other", "{entry}");
     assert_eq!(entry["url"], Value::Null, "{entry}");
+    // Accept still waits, and says what the user can do where no Share is offered.
+    let why = waits(&user, number);
+    assert!(
+        why.contains("app-token")
+            && why.contains("Every project, in its dialog in Settings, Vault"),
+        "{why}"
+    );
 }
 
 #[test]
