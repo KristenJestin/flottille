@@ -467,6 +467,50 @@ async fn set(daemon: &std::sync::Arc<Daemon>, params: Value) -> Result<Value, Fa
     Ok(entry.to_json())
 }
 
+/// The user's Share of the entry `name` from an agent's connection request: every project's from
+/// now on, the rest of it as it was. A worklog's entry stays its project's alone.
+pub fn shared(daemon: &Daemon, name: &str) -> Result<Value, Failure> {
+    rewritten(daemon, name, |entry| {
+        if let Some(bound) = entry.bound.as_deref().filter(|b| b.starts_with("worklog:")) {
+            return Err(Failure::refused(format!(
+                "the vault entry {name} is bound to {}, which is its project's alone: name \
+                 another entry for the connection",
+                use_said(bound).unwrap_or_else(|| bound.to_owned())
+            )));
+        }
+        entry.project = None;
+        Ok(())
+    })
+}
+
+/// The user's Bind of the entry `name` from an agent's connection request: its `url` becomes
+/// `origin`, the address the request's connection sends it to, read by the daemon; the rest of
+/// it as it was.
+pub fn bound_to(daemon: &Daemon, name: &str, origin: &str) -> Result<Value, Failure> {
+    rewritten(daemon, name, |entry| {
+        entry.url = Some(origin.to_owned());
+        Ok(())
+    })
+}
+
+/// The entry `name`'s metadata changed by `change` and written, its secret untouched.
+fn rewritten(
+    daemon: &Daemon,
+    name: &str,
+    change: impl FnOnce(&mut Entry) -> Result<(), Failure>,
+) -> Result<Value, Failure> {
+    let mut entry = daemon
+        .read(|store| store.vault_entries())?
+        .into_iter()
+        .find(|entry| entry.name == name)
+        .ok_or_else(|| Failure::new("not-found", format!("the vault has no entry {name}")))?;
+    change(&mut entry)?;
+    entry.updated_at = now_ms();
+    daemon.write(|store| store.put_vault_entry(&entry))?;
+    retool(daemon);
+    Ok(entry.to_json())
+}
+
 /// The project an entry bound to `bound` has, if Flottille knows the use and it fits the entry's
 /// `project`: a project's worklog reads only an entry that project sees, so the entry is the
 /// project's; a connection reads only an entry of every project, whose `url` is no plain `http`
@@ -661,6 +705,8 @@ struct Ask {
     bound: Option<String>,
     /// The entry is every project's, not the asking project's alone.
     every: bool,
+    /// The connection it is for, declared or asked for.
+    connection: Option<String>,
     takes_username: bool,
     /// The agents whose ask joined it while it was open, with their projects.
     joined: Vec<(String, String)>,
@@ -671,7 +717,8 @@ impl Ask {
         json!({"ask": self.number, "at": self.at, "agent": self.agent, "project": self.project,
             "name": self.name, "why": self.why, "description": self.description,
             "url": self.url, "host": self.host, "username": self.username, "for": self.bound,
-            "every": self.every, "takes_username": self.takes_username,
+            "every": self.every, "connection": self.connection,
+            "takes_username": self.takes_username,
             "joined": self.joined.iter().map(|(agent, _)| agent).collect::<Vec<_>>()})
     }
 }
@@ -705,6 +752,7 @@ fn asks(store: &Store) -> flottille_core::Result<Asks> {
                 username: given(data, "username"),
                 bound: given(data, "for"),
                 every: data["every"] == true,
+                connection: given(data, "connection"),
                 takes_username: data["takes_username"] == true,
                 joined: Vec::new(),
             }),
@@ -888,6 +936,7 @@ struct Asked {
     #[serde(rename = "for")]
     bound: Option<String>,
     project: Option<String>,
+    connection: Option<String>,
 }
 
 /// `vault`: what the agent's project sees of the vault, metadata only. No action gives a secret.
@@ -1001,8 +1050,34 @@ fn ask(daemon: &Daemon, grant: &Grant, asked: Asked) -> Outcome {
             ));
         }
     };
+    // The connection whose server is given the entry: named, or the one this agent's own request
+    // waiting for the user names it in. Its entry is every project's, at its address unless the
+    // agent gave one. A login's entry (`for`) is not one: its project is left as asked here.
+    let connection = match given(asked.connection) {
+        Some(connection) => {
+            match crate::extensions::asked_for(daemon, &grant.agent, &connection, &name) {
+                Ok(Some(origin)) => Some((connection, origin)),
+                Ok(None) => {
+                    return Outcome::Refused(format!(
+                        "refused: there is no connection {connection}, declared or asked for: \
+                         connection names one the user declared, or one your request asks to add"
+                    ));
+                }
+                Err(why) => return Outcome::Refused(format!("refused: {why}")),
+            }
+        }
+        None => crate::extensions::wanting(daemon, &grant.agent, &name),
+    };
+    let project_asked = given(asked.project);
+    if connection.is_some() && project_asked.as_deref() == Some("this") {
+        return Outcome::Refused(
+            "refused: a connection's entry is every project's, since a connection is given to \
+             every project: leave project out"
+                .into(),
+        );
+    }
     // A connection is given to every project: its entry is every project's.
-    let every = match (given(asked.project).as_deref(), &bound) {
+    let every = match (project_asked.as_deref(), &bound) {
         (Some("every"), Some(b)) if b.starts_with("worklog:") => {
             return Outcome::Refused(
                 "refused: an entry for this project's worklog is this project's alone".into(),
@@ -1014,9 +1089,12 @@ fn ask(daemon: &Daemon, grant: &Grant, asked: Asked) -> Outcome {
             );
         }
         (Some("every"), _) => true,
-        (None | Some("this"), _) => bound
-            .as_deref()
-            .is_some_and(|b| b.starts_with("connection:")),
+        (None | Some("this"), _) => {
+            connection.is_some()
+                || bound
+                    .as_deref()
+                    .is_some_and(|b| b.starts_with("connection:"))
+        }
         (Some(other), _) => {
             return Outcome::Refused(format!("refused: project is this or every, not {other}"));
         }
@@ -1026,9 +1104,12 @@ fn ask(daemon: &Daemon, grant: &Grant, asked: Asked) -> Outcome {
     let description = need.as_ref().map(|need| need.description.clone());
     let takes_username = need.as_ref().is_some_and(|need| need.takes_username);
     let (url, username) = (
-        given(asked.url).map(masked),
+        given(asked.url)
+            .map(masked)
+            .or_else(|| connection.as_ref().and_then(|(_, origin)| origin.clone())),
         given(asked.username).map(masked),
     );
+    let connection = connection.map(|(connection, _)| connection);
     // Where the secret goes, as a connection's login reads the URL: the card says that host,
     // never its own reading of the text.
     let host = match url.as_deref() {
@@ -1045,6 +1126,10 @@ fn ask(daemon: &Daemon, grant: &Grant, asked: Asked) -> Outcome {
             }
             (None, Some(host)) => Some(host),
         },
+    };
+    let for_connection = match &connection {
+        Some(connection) => format!(", every project's, for the connection {connection}"),
+        None => String::new(),
     };
     let written = daemon.write(|store| {
         let state = asks(store)?;
@@ -1072,7 +1157,7 @@ fn ask(daemon: &Daemon, grant: &Grant, asked: Asked) -> Outcome {
                     json!({"agent": grant.agent, "project": project.name, "name": name,
                         "why": why, "description": description, "url": url, "host": host,
                         "username": username, "for": bound, "every": every,
-                        "takes_username": takes_username}),
+                        "connection": connection, "takes_username": takes_username}),
                     false,
                 )?,
                 false,
@@ -1091,8 +1176,8 @@ fn ask(daemon: &Daemon, grant: &Grant, asked: Asked) -> Outcome {
              sets it or dismisses it."
         )),
         Ok(Some(false)) => Outcome::Done(format!(
-            "The user is offered the vault's form of a new entry {name}, prefilled with what \
-             you gave. Nothing waits: continue with what does not need it; a delivery says when \
+            "The user is offered the vault's form of a new entry {name}{for_connection}, \
+             prefilled with what you gave. Nothing waits: continue with what does not need it; a delivery says when \
              the user sets it or dismisses it. You never see the secret: once set, give its name \
              to the tool that needs it."
         )),

@@ -8,7 +8,8 @@
 //! whose Save answers it. The results are toasts.
 
 use gpui_design_system::{
-    Button, Field, Icon, Modal, Skeleton, Tag, Toast, awaiting, palette, presence_of, space, toast,
+    Button, Confirm, Field, Icon, Modal, Skeleton, Tag, Toast, awaiting, palette, presence_of,
+    space, toast,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -30,6 +31,25 @@ pub enum Then {
     Proposed { number: u64 },
     /// `approval.approve` (`accepted`) or `approval.deny` of the request `number`.
     Decided { number: u64, accepted: bool },
+    /// `connection.share_entry` or `connection.bind_entry` of an entry the request `number` names.
+    Widened { number: u64 },
+}
+
+/// What the user gives a vault entry from the request's dialog, behind the confirmation: the
+/// entry every project's, or bound to the host the connection sends it to.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Widen {
+    Share {
+        entry: String,
+        project: String,
+    },
+    /// `was` is the entry's address before, `origin` the one it gets.
+    Bind {
+        entry: String,
+        host: String,
+        was: Option<String>,
+        origin: String,
+    },
 }
 
 /// What a request would write, as `connection.proposed` says it.
@@ -64,6 +84,16 @@ pub struct Secret {
     pub host: Option<String>,
     /// Sent elsewhere than the entry's address says, or given to a program.
     pub differs: bool,
+    /// The one project the entry is alone to, when it is: a connection needs it for every project.
+    pub project: Option<String>,
+    /// The user may share it from the request: the asking agent's own project's alone.
+    pub share: bool,
+    /// Accept waits for the user to bind the entry to the connection's host.
+    pub to_bind: bool,
+    /// The entry's address as it is.
+    pub entry_url: Option<String>,
+    /// The connection's origin, the address a Bind gives the entry.
+    pub origin: Option<String>,
     /// The vault holds no entry of that name yet.
     pub missing: bool,
 }
@@ -78,6 +108,11 @@ impl Secret {
             entry_host: value["entry_host"].as_str().map(str::to_owned),
             host: value["host"].as_str().map(str::to_owned),
             differs: value["differs"] != false,
+            project: value["project"].as_str().map(str::to_owned),
+            share: value["share"] == true,
+            to_bind: value["to_bind"] == true,
+            entry_url: value["entry_url"].as_str().map(str::to_owned),
+            origin: value["origin"].as_str().map(str::to_owned),
             missing: value["missing"] == true,
         }
     }
@@ -184,6 +219,15 @@ pub struct ConnectionRequest {
     proposal: Option<Result<Proposal, String>>,
     deciding: bool,
     error: Option<SharedString>,
+    /// What the confirmation asks before it is given, while it is open.
+    confirming: Option<Widen>,
+    /// What the confirmation said last, kept while it fades out.
+    confirmed: Option<Widen>,
+    /// A Share or a Bind sent, until the daemon answers.
+    widening: bool,
+    /// The lines of entries to mend shown since the dialog opened, `(id, sentence, action, what
+    /// it gives)`: kept so that one mended folds away.
+    lines: Vec<(String, String, SharedString, Widen)>,
     /// The entries an Accept answered it waits for, one `entry\thost` line each: what the
     /// **New entry…** buttons are made of, kept by their block while it folds away.
     waits_for: Option<SharedString>,
@@ -229,6 +273,10 @@ impl ConnectionRequest {
             proposal: None,
             deciding: false,
             error: None,
+            confirming: None,
+            confirmed: None,
+            widening: false,
+            lines: Vec::new(),
             waits_for: None,
         }
     }
@@ -258,6 +306,9 @@ impl ConnectionRequest {
         self.proposal = None;
         self.deciding = false;
         self.error = None;
+        self.confirming = None;
+        self.widening = false;
+        self.lines.clear();
         self.waits_for = None;
         self.ask(
             "connection.proposed",
@@ -270,6 +321,7 @@ impl ConnectionRequest {
 
     pub fn close(&mut self, cx: &mut Context<Self>) {
         self.open = false;
+        self.confirming = None;
         cx.notify();
     }
 
@@ -278,9 +330,36 @@ impl ConnectionRequest {
         match then {
             Then::Proposed { number } => {
                 if self.number == Some(number) {
-                    self.proposal = Some(answer.map(|value| Proposal::of(&value)));
+                    let proposal = answer.map(|value| Proposal::of(&value));
+                    let now = proposal
+                        .as_ref()
+                        .map_or_else(|_| Vec::new(), Self::widenings_of);
+                    // Each line acts as the latest reading says; one gone keeps its last words
+                    // while it folds away.
+                    for line in &now {
+                        match self.lines.iter_mut().find(|(id, ..)| *id == line.0) {
+                            Some(known) => *known = line.clone(),
+                            None => self.lines.push(line.clone()),
+                        }
+                    }
+                    // A confirmation of what the request no longer asks closes: confirmed, it
+                    // would give what the user did not read.
+                    if self
+                        .confirming
+                        .as_ref()
+                        .is_some_and(|widen| !now.iter().any(|(.., is)| is == widen))
+                    {
+                        self.confirming = None;
+                    }
+                    // A request no longer current offers nothing to mend: its New entry… block
+                    // folds away with the rest.
+                    if proposal.as_ref().is_ok_and(|p| !p.current) {
+                        self.waits_for = None;
+                    }
+                    self.proposal = Some(proposal);
                 }
             }
+            Then::Widened { number } => self.widened(number, answer, cx),
             Then::Decided { number, accepted } => {
                 if self.number == Some(number) {
                     self.deciding = false;
@@ -417,6 +496,236 @@ impl ConnectionRequest {
             })
             .ok();
         cx.notify();
+    }
+
+    // ── Share and Bind ───────────────────────────────────────────────────────────────────────
+
+    /// The action of an entry's line: the confirmation, which says what it gives and to where.
+    fn ask_to_widen(&mut self, widen: Widen, cx: &mut Context<Self>) {
+        self.confirmed = Some(widen.clone());
+        self.confirming = Some(widen);
+        cx.notify();
+    }
+
+    /// The confirmation's action: the daemon widens the entry, reading where from the request
+    /// itself; the dialog reads the request again once it is done.
+    fn widen(&mut self, cx: &mut Context<Self>) {
+        let (Some(number), Some(widen)) = (self.number, self.confirming.take()) else {
+            return;
+        };
+        // A Bind names the host the confirmation showed: the daemon binds nothing if it reads
+        // another one.
+        let (method, params) = match &widen {
+            Widen::Share { entry, .. } => (
+                "connection.share_entry",
+                json!({"number": number, "entry": entry}),
+            ),
+            Widen::Bind { entry, host, .. } => (
+                "connection.bind_entry",
+                json!({"number": number, "entry": entry, "host": host}),
+            ),
+        };
+        self.widening = true;
+        self.error = None;
+        self.ask(method, params, Then::Widened { number }, cx);
+        cx.notify();
+    }
+
+    fn widened(&mut self, number: u64, answer: Result<Value, String>, cx: &mut Context<Self>) {
+        if self.number != Some(number) {
+            return;
+        }
+        self.widening = false;
+        // Done or refused, the request is read again: a refusal is often that it changed.
+        if let Err(why) = answer {
+            self.error = Some(why.into());
+        }
+        self.ask(
+            "connection.proposed",
+            json!({"number": number}),
+            Then::Proposed { number },
+            cx,
+        );
+    }
+
+    /// The lines a proposal asks of the user, each `(id, sentence, action, what it gives)`: an
+    /// entry the asking agent's project's alone (Share), one bound to no address or another host
+    /// (Bind). None for a request that would no longer be done.
+    fn widenings_of(proposal: &Proposal) -> Vec<(String, String, SharedString, Widen)> {
+        let mut lines: Vec<(String, String, SharedString, Widen)> = Vec::new();
+        if !proposal.current {
+            return lines;
+        }
+        for secret in &proposal.secrets {
+            let entry = &secret.entry;
+            let id = format!("connection-request-share-{entry}");
+            if secret.share
+                && let Some(project) = &secret.project
+                && !lines.iter().any(|(known, ..)| *known == id)
+            {
+                lines.push((
+                    id,
+                    format!(
+                        "the vault entry {entry} is {project}'s alone; a connection needs it for \
+                         every project"
+                    ),
+                    "Share with every project".into(),
+                    Widen::Share {
+                        entry: entry.clone(),
+                        project: project.clone(),
+                    },
+                ));
+            }
+            let id = format!("connection-request-bind-{entry}");
+            if secret.to_bind
+                && let Some(host) = &secret.host
+                && let Some(origin) = &secret.origin
+                && !lines.iter().any(|(known, ..)| *known == id)
+            {
+                let said = match &secret.entry_host {
+                    Some(entry_host) => format!(
+                        "the vault entry {entry} is for {entry_host}; this connection would send \
+                         it to {host}"
+                    ),
+                    None => format!(
+                        "the vault entry {entry} has no address; this connection would send it \
+                         to {host}"
+                    ),
+                };
+                lines.push((
+                    id,
+                    said,
+                    SharedString::from(format!("Bind it to {host}")),
+                    Widen::Bind {
+                        entry: entry.clone(),
+                        host: host.clone(),
+                        was: secret.entry_url.clone(),
+                        origin: origin.clone(),
+                    },
+                ));
+            }
+        }
+        lines
+    }
+
+    /// The lines of the entries the user may mend from here, each with its action: one project's
+    /// alone (**Share with every project**), bound to no address or to another host than the one
+    /// this connection sends it to (**Bind it to <host>**). Each unfolds and folds away with its
+    /// gap, as the dialog reads the request again.
+    fn widenings(&self, proposal: &Proposal, cx: &Context<Self>) -> AnyElement {
+        let wait = palette(cx).wait;
+        let current = Self::widenings_of(proposal);
+        let this = cx.entity().downgrade();
+        let busy = self.widening || self.deciding;
+        let line = move |id: String,
+                         said: Option<String>,
+                         action: SharedString,
+                         widen: Widen|
+              -> AnyElement {
+            let this = this.clone();
+            presence_of(
+                SharedString::from(format!("{id}-block")),
+                said.map(SharedString::from),
+                move |said| {
+                    div()
+                        .flex()
+                        .items_start()
+                        .gap(space::SM)
+                        .child(
+                            div()
+                                .id(SharedString::from(id.clone()))
+                                .flex_1()
+                                .min_w_0()
+                                .whitespace_normal()
+                                .text_color(wait)
+                                .aria_label(said.clone())
+                                .child(said)
+                                .test_support(),
+                        )
+                        .child(
+                            Button::secondary(SharedString::from(format!("{id}-action")), action)
+                                .disabled(busy)
+                                .on_click(move |_, _, cx| {
+                                    this.update(cx, |this, cx| {
+                                        this.ask_to_widen(widen.clone(), cx)
+                                    })
+                                    .ok();
+                                }),
+                        )
+                        .into_any_element()
+                },
+            )
+            .space(space::SM)
+            .into_any_element()
+        };
+        let mut lines = div().id("connection-request-widenings").flex().flex_col();
+        // Every line shown since the dialog opened is built on every frame: one whose entry is
+        // mended folds away instead of vanishing.
+        for (id, _, action, widen) in &self.lines {
+            let said = current
+                .iter()
+                .find(|(now, ..)| now == id)
+                .map(|(_, said, ..)| said.clone());
+            lines = lines.child(line(id.clone(), said, action.clone(), widen.clone()));
+        }
+        lines.test_support().into_any_element()
+    }
+
+    /// The one confirmation of a Share or a Bind: the question names the entry, the sentence what
+    /// it gives and to where.
+    fn confirmation(&self, cx: &Context<Self>) -> Confirm {
+        let connection = self
+            .proposal
+            .as_ref()
+            .and_then(|p| p.as_ref().ok())
+            .map(|p| p.name.clone())
+            .unwrap_or_default();
+        let (question, sentence, action) = match &self.confirmed {
+            Some(Widen::Share { entry, project }) => (
+                format!("Share the entry {entry} with every project?"),
+                format!(
+                    "Every project's agents will see its name, what it is for, its URL and its \
+                     username, and every feature of every project may use it, the connection \
+                     {connection} among them; it will no longer be {project}'s alone. Its \
+                     secret stays in your keyring. This stays so even if you then refuse the \
+                     request."
+                ),
+                "Share with every project".to_owned(),
+            ),
+            Some(Widen::Bind {
+                entry,
+                host,
+                was,
+                origin,
+            }) => (
+                format!("Bind the entry {entry} to {host}?"),
+                format!(
+                    "Its address, now {}, becomes {origin}, the one of the connection \
+                     {connection}, and its secret will be sent to {host} in that connection's \
+                     requests, as an agent asked. This stays so even if you then refuse the \
+                     request.",
+                    was.as_deref().unwrap_or("no address")
+                ),
+                format!("Bind it to {host}"),
+            ),
+            None => (String::new(), String::new(), String::new()),
+        };
+        let (this, again) = (cx.entity().downgrade(), cx.entity().downgrade());
+        Confirm::new("connection-request-widen", question)
+            .sentence(sentence)
+            .action(action)
+            .open(self.confirming.is_some())
+            .on_confirm(move |_, cx| {
+                this.update(cx, |this, cx| this.widen(cx)).ok();
+            })
+            .on_cancel(move |_, cx| {
+                again
+                    .update(cx, |this, cx| {
+                        this.confirming = None;
+                        cx.notify();
+                    })
+                    .ok();
+            })
     }
 
     // ── Drawing ──────────────────────────────────────────────────────────────────────────────
@@ -725,7 +1034,11 @@ impl ConnectionRequest {
         Field::new(
             "connection-request-secrets-field",
             "Where its secrets go",
-            lines,
+            div()
+                .flex()
+                .flex_col()
+                .child(lines)
+                .child(self.widenings(proposal, cx)),
         )
         .warning(warning)
         .into_any_element()
@@ -887,10 +1200,10 @@ impl Render for ConnectionRequest {
                         false => "Accept",
                     },
                 )
-                .disabled(decided)
+                .disabled(decided || self.widening)
                 .on_click(cx.listener(|this, _, _, cx| this.accept(cx))),
             );
         }
-        modal
+        div().child(modal).child(self.confirmation(cx))
     }
 }

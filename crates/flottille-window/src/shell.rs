@@ -2779,13 +2779,14 @@ impl Shell {
         entry: crate::vault::VaultEntry,
         why: String,
         host: Option<String>,
+        connection: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.open_settings_at(crate::settings::Reveal::Vault, window, cx);
         let vault = self.settings.read(cx).vault().clone();
         vault.update(cx, |vault, cx| {
-            vault.add_asked(&entry, why, host, window, cx)
+            vault.add_asked(&entry, why, host, connection, window, cx)
         });
     }
 

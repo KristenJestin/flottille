@@ -50,13 +50,47 @@ pub fn held_reason(args: &Value) -> String {
 }
 
 /// A `connections` call checked before the gate is asked: what a write changes, or its refusal.
-pub fn family_says(daemon: &Daemon, root: bool, args: &Value) -> Result<Vec<String>, Outcome> {
-    connections::requests::says(daemon, root, args)
+pub fn family_says(
+    daemon: &Daemon,
+    root: bool,
+    project: &str,
+    args: &Value,
+) -> Result<Vec<String>, Outcome> {
+    connections::requests::says(daemon, root, project, args)
 }
 
-/// Why the user's Accept of a held `connections` call waits: an entry it names is still missing.
+/// Why the user's Accept of a held `connections` call waits: an entry it names is not right for
+/// it yet (missing, one project's, bound to another use or to no address of its host).
 pub fn family_waits(daemon: &Daemon, args: &Value) -> Option<String> {
     connections::requests::waits(daemon, args)
+}
+
+/// Whether a root may propose what needs vault entries it then asks for: Connections is on.
+pub fn entries_proposed(daemon: &Daemon) -> bool {
+    is_on(&daemon.paths, &connections::EXTENSION)
+}
+
+/// What an agent is told with its held `connections` write that names vault entries.
+pub fn family_held_note(args: &Value) -> Option<String> {
+    connections::requests::held_note(args)
+}
+
+/// The connection `name` the vault entry `entry` may be asked for by the agent `agent`, declared
+/// or asked by its own request waiting for the user, its server given that entry: its origin;
+/// `None` when there is no such connection, why when it gives its server no such entry.
+pub fn asked_for(
+    daemon: &Daemon,
+    agent: &str,
+    name: &str,
+    entry: &str,
+) -> Result<Option<Option<String>>, String> {
+    connections::requests::asked_for(daemon, agent, name, entry)
+}
+
+/// The connection a request of the agent `agent` waiting for the user names the vault entry
+/// `entry` in, with its origin.
+pub fn wanting(daemon: &Daemon, agent: &str, entry: &str) -> Option<(String, Option<String>)> {
+    connections::requests::naming(daemon, agent, entry)
 }
 
 /// A `connections` call performed: a read, or a write the user accepted, `approved` being the

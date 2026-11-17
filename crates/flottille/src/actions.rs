@@ -466,7 +466,12 @@ pub async fn prepared(
         return crate::services::says(daemon, &grant.place, is_root(daemon, grant), args);
     }
     if tool == "connections" {
-        return crate::extensions::family_says(daemon, is_root(daemon, grant), args);
+        return crate::extensions::family_says(
+            daemon,
+            is_root(daemon, grant),
+            &grant.place.project,
+            args,
+        );
     }
     if tool == "run" {
         return Ok(crate::services::starts_said(

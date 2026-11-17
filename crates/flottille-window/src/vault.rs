@@ -41,6 +41,14 @@ pub const KEEP_SECRET_HINT: &str = "Leave empty to keep the current secret";
 pub const EVERY_PROJECT_NOTE: &str = "This entry is every project's: changing it changes it \
                                       for all of them.";
 
+/// What the form says of a new entry an agent asked for a connection: why it is every project's.
+pub fn connection_note(connection: &str) -> String {
+    format!(
+        "For the connection {connection}: a connection is given to every project, so the entries \
+         it names are every project's."
+    )
+}
+
 /// What the project select calls no project.
 pub const EVERY_PROJECT: &str = "Every project";
 
@@ -114,6 +122,8 @@ pub struct VaultSection {
     /// The host the request's URL sends the secret to, as the daemon read it, and that URL: the
     /// host is said while the URL is the one asked.
     host: Option<(String, String)>,
+    /// The connection an agent asked the new entry for: the form says why it is every project's.
+    connection: Option<String>,
     saving: bool,
     writing: Option<Writing>,
     form_error: Option<SharedString>,
@@ -196,6 +206,7 @@ impl VaultSection {
             bound: None,
             why: None,
             host: None,
+            connection: None,
             saving: false,
             writing: None,
             form_error: None,
@@ -360,18 +371,21 @@ impl VaultSection {
     }
 
     /// "New entry" from an agent's request (`vault_ask.rs`): `entry` prefilled, `why` under what it
-    /// is for, and `host`, where the daemon reads its URL sends the secret; the user may change
-    /// every field before Add, remove the binding, or close it.
+    /// is for, and `host`, where the daemon reads its URL sends the secret; for a `connection`,
+    /// every project's, and the form says why. The user may change every field before Add,
+    /// remove the binding, or close it.
     pub fn add_asked(
         &mut self,
         entry: &VaultEntry,
         why: String,
         host: Option<String>,
+        connection: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.add_prefilled(entry, Some(why), None, window, cx);
         self.host = host.zip(entry.url.clone());
+        self.connection = connection;
     }
 
     /// "New entry…" on an agent's request to write a connection that names `entry`, not made yet:
@@ -430,6 +444,7 @@ impl VaultSection {
         self.bound = None;
         self.why = None;
         self.host = None;
+        self.connection = None;
         let fields = self.fields(window, cx);
         let (name, secret, description, url, username) = (
             fields.name.clone(),
@@ -861,6 +876,25 @@ impl VaultSection {
                         "Seen by agents of",
                         select,
                     ))
+                    .child(
+                        presence_of(
+                            "vault-connection-note-block",
+                            self.connection
+                                .as_deref()
+                                .map(|connection| SharedString::from(connection_note(connection))),
+                            move |note| {
+                                div()
+                                    .id("vault-connection-note")
+                                    .aria_label(note.clone())
+                                    .text_size(px(12.5))
+                                    .text_color(p.mute)
+                                    .child(note)
+                                    .test_support()
+                                    .into_any_element()
+                            },
+                        )
+                        .space(space::XS),
+                    )
                     .child(
                         presence_of(
                             "vault-every-project-note-block",

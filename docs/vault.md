@@ -134,13 +134,25 @@ is missing (the tracker's `worklog_token`, a browser `login`'s entry), or the ta
 the vault does not hold. It may ask the user to add **any new entry**: the ask is a helper to add
 an entry to the vault, not a request with rules of its own.
 
-- **`vault {action: "ask", name, why, url?, username?, for?, project?}`.** `name` is the new
-  entry's name; `url` the address the secret is for, which the daemon reads as a connection's
-  `login` does (a backslash is a `/`, a domain is said in ASCII) and refuses when it is no `https`
-  address, or `http` on this machine; `username` the account; `for` the use it is bound to,
-  `worklog` (the agent's project's) or `connection:<name>` (a connection the user declared), or
-  none; `project` `this`
-  (the agent's project's alone) or `every`, a connection's entry being every project's. A name
+- **`vault {action: "ask", name, why, url?, username?, for?, project?, connection?}`.** `name` is
+  the new entry's name; `url` the address the secret is for, which the daemon reads as a
+  connection's `login` does (a backslash is a `/`, a domain is said in ASCII) and refuses when it
+  is no `https` address, or `http` on this machine; `username` the account; `for` the use it is
+  bound to, `worklog` (the agent's project's) or `connection:<name>` (a connection the user
+  declared), or none; `project` `this` (the agent's project's alone) or `every`, a connection's
+  entry being every project's.
+- **An ask for a connection's server is every project's.** `connection` names the connection the
+  entry is for: one the user declared, or one the asking agent's own request waiting for the
+  user asks to add (another agent's request never decides what this one's ask is for), whose declaration gives that entry to its server (a variable, a header, a query parameter,
+  a cookie, basic); one it does not name is refused, a login's entry being asked with `for`
+  instead and keeping the project asked. Left out, an ask for an entry such a request of its own
+  names is for that connection. Such an ask is every
+  project's (`project: "this"` is refused), its `url`, left out, is the connection's origin
+  (`http://127.0.0.1:7468` for a server on this machine), and its card says `For the connection
+  <name> (every project)`. The form it opens has "Seen by agents of" on **Every project** and
+  says why under it, and the URL prefilled and editable: the secret typed for that address is
+  what binds it, and the request then goes through at Accept (`docs/extensions.md`,
+  "Connections"). A name
   the vault already holds is refused, naming it: the agent uses it (when its project sees it) or
   asks under another name. An entry a feature of Flottille names and the project misses (today
   the tracker's `worklog_token`, `docs/tickets.md`, "Logging time") keeps the feature's prefill:
@@ -192,7 +204,13 @@ an entry without one goes in no request an agent chose; the user's own form bind
 card of the request says where each entry goes. An agent's connection may name an entry that does
 not exist yet, for the user to save (never one that looks like a secret): the request waits, its
 Accept refused while the entry is missing, and once saved the entry's host is checked as any
-other's. `vault::secret` and the connections' reading take the use asking, and refuse an entry bound to
+other's. An entry that is one project's, or bound to no address or another host, leaves the
+request waiting the same way, never refused, unless it is another project's than the asking
+agent's: that one is refused at the call, as no project's entry is offered to another's agent's
+connection. The user widens it from the request's dialog, the
+scope with **Share with every project**, the address with **Bind it to <host>**, each behind the
+window's confirmation, which says that the change stays even if the request is then refused,
+and the agent can do neither. `vault::secret` and the connections' reading take the use asking, and refuse an entry bound to
 another.
 
 ## The runtime folder

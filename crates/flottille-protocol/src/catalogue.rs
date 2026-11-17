@@ -64,6 +64,9 @@ pub const METHODS: &[(&str, Class)] = &[
     ("connection.accept", Drive),
     ("connection.login", Drive),
     ("connection.proposed", Read),
+    // The user's Share and Bind of a vault entry an agent's request names.
+    ("connection.share_entry", Drive),
+    ("connection.bind_entry", Drive),
     ("spec.new", Drive),
     ("spec.from_ticket", Drive),
     ("spec.answer", Drive),
