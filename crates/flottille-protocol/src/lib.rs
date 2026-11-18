@@ -84,6 +84,11 @@ pub struct WatchParams {
     /// its connection is open (`docs/items.md`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client: Option<String>,
+    /// A workspace to watch for its forge, `[project, name]`, as `workspace.forge {watch: true}`
+    /// does for the connection: the subscription carries it, so that it lasts as long as the
+    /// subscription does, on another machine too.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forge: Option<[String; 2]>,
 }
 
 /// The parameters of `project.detect` and `project.add`.

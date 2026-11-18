@@ -363,6 +363,7 @@ mod tests {
             .watch(WatchParams {
                 after: Some(7),
                 client: Some("window".into()),
+                forge: None,
             })
             .unwrap();
         assert_eq!(started, Ok(json!({"after": 9})));

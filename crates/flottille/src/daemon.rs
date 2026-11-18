@@ -820,6 +820,17 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
             watched.insert((asked.project, asked.name), watch);
         }
         if request.method == "events.watch"
+            && let Ok(WatchParams {
+                forge: Some([project, name]),
+                ..
+            }) = serde_json::from_value::<WatchParams>(request.params.clone())
+            && !watched.contains_key(&(project.clone(), name.clone()))
+            && let Ok(Some(workspace)) = daemon.read(|store| store.workspace(&project, &name))
+        {
+            let watch = forge::watch(&daemon, &workspace);
+            watched.insert((project, name), watch);
+        }
+        if request.method == "events.watch"
             && window.is_none()
             && let Ok(asked) = serde_json::from_value::<WatchParams>(request.params.clone())
             && asked.client.as_deref() == Some("window")

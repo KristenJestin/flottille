@@ -555,6 +555,7 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
             client.watch(WatchParams {
                 after,
                 client: None,
+                forge: None,
             })?;
             // Not waited for: its answer is not an event, and the events of its read come
             // meanwhile.
@@ -590,21 +591,21 @@ fn watch_another(
     let mut stdout = std::io::stdout().lock();
     loop {
         let mut client = Client::connect_or_start(paths)?;
+        // The forge is asked for on the watch's own stream: the other machine ends each request
+        // of its own at its answer, and a watch of a workspace lasts as long as its stream.
         match client.watch(WatchParams {
             after,
             client: None,
+            forge: match forge {
+                [project, name] => Some([project.clone(), name.clone()]),
+                _ => None,
+            },
         }) {
             Ok(answer) => {
                 said = None;
                 // Without `after`, the stream starts after the number it answered: a resume
                 // starts there too.
                 after = after.or_else(|| answer["after"].as_u64());
-                if let [project, name] = forge {
-                    client.send(
-                        "workspace.forge",
-                        serde_json::json!({"project": project, "name": name, "watch": true}),
-                    )?;
-                }
                 while let Ok(Some(event)) = client.next_event() {
                     after = Some(event.seq);
                     if writeln!(stdout, "{}", serde_json::to_string(&event)?).is_err() {
