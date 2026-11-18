@@ -357,7 +357,9 @@ async fn fetch(repository: &Path, bundle: &Path, refspec: &str) -> Result<(), St
     .into();
     args.push(bundle.as_os_str().to_owned());
     args.push(refspec.into());
-    output_git(repository, &args, Class::Work)
+    // The daemon's git reaches no remote by default (`super::command`): the file alone here.
+    let file = [("GIT_ALLOW_PROTOCOL", OsStr::new("file"))];
+    output_git_with(repository, &args, Class::Work, &file)
         .await
         .map(drop)
         .map_err(|reason| format!("the bundle could not be fetched: {reason}"))

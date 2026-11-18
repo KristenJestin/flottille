@@ -638,9 +638,11 @@ async fn base_refusal(
                 format!("{path}: {branch} is not a branch of {path}, which has no remote {remote}")
             });
     }
-    match git::output(
+    match git::output_remote(
         &folder,
-        &["ls-remote", "--heads", "--end-of-options", remote],
+        remote,
+        "ls-remote",
+        &["--heads", "--end-of-options", remote],
         Class::Read,
     )
     .await
