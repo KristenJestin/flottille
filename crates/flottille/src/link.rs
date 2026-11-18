@@ -928,6 +928,17 @@ struct Serving {
     _write: tokio::net::unix::OwnedWriteHalf,
     /// Its answer is the only line: anything but a watch that was answered.
     once: bool,
+    /// The device a watch is served for: the log says when it ends, which is how a watch that
+    /// outlived its client is seen.
+    watch_of: Option<String>,
+}
+
+impl Drop for Serving {
+    fn drop(&mut self) {
+        if let Some(device) = &self.watch_of {
+            eprintln!("flottille daemon: the watch asked by {device} ended");
+        }
+    }
 }
 
 fn message_bytes(message: &flottille_core::protocol::Message) -> Vec<u8> {
@@ -1011,6 +1022,7 @@ impl Remote {
             lines: tokio::io::BufReader::new(read).lines(),
             _write: write,
             once,
+            watch_of: (!once).then(|| accepted.device.name.clone()),
         })
     }
 
