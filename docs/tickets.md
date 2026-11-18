@@ -75,8 +75,11 @@ user's), so that the user's own sign-in works; a call is cut after 30 s.
   quoted, never spliced. A text written is passed as one argument, never through a shell.
 - **Agents never get that sign-in.** An agent's own command runs have the forge tokens emptied and
   `GH_CONFIG_DIR` pointed at an empty folder (`docs/tools.md`), so `gh` has no login there.
-  `acli`'s sign-in lives in the user's home, which no variable of ours moves, so **the gate refuses
-  every `acli` line an agent runs, reads included**; an agent reads the tickets with `tickets`.
+  `acli`'s sign-in lives in the user's home, which no variable of ours moves, so **an `acli` line an
+  agent runs is the gate's**: what only shows or lists passes as a read, as `gh`'s reads do, what
+  writes is judged (the card says it writes to the tracker signed in as the user), and what
+  touches the sign-in is base (`docs/tools.md`, "`acli` in a run"); an agent still reads and
+  writes the tickets with `tickets`.
 
 ## The Jira site
 

@@ -669,7 +669,8 @@ role, arguments decoded, place rules, then the call's **class**. The gate grants
 says what kind of call it is, and the session's **mode** says who answers it.
 
 - **Harmless** calls pass, in every mode: reading in the project, writing in a workspace, the
-  commands the rules know to only read, a task in a workspace. A known program is
+  commands the rules know to only read (those of `gh` and `glab`, and those of `acli` that only
+  show or list: `docs/tools.md`, "`acli` in a run"), a task in a workspace. A known program is
   the system's only: named bare and found through the run's `PATH` outside the project, its
   workspaces, the place and the user's `~/.local/bin` and `~/bin`; an option that runs a program or reads past ignored files toward a secret takes it
   out of this class.
@@ -683,7 +684,8 @@ says what kind of call it is, and the session's **mode** says who answers it.
   folders, git settings that run programs or lead pushes (`core`, `alias`, `remote`, `url`,
   `push`, `credential`, `include`, and every key whose value git runs, set by `-c` or `git
   config`, or through the environment), a push naming the program that receives it, running as
-  another user (`sudo`, `doas`, `pkexec`), sensitive places (`.env` files, credential folders,
+  another user (`sudo`, `doas`, `pkexec`), `acli`'s sign-in (`auth login`, `logout`, `switch`),
+  sensitive places (`.env` files, credential folders,
   Flottille's own folders, another process's `/proc`), publishing, a merge whose checks are
   waived, a change of the project's tracker or of its rules, and the project's `never` list.
   They are looked for in every line a wrapper, an option or `git rebase --exec` runs, and in

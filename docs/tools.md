@@ -665,6 +665,29 @@ pending requests.
   runs that ended go with their session, as its images do: when its root failed or ended and
   cannot be resumed, or 7 days after a root that can (`docs/protocol.md`, `agent.image`).
 
+### `acli` in a run
+
+`acli` is Atlassian's command line, signed in as the user to Jira in their own home: the gate
+judges its lines as it judges `gh`'s, by what they do, and lists its reads in the code
+(`acli_reads`, as `forge_reads` lists `gh`'s) from the commands of its reference
+(<https://developer.atlassian.com/cloud/acli/reference/commands/>), each on its own page.
+
+- **A read passes**, in every mode, as a `gh` read does: `jira workitem view` and `search`,
+  `jira workitem comment list` and `visibility`, `jira workitem attachment list`, `jira workitem
+  link list` and `type`, `jira project list` and `view`, `jira board search` and `list-sprints`,
+  `jira sprint list-workitems`, `jira dashboard search`, `jira filter list` and `search`, `<jira |
+  admin | rovodev> auth status`, `--version`, and the help of any command (its words, then `-h` or
+  `--help`: a `--help` after another option may be that option's value). `--web` (`-w`) opens a
+  browser on the desktop, which is no read.
+- **A write is judged**: everything else, the writes of the reference (`create`, `edit`,
+  `transition`, `assign`, `comment create`, `delete`, `link create`…) and what it does not list.
+  The card says the line writes to the tracker signed in as the user.
+- **The sign-in is base**: every `auth` command but `status` (`login`, `logout`, `switch`), `auth
+  status` given an option, and an option that shows a token (`--show-token`); a call to judge
+  would let the sign-in change under the user's other programs.
+- **Only the system's `acli` counts**: a line whose program is a path, or found in a folder the
+  agent writes or in the user's own `~/.local/bin` and `~/bin`, is judged as for every program.
+
 ## The forge
 
 | Tool | |
