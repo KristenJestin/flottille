@@ -1191,12 +1191,17 @@ impl Conversation {
     /// `kind`), which is not one.
     fn launch(&mut self, id: String, input: &Value) {
         if input["root"] == true || matches!(input["kind"].as_str(), Some("led" | "handed")) {
-            // A session started in another project names it after its title.
+            // `Started the session "X" in kit`: the project is named only when it is another one
+            // than the project this conversation's agent works in (its own is said by the page).
             let title =
                 gpui_design_system::quoted_title(input["title"].as_str().unwrap_or_default());
             let said = match input["project"].as_str().map(str::trim) {
-                Some(project) if !project.is_empty() => format!("{title} in {project}"),
-                _ => title,
+                Some(project)
+                    if !project.is_empty() && self.project.as_deref() != Some(project) =>
+                {
+                    format!("\"{title}\" in {project}")
+                }
+                _ => format!("\"{title}\""),
             };
             self.sessions.insert(id.clone(), said);
             if self.child_launches.remove(&id) && self.child_launches.is_empty() {
@@ -1728,7 +1733,7 @@ const STARTED_SESSION: &str = "Started a session ";
 pub const WOKEN_BY_KIND: &str = "woken by";
 
 /// The kind of the line that says a session was started for the user, before its title.
-pub const STARTED_SESSION_KIND: &str = "started session";
+pub const STARTED_SESSION_KIND: &str = "started the session";
 
 /// The notice of a started session: its title as `launch` said it, with its project when it is
 /// another's.

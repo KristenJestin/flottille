@@ -425,8 +425,10 @@ impl SessionPage {
         let drawer = cx.new(|_| Drawer::new("rail-drawer", Side::Right, px(RAIL), rail.clone()));
         let shown = opened.id.clone();
         ask_dock.update(cx, |dock, cx| dock.attach(page.clone(), cx));
-        let conversation =
-            cx.new(|cx| ConversationView::new(page, &shown, THE_CONVERSATION.into(), None, cx));
+        let project = opened.project.clone();
+        let conversation = cx.new(|cx| {
+            ConversationView::new(page, &shown, THE_CONVERSATION.into(), None, project, cx)
+        });
         let _status = cx.observe(&status, |this, status, cx| {
             let needs_you = status.read(cx).state() == AgentState::NeedsYou;
             if this.needs_you != needs_you {
@@ -1238,7 +1240,9 @@ impl SessionPage {
         let parent = self.parent_of(agent).map(|p| self.said_name(&p));
         let (page, name) = (cx.entity().downgrade(), self.said_name(agent));
         let shown = self.shown.clone();
-        self.conversation = cx.new(|cx| ConversationView::new(page, &shown, name, parent, cx));
+        let project = self.opened.project.clone();
+        self.conversation =
+            cx.new(|cx| ConversationView::new(page, &shown, name, parent, project, cx));
         self.rail
             .update(cx, |rail, cx| rail.set_selected(agent.to_owned(), cx));
         self.sync_pending(cx);
@@ -2597,14 +2601,17 @@ impl ConversationView {
         id: &str,
         me: String,
         parent: Option<String>,
+        project: String,
         cx: &mut Context<Self>,
     ) -> Self {
         let list = Self::list();
         let to_end = cx.new(|_| ToEnd::new(list.clone()));
+        let mut model = Conversation::new(me, parent);
+        model.set_project(project);
         let this = Self {
             page,
             id: id.to_owned(),
-            model: Conversation::new(me, parent),
+            model,
             rows: Vec::new(),
             specials: Vec::new(),
             earlier: false,
