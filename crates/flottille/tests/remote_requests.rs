@@ -850,3 +850,90 @@ fn the_variable_alone_does_not_refuse_the_commands_that_run_here() {
         assert!(!said.contains("this machine's own"), "{line:?}: {said}");
     }
 }
+
+/// The pull request of `app/login` in `acme/api` as the fake `gh` answers it.
+fn pull(checks: &str) -> Value {
+    json!({
+        "number": 12,
+        "title": "Add the login page",
+        "state": "OPEN",
+        "isDraft": false,
+        "baseRefName": "main",
+        "url": "https://github.com/acme/api/pull/12",
+        "reviewDecision": "",
+        "statusCheckRollup": [
+            {"__typename": "CheckRun", "name": "build", "status": "COMPLETED", "conclusion": checks}
+        ],
+        "comments": [],
+        "reviews": []
+    })
+}
+
+#[test]
+fn a_forge_watched_on_another_machine_stays_read_while_the_watch_runs() {
+    let server_user = User::new()
+        .with_fake_gh()
+        .with_env("FLOTTILLE_TEST_CLOCK", "1");
+    let (_hub, pc, server) = pc_and_server(server_user);
+    let folder = repository(&server.user);
+    server
+        .user
+        .call("project.add", json!({"folder": folder, "name": "app"}))
+        .unwrap();
+    server
+        .user
+        .call(
+            "workspace.create",
+            json!({"project": "app", "name": "login"}),
+        )
+        .unwrap();
+    server.user.git(
+        &folder,
+        &["remote", "set-url", "origin", "git@github.com:acme/api.git"],
+    );
+    let settings = server
+        .user
+        .call("project.settings", json!({"name": "app"}))
+        .unwrap();
+    let declared: Vec<Value> = settings["repositories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| json!({"path": r["path"], "forge": r["proposal"]}))
+        .collect();
+    server
+        .user
+        .call(
+            "project.set_settings",
+            json!({"name": "app", "repositories": declared}),
+        )
+        .unwrap();
+    let pulls = |checks: &str| {
+        server
+            .user
+            .gh_script(json!({"pulls": {"acme/api": {"app/login": pull(checks)}}}));
+    };
+    pulls("SUCCESS");
+
+    let watch = pc
+        .user
+        .watch(&["--machine", "server", "--forge", "app", "login"]);
+    let first = watch
+        .until(|event| event["name"] == "workspace.forge")
+        .pop()
+        .unwrap();
+    assert_eq!(first["data"]["project"], "app", "{first}");
+
+    // The checks fail; a minute later the server reads the forge again, for the watch is still
+    // there, and says so.
+    pulls("FAILURE");
+    server
+        .user
+        .call("test.advance", json!({"ms": 61_000}))
+        .unwrap();
+    let changed = watch
+        .until(|event| event["name"] == "workspace.forge")
+        .pop()
+        .unwrap();
+    assert!(changed["data"].to_string().contains("failing"), "{changed}");
+}
