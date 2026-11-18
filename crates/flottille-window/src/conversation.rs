@@ -510,6 +510,8 @@ pub struct Conversation {
     me: String,
     /// Its parent's name; `None` for the root.
     parent: Option<String>,
+    /// The project the agent works in, once known: a session started in another is said with it.
+    project: Option<String>,
     /// The names of the agents of the tree, by id, to say which child reported.
     names: HashMap<String, String>,
     /// A child was launched since the last row that was not a tool call: its list follows the
@@ -569,6 +571,7 @@ impl Conversation {
             last_at: None,
             me,
             parent,
+            project: None,
             names: HashMap::new(),
             launched: false,
             has_sub_agents: false,
@@ -654,6 +657,11 @@ impl Conversation {
             }
         }
         Activity::Thinking
+    }
+
+    /// The project the agent works in.
+    pub fn set_project(&mut self, project: String) {
+        self.project = Some(project);
     }
 
     pub fn set_names(&mut self, names: HashMap<String, String>) {
@@ -2473,7 +2481,7 @@ mod tests {
             c.blocks()[1],
             Block::Notice {
                 kind: STARTED_SESSION_KIND.into(),
-                text: "Docs".into()
+                text: "\"Docs\"".into()
             }
         );
     }
@@ -2481,6 +2489,7 @@ mod tests {
     #[test]
     fn a_session_started_in_another_project_is_said_with_that_project() {
         let mut c = Conversation::new("the conversation".into(), None);
+        c.set_project("app".into());
         c.apply(&event(
             1,
             "agent.tool_call",
@@ -2503,7 +2512,33 @@ mod tests {
             c.blocks().last(),
             Some(&Block::Notice {
                 kind: STARTED_SESSION_KIND.into(),
-                text: "Make the fonts settable in kit".into()
+                text: "\"Make the fonts settable\" in kit".into()
+            })
+        );
+    }
+
+    #[test]
+    fn a_session_started_in_the_conversation_s_own_project_is_not_said_with_it() {
+        let mut c = Conversation::new("the conversation".into(), None);
+        c.set_project("kit".into());
+        c.apply(&event(
+            1,
+            "agent.tool_call",
+            json!({"id": "l", "title": "mcp__flottille__agent_launch", "status": "in_progress",
+                "raw_input": {"kind": "led", "project": "kit",
+                    "title": "Make the fonts settable", "brief": "Go"}}),
+        ));
+        c.apply(&event(
+            2,
+            "agent.tool_call",
+            json!({"id": "l", "update": true, "status": "completed",
+                "raw_output": "Started a session led by you, \"Make the fonts settable\" (agent 0123456789ab), on Claude, in main."}),
+        ));
+        assert_eq!(
+            c.blocks().last(),
+            Some(&Block::Notice {
+                kind: STARTED_SESSION_KIND.into(),
+                text: "\"Make the fonts settable\"".into()
             })
         );
     }
@@ -2535,7 +2570,7 @@ mod tests {
             c.blocks().last(),
             Some(&Block::Notice {
                 kind: STARTED_SESSION_KIND.into(),
-                text: "Docs".into()
+                text: "\"Docs\"".into()
             })
         );
     }
