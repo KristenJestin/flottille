@@ -34,6 +34,7 @@ use crate::projects::{self, Failure};
 use crate::reads::{self, Reads};
 
 mod events;
+mod fields;
 mod links;
 mod milestones;
 mod people;
@@ -101,6 +102,9 @@ pub struct Ticket {
     /// A GitHub issue's milestone, by its title, or a Jira work item's fix versions, by their
     /// names; none for an item in none.
     pub milestone: Option<String>,
+    /// A Jira work item's custom fields that hold a value, one line each (`tickets show`, `detail
+    /// full`); none for GitHub.
+    pub custom_fields: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -233,6 +237,15 @@ impl Ticket {
             text.push_str("\nNo description.\n");
         } else {
             text.push_str(&format!("\nDescription:\n{}\n", self.description));
+        }
+        if full && !self.custom_fields.is_empty() {
+            text.push_str(&format!(
+                "\nCustom fields ({}):\n",
+                self.custom_fields.len()
+            ));
+            for field in &self.custom_fields {
+                text.push_str(&format!("- {field}\n"));
+            }
         }
         if !self.comments.is_empty() && !full {
             let older = self.older;
@@ -461,6 +474,7 @@ async fn read_issue(forge: &Forge, number: u64) -> Result<Ticket, String> {
         parent: None,
         sprint: None,
         milestone: Some(said(&issue["milestone"]["title"])).filter(|m| !m.is_empty()),
+        custom_fields: Vec::new(),
     })
 }
 
@@ -631,6 +645,7 @@ fn work_item(key: &str, item: &Value, site: &str) -> Ticket {
         }),
         sprint: sprints::said_in(fields),
         milestone: versions::said_in(fields),
+        custom_fields: fields::held_in(item),
     }
 }
 
@@ -1331,13 +1346,14 @@ fn types_said(types: &[WorkItemType]) -> String {
     and_listed(&names.iter().map(String::as_str).collect::<Vec<_>>())
 }
 
-/// What to do with a field a work item type requires: `acli` and Flottille list none of them, so
-/// it is Jira's refusal that names one, and `fields` that fills it. An id, not a name: Jira's
-/// REST takes no other key.
+/// What to do with a field a work item type requires: `fields` lists them with their ids (when the
+/// project has the vault entry it reads them with), and it is Jira's refusal that names one
+/// otherwise. An id, not a name: Jira's REST takes no other key.
 const REQUIRED_FIELDS: &str = "give each required field in fields, keyed by its Jira id \
     (customfield_10042; a system field by its key: priority, components) and valued as Jira \
     takes it (a select: {\"value\": \"Major\"}, a user: {\"accountId\": \"...\"}), the values \
-    the refusal says it allows; ask the user for an id or a value not known";
+    the refusal says it allows; tickets fields lists a type's fields with their ids, or ask the \
+    user for an id or a value not known";
 
 /// Whether the words of a refusal say a field is missing.
 fn required_said(refusal: &str) -> bool {
@@ -1376,8 +1392,9 @@ async fn types(project: &Project, asked: &TicketsCall) -> Outcome {
             match work_item_types(site, in_project).await {
                 Ok(types) => Outcome::Done(format!(
                     "The work item types of {in_project} on {site} are {}. Give one of them, \
-                     spelled so, as type to create. A type may require fields; acli lists no \
-                     type's required fields, so a creation refused for one names it: {REQUIRED_FIELDS}.",
+                     spelled so, as type to create. A type may require fields: tickets fields \
+                     lists them with their ids (add a kind for one type's), and a creation \
+                     refused for one names it too: {REQUIRED_FIELDS}.",
                     types_said(&types)
                 )),
                 Err(why) => Outcome::Failed(why),
@@ -1441,6 +1458,7 @@ pub async fn tickets(daemon: &Arc<Daemon>, agent: &str, place: &Place, args: Val
             other => other,
         },
         "types" => types(&project, &asked).await,
+        "fields" => fields::fields(daemon, &project, &asked).await,
         "link_types" => links::types(&project).await,
         "sprints" => sprints::listed(&project, &asked).await,
         "milestones" => milestones::listed(&project, &asked).await,
@@ -2291,6 +2309,7 @@ async fn create(daemon: &Daemon, project: &Project, asked: &TicketsCall) -> Outc
     if let Some(tracker @ ProjectTracker::Jira { site, projects, .. }) = &project.tracker {
         return create_work_item(
             daemon,
+            project,
             (&project.name, tracker),
             (site, projects),
             title,
@@ -2644,6 +2663,7 @@ fn work_item_fields<'a>(
 /// set right after, with `edit`.
 async fn create_work_item(
     daemon: &Daemon,
+    project_of: &Project,
     (name, tracker): (&str, &ProjectTracker),
     (site, projects): (&str, &[String]),
     title: &str,
@@ -2763,9 +2783,27 @@ async fn create_work_item(
                 ),
                 _ => explained,
             };
-            return Outcome::Failed(match required_said(&why) {
-                true => format!("{said}; nothing was created; {REQUIRED_FIELDS}"),
-                false => said,
+            if !required_said(&why) {
+                return Outcome::Failed(said);
+            }
+            // The fields the type requires and `fields` lacks, by id: read with the project's
+            // entry when it has one.
+            let lacked = match kind {
+                Some(kind) => {
+                    fields::lacked(
+                        daemon,
+                        project_of,
+                        (site, project),
+                        kind,
+                        asked.fields_given(),
+                    )
+                    .await
+                }
+                None => None,
+            };
+            return Outcome::Failed(match lacked {
+                Some(lacked) => format!("{said}; nothing was created; {lacked}; {REQUIRED_FIELDS}"),
+                None => format!("{said}; nothing was created; {REQUIRED_FIELDS}"),
             });
         }
     };
