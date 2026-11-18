@@ -33,6 +33,17 @@ struct Received {
     body: Value,
 }
 
+/// What the fake Jira does once it has read a request.
+#[derive(Clone, Copy)]
+enum Reply {
+    /// Answers with a status and a body.
+    Answer(&'static str, &'static str),
+    /// Closes the connection with no answer, as a site that applied the change may as it drops.
+    HangUp,
+    /// Says nothing for this long, then closes: a site that never answers.
+    Silent(Duration),
+}
+
 /// A Jira that answers every request with `status` and `body`, and remembers what it was asked.
 struct Jira {
     base: String,
@@ -41,6 +52,10 @@ struct Jira {
 
 impl Jira {
     fn start(status: &'static str, said: &'static str) -> Jira {
+        Jira::replying(Reply::Answer(status, said))
+    }
+
+    fn replying(reply: Reply) -> Jira {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         let received = Arc::new(Mutex::new(Vec::new()));
@@ -85,6 +100,14 @@ impl Jira {
                     authorization: header("authorization"),
                     body: serde_json::from_slice(&rest).unwrap_or(Value::Null),
                 });
+                let (status, said) = match reply {
+                    Reply::Answer(status, said) => (status, said),
+                    Reply::HangUp => continue,
+                    Reply::Silent(for_long) => {
+                        std::thread::sleep(for_long);
+                        continue;
+                    }
+                };
                 let _ = stream.write_all(
                     format!(
                         "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: \
@@ -179,7 +202,11 @@ fn store(user: &User) -> Store {
 }
 
 fn eventually(what: &str, check: impl Fn() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(15);
+    eventually_for(Duration::from_secs(15), what, check);
+}
+
+fn eventually_for(long: Duration, what: &str, check: impl Fn() -> bool) {
+    let deadline = Instant::now() + long;
     while !check() {
         assert!(Instant::now() < deadline, "{what} never happened");
         std::thread::sleep(Duration::from_millis(50));
@@ -206,10 +233,14 @@ fn held(answer: &Answer) -> u64 {
 
 /// The user allows request `number`: the text the agent is handed for it.
 fn allow(user: &User, number: u64) -> String {
+    allow_within(user, number, Duration::from_secs(15))
+}
+
+fn allow_within(user: &User, number: u64, long: Duration) -> String {
     user.call("approval.approve", json!({"number": number}))
         .unwrap();
     let id = format!("approval-{number}");
-    eventually("the answer", || {
+    eventually_for(long, "the answer", || {
         store(user).delivery(&id).unwrap().is_some()
     });
     store(user).delivery(&id).unwrap().unwrap().body
@@ -445,4 +476,213 @@ fn a_fix_version_of_an_existing_work_item_is_set_through_the_api() {
     assert!(said.contains("9.9"), "{said}");
     assert!(said.contains("nothing was written"), "{said}");
     assert_eq!(jira.received().len(), 2);
+}
+
+/// What the agent is told of an edit whose change Jira may or may not have applied: not that
+/// nothing was written.
+fn not_confirmed(said: &str) {
+    assert!(said.contains("not confirmed"), "{said}");
+    assert!(said.contains("check the work item"), "{said}");
+    assert!(!said.contains("nothing was written"), "{said}");
+    assert!(!said.contains(SECRET), "{said}");
+}
+
+#[test]
+fn a_site_that_hangs_up_after_the_request_is_not_said_to_have_written_nothing() {
+    let jira = Jira::replying(Reply::HangUp);
+    let (user, mcp) = signed_in(&jira);
+
+    let said = written(
+        &user,
+        &mcp,
+        json!({"action": "edit", "ticket": "ABC-1", "fields": {"priority": {"name": "High"}}}),
+    );
+
+    // The request reached the site: it may have applied it before it dropped.
+    assert_eq!(jira.received().len(), 1);
+    not_confirmed(&said);
+}
+
+#[test]
+fn a_site_that_never_answers_is_said_not_confirmed() {
+    let jira = Jira::replying(Reply::Silent(Duration::from_secs(45)));
+    let (user, mcp) = signed_in(&jira);
+
+    let number = held(&mcp.call(
+        "tickets",
+        json!({"action": "edit", "ticket": "ABC-1", "parent": "ABC-10"}),
+    ));
+    let said = allow_within(&user, number, Duration::from_secs(60));
+
+    not_confirmed(&said);
+}
+
+#[test]
+fn a_status_that_is_not_a_success_is_said_with_nothing_written() {
+    let jira = Jira::start("403 Forbidden", "{\"errorMessages\":[\"No permission\"]}");
+    let (user, mcp) = signed_in(&jira);
+
+    let said = written(
+        &user,
+        &mcp,
+        json!({"action": "edit", "ticket": "ABC-1", "parent": "ABC-10"}),
+    );
+
+    assert!(said.contains("403"), "{said}");
+    assert!(said.contains("nothing was written"), "{said}");
+}
+
+#[test]
+fn the_other_refusals_of_an_edit_are_not_skipped_when_it_sets_fields_on_jira() {
+    let jira = Jira::accepting();
+    let (user, mcp) = signed_in(&jira);
+    let fields = json!({"priority": {"name": "High"}});
+
+    for (key, value) in [
+        ("assignees", json!(["someone"])),
+        ("remove_assignees", json!(["someone"])),
+        ("reason", json!("completed")),
+    ] {
+        let said = refused_at_once(
+            &user,
+            &mcp,
+            json!({"action": "edit", "ticket": "ABC-1", "fields": fields, key: value}),
+        );
+        assert!(said.contains(key), "{key}: {said}");
+    }
+    // Nor with a parent or a fix version.
+    let said = refused_at_once(
+        &user,
+        &mcp,
+        json!({"action": "edit", "ticket": "ABC-1", "parent": "ABC-10", "assignees": ["x"]}),
+    );
+    assert!(said.contains("assignees"), "{said}");
+    assert!(jira.received().is_empty());
+}
+
+#[test]
+fn an_edit_with_a_milestone_on_github_still_refuses_what_github_does_not_take() {
+    let jira = Jira::accepting();
+    let user = user(&jira).with_fake_gh();
+    fixture(&user, json!({"kind": "github", "repository": "."}));
+    user.gh_script(json!({
+        "milestones": {"acme/app": [{"number": 1, "title": "v1", "state": "open",
+            "description": null, "due_on": null, "open_issues": 1, "closed_issues": 0}]},
+        "issues": {"acme/app": {"3": {"number": 3, "title": "T", "state": "OPEN", "body": "b",
+            "url": "https://github.com/acme/app/issues/3", "labels": [], "assignees": [],
+            "comments": [], "milestone": null}}},
+    }));
+    let mcp = root_in(&user);
+
+    let said = refused_at_once(
+        &user,
+        &mcp,
+        json!({"action": "edit", "ticket": "#3", "milestone": "v1", "assignee": "someone"}),
+    );
+
+    assert!(said.contains("assignee"), "{said}");
+}
+
+#[test]
+fn a_failed_acli_after_the_api_says_what_was_set() {
+    let jira = Jira::accepting();
+    let (user, mcp) = signed_in(&jira);
+    user.acli_script(json!({
+        "items": {"ABC-1": {"key": "ABC-1"}},
+        "versions": {"ABC": [{"name": "1.0", "released": true}, {"name": "1.1"}]},
+        "users": ["known@example.com"]}));
+
+    // A parent and a fix version were set; acli then could not assign the work item.
+    let said = written(
+        &user,
+        &mcp,
+        json!({"action": "edit", "ticket": "ABC-1", "parent": "ABC-10", "milestone": "1.1",
+            "assignee": "nobody@example.com"}),
+    );
+
+    assert_eq!(jira.received().len(), 1);
+    assert!(said.contains("acli did not change ABC-1"), "{said}");
+    assert!(said.contains("its parent and its fix version"), "{said}");
+    assert!(!said.contains("its fields"), "{said}");
+
+    // Fields given: they are the ones said.
+    let said = written(
+        &user,
+        &mcp,
+        json!({"action": "edit", "ticket": "ABC-1", "fields": {"priority": {"name": "High"}},
+            "assignee": "nobody@example.com"}),
+    );
+    assert!(said.contains("its fields"), "{said}");
+    assert!(!said.contains("its parent"), "{said}");
+}
+
+#[test]
+fn the_card_of_an_edit_says_it_goes_through_jiras_api_with_the_entry() {
+    let jira = Jira::accepting();
+    let (user, mcp) = signed_in(&jira);
+
+    let number = held(&mcp.call(
+        "tickets",
+        json!({"action": "edit", "ticket": "ABC-1", "parent": "ABC-10"}),
+    ));
+
+    let card = requests(&user)
+        .iter()
+        .find(|r| r["number"] == number)
+        .unwrap()
+        .to_string();
+    for said in ["ABC-1", "Jira's API", "jira-time"] {
+        assert!(card.contains(said), "{said} is not on the card: {card}");
+    }
+    assert!(!card.contains(SECRET), "{card}");
+    assert!(
+        jira.received().is_empty(),
+        "sent before the user allowed it"
+    );
+}
+
+#[test]
+fn removing_the_fix_version_and_setting_it_by_the_fields_are_refused_together() {
+    let jira = Jira::accepting();
+    let (user, mcp) = signed_in(&jira);
+
+    let said = refused_at_once(
+        &user,
+        &mcp,
+        json!({"action": "edit", "ticket": "ABC-1", "remove_milestone": true,
+            "fields": {"fixVersions": [{"name": "1.0"}]}}),
+    );
+
+    assert!(said.contains("fields.fixVersions"), "{said}");
+    assert!(jira.received().is_empty());
+}
+
+#[test]
+fn a_versions_read_that_fails_is_a_failure_and_an_unknown_version_a_refusal() {
+    let jira = Jira::accepting();
+    let (user, mcp) = signed_in(&jira);
+    user.acli_script(json!({
+        "items": {"ABC-1": {"key": "ABC-1"}},
+        "versions": {"ABC": [{"name": "1.0"}]}, "no_versions_field": true}));
+
+    let said = written(
+        &user,
+        &mcp,
+        json!({"action": "edit", "ticket": "ABC-1", "milestone": "1.0"}),
+    );
+
+    // acli could not say the versions: that is no refusal of what was asked.
+    assert!(said.contains("but nothing was done"), "{said}");
+    assert!(!said.contains("was not executed"), "{said}");
+    assert!(said.contains("nothing was written"), "{said}");
+
+    user.acli_script(json!({
+        "items": {"ABC-1": {"key": "ABC-1"}}, "versions": {"ABC": [{"name": "1.0"}]}}));
+    let said = written(
+        &user,
+        &mcp,
+        json!({"action": "edit", "ticket": "ABC-1", "milestone": "9.9"}),
+    );
+    assert!(said.contains("was not executed: refused:"), "{said}");
+    assert!(jira.received().is_empty());
 }

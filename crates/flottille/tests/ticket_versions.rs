@@ -314,7 +314,7 @@ fn milestones_say_what_acli_printed_when_it_prints_no_versions() {
 }
 
 #[test]
-fn create_sets_a_work_item_s_fix_version_and_edit_and_removal_are_refused() {
+fn create_sets_a_work_item_s_fix_version_by_its_name_or_its_id() {
     let user = user();
     on_jira(&user);
     user.acli_script(json!({"versions": versions(), "created": "ABC-7",
