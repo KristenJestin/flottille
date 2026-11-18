@@ -1445,9 +1445,16 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   same in every window of the machine. A draft is the text a session's composer or a project's
   first message holds and did not send, with its pictures (the picture strip and the markers'
   chips; a large pasted text, attached as a file, is not kept): the window writes it 500 ms after
-  the last change, at once when it closes and when the message is sent, which forgets it, as
-  emptying the composer does; it reads it when the composer is made, which takes it only if the
-  user has not typed meanwhile, and without taking the focus. A session that is forgotten and a
+  the last change, at once when the message is sent, which forgets it, as emptying the composer
+  does, and when the program ends however it ends (the window closed, the desktop's quit, a
+  signal); it reads it when the composer is made, which takes it only if the user has not typed
+  meanwhile (what they typed is then written over it), and without taking the focus. What the
+  daemon did not answer is asked again, later (a wait that doubles up to 30 s): a write the daemon
+  did not take is not taken as kept, a read it did not answer is not taken as "no draft", so that
+  nothing is written over a draft the window never saw, and the text typed before the read
+  answered is written once it does, or at the close once the daemon says it holds nothing else.
+  The row of a session says its pencil as soon as the window opens (`draft.list`), without its
+  page being opened. A session that is forgotten and a
   project that is removed take their drafts with them; the pictures are files of the daemon's
   state folder (mode 0700) that go with the draft. A draft is the user's own words: never given to
   an agent, never logged, in no event, and drawn nowhere but in its composer. The sidebar keeps
