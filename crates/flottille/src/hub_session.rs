@@ -381,25 +381,32 @@ impl Control {
             invitation.inviter.fingerprint()
         );
         let (device, members) = joined.accepted().await.map_err(|error| error.to_string())?;
-        let entry = members
-            .get(&key)
+        let answer = accepted_json(&device, &members, &key)
             .expect("the list checked holds the device's entry");
-        let added_by = members.get(&entry.added_by).map_or_else(
-            || entry.added_by.fingerprint(),
-            |member| member.name.clone(),
-        );
-        let answer = json!({
-            "head": device.list.head(),
-            "name": entry.name,
-            "role": entry.role,
-            "added_by": added_by,
-            "hub": device.hub.fingerprint(),
-        });
         *joining = Some(Joining {
             joined,
             device: Some(device),
         });
         Ok(answer)
+    }
+
+    /// `remote.join` asked to resume: the answer of the join accepted for the device `key`, which
+    /// its command, gone, did not take; `null` when no join holds it as a member. A join still
+    /// waiting is waited for.
+    pub async fn accepted(&self, key: &PublicKey) -> Value {
+        let joining = self.joining.lock().await;
+        let Some(Joining {
+            device: Some(device),
+            ..
+        }) = joining.as_ref()
+        else {
+            return Value::Null;
+        };
+        device
+            .members()
+            .ok()
+            .and_then(|members| accepted_json(device, &members, key))
+            .unwrap_or(Value::Null)
     }
 
     /// `remote.declare`: the declaration of this machine by the device that joined, signed by it
@@ -568,6 +575,23 @@ fn no_request(request: &str) -> String {
     )
 }
 
+/// What `remote.join` answers once the device `key` was accepted; `None` when the list does not
+/// hold it.
+fn accepted_json(device: &Device, members: &Members, key: &PublicKey) -> Option<Value> {
+    let entry = members.get(key)?;
+    let added_by = members.get(&entry.added_by).map_or_else(
+        || entry.added_by.fingerprint(),
+        |member| member.name.clone(),
+    );
+    Some(json!({
+        "head": device.list.head(),
+        "name": entry.name,
+        "role": entry.role,
+        "added_by": added_by,
+        "hub": device.hub.fingerprint(),
+    }))
+}
+
 /// What is said of a member added.
 fn added_json(name: &str, role: Role, key: &PublicKey, members: &Members, by: &PublicKey) -> Value {
     let by = members
@@ -714,6 +738,29 @@ pub async fn run(
     }
 }
 
+/// Tells a machine that slept: on Linux the monotonic clock does not count a suspend, and the wall
+/// clock does. A session to the hub may look alive for minutes after one, with no heartbeat to say
+/// otherwise, while the list it kept missed what changed meanwhile.
+struct Awake {
+    wall: std::time::SystemTime,
+    steady: std::time::Instant,
+}
+
+impl Awake {
+    fn new(wall: std::time::SystemTime, steady: std::time::Instant) -> Awake {
+        Awake { wall, steady }
+    }
+
+    /// Whether the machine slept since the last round, at `wall` and `steady` now.
+    fn slept(&mut self, wall: std::time::SystemTime, steady: std::time::Instant) -> bool {
+        // A wall clock set back moved by nothing.
+        let walked = wall.duration_since(self.wall).unwrap_or_default();
+        let ran = steady.saturating_duration_since(self.steady);
+        *self = Awake { wall, steady };
+        walked > ran + ASLEEP
+    }
+}
+
 enum Ended {
     Stopping,
     /// A setup wrote another hub: start from it.
@@ -738,29 +785,6 @@ async fn keep_session(
     control.asker.send_replace(Some(asker.clone()));
     let _ = control.list.send(device.list.clone());
     // The asker is let go with the session, however it ends.
-/// Tells a machine that slept: on Linux the monotonic clock does not count a suspend, and the wall
-/// clock does. A session to the hub may look alive for minutes after one, with no heartbeat to say
-/// otherwise, while the list it kept missed what changed meanwhile.
-struct Awake {
-    wall: std::time::SystemTime,
-    steady: std::time::Instant,
-}
-
-impl Awake {
-    fn new(wall: std::time::SystemTime, steady: std::time::Instant) -> Awake {
-        Awake { wall, steady }
-    }
-
-    /// Whether the machine slept since the last round, at `wall` and `steady` now.
-    fn slept(&mut self, wall: std::time::SystemTime, steady: std::time::Instant) -> bool {
-        // A wall clock set back moved by nothing.
-        let walked = wall.duration_since(self.wall).unwrap_or_default();
-        let ran = steady.saturating_duration_since(self.steady);
-        *self = Awake { wall, steady };
-        walked > ran + ASLEEP
-    }
-}
-
     struct Forget<'a>(&'a Control);
     impl Drop for Forget<'_> {
         fn drop(&mut self) {
@@ -771,6 +795,7 @@ impl Awake {
     // The ask of this machine's addresses on its way, at most one: dropped with the session.
     let mut telling = tokio::task::JoinSet::new();
     let mut said: Option<String> = None;
+    let mut awake = Awake::new(std::time::SystemTime::now(), std::time::Instant::now());
     loop {
         tokio::select! {
             pushed = session.next() => {
@@ -795,7 +820,6 @@ impl Awake {
                                 ListError::Refused(_) => "refused",
                             };
                             control.set(state, Some(refused.to_string()));
-    let mut awake = Awake::new(std::time::SystemTime::now(), std::time::Instant::now());
                             remote.heard_hub();
                             continue;
                         }
@@ -819,6 +843,10 @@ impl Awake {
                 }
             }
             _ = round.tick() => {
+                if awake.slept(std::time::SystemTime::now(), std::time::Instant::now()) {
+                    // Ended as lost: the links wait for the next session's list.
+                    return Ended::Lost("this machine was asleep".to_owned());
+                }
                 let now = remote.told_addresses();
                 if telling.is_empty() && told.as_ref() != Some(&now) {
                     // Answered later: the session goes on meanwhile.
@@ -843,10 +871,6 @@ impl Awake {
                     if said.as_ref() != Some(&error) {
                         eprintln!("flottille daemon: the hub was not told this machine's addresses: {error}");
                     }
-                if awake.slept(std::time::SystemTime::now(), std::time::Instant::now()) {
-                    // Ended as lost: the links wait for the next session's list.
-                    return Ended::Lost("this machine was asleep".to_owned());
-                }
                     said = Some(error);
                 }
             },

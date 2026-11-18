@@ -173,24 +173,31 @@ pub fn run(paths: &Paths, action: RemoteAction) -> Result<ExitCode> {
         RemoteAction::Join { json } => {
             let code = read_code("The invitation's code: ", "no invitation code")?;
             let invitation = flottille_link::Invitation::from_code(&code)?;
+            let resumed = settle_pending(paths, &mut ask)?;
             let (mut device, new) = device_key_to_join(paths)?;
-            let words = invitation.words(&device.public());
-            if json {
-                println!("{}", json!({"words": words}));
-            } else {
-                println!(
-                    "Verification words: {}\nThe device that invited shows them too: accept there \
-                     only if they are the same. Waiting for it...",
-                    words.join(" ")
-                );
-            }
-            std::io::Write::flush(&mut std::io::stdout())?;
             let machine: flottille_link::PublicKey =
                 serde_json::from_value(ask("remote.machines", json!({}))?["this"]["key"].clone())?;
-            let accepted = ask(
-                "remote.join",
-                json!({"code": code.as_str(), "key": device.public()}),
-            )?;
+            // A join accepted while its command was gone goes on with its answer.
+            let accepted = match resumed {
+                Some(accepted) => accepted,
+                None => {
+                    let words = invitation.words(&device.public());
+                    if json {
+                        println!("{}", json!({"words": words}));
+                    } else {
+                        println!(
+                            "Verification words: {}\nThe device that invited shows them too: \
+                             accept there only if they are the same. Waiting for it...",
+                            words.join(" ")
+                        );
+                    }
+                    std::io::Write::flush(&mut std::io::stdout())?;
+                    ask(
+                        "remote.join",
+                        json!({"code": code.as_str(), "key": device.public()}),
+                    )?
+                }
+            };
             if new {
                 device = keep_new(paths, device)?;
             }
@@ -356,6 +363,7 @@ pub fn run(paths: &Paths, action: RemoteAction) -> Result<ExitCode> {
                 None => host_name()?,
             };
             let code = read_code("The hub's setup code: ", "no setup code")?;
+            settle_pending(paths, &mut ask)?;
             let (device, new) = device_key_to_join(paths)?;
             let machine: flottille_link::PublicKey =
                 serde_json::from_value(ask("remote.machines", json!({}))?["this"]["key"].clone())?;
@@ -485,41 +493,139 @@ fn device_key(paths: &Paths) -> Result<flottille_link::DeviceKey> {
 }
 
 fn kept_device_key(paths: &Paths) -> Result<Option<flottille_link::DeviceKey>> {
-    let folder = crate::remote::folder(paths);
-    let key = if crate::vault::memory_chosen(paths) {
-        flottille_link::DeviceKey::load(&NoKeyring, &folder)
-    } else {
-        flottille_link::DeviceKey::load(&SessionKeyring, &folder)
-    };
-    Ok(key?)
-}
-
-/// The device key a setup or a join is made with: the one kept, or a new one, kept only once the
-/// hub took it (`keep_new`). A join that did not succeed leaves no key behind, so the next one
-/// sends a key the hub never saw, whose words it could not have searched a token for
-/// (`docs/remote.md`, "Pairing").
-fn device_key_to_join(paths: &Paths) -> Result<(flottille_link::DeviceKey, bool)> {
-    Ok(match kept_device_key(paths)? {
-        Some(key) => (key, false),
-        None => (flottille_link::DeviceKey::make()?, true),
+    with_keyring(paths, |keyring, folder| {
+        flottille_link::DeviceKey::load(keyring, folder)
     })
 }
 
-/// Keeps `key`, the new key a setup or a join succeeded with.
-fn keep_new(paths: &Paths, key: flottille_link::DeviceKey) -> Result<flottille_link::DeviceKey> {
-    let folder = crate::remote::folder(paths);
-    let public = key.public();
-    let kept = if crate::vault::memory_chosen(paths) {
-        key.keep(&NoKeyring, &folder)
+/// The device key a setup or a join is made with: the one kept, or a new one, kept as pending
+/// before the hub sees it and kept only once the hub took it (`keep_new`). A join that did not
+/// succeed leaves no key kept, so the next one sends a key the hub never saw, whose words it could
+/// not have searched a token for (`docs/remote.md`, "Pairing").
+fn device_key_to_join(paths: &Paths) -> Result<(flottille_link::DeviceKey, bool)> {
+    Ok(match kept_device_key(paths)? {
+        Some(key) => (key, false),
+        None => {
+            let key = flottille_link::DeviceKey::make()?;
+            let public = key.public();
+            let pending = with_keyring(paths, |keyring, folder| key.keep_pending(keyring, folder))?;
+            if pending.public() != public {
+                return Err(ANOTHER_CLIENT.into());
+            }
+            (pending, true)
+        }
+    })
+}
+
+const ANOTHER_CLIENT: &str = "another client kept a device key at the same moment: run flottille \
+                              remote members to see which one is a member";
+
+/// The pending key a setup or a join left when its command was gone before it ended (`keep_new`
+/// was never reached): kept when the daemon's list, pinned or of the join it accepted, holds it
+/// as a member, removed otherwise, so that a key the hub saw in a join that did not succeed is
+/// never sent again. When the daemon holds a join accepted for it, that join's answer.
+fn settle_pending(
+    paths: &Paths,
+    ask: &mut impl FnMut(&str, Value) -> Result<Value>,
+) -> Result<Option<Value>> {
+    let Some(pending) = with_keyring(paths, |keyring, folder| {
+        flottille_link::DeviceKey::load_pending(keyring, folder)
+    })?
+    else {
+        return Ok(None);
+    };
+    let key = pending.public();
+    let member = if ask("remote.machines", json!({}))?["hub"].is_null() {
+        // Not set up: a member only of a join the daemon accepted, its declaration still to come.
+        let accepted = ask("remote.join", json!({"key": key, "resume": true}))?;
+        (!accepted.is_null()).then_some(Some(accepted))
     } else {
-        key.keep(&SessionKeyring, &folder)
-    }?;
+        let members = ask("remote.members", json!({}))?;
+        let listed = members["members"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|member| member["key"] == json!(key));
+        listed.then_some(None)
+    };
+    match member {
+        Some(accepted) => {
+            keep_new(paths, pending)?;
+            Ok(accepted)
+        }
+        None => {
+            with_keyring(paths, |keyring, folder| {
+                flottille_link::DeviceKey::discard_pending(keyring, folder)
+            })?;
+            Ok(None)
+        }
+    }
+}
+
+/// `act` on the keyring of this session's clients, and the key folder.
+fn with_keyring<T>(
+    paths: &Paths,
+    act: impl FnOnce(
+        &ClientKeyring,
+        &std::path::Path,
+    ) -> std::result::Result<T, flottille_link::KeyError>,
+) -> Result<T> {
+    let keyring = if crate::vault::memory_chosen(paths) {
+        ClientKeyring::None(NoKeyring)
+    } else {
+        ClientKeyring::Session(SessionKeyring)
+    };
+    Ok(act(&keyring, &crate::remote::folder(paths))?)
+}
+
+/// The keyring of this session's clients: none in a test build whose configuration keeps the
+/// daemon's secrets in its memory.
+enum ClientKeyring {
+    None(NoKeyring),
+    Session(SessionKeyring),
+}
+
+impl flottille_link::Keyring for ClientKeyring {
+    fn read(
+        &self,
+        attributes: &[(&str, &str)],
+    ) -> std::result::Result<Option<zeroize::Zeroizing<Vec<u8>>>, flottille_link::KeyringError>
+    {
+        match self {
+            ClientKeyring::None(keyring) => keyring.read(attributes),
+            ClientKeyring::Session(keyring) => keyring.read(attributes),
+        }
+    }
+
+    fn store(
+        &self,
+        label: &str,
+        attributes: &[(&str, &str)],
+        secret: &[u8],
+    ) -> std::result::Result<(), flottille_link::KeyringError> {
+        match self {
+            ClientKeyring::None(keyring) => keyring.store(label, attributes, secret),
+            ClientKeyring::Session(keyring) => keyring.store(label, attributes, secret),
+        }
+    }
+
+    fn delete(
+        &self,
+        attributes: &[(&str, &str)],
+    ) -> std::result::Result<(), flottille_link::KeyringError> {
+        match self {
+            ClientKeyring::None(keyring) => keyring.delete(attributes),
+            ClientKeyring::Session(keyring) => keyring.delete(attributes),
+        }
+    }
+}
+
+/// Keeps `key`, the pending key a setup or a join succeeded with.
+fn keep_new(paths: &Paths, key: flottille_link::DeviceKey) -> Result<flottille_link::DeviceKey> {
+    let public = key.public();
+    let kept = with_keyring(paths, |keyring, folder| key.promote(keyring, folder))?;
     if kept.public() != public {
-        return Err(
-            "another client kept a device key at the same moment: run flottille remote \
-                    members to see which one is a member"
-                .into(),
-        );
+        return Err(ANOTHER_CLIENT.into());
     }
     Ok(kept)
 }
@@ -541,6 +647,13 @@ impl flottille_link::Keyring for NoKeyring {
         _label: &str,
         _attributes: &[(&str, &str)],
         _secret: &[u8],
+    ) -> std::result::Result<(), flottille_link::KeyringError> {
+        Err(flottille_link::KeyringError::Absent)
+    }
+
+    fn delete(
+        &self,
+        _attributes: &[(&str, &str)],
     ) -> std::result::Result<(), flottille_link::KeyringError> {
         Err(flottille_link::KeyringError::Absent)
     }
@@ -610,8 +723,17 @@ impl flottille_link::Keyring for SessionKeyring {
         let failed = |error: oo7::Error| flottille_link::KeyringError::Failed(error.to_string());
         self.with(async |keyring| {
             let items = keyring.search_items(&attributes).await.map_err(failed)?;
-            let Some(item) = items.first() else {
-                return Ok(None);
+            let item = match items.as_slice() {
+                [] => return Ok(None),
+                [item] => item,
+                // Two clients kept one at the same moment: which is the member's cannot be told.
+                more => {
+                    return Err(flottille_link::KeyringError::Failed(format!(
+                        "{} items of the keyring hold a device key of Flottille's; one at most \
+                         may: flottille remote members says which key is a member",
+                        more.len()
+                    )));
+                }
             };
             if item.is_locked().await.map_err(failed)? {
                 return Err(flottille_link::KeyringError::Failed(
@@ -632,6 +754,18 @@ impl flottille_link::Keyring for SessionKeyring {
         self.with(async |keyring| {
             keyring
                 .create_item(label, &attributes, secret, false)
+                .await
+                .map_err(|error| flottille_link::KeyringError::Failed(error.to_string()))
+        })
+    }
+
+    fn delete(
+        &self,
+        attributes: &[(&str, &str)],
+    ) -> std::result::Result<(), flottille_link::KeyringError> {
+        self.with(async |keyring| {
+            keyring
+                .delete(&attributes)
                 .await
                 .map_err(|error| flottille_link::KeyringError::Failed(error.to_string()))
         })

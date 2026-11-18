@@ -1000,12 +1000,15 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Result<Va
                 .map_err(Failure::refused)
         }
         "remote.join" => {
-            let code: String = param(&params, "code")?;
             let key: PublicKey = param(&params, "key")?;
-            control_of(&remote)?
-                .join(&code, key)
-                .await
-                .map_err(Failure::refused)
+            let control = control_of(&remote)?;
+            // The answer of the join accepted for `key`, which a command gone did not take; no
+            // join is asked.
+            if params["resume"] == json!(true) {
+                return Ok(control.accepted(&key).await);
+            }
+            let code: String = param(&params, "code")?;
+            control.join(&code, key).await.map_err(Failure::refused)
         }
         "remote.declare" => {
             let change: flottille_link::Change = param(&params, "change")?;
