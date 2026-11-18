@@ -261,6 +261,31 @@ password manager's under the home), from Landlock's ninth ABI, the folders on th
 ruled without the right to connect, their other entries with every right, and the socket itself
 gets no rule.
 
+The agent command lines (Claude Code, Codex, OpenCode, the judge's, the one that lists models)
+start without `SSH_AUTH_SOCK` either: bare mode gives them no shell, and the variable would still
+tell them where the agent is, and lend it to a tool that spawns.
+
+**The daemon's own git is walled like a run's.** Every `git` the daemon runs for itself on a
+repository (its status and log reads, its worktrees, the `ls-remote` and `fetch` that find a
+workspace's base) is bound by the same Landlock rules, gets no `SSH_AUTH_SOCK`, and is given what a
+repository's settings could otherwise turn into a program of theirs: `core.hooksPath=/dev/null`,
+`core.fsmonitor=false`, `fetch.recurseSubmodules=false` and `submodule.recurse=false` on its line
+(the command's scope, which wins over the repository's settings and what they include: git cannot
+be told to skip an `include.path`, so what it brings is overridden instead), and
+`GIT_SSH_COMMAND` naming the `ssh` the daemon's `PATH` led to at its start, which wins over
+`core.sshCommand` and `GIT_SSH`. A call that reaches a remote also gets:
+
+- `GIT_ALLOW_PROTOCOL` set to the one protocol the remote's URL uses, as git resolves it
+  (`ls-remote --get-url`, so after `url.*.insteadOf`): `ssh`, `https`, `file`…, so no `ext::` or
+  other helper the settings slip in;
+- `--upload-pack=git-upload-pack` on its line: git takes the first `remote.<name>.uploadpack` it
+  reads, the repository's, so only the line's own option wins over it. The daemon never pushes,
+  so no `receivepack` is ever read;
+- when that protocol is SSH, the user's SSH agent, lent as to nothing else: `SSH_AUTH_SOCK` names
+  the socket found at the start, and from Landlock's ninth ABI a rule on that socket alone grants
+  connecting to it, the rest of the runtime folder (the bus) staying denied. An HTTPS remote gets
+  no agent and no session bus: its credential helper runs confined (below, "The gaps").
+
 **A push the gate let through runs outside the sandbox.** A run that is itself a `git push` (its own
 line, no wrapper) the user, the judge, a rule or Full mode let through, and the dry run the
 project's commit checks make of it, run with no Landlock and the daemon's own environment, as if
@@ -307,6 +332,14 @@ The gaps, where the platform does not allow more:
   until the private mount namespace (#976) mounts `~/.ssh` read-only. The gate judges the push's
   line, not the repository it runs in: an accepted risk, decided so that a push the user allowed
   signs in as theirs does;
+- the daemon's own fetch or listing of an SSH remote runs the user's `~/.ssh/config` with the
+  lent agent (`ProxyCommand`, `Match exec`), as a push does; and the remote's URL is read just
+  before the call, so a run that rewrites it in between sends that call to another host of the
+  same protocol;
+- the daemon's own fetch of an HTTPS remote runs its credential helper confined: one that reads a
+  file signs in, one that asks the keyring over the session bus (`gh auth git-credential` with
+  its token in the keyring, `git-credential-libsecret`) cannot, and the workspace then starts
+  from the base as last fetched, saying why;
 - from the ninth ABI, a socket made after a command started directly in a folder on the way to a
   kept-out agent socket (`/tmp` for `/tmp/ssh-…/agent.…`) cannot be connected to by that command;
 - without Landlock (a kernel before 5.19, or one built without it), the process runs as before,
