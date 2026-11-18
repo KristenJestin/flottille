@@ -19,6 +19,7 @@ use gpui_kit::{
 
 use crate::actions::{Command, Pick, Target};
 use crate::attachments::{Attachments, STILL_SCALING};
+use crate::kept::{Draft, DraftKey, Keeping, Written};
 use crate::mode::ModeSwitch;
 use crate::providers::{Provider, Providers};
 use crate::settings::Reveal;
@@ -226,6 +227,8 @@ pub struct Composer {
     focused: bool,
     /// The pictures that go with the first message.
     attached: Attachments,
+    /// What the daemon keeps of the draft, and the wait before it is written.
+    keeping: Keeping,
     places: Vec<PlaceChoice>,
     choice: Choice,
     /// A workspace made from the picker, which becomes the place once the daemon lists it.
@@ -281,13 +284,15 @@ impl Composer {
         let mode = cx.new(|_| ModeSwitch::local(shell.clone()));
         let subscriptions = vec![
             cx.subscribe(&tokens, |this: &mut Self, _, event: &TokenEvent, cx| {
-                this.attached.chip_changed(event, cx)
+                this.attached.chip_changed(event, cx);
+                this.draft_changed(cx);
             }),
             cx.subscribe_in(
                 &field,
                 window,
                 |this, field, event, window, cx| match event {
                     InputEvent::Change => {
+                        this.draft_changed(cx);
                         let has_text = !field.read(cx).value().trim().is_empty();
                         this.set_flag(|this| &mut this.has_text, has_text, cx);
                         this.attached.follow(cx);
@@ -301,6 +306,7 @@ impl Composer {
         ];
         Self {
             shell,
+            keeping: Keeping::new(DraftKey::Project(project.clone())),
             project,
             attached: Attachments::new(tokens.clone()),
             tokens,
@@ -323,6 +329,90 @@ impl Composer {
             mode,
             renders: 0,
             _subscriptions: subscriptions,
+        }
+    }
+
+    /// How many times the draft was written to the daemon.
+    pub fn drafts_sent(&self) -> usize {
+        self.keeping.sent()
+    }
+
+    fn draft_now(&self, cx: &App) -> Draft {
+        let (text, pictures) = self.attached.draft(cx);
+        Draft { text, pictures }
+    }
+
+    /// The draft changed: it is written 500 ms after the last change.
+    fn draft_changed(&mut self, cx: &mut Context<Self>) {
+        self.keeping.changed(cx, Self::keep_draft_now);
+    }
+
+    /// Writes the draft to the daemon now, when it does not hold it already. Asked once this
+    /// update is over: the shell is the one updating when a session started.
+    fn keep_draft_now(&mut self, cx: &mut Context<Self>) {
+        if let Some(write) = self.draft_to_write(cx, false) {
+            let shell = self.shell.clone();
+            cx.defer(move |cx| {
+                shell.update(cx, |shell, _| shell.perform(write)).ok();
+            });
+        }
+    }
+
+    /// What the daemon must be asked to keep the draft as it is now, if it does not hold it
+    /// (`closing`: the window is closing, `Keeping::write`).
+    pub fn draft_to_write(&mut self, cx: &mut Context<Self>, closing: bool) -> Option<Command> {
+        let now = self.draft_now(cx);
+        self.keeping.write(now, closing)
+    }
+
+    /// Whether the daemon answered the read of the draft.
+    pub fn draft_was_read(&self) -> bool {
+        self.keeping.was_read()
+    }
+
+    /// The daemon answered the read of the draft: a composer still empty takes it, a field the
+    /// user typed in meanwhile keeps their words, and is written.
+    pub fn draft_read(
+        &mut self,
+        found: Option<Draft>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let typed = !self.draft_now(cx).is_empty();
+        self.keeping.answered(found.clone());
+        match found {
+            Some(Draft { text, pictures }) if !typed => {
+                let restored = self.attached.restore_with(&text, pictures, Vec::new(), cx);
+                self.tokens
+                    .update(cx, |field, cx| field.set_value(restored, window, cx).ok());
+                let end = self.field.read(cx).value().len();
+                self.field
+                    .update(cx, |field, cx| field.set_selected_range(end..end, cx));
+                self.has_text = !self.field.read(cx).value().trim().is_empty();
+                cx.notify();
+            }
+            _ if typed => self.draft_changed(cx),
+            _ => {}
+        }
+    }
+
+    /// The daemon did not answer the read of the draft: nothing is written, and it is asked
+    /// again.
+    pub fn draft_read_failed(&mut self, cx: &mut Context<Self>) {
+        self.keeping.read_failed(cx, Self::read_draft_again);
+    }
+
+    fn read_draft_again(&mut self, cx: &mut Context<Self>) {
+        let key = self.keeping.key().clone();
+        self.shell
+            .update(cx, |shell, _| shell.perform(Command::DraftRead { key }))
+            .ok();
+    }
+
+    /// The daemon answered a write of the draft.
+    pub fn draft_written(&mut self, result: Written, cx: &mut Context<Self>) {
+        if self.keeping.wrote(result) {
+            self.draft_changed(cx);
         }
     }
 
@@ -717,6 +807,8 @@ impl Composer {
             .update(cx, |field, cx| field.set_value(Vec::new(), window, cx).ok());
         self.has_text = false;
         self.attached.clear();
+        // Started: its draft goes now, not 500 ms later.
+        self.keep_draft_now(cx);
         self.reset_mode(cx);
         cx.notify();
         used

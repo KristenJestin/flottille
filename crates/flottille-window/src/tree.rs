@@ -538,12 +538,14 @@ pub struct ProjectNode {
 }
 
 impl ProjectNode {
-    pub fn new(name: String, shell: WeakEntity<Shell>, cx: &mut Context<Self>) -> Self {
+    /// The node of a project, unfolded or folded as the user left it: made so, it never animates
+    /// from the other.
+    pub fn new(name: String, shell: WeakEntity<Shell>, open: bool, cx: &mut Context<Self>) -> Self {
         let sessions = cx.new(|_| Level::new());
-        let fold = cx.new(|_| Fold::new(format!("fold-project-{name}"), sessions.clone(), true));
+        let fold = cx.new(|_| Fold::new(format!("fold-project-{name}"), sessions.clone(), open));
         Self {
             name,
-            open: true,
+            open,
             mark: Mark::new(cx),
             held: None,
             commands: 0,
@@ -623,6 +625,7 @@ impl ProjectNode {
         self.fold.update(cx, |fold, cx| fold.set_open(open, cx));
         self.show_mark(cx);
         cx.notify();
+        kept_changed(&self.shell, cx);
     }
 }
 
@@ -728,23 +731,34 @@ impl Render for Level {
     }
 }
 
+/// A node was folded or unfolded: the shell keeps what the sidebar has folded, once the node's
+/// own update is over (the shell reads the nodes).
+fn kept_changed<T: 'static>(shell: &WeakEntity<Shell>, cx: &mut Context<T>) {
+    let shell = shell.clone();
+    cx.defer(move |cx| {
+        shell.update(cx, |shell, cx| shell.sidebar_changed(cx)).ok();
+    });
+}
+
 /// The "Ended" group, at the bottom of the tree: it gathers the ended sessions of every project,
 /// folded until the user opens it.
 pub struct EndedNode {
     open: bool,
     sessions: Entity<Level>,
     fold: Entity<Fold>,
+    shell: WeakEntity<Shell>,
 }
 
 impl EndedNode {
-    /// The group, folded.
-    pub fn new(cx: &mut Context<Self>) -> Self {
+    /// The group, folded unless the user left it unfolded.
+    pub fn new(shell: WeakEntity<Shell>, open: bool, cx: &mut Context<Self>) -> Self {
         let sessions = cx.new(|_| Level::scrolling());
-        let fold = cx.new(|_| Fold::new("fold-ended", sessions.clone(), false));
+        let fold = cx.new(|_| Fold::new("fold-ended", sessions.clone(), open));
         Self {
-            open: false,
+            open,
             sessions,
             fold,
+            shell,
         }
     }
 
@@ -776,6 +790,7 @@ impl EndedNode {
         let open = self.open;
         self.fold.update(cx, |fold, cx| fold.set_open(open, cx));
         cx.notify();
+        kept_changed(&self.shell, cx);
     }
 }
 
@@ -984,6 +999,12 @@ impl SessionRow {
         self.open
     }
 
+    /// Makes its led rows folded or unfolded as the user left them, before it is first listed:
+    /// nothing animates.
+    pub fn restore_open(&mut self, open: bool) {
+        self.open = open;
+    }
+
     /// Folds or unfolds the led sessions under its row: the tree draws its level again.
     pub fn toggle(&mut self, cx: &mut Context<Self>) {
         self.open = !self.open;
@@ -991,7 +1012,12 @@ impl SessionRow {
         // The level reads this row: it is drawn again once this update is over.
         let (shell, id) = (self.shell.clone(), self.id.clone());
         cx.defer(move |cx| {
-            shell.update(cx, |shell, cx| shell.relist(&id, cx)).ok();
+            shell
+                .update(cx, |shell, cx| {
+                    shell.relist(&id, cx);
+                    shell.sidebar_changed(cx);
+                })
+                .ok();
         });
     }
 

@@ -100,6 +100,14 @@ pub const METHODS: &[(&str, Class)] = &[
     ("sessions.set", Drive),
     ("workspaces_folder.show", Read),
     ("workspaces_folder.set", Drive),
+    // What the user left in the window is of the machine: a device that follows over a link reads
+    // none of it.
+    ("draft.get", Local),
+    ("draft.set", Local),
+    ("draft.clear", Local),
+    ("draft.list", Local),
+    ("window.get", Local),
+    ("window.set", Local),
     ("vault.list", Read),
     ("vault.set", Drive),
     ("vault.remove", Drive),
@@ -252,6 +260,21 @@ mod tests {
         assert_eq!(class("agent.send"), Some(Drive));
         assert_eq!(class("approval.approve"), Some(Drive));
         assert_eq!(class("daemon.stop"), Some(Drive));
+    }
+
+    #[test]
+    fn the_drafts_and_the_window_s_state_are_of_the_machine_alone() {
+        // What the user left in the window is not read by a device that follows over a link.
+        for method in [
+            "draft.get",
+            "draft.set",
+            "draft.clear",
+            "draft.list",
+            "window.get",
+            "window.set",
+        ] {
+            assert_eq!(class(method), Some(Local), "{method}");
+        }
     }
 
     #[test]

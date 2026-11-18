@@ -16,6 +16,7 @@ use futures::channel::mpsc::UnboundedSender;
 use serde_json::{Value, json};
 
 use crate::commands::CommandInfo;
+use crate::kept::{Draft, DraftKey, Written};
 use crate::link::{Conn, Connect, Update};
 use crate::rules::Shown;
 use crate::runs::{CommandOutput, CommandRow, Watch};
@@ -206,6 +207,25 @@ pub enum Command {
     AppearanceSet {
         appearance: gpui_design_system::Appearance,
         seq: u64,
+    },
+    /// What the daemon keeps of a composer's draft (`draft.get`).
+    DraftRead {
+        key: DraftKey,
+    },
+    /// Keeps a composer's draft (`draft.set`; an empty one forgets it): the pictures only when
+    /// they are not the ones the daemon holds. `after_read`: the window is closing before the
+    /// daemon answered the read of the draft, the keeper reads it first and writes only if it
+    /// could.
+    DraftWrite {
+        key: DraftKey,
+        text: String,
+        pictures: Option<Vec<Picture>>,
+        after_read: bool,
+    },
+    /// Keeps one value of the window's own state (`window.set`).
+    WindowSet {
+        key: String,
+        value: Value,
     },
     /// The user saw the notice of the Auto judge Flottille picked (`provider.judge_noticed`);
     /// the providers are read again.
@@ -999,6 +1019,21 @@ pub enum Outcome {
         written: Option<SessionsSetting>,
         shown: Result<(Option<u64>, bool), String>,
     },
+    /// What the daemon keeps of a composer's draft.
+    Draft {
+        key: DraftKey,
+        found: Result<Option<Draft>, String>,
+    },
+    /// How the write of a composer's draft ended.
+    DraftWritten {
+        key: DraftKey,
+        result: Written,
+    },
+    /// How the write of a value of the window's state ended, with the value.
+    WindowKept {
+        value: Value,
+        result: Written,
+    },
     /// The window's appearance as the daemon keeps it, after a read (`written` false) or a
     /// choice.
     Appearance {
@@ -1281,6 +1316,7 @@ const DETAILS_EVERY: Duration = Duration::from_secs(1);
 pub struct Actions {
     details: Sender<String>,
     appearance: Sender<Command>,
+    keeper: Sender<Keep>,
     connect: Connect,
     updates: UnboundedSender<Update>,
     bounds: Bounds,
@@ -1318,16 +1354,41 @@ impl Actions {
                 }
             })
             .expect("a thread for the window's appearance");
+        // What the window keeps is written one request at a time, in the order it was asked: a
+        // draft written, then forgotten, must not reach the daemon the other way round.
+        let (keeper, kept) = channel();
+        let (to, updates_to) = (connect.clone(), updates.clone());
+        std::thread::Builder::new()
+            .name("flottille-keeper".into())
+            .spawn(move || keep(to, kept, updates_to, bounds))
+            .expect("a thread for what the window keeps");
         Actions {
             details,
             appearance,
+            keeper,
             connect,
             updates,
             bounds,
         }
     }
 
+    /// Waits until everything asked of the keeper so far reached the daemon, for `wait` at most:
+    /// the window is closing, and what it holds must be written before the process ends.
+    pub fn flush(&self, wait: Duration) {
+        let (done, reached) = channel();
+        if self.keeper.send(Keep::Barrier(done)).is_ok() {
+            let _ = reached.recv_timeout(wait);
+        }
+    }
+
     pub fn send(&self, command: Command) {
+        if matches!(
+            command,
+            Command::DraftRead { .. } | Command::DraftWrite { .. } | Command::WindowSet { .. }
+        ) {
+            let _ = self.keeper.send(Keep::Do(command));
+            return;
+        }
         if let Command::Details(project) = command {
             let _ = self.details.send(project);
             return;
@@ -1348,6 +1409,135 @@ impl Actions {
             })
             .expect("a thread for a window's action");
     }
+}
+
+/// What the keeper's thread is asked.
+enum Keep {
+    Do(Command),
+    /// Answers once everything asked before it was.
+    Barrier(Sender<()>),
+}
+
+/// The keeper's thread: what the window keeps, one request at a time on a connection kept.
+fn keep(connect: Connect, asked: Receiver<Keep>, updates: UnboundedSender<Update>, bounds: Bounds) {
+    let mut conn: Option<Conn> = None;
+    while let Ok(next) = asked.recv() {
+        let command = match next {
+            Keep::Barrier(done) => {
+                let _ = done.send(());
+                continue;
+            }
+            Keep::Do(command) => command,
+        };
+        let outcome = match command {
+            Command::DraftRead { key } => {
+                let params = json!({"kind": key.kind(), "target": key.target()});
+                let found = match coded(&connect, &mut conn, "draft.get", params, bounds.quick) {
+                    Ok(Ok(answer)) => Ok(draft_of(&answer["draft"])),
+                    // Gone: no composer, no draft.
+                    Ok(Err(refused)) if refused.code == "not-found" => Ok(None),
+                    Ok(Err(refused)) => Err(refused.message),
+                    Err(why) => Err(why),
+                };
+                Outcome::Draft { key, found }
+            }
+            Command::DraftWrite {
+                key,
+                text,
+                pictures,
+                after_read,
+            } => {
+                let params = json!({"kind": key.kind(), "target": key.target()});
+                // The window is closing and did not read the draft: what is typed replaces it
+                // only if the daemon can say that it holds one the field did not know.
+                let readable = !after_read
+                    || coded(
+                        &connect,
+                        &mut conn,
+                        "draft.get",
+                        params.clone(),
+                        bounds.quick,
+                    )
+                    .is_ok_and(|read| read.is_ok());
+                let result = if readable {
+                    let mut params = params;
+                    params["text"] = json!(text);
+                    if let Some(pictures) = pictures {
+                        params["images"] = pictures.iter().map(Picture::to_json).collect();
+                    }
+                    written(coded(
+                        &connect,
+                        &mut conn,
+                        "draft.set",
+                        params,
+                        bounds.quick,
+                    ))
+                } else {
+                    Written::Retry
+                };
+                Outcome::DraftWritten { key, result }
+            }
+            Command::WindowSet { key, value } => {
+                let params = json!({"key": key, "value": value});
+                let result = written(coded(
+                    &connect,
+                    &mut conn,
+                    "window.set",
+                    params,
+                    bounds.quick,
+                ));
+                Outcome::WindowKept { value, result }
+            }
+            _ => unreachable!("only what the window keeps is sent to the keeper"),
+        };
+        if updates.unbounded_send(Update::Done(outcome)).is_err() {
+            return;
+        }
+    }
+}
+
+/// How a write ended, by what the daemon answered.
+fn written(asked: Result<Result<Value, flottille_protocol::ErrorBody>, String>) -> Written {
+    match asked {
+        Ok(Ok(_)) => Written::Kept,
+        Ok(Err(refused)) => match refused.code.as_str() {
+            "not-found" => Written::Gone,
+            "unavailable" => Written::Retry,
+            _ => Written::Refused,
+        },
+        Err(_) => Written::Retry,
+    }
+}
+
+/// [`ask`], with the code of the daemon's refusal beside its sentence.
+fn coded(
+    connect: &Connect,
+    conn: &mut Option<Conn>,
+    method: &str,
+    params: Value,
+    bound: Duration,
+) -> Result<Result<Value, flottille_protocol::ErrorBody>, String> {
+    if conn.is_none() {
+        *conn = Some(connected(connect)?);
+    }
+    let answer = conn
+        .as_mut()
+        .expect("connected")
+        .ask_within_coded(method, params, bound);
+    if answer.is_err() {
+        *conn = None;
+    }
+    answer.map_err(|e| e.to_string())
+}
+
+/// A draft as the daemon answers it (`null` when it holds none).
+fn draft_of(found: &Value) -> Option<Draft> {
+    let text = found["text"].as_str()?.to_owned();
+    let pictures = found["images"]
+        .as_array()
+        .map(|images| images.iter().filter_map(Picture::of).collect())
+        .unwrap_or_default();
+    Some(Draft { text, pictures })
 }
 
 fn read_details(
@@ -1480,6 +1670,9 @@ fn run_answer(
 fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
     match command {
         Command::Details(_) => unreachable!("the details have their own thread"),
+        Command::DraftRead { .. } | Command::DraftWrite { .. } | Command::WindowSet { .. } => {
+            unreachable!("what the window keeps has its own thread")
+        }
         Command::Start {
             project,
             target,
