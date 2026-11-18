@@ -71,7 +71,12 @@ fn set_models(user: &User) -> Vec<String> {
         .into_iter()
         .filter_map(|e| e.get("received").cloned())
         .filter(|m| m["type"] == "control_request" && m["request"]["subtype"] == "set_model")
-        .map(|m| m["request"]["model"].as_str().unwrap_or("default").to_owned())
+        .map(|m| {
+            m["request"]["model"]
+                .as_str()
+                .unwrap_or("default")
+                .to_owned()
+        })
         .collect()
 }
 
@@ -142,7 +147,11 @@ fn an_alias_that_left_the_list_runs_on_the_newest_of_its_family() {
     let (id, after) = start(&user, "fable", "hello");
     let events = until_settled(&user, &id, after);
 
-    assert!(names(&events).contains(&"agent.turn_ended"), "{:?}", names(&events));
+    assert!(
+        names(&events).contains(&"agent.turn_ended"),
+        "{:?}",
+        names(&events)
+    );
     assert_eq!(set_models(&user), ["claude-fable-5-2"]);
     assert_eq!(
         replaced(&events),
@@ -167,7 +176,11 @@ fn a_model_id_that_left_the_list_runs_on_the_newest_of_its_family() {
     let (id, after) = start(&user, "claude-fable-5-1", "hello");
     let events = until_settled(&user, &id, after);
 
-    assert!(names(&events).contains(&"agent.turn_ended"), "{:?}", names(&events));
+    assert!(
+        names(&events).contains(&"agent.turn_ended"),
+        "{:?}",
+        names(&events)
+    );
     assert_eq!(set_models(&user), ["claude-fable-5-2"]);
     assert_eq!(
         replaced(&events),
@@ -185,8 +198,16 @@ fn a_model_with_no_family_offered_starts_on_the_default_and_says_so() {
     let (id, after) = start(&user, "fable", "hello");
     let events = until_settled(&user, &id, after);
 
-    assert!(names(&events).contains(&"agent.turn_ended"), "{:?}", names(&events));
-    assert_eq!(set_models(&user), ["opus"], "the model `default` stands for");
+    assert!(
+        names(&events).contains(&"agent.turn_ended"),
+        "{:?}",
+        names(&events)
+    );
+    assert_eq!(
+        set_models(&user),
+        ["opus"],
+        "the model `default` stands for"
+    );
     assert_eq!(
         replaced(&events),
         ["the agent does not offer the model fable: running opus, its default"]
@@ -208,16 +229,18 @@ fn a_refused_model_never_ends_the_session_and_its_message_is_sent() {
     let (id, after) = start(&user, "fable", "hello");
     let events = until_settled(&user, &id, after);
 
-    assert!(!names(&events).contains(&"agent.failed"), "{:?}", names(&events));
+    assert!(
+        !names(&events).contains(&"agent.failed"),
+        "{:?}",
+        names(&events)
+    );
     assert!(
         prompts(&user).iter().any(|p| p.contains("hello")),
         "the message was sent: {:?}",
         prompts(&user)
     );
     assert!(
-        events
-            .iter()
-            .any(|e| e["data"]["text"] == "Hello there"),
+        events.iter().any(|e| e["data"]["text"] == "Hello there"),
         "{:?}",
         names(&events)
     );
@@ -241,11 +264,22 @@ fn a_session_ended_by_a_refused_model_resumes() {
     let sent = user
         .call("agent.send", json!({"agent": id, "message": "again"}))
         .unwrap();
-    let from = resumed["after"].as_u64().or(sent["after"].as_u64()).unwrap();
+    let from = resumed["after"]
+        .as_u64()
+        .or(sent["after"].as_u64())
+        .unwrap();
     let events = until_settled(&user, &id, from);
 
-    assert!(names(&events).contains(&"agent.turn_ended"), "{:?}", names(&events));
-    assert!(!names(&events).contains(&"agent.failed"), "{:?}", names(&events));
+    assert!(
+        names(&events).contains(&"agent.turn_ended"),
+        "{:?}",
+        names(&events)
+    );
+    assert!(
+        !names(&events).contains(&"agent.failed"),
+        "{:?}",
+        names(&events)
+    );
     assert_eq!(set_models(&user).last().unwrap(), "claude-fable-5-2");
     assert_eq!(show(&user, &id)["chosen"]["model"], "claude-fable-5-2");
 }
