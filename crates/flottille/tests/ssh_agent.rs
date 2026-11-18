@@ -872,3 +872,54 @@ fn a_partial_clone_fetches_nothing_lazily_in_the_daemon_s_git() {
 
     assert!(!ran.exists(), "the promisor remote's helper ran");
 }
+
+#[test]
+fn a_planted_git_proxy_does_not_run_in_the_daemon_s_fetch() {
+    let (user, _agent, _bus) = user();
+    project(&user, "git://forge.invalid/acme/app.git");
+    let planted = user.path("planted/proxy");
+    script(
+        &planted,
+        &format!(
+            "echo ran >> '{}'\nexit 1\n",
+            user.path("planted-ran").display()
+        ),
+    );
+    user.git(
+        &user.path("work/app"),
+        &["config", "core.gitProxy", planted.to_str().unwrap()],
+    );
+
+    let base = created(&user);
+
+    assert!(!user.path("planted-ran").exists(), "the planted proxy ran");
+    assert_eq!(base["fetched_now"], false, "{base}");
+}
+
+#[test]
+fn a_planted_askpass_does_not_run_in_the_daemon_s_fetch() {
+    let user = User::with_fake_agent();
+    std::fs::create_dir_all(user.path("remotes")).unwrap();
+    let (_server, url) = http_remote(&user);
+    project(&user, &url);
+    let planted = user.path("planted/askpass");
+    script(
+        &planted,
+        &format!(
+            "echo ran >> '{}'\necho invented\n",
+            user.path("planted-ran").display()
+        ),
+    );
+    user.git(
+        &user.path("work/app"),
+        &["config", "core.askPass", planted.to_str().unwrap()],
+    );
+
+    let base = created(&user);
+
+    assert!(
+        !user.path("planted-ran").exists(),
+        "the planted askpass ran"
+    );
+    assert_eq!(base["fetched_now"], false, "{base}");
+}
