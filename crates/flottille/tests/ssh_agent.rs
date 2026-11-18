@@ -80,7 +80,8 @@ fn fake_ssh(user: User) -> User {
     let path = format!(
         "{}:{}",
         user.path("ssh-bin").display(),
-        std::env::var("PATH").unwrap_or_default()
+        user.programs_but_ssh(&std::env::var("PATH").unwrap_or_default())
+            .display()
     );
     user.with_env("PATH", &path)
 }
@@ -922,4 +923,35 @@ fn a_planted_askpass_does_not_run_in_the_daemon_s_fetch() {
         "the planted askpass ran"
     );
     assert_eq!(base["fetched_now"], false, "{base}");
+}
+
+#[test]
+fn the_ssh_found_at_the_start_is_its_target_not_its_link() {
+    let (user, _agent, _bus) = user();
+    // The fake `ssh` behind a link of the `PATH`, which is pointed elsewhere once the daemon runs.
+    let fake = user.path("ssh-real/ssh");
+    std::fs::create_dir_all(fake.parent().unwrap()).unwrap();
+    std::fs::rename(user.path("ssh-bin/ssh"), &fake).unwrap();
+    std::os::unix::fs::symlink(&fake, user.path("ssh-bin/ssh")).unwrap();
+    project(&user, SSH_REMOTE);
+    let planted = user.path("planted/ssh");
+    script(
+        &planted,
+        &format!(
+            "echo ran >> '{}'\nexit 1\n",
+            user.path("planted-ran").display()
+        ),
+    );
+    std::fs::remove_file(user.path("ssh-bin/ssh")).unwrap();
+    std::os::unix::fs::symlink(&planted, user.path("ssh-bin/ssh")).unwrap();
+
+    let base = created(&user);
+
+    assert!(
+        !user.path("planted-ran").exists(),
+        "the link's new target ran"
+    );
+    assert_eq!(base["fetched_now"], true, "{base}");
+    let reached = format!("reached {}", lent(&user).display());
+    assert!(ssh_said(&user).contains(&reached), "{:?}", ssh_said(&user));
 }
