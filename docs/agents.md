@@ -179,17 +179,23 @@ efforts are read; the tree, the deliveries, the gate and the store know nothing 
   at once, naming those the provider offers. A model asked as a listed model's id without its
   date suffix (`-YYYYMMDD`) is that model (`claude-haiku-4-5` for `claude-haiku-4-5-20251001`),
   and its agent's choice, the Auto judge's (`provider.set_judge`) and the session's own check
-  hold the listed id. An id that two listed models answer to is taken for none. A model the list
-  does not hold as it is (an alias the provider's update dropped, `fable`, or an id it replaced,
-  `claude-fable-5-1`) is the newest listed model of its family (#1076): the ids whose words end
-  with its own (`claude-fable-*` for `fable`), ordered by the version in the id (`5-2` before
-  `5-1` before `5`) and then by its date, never by the list's order. No family listed, it is
-  refused when the models are known; at a session's start, the session runs on the provider's
-  default model instead. Either way the start goes on: the session's `chosen` and `taken` become
-  the model that runs, the user's message is sent, and `agent.options_replaced` says why once in
-  its conversation (`the model fable is no longer offered by the agent: running
-  claude-fable-5-2`). An effort the model does not offer at start is let go the same way, said
-  the same way. A change of the effort alone is checked against the model the agent runs on
+  hold the listed id. An id that two listed models answer to is taken for none. What the user
+  or an agent asks (a pick, `agent.options`, a new session's model, the judge's or the new
+  sessions' setting) is matched only so: another model is never put in its place, and one the
+  list does not hold is refused, naming what is offered. The model a session was stored on (its
+  `chosen`, `taken` or `pending`), and a project's or the new sessions' setting's model at a
+  session's start, may have left the list since (an alias the provider's update dropped, `fable`,
+  or an id it replaced, `claude-fable-5-1`): it is the newest listed model of its family (#1076),
+  the ids whose words end with its own (`claude-fable-*` for `fable`), ordered by the version in
+  the id (`5-2` before `5-1` before `5`), then by its date (`-YYYYMMDD` or `-YYYY-MM-DD`, never
+  read as a version), then by the id, never by the list's order. No family listed: at a session's
+  start the session runs on the provider's default model (a project's model is refused, as
+  before; the setting's is let go); if the agent refuses the model of the family, on its default
+  too, said once. Either way the start goes on: the session's `chosen` and `taken` become the
+  model that runs, the user's message is sent, and `agent.options_replaced` says why once in its
+  conversation (`the model fable is no longer offered by the agent: running claude-fable-5-2`).
+  An effort the agent refuses at start is let go the same way, said the same way, and leaves the
+  session's `chosen`: it is not said again at the next start. A change of the effort alone is checked against the model the agent runs on
   resolved so, never refused because that model left the list. A session's start that finds the
   provider's list changed announces it (`provider.models_read`), so that the window's pickers
   never offer a model the list no longer holds. The efforts of a model are `null` until a session

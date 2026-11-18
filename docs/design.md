@@ -137,8 +137,9 @@ without a prompt (Codex's `model/list` with no thread; Claude's and OpenCode's a
 for a session, with no user message): at the daemon's start, when the provider is enabled, and
 when its program (path or modification time), the names of its API keys set or the presence of
 its sign-in file change. The first session can be given a model (`docs/agents.md`, "The
-models"). A model the agent's list no longer holds (an alias its update dropped) runs as the
-newest offered of its family, by the version in its id, else as the provider's default; a model
+models"). A model a session was stored on that the agent's list no longer holds (an alias its
+update dropped) runs as the newest offered of its family, by the version in its id, else as the
+provider's default; a model the user asks is never replaced, only refused. A model
 or an effort the agent does not offer never ends a session nor drops its message: the session
 starts on what replaces it and its conversation says why, once.
 

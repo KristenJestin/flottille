@@ -959,7 +959,7 @@ refusal is none: the change stays pending.
 
 At a session's start, the model or the effort it was stored on is not one the agent offers (#1076):
 it runs on the newest offered model of the same family, else on the provider's default, and its
-effort is let go. The session is not failed and its message is sent; the agent's `chosen` and
+effort is let go (it leaves the agent's `chosen`). The session is not failed and its message is sent; the agent's `chosen` and
 `taken` follow (`agent.options_taken`), so that it is said once. Its conversation shows the
 sentence (`docs/agents.md`, "The options").
 
