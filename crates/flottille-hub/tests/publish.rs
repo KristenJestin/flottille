@@ -283,6 +283,13 @@ fn the_image_holds_the_binary_only_and_runs_as_nobody() {
             .iter()
             .any(|l| l.starts_with("COPY") && l.contains("flottille-hub /flottille-hub"))
     );
+    // The hub refuses a state folder open to others, and `COPY` leaves the folder it creates for
+    // the files it copies at 0755 (CI saw it): the folder itself is what is copied, at 0700, with
+    // its parent made for it.
+    assert!(
+        lines.contains(&"COPY --chown=65532:65532 --chmod=0700 lib/ /var/lib/"),
+        "{lines:?}"
+    );
     assert!(lines.contains(&"USER 65532:65532"), "{lines:?}");
     assert!(lines.contains(&"EXPOSE 7448"));
     assert!(lines.contains(&"VOLUME /var/lib/flottille-hub"));
@@ -446,6 +453,11 @@ fn the_hub_jobs_run_on_a_pull_request_only_when_the_hub_or_the_release_changes()
     );
     assert!(
         hub.contains("CC_x86_64_unknown_linux_musl: musl-gcc"),
+        "{hub}"
+    );
+    // The context holds the state folder, empty, as `lib/flottille-hub`.
+    assert!(
+        hub.contains("mkdir -p \"$context/lib/flottille-hub\""),
         "{hub}"
     );
     // The image names its repository: the build is given it.
