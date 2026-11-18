@@ -955,3 +955,53 @@ fn the_ssh_found_at_the_start_is_its_target_not_its_link() {
     let reached = format!("reached {}", lent(&user).display());
     assert!(ssh_said(&user).contains(&reached), "{:?}", ssh_said(&user));
 }
+
+/// The packs of the repository `folder`.
+fn packs(folder: &Path) -> usize {
+    std::fs::read_dir(folder.join(".git/objects/pack"))
+        .unwrap()
+        .flatten()
+        .filter(|entry| entry.path().extension().is_some_and(|e| e == "pack"))
+        .count()
+}
+
+#[test]
+fn the_daemon_s_fetch_starts_no_maintenance() {
+    let (user, _agent, _bus) = user();
+    project(&user, SSH_REMOTE);
+    let folder = user.path("work/app");
+    // A commit the remote has and the repository has not, fetched as a pack of its own.
+    let seed = user.path("seed");
+    let remote = user.path("remotes/app.git");
+    user.git(
+        &user.path(""),
+        &[
+            "clone",
+            "--quiet",
+            "--branch",
+            "main",
+            remote.to_str().unwrap(),
+            seed.to_str().unwrap(),
+        ],
+    );
+    std::fs::write(seed.join("later.txt"), "later\n").unwrap();
+    user.git(&seed, &["add", "later.txt"]);
+    user.git(&seed, &["commit", "--quiet", "-m", "later"]);
+    user.git(&seed, &["push", "--quiet", "origin", "main"]);
+    // Settings that make the maintenance after a fetch pack it all at once, in the foreground.
+    for (name, value) in [
+        ("fetch.unpackLimit", "1"),
+        ("gc.autoPackLimit", "1"),
+        ("gc.autoDetach", "false"),
+        ("maintenance.autoDetach", "false"),
+    ] {
+        user.git(&folder, &["config", name, value]);
+    }
+    user.git(&folder, &["repack", "--quiet"]);
+    assert_eq!(packs(&folder), 1);
+
+    let base = created(&user);
+
+    assert_eq!(base["fetched_now"], true, "{base}");
+    assert_eq!(packs(&folder), 2, "the fetch's pack was packed again");
+}
