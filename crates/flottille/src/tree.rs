@@ -1080,10 +1080,14 @@ fn session_send(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
     let asked: SessionSend = arguments("session_send", args)?;
     let (session, relation) = session_of(daemon, caller, &asked)?;
     // A following ties a session to the one that started it; two sessions a leave joins have none.
-    let following = match relation {
-        Relation::Started => Some((caller.id.as_str(), &session)),
-        Relation::StartedYou => Some((session.id.as_str(), caller)),
-        Relation::Leave | Relation::NoLeave => None,
+    // Told by who started whom, not by the relation: across projects the first message of a pair
+    // is performed once the user allowed it, before the leave is kept, as `NoLeave`, and it counts.
+    let following = if session.launched_by.as_deref() == Some(caller.id.as_str()) {
+        Some((caller.id.as_str(), &session))
+    } else if caller.launched_by.as_deref() == Some(session.id.as_str()) {
+        Some((session.id.as_str(), caller))
+    } else {
+        None
     };
     if let Some((starter, followed)) = following
         && crate::subscriptions::paused(daemon, starter, &followed.id)
@@ -2491,15 +2495,32 @@ async fn remind_once(daemon: &Arc<Daemon>, session: &Agent) {
             return;
         }
     };
+    // The pilot's workspace tool reaches its own project's workspaces: a session led from another
+    // project is stopped, and its workspace is left to that session and its project (a workspace
+    // of the same name in the pilot's project is none of this one).
+    let across = matches!(
+        daemon.read(|store| store.agent(pilot)),
+        Ok(Some(pilot)) if pilot.project != session.project
+    );
+    let text = match across {
+        true => format!(
+            "{} reported and its branch is in {branch}: stop it. Its workspace {workspace} is in \
+             project {}, which your workspace tool does not reach: it is that session's, or that \
+             project's, to remove, never one of yours",
+            named(session),
+            session.project
+        ),
+        false => format!(
+            "{} reported and its branch is in {branch}: stop it and remove its workspace?",
+            named(session)
+        ),
+    };
     deliveries::deliver(
         daemon,
         pilot,
         LED_INTEGRATED,
         Some(id),
-        &format!(
-            "{} reported and its branch is in {branch}: stop it and remove its workspace?",
-            named(session)
-        ),
+        &text,
         approval::BETWEEN_TURNS,
     );
 }

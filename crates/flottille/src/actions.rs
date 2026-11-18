@@ -2299,9 +2299,10 @@ async fn launch_elsewhere_says(
                 serde_json::from_value(args["base"].clone()).unwrap_or_default(),
                 repositories.as_deref(),
             )?;
+            // The services its setup starts are told as that project's own place reaches them.
             says = create_says(
                 daemon,
-                &grant.place,
+                &crate::place::Place::main(&project, project.folder.clone()),
                 &project,
                 name,
                 &repositories,

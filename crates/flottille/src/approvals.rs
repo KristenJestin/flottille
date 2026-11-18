@@ -192,8 +192,10 @@ fn asking_leave(store: &Store, asked: &Request) -> flottille_core::Result<Option
         .into_iter()
         .chain(store.unsettled_requests()?)
         .find(|request| {
+            // One leave covers reading and writing across projects: a read and a message for the
+            // same pair are one card.
             request.agent == asked.agent
-                && request.tool == asked.tool
+                && matches!(request.tool.as_str(), "session_send" | "session_read")
                 && request.arguments["session"] == asked.arguments["session"]
                 && request
                     .reasons
