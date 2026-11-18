@@ -169,6 +169,15 @@ the wrong code first).
    the action cannot be done, the dialog says why and its button is disabled. Never a button that
    turns into other buttons in place. **[test]** `Confirm`, and a scan refusing the
    inline-confirmation ids.
+   **A dialog opens over the page it is asked from** (#1018): a form or a review is the kit's
+   `Modal`, drawn by the shell's one host of dialogs (`modals.rs`) above whichever page is shown,
+   never by the page that happens to hold its state, and never after a change of page. The
+   section that holds the form's state (`VaultSection`, `ConnectionsSection`) gives its modal to
+   the host (`Modals::add`) and opens it through `Modals::open`, whoever asked; a dialog opened
+   from a dialog is stacked over it, Escape and Cancel close the top one (the window's root asks
+   the kit for the topmost overlay) and the focus goes back to the one below. **[test]**
+   `crates/flottille-window/tests/no_dialog_is_opened_by_changing_page.rs`, a scan refusing a
+   function that changes page and opens a dialog in the same body.
 3. **An action's result is a toast**: bottom right, 360 px, an icon, one line and an optional
    second; it rises and fades in, folds away with its gap; a success leaves after 4 s (held while
    hovered), a failure stays until dismissed; several stack, the newest on top. Never a line

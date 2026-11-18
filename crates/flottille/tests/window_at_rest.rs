@@ -2342,3 +2342,92 @@ fn the_window_draws_no_frame_at_rest_on_a_session_with_the_card_of_a_connection_
     settle(&shell, cx);
     assert_eq!(frames_at_rest(&shell, cx), (0, 0), "the card, folded away");
 }
+
+/// #1018: a dialog opens over the session it is asked from: the vault's form, from an agent's
+/// request for an entry, at rest with the session behind it.
+#[gpui_kit::test]
+fn the_window_draws_no_frame_at_rest_on_the_vault_form_over_a_session(cx: &mut TestAppContext) {
+    let user = User::with_fake_agent();
+    let id = idle_session(&user);
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the session is in the tree", |cx| {
+        cx.update(|window, _| window.try_find(session_id(&id)).is_some())
+    });
+    cx.update(|window, cx| window.click(session_id(&id), cx));
+    until(&shell, cx, "the conversation", |cx| {
+        shell.read_with(cx, |s, cx| {
+            s.main()
+                .read(cx)
+                .session_page()
+                .is_some_and(|page| !page.read(cx).conversation().read(cx).rows().is_empty())
+        })
+    });
+    let entry = flottille_window::vault::VaultEntry {
+        name: "notes-key".to_owned(),
+        ..Default::default()
+    };
+    shell.update_in(cx, |shell, window, cx| {
+        shell.add_asked_vault_entry(
+            entry,
+            "to read the notes".to_owned(),
+            None,
+            None,
+            window,
+            cx,
+        )
+    });
+    until(&shell, cx, "the form is drawn", |cx| {
+        cx.update(|window, _| window.try_find("vault-modal").is_some_and(|f| f.visible()))
+    });
+    settle(&shell, cx);
+    assert_eq!(
+        shell.read_with(cx, |s, _| s.selected().cloned()),
+        Some(Selection::Session(id)),
+        "the form is over the session"
+    );
+    cx.update(|window, cx| window.blur(cx));
+    settle(&shell, cx);
+    assert_eq!(frames_at_rest(&shell, cx), (0, 0), "(drawn, asked)");
+}
+
+/// #1018: the connection's form, from Edit on an agent's request, over the session, at rest.
+#[gpui_kit::test]
+fn the_window_draws_no_frame_at_rest_on_the_connection_form_over_a_session(
+    cx: &mut TestAppContext,
+) {
+    let (user, lead, mcp) = lead_for_connections();
+    let answer = mcp.call(
+        "connections",
+        json!({"action": "add", "name": "notes", "about": "The user's notes.",
+            "url": "http://127.0.0.1:7468/mcp"}),
+    );
+    let number = held_number(&answer);
+    let (shell, cx) = window(&user, cx);
+    open_with_request_card(&shell, &lead, number, cx);
+    cx.update(|window, cx| window.click(format!("open-request-{number}"), cx));
+    until(&shell, cx, "the request's dialog", |cx| {
+        cx.update(|window, _| {
+            window
+                .try_find("connection-request-edit")
+                .is_some_and(|f| f.visible())
+        })
+    });
+    settle(&shell, cx);
+    cx.update(|window, cx| window.click("connection-request-edit", cx));
+    until(&shell, cx, "the form is drawn", |cx| {
+        cx.update(|window, _| {
+            window
+                .try_find("connection-modal")
+                .is_some_and(|f| f.visible())
+        })
+    });
+    settle(&shell, cx);
+    assert_eq!(
+        shell.read_with(cx, |s, _| s.selected().cloned()),
+        Some(Selection::Session(lead)),
+        "the form is over the session"
+    );
+    cx.update(|window, cx| window.blur(cx));
+    settle(&shell, cx);
+    assert_eq!(frames_at_rest(&shell, cx), (0, 0), "(drawn, asked)");
+}
