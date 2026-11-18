@@ -216,7 +216,8 @@ field), with `vault::secret`, which only a tool's own code calls and whose value
 use. It never waits for the user: an item of a locked keyring is answered at once that the keyring
 is locked and the user must unlock it, and a keyring that does not answer within 3 seconds is
 answered the same. Its users: `tickets log_time` (`docs/tickets.md`, "Logging time"), with `worklogs` and `fields`
-that read Jira's REST API with the same entry, `web`'s calls of an API (`docs/tools.md`, "The web": `entry` names the entry, the daemon signs in with
+that read Jira's REST API with the same entry and `edit` with `fields`, `parent` or a milestone that
+writes through it (#1067), `web`'s calls of an API (`docs/tools.md`, "The web": `entry` names the entry, the daemon signs in with
 HTTP Basic when it has a username, else as a bearer token, and only on the origin of its `url`
 (its scheme, host and port), `https` or `http` on this machine; an entry without a `url`, of another project or bound to
 another use is refused before anything is sent, and a missing one offers `vault ask`), and

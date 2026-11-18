@@ -1260,7 +1260,7 @@ Jira: their account id, else their e-mail). The card shows the names as given.
   tracker does not take,
   a `status` with no name, a `reason` that is neither value, and, for an argument of another action
   (`reason` is for close, `remove_labels`, `assignees` and `remove_assignees` for edit, `assignee`
-  for create and edit, `parent` and `sprint` for create) or of the other tracker (on Jira,
+  for create and edit, `sprint` for create, `parent` for create and, on Jira, edit) or of the other tracker (on Jira,
   `assignees` or a reason; on GitHub, `assignee`, `parent` or `sprint`: GitHub's is `assignees`),
   is refused before anything is asked. A
   `title` on `comment`, `close`, `reopen` or `status` is refused before anything is asked
@@ -1329,11 +1329,15 @@ Jira: their account id, else their e-mail). The card shows the names as given.
   --from-json`, as for a sprint or a version) whose `additionalAttributes` are the fields, so it
   needs `type` (`refused: tickets create with fields needs type: …`, before anything is asked);
   `fixVersions` in `fields` and `milestone` together are refused (both set the fix version). An
-  **edit** sets them first, by `acli jira workitem edit --from-json` (`{"issues": [<key>],
-  "additionalAttributes": {…}}`, **assumed** like the creation's shape, as `acli` was not
-  available to measure it), then the title, the description, the labels and the assignee by the
-  flags above; a refusal of the fields leaves the rest unwritten, and a refusal of the rest says
-  the fields were set. A creation `acli` refuses with a field *required* in Jira's words (`Severity
+  **edit** sets them first, through Jira's REST API (`PUT /rest/api/3/issue/<key>` with `{"fields":
+  {…}}`, #1067: `acli`'s `workitem edit --from-json` reads no `additionalAttributes`), with the
+  project's tracker entry, the one `log_time`, `worklogs` and `fields` use; without one set the
+  edit is refused before anything is asked, saying it needs the entry (and offering `vault ask`
+  when the entry is named and missing), then the title, the description, the labels and the
+  assignee by the flags above; a refusal of the fields leaves the rest unwritten, and a refusal of
+  the rest says the fields were set. A `parent` and a `milestone` (or `remove_milestone`) on an
+  edit go the same way, as `fields.parent` and `fields.fixVersions`; they win over the same key in
+  `fields`. A creation `acli` refuses with a field *required* in Jira's words (`Severity
   is required (allowed values: Minor, Major)`) answers those words, `nothing was created`, and how
   to give each required field in `fields`, never trying it again by itself. When the project has
   the vault entry `fields` reads with, it also names each field the type requires and `fields`
@@ -1387,10 +1391,10 @@ Jira: their account id, else their e-mail). The card shows the names as given.
   do, before the user is asked, and a `create` is read back: it says so when Jira did not set the
   version. Once allowed, a `create` in a milestone has its card made again and compared with
   the one the user read: a version renamed or replaced meanwhile is not written. **Refused, saying what to do instead** (the user's, in Jira, on the
-  project's Releases page; nothing run): `milestone_create`, `milestone_edit`, and `edit` with
-  `milestone` or `remove_milestone`, since `acli` has no command that makes or releases a version
-  and its `workitem edit` takes no fix version; Flottille calls no Jira REST API for it (as for a
-  sprint).
+  project's Releases page; nothing run): `milestone_create` and `milestone_edit`, since `acli` has
+  no command that makes or releases a version. An `edit` with `milestone` or `remove_milestone`
+  sets the fix version of an existing work item through Jira's REST API (#1067, "`fields` on
+  Jira").
 - **Parents and sprints on Jira**: `create` takes `parent` (a key of the tracker, the epic or the
   sub-task's parent: `--parent`) and `sprint` (an open sprint, by its name or its id, with a
   `type`); `sprints {project?, board?}` (a read, never held) lists the active and future sprints
@@ -1402,8 +1406,9 @@ Jira: their account id, else their e-mail). The card shows the names as given.
   Sprint field is not known, is refused then, and the card names the sprint and its board as the
   site does. A creation that loses its assignee, or that `acli` answers without its key, says
   what may not be set. A label holding a comma is refused, a blank one left out; `board` is
-  `sprints`' alone. The parent and the
-  sprint of an existing work item are refused, saying why: `acli`'s `edit` sets neither. The
+  `sprints`' alone. The parent of an existing work
+  item is set by `edit` through Jira's REST API (#1067); its sprint is refused, saying why:
+  `acli`'s `edit` sets none. The
   request says them (`It puts it in sprint "Sprint 42" (board "ABC board")`, `It puts it under
   ABC-10`, `It adds the labels bug, p1`), and `show`
   says a work item's assignee, parent and sprint ([`tickets.md`](tickets.md), "Parents and

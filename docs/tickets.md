@@ -514,10 +514,11 @@ refused it, and the new work item went to the project's default assignee.
   of one, and the agent fell back to a Task. `create` and `edit` take `fields`, an object passed
   to `acli` **as given**: a creation puts it in the `additionalAttributes` of its JSON definition
   (`workitem create --from-json`, like a sprint's field and a version, with the type that JSON
-  needs), an edit in `{"issues": [<key>], "additionalAttributes": {…}}` of `workitem edit
-  --from-json <file> --yes` (**assumed** from the creation's shape: `acli` was not at hand to
-  measure `--generate-json`), run before the flags that set the title, the description, the
-  labels and the assignee. Keys are a field's id (`customfield_10042`) or a system field's key,
+  needs), an edit through Jira's REST API (`PUT /rest/api/3/issue/<key>` with `{"fields": {…}}`, #1067),
+  run before the flags that set the title, the description, the labels and the assignee: `acli`'s
+  `workitem edit --from-json` reads **no** `additionalAttributes` (it answers `json: unknown field
+  "additionalAttributes"`, which the first version of this edit, written to the creation's
+  shape, met on a real site on every call), so an edit never goes through it. Keys are a field's id (`customfield_10042`) or a system field's key,
   values are Jira's (a select `{"value": "Major"}`): there is no model of the fields' kinds, so
   every field `acli` or Jira accepts is reachable. A name is not resolved to an id: Jira's REST
   takes ids, and `acli` lists no create metadata (`project view` has `issueTypes` names only), so
@@ -526,9 +527,13 @@ refused it, and the new work item went to the project's default assignee.
   `acli`'s own words (the field's name, the values it allows, when Jira says them), `nothing was
   created`, the fields the type requires and `fields` does not set by name and id when the
   project's vault entry lets them be read, and how to fill each in `fields`; it is not tried
-  again. An edit whose fields `acli` refuses
-  writes nothing; one whose fields were set and whose flags `acli` then refused says the fields
-  were set. The card says each field and its value. Refused before anything is asked: `fields`
+  again. An edit's call is made by the daemon with the project's tracker entry, the one `log_time`,
+  `worklogs` and `fields` use (the same client; the secret goes to the tracker's site alone and is
+  in no answer, "Logging time"): without one set, `edit` with `fields` is **refused before
+  anything is asked**, saying it needs the entry and how to set one (or to ask the user for it,
+  `vault ask`), never a Jira that did not refuse. An edit whose fields Jira refuses writes
+  nothing, says Jira's words and `nothing was written`; one whose fields were set and whose flags
+  `acli` then refused says the fields were set. The card says each field and its value. Refused before anything is asked: `fields`
   on GitHub, on an action other than `create` and `edit`, with `fixVersions` beside `milestone`,
   or on a `create` without `type`.
 - **`assignee`** on Jira `create` (`--assignee`) and `edit` (`--assignee`; `assignee: null` is
@@ -678,9 +683,10 @@ does (#362):
 - **A parent at `create`**: `parent`, a key of the tracker (any case, kept in upper case),
   `--parent <key>`: an epic, or the parent of a sub-task. Measured: a task created with `--parent`
   on an epic's key is under that epic. `acli jira workitem edit` has no parent, so **`edit` with
-  `parent` is refused before anything is asked**: `acli's workitem edit has no parent …: changing
-  the parent of an existing work item needs Jira's REST API, which Flottille does not call yet
-  (#382)`. A `link` of kind `parent of` is refused the same way.
+  `parent` (#1067) is a `PUT /rest/api/3/issue/<key>` with `{"fields": {"parent": {"key":
+  "<parent>"}}}`**, through the tracker's entry as `edit` with `fields` is, and judged as `edit`
+  is today (the gate); without the entry it is refused before anything is asked. A `link` of
+  kind `parent of` is refused as before.
 - **`sprints {project?, board?}`**, a read: the project's boards (`acli jira board search
   --project <P> --json`, Jira's agile page `{"values": [{"id", "name", "type"}]}`, as a real site
   printed it), the one named alone when `board` names one (its name or its id; `board` on any
@@ -865,9 +871,12 @@ What Flottille does with it:
 - **Refused, with what to do instead**, before anything is asked and nothing run: `milestone_create`
   and `milestone_edit` (`none of acli's jira commands makes, changes or releases a project's
   version, and Flottille calls no Jira REST API for it: the user does it in Jira, on the
-  project's Releases page`), and `edit` with `milestone` or `remove_milestone` (`acli's workitem
-  edit takes no fix version …: the user changes it in Jira`). This is the rule of a sprint's move
-  (#382): nothing is done through another route, and the daemon calls no REST API for a version.
+  project's Releases page`), and (`edit` with `milestone` or
+  `remove_milestone` is no longer refused: it is `PUT /rest/api/3/issue/<key>` with `{"fields":
+  {"fixVersions": [{"name": "<the version>"}]}}`, `[]` for `remove_milestone` (#1067), with the
+  tracker's entry as `edit` with `fields` is; the version is found among those of the work item's
+  project first, and one that does not exist is refused, `nothing was written`). A sprint's move
+  is still refused (#382).
 - **The writes are judged as every ticket write**: a `create` in a version is held in Ask and
   allowed in Full, and its card says the version.
 - **Not measured**: no `acli` is installed where this was written, and no Jira was tried. Assumed:
