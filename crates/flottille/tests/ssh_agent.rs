@@ -783,3 +783,33 @@ fn a_remote_helper_of_the_path_runs_nothing_in_the_daemon_s_fetch() {
     assert!(!ran.exists(), "git-remote-foo ran");
     assert_eq!(base["fetched_now"], false, "{base}");
 }
+
+#[test]
+fn a_repository_s_credential_helper_never_sees_the_user_s_sign_in() {
+    let (user, _agent, _bus) = user();
+    let user = credential_helper(user);
+    let (_server, url) = http_remote(&user);
+    project(&user, &url);
+    let folder = user.path("work/app");
+    let said = user.path("planted-said");
+    let planted = user.path("planted/helper");
+    script(&planted, &format!("echo \"$1\" >> '{}'\n", said.display()));
+    // The repository's own helpers, for every URL and for this one: files a run may write.
+    let helper = format!("!{}", planted.display());
+    user.git(&folder, &["config", "credential.helper", &helper]);
+    user.git(
+        &folder,
+        &["config", &format!("credential.{url}.helper"), &helper],
+    );
+
+    let base = created(&user);
+
+    assert_eq!(base["fetched_now"], true, "{base}");
+    assert!(
+        helper_said(&user).contains(&"get".to_owned()),
+        "{:?}",
+        helper_said(&user)
+    );
+    let planted_said = std::fs::read_to_string(&said).unwrap_or_default();
+    assert_eq!(planted_said, "", "the repository's helper was asked");
+}
