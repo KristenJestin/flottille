@@ -259,6 +259,10 @@ fn command<S: AsRef<OsStr>>(dir: &Path, args: &[S]) -> tokio::process::Command {
         // a repository's `core.sshCommand`.
         .env_remove(crate::ssh_agent::VARIABLE)
         .env("GIT_SSH_COMMAND", ssh_command())
+        // No remote reached but by `output_remote`, which names its one protocol: not the
+        // promisor remote a partial clone asks for a missing object while it reads.
+        .env("GIT_NO_LAZY_FETCH", "1")
+        .env("GIT_ALLOW_PROTOCOL", "")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
