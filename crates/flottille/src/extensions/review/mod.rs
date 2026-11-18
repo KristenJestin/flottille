@@ -25,7 +25,9 @@ use crate::providers;
 /// The passes a review may run, in their order; the verifier comes after them.
 const PASSES: &[&str] = &["spec", "bugs", "standards", "security"];
 
-/// The switches of the user's other doors: both off unless the user turns them on.
+/// The switches of the other doors: a review on a pull request opened is off unless the user turns
+/// it on; an agent's `start` is on unless they turn it off, its description saying it is for when
+/// the user asks for one (#1061).
 const AUTO: &str = "auto_on_pull_request";
 const AGENTS: &str = "agents_start";
 const VERIFIER: &str = "verifier";
@@ -141,14 +143,14 @@ pub const EXTENSION: Extension = Extension {
             key: AUTO,
             label: "Start a review when a session's pull request opens",
             hint: "Off, a review starts only when you ask for one.",
-            kind: Kind::Switch,
+            kind: Kind::Switch { default: false },
             per_project: true,
         },
         Setting {
             key: AGENTS,
             label: "Let agents start a review",
-            hint: "Off, an agent cannot ask for a review of its own change: only you can.",
-            kind: Kind::Switch,
+            hint: "Off, an agent cannot ask for a review: only you can.",
+            kind: Kind::Switch { default: true },
             per_project: true,
         },
     ],
@@ -232,8 +234,8 @@ fn starts_no_session(_: &Daemon, _: &str) -> bool {
     false
 }
 
-/// Whether the project's switch `key` is on: a project's own value, else Settings', else off. A
-/// file that cannot be read leaves it off.
+/// Whether the project's switch `key` is on: a project's own value, else Settings', else its
+/// default. A file that cannot be read leaves it off.
 fn switched(daemon: &Daemon, project: &flottille_core::project::Project, key: &str) -> bool {
     super::value(daemon, &EXTENSION, project, key)
         .ok()
@@ -241,8 +243,8 @@ fn switched(daemon: &Daemon, project: &flottille_core::project::Project, key: &s
         .unwrap_or(false)
 }
 
-/// The roots get `review` only while agents may start a review (`agents_start`): it has no other
-/// action for them. The pilot's `run_pass` and `report` are the user's review's own.
+/// The roots get `review` while agents may start a review (`agents_start`, on by default): it has
+/// no other action for them. The pilot's `run_pass` and `report` are the user's review's own.
 fn offered(daemon: &Daemon, project: &flottille_core::project::Project, to: To) -> bool {
     to != To::Roots || switched(daemon, project, AGENTS)
 }
@@ -255,10 +257,12 @@ const TOOL: Tool = Tool {
         name: "review",
         title: "Review a change",
         description: "A review of a session's change with fresh eyes (`docs/extensions.md`, \
-            \"Review\"). start, for a session: what the user's /review does: review your own \
-            change from its base, the answer and the findings coming later as a delivery \
-            [flottille:review]; two rounds at most, the second reading what changed since the \
-            first. run_pass, for the pilot of a review: \
+            \"Review\"). start, for a session: what the user's /review does. Start one only when \
+            the user asks for one, or when the project's instructions say to, never on your own. \
+            It reviews your own change from its base, or, with agent, the change of a session you \
+            lead (agent_launch led), in its workspace; the findings come later as a delivery \
+            [flottille:review] to the session reviewed, and you are told of them for one you \
+            lead; two rounds at most, the second reading what changed since the first. run_pass, for the pilot of a review: \
             run one pass as your child (pass spec, bugs, standards, security or verifier; brief, \
             what it should look at), each once. report, for the pilot: the findings, once \
             (summary; findings [{severity high|medium|low|info, confidence confirmed|plausible|\
@@ -284,6 +288,7 @@ const TOOL: Tool = Tool {
 fn tool_schema() -> Value {
     json!({"type": "object", "properties": {
         "action": {"type": "string", "enum": ["start", "run_pass", "report"]},
+        "agent": {"type": "string"},
         "pass": {"type": "string", "enum": ["spec", "bugs", "standards", "security", "verifier"]},
         "brief": {"type": "string"},
         "summary": {"type": "string"},
@@ -1317,6 +1322,13 @@ fn agent_ended(daemon: &Arc<Daemon>, data: &Value) {
                 review.round
             ),
         );
+        tell_lead(daemon, &review, |session| {
+            format!(
+                "The review of {session}, the session you lead (round {}), ended without its \
+                 findings: {reason}. It counts as no round.",
+                review.round
+            )
+        });
     }
 }
 
@@ -1326,6 +1338,9 @@ fn agent_ended(daemon: &Arc<Daemon>, data: &Value) {
 #[serde(deny_unknown_fields)]
 struct ToolCall {
     action: String,
+    /// With `start`: the session the caller leads whose change to review, else its own.
+    #[serde(default)]
+    agent: Option<String>,
     #[serde(default)]
     pass: Option<String>,
     #[serde(default)]
@@ -1378,20 +1393,23 @@ fn tool_call(daemon: &Arc<Daemon>, grant: &Grant, args: Value) -> super::Called 
             _ => return Outcome::Failed(format!("there is no agent {agent}")),
         };
         let done = match asked.action.as_str() {
-            "start" => start(&daemon, &caller)
-                .await
-                .map(|started| {
-                    format!(
-                        "Started the review of your change, round {} of {ROUNDS}: review {}, its \
-                         pilot agent {}. It is not yours to steer: the agent_* tools do not reach \
-                         it, and its findings come to you as [flottille:review] once it reports. \
-                         Go on, or end your turn.",
-                        started["round"],
-                        started["review"],
-                        started["pilot"].as_str().unwrap_or_default()
-                    )
-                })
-                .map_err(|failure| failure.message),
+            "start" => match asked.agent {
+                None => start(&daemon, &caller)
+                    .await
+                    .map(|started| {
+                        format!(
+                            "Started the review of your change, round {} of {ROUNDS}: review {}, \
+                             its pilot agent {}. It is not yours to steer: the agent_* tools do \
+                             not reach it, and its findings come to you as [flottille:review] \
+                             once it reports. Go on, or end your turn.",
+                            started["round"],
+                            started["review"],
+                            started["pilot"].as_str().unwrap_or_default()
+                        )
+                    })
+                    .map_err(|failure| failure.message),
+                Some(id) => start_led(&daemon, &caller, &id).await,
+            },
             "run_pass" => run_pass(&daemon, &caller, asked.pass, asked.brief).await,
             "report" => report(&daemon, &caller, asked).await,
             other => Err(format!("review takes no action {other}")),
@@ -1401,6 +1419,38 @@ fn tool_call(daemon: &Arc<Daemon>, grant: &Grant, args: Value) -> super::Called 
             Err(why) => Outcome::Refused(format!("refused: {why}")),
         }
     })
+}
+
+/// A lead starts the review of a session it leads: that session is the one reviewed, and the one
+/// its findings go to; the lead is told of them.
+async fn start_led(
+    daemon: &Arc<Daemon>,
+    lead: &Agent,
+    id: &str,
+) -> std::result::Result<String, String> {
+    let session = daemon
+        .read(|store| store.agent(id))
+        .ok()
+        .flatten()
+        .ok_or_else(|| format!("there is no agent {id}"))?;
+    if !crate::tree::leads(lead, &session) {
+        return Err(format!(
+            "agent {id} is not a session you lead: you do not lead it (the sessions you lead are \
+             those you started with agent_launch led); leave agent out to review your own change"
+        ));
+    }
+    let started = start(daemon, &session)
+        .await
+        .map_err(|failure| failure.message)?;
+    Ok(format!(
+        "Started the review of {}, the session you lead, round {} of {ROUNDS}: review {}, its \
+         pilot agent {}. Its findings go to that session as [flottille:review], and you are told \
+         of them. Go on, or end your turn.",
+        crate::tree::named(&session),
+        started["round"],
+        started["review"],
+        started["pilot"].as_str().unwrap_or_default()
+    ))
 }
 
 /// The pilot runs one of its review's passes as its child, once.
@@ -1743,12 +1793,47 @@ async fn report(
             changed.as_deref(),
         ),
     );
+    tell_lead(daemon, &review, |session| {
+        let shown: Vec<&Finding> = kept.iter().filter(|f| delivered(f)).collect();
+        let mut text = format!(
+            "The review of {session}, the session you lead, round {} of {ROUNDS}, is done: {} \
+             finding{}, delivered to it, which fixes what it agrees with.",
+            review.round,
+            shown.len(),
+            if shown.len() == 1 { "" } else { "s" }
+        );
+        for finding in shown {
+            text.push_str(&format!("\n\n- {}", finding_line(finding)));
+        }
+        text
+    });
     Ok(format!(
         "Your report went to the session: {} findings kept, {} delivered. Your session ends with \
          this turn: end it now.",
         kept.len(),
         kept.iter().filter(|f| delivered(f)).count()
     ))
+}
+
+/// The lead of the reviewed session, when it has one, is told what happened to its review, as it is
+/// told what happens to the sessions it leads; `said` is given how the session is named.
+fn tell_lead(daemon: &Arc<Daemon>, review: &Review, said: impl FnOnce(&str) -> String) {
+    let Some(session) = daemon
+        .read(|store| store.agent(&review.session))
+        .ok()
+        .flatten()
+    else {
+        return;
+    };
+    let Some(lead) = session.launched_by.as_deref().filter(|_| session.led) else {
+        return;
+    };
+    super::tell(
+        daemon,
+        &EXTENSION,
+        lead,
+        &said(&crate::tree::named(&session)),
+    );
 }
 
 /// What is wrong with a finding as the pilot gave it.
