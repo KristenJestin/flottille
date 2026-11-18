@@ -361,8 +361,18 @@ impl Remote {
     }
 
     /// The clocks the session to the hub saw at its round.
+    /// A sleep since the pair stored is judged before it is overwritten: the session's round or
+    /// start would otherwise hide it from `holding`.
     pub(crate) fn awake_at(&self, awake: crate::hub_session::Awake) {
-        *self.awake.lock().unwrap() = awake;
+        let slept = {
+            let mut stored = self.awake.lock().unwrap();
+            let slept = stored.slept_until(&awake);
+            *stored = awake;
+            slept
+        };
+        if slept {
+            self.lost_hub();
+        }
     }
 
     /// Whether new links wait for the hub's list now: also when the machine slept since the
