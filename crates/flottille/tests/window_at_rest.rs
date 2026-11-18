@@ -1233,26 +1233,12 @@ fn the_window_draws_no_frame_at_rest_on_a_question_card_open_with_three_question
                     .is_some()
         })
     });
-    settle(&shell, cx);
-    let (with_card, asked) = frames_at_rest(&shell, cx);
+    // The row of a session that needs the user pulses, by design, while the wait is new: the card
+    // is measured once the pulse is over.
+    past_the_pulse(&shell, cx);
+    let (frames, asked) = frames_at_rest(&shell, cx);
     assert_eq!(asked, 0, "no animation frame asked");
-
-    // The row of a session that needs the user pulses, by design, while the wait is new, on every
-    // page: the card adds nothing to what the pulse alone draws.
-    shell.update_in(cx, |s, window, cx| {
-        s.open(Selection::Project("app".into()), window, cx)
-    });
-    until(&shell, cx, "the project's page is shown", |cx| {
-        shell.read_with(cx, |s, cx| s.main().read(cx).project_page().is_some())
-    });
-    settle(&shell, cx);
-    let (pulse, _) = frames_at_rest(&shell, cx);
-    // Two windows of the same length count the pulse a frame or two apart (where its first and
-    // last frames fall); a card that moved at rest would add a frame per tick, hundreds.
-    assert!(
-        with_card <= pulse + 5,
-        "the open card adds no frame to the pulse of the row: {with_card} against {pulse}"
-    );
+    assert_eq!(frames, 0, "the open card draws no frame at rest");
 }
 
 #[gpui_kit::test]
