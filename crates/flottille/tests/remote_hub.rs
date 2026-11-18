@@ -1952,3 +1952,119 @@ fn a_declaration_the_hub_never_took_leaves_the_key_pending() {
         "the resumed join said nothing of what it waits for: {said}"
     );
 }
+
+#[test]
+fn a_replaced_setup_whose_command_was_gone_keeps_its_root_key() {
+    let (old, new) = (TestHub::new(), TestHub::new());
+    let slow = SlowWay::new(new.address, Duration::from_secs(4));
+    let pc = Machine::new(None);
+    set_up(&old, &pc);
+    // No device key is kept any more, as after a keyring cleared: the next setup makes one.
+    std::fs::remove_file(pc.folder().join(flottille_link::DEVICE_FILE)).unwrap();
+    assert_eq!(kept_key(&pc), None);
+    let code = format!("{}\n", new.code());
+
+    // The command that replaces the hub is gone while its daemon still talks to the new hub, and
+    // it is asked again at once: the machine is pinned to the old hub meanwhile.
+    let mut first = pc
+        .user
+        .command(&["remote", "setup", &slow.url(), "--name", "pc", "--replace"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::io::Write::write_all(&mut first.stdin.as_ref().unwrap(), code.as_bytes()).unwrap();
+    let deadline = Instant::now() + WAIT;
+    while slow.connections() == 0 {
+        assert!(
+            Instant::now() < deadline,
+            "the setup never reached the hub\n{}",
+            pc.log()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    first.kill().unwrap();
+    first.wait().unwrap();
+    let again = pc.user.run_with_input(
+        &["remote", "setup", &slow.url(), "--name", "pc", "--replace"],
+        &code,
+    );
+    let said = String::from_utf8_lossy(&again.stderr);
+
+    // The daemon's setup ended with the first key, the new hub's root: that one is kept.
+    let members = pc.user.call("remote.members", json!({})).unwrap();
+    let root: PublicKey = serde_json::from_value(
+        members["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|member| member["name"] == "pc")
+            .unwrap()["key"]
+            .clone(),
+    )
+    .unwrap();
+    assert_eq!(kept_key(&pc), Some(root), "{said}\n{}", pc.log());
+    assert_eq!(pending_key(&pc), None, "{said}");
+    drop(slow.runtime);
+}
+
+#[test]
+fn a_declaration_lost_on_a_dead_session_is_not_resumed_again() {
+    let mut hub = TestHub::new();
+    let (pc, server) = (Machine::new(None), Machine::new(None));
+    set_up(&hub, &pc);
+
+    // The join is accepted while its command is gone, and the server's daemon takes the answer.
+    let code = invitation(&pc);
+    let mut joining = join_in_background(&server, &code);
+    let request = pc.wait_until_requested();
+    let key: PublicKey = serde_json::from_value(request["key"].clone()).unwrap();
+    joining.kill().unwrap();
+    joining.wait().unwrap();
+    let accepted = pc.user.run(&[
+        "remote",
+        "accept",
+        request["request"].as_str().unwrap(),
+        "--name",
+        "server",
+        "--role",
+        "runner",
+    ]);
+    assert!(
+        accepted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&accepted.stderr)
+    );
+    let deadline = Instant::now() + WAIT;
+    while server
+        .user
+        .call("remote.join", json!({"key": key, "resume": true}))
+        .unwrap()
+        .is_null()
+    {
+        assert!(
+            Instant::now() < deadline,
+            "no answer came\n{}",
+            server.log()
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    // The hub is gone before the declaration, which fails on the dead session: the join is not
+    // held for the commands after it, each of which would fail the same way.
+    hub.down();
+    let again = server
+        .user
+        .run_with_input(&["remote", "join"], &format!("{code}\n"));
+    assert!(!again.status.success());
+    let resumed = server
+        .user
+        .call("remote.join", json!({"key": key, "resume": true}))
+        .unwrap();
+    assert!(
+        resumed.is_null(),
+        "the join whose session ended is resumed again\n{}",
+        server.log()
+    );
+}

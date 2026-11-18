@@ -755,7 +755,7 @@ pub(crate) struct Awake {
 }
 
 impl Awake {
-    fn new(wall: std::time::SystemTime, steady: std::time::Instant) -> Awake {
+    pub(crate) fn new(wall: std::time::SystemTime, steady: std::time::Instant) -> Awake {
         Awake { wall, steady }
     }
 

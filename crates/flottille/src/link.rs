@@ -1244,6 +1244,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_sleep_between_two_rounds_is_taken_where_the_clocks_are_told() {
+        let dir = tempfile::tempdir().unwrap();
+        let (remote, _) = remote_in(dir.path(), 1);
+        let (wall, steady) = (std::time::SystemTime::now(), std::time::Instant::now());
+        let at = |seconds: u64, ran: u64| {
+            crate::hub_session::Awake::new(
+                wall + Duration::from_secs(seconds),
+                steady + Duration::from_secs(ran),
+            )
+        };
+        remote.heard_hub();
+        remote.awake_at(at(0, 0));
+        // Rounds a second apart: the hub's list is trusted.
+        remote.awake_at(at(1, 1));
+        assert!(!remote.holding());
+
+        // The clocks told after a suspend, at a round or at a session's start: the stored pair is
+        // not overwritten before the sleep is judged, so the links wait for the next list.
+        remote.awake_at(at(3601, 2));
+        assert!(remote.holding());
+    }
+
+    #[tokio::test]
     async fn links_are_released_when_the_hub_sends_no_list_within_the_bound() {
         let dir = tempfile::tempdir().unwrap();
         let (mut remote, _) = remote_in(dir.path(), 1);
