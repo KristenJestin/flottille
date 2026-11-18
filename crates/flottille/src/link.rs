@@ -193,6 +193,9 @@ pub struct Remote {
     first_list: Duration,
     /// The machines a link of which waits for the hub's list.
     waiting: Mutex<HashSet<[u8; 32]>>,
+    /// The clocks as the session to the hub last saw them: a machine that woke from a suspend is
+    /// told at once, before the session's next round sees it and ends.
+    awake: Mutex<crate::hub_session::Awake>,
     emit: Emit,
 }
 
@@ -239,6 +242,19 @@ pub fn start(
 }
 
 /// This build's hello; a test build may make it another's.
+/// The wall clock; in a test build, as far ahead as the file a test names says, in seconds, to
+/// play a suspend.
+pub(crate) fn wall_now() -> SystemTime {
+    let now = SystemTime::now();
+    let ahead = cfg!(debug_assertions)
+        .then(|| std::env::var_os("FLOTTILLE_TEST_WALL_AHEAD_FILE"))
+        .flatten()
+        .and_then(|file| std::fs::read_to_string(file).ok())
+        .and_then(|text| text.trim().parse().ok())
+        .map(Duration::from_secs);
+    ahead.map_or(now, |ahead| now + ahead)
+}
+
 pub(crate) fn hello() -> Hello {
     cfg!(debug_assertions)
         .then(|| std::env::var("FLOTTILLE_TEST_LINK_HELLO").ok())
@@ -275,6 +291,7 @@ impl Remote {
             heard: tokio::sync::watch::Sender::new(Some(tokio::time::Instant::now())),
             first_list: FIRST_LIST,
             waiting: Mutex::new(HashSet::new()),
+            awake: Mutex::new(crate::hub_session::Awake::now()),
             emit,
         }
     }
@@ -343,8 +360,26 @@ impl Remote {
         self.heard.send_replace(Some(tokio::time::Instant::now()));
     }
 
-    /// Whether new links wait for the hub's list now.
+    /// The clocks the session to the hub saw at its round.
+    pub(crate) fn awake_at(&self, awake: crate::hub_session::Awake) {
+        *self.awake.lock().unwrap() = awake;
+    }
+
+    /// Whether new links wait for the hub's list now: also when the machine slept since the
+    /// session's last round, the list it kept having missed what changed meanwhile.
     fn holding(&self) -> bool {
+        let slept = {
+            let mut awake = self.awake.lock().unwrap();
+            let now = crate::hub_session::Awake::now();
+            let slept = awake.slept_until(&now);
+            if slept {
+                *awake = now;
+            }
+            slept
+        };
+        if slept {
+            self.lost_hub();
+        }
         self.heard
             .borrow()
             .is_some_and(|since| since.elapsed() < self.first_list)

@@ -85,6 +85,9 @@ pub struct Control {
     /// The invitations given to this machine's member, while they are valid.
     issued: Mutex<Vec<Issued>>,
     joining: tokio::sync::Mutex<Option<Joining>>,
+    /// Held by a setup for its whole exchange with the hub: a command that asks after its key
+    /// meanwhile waits for how it ends.
+    setting_up: tokio::sync::Mutex<()>,
     emit: Emit,
 }
 
@@ -104,6 +107,7 @@ impl Control {
             requests: Mutex::new(Vec::new()),
             issued: Mutex::new(Vec::new()),
             joining: tokio::sync::Mutex::new(None),
+            setting_up: tokio::sync::Mutex::new(()),
             emit,
         }
     }
@@ -176,6 +180,8 @@ impl Control {
         mut changes: Vec<Change>,
         replace: bool,
     ) -> Result<Value, String> {
+        // Held to the end, even when the command that asked is gone: its key's fate is told then.
+        let _setting_up = self.setting_up.lock().await;
         if !replace && let Some(pinned) = self.pinned() {
             let url =
                 pinned.map_or_else(|_| self.file().display().to_string(), |device| device.url);
@@ -391,9 +397,10 @@ impl Control {
     }
 
     /// `remote.join` asked to resume: the answer of the join accepted for the device `key`, which
-    /// its command, gone, did not take; `null` when no join holds it as a member. A join still
-    /// waiting is waited for.
+    /// its command, gone, did not take; `null` when no join holds it as a member. A join or a
+    /// setup still running is waited for: once it ended, the caller asks the pinned list.
     pub async fn accepted(&self, key: &PublicKey) -> Value {
+        drop(self.setting_up.lock().await);
         let joining = self.joining.lock().await;
         let Some(Joining {
             device: Some(device),
@@ -741,7 +748,8 @@ pub async fn run(
 /// Tells a machine that slept: on Linux the monotonic clock does not count a suspend, and the wall
 /// clock does. A session to the hub may look alive for minutes after one, with no heartbeat to say
 /// otherwise, while the list it kept missed what changed meanwhile.
-struct Awake {
+#[derive(Clone, Copy)]
+pub(crate) struct Awake {
     wall: std::time::SystemTime,
     steady: std::time::Instant,
 }
@@ -751,13 +759,25 @@ impl Awake {
         Awake { wall, steady }
     }
 
+    /// The clocks now.
+    pub(crate) fn now() -> Awake {
+        Awake::new(crate::link::wall_now(), std::time::Instant::now())
+    }
+
+    /// Whether the machine slept between these clocks and `later`.
+    pub(crate) fn slept_until(&self, later: &Awake) -> bool {
+        // A wall clock set back moved by nothing.
+        let walked = later.wall.duration_since(self.wall).unwrap_or_default();
+        let ran = later.steady.saturating_duration_since(self.steady);
+        walked > ran + ASLEEP
+    }
+
     /// Whether the machine slept since the last round, at `wall` and `steady` now.
     fn slept(&mut self, wall: std::time::SystemTime, steady: std::time::Instant) -> bool {
-        // A wall clock set back moved by nothing.
-        let walked = wall.duration_since(self.wall).unwrap_or_default();
-        let ran = steady.saturating_duration_since(self.steady);
-        *self = Awake { wall, steady };
-        walked > ran + ASLEEP
+        let now = Awake { wall, steady };
+        let slept = self.slept_until(&now);
+        *self = now;
+        slept
     }
 }
 
@@ -795,7 +815,8 @@ async fn keep_session(
     // The ask of this machine's addresses on its way, at most one: dropped with the session.
     let mut telling = tokio::task::JoinSet::new();
     let mut said: Option<String> = None;
-    let mut awake = Awake::new(std::time::SystemTime::now(), std::time::Instant::now());
+    let mut awake = Awake::now();
+    remote.awake_at(awake);
     loop {
         tokio::select! {
             pushed = session.next() => {
@@ -843,7 +864,9 @@ async fn keep_session(
                 }
             }
             _ = round.tick() => {
-                if awake.slept(std::time::SystemTime::now(), std::time::Instant::now()) {
+                let now = Awake::now();
+                remote.awake_at(now);
+                if awake.slept(now.wall, now.steady) {
                     // Ended as lost: the links wait for the next session's list.
                     return Ended::Lost("this machine was asleep".to_owned());
                 }
