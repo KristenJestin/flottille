@@ -326,3 +326,30 @@ fn picking_an_offered_model_on_a_session_whose_model_left_the_list_is_not_refuse
     );
     answer.unwrap_or_else(|(_, why)| panic!("refused: {why}"));
 }
+
+#[test]
+fn an_explicit_pick_of_a_model_not_offered_is_refused_naming_what_is_offered() {
+    let user = User::with_fake_claude();
+    let id = a_session_on_the_alias_that_left(&user);
+
+    // Neither the alias that left nor an id of its family the list does not hold is replaced by
+    // another model: what the user asks is refused, as before.
+    for model in ["fable", "claude-fable-5-3"] {
+        let (code, why) = user
+            .call("agent.options", json!({"agent": id, "model": model}))
+            .unwrap_err();
+        assert_eq!(code, "refused", "{why}");
+        assert!(
+            why.contains(&format!("offers no model {model}: it offers default, opus")),
+            "{why}"
+        );
+        let (code, why) = user
+            .call(
+                "agent.run",
+                json!({"project": "app", "message": "hello", "model": model}),
+            )
+            .unwrap_err();
+        assert_eq!(code, "refused", "{why}");
+        assert!(why.contains(&format!("offers no model {model}")), "{why}");
+    }
+}

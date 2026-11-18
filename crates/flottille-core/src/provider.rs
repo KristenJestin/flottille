@@ -331,16 +331,16 @@ mod tests {
             Some("claude-haiku-4-5-20251001")
         );
         assert_eq!(listed_model(listed, "haiku"), Some("haiku"));
-        // As it is: not a date, a wrong date or a prefix of the name; nor a model of no family listed.
-        assert_eq!(listed_as_is(listed, "claude-haiku-4"), None);
-        assert_eq!(listed_as_is(listed, "claude-haiku-4-5-2025"), None);
+        // Not a date, a wrong date, a prefix of the name, or a model that is not listed.
+        assert_eq!(listed_model(listed, "claude-haiku-4"), None);
+        assert_eq!(listed_model(listed, "claude-haiku-4-5-2025"), None);
         assert_eq!(listed_model(listed, "claude-opus-4-5"), None);
         assert_eq!(
-            listed_as_is(["claude-haiku-4-5-2025101x"], "claude-haiku-4-5"),
+            listed_model(["claude-haiku-4-5-2025101x"], "claude-haiku-4-5"),
             None
         );
-        // Two listed models that answer to it as it is: none is guessed.
-        assert_eq!(listed_as_is(["m-1-20250101", "m-1-20260101"], "m-1"), None);
+        // Two listed models that answer to it: none is guessed.
+        assert_eq!(listed_model(["m-1-20250101", "m-1-20260101"], "m-1"), None);
         // An exact id wins over a dated one.
         assert_eq!(listed_model(["m-1", "m-1-20250101"], "m-1"), Some("m-1"));
     }
@@ -359,45 +359,42 @@ mod tests {
             "claude-opus-5",
         ];
         // An alias that left the list, and an id that left it: the newest of the family.
-        assert_eq!(listed_model(listed, "fable"), Some("claude-fable-5-2"));
+        assert_eq!(resolved_model(listed, "fable"), Some("claude-fable-5-2"));
         assert_eq!(
-            listed_model(listed, "claude-fable-4-9"),
+            resolved_model(listed, "claude-fable-4-9"),
             Some("claude-fable-5-2")
         );
         // `5` is newer than `4-8`, whichever comes first.
         assert_eq!(
-            listed_model(listed, "claude-opus-4-5"),
+            resolved_model(listed, "claude-opus-4-5"),
             Some("claude-opus-5")
         );
         // An id with its date is matched by its version, as today.
         assert_eq!(
-            listed_model(listed, "claude-haiku-4"),
+            resolved_model(listed, "claude-haiku-4"),
             Some("claude-haiku-4-5-20251001")
         );
         assert_eq!(
-            listed_model(listed, "haiku"),
+            resolved_model(listed, "haiku"),
             Some("claude-haiku-4-5-20251001")
         );
         // Offered as is: itself, never another of its family.
-        assert_eq!(listed_model(listed, "opus"), Some("opus"));
+        assert_eq!(resolved_model(listed, "opus"), Some("opus"));
         assert_eq!(
-            listed_model(listed, "claude-fable-5"),
+            resolved_model(listed, "claude-fable-5"),
             Some("claude-fable-5")
         );
         // No family offered.
-        assert_eq!(listed_model(listed, "gpt-5"), None);
-        assert_eq!(listed_model(listed, "5"), None);
+        assert_eq!(resolved_model(listed, "gpt-5"), None);
+        assert_eq!(resolved_model(listed, "5"), None);
         // Of two of the same version, the newest date.
         assert_eq!(
-            listed_model(["m-1-20250101", "m-1-20260101"], "m"),
+            resolved_model(["m-1-20250101", "m-1-20260101"], "m"),
             Some("m-1-20260101")
         );
-        // Whether the model asked is offered as it is, or by another of its family.
-        assert_eq!(listed_as_is(listed, "fable"), None);
-        assert_eq!(
-            listed_as_is(listed, "claude-haiku-4-5"),
-            Some("claude-haiku-4-5-20251001")
-        );
+        // What is asked is never another model of its family.
+        assert_eq!(listed_model(listed, "fable"), None);
+        assert_eq!(listed_model(listed, "claude-haiku-4-6"), None);
     }
 
     #[test]

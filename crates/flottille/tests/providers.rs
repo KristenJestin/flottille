@@ -330,26 +330,20 @@ fn a_model_id_without_its_date_suffix_starts_as_the_listed_model() {
         agent(&user, &started)["taken"]["model"],
         "claude-haiku-4-5-20251001"
     );
-    // The dated id is as before; an id the list does not hold is the newest of its family
-    // (#1076), and one of no family listed is refused.
+    // The dated id, and the model of a name the list does not hold, are as before.
     start(
         &user,
         json!({"message": "hello", "model": "claude-sonnet-4-5-20250929"}),
     )
     .unwrap();
-    let family = start(
+    let (code, message) = start(
         &user,
         json!({"message": "hello", "model": "claude-haiku-4-6"}),
     )
-    .unwrap();
-    assert_eq!(
-        agent(&user, &id(&family))["chosen"]["model"],
-        "claude-haiku-4-5-20251001"
-    );
-    let (code, message) = start(&user, json!({"message": "hello", "model": "gpt-5"})).unwrap_err();
+    .unwrap_err();
     assert_eq!(code, "refused");
     assert!(
-        message.contains("claude offers no model gpt-5"),
+        message.contains("claude offers no model claude-haiku-4-6"),
         "{message}"
     );
     assert!(
