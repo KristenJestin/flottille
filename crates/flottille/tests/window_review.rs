@@ -969,7 +969,7 @@ const DOORS: [(&str, &str, &str); 2] = [
     (
         "agents_start",
         "Let agents start a review",
-        "Off, an agent cannot ask for a review of its own change: only you can.",
+        "Off, an agent cannot ask for a review: only you can.",
     ),
 ];
 
@@ -991,17 +991,17 @@ fn door_value(user: &User, key: &str) -> Value {
 }
 
 #[gpui_kit::test]
-fn review_s_page_has_both_switches_off_by_default(cx: &mut TestAppContext) {
+fn review_s_page_has_the_pull_request_switch_off_and_agents_on_by_default(cx: &mut TestAppContext) {
     let user = User::with_fake_agent();
     let (shell, cx) = review_page(&user, true, cx);
 
-    // Each with its visible label and its help line, off.
-    for (key, name, line) in DOORS {
+    // Each with its visible label and its help line; agents may ask for a review by default.
+    for ((key, name, line), on) in DOORS.into_iter().zip([false, true]) {
         let switch = format!("review-door-{key}-switch");
         assert_eq!(label(cx, &format!("{switch}-label")).as_deref(), Some(name));
         assert_eq!(label(cx, &format!("{switch}-hint")).as_deref(), Some(line));
-        assert!(!is_on(cx, &switch), "{key} is off by default");
-        assert_eq!(door_value(&user, key), false);
+        assert_eq!(is_on(cx, &switch), on, "{key} by default");
+        assert_eq!(door_value(&user, key), on);
     }
     // They come before what a review checks.
     assert!(
@@ -1010,7 +1010,7 @@ fn review_s_page_has_both_switches_off_by_default(cx: &mut TestAppContext) {
     );
     let usage = label(cx, "review-usage").unwrap();
     assert!(
-        !usage.contains("pull request") && !usage.contains("agent"),
+        !usage.contains("pull request") && usage.contains("agent may ask"),
         "{usage}"
     );
 
@@ -1029,14 +1029,17 @@ fn review_s_page_has_both_switches_off_by_default(cx: &mut TestAppContext) {
     settle(cx);
     assert!(moved.get() > 0, "the switch moves");
     assert!(is_on(cx, "review-door-auto_on_pull_request-switch"));
-    assert!(!is_on(cx, "review-door-agents_start-switch"));
+    assert!(is_on(cx, "review-door-agents_start-switch"));
+    // Turned off, the agents' door leaves the usage line.
     cx.update(|window, cx| window.click("review-door-agents_start-switch", cx));
-    until(&shell, cx, "the daemon has agents on", |_| {
-        door_value(&user, "agents_start") == true
+    until(&shell, cx, "the daemon has agents off", |_| {
+        door_value(&user, "agents_start") == false
     });
-    until(&shell, cx, "the usage says the agents", |cx| {
-        label(cx, "review-usage").is_some_and(|usage| usage.contains("agent"))
+    until(&shell, cx, "the usage no longer says the agents", |cx| {
+        label(cx, "review-usage").is_some_and(|usage| !usage.contains("agent may ask"))
     });
+    settle(cx);
+    assert!(!is_on(cx, "review-door-agents_start-switch"));
     let usage = label(cx, "review-usage").unwrap();
     assert!(usage.contains("/review") && usage.contains("flottille review <session>"));
     at_rest(cx);
@@ -1047,23 +1050,23 @@ fn a_project_s_two_switches_carry_the_dot_and_go_back_to_settings(cx: &mut TestA
     let user = User::with_fake_agent();
     let (shell, cx) = project_page(&user, cx);
 
-    for (key, name, line) in DOORS {
+    for ((key, name, line), on) in DOORS.into_iter().zip([false, true]) {
         let switch = format!("project-review-door-{key}-switch");
         assert_eq!(label(cx, &format!("{switch}-label")).as_deref(), Some(name));
         assert_eq!(label(cx, &format!("{switch}-hint")).as_deref(), Some(line));
-        assert!(!is_on(cx, &switch), "{key}");
+        assert_eq!(is_on(cx, &switch), on, "{key}");
         assert!(!present(cx, &format!("project-review-door-{key}-set")));
     }
     cx.update(|window, cx| window.click("project-review-door-agents_start-switch", cx));
-    until(&shell, cx, "the project lets agents start", |_| {
-        review_listed(&user)["projects"][0]["settings"]["agents_start"] == true
+    until(&shell, cx, "the project keeps agents from starting", |_| {
+        review_listed(&user)["projects"][0]["settings"]["agents_start"] == false
     });
     until(&shell, cx, "the dot is shown", |cx| {
         settle(cx);
         present(cx, "project-review-door-agents_start-set")
     });
     assert!(!present(cx, "project-review-door-auto_on_pull_request-set"));
-    assert_eq!(door_value(&user, "agents_start"), false, "Settings' own");
+    assert_eq!(door_value(&user, "agents_start"), true, "Settings' own");
     cx.update(|window, cx| window.click("project-review-door-agents_start-reset", cx));
     until(
         &shell,
