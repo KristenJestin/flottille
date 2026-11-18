@@ -139,11 +139,13 @@ pub enum KeyringError {
     Absent,
     /// There is one, and it failed (locked, refused): said, never worked around.
     Failed(String),
+    /// More than one item has the attributes asked for: which one is meant cannot be told.
+    Several(usize),
 }
 
 /// The session's keyring, as the client that holds a device key reaches it.
 pub trait Keyring {
-    /// The secret of the item that has these attributes, `None` when there is none; a failure
+    /// The secret of the item that has these attributes, `None` when there is none; `Several`
     /// when more than one has them, which cannot be told apart.
     fn read(&self, attributes: &[(&str, &str)])
     -> Result<Option<Zeroizing<Vec<u8>>>, KeyringError>;
@@ -250,11 +252,17 @@ impl DeviceKey {
     }
 
     /// The new key of a setup or a join that did not say how it ended, kept beside the kept one
-    /// (`keep_pending`); `None` when there is none.
+    /// (`keep_pending`); `None` when there is none. Two clients that kept theirs at the same
+    /// moment leave two, of which the hub may have seen either: both are removed, never sent
+    /// again, and `None` said, so that a new one is made.
     pub fn load_pending(
         keyring: &impl Keyring,
         folder: &Path,
     ) -> Result<Option<DeviceKey>, KeyError> {
+        if let Err(KeyringError::Several(_)) = keyring.read(PENDING.attributes) {
+            DeviceKey::discard_pending(keyring, folder)?;
+            return Ok(None);
+        }
         load_at(keyring, folder, &PENDING)
     }
 
@@ -269,10 +277,15 @@ impl DeviceKey {
         keep_at(self, keyring, folder, &PENDING)
     }
 
-    /// This pending key, a member now, made the kept one; the pending one removed.
+    /// This pending key, a member now, made the kept one; the pending one removed. When another
+    /// client kept its own first, that one is said and this one stays pending: it may be the
+    /// member's, and only it signs for it.
     pub fn promote(self, keyring: &impl Keyring, folder: &Path) -> Result<DeviceKey, KeyError> {
+        let public = self.public();
         let kept = self.keep(keyring, folder)?;
-        DeviceKey::discard_pending(keyring, folder)?;
+        if kept.public() == public {
+            DeviceKey::discard_pending(keyring, folder)?;
+        }
         Ok(kept)
     }
 
@@ -280,7 +293,7 @@ impl DeviceKey {
     pub fn discard_pending(keyring: &impl Keyring, folder: &Path) -> Result<(), KeyError> {
         match keyring.delete(PENDING.attributes) {
             Ok(()) => Ok(()),
-            Err(KeyringError::Failed(why)) => Err(keyring_failed(why)),
+            Err(error @ (KeyringError::Failed(_) | KeyringError::Several(_))) => Err(failed(error)),
             Err(KeyringError::Absent) => {
                 let file = folder.join(PENDING.file);
                 match std::fs::remove_file(&file) {
@@ -323,7 +336,7 @@ fn load_at(
             private_folder(folder)?;
             read_file(&folder.join(place.file)).map(|key| key.map(DeviceKey))
         }
-        Err(KeyringError::Failed(why)) => Err(keyring_failed(why)),
+        Err(error @ (KeyringError::Failed(_) | KeyringError::Several(_))) => Err(failed(error)),
     }
 }
 
@@ -347,17 +360,19 @@ fn keep_at(
                 Ok(None) => Err(keyring_failed(
                     "the key was stored, then was not there".to_owned(),
                 )),
-                Err(KeyringError::Failed(why)) => Err(keyring_failed(why)),
+                Err(error @ (KeyringError::Failed(_) | KeyringError::Several(_))) => {
+                    Err(failed(error))
+                }
                 Err(KeyringError::Absent) => {
                     Err(keyring_failed("it was there, then was not".to_owned()))
                 }
             },
-            Err(KeyringError::Failed(why)) => Err(keyring_failed(why)),
+            Err(error @ (KeyringError::Failed(_) | KeyringError::Several(_))) => Err(failed(error)),
             Err(KeyringError::Absent) => {
                 Err(keyring_failed("it was there, then was not".to_owned()))
             }
         },
-        Err(KeyringError::Failed(why)) => Err(keyring_failed(why)),
+        Err(error @ (KeyringError::Failed(_) | KeyringError::Several(_))) => Err(failed(error)),
         Err(KeyringError::Absent) => {
             private_folder(folder)?;
             let file = folder.join(place.file);
@@ -377,6 +392,18 @@ fn not_a_key(place: &Place) -> KeyError {
 
 fn keyring_failed(why: String) -> KeyError {
     KeyError(format!("the device key's keyring failed: {why}"))
+}
+
+/// What a keyring that is there answered when it could not.
+fn failed(error: KeyringError) -> KeyError {
+    match error {
+        KeyringError::Several(n) => keyring_failed(format!(
+            "{n} items of the keyring hold a device key of Flottille's; one at most may: \
+             flottille remote members says which key is a member"
+        )),
+        KeyringError::Failed(why) => keyring_failed(why),
+        KeyringError::Absent => keyring_failed("it was there, then was not".to_owned()),
+    }
 }
 
 /// `N` bytes from the operating system's random generator.
