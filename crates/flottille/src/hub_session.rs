@@ -41,6 +41,9 @@ const ROUND: Duration = Duration::from_secs(1);
 const ASK_WAIT: Duration = Duration::from_secs(10);
 /// How long an invitation is valid, in seconds (`docs/remote.md`, "Pairing").
 const FIVE_MINUTES: u64 = 5 * 60;
+/// How much further the wall clock may move than the monotonic one between two rounds before the
+/// machine is taken to have slept: a time service steps the clock by less.
+const ASLEEP: Duration = Duration::from_secs(5);
 
 /// How the daemon sees its hub.
 struct Seen {
@@ -735,6 +738,29 @@ async fn keep_session(
     control.asker.send_replace(Some(asker.clone()));
     let _ = control.list.send(device.list.clone());
     // The asker is let go with the session, however it ends.
+/// Tells a machine that slept: on Linux the monotonic clock does not count a suspend, and the wall
+/// clock does. A session to the hub may look alive for minutes after one, with no heartbeat to say
+/// otherwise, while the list it kept missed what changed meanwhile.
+struct Awake {
+    wall: std::time::SystemTime,
+    steady: std::time::Instant,
+}
+
+impl Awake {
+    fn new(wall: std::time::SystemTime, steady: std::time::Instant) -> Awake {
+        Awake { wall, steady }
+    }
+
+    /// Whether the machine slept since the last round, at `wall` and `steady` now.
+    fn slept(&mut self, wall: std::time::SystemTime, steady: std::time::Instant) -> bool {
+        // A wall clock set back moved by nothing.
+        let walked = wall.duration_since(self.wall).unwrap_or_default();
+        let ran = steady.saturating_duration_since(self.steady);
+        *self = Awake { wall, steady };
+        walked > ran + ASLEEP
+    }
+}
+
     struct Forget<'a>(&'a Control);
     impl Drop for Forget<'_> {
         fn drop(&mut self) {
@@ -769,6 +795,7 @@ async fn keep_session(
                                 ListError::Refused(_) => "refused",
                             };
                             control.set(state, Some(refused.to_string()));
+    let mut awake = Awake::new(std::time::SystemTime::now(), std::time::Instant::now());
                             remote.heard_hub();
                             continue;
                         }
@@ -816,6 +843,10 @@ async fn keep_session(
                     if said.as_ref() != Some(&error) {
                         eprintln!("flottille daemon: the hub was not told this machine's addresses: {error}");
                     }
+                if awake.slept(std::time::SystemTime::now(), std::time::Instant::now()) {
+                    // Ended as lost: the links wait for the next session's list.
+                    return Ended::Lost("this machine was asleep".to_owned());
+                }
                     said = Some(error);
                 }
             },
