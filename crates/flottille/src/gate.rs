@@ -4918,7 +4918,10 @@ mod tests {
             std::fs::create_dir_all(base.join("home")).unwrap();
             let bin = base.join("bin");
             std::fs::create_dir_all(&bin).unwrap();
-            for program in READS.iter().chain(&["git", "gh", "glab", "less", "more"]) {
+            for program in READS
+                .iter()
+                .chain(&["git", "gh", "glab", "acli", "less", "more"])
+            {
                 installed(&bin.join(program));
             }
             let grant = Grant {
@@ -5340,6 +5343,158 @@ mod tests {
                 Some(&fixture.never),
             );
             assert!(to_judge(&verdict), "{action}");
+        }
+    }
+
+    /// What `acli`'s reference lists as only showing or listing
+    /// (<https://developer.atlassian.com/cloud/acli/reference/commands/>), each command from its
+    /// own page, with the flags its page gives.
+    const ACLI_READS: [&str; 28] = [
+        "acli jira workitem view ABC-1",
+        "acli jira workitem view ABC-1 --json --fields summary,comment",
+        "acli jira workitem search --jql 'project = TEAM' --json --paginate",
+        "acli jira workitem search --filter 10001 --count",
+        "acli jira workitem comment list --key ABC-1 --json",
+        "acli jira workitem comment visibility --group",
+        "acli jira workitem attachment list --key ABC-1",
+        "acli jira workitem link list --key ABC-1 --json",
+        "acli jira workitem link type",
+        "acli jira project list --paginate",
+        "acli jira project view --key TEAM --json",
+        "acli jira board search --project TEAM --json",
+        "acli jira board list-sprints --id 123 --state active,closed",
+        "acli jira sprint list-workitems --sprint 1 --board 6",
+        "acli jira dashboard search --name report",
+        "acli jira filter list --my",
+        "acli jira filter search --owner someone@example.com --json",
+        "acli jira auth status",
+        "acli admin auth status",
+        "acli rovodev auth status",
+        "acli --help",
+        "acli jira --help",
+        "acli jira workitem -h",
+        "acli jira workitem delete --help",
+        "acli jira workitem comment create --help",
+        "acli --version",
+        "env acli jira workitem view ABC-1",
+        "nice acli jira project list",
+    ];
+
+    #[test]
+    fn acli_reads_pass_as_reads() {
+        for fixture in [Fixture::main(), Fixture::workspace()] {
+            for line in ACLI_READS {
+                assert_eq!(fixture.run(line), Verdict::Allow, "{line}");
+            }
+        }
+    }
+
+    #[test]
+    fn acli_writes_are_judged_with_a_card_that_says_who_writes() {
+        for fixture in [Fixture::main(), Fixture::workspace()] {
+            for line in [
+                "acli jira workitem create --project TEAM --type Task --summary x",
+                "acli jira workitem create-bulk --from-json items.json",
+                "acli jira workitem edit --key ABC-1 --summary x --yes",
+                "acli jira workitem transition --key ABC-1 --status Done --yes",
+                "acli jira workitem assign --key ABC-1 --assignee someone@example.com",
+                "acli jira workitem comment create --key ABC-1 --body x",
+                "acli jira workitem comment update --key ABC-1 --id 1 --body x",
+                "acli jira workitem comment delete --key ABC-1 --id 1",
+                "acli jira workitem delete --key ABC-1 --yes",
+                "acli jira workitem archive --key ABC-1",
+                "acli jira workitem clone --key ABC-1",
+                "acli jira workitem link create --out ABC-1 --in ABC-2 --type Blocks --yes",
+                "acli jira workitem link delete --id 10000 --yes",
+                "acli jira workitem attachment delete --id 1",
+                "acli jira workitem watcher remove --key ABC-1 --user someone@example.com",
+                "acli jira project create --key TEAM --name x",
+                "acli jira project delete --key TEAM",
+                "acli jira filter add-favourite --id 1",
+                "acli jira field delete --id customfield_1",
+                "acli admin user deactivate --email someone@example.com",
+                "acli feedback --summary x",
+                "acli",
+                "acli jira workitem frobnicate ABC-1",
+            ] {
+                let verdict = fixture.run(line);
+                assert!(to_judge(&verdict), "{line}: {verdict:?}");
+                let said = reasons(&verdict);
+                assert!(
+                    said.contains("acli") && said.contains("writes to the tracker"),
+                    "{line}: {said}"
+                );
+                assert!(said.contains("signed in as the user"), "{line}: {said}");
+            }
+        }
+    }
+
+    #[test]
+    fn acli_reads_that_open_a_browser_or_take_more_than_a_read_are_judged() {
+        let fixture = Fixture::workspace();
+        for line in [
+            "acli jira workitem view ABC-1 --web",
+            "acli jira workitem search --filter 10001 -w",
+            // A flag after a help flag is a value, not a help: the body is `--help`.
+            "acli jira workitem comment create --key ABC-1 --body --help",
+        ] {
+            let verdict = fixture.run(line);
+            assert!(to_judge(&verdict), "{line}: {verdict:?}");
+        }
+    }
+
+    #[test]
+    fn acli_auth_login_stays_base() {
+        for fixture in [Fixture::main(), Fixture::workspace()] {
+            for line in [
+                "acli jira auth login",
+                "acli jira auth login --site example.atlassian.net --web",
+                "acli jira auth logout",
+                "acli jira auth switch --site example.atlassian.net",
+                "acli admin auth login",
+                "acli admin auth logout",
+                "acli admin auth switch",
+                "acli rovodev auth login",
+                "acli rovodev auth logout",
+                "acli jira auth token",
+                "acli jira auth status --show-token",
+                "env acli jira auth login",
+                "xargs acli jira auth logout",
+            ] {
+                let verdict = fixture.run(line);
+                assert!(base_class(&verdict), "{line}: {verdict:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn an_acli_the_agent_wrote_is_judged() {
+        let fixture = Fixture::workspace();
+        let root = fixture.root.display().to_string();
+        let bin = fixture.root.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        installed(&bin.join("acli"));
+        let mut inside = Fixture::workspace();
+        let system = PathBuf::from(&inside.search);
+        inside.search = std::env::join_paths([inside.root.join("bin"), system]).unwrap();
+        std::fs::create_dir_all(inside.root.join("bin")).unwrap();
+        installed(&inside.root.join("bin/acli"));
+        for (fixture, line) in [
+            (&fixture, "./acli jira workitem view ABC-1".to_owned()),
+            (&fixture, "bin/acli jira project list".to_owned()),
+            (
+                &fixture,
+                format!("{root}/bin/acli jira workitem view ABC-1"),
+            ),
+            (&inside, "acli jira workitem view ABC-1".to_owned()),
+            (&inside, "acli --version".to_owned()),
+        ] {
+            let verdict = fixture.run(&line);
+            assert!(to_judge(&verdict), "{line}: {verdict:?}");
+            assert!(
+                reasons(&verdict).contains("agent's own file"),
+                "{line}: {verdict:?}"
+            );
         }
     }
 
@@ -6075,7 +6230,6 @@ mod tests {
             fixture.run("docker compose down"),
             fixture.run("nice deploy now"),
             fixture.run("bkt pr list"),
-            fixture.run("acli jira workitem view ABC-1"),
             fixture.judge(
                 "forge",
                 json!({"action": "merge", "repository": ".", "waive": "ship it"}),
