@@ -288,6 +288,8 @@ fn a_session_title_quoted_in_the_conversation_never_wraps_in_a_narrow_window(
     cx.simulate_resize(size(px(300.), px(800.)));
     let cut = gpui_design_system::quoted_title(LONG);
     assert!(cut.ends_with('…'), "the title is cut: {cut}");
+    // The notice quotes the cut title (`started the session "…"`).
+    let cut = format!("\"{cut}\"");
     // The notice sits among the steps of the turn that launched it, folded: a click opens them.
     until(&shell, cx, "the steps of the turn", |cx| {
         (0..30).any(|at| cx.update(|window, _| window.try_find(format!("group-{at}")).is_some()))

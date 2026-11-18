@@ -386,7 +386,7 @@ fn a_withdrawn_leave_is_asked_again() {
 }
 
 #[test]
-fn a_child_or_another_project_s_session_is_still_refused() {
+fn a_child_is_still_refused_and_another_project_s_session_asks_the_user() {
     let user = user();
     project(&user, "other");
     let (_, mcp) = root(&user, "app");
@@ -417,15 +417,11 @@ fn a_child_or_another_project_s_session_is_still_refused() {
         "{}",
         to_child.text
     );
-    assert!(to_elsewhere.error, "{}", to_elsewhere.text);
-    assert!(
-        to_elsewhere.text.starts_with(&format!(
-            "refused: {elsewhere} is a session of another project, other, not of app"
-        )),
-        "{}",
-        to_elsewhere.text
-    );
-    assert!(requests(&user).is_empty());
+    // Another project's session is reached with the user's leave (#1058), never refused.
+    let number = held(&to_elsewhere);
+    let listed = requests(&user);
+    assert_eq!(listed.len(), 1, "{listed:?}");
+    assert_eq!(listed[0]["number"], number);
     assert_eq!(judge_prompts(&user), judged, "the judge was asked");
     assert!(written_to(&user, &child).is_empty());
     assert!(written_to(&user, &elsewhere).is_empty());

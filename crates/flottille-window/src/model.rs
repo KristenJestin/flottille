@@ -283,6 +283,9 @@ pub struct Session {
     pub runs: String,
     /// The session of the agent that leads it, whose row it sits under.
     pub pilot: Option<String>,
+    /// Whether the agent that leads it works in another project: its row sits among its own
+    /// project's and names it.
+    pub led_from_elsewhere: bool,
 }
 
 /// One thing that waits for the user. Choosing it opens its session.
@@ -473,6 +476,8 @@ pub struct Answers<'a> {
     pub agents: &'a Value,
     /// `approval.list`
     pub approvals: &'a Value,
+    /// `vault.asks`: the requests for a vault entry that wait for the user.
+    pub vault_asks: &'a Value,
     /// The roots whose `needs_user` the daemon says is true (`agent.trees`).
     pub needs_user: &'a HashSet<String>,
     /// Each root's first message, by id.
@@ -662,6 +667,21 @@ impl Snapshot {
                 at: number(request, "created_at"),
             });
         }
+        // An agent's request for a vault entry waits for the user as a held request does: its
+        // session's row says it and the bell rings, the card being in the rail's "Waiting for you".
+        let mut needs_user = answers.needs_user.clone();
+        for ask in list(answers.vault_asks, "asks") {
+            let asker = ask["agent"].as_str().unwrap_or_default();
+            let session = root_of(&parents, asker).to_owned();
+            needs_user.insert(session.clone());
+            bell.push(BellItem {
+                key: format!("vault-{}", number(ask, "ask")),
+                session,
+                label: "Asks you for a vault entry".into(),
+                detail: text(ask, "name"),
+                at: number(ask, "at"),
+            });
+        }
         for root in agents.iter().filter(|agent| asks_the_user(agent)) {
             let id = text(root, "id");
             let open = answers.questions.get(&id).map_or(&[][..], Vec::as_slice);
@@ -792,6 +812,20 @@ impl Snapshot {
                 .entry(root_of(&parents, agent))
                 .or_insert((said, line));
         }
+        // An agent of another project than the session it started or leads is named with its
+        // project: the session is that project's, its pilot is not.
+        let across = |session: &Value, id: &str| {
+            let name = name_of(id);
+            let theirs = agents
+                .iter()
+                .find(|a| a["id"].as_str() == Some(id))
+                .and_then(|a| a["project"].as_str())
+                .filter(|theirs| Some(*theirs) != session["project"].as_str());
+            match theirs {
+                Some(project) => format!("{name} in {project}"),
+                None => name,
+            }
+        };
         let mut sessions: Vec<Session> = agents
             .iter()
             .filter(|agent| agent["parent"].is_null())
@@ -805,7 +839,7 @@ impl Snapshot {
                     .flatten();
                 let mark = if ended(agent) {
                     None
-                } else if answers.needs_user.contains(&id) {
+                } else if needs_user.contains(&id) {
                     Some(AgentState::NeedsYou)
                 } else if busy {
                     Some(AgentState::Running)
@@ -841,6 +875,9 @@ impl Snapshot {
                         Some(item) if item.key.starts_with("request-") => {
                             "Needs you: a permission".to_owned()
                         }
+                        Some(item) if item.key.starts_with("vault-") => {
+                            "Needs you: a vault entry".to_owned()
+                        }
                         Some(_) => "Needs you: a question".to_owned(),
                         None => "Needs you".to_owned(),
                     },
@@ -863,12 +900,18 @@ impl Snapshot {
                     ended_at: agent["ended_at"].as_u64().unwrap_or(active_at),
                     created_at: number(agent, "created_at"),
                     commands: commands_of("root", &id),
-                    started_by: agent["launched_by"].as_str().map(name_of),
-                    led_by: agent["led_by"].as_str().map(name_of),
+                    started_by: agent["launched_by"].as_str().map(|by| across(agent, by)),
+                    led_by: agent["led_by"].as_str().map(|by| across(agent, by)),
                     runs: runs_on(&agent["runs_on"]),
                     pilot: agent["led_by"]
                         .as_str()
                         .map(|pilot| root_of(&parents, pilot).to_owned()),
+                    led_from_elsewhere: agent["led_by"].as_str().is_some_and(|pilot| {
+                        agents
+                            .iter()
+                            .find(|a| a["id"].as_str() == Some(pilot))
+                            .is_some_and(|a| a["project"] != agent["project"])
+                    }),
                     id,
                 }
             })
@@ -1009,6 +1052,7 @@ mod tests {
             workspaces: &json!({"workspaces": [{"project": "app", "name": "login"}]}),
             agents: &agents,
             approvals: &approvals,
+            vault_asks: &json!({"asks": []}),
             needs_user: &needs_user.iter().map(|id| id.to_string()).collect(),
             questions: &HashMap::new(),
             briefs: &HashMap::from([("r1".into(), "\n  Fix the login\nmore".into())]),
@@ -1320,6 +1364,7 @@ mod tests {
             workspaces: &json!({"workspaces": []}),
             agents: &json!({"agents": [agent("r2", None, "idle", None)]}),
             approvals: &json!({"requests": []}),
+            vault_asks: &json!({"asks": []}),
             needs_user: &HashSet::new(),
             questions: &HashMap::new(),
             briefs: &HashMap::from([("r2".into(), "Hello".into())]),
@@ -1376,6 +1421,7 @@ mod tests {
             workspaces: &json!({"workspaces": []}),
             agents: &json!({"agents": [agent("r1", None, "idle", None), started, child, by_child]}),
             approvals: &json!({"requests": []}),
+            vault_asks: &json!({"asks": []}),
             needs_user: &HashSet::new(),
             questions: &HashMap::new(),
             briefs: &HashMap::from([
@@ -1390,6 +1436,32 @@ mod tests {
         assert_eq!(by("r2").as_deref(), Some("Lead the work"));
         assert_eq!(by("r3").as_deref(), Some("planner"));
         assert_eq!(by("r1"), None, "a session the user started names nobody");
+    }
+
+    #[test]
+    fn a_session_led_from_another_project_names_its_pilot_s_project() {
+        let mut pilot = agent("r1", None, "idle", None);
+        pilot["title"] = json!("Release the fonts");
+        let mut led = agent("r2", None, "idle", None);
+        led["project"] = json!("kit");
+        led["launched_by"] = json!("r1");
+        led["led_by"] = json!("r1");
+        let mut near = agent("r3", None, "idle", None);
+        near["launched_by"] = json!("r1");
+        near["led_by"] = json!("r1");
+        let snapshot = build(
+            json!({"agents": [pilot, led, near]}),
+            json!({"requests": []}),
+            &[],
+        );
+        let led = snapshot.session("r2").unwrap();
+        assert_eq!(led.project, "kit");
+        assert_eq!(led.led_by.as_deref(), Some("Release the fonts in app"));
+        assert_eq!(led.started_by.as_deref(), Some("Release the fonts in app"));
+        assert!(led.led_from_elsewhere);
+        let near = snapshot.session("r3").unwrap();
+        assert_eq!(near.led_by.as_deref(), Some("Release the fonts"));
+        assert!(!near.led_from_elsewhere);
     }
 
     fn workspace_json(steps: Value) -> Value {
@@ -1412,6 +1484,7 @@ mod tests {
             workspaces: &json!({"workspaces": [workspace_json(steps)]}),
             agents: &json!({"agents": []}),
             approvals: &json!({"requests": []}),
+            vault_asks: &json!({"asks": []}),
             needs_user: &HashSet::new(),
             questions: &HashMap::new(),
             briefs: &HashMap::new(),
@@ -1500,6 +1573,7 @@ mod tests {
             workspaces: &json!({"workspaces": [shown]}),
             agents: &json!({"agents": []}),
             approvals: &json!({"requests": []}),
+            vault_asks: &json!({"asks": []}),
             needs_user: &HashSet::new(),
             questions: &HashMap::new(),
             briefs: &HashMap::new(),
@@ -1543,6 +1617,7 @@ mod tests {
             workspaces: &json!({"workspaces": [shown]}),
             agents: &json!({"agents": []}),
             approvals: &json!({"requests": []}),
+            vault_asks: &json!({"asks": []}),
             needs_user: &HashSet::new(),
             questions: &HashMap::new(),
             briefs: &HashMap::new(),
@@ -1589,6 +1664,7 @@ mod tests {
                 workspaces: &json!({"workspaces": []}),
                 agents: &agents,
                 approvals: &json!({"requests": []}),
+                vault_asks: &json!({"asks": []}),
                 needs_user,
                 questions: &HashMap::new(),
                 briefs: &HashMap::new(),
@@ -1636,6 +1712,7 @@ mod tests {
             workspaces: &json!({"workspaces": []}),
             agents: &agents,
             approvals: &approvals,
+            vault_asks: &json!({"asks": []}),
             needs_user: &asking,
             questions: &HashMap::from([(
                 "r2".to_owned(),
@@ -1692,6 +1769,7 @@ mod tests {
             workspaces: &json!({"workspaces": []}),
             agents: &agents,
             approvals: &json!({"requests": []}),
+            vault_asks: &json!({"asks": []}),
             needs_user: &HashSet::new(),
             questions: &HashMap::new(),
             briefs: &HashMap::new(),
@@ -1718,6 +1796,7 @@ mod tests {
             workspaces: &json!({"workspaces": []}),
             agents: &agents,
             approvals: &json!({"requests": []}),
+            vault_asks: &json!({"asks": []}),
             needs_user: &HashSet::new(),
             questions: &HashMap::new(),
             briefs: &HashMap::new(),
@@ -1744,6 +1823,7 @@ mod tests {
             workspaces: &json!({"workspaces": []}),
             agents: &agents,
             approvals: &json!({"requests": []}),
+            vault_asks: &json!({"asks": []}),
             needs_user: &HashSet::new(),
             questions: &HashMap::new(),
             briefs: &HashMap::new(),

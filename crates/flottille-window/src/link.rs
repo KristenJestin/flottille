@@ -517,6 +517,8 @@ fn matters(event: &Event) -> bool {
     match name.split_once('.').map(|(subject, _)| subject) {
         // A workspace's preparation shows in its place, step by step.
         Some("project" | "approval" | "daemon" | "workspace") => true,
+        // A request for a vault entry marks its session and rings the bell until it is answered.
+        Some("vault") => matches!(name, "vault.asked" | "vault.ask_answered"),
         // A subscription opening or ending moves the session from waiting to rest.
         Some("subscription") => true,
         // A following that pauses or resumes shows on its row in the rail.
@@ -605,6 +607,7 @@ fn read(conn: &mut Conn, briefs: &mut Briefs, seen: &Seen) -> Result<Snapshot> {
     let workspaces = conn.request("workspace.list", json!({}))?;
     let agents = conn.request("agent.list", json!({}))?;
     let approvals = conn.request("approval.list", json!({}))?;
+    let vault_asks = conn.request("vault.asks", json!({}))?;
     let commands = conn.request("run.list", json!({}))?;
     let subscriptions = conn.request("subscription.list", json!({}))?;
     let (needs_user, questions) = needing_the_user(conn)?;
@@ -632,6 +635,7 @@ fn read(conn: &mut Conn, briefs: &mut Briefs, seen: &Seen) -> Result<Snapshot> {
         workspaces: &workspaces,
         agents: &agents,
         approvals: &approvals,
+        vault_asks: &vault_asks,
         needs_user: &needs_user,
         briefs: &briefs.texts,
         questions: &questions,

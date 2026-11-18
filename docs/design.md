@@ -233,17 +233,21 @@ Flottille's own tools:
   that root was itself started by an agent (`tools.md`, "Sessions an agent starts"): a `led`
   session is piloted by the caller, asks it its questions and wakes it when it asks, reports or
   ends; a `handed` one is the user's, and the caller hears nothing more of it. It answers at once
-  with the id.
+  with the id. With `project`, a `led` or `handed` session is started in another registered
+  project, held for the user every time, in every mode (§7.2): a full lead of that project, in its
+  places, with its tools, settings and vault entries; a child never is.
 - `session_send {session, text}` (a root): a message to a session the caller started, to the
-  agent that started it, or to any other session of its project once the user gave their leave
-  for that pair (asked with the first message, in every mode, §7.2), judged as a write is; it
+  agent that started it, or to any other session, of its project or another, once the user gave
+  their leave for that pair (asked with the first message, in every mode, §7.2; across projects
+  even to a session the caller started), judged as a write is; it
   arrives as a delivery labelled with its sender, never as the user's, and the answer comes back
   the same way.
 - `session_read {session?, last?, since?, until?, cursor?}` (a root): a page of the conversation
   of another session of the caller's project (the user's messages to it and its agent's replies,
   with their times), the last messages or those between two dates, with a cursor to the next page,
   and the mode of that session's tree; framed as that session's data, never instructions; judged
-  in Ask and Auto; a session of another project is refused. Without `session` (or with the
+  in Ask and Auto; a session of another project the caller did not start is read with the user's
+  leave for the pair, asked once (§7.2). Without `session` (or with the
   caller's own id) it reads this session: its id, its role and its tree's mode, asked of nobody.
 - `session_title {title}` (a root): names its session for the user, 3 to 8 words on one line, at
   most 60 characters, in its first turn and again when the work changes, until the user renames
@@ -366,7 +370,9 @@ user.
 A led session stays open after its report: once its work is integrated, its pilot stops it and
 removes its workspace. When a led session reported, is idle and its work is integrated, its
 pilot is reminded once, by `led-integrated` (`"Login" (agent …) reported and its branch is in
-main: stop it and remove its workspace?`), checked at the end of a turn of either. Integrated
+main: stop it and remove its workspace?`; for a session led in another project, only to stop it:
+its workspace is in that project, which the pilot's tools do not reach), checked at the end of a
+turn of either. Integrated
 means in the **base** the work goes into, never in any other branch (a second session's branch
 started from this one holds it too): in every repository that holds commits of its own, the forge
 says its pull request is merged and the branch is no further than the commit it merged (the
@@ -720,7 +726,10 @@ whatever agent of it is named); no tool of an agent does, and a session an agent
 user (`agent_launch` with `kind` `led` or `handed`) takes the mode of the tree that started it, Full included, never
 above it: an agent in Full can already do what the session would do, the session caps still apply,
 and the rules refused in every mode stay refused in it. Each tree keeps its own mode afterwards: a
-switch of the launcher's tree does not reach it. It is kept when the session resumes. An agent
+switch of the launcher's tree does not reach it. It is kept when the session resumes. A session an
+agent starts in another project (`agent_launch` with `project`) takes the mode that project gives a
+new session, Auto, never above the caller's tree's: Ask stays Ask, and Full is never carried to
+another project. An agent
 reads its mode, never sets it: `session_read` with no `session` (its own id is not told to it)
 answers with its id, its role and its tree's mode, and the text Flottille starts every session
 with says so. Reading another session says the mode of that session's tree too.
@@ -945,7 +954,11 @@ who asked:
   reaches the judge; allowing it delivers the message and lets that session write to the other
   from then on, one way, each message then judged as a write is, until either session ends or
   the user withdraws it where the session's rights are shown (`docs/tools.md`, "Sessions that
-  talk to each other").
+  talk to each other"). Across projects the leave is asked even of a session the caller started,
+  and the first read of another project's session it did not start asks it too: one leave, to
+  read and write, per pair.
+  **A launch in another project** (`agent_launch` with `project`) is held for the user the same
+  way, in every mode, Full included, never judged, and every time.
   Ending a session that is not the agent's own child (`agent_stop`) is held for the user the same
   way, in every mode, Full included, and every time: nothing is kept (`docs/tools.md`, "Ending
   another session"). The one exception is a session the agent itself started as `led`, which it
@@ -1270,12 +1283,14 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   (`developer.md`), and the path of its log unfolding under it;
 - a session page: the root's conversation, live (messages, the user's own as selectable as the agent's, thoughts collapsed (their head says how long the thinking lasted, from the event before it
   to the one after it, and no time when it lasted less than a tenth of a second), tool calls with
-  their result (a result cut at the source says so on its step, with the number of characters left out), the children launched, a session started for the user as one line, "started session <title>" (it is no sub-agent), reports and an edit's diff, each folded to one line until a click unfolds it), one compact line for each command a
+  their result (a result cut at the source says so on its step, with the number of characters left out), the children launched, a session started for the user as one line, `started the session "<title>"` (it is no sub-agent), reports and an edit's diff, each folded to one line until a click unfolds it), one compact line for each command a
   tool call ran (an icon, the line, how it ended, how long: a click opens the output panel the
   rail opens, and the output itself is only there; the rail's own row for a command of the root
   agent does not name it, the conversation being the page it is on), one line for each request that reached the
   user, neutral ("Request #1 · Run pnpm test", which lights its card in the rail, then, once
-  answered, the outcome), each picture sent inside the bubble of its message, above its words, a
+  answered, the outcome), one quiet line, with no button, for each request of the agent for a vault
+  entry (`asked for the vault entry hippocampe-key · waiting for you`, then `… · saved` or `… ·
+  dismissed`, staying in sight: it is the conversation's record of what the user decided), each picture sent inside the bubble of its message, above its words, a
   message another session sent with `session_send` marked with its sender ("from <session>") and
   folded to its first line until a click unfolds it (the card keeps one width while it folds and
   unfolds), and
@@ -1379,7 +1394,12 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   as many lines as it takes, its class
   and the judge's reason, or the first reason it was held, on one line, "Details" unfolding the
   rest (why it was held, one sentence for each reason, and for a base card the sentence that says
-  why it always comes back), and Deny and Allow; a base card stands apart by its "Always asks" tag and its still dot, in the attention tone like the others: a request that waits is never drawn as an error, and a denied one is recorded in the error ink;
+  why it always comes back), and Deny and Allow; an agent's request for a vault entry is a card
+  of the same section (its entry, where the secret goes, its project and its reason on lines,
+  "Details" for what it is for, what it is bound to and who asked, and Dismiss and New entry in
+  the place of Deny and Allow), counted in the section's number, marking its session's row and
+  ringing the bell as a held request does; a card arriving unfolds and one leaving folds away;
+  a base card stands apart by its "Always asks" tag and its still dot, in the attention tone like the others: a request that waits is never drawn as an error, and a denied one is recorded in the error ink;
   an answered card leaves). The
   root's row menu ("⋯") holds End session, the only way the window ends an agent: it ends the root
   and its tree, after a confirmation that counts the agents that end. An ended session leaves its
