@@ -32,9 +32,10 @@ pub type Connect = Arc<dyn Fn() -> std::io::Result<UnixStream> + Send + Sync>;
 pub enum Update {
     /// A fresh read of everything the shell shows.
     Snapshot(Snapshot),
-    /// What the daemon keeps of the window (the sidebar's folds), read once, before the first
-    /// snapshot: the tree is made as it was left, not animated from its default.
-    Kept(crate::kept::Folds),
+    /// What the daemon keeps of the window (the sidebar's folds, and the sessions that have a
+    /// draft), read once, before the first snapshot: the tree is made as it was left, not
+    /// animated from its default.
+    Kept(crate::kept::Folds, std::collections::HashSet<String>),
     /// The connection broke, with why; the link is connecting again.
     Disconnected(String),
     /// Flottille has not answered the link for `NOT_ANSWERING`: since when it was asked, in ms
@@ -240,11 +241,24 @@ fn follow(
     // user left them. A daemon that cannot say leaves every fold at its default.
     if seen.connections.load(Ordering::Relaxed) == 1
         && let Ok(state) = conn.request("window.get", json!({}))
-        && updates
-            .unbounded_send(Update::Kept(crate::kept::Folds::of(&state["state"])))
-            .is_err()
     {
-        return Ok(());
+        // The sessions that hold a draft: their rows say it before their pages are opened.
+        let drafts = conn
+            .request("draft.list", json!({}))
+            .ok()
+            .and_then(|listed| {
+                listed["drafts"].as_array().map(|keys| {
+                    keys.iter()
+                        .filter_map(|key| key.as_str()?.strip_prefix("session:"))
+                        .map(str::to_owned)
+                        .collect()
+                })
+            })
+            .unwrap_or_default();
+        let kept = Update::Kept(crate::kept::Folds::of(&state["state"]), drafts);
+        if updates.unbounded_send(kept).is_err() {
+            return Ok(());
+        }
     }
     // When what the shell shows, and the providers, were first known to be stale.
     let mut stale = Some(Instant::now());

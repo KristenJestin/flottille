@@ -3,7 +3,7 @@
 //! sidebar has folded. They are the user's own: a draft is never logged, never in an event, never
 //! given to an agent, and drawn nowhere but in its composer.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::time::Duration;
 
 use gpui_kit::{Context, Task, WeakEntity};
@@ -52,17 +52,42 @@ impl Draft {
     }
 }
 
+/// How a write of a draft, or of the window's state, ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Written {
+    /// The daemon keeps it.
+    Kept,
+    /// The session or the project it belongs to is gone: nothing is kept, and nothing is asked
+    /// again. Said to nobody: the composer of a thing that is gone is closing.
+    Gone,
+    /// The daemon could not be reached, or could not write: it is asked again, later.
+    Retry,
+    /// The daemon refused it for good (a text too long): asking again would be refused again.
+    Refused,
+}
+
+/// The longest wait before a failed read or write is asked again.
+const LONGEST_WAIT: Duration = Duration::from_secs(30);
+
 /// What a composer knows of its draft and how it keeps it: the debounce, and what the daemon holds
-/// as far as it knows, so that nothing is written that the daemon has already.
+/// as far as it is known, so that nothing is written that the daemon has already.
 pub struct Keeping {
     key: DraftKey,
-    /// What the daemon holds: what was read from it, or what was last written.
+    /// What the daemon holds: what was read from it, or the last write it answered it kept.
     known: Option<Draft>,
     /// The daemon answered the read of the draft: until then nothing is written, which would
     /// replace what it holds with an empty field.
     read: bool,
     /// The wait that ends with the write.
     due: Option<Task<()>>,
+    /// The wait that ends with the next try of a read the daemon did not answer.
+    rereading: Option<Task<()>>,
+    /// The writes asked and not answered yet, oldest first (the keeper answers in order).
+    writing: VecDeque<Draft>,
+    /// How many reads or writes in a row the daemon did not answer.
+    failures: u32,
+    /// The composer's session or project is gone: nothing is written.
+    gone: bool,
     /// How many writes were asked.
     sent: usize,
 }
@@ -74,6 +99,10 @@ impl Keeping {
             known: None,
             read: false,
             due: None,
+            rereading: None,
+            writing: VecDeque::new(),
+            failures: 0,
+            gone: false,
             sent: 0,
         }
     }
@@ -96,41 +125,107 @@ impl Keeping {
     /// it is still empty.
     pub fn answered(&mut self, found: Option<Draft>) {
         self.read = true;
+        self.failures = 0;
+        self.rereading = None;
         self.known = found.filter(|draft| !draft.is_empty());
     }
 
+    /// Whether the daemon answered the read of the draft.
     pub fn was_read(&self) -> bool {
         self.read
     }
 
+    /// How long the next try waits: the debounce, doubled by each failure in a row.
+    fn wait(&self) -> Duration {
+        (DEBOUNCE * 2u32.pow(self.failures.min(6))).min(LONGEST_WAIT)
+    }
+
+    /// The daemon did not answer the read: it is asked again, later, by `again`. Nothing is
+    /// written meanwhile, a field read as empty would replace what the daemon holds.
+    pub fn read_failed<T: 'static>(
+        &mut self,
+        cx: &mut Context<T>,
+        again: fn(&mut T, &mut Context<T>),
+    ) {
+        let wait = self.wait();
+        self.failures += 1;
+        self.rereading = Some(cx.spawn(async move |this: WeakEntity<T>, cx| {
+            cx.background_executor().timer(wait).await;
+            this.update(cx, again).ok();
+        }));
+    }
+
     /// The composer changed: the draft is written 500 ms after its last change, by `write`.
     pub fn changed<T: 'static>(&mut self, cx: &mut Context<T>, write: fn(&mut T, &mut Context<T>)) {
+        let wait = self.wait();
         self.due = Some(cx.spawn(async move |this: WeakEntity<T>, cx| {
-            cx.background_executor().timer(DEBOUNCE).await;
+            cx.background_executor().timer(wait).await;
             this.update(cx, write).ok();
         }));
     }
 
     /// What to ask of the daemon to keep `now`, when it does not hold it already: its pictures
-    /// only when they changed. Ends the wait for the write.
-    pub fn write(&mut self, now: Draft) -> Option<Command> {
+    /// only when they are not the ones it holds. Ends the wait for the write.
+    ///
+    /// `closing`: the window is closing, nothing will answer, so what the daemon is not known to
+    /// hold is asked whatever is in flight, and a field typed in before the read of the draft was
+    /// answered is written once the keeper has read it.
+    pub fn write(&mut self, now: Draft, closing: bool) -> Option<Command> {
         self.due = None;
-        if !self.read {
+        if self.gone {
             return None;
         }
-        let kept = self.known.clone().unwrap_or_default();
-        if now == kept {
-            return None;
+        let known = self.known.clone().unwrap_or_default();
+        let after_read = !self.read;
+        if after_read {
+            if !closing || now.is_empty() {
+                return None;
+            }
+        } else {
+            let expected = if closing {
+                known.clone()
+            } else {
+                self.writing
+                    .back()
+                    .cloned()
+                    .unwrap_or_else(|| known.clone())
+            };
+            if now == expected {
+                return None;
+            }
         }
-        let pictures = (now.pictures != kept.pictures).then(|| now.pictures.clone());
+        let pictures = (after_read || now.pictures != known.pictures).then(|| now.pictures.clone());
         let command = Command::DraftWrite {
             key: self.key.clone(),
             text: now.text.clone(),
             pictures,
+            after_read,
         };
         self.sent += 1;
-        self.known = Some(now).filter(|draft| !draft.is_empty());
+        self.writing.push_back(now);
         Some(command)
+    }
+
+    /// The daemon answered the oldest write asked. `true` when it must be asked again.
+    pub fn wrote(&mut self, result: Written) -> bool {
+        let sent = self.writing.pop_front();
+        match result {
+            Written::Kept => {
+                self.failures = 0;
+                self.known = sent.filter(|draft| !draft.is_empty());
+                false
+            }
+            Written::Gone => {
+                self.gone = true;
+                self.known = None;
+                false
+            }
+            Written::Refused => false,
+            Written::Retry => {
+                self.failures += 1;
+                true
+            }
+        }
     }
 }
 

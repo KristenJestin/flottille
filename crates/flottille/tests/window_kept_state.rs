@@ -241,11 +241,16 @@ fn open_unread(id: &str, shell: &Entity<Shell>, cx: &mut VisualTestContext) {
 /// next is typed in a composer that knows what the daemon holds.
 fn open(id: &str, shell: &Entity<Shell>, cx: &mut VisualTestContext) {
     open_unread(id, shell, cx);
-    until(shell, cx, "the daemon answered the read of the draft", |cx| {
-        shell.read_with(cx, |s, cx| {
-            s.reply_of(id).is_some_and(|r| r.read(cx).draft_was_read())
-        })
-    });
+    until(
+        shell,
+        cx,
+        "the daemon answered the read of the draft",
+        |cx| {
+            shell.read_with(cx, |s, cx| {
+                s.reply_of(id).is_some_and(|r| r.read(cx).draft_was_read())
+            })
+        },
+    );
 }
 
 /// A window on the project's page, its composer made.
@@ -257,12 +262,17 @@ fn open_project(name: &str, shell: &Entity<Shell>, cx: &mut VisualTestContext) {
     until(shell, cx, "the project's composer is made", |cx| {
         shell.read_with(cx, |s, _| s.composer_of(name).is_some())
     });
-    until(shell, cx, "the daemon answered the read of the draft", |cx| {
-        shell.read_with(cx, |s, cx| {
-            s.composer_of(name)
-                .is_some_and(|c| c.read(cx).draft_was_read())
-        })
-    });
+    until(
+        shell,
+        cx,
+        "the daemon answered the read of the draft",
+        |cx| {
+            shell.read_with(cx, |s, cx| {
+                s.composer_of(name)
+                    .is_some_and(|c| c.read(cx).draft_was_read())
+            })
+        },
+    );
     settle(cx);
 }
 
@@ -577,7 +587,10 @@ fn a_session_ended_for_good_forgets_its_draft(cx: &mut TestAppContext) {
     eventually("the draft goes with its session", || !listed(&user, &id));
     assert_eq!(picture_files(&user), 0, "the picture goes with its draft");
     // A debounce, the close of a window or a composer still open writes it again: refused.
-    assert_eq!(refusal(&user, &id, "too late").as_deref(), Some("not-found"));
+    assert_eq!(
+        refusal(&user, &id, "too late").as_deref(),
+        Some("not-found")
+    );
     assert!(!listed(&user, &id), "a forgotten session gets no draft");
     let _ = cx;
 }
@@ -599,7 +612,10 @@ fn a_session_forgotten_after_its_kept_week_forgets_its_draft(cx: &mut TestAppCon
         .unwrap();
     assert!(!listed(&user, &id), "the draft goes with the kept session");
     assert_eq!(picture_files(&user), 0, "the picture goes with its draft");
-    assert_eq!(refusal(&user, &id, "too late").as_deref(), Some("not-found"));
+    assert_eq!(
+        refusal(&user, &id, "too late").as_deref(),
+        Some("not-found")
+    );
     assert!(!listed(&user, &id));
     let _ = cx;
 }
@@ -646,7 +662,10 @@ fn a_removed_project_forgets_its_sessions_drafts_and_takes_no_other(cx: &mut Tes
     });
     assert_eq!(picture_files(&user), 0);
     // Its agents' rows are kept, but their project is gone: nothing of them is written again.
-    assert_eq!(refusal(&user, &id, "too late").as_deref(), Some("not-found"));
+    assert_eq!(
+        refusal(&user, &id, "too late").as_deref(),
+        Some("not-found")
+    );
     let again = user.call(
         "draft.set",
         json!({"kind": "project", "target": "app", "text": "too late"}),
@@ -656,9 +675,7 @@ fn a_removed_project_forgets_its_sessions_drafts_and_takes_no_other(cx: &mut Tes
 }
 
 #[gpui_kit::test]
-fn the_drafts_left_without_their_session_are_swept_when_the_daemon_starts(
-    cx: &mut TestAppContext,
-) {
+fn the_drafts_left_without_their_session_are_swept_when_the_daemon_starts(cx: &mut TestAppContext) {
     let user = user();
     project(&user, "app");
     project(&user, "other");
@@ -688,7 +705,11 @@ fn the_drafts_left_without_their_session_are_swept_when_the_daemon_starts(
 
     let drafts = user.call("draft.list", json!({})).unwrap()["drafts"].clone();
     assert_eq!(drafts, json!([format!("session:{kept_id}")]));
-    assert_eq!(picture_files(&user), 0, "no picture is left without its draft");
+    assert_eq!(
+        picture_files(&user),
+        0,
+        "no picture is left without its draft"
+    );
     let _ = cx;
 }
 
@@ -921,7 +942,9 @@ fn a_draft_read_that_failed_is_asked_again_and_not_taken_for_no_draft(cx: &mut T
     let (shell, cx) = window_with_a_daemon_that_does_not_answer(&user, &id, &down, cx);
 
     // Said nothing yet, the composer is empty and may be typed in: it does not know the draft.
-    assert!(!shell.read_with(cx, |s, cx| s.reply_of(&id).unwrap().read(cx).draft_was_read()));
+    assert!(!shell.read_with(cx, |s, cx| {
+        s.reply_of(&id).unwrap().read(cx).draft_was_read()
+    }));
     assert_eq!(reply_text(&id, &shell, cx), "");
     down.store(false, Ordering::SeqCst);
     until_later(
@@ -939,9 +962,7 @@ fn a_draft_read_that_failed_is_asked_again_and_not_taken_for_no_draft(cx: &mut T
 }
 
 #[gpui_kit::test]
-fn a_text_typed_before_the_draft_was_read_is_kept_when_the_window_closes(
-    cx: &mut TestAppContext,
-) {
+fn a_text_typed_before_the_draft_was_read_is_kept_when_the_window_closes(cx: &mut TestAppContext) {
     let user = user();
     project(&user, "app");
     let id = start(&user, "app", "first");
@@ -954,7 +975,9 @@ fn a_text_typed_before_the_draft_was_read_is_kept_when_the_window_closes(
     let (shell, cx) = window_with_a_daemon_that_does_not_answer(&user, &id, &down, cx);
     cx.update(|window, cx| window.click("reply-field", cx));
     cx.simulate_input("typed meanwhile");
-    assert!(!shell.read_with(cx, |s, cx| s.reply_of(&id).unwrap().read(cx).draft_was_read()));
+    assert!(!shell.read_with(cx, |s, cx| {
+        s.reply_of(&id).unwrap().read(cx).draft_was_read()
+    }));
 
     // The daemon is back, and the window closes before the read was asked again.
     down.store(false, Ordering::SeqCst);
@@ -965,9 +988,7 @@ fn a_text_typed_before_the_draft_was_read_is_kept_when_the_window_closes(
 }
 
 #[gpui_kit::test]
-fn a_text_typed_while_the_daemon_does_not_answer_never_replaces_its_draft(
-    cx: &mut TestAppContext,
-) {
+fn a_text_typed_while_the_daemon_does_not_answer_never_replaces_its_draft(cx: &mut TestAppContext) {
     let user = user();
     project(&user, "app");
     let id = start(&user, "app", "first");

@@ -60,7 +60,7 @@ use crate::conversation::{
     ConnectionReview, Conversation, DiffLine, Ending, STARTED_SESSION_KIND, Summary,
     TIME_LOGGING_KIND, USER, VaultAsk, WOKEN_BY_KIND, in_sight, is_hidden,
 };
-use crate::kept::{Draft, DraftKey, Keeping};
+use crate::kept::{Draft, DraftKey, Keeping, Written};
 use crate::leaves::LeaveList;
 use crate::link::{Connect, Update};
 use crate::links_card::{LinksCard, Open};
@@ -9304,11 +9304,6 @@ impl Reply {
         self.keeping.sent()
     }
 
-    /// Whether the daemon answered the read of the draft.
-    pub fn draft_was_read(&self) -> bool {
-        self.keeping.was_read()
-    }
-
     /// The composer as the daemon keeps it: its text and its pictures.
     fn draft_now(&self, cx: &App) -> Draft {
         let (text, pictures) = self.attached.draft(cx);
@@ -9320,18 +9315,27 @@ impl Reply {
         self.keeping.changed(cx, Self::keep_draft_now);
     }
 
-    /// Writes the draft to the daemon now, when it does not hold it already.
+    /// Writes the draft to the daemon now, when it does not hold it already. Asked once this
+    /// update is over: the shell may be the one updating (it started or answered something).
     fn keep_draft_now(&mut self, cx: &mut Context<Self>) {
-        if let Some(write) = self.draft_to_write(cx) {
-            self.shell.update(cx, |shell, _| shell.perform(write)).ok();
+        if let Some(write) = self.draft_to_write(cx, false) {
+            let shell = self.shell.clone();
+            cx.defer(move |cx| {
+                shell.update(cx, |shell, _| shell.perform(write)).ok();
+            });
         }
     }
 
-    /// What the daemon must be asked to keep the draft as it is now (the window is closing, or
-    /// the shell asks for it), if it does not hold it.
-    pub fn draft_to_write(&mut self, cx: &mut Context<Self>) -> Option<Command> {
+    /// What the daemon must be asked to keep the draft as it is now, if it does not hold it
+    /// (`closing`: the window is closing, `Keeping::write`).
+    pub fn draft_to_write(&mut self, cx: &mut Context<Self>, closing: bool) -> Option<Command> {
         let now = self.draft_now(cx);
-        self.keeping.write(now)
+        self.keeping.write(now, closing)
+    }
+
+    /// Whether the daemon answered the read of the draft.
+    pub fn draft_was_read(&self) -> bool {
+        self.keeping.was_read()
     }
 
     /// The daemon answered the read of the draft: a composer still empty takes it, a field the
@@ -9351,6 +9355,28 @@ impl Reply {
             }
             _ if typed => self.draft_changed(cx),
             _ => {}
+        }
+        // The row says whether it holds a draft, and now it knows.
+        cx.notify();
+    }
+
+    /// The daemon did not answer the read of the draft: nothing is written, and it is asked
+    /// again.
+    pub fn draft_read_failed(&mut self, cx: &mut Context<Self>) {
+        self.keeping.read_failed(cx, Self::read_draft_again);
+    }
+
+    fn read_draft_again(&mut self, cx: &mut Context<Self>) {
+        let key = self.keeping.key().clone();
+        self.shell
+            .update(cx, |shell, _| shell.perform(Command::DraftRead { key }))
+            .ok();
+    }
+
+    /// The daemon answered a write of the draft.
+    pub fn draft_written(&mut self, result: Written, cx: &mut Context<Self>) {
+        if self.keeping.wrote(result) {
+            self.draft_changed(cx);
         }
     }
 

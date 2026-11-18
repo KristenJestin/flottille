@@ -16,7 +16,7 @@ use futures::channel::mpsc::UnboundedSender;
 use serde_json::{Value, json};
 
 use crate::commands::CommandInfo;
-use crate::kept::{Draft, DraftKey};
+use crate::kept::{Draft, DraftKey, Written};
 use crate::link::{Conn, Connect, Update};
 use crate::rules::Shown;
 use crate::runs::{CommandOutput, CommandRow, Watch};
@@ -213,11 +213,14 @@ pub enum Command {
         key: DraftKey,
     },
     /// Keeps a composer's draft (`draft.set`; an empty one forgets it): the pictures only when
-    /// they are not the ones the daemon holds.
+    /// they are not the ones the daemon holds. `after_read`: the window is closing before the
+    /// daemon answered the read of the draft, the keeper reads it first and writes only if it
+    /// could.
     DraftWrite {
         key: DraftKey,
         text: String,
         pictures: Option<Vec<Picture>>,
+        after_read: bool,
     },
     /// Keeps one value of the window's own state (`window.set`).
     WindowSet {
@@ -1021,6 +1024,16 @@ pub enum Outcome {
         key: DraftKey,
         found: Result<Option<Draft>, String>,
     },
+    /// How the write of a composer's draft ended.
+    DraftWritten {
+        key: DraftKey,
+        result: Written,
+    },
+    /// How the write of a value of the window's state ended, with the value.
+    WindowKept {
+        value: Value,
+        result: Written,
+    },
     /// The window's appearance as the daemon keeps it, after a read (`written` false) or a
     /// choice.
     Appearance {
@@ -1416,46 +1429,105 @@ fn keep(connect: Connect, asked: Receiver<Keep>, updates: UnboundedSender<Update
             }
             Keep::Do(command) => command,
         };
-        match command {
+        let outcome = match command {
             Command::DraftRead { key } => {
-                let found = answer(ask(
-                    &connect,
-                    &mut conn,
-                    "draft.get",
-                    json!({"kind": key.kind(), "target": key.target()}),
-                    bounds.quick,
-                ))
-                .map(|answer| draft_of(&answer["draft"]));
-                if updates
-                    .unbounded_send(Update::Done(Outcome::Draft { key, found }))
-                    .is_err()
-                {
-                    return;
-                }
+                let params = json!({"kind": key.kind(), "target": key.target()});
+                let found = match coded(&connect, &mut conn, "draft.get", params, bounds.quick) {
+                    Ok(Ok(answer)) => Ok(draft_of(&answer["draft"])),
+                    // Gone: no composer, no draft.
+                    Ok(Err(refused)) if refused.code == "not-found" => Ok(None),
+                    Ok(Err(refused)) => Err(refused.message),
+                    Err(why) => Err(why),
+                };
+                Outcome::Draft { key, found }
             }
             Command::DraftWrite {
                 key,
                 text,
                 pictures,
+                after_read,
             } => {
-                let mut params = json!({"kind": key.kind(), "target": key.target(), "text": text});
-                if let Some(pictures) = pictures {
-                    params["images"] = pictures.iter().map(Picture::to_json).collect();
-                }
-                let _ = ask(&connect, &mut conn, "draft.set", params, bounds.quick);
+                let params = json!({"kind": key.kind(), "target": key.target()});
+                // The window is closing and did not read the draft: what is typed replaces it
+                // only if the daemon can say that it holds one the field did not know.
+                let readable = !after_read
+                    || coded(
+                        &connect,
+                        &mut conn,
+                        "draft.get",
+                        params.clone(),
+                        bounds.quick,
+                    )
+                    .is_ok_and(|read| read.is_ok());
+                let result = if readable {
+                    let mut params = params;
+                    params["text"] = json!(text);
+                    if let Some(pictures) = pictures {
+                        params["images"] = pictures.iter().map(Picture::to_json).collect();
+                    }
+                    written(coded(
+                        &connect,
+                        &mut conn,
+                        "draft.set",
+                        params,
+                        bounds.quick,
+                    ))
+                } else {
+                    Written::Retry
+                };
+                Outcome::DraftWritten { key, result }
             }
             Command::WindowSet { key, value } => {
-                let _ = ask(
+                let params = json!({"key": key, "value": value});
+                let result = written(coded(
                     &connect,
                     &mut conn,
                     "window.set",
-                    json!({"key": key, "value": value}),
+                    params,
                     bounds.quick,
-                );
+                ));
+                Outcome::WindowKept { value, result }
             }
             _ => unreachable!("only what the window keeps is sent to the keeper"),
+        };
+        if updates.unbounded_send(Update::Done(outcome)).is_err() {
+            return;
         }
     }
+}
+
+/// How a write ended, by what the daemon answered.
+fn written(asked: Result<Result<Value, flottille_protocol::ErrorBody>, String>) -> Written {
+    match asked {
+        Ok(Ok(_)) => Written::Kept,
+        Ok(Err(refused)) => match refused.code.as_str() {
+            "not-found" => Written::Gone,
+            "unavailable" => Written::Retry,
+            _ => Written::Refused,
+        },
+        Err(_) => Written::Retry,
+    }
+}
+
+/// [`ask`], with the code of the daemon's refusal beside its sentence.
+fn coded(
+    connect: &Connect,
+    conn: &mut Option<Conn>,
+    method: &str,
+    params: Value,
+    bound: Duration,
+) -> Result<Result<Value, flottille_protocol::ErrorBody>, String> {
+    if conn.is_none() {
+        *conn = Some(connected(connect)?);
+    }
+    let answer = conn
+        .as_mut()
+        .expect("connected")
+        .ask_within_coded(method, params, bound);
+    if answer.is_err() {
+        *conn = None;
+    }
+    answer.map_err(|e| e.to_string())
 }
 
 /// A draft as the daemon answers it (`null` when it holds none).

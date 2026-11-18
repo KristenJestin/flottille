@@ -19,7 +19,7 @@ use gpui_kit::{
 
 use crate::actions::{Command, Pick, Target};
 use crate::attachments::{Attachments, STILL_SCALING};
-use crate::kept::{Draft, DraftKey, Keeping};
+use crate::kept::{Draft, DraftKey, Keeping, Written};
 use crate::mode::ModeSwitch;
 use crate::providers::{Provider, Providers};
 use crate::settings::Reveal;
@@ -323,11 +323,6 @@ impl Composer {
         self.keeping.sent()
     }
 
-    /// Whether the daemon answered the read of the draft.
-    pub fn draft_was_read(&self) -> bool {
-        self.keeping.was_read()
-    }
-
     fn draft_now(&self, cx: &App) -> Draft {
         let (text, pictures) = self.attached.draft(cx);
         Draft { text, pictures }
@@ -338,17 +333,27 @@ impl Composer {
         self.keeping.changed(cx, Self::keep_draft_now);
     }
 
-    /// Writes the draft to the daemon now, when it does not hold it already.
+    /// Writes the draft to the daemon now, when it does not hold it already. Asked once this
+    /// update is over: the shell is the one updating when a session started.
     fn keep_draft_now(&mut self, cx: &mut Context<Self>) {
-        if let Some(write) = self.draft_to_write(cx) {
-            self.shell.update(cx, |shell, _| shell.perform(write)).ok();
+        if let Some(write) = self.draft_to_write(cx, false) {
+            let shell = self.shell.clone();
+            cx.defer(move |cx| {
+                shell.update(cx, |shell, _| shell.perform(write)).ok();
+            });
         }
     }
 
-    /// What the daemon must be asked to keep the draft as it is now, if it does not hold it.
-    pub fn draft_to_write(&mut self, cx: &mut Context<Self>) -> Option<Command> {
+    /// What the daemon must be asked to keep the draft as it is now, if it does not hold it
+    /// (`closing`: the window is closing, `Keeping::write`).
+    pub fn draft_to_write(&mut self, cx: &mut Context<Self>, closing: bool) -> Option<Command> {
         let now = self.draft_now(cx);
-        self.keeping.write(now)
+        self.keeping.write(now, closing)
+    }
+
+    /// Whether the daemon answered the read of the draft.
+    pub fn draft_was_read(&self) -> bool {
+        self.keeping.was_read()
     }
 
     /// The daemon answered the read of the draft: a composer still empty takes it, a field the
@@ -374,6 +379,26 @@ impl Composer {
             }
             _ if typed => self.draft_changed(cx),
             _ => {}
+        }
+    }
+
+    /// The daemon did not answer the read of the draft: nothing is written, and it is asked
+    /// again.
+    pub fn draft_read_failed(&mut self, cx: &mut Context<Self>) {
+        self.keeping.read_failed(cx, Self::read_draft_again);
+    }
+
+    fn read_draft_again(&mut self, cx: &mut Context<Self>) {
+        let key = self.keeping.key().clone();
+        self.shell
+            .update(cx, |shell, _| shell.perform(Command::DraftRead { key }))
+            .ok();
+    }
+
+    /// The daemon answered a write of the draft.
+    pub fn draft_written(&mut self, result: Written, cx: &mut Context<Self>) {
+        if self.keeping.wrote(result) {
+            self.draft_changed(cx);
         }
     }
 
