@@ -934,9 +934,16 @@ pub fn learn(
         })
         .collect();
     let version = models_version(&check);
-    let _ = daemon.read(|store| {
-        store.set_provider_models(provider.name, version.as_deref(), &Value::Array(models))
-    });
+    let models = Value::Array(models);
+    let changed = last_models(daemon, &check)
+        .is_none_or(|(kept, current)| !current || Value::Array(kept) != models);
+    let _ =
+        daemon.read(|store| store.set_provider_models(provider.name, version.as_deref(), &models));
+    // The window reads the models again: a session that fails right after its start says
+    // nothing else, and its picker would offer a list the agent no longer has.
+    if changed {
+        let _ = daemon.emit("provider.models_read", json!({"name": provider.name}));
+    }
 }
 
 /// The value an option's `default` stands for, when the agent names it.
@@ -1065,9 +1072,20 @@ fn check_known(
     {
         *model = Some(listed.to_owned());
     }
-    let target = match model.as_deref().or(current) {
-        Some(model) => match models.iter().find(|m| m["id"] == model) {
-            Some(known) => Some((known, format!("model {model}"))),
+    let named = |model: &str| {
+        models
+            .iter()
+            .find(|m| m["id"] == model)
+            .map(|known| (known, format!("model {model}")))
+    };
+    // The model the agent runs on may have left the list: its session runs on what replaced it
+    // (the newest of its family, else the default), never a reason to refuse an effort.
+    let current = current
+        .and_then(|current| provider::listed_model(offered.iter().copied(), current))
+        .and_then(named);
+    let target = match model.as_deref() {
+        Some(model) => match named(model) {
+            Some(known) => Some(known),
             None => {
                 return Err(Failure::refused(format!(
                     "provider {} offers no model {model}: it offers {}",
@@ -1076,10 +1094,12 @@ fn check_known(
                 )));
             }
         },
-        None => models
-            .iter()
-            .find(|m| m["default"] == true)
-            .and_then(|known| Some((known, format!("default model {}", known["id"].as_str()?)))),
+        None => current.or_else(|| {
+            models
+                .iter()
+                .find(|m| m["default"] == true)
+                .and_then(|known| Some((known, format!("default model {}", known["id"].as_str()?))))
+        }),
     };
     if let (Some(effort), Some((known, named))) = (effort, target)
         && let Some(efforts) = known["efforts"].as_array()

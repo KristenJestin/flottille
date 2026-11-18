@@ -17,10 +17,21 @@ const ENABLED_BY_DEFAULT: [&str; 1] = ["claude"];
 /// refused unless the user allows it (`allow_unqualified_version`).
 pub const QUALIFIED_ONLY: [&str; 2] = ["opencode", "codex"];
 
-/// The model a provider lists that `asked` names: the listed id itself, else the one listed id that
-/// is `asked` followed by a date (`-YYYYMMDD`), as a provider's CLI takes `claude-haiku-4-5` for
-/// `claude-haiku-4-5-20251001`. None when no listed model, or more than one, answers to it.
+/// The model a provider lists that `asked` names: the one offered as it is (`listed_as_is`), else
+/// the newest offered of its family (`newest_of_family`): an alias or an id the provider's list
+/// dropped runs on what replaced it. None when no model of its family is offered.
 pub fn listed_model<'a>(
+    offered: impl IntoIterator<Item = &'a str>,
+    asked: &str,
+) -> Option<&'a str> {
+    let offered: Vec<&str> = offered.into_iter().collect();
+    listed_as_is(offered.iter().copied(), asked).or_else(|| newest_of_family(offered, asked))
+}
+
+/// The model a provider lists as `asked` itself: the listed id, else the one listed id that is
+/// `asked` followed by a date (`-YYYYMMDD`), as a provider's CLI takes `claude-haiku-4-5` for
+/// `claude-haiku-4-5-20251001`. None when no listed model, or more than one, answers to it.
+pub fn listed_as_is<'a>(
     offered: impl IntoIterator<Item = &'a str>,
     asked: &str,
 ) -> Option<&'a str> {
@@ -31,10 +42,49 @@ pub fn listed_model<'a>(
     let mut dated = offered.into_iter().filter(|id| {
         id.strip_prefix(asked)
             .and_then(|rest| rest.strip_prefix('-'))
-            .is_some_and(|date| date.len() == 8 && date.bytes().all(|b| b.is_ascii_digit()))
+            .is_some_and(is_date)
     });
     let found = dated.next()?;
     dated.next().is_none().then_some(found)
+}
+
+fn is_date(part: &str) -> bool {
+    part.len() == 8 && part.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// An id cut into its family (its words: `claude-fable` of `claude-fable-5-2`, `fable` of the
+/// alias), its version (`[5, 2]`) and its date, if it has one.
+fn family_of(id: &str) -> (Vec<&str>, Vec<u64>, Option<&str>) {
+    let mut words = Vec::new();
+    let mut version = Vec::new();
+    let mut date = None;
+    for part in id.split('-') {
+        if is_date(part) {
+            date = Some(part);
+        } else if !part.is_empty() && part.split('.').all(|n| n.parse::<u64>().is_ok()) {
+            version.extend(part.split('.').filter_map(|n| n.parse::<u64>().ok()));
+        } else {
+            words.push(part);
+        }
+    }
+    (words, version, date)
+}
+
+/// The newest offered model of `asked`'s family: one whose words end with `asked`'s (the alias
+/// `fable` is of `claude-fable-*`), the highest version first, then the latest date. The order of
+/// the list says nothing.
+fn newest_of_family<'a>(offered: Vec<&'a str>, asked: &str) -> Option<&'a str> {
+    let (family, _, _) = family_of(asked);
+    if family.is_empty() || asked == OWN_CHOICE {
+        return None;
+    }
+    offered
+        .into_iter()
+        .filter(|id| *id != OWN_CHOICE)
+        .map(|id| (family_of(id), id))
+        .filter(|((words, _, _), _)| words.ends_with(&family))
+        .max_by(|((_, a, x), _), ((_, b, y), _)| a.cmp(b).then(x.cmp(y)))
+        .map(|(_, id)| id)
 }
 
 /// The value a provider gives for "its own choice" of a model or an effort. Flottille never leaves
@@ -281,16 +331,16 @@ mod tests {
             Some("claude-haiku-4-5-20251001")
         );
         assert_eq!(listed_model(listed, "haiku"), Some("haiku"));
-        // Not a date, a wrong date, a prefix of the name, or a model that is not listed.
-        assert_eq!(listed_model(listed, "claude-haiku-4"), None);
-        assert_eq!(listed_model(listed, "claude-haiku-4-5-2025"), None);
+        // As it is: not a date, a wrong date or a prefix of the name; nor a model of no family listed.
+        assert_eq!(listed_as_is(listed, "claude-haiku-4"), None);
+        assert_eq!(listed_as_is(listed, "claude-haiku-4-5-2025"), None);
         assert_eq!(listed_model(listed, "claude-opus-4-5"), None);
         assert_eq!(
-            listed_model(["claude-haiku-4-5-2025101x"], "claude-haiku-4-5"),
+            listed_as_is(["claude-haiku-4-5-2025101x"], "claude-haiku-4-5"),
             None
         );
-        // Two listed models that answer to it: none is guessed.
-        assert_eq!(listed_model(["m-1-20250101", "m-1-20260101"], "m-1"), None);
+        // Two listed models that answer to it as it is: none is guessed.
+        assert_eq!(listed_as_is(["m-1-20250101", "m-1-20260101"], "m-1"), None);
         // An exact id wins over a dated one.
         assert_eq!(listed_model(["m-1", "m-1-20250101"], "m-1"), Some("m-1"));
     }
@@ -315,16 +365,25 @@ mod tests {
             Some("claude-fable-5-2")
         );
         // `5` is newer than `4-8`, whichever comes first.
-        assert_eq!(listed_model(listed, "claude-opus-4-5"), Some("claude-opus-5"));
+        assert_eq!(
+            listed_model(listed, "claude-opus-4-5"),
+            Some("claude-opus-5")
+        );
         // An id with its date is matched by its version, as today.
         assert_eq!(
             listed_model(listed, "claude-haiku-4"),
             Some("claude-haiku-4-5-20251001")
         );
-        assert_eq!(listed_model(listed, "haiku"), Some("claude-haiku-4-5-20251001"));
+        assert_eq!(
+            listed_model(listed, "haiku"),
+            Some("claude-haiku-4-5-20251001")
+        );
         // Offered as is: itself, never another of its family.
         assert_eq!(listed_model(listed, "opus"), Some("opus"));
-        assert_eq!(listed_model(listed, "claude-fable-5"), Some("claude-fable-5"));
+        assert_eq!(
+            listed_model(listed, "claude-fable-5"),
+            Some("claude-fable-5")
+        );
         // No family offered.
         assert_eq!(listed_model(listed, "gpt-5"), None);
         assert_eq!(listed_model(listed, "5"), None);

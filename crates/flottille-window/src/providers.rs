@@ -276,7 +276,8 @@ impl Provider {
         models.iter().find(|m| m.id == id)
     }
 
-    /// The model listed under that id, or that id without its date suffix (the daemon takes both).
+    /// The model listed under that id, or that id without its date suffix, else the newest listed
+    /// of its family (`provider::listed_model`): the daemon takes each the same way.
     pub fn model(&self, id: &str) -> Option<&Model> {
         let models = self.models.as_ref()?;
         let listed = provider::listed_model(models.iter().map(|m| m.id.as_str()), id)?;
@@ -539,7 +540,12 @@ mod tests {
             claude.model("sonnet-4-5").unwrap().id,
             "sonnet-4-5-20250929"
         );
-        assert!(claude.model("sonnet-4-6").is_none());
+        // An id the list does not hold is the newest of its family, as the daemon takes it.
+        assert_eq!(
+            claude.model("sonnet-4-6").unwrap().id,
+            "sonnet-4-5-20250929"
+        );
+        assert!(claude.model("gpt-5").is_none());
     }
 
     #[test]
