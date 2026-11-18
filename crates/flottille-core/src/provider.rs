@@ -54,27 +54,42 @@ fn is_date(part: &str) -> bool {
     part.len() == 8 && part.bytes().all(|b| b.is_ascii_digit())
 }
 
+fn digits(part: &str, len: usize) -> bool {
+    part.len() == len && part.bytes().all(|b| b.is_ascii_digit())
+}
+
 /// An id cut into its family (its words: `claude-fable` of `claude-fable-5-2`, `fable` of the
-/// alias), its version (`[5, 2]`) and its date, if it has one.
-fn family_of(id: &str) -> (Vec<&str>, Vec<u64>, Option<&str>) {
+/// alias), its version (`[5, 2]`) and its date (`20250807` of `-20250807` or `-2025-08-07`),
+/// if it has one.
+fn family_of(id: &str) -> (Vec<&str>, Vec<u64>, Option<String>) {
     let mut words = Vec::new();
     let mut version = Vec::new();
     let mut date = None;
-    for part in id.split('-') {
+    let parts: Vec<&str> = id.split('-').collect();
+    let mut i = 0;
+    while i < parts.len() {
+        let part = parts[i];
         if is_date(part) {
-            date = Some(part);
+            date = Some(part.to_owned());
+        } else if digits(part, 4)
+            && parts.get(i + 1).is_some_and(|month| digits(month, 2))
+            && parts.get(i + 2).is_some_and(|day| digits(day, 2))
+        {
+            date = Some(parts[i..i + 3].concat());
+            i += 2;
         } else if !part.is_empty() && part.split('.').all(|n| n.parse::<u64>().is_ok()) {
             version.extend(part.split('.').filter_map(|n| n.parse::<u64>().ok()));
         } else {
             words.push(part);
         }
+        i += 1;
     }
     (words, version, date)
 }
 
 /// The newest offered model of `asked`'s family: one whose words end with `asked`'s (the alias
-/// `fable` is of `claude-fable-*`), the highest version first, then the latest date. The order of
-/// the list says nothing.
+/// `fable` is of `claude-fable-*`), the highest version first, then the latest date, then the
+/// id: the order of the list says nothing.
 fn newest_of_family<'a>(offered: Vec<&'a str>, asked: &str) -> Option<&'a str> {
     let (family, _, _) = family_of(asked);
     if family.is_empty() || asked == OWN_CHOICE {
@@ -85,7 +100,7 @@ fn newest_of_family<'a>(offered: Vec<&'a str>, asked: &str) -> Option<&'a str> {
         .filter(|id| *id != OWN_CHOICE)
         .map(|id| (family_of(id), id))
         .filter(|((words, _, _), _)| words.ends_with(&family))
-        .max_by(|((_, a, x), _), ((_, b, y), _)| a.cmp(b).then(x.cmp(y)))
+        .max_by(|((_, a, x), i), ((_, b, y), j)| a.cmp(b).then(x.cmp(y)).then(i.cmp(j)))
         .map(|(_, id)| id)
 }
 
