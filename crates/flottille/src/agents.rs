@@ -2472,6 +2472,29 @@ impl acp::Events for Recorder {
         }
     }
 
+    fn effort_dropped(&self) {
+        let result = self.daemon.write(|store| {
+            let Some(agent) = store.agent(&self.agent)? else {
+                return Ok(((), None));
+            };
+            let (_, event) = store.change_agent(
+                &self.agent,
+                AgentChange {
+                    chosen: Some(Choices {
+                        effort: None,
+                        ..agent.chosen
+                    }),
+                    ..AgentChange::default()
+                },
+                None,
+            )?;
+            Ok(((), event))
+        });
+        if let Err(error) = result {
+            eprintln!("flottille daemon: agent {}: {error}", self.agent);
+        }
+    }
+
     fn pump(&self) -> Option<deliveries::Prompt> {
         crate::compaction::before_turn(&self.daemon, &self.agent);
         deliveries::pump(&self.daemon, &self.agent)
