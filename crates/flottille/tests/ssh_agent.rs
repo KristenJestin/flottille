@@ -47,7 +47,9 @@ fn socket_at(user: &User, agent: &str) -> PathBuf {
 
 /// A fake `ssh` first in the user's `PATH`: each call adds to `ssh-said` whether it reached the
 /// socket its `SSH_AUTH_SOCK` names (`reached <path>`, `refused <path>`, `no agent`), the value
-/// of `FLOTTILLE_PLANTED` it was given (`planted=…`), and serves git's own call from
+/// of `FLOTTILLE_PLANTED` it was given (`planted=…`), whether it could list the runtime folder
+/// (`runtime listed`, `runtime unlisted`) and connect to its bus (`bus reached`, `bus refused`),
+/// and serves git's own call from
 /// `remotes/<name>`, whatever the host.
 fn fake_ssh(user: User) -> User {
     std::fs::create_dir(user.path("ssh-bin")).unwrap();
@@ -60,12 +62,17 @@ fn fake_ssh(user: User) -> User {
          elif {connect} \"$SSH_AUTH_SOCK\" 2>/dev/null; then echo \"reached $SSH_AUTH_SOCK\" >> '{said}'\n\
          else echo \"refused $SSH_AUTH_SOCK\" >> '{said}'; fi\n\
          echo \"planted=$FLOTTILLE_PLANTED\" >> '{said}'\n\
+         if ls '{runtime}' >/dev/null 2>&1; then echo 'runtime listed' >> '{said}'\n\
+         else echo 'runtime unlisted' >> '{said}'; fi\n\
+         if {connect} '{runtime}/bus' 2>/dev/null; then echo 'bus reached' >> '{said}'\n\
+         else echo 'bus refused' >> '{said}'; fi\n\
          for last; do :; done\n\
          service=${{last%% *}}\n\
          repository=$(basename \"$(echo \"${{last#* }}\" | tr -d \"'\")\")\n\
          exec git \"${{service#git-}}\" '{remotes}'/\"$repository\"\n",
         said = said.display(),
         remotes = user.path("remotes").display(),
+        runtime = user.path("runtime").display(),
     );
     let ssh = user.path("ssh-bin/ssh");
     std::fs::write(&ssh, script).unwrap();
@@ -90,6 +97,13 @@ fn ssh_said(user: &User) -> Vec<String> {
 /// A project `app` over a throwaway repository whose remote `origin` is `url` (served by
 /// `remotes/app.git`), and the session of a root agent in the project folder.
 fn session(user: &User, url: &str) -> Mcp {
+    project(user, url);
+    agent(user)
+}
+
+/// A project `app` over a throwaway repository whose remote `origin` is `url`, served by
+/// `remotes/app.git`, which has `main`.
+fn project(user: &User, url: &str) {
     let folder = user.path("work/app");
     user.git_init(&folder);
     std::fs::write(folder.join("README.md"), "app\n").unwrap();
@@ -108,7 +122,6 @@ fn session(user: &User, url: &str) -> Mcp {
     user.git(&folder, &["remote", "set-url", "origin", url]);
     user.call("project.add", json!({"folder": folder, "name": "app"}))
         .unwrap();
-    agent(user)
 }
 
 /// The session of a new root agent of `app`, which reads the project's place as it is now.
@@ -574,4 +587,166 @@ fn a_push_tasks_ready_and_url_commands_get_no_ssh_agent() {
     let said = std::fs::read_to_string(&probed).unwrap_or_default();
     assert!(said.contains("agent=\n"), "{said:?}");
     assert!(!said.contains(socket(&user).to_str().unwrap()), "{said:?}");
+}
+
+/// The socket lent to the daemon's own fetch: the one found at its start, links followed.
+fn lent(user: &User) -> PathBuf {
+    socket(user).canonicalize().unwrap()
+}
+
+/// The workspace `login` of `app`, made now: its first repository's base, as `workspace.create`
+/// answers it.
+fn created(user: &User) -> serde_json::Value {
+    let created = user
+        .call(
+            "workspace.create",
+            json!({"project": "app", "name": "login"}),
+        )
+        .unwrap();
+    created["repositories"][0]["base"].clone()
+}
+
+#[test]
+fn a_planted_ssh_command_does_not_run_in_the_daemon_s_fetch() {
+    let (user, _agent, _bus) = user();
+    project(&user, SSH_REMOTE);
+    let folder = user.path("work/app");
+    let planted = user.path("planted/ssh");
+    script(
+        &planted,
+        &format!(
+            "echo ran >> '{}'\nexit 1\n",
+            user.path("planted-ran").display()
+        ),
+    );
+    // Through an included file, and the remote's own upload command, as a run could write them.
+    let included = user.path("planted/settings");
+    std::fs::write(
+        &included,
+        format!("[core]\n\tsshCommand = {}\n", planted.display()),
+    )
+    .unwrap();
+    user.git(
+        &folder,
+        &["config", "include.path", included.to_str().unwrap()],
+    );
+    user.git(
+        &folder,
+        &[
+            "config",
+            "remote.origin.uploadpack",
+            planted.to_str().unwrap(),
+        ],
+    );
+
+    let base = created(&user);
+
+    assert!(!user.path("planted-ran").exists(), "the planted ssh ran");
+    assert_eq!(base["fetched_now"], true, "{base}");
+    assert_eq!(base["ref"], "refs/remotes/origin/main", "{base}");
+    // The `ssh` found at the daemon's start, lent the agent for this fetch alone.
+    let reached = format!("reached {}", lent(&user).display());
+    assert!(ssh_said(&user).contains(&reached), "{:?}", ssh_said(&user));
+}
+
+#[test]
+fn the_daemon_s_git_cannot_reach_the_runtime_folder() {
+    if landlock_abi() < 2 {
+        eprintln!(
+            "skipped: this kernel's Landlock (ABI {}) cannot keep the runtime folder out",
+            landlock_abi()
+        );
+        return;
+    }
+    let (user, _agent, _bus) = user();
+    project(&user, SSH_REMOTE);
+
+    let base = created(&user);
+
+    assert_eq!(base["fetched_now"], true, "{base}");
+    let said = ssh_said(&user);
+    assert!(said.contains(&"runtime unlisted".to_owned()), "{said:?}");
+    assert!(!said.contains(&"runtime listed".to_owned()), "{said:?}");
+    // Connecting by a path is governed from the ninth ABI: the bus stays out, the agent lent.
+    if landlock_abi() < 9 {
+        eprintln!(
+            "skipped the connect: this kernel's Landlock (ABI {}) cannot deny connecting to a \
+             socket",
+            landlock_abi()
+        );
+        return;
+    }
+    assert!(said.contains(&"bus refused".to_owned()), "{said:?}");
+    assert!(!said.contains(&"bus reached".to_owned()), "{said:?}");
+    let reached = format!("reached {}", lent(&user).display());
+    assert!(said.contains(&reached), "{said:?}");
+}
+
+#[test]
+fn an_agent_cli_starts_without_ssh_auth_sock() {
+    let (user, _agent, _bus) = user();
+    project(&user, SSH_REMOTE);
+    user.fake_script(json!({"turns": [{"when": "hello", "do": [
+        {"say": "agent=<"}, {"say_variable": "SSH_AUTH_SOCK"}, {"say": ">"}
+    ]}]}));
+
+    let id = user
+        .call("agent.run", json!({"project": "app", "message": "hello"}))
+        .unwrap()["agent"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let said = || user.call("agent.read", json!({"agent": id})).unwrap()["lines"].to_string();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !said().contains('>') {
+        assert!(
+            Instant::now() < deadline,
+            "the agent never said: {}",
+            said()
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    // Empty: a value it had would show, masked.
+    let said = said();
+    assert!(said.contains("agent=<>"), "{said}");
+}
+
+#[test]
+fn an_https_remote_is_still_fetched_by_the_daemon() {
+    let user = credential_helper(User::with_fake_agent());
+    std::fs::create_dir_all(user.path("remotes")).unwrap();
+    let (_server, url) = http_remote(&user);
+    project(&user, &url);
+
+    let base = created(&user);
+
+    assert_eq!(base["fetched_now"], true, "{base}");
+    assert!(
+        helper_said(&user).contains(&"get".to_owned()),
+        "{:?}",
+        helper_said(&user)
+    );
+}
+
+#[test]
+fn a_remote_rewritten_to_ssh_is_still_fetched_with_the_agent() {
+    let (user, _agent, _bus) = user();
+    // A path in the repository's settings, which git rewrites to the SSH remote.
+    project(&user, "/nowhere/acme/app.git");
+    let folder = user.path("work/app");
+    user.git(
+        &folder,
+        &[
+            "config",
+            "url.git@forge.invalid:acme/.insteadOf",
+            "/nowhere/acme/",
+        ],
+    );
+
+    let base = created(&user);
+
+    assert_eq!(base["fetched_now"], true, "{base}");
+    let reached = format!("reached {}", lent(&user).display());
+    assert!(ssh_said(&user).contains(&reached), "{:?}", ssh_said(&user));
 }
