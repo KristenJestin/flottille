@@ -2330,6 +2330,16 @@ mod tests {
     }
 
     #[test]
+    fn the_agent_s_headers_are_no_longer_than_what_the_judge_reads_whole() {
+        let args = json!({"action": "read", "url": "https://api.example/items",
+            "headers": {"X-One": "a".repeat(LONGEST / 2), "X-Two": "b".repeat(LONGEST / 2)}});
+        match verdict(&args, |_| Pass::Free, GateMode::Full, None) {
+            gate::Verdict::Deny(why) => assert!(why.contains("longer than"), "{why}"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
     fn a_seen_url_passes_a_built_one_is_judged_and_a_search_only_in_ask() {
         let seen = |url: &Url| match url.as_str() {
             "https://docs.rs/tokio" => Pass::Free,

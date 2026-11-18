@@ -1248,6 +1248,40 @@ mod tests {
     use super::*;
 
     #[test]
+    fn every_form_of_a_basic_credential_is_masked() {
+        use base64::Engine as _;
+        // Invented: the secret holds a `/`, and its base64 a `+`, a `/` and padding.
+        let secret = "pw/9xQ2vab~cd?e";
+        let encoded = base64::engine::general_purpose::STANDARD.encode(format!("sam:{secret}"));
+        assert!(
+            encoded.contains(['+', '/']) && encoded.ends_with('='),
+            "{encoded}"
+        );
+        add_vault_login(Some("sam"), secret);
+        let unpadded = encoded.trim_end_matches('=');
+        let percent = |text: &str| {
+            text.replace('+', "%2B")
+                .replace('/', "%2F")
+                .replace('=', "%3D")
+                .replace('~', "%7E")
+                .replace('?', "%3F")
+        };
+        let slashed = |text: &str| text.replace('/', "\\/");
+        for form in [
+            encoded.clone(),
+            unpadded.to_owned(),
+            percent(&encoded),
+            percent(unpadded),
+            slashed(&encoded),
+            slashed(unpadded),
+            slashed(secret),
+        ] {
+            let masked = mask_also(&format!("said {form} back"), &BTreeMap::new(), &[]);
+            assert_eq!(masked, "said [masked] back", "{form}");
+        }
+    }
+
+    #[test]
     fn the_value_of_a_variable_named_like_a_secret_is_masked() {
         let env = BTreeMap::from([
             ("NPM_TOKEN".into(), "s3cr3t-value".into()),

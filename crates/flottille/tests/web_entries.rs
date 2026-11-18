@@ -98,7 +98,11 @@ impl Site {
 }
 
 fn answer(received: &Received, elsewhere: Option<SocketAddr>) -> Vec<u8> {
-    let (status, location, body) = match received.path.as_str() {
+    let (path, query) = received
+        .path
+        .split_once('?')
+        .unwrap_or((received.path.as_str(), ""));
+    let (status, location, body) = match path {
         "/rest/api/3/field" => (
             "200 OK",
             None,
@@ -112,6 +116,35 @@ fn answer(received: &Received, elsewhere: Option<SocketAddr>) -> Vec<u8> {
                 "said": format!("your token is {SECRET}")})
             .to_string(),
         ),
+        // An echo padded so that what it says back falls where the agent wants in the answer:
+        // `n` characters, then the request's credential or the secret alone.
+        "/pad" => {
+            let asked = |key: &str| {
+                query
+                    .split('&')
+                    .find_map(|pair| pair.strip_prefix(&format!("{key}=")))
+                    .unwrap_or_default()
+                    .to_owned()
+            };
+            let said = match asked("what").as_str() {
+                "secret" => SECRET.to_owned(),
+                _ => received
+                    .headers
+                    .get("authorization")
+                    .cloned()
+                    .unwrap_or_default(),
+            };
+            let n: usize = asked("n").parse().unwrap_or(0);
+            ("200 OK", None, format!("{}{said}", "x".repeat(n)))
+        }
+        // A link that carries the secret out.
+        "/linked" => (
+            "200 OK",
+            None,
+            json!({"next": elsewhere.map(|addr| format!("http://{addr}/collect?t={SECRET} more"))})
+                .to_string(),
+        ),
+        "/collect" => ("200 OK", None, "{}".to_owned()),
         "/rest/api/3/issue" => ("201 Created", None, r#"{"key":"ABC-7"}"#.to_owned()),
         "/away" => (
             "302 Found",
@@ -540,4 +573,156 @@ fn an_agent_header_cannot_set_authorization_or_cookie() {
         );
     }
     assert!(api.received().is_empty());
+}
+
+/// What web shows of an answer's body, at most (`web::TEXT_CHARS`).
+const TEXT_CHARS: usize = 30_000;
+
+#[test]
+fn a_secret_cut_at_the_end_of_an_answer_is_never_shown_in_part() {
+    let (api, other) = sites();
+    let user = user_of(&api, &other);
+    let credential = basic();
+    let encoded = credential.strip_prefix("Basic ").unwrap().to_owned();
+    // The echo's padding puts the cut `inside` characters into what it says back.
+    let cases: Vec<(&str, usize)> = [1, 4, 9, 20, 40, credential.len() - 1]
+        .into_iter()
+        .map(|inside| ("auth", inside))
+        .chain([1, 4, 9, SECRET.len() - 1].map(|inside| ("secret", inside)))
+        .collect();
+    let urls: Vec<String> = cases
+        .iter()
+        .map(|(what, inside)| api.url(&format!("/pad?n={}&what={what}", TEXT_CHARS - inside)))
+        .collect();
+    let (_, mcp) = session(&user, &urls);
+    entry(&user, json!({"username": ACCOUNT, "url": api.url("/")}));
+
+    for url in &urls {
+        let text = done(mcp.call("web", call(url, json!({"entry": ENTRY}))));
+        for whole in [encoded.as_str(), SECRET] {
+            for end in 4..=whole.len() {
+                let part = &whole[..end];
+                assert!(!text.contains(part), "{url}: a part of the secret is shown");
+            }
+        }
+    }
+}
+
+#[test]
+fn a_range_header_is_refused_with_an_entry() {
+    let (api, other) = sites();
+    let user = user_of(&api, &other);
+    let echo = api.url("/echo");
+    let (_, mcp) = session(&user, std::slice::from_ref(&echo));
+    entry(&user, json!({"username": ACCOUNT, "url": api.url("/")}));
+
+    for name in ["Range", "if-range"] {
+        let said = refused(
+            &user,
+            mcp.call(
+                "web",
+                call(
+                    &echo,
+                    json!({"entry": ENTRY, "headers": {name: "bytes=40-49"}}),
+                ),
+            ),
+        );
+        assert!(
+            said.to_ascii_lowercase()
+                .contains(&format!("{} header", name.to_ascii_lowercase())),
+            "{said}"
+        );
+    }
+    assert!(api.received().is_empty());
+}
+
+#[test]
+fn web_refuses_an_entry_for_another_port_of_its_host() {
+    let elsewhere = Site::start("127.0.0.1", None);
+    let api = Site::start("127.0.0.1", Some(elsewhere.addr));
+    let user = user_of(&api, &elsewhere);
+    let fields = elsewhere.url("/rest/api/3/field");
+    let (_, mcp) = session(&user, std::slice::from_ref(&fields));
+    entry(&user, json!({"username": ACCOUNT, "url": api.url("/")}));
+
+    let said = refused(
+        &user,
+        mcp.call("web", call(&fields, json!({"entry": ENTRY}))),
+    );
+
+    assert!(said.contains(&api.url("")), "{said}");
+    assert!(said.contains(&elsewhere.url("")), "{said}");
+    assert!(api.received().is_empty());
+    assert!(elsewhere.received().is_empty());
+}
+
+#[test]
+fn web_does_not_follow_a_redirect_to_another_port_with_the_credential() {
+    let elsewhere = Site::start("127.0.0.1", None);
+    let api = Site::start("127.0.0.1", Some(elsewhere.addr));
+    let user = user_of(&api, &elsewhere);
+    let away = api.url("/away");
+    let (_, mcp) = session(&user, std::slice::from_ref(&away));
+    entry(&user, json!({"username": ACCOUNT, "url": api.url("/")}));
+
+    let answer = mcp.call("web", call(&away, json!({"entry": ENTRY})));
+
+    assert!(answer.error, "{}", answer.text);
+    assert!(answer.text.starts_with("refused: "), "{}", answer.text);
+    assert!(
+        answer.text.contains(&elsewhere.url("/collect")),
+        "{}",
+        answer.text
+    );
+    assert_eq!(api.received().len(), 1);
+    assert!(
+        elsewhere.received().is_empty(),
+        "{:?}",
+        elsewhere.received()
+    );
+}
+
+#[test]
+fn a_signed_get_on_a_url_the_agent_built_says_who_it_signs_in_as() {
+    let (api, other) = sites();
+    let user = user_of(&api, &other);
+    let fields = api.url("/rest/api/3/field");
+    // The user's message names no URL: the agent built this one.
+    let (id, mcp) = session(&user, &[]);
+    set_mode(&user, &id, "ask");
+    entry(&user, json!({"username": ACCOUNT, "url": api.url("/")}));
+
+    let number = held(&mcp.call("web", call(&fields, json!({"entry": ENTRY}))));
+
+    let asked = requests(&user)
+        .into_iter()
+        .find(|request| request["number"] == number)
+        .unwrap();
+    let card = asked["reasons"].to_string();
+    for said in [
+        "the agent built this URL itself",
+        "as robin@example.test with the vault entry tracker-key",
+    ] {
+        assert!(card.contains(said), "{said} not in {card}");
+    }
+    assert!(api.received().is_empty());
+}
+
+#[test]
+fn the_links_of_an_answer_are_taken_from_its_masked_text() {
+    let (api, other) = sites();
+    let user = user_of(&api, &other);
+    let linked = api.url("/linked");
+    let (id, mcp) = session(&user, std::slice::from_ref(&linked));
+    set_mode(&user, &id, "ask");
+    entry(&user, json!({"username": ACCOUNT, "url": api.url("/")}));
+
+    let text = done(mcp.call("web", call(&linked, json!({"entry": ENTRY}))));
+    assert!(!text.contains(SECRET), "{text}");
+
+    // The link as the agent was shown it, its secret masked, is a link it may read.
+    let shown = other.url("/collect?t=");
+    assert!(text.contains(&format!("{shown}[masked]")), "{text}");
+    done(mcp.call("web", json!({"action": "read", "url": shown})));
+    assert_eq!(other.received().len(), 1);
 }
