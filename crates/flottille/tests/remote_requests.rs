@@ -811,3 +811,42 @@ fn an_exported_machine_does_not_stop_the_local_daemon_from_starting() {
         String::from_utf8_lossy(&refused.stderr)
     );
 }
+
+#[test]
+fn the_commands_that_run_here_refuse_the_flag() {
+    let pc = Machine::new();
+    for line in [
+        &["doctor"][..],
+        &["vault", "provide", "/nonexistent/login.sock"],
+        &["read-page", "web", "http://app.example.com/"],
+        &["mcp"],
+        &["update"],
+        &["remote", "members"],
+    ] {
+        let flagged = pc.user.run(&[&["--machine", "server"], line].concat());
+        let said = String::from_utf8_lossy(&flagged.stderr);
+        assert!(
+            !flagged.status.success() && said.contains("this machine's own"),
+            "{line:?}: {said}"
+        );
+    }
+}
+
+#[test]
+fn the_variable_alone_does_not_refuse_the_commands_that_run_here() {
+    let pc = Machine::new();
+    // Only the ones that touch nothing outside the test's folders.
+    for line in [
+        &["vault", "provide", "/nonexistent/login.sock"][..],
+        &["read-page", "web", "http://app.example.com/"],
+    ] {
+        let exported = pc
+            .user
+            .command(line)
+            .env("FLOTTILLE_MACHINE", "server")
+            .output()
+            .unwrap();
+        let said = String::from_utf8_lossy(&exported.stderr);
+        assert!(!said.contains("this machine's own"), "{line:?}: {said}");
+    }
+}
