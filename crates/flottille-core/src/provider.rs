@@ -17,21 +17,12 @@ const ENABLED_BY_DEFAULT: [&str; 1] = ["claude"];
 /// refused unless the user allows it (`allow_unqualified_version`).
 pub const QUALIFIED_ONLY: [&str; 2] = ["opencode", "codex"];
 
-/// The model a provider lists that `asked` names: the one offered as it is (`listed_as_is`), else
-/// the newest offered of its family (`newest_of_family`): an alias or an id the provider's list
-/// dropped runs on what replaced it. None when no model of its family is offered.
+/// The model a provider lists that `asked` names: the listed id itself, else the one listed id that
+/// is `asked` followed by a date (`-YYYYMMDD`), as a provider's CLI takes `claude-haiku-4-5` for
+/// `claude-haiku-4-5-20251001`. None when no listed model, or more than one, answers to it. What
+/// the user asks is matched so, never replaced by another model (`resolved_model` is for a model
+/// a session was stored on).
 pub fn listed_model<'a>(
-    offered: impl IntoIterator<Item = &'a str>,
-    asked: &str,
-) -> Option<&'a str> {
-    let offered: Vec<&str> = offered.into_iter().collect();
-    listed_as_is(offered.iter().copied(), asked).or_else(|| newest_of_family(offered, asked))
-}
-
-/// The model a provider lists as `asked` itself: the listed id, else the one listed id that is
-/// `asked` followed by a date (`-YYYYMMDD`), as a provider's CLI takes `claude-haiku-4-5` for
-/// `claude-haiku-4-5-20251001`. None when no listed model, or more than one, answers to it.
-pub fn listed_as_is<'a>(
     offered: impl IntoIterator<Item = &'a str>,
     asked: &str,
 ) -> Option<&'a str> {
@@ -46,6 +37,17 @@ pub fn listed_as_is<'a>(
     });
     let found = dated.next()?;
     dated.next().is_none().then_some(found)
+}
+
+/// The model a session stored on `asked` runs on: the one listed as it is (`listed_model`), else
+/// the newest offered of its family (`newest_of_family`): an alias or an id the provider's list
+/// dropped runs on what replaced it. None when no model of its family is offered.
+pub fn resolved_model<'a>(
+    offered: impl IntoIterator<Item = &'a str>,
+    asked: &str,
+) -> Option<&'a str> {
+    let offered: Vec<&str> = offered.into_iter().collect();
+    listed_model(offered.iter().copied(), asked).or_else(|| newest_of_family(offered, asked))
 }
 
 fn is_date(part: &str) -> bool {

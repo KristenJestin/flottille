@@ -276,11 +276,18 @@ impl Provider {
         models.iter().find(|m| m.id == id)
     }
 
-    /// The model listed under that id, or that id without its date suffix, else the newest listed
-    /// of its family (`provider::listed_model`): the daemon takes each the same way.
+    /// The model listed under that id, or that id without its date suffix (the daemon takes both).
     pub fn model(&self, id: &str) -> Option<&Model> {
         let models = self.models.as_ref()?;
         let listed = provider::listed_model(models.iter().map(|m| m.id.as_str()), id)?;
+        models.iter().find(|m| m.id == listed)
+    }
+
+    /// The model a stored id runs on (`provider::resolved_model`): the one listed as it is, else
+    /// the newest listed of its family, as the daemon starts a session on it.
+    pub fn resolved_model(&self, id: &str) -> Option<&Model> {
+        let models = self.models.as_ref()?;
+        let listed = provider::resolved_model(models.iter().map(|m| m.id.as_str()), id)?;
         models.iter().find(|m| m.id == listed)
     }
 }

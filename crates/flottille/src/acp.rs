@@ -682,17 +682,17 @@ fn own_choice(options: &Value, category: &str) -> Option<String> {
     found.map(str::to_owned)
 }
 
-/// What runs instead of the model asked when the agent does not offer it as it is: the newest
-/// offered of its family (`provider::listed_model`), else the agent's default; with why, as the
-/// conversation says it. `None` when it is offered, or nothing can replace it.
+/// What runs instead of the model a session was stored on when the agent does not offer it as it
+/// is: the newest offered of its family (`provider::resolved_model`), else the agent's default;
+/// with why, as the conversation says it. `None` when it is offered, or nothing can replace it.
 fn runs_instead(options: &Value, asked: &str) -> Option<(String, String)> {
     let option = find_option(options, "model")?;
     let offered = providers::values(&option);
     let ids = || offered.iter().map(String::as_str);
-    if provider::listed_as_is(ids(), asked).is_some() {
+    if provider::listed_model(ids(), asked).is_some() {
         return None;
     }
-    if let Some(newest) = provider::listed_model(ids(), asked) {
+    if let Some(newest) = provider::resolved_model(ids(), asked) {
         let why = format!("the model {asked} is no longer offered by the agent: running {newest}");
         return Some((newest.to_owned(), why));
     }
