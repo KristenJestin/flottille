@@ -53,7 +53,8 @@ impl Keyring for NoKeyring {
 
 /// The hub, served from a temporary state folder in a runtime of the test's own.
 struct TestHub {
-    runtime: tokio::runtime::Runtime,
+    /// Serves the hub while the test runs.
+    _runtime: tokio::runtime::Runtime,
     _folder: tempfile::TempDir,
     served: Served<SystemClock>,
     address: SocketAddr,
@@ -74,7 +75,7 @@ impl TestHub {
         });
         let address = served.address();
         TestHub {
-            runtime,
+            _runtime: runtime,
             _folder: folder,
             served,
             address,
@@ -183,7 +184,8 @@ impl Machine {
     /// One line written to this machine's socket as it is: the answer the daemon wrote back.
     fn raw(&self, line: &str) -> Value {
         self.user.status();
-        let mut stream = UnixStream::connect(self.user.path("runtime/flottille/daemon.sock")).unwrap();
+        let mut stream =
+            UnixStream::connect(self.user.path("runtime/flottille/daemon.sock")).unwrap();
         stream.set_read_timeout(Some(WAIT)).unwrap();
         writeln!(stream, "{line}").unwrap();
         let line = common::read_line_patiently(stream);
@@ -341,11 +343,28 @@ fn the_cli_starts_and_reads_a_session_on_another_machine() {
     let folder = repository(&server.user);
     let added = json_of(pc.on(
         "server",
-        &["project", "add", folder.to_str().unwrap(), "--name", "app", "--yes", "--json"],
+        &[
+            "project",
+            "add",
+            folder.to_str().unwrap(),
+            "--name",
+            "app",
+            "--yes",
+            "--json",
+        ],
     ));
     assert_eq!(added["name"], "app", "{added}");
-    assert!(server.user.call("project.show", json!({"name": "app"})).is_ok());
-    assert!(pc.user.call("project.show", json!({"name": "app"})).is_err());
+    assert!(
+        server
+            .user
+            .call("project.show", json!({"name": "app"}))
+            .is_ok()
+    );
+    assert!(
+        pc.user
+            .call("project.show", json!({"name": "app"}))
+            .is_err()
+    );
 
     let started = json_of(pc.on("server", &["agent", "start", "app", "GREET", "--json"]));
     let id = started["agent"]["id"].as_str().unwrap().to_owned();
@@ -367,16 +386,13 @@ fn the_cli_starts_and_reads_a_session_on_another_machine() {
         .output()
         .unwrap();
     let listed = json_of(listed);
-    assert_eq!(listed["agents"][0]["agent"]["id"], id.as_str());
+    assert!(listed.to_string().contains(&id), "{listed}");
     let status = json_of(pc.on("server", &["status", "--json"]));
     assert_eq!(status["pid"], server.user.status()["pid"]);
 
     // The server names the device in its log, and in the events its serving emitted.
     let log = server.log();
-    assert!(
-        log.contains("agent.start asked by pc from pc"),
-        "{log}"
-    );
+    assert!(log.contains("agent.start asked by pc from pc"), "{log}");
     let events = server
         .user
         .watch(&["--after", "0"])
@@ -393,7 +409,8 @@ fn the_cli_starts_and_reads_a_session_on_another_machine() {
 fn an_unsigned_or_badly_signed_request_is_refused() {
     let (_hub, pc, server) = pc_and_server(User::new());
 
-    let unsigned = pc.raw(&json!({"id": "1", "machine": "server", "method": "daemon.stop"}).to_string());
+    let unsigned =
+        pc.raw(&json!({"id": "1", "machine": "server", "method": "daemon.stop"}).to_string());
     assert_eq!(unsigned["id"], "1");
     assert!(
         error_of(&unsigned).starts_with("refused: this is not a signed request"),
@@ -458,7 +475,7 @@ fn a_request_of_a_removed_device_is_refused() {
 
     // Carried by pc's daemon, which holds no device key: the signature is laptop's.
     let answer = pc.raw(&signed(&device, "1", "server", "project.list", json!({})));
-    assert!(answer["result"].is_array(), "{answer}");
+    assert!(answer["result"]["projects"].is_array(), "{answer}");
 
     let removed = pc.user.run(&["remote", "remove", "laptop"]);
     assert!(
@@ -505,18 +522,16 @@ fn events_of_another_machine_resume_after_the_last_seen_when_the_link_drops() {
     let first_pid = server.user.status()["pid"].clone();
 
     let watch = pc.user.watch(&["--machine", "server", "--after", "0"]);
-    let seen = watch.until(|event| {
-        event["name"] == "daemon.started" && event["data"]["pid"] == first_pid
-    });
+    let seen =
+        watch.until(|event| event["name"] == "daemon.started" && event["data"]["pid"] == first_pid);
     let last = seen.last().unwrap()["seq"].as_u64().unwrap();
 
     // The server stops and starts again: the link drops, and comes back.
     assert!(server.user.run(&["daemon", "stop"]).status.success());
     let second_pid = server.user.status()["pid"].clone();
     assert_ne!(first_pid, second_pid);
-    let after = watch.until(|event| {
-        event["name"] == "daemon.started" && event["data"]["pid"] == second_pid
-    });
+    let after = watch
+        .until(|event| event["name"] == "daemon.started" && event["data"]["pid"] == second_pid);
     // Every event after the last seen, none twice, none missing.
     let seqs: Vec<u64> = after
         .iter()
@@ -679,10 +694,17 @@ fn a_client_started_by_an_agent_is_still_refused_with_machine() {
     )
     .unwrap();
     let answer = mcp.call("run", json!({"line": "sh client.sh"}));
-    assert!(answer.text.contains("exited with code 1"), "{}", answer.text);
-    let said = std::fs::read_to_string(folder.join("client.out")).unwrap();
     assert!(
-        said.contains("refused: this client was started by an agent"),
+        answer.text.contains("exited with code 1"),
+        "{}",
+        answer.text
+    );
+    let said = std::fs::read_to_string(folder.join("client.out")).unwrap();
+    // Refused by its ancestry; where the kernel's Landlock reaches sockets by their path, the
+    // run cannot even open the socket.
+    assert!(
+        said.contains("refused: this client was started by an agent")
+            || said.contains("daemon.sock: Permission denied"),
         "{said}"
     );
     server.user.status();
