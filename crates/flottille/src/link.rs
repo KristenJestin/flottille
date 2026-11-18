@@ -883,6 +883,12 @@ async fn serve(remote: Arc<Remote>, link: Link, name: String, generation: u64) {
 /// of a local client's, its answer, then the events of a subscription, sent back on its stream.
 async fn serve_clients(remote: Arc<Remote>, link: Link, from: String) {
     while let Some(received) = link.next().await {
+        // A machine removed from the list since its link came in carries nothing more.
+        if remote.trusted(&link.peer()).is_none() {
+            received.answer(Err(REMOVED.to_owned()));
+            link.close(REMOVED);
+            break;
+        }
         let Message::Client(request) = received.message().clone() else {
             // Kept apart by the link's protocol name: refused before it gets here.
             received.answer(Err(
