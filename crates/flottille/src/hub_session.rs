@@ -857,3 +857,37 @@ fn trust(
 async fn stopped(stopping: &mut tokio::sync::watch::Receiver<bool>) {
     let _ = stopping.wait_for(|stop| *stop).await;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_machine_that_wakes_from_a_suspend_waits_for_the_next_list() {
+        let (wall, steady) = (std::time::SystemTime::now(), std::time::Instant::now());
+        let at = |seconds: u64, ran: u64| {
+            (
+                wall + Duration::from_secs(seconds),
+                steady + Duration::from_secs(ran),
+            )
+        };
+        let mut awake = Awake::new(wall, steady);
+        // Rounds a second apart, or late on a loaded machine: both clocks move alike.
+        let (now, ran) = at(1, 1);
+        assert!(!awake.slept(now, ran));
+        let (now, ran) = at(31, 31);
+        assert!(!awake.slept(now, ran));
+        // The wall clock set back, or a little ahead, as a time service does.
+        let (now, ran) = at(30, 32);
+        assert!(!awake.slept(now, ran));
+        let (now, ran) = at(35, 33);
+        assert!(!awake.slept(now, ran));
+        // A suspend: an hour on the wall clock, a second on the one that does not count it. The
+        // session is then ended as lost, so that the links wait for the next list.
+        let (now, ran) = at(3635, 34);
+        assert!(awake.slept(now, ran));
+        // And once awake, the rounds go on.
+        let (now, ran) = at(3636, 35);
+        assert!(!awake.slept(now, ran));
+    }
+}

@@ -1167,15 +1167,74 @@ mod tests {
     async fn links_are_released_when_the_hub_sends_no_list_within_the_bound() {
         let dir = tempfile::tempdir().unwrap();
         let (mut remote, _) = remote_in(dir.path(), 1);
-        remote.first_list = Duration::from_millis(400);
-        // At start, and after a session lost: held until the bound, then released with no list.
+        remote.first_list = Duration::from_secs(3);
+        // As at start, then after a session lost: held until the bound, then released with no
+        // list. The hold starts here, not when the remote was made, so that the wait for it is
+        // not what a loaded machine took to make it.
         for _ in 0..2 {
+            remote.lost_hub();
             assert!(remote.holding());
             assert!(!released(&remote, Duration::from_millis(100)).await);
-            assert!(released(&remote, Duration::from_secs(2)).await);
+            assert!(released(&remote, Duration::from_secs(20)).await);
             assert!(!remote.holding());
-            remote.lost_hub();
         }
+    }
+
+    #[tokio::test]
+    async fn an_unknown_key_is_refused_at_once_during_a_hold() {
+        let dir = tempfile::tempdir().unwrap();
+        let (remote, _) = remote_in(dir.path(), 1);
+        let key = MachineKey::load_or_make(&dir.path().join("key")).unwrap();
+        let mut remote = Remote {
+            endpoint: Endpoint::bind(&key, "127.0.0.1:0".parse().unwrap()).unwrap(),
+            ..remote
+        };
+        // A hold far longer than any of the waits below: a link that waits for it is told apart
+        // from one refused at once, however loaded the machine is.
+        remote.first_list = Duration::from_secs(120);
+        let remote = Arc::new(remote);
+        remote.peers();
+        remote.lost_hub();
+        let at = [remote.endpoint.listening().unwrap()];
+        let public = key.public();
+        tokio::spawn(accept(remote.clone()));
+        let dial = |from: MachineKey| async move {
+            let endpoint = Endpoint::dialler(&from).unwrap();
+            endpoint
+                .connect(public, &at, Traffic::Machine, &hello(), "this")
+                .await
+        };
+
+        // A key the list kept does not trust: refused now, not once the hold ends.
+        let stranger = MachineKey::load_or_make(&dir.path().join("stranger")).unwrap();
+        let refused = tokio::time::timeout(Duration::from_secs(5), dial(stranger))
+            .await
+            .expect("an unknown key waits for the hold");
+        assert!(
+            matches!(refused, Err(LinkError::Refused { .. })),
+            "{:?}",
+            refused.err()
+        );
+
+        // A key it trusts waits for the list; a second link of the same key meanwhile does not.
+        let trusted = || MachineKey::load_or_make(&dir.path().join("peer-0")).unwrap();
+        let waiting = tokio::spawn(dial(trusted()));
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(!waiting.is_finished());
+        let again = tokio::time::timeout(Duration::from_secs(5), dial(trusted()))
+            .await
+            .expect("a second link of a key that waits waits too");
+        assert!(
+            matches!(again, Err(LinkError::Refused { .. })),
+            "{:?}",
+            again.err()
+        );
+        remote.heard_hub();
+        let linked = tokio::time::timeout(Duration::from_secs(5), waiting)
+            .await
+            .expect("the list releases the link waiting")
+            .unwrap();
+        assert!(linked.is_ok(), "{:?}", linked.err());
     }
 
     #[tokio::test]

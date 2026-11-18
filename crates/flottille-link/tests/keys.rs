@@ -88,6 +88,61 @@ impl Keyring for NoKeyring {
     }
 }
 
+/// A keyring in which another client keeps its own device key at the same moment as this one:
+/// both items stay, or only the other's when `keeps_one`.
+struct Racing {
+    items: RefCell<Vec<Vec<u8>>>,
+    keeps_one: bool,
+}
+
+impl Racing {
+    fn new(keeps_one: bool) -> Racing {
+        Racing {
+            items: RefCell::new(Vec::new()),
+            keeps_one,
+        }
+    }
+}
+
+impl Keyring for Racing {
+    fn read(&self, _: &[(&str, &str)]) -> Result<Option<Zeroizing<Vec<u8>>>, KeyringError> {
+        let items = self.items.borrow();
+        match items.as_slice() {
+            [] => Ok(None),
+            [one] => Ok(Some(Zeroizing::new(one.clone()))),
+            more => Err(KeyringError::Failed(format!(
+                "{} items have the device key's attributes",
+                more.len()
+            ))),
+        }
+    }
+
+    fn store(&self, _: &str, _: &[(&str, &str)], secret: &[u8]) -> Result<(), KeyringError> {
+        let mut items = self.items.borrow_mut();
+        items.push(vec![5; 32]);
+        if !self.keeps_one {
+            items.push(secret.to_vec());
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn a_device_key_kept_at_the_same_moment_as_another_is_never_taken_for_it() {
+    let (_dir, folder) = state();
+
+    // Two items: which one is the member's cannot be told, and neither is taken.
+    let both = Racing::new(false);
+    assert!(DeviceKey::make().unwrap().keep(&both, &folder).is_err());
+
+    // The other's only: that one is the key kept, not this one.
+    let other = Racing::new(true);
+    let ours = DeviceKey::make().unwrap();
+    let public = ours.public();
+    let kept = ours.keep(&other, &folder).unwrap();
+    assert_ne!(kept.public(), public);
+}
+
 #[test]
 fn a_machine_key_is_made_once_then_read_back() {
     let (_dir, folder) = state();
