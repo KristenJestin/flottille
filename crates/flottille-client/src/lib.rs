@@ -67,9 +67,15 @@ impl From<io::Error> for Error {
 /// The daemon's answer to a request: its result, or the error it answered with.
 pub type Answer = std::result::Result<Value, ErrorBody>;
 
+/// What a request becomes before it is written: for another machine, the request its client
+/// signed with the device key (`docs/remote.md`, "Requests from another machine's clients"),
+/// which the caller makes, the device key being its own.
+pub type Sign = Box<dyn FnMut(&Request) -> io::Result<Value> + Send>;
+
 /// One connection: requests answered in turn, the events that come meanwhile kept for
 /// [`Connection::next_event`].
 pub struct Connection<S: Stream> {
+    sign: Option<Sign>,
     reader: BufReader<S>,
     next_id: u64,
     /// The start of a line a timeout cut short, kept as bytes: a cut can fall inside a character.
@@ -81,11 +87,19 @@ pub struct Connection<S: Stream> {
 impl<S: Stream> Connection<S> {
     pub fn new(stream: S) -> Connection<S> {
         Connection {
+            sign: None,
             reader: BufReader::new(stream),
             next_id: 1,
             partial: Vec::new(),
             queued: VecDeque::new(),
         }
+    }
+
+    /// Every request of this connection written as `sign` makes it: the daemon carries a signed
+    /// one to the machine it names.
+    pub fn signing(mut self, sign: Sign) -> Connection<S> {
+        self.sign = Some(sign);
+        self
     }
 
     /// The stream, for a client that speaks the protocol on its own. Taken before anything was
@@ -103,7 +117,11 @@ impl<S: Stream> Connection<S> {
             method: method.to_owned(),
             params,
         };
-        let mut line = serde_json::to_vec(&request).map_err(io::Error::other)?;
+        let mut line = match &mut self.sign {
+            Some(sign) => serde_json::to_vec(&sign(&request)?),
+            None => serde_json::to_vec(&request),
+        }
+        .map_err(io::Error::other)?;
         line.push(b'\n');
         let stream = self.reader.get_mut();
         stream.write_all(&line)?;

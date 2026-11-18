@@ -273,6 +273,18 @@ impl Conn {
         recv.read_to_end(limit).await.map_err(read_failure)
     }
 
+    /// Sends `frame` on a stream of its own, and gives the stream the other side answers on, read
+    /// frame by frame (`Frames`): a request whose answer is followed by events.
+    pub(crate) async fn open(&self, frame: &[u8]) -> Result<Frames, Failure> {
+        let (mut send, recv) = self.0.open_bi().await.map_err(failure)?;
+        send.write_all(frame).await.map_err(write_failure)?;
+        let _ = send.finish();
+        Ok(Frames {
+            recv,
+            buffer: Vec::new(),
+        })
+    }
+
     /// The next frame the other side sends, with the stream to answer it on; `None` once the
     /// connection is gone. A stream that fails alone is passed over.
     pub(crate) async fn next(&self, limit: usize) -> Option<(Vec<u8>, Reply)> {
@@ -308,6 +320,58 @@ impl Reply {
 
     pub(crate) async fn send_owned(self, frame: Vec<u8>) {
         self.send(&frame).await;
+    }
+
+    /// Writes one frame of an answer given frame by frame, a newline after it; `false` once the
+    /// other side stopped reading.
+    pub(crate) async fn line(&mut self, frame: &[u8]) -> bool {
+        self.0.write_all(frame).await.is_ok() && self.0.write_all(b"\n").await.is_ok()
+    }
+
+    /// Ends an answer given frame by frame, once the other side read it.
+    pub(crate) async fn end(mut self) {
+        if self.0.finish().is_ok() {
+            let _ = self.0.stopped().await;
+        }
+    }
+
+    /// Until the other side stops reading the answer, or the connection is gone.
+    pub(crate) fn gone(&self) -> impl Future<Output = ()> + Send + 'static {
+        let stopped = self.0.stopped();
+        async move {
+            let _ = stopped.await;
+        }
+    }
+}
+
+/// An answer read frame by frame, each ended by a newline.
+pub(crate) struct Frames {
+    recv: quinn::RecvStream,
+    buffer: Vec<u8>,
+}
+
+impl Frames {
+    /// The next frame; `None` once the other side ended the stream. What it wrote last without a
+    /// newline is a frame too: a refusal of the whole stream is one frame, written so.
+    pub(crate) async fn next(&mut self, limit: usize) -> Option<Result<Vec<u8>, Failure>> {
+        loop {
+            if let Some(at) = self.buffer.iter().position(|byte| *byte == b'\n') {
+                let rest = self.buffer.split_off(at + 1);
+                let mut frame = std::mem::replace(&mut self.buffer, rest);
+                frame.pop();
+                return Some(Ok(frame));
+            }
+            if self.buffer.len() > limit {
+                return Some(Err(Failure::Lost("a frame is too long".to_owned())));
+            }
+            match self.recv.read_chunk(64 * 1024, true).await {
+                Ok(Some(chunk)) => self.buffer.extend_from_slice(&chunk.bytes),
+                Ok(None) if self.buffer.is_empty() => return None,
+                Ok(None) => return Some(Ok(std::mem::take(&mut self.buffer))),
+                Err(quinn::ReadError::ConnectionLost(error)) => return Some(Err(failure(error))),
+                Err(other) => return Some(Err(Failure::Lost(other.to_string()))),
+            }
+        }
     }
 }
 

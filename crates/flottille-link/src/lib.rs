@@ -38,7 +38,8 @@ pub use control::{
 pub use hello::{Hello, NeedsUpdate, PeerState, choose};
 pub use invitation::{Invitation, InvitationAsk, InvitationError, Token};
 pub use link::{
-    Accepting, Endpoint, FRAME_LIMIT, Link, LinkError, MachineMessage, Message, Received, Traffic,
+    Accepting, Answers, Endpoint, FRAME_LIMIT, Link, LinkError, MachineMessage, Message, Received,
+    Streamed, Traffic,
 };
 pub use members::{
     Action, Change, ChangeHash, ListError, MANAGING_HEADROOM, MOST_CHANGES, Member, MemberList,
