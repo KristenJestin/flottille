@@ -2195,7 +2195,10 @@ async fn launch_says(daemon: &Daemon, grant: &Grant, args: &Value) -> Result<Vec
     if root && !is_root(daemon, grant) {
         return Err(Outcome::Refused(CHILD_ROOTS.into()));
     }
-    crate::tree::launch_refusal(grant.place.workspace.as_deref(), args)?;
+    crate::tree::launch_refusal(&grant.place.project, grant.place.workspace.as_deref(), args)?;
+    if let Some(elsewhere) = crate::tree::launched_elsewhere(&grant.place.project, args) {
+        return launch_elsewhere_says(daemon, grant, elsewhere, args).await;
+    }
     let title = args["title"].as_str().unwrap_or_default();
     let mut says = match (args["new_workspace"].as_str(), args["workspace"].is_null()) {
         (Some(name), true) => {
@@ -2258,6 +2261,94 @@ async fn launch_says(daemon: &Daemon, grant: &Grant, args: &Value) -> Result<Vec
     Ok(says)
 }
 
+/// What a launch in another project does, in words, for the user who decides it every time: the
+/// two projects and the caller, the kind, the place in that project and the first message whole
+/// (`docs/tools.md`, "Sessions an agent starts"). A project that is not registered is refused
+/// before anything is asked.
+async fn launch_elsewhere_says(
+    daemon: &Daemon,
+    grant: &Grant,
+    elsewhere: &str,
+    args: &Value,
+) -> Result<Vec<String>, Outcome> {
+    let project = projects::load_project(daemon, elsewhere).map_err(|failure| {
+        Outcome::Refused(format!(
+            "refused: {}: agent_launch starts a session in a registered project only",
+            failure.message
+        ))
+    })?;
+    let caller = daemon
+        .read(|store| store.agent(&grant.agent))
+        .map_err(|error| Outcome::Failed(error.to_string()))?
+        .ok_or_else(|| Outcome::Failed(format!("there is no agent {}", grant.agent)))?;
+    let title = args["title"].as_str().unwrap_or_default();
+    let whose = match args["kind"].as_str() {
+        Some("led") => {
+            "led by it, a session of that project the user sees and may talk to, \
+            which asks it its questions and wakes it"
+        }
+        _ => "for the user, handed over, theirs",
+    };
+    let mut says = Vec::new();
+    let place = match (args["new_workspace"].as_str(), args["workspace"].as_str()) {
+        (Some(name), None) => {
+            let repositories: Option<Vec<String>> =
+                serde_json::from_value(args["repositories"].clone()).unwrap_or_default();
+            let bases = bases_of(
+                &project,
+                serde_json::from_value(args["base"].clone()).unwrap_or_default(),
+                repositories.as_deref(),
+            )?;
+            says = create_says(
+                daemon,
+                &grant.place,
+                &project,
+                name,
+                &repositories,
+                args["branch"].as_str(),
+                &bases,
+            )
+            .await?;
+            says[0] = format!("{} of project {}", says[0], project.name);
+            format!("the new workspace {name}")
+        }
+        (None, Some(name)) if !crate::tree::names_main(daemon, &project.name, name) => {
+            if !matches!(
+                daemon.read(|store| store.workspace(&project.name, name)),
+                Ok(Some(_))
+            ) {
+                return Err(Outcome::Refused(format!(
+                    "refused: project {} has no workspace {name}: name one of its workspaces, \
+                     main for its folder, or new_workspace for a new one",
+                    project.name
+                )));
+            }
+            format!("its workspace {name}")
+        }
+        _ => "main, its project folder".to_owned(),
+    };
+    says.insert(
+        0,
+        format!(
+            "{}'s session {} asks to start a session in {}: \"{title}\", {whose}, in {place}, a \
+             lead there with that project's own tools, settings and vault entries (asked by agent \
+             {})",
+            grant.place.project,
+            match &caller.title {
+                Some(title) => format!("\"{title}\""),
+                None => format!("agent {}", caller.id),
+            },
+            project.name,
+            caller.id
+        ),
+    );
+    says.push(format!(
+        "Its first message: {}",
+        args["brief"].as_str().unwrap_or_default()
+    ));
+    Ok(says)
+}
+
 /// What `session_send` does, in words: the session written to and the text whole, or, for its
 /// first message to a session it did not start, the leave it asks with that message; or the
 /// refusal of a session the caller may not write to, before anything is asked.
@@ -2272,6 +2363,16 @@ fn session_says(daemon: &Daemon, grant: &Grant, args: &Value) -> Result<Vec<Stri
         Relation::Started => "which you started",
         Relation::StartedYou => "the agent that started this session",
         Relation::Leave => "which the user let you write to",
+        Relation::NoLeave if session.project != caller.project => {
+            let (writer, reached) = crate::tree::sessions_across(daemon, &caller, &session);
+            return Ok(vec![
+                format!(
+                    "Let the session {writer} read and write to {reached}, from now on without \
+                     asking you"
+                ),
+                format!("Its first message: {}", asked.text),
+            ]);
+        }
         Relation::NoLeave => {
             return Ok(vec![
                 format!(

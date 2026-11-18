@@ -732,6 +732,7 @@ const SERVED: [Definition; 33] = [
         schema: || {
             json!({"type": "object", "properties": {
                 "kind": {"type": "string", "enum": ["child", "led", "handed"], "description": "child: a part of your task, in your place, that reports to you. led: an autonomous session you pilot, which asks you and wakes you. handed: a session you start for the user and let go."},
+                "project": {"type": "string", "description": "With led or handed: another registered project to start the session in, a full lead of its own there; yours when left out. Always held for the user."},
                 "title": {"type": "string", "description": "The task in a few words: how you and the user will name this session or child."},
                 "brief": {"type": "string", "description": "Everything the session or the child needs to know."},
                 "provider": {"type": "string", "description": "The provider it runs on: yours when left out."},
@@ -2450,6 +2451,7 @@ async fn played_in(
                                 && !removes_own_workspace(grant, tool, &args)
                                 && !gate::asks_leave(&ask)
                                 && !gate::asks_end(&ask)
+                                && !gate::asks_launch_elsewhere(&ask)
                                 && !crate::services::stops(tool, &args)
                                 && !crate::extensions::held_for_the_user(tool, &args)
                                 && !gate::asks_review(&ask)
@@ -2723,11 +2725,21 @@ fn verdict_of(
             Ok(false) => {}
         }
     }
+    if tool == "session_read" && crate::session_read::needs_leave(daemon, grant, args) {
+        return gate::read_leave();
+    }
     if tool == "agent_stop" && crate::tree::ends_session(daemon, grant, args) {
         return gate::end_session();
     }
     if tool == "agent_stop" && crate::tree::ends_led(daemon, grant, args) {
         return gate::end_led();
+    }
+    // A launch in another project is the user's, every time: its setup steps are that
+    // project's, played once the user allowed the session.
+    if tool == "agent_launch"
+        && crate::tree::launched_elsewhere(&grant.place.project, args).is_some()
+    {
+        return gate::launch_elsewhere(grant, args);
     }
     // A new workspace's launch is classified by its steps below, but its brief is held to the
     // judge's limit like any other launch's.
