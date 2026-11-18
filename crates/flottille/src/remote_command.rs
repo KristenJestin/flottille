@@ -539,17 +539,17 @@ fn settle_pending(
         return Ok(None);
     };
     let key = pending.public();
-    if ask("remote.machines", json!({}))?["hub"].is_null() {
-        // Not set up: a member only of a join the daemon accepted, its declaration still to come.
-        eprintln!(
-            "A setup or a join of this device whose command was gone is looked for: a join \
-             waits for the member who invited it to accept or refuse it, and goes on with the \
-             code it was given, not the one typed now..."
-        );
-        let accepted = ask("remote.join", json!({"key": key, "resume": true}))?;
-        if !accepted.is_null() {
-            return Ok(Some((accepted, pending)));
-        }
+    // Also when pinned: a setup that replaces the hub is waited for the same way, and the join of
+    // a machine pinned cannot hold an accepted device. A member only of a join the daemon
+    // accepted has its declaration still to come.
+    eprintln!(
+        "A setup or a join of this device whose command was gone is looked for: a join \
+         waits for the member who invited it to accept or refuse it, and goes on with the \
+         code it was given, not the one typed now..."
+    );
+    let accepted = ask("remote.join", json!({"key": key, "resume": true}))?;
+    if !accepted.is_null() {
+        return Ok(Some((accepted, pending)));
     }
     // Pinned now, before or by a setup the daemon ended meanwhile: its list says.
     let listed = !ask("remote.machines", json!({}))?["hub"].is_null()
