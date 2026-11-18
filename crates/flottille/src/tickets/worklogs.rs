@@ -115,7 +115,9 @@ impl Site<'_> {
 
 impl Site<'_> {
     /// `PUT /rest/api/3/<path>` with `body` as JSON: Jira answers a change with `204` and nothing
-    /// to read, or says why it refused. A write, so a time-out is said as not confirmed.
+    /// to read, or says why it refused. A write: "nothing was written" is said of a status that is no
+    /// success alone; a time-out, or a failure once the request is sent, may follow a change Jira
+    /// applied, so it is said as not confirmed.
     pub(super) async fn put(&self, path: &str, body: &Value) -> Result<(), String> {
         let url = rest_url(self.site, path)?;
         let answer = tokio::time::timeout(
@@ -136,10 +138,13 @@ impl Site<'_> {
                 self.site,
                 READ_TIME.as_secs()
             )),
-            Ok(Err(why)) => Err(self.clean(&why)),
+            Ok(Err(why)) => Err(format!(
+                "{}; the change was not confirmed: check the work item before changing it again",
+                self.clean(&why)
+            )),
             Ok(Ok((status, _))) if status.is_success() => Ok(()),
             Ok(Ok((status, text))) => Err(format!(
-                "Jira on {} answered {status}: {}",
+                "Jira on {} answered {status}: {}; nothing was written",
                 self.site,
                 self.clean(&super::worklog::first_words(&text))
             )),

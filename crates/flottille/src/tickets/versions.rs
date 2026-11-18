@@ -193,8 +193,20 @@ pub(super) async fn listed(project: &Project, state: &str, asked: &TicketsCall) 
 
 /// The version a `create` puts a work item in, found in the project it is made in.
 pub(super) async fn chosen(site: &str, project: &str, named: &str) -> Result<Version, String> {
+    chosen_among(site, project, named)
+        .await
+        .and_then(|found| found)
+}
+
+/// The same, told apart: the outer `Err` is a read that failed (`acli` is down), the inner one a
+/// version the project has not.
+pub(super) async fn chosen_among(
+    site: &str,
+    project: &str,
+    named: &str,
+) -> Result<Result<Version, String>, String> {
     let all = of(site, &[project], "written").await?;
-    find(&all, &[project], named).cloned()
+    Ok(find(&all, &[project], named).cloned())
 }
 
 /// The version `named` says, for a list or a search to filter by: looked for in the project the

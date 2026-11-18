@@ -151,6 +151,7 @@ pub(super) fn through_api(args: &Value) -> bool {
 }
 
 /// Why such an edit cannot be done before anyone is asked: a Jira tracker names no entry for it.
+/// None is no leave to skip the other checks of the call.
 pub(super) fn unwritable_edit(tracker: &ProjectTracker) -> Option<String> {
     match tracker {
         ProjectTracker::Jira {
@@ -199,8 +200,12 @@ pub fn says(
         && matches!(project.tracker, Some(ProjectTracker::Jira { .. }))
     {
         // An entry the vault does not hold is refused here, before the user is asked.
-        entry_of(daemon, project)?;
-        return Ok(Vec::new());
+        let (entry, _, _) = entry_of(daemon, project)?;
+        let key = given(args, "ticket").map_or_else(String::new, |key| format!(" of {key}"));
+        return Ok(vec![format!(
+            "It changes the work item's fields, parent or fix version{key} through Jira's API, \
+             with the vault entry {entry}"
+        )]);
     }
     if args["action"] != "log_time" {
         return Ok(Vec::new());
