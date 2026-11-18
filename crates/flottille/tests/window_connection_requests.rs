@@ -16,6 +16,7 @@ use common::mcp::{Mcp, server_of};
 use flottille_window::Shell;
 use flottille_window::conversation::Block;
 use flottille_window::session::SessionPage;
+use flottille_window::shell::Selection;
 use flottille_window::vault::VaultSection;
 use gpui_design_system::motion::PANEL;
 use gpui_design_system::omarchy::Environment;
@@ -1718,4 +1719,100 @@ fn a_failed_write_of_an_accepted_request_says_so_and_opens_no_review(cx: &mut Te
     // Nothing was written, so no review is opened for it: the connection is as it was.
     assert!(!present(cx, "connection-review-server"));
     assert!(!visible(cx, "connection-review"));
+}
+
+// ── A dialog opens over the page it is asked from (#1018) ─────────────────────────────────────
+
+fn selected(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Option<Selection> {
+    shell.read_with(cx, |s, _| s.selected().cloned())
+}
+
+fn stack(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Vec<&'static str> {
+    shell.read_with(cx, |s, cx| s.modal_stack(cx))
+}
+
+#[gpui_kit::test]
+fn edit_on_a_connection_request_opens_the_form_over_the_session(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, mcp) = a_root(&user);
+    let line = line_of(&user, "almanac");
+    let number = held(
+        &mcp,
+        json!({"action": "add", "name": "almanac", "about": "Notes.", "command": line}),
+    );
+
+    let (shell, cx) = window(&user, cx);
+    open_card(&shell, cx, &lead, number);
+    open_dialog(&shell, cx, number);
+    click(cx, "connection-request-edit");
+    until(&shell, cx, "the form opens", |cx| {
+        visible(cx, "connection-modal")
+    });
+    settle(cx);
+
+    // The user is where they were: the session, with the request's card in its rail.
+    assert_eq!(selected(&shell, cx), Some(Selection::Session(lead.clone())));
+    assert!(
+        session_page(&shell, cx).is_some(),
+        "the session's page is shown"
+    );
+    assert!(
+        present(cx, &format!("open-request-{number}")),
+        "its card is behind the form"
+    );
+    assert_eq!(stack(&shell, cx), ["connection-modal"]);
+    let fields = connections_section(&shell, cx).read_with(cx, |s, _| s.form_fields().unwrap());
+    assert_eq!(
+        fields.about.read_with(cx, |f, _| f.value().to_string()),
+        "Notes."
+    );
+
+    // Cancel leaves the request waiting, on the same page.
+    click(cx, "connection-modal-cancel");
+    until(&shell, cx, "the form closes", |cx| {
+        !visible(cx, "connection-modal")
+    });
+    assert_eq!(selected(&shell, cx), Some(Selection::Session(lead)));
+    assert_eq!(pending(&user), 1, "the request is still waiting");
+}
+
+#[gpui_kit::test]
+fn a_dialog_opened_from_a_dialog_stacks_and_escape_returns_to_the_first(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, mcp) = a_root(&user);
+    let number = a_bearer_request(&mcp);
+
+    let (shell, cx) = window(&user, cx);
+    waiting_for_its_entry(&shell, cx, &lead, number);
+    click(cx, "connection-request-new-entry-notes-key");
+    until(&shell, cx, "the vault's dialog opens", |cx| {
+        visible(cx, "vault-modal")
+    });
+    settle(cx);
+
+    // The request's dialog stays, under the entry's.
+    assert_eq!(stack(&shell, cx), ["connection-request", "vault-modal"]);
+    assert!(
+        visible(cx, "connection-request"),
+        "the first is still drawn"
+    );
+    assert_eq!(selected(&shell, cx), Some(Selection::Session(lead.clone())));
+
+    // Escape closes the top one and returns to the one below.
+    cx.update(|window, cx| window.press("escape", cx));
+    settle(cx);
+    assert_eq!(stack(&shell, cx), ["connection-request"]);
+    assert!(!visible(cx, "vault-modal"), "the top one is closed");
+    assert!(
+        visible(cx, "connection-request"),
+        "the first is back, alone"
+    );
+
+    // Escape again closes it: the request stays waiting, the page is as it was.
+    cx.update(|window, cx| window.press("escape", cx));
+    settle(cx);
+    assert!(stack(&shell, cx).is_empty());
+    assert!(!visible(cx, "connection-request"));
+    assert_eq!(selected(&shell, cx), Some(Selection::Session(lead)));
+    assert_eq!(pending(&user), 1);
 }

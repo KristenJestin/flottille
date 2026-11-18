@@ -15,6 +15,7 @@ use flottille_window::Shell;
 use flottille_window::conversation::Block;
 use flottille_window::link::Connect;
 use flottille_window::session::SessionPage;
+use flottille_window::shell::Selection;
 use flottille_window::tree::session_id;
 use flottille_window::vault::VaultSection;
 use gpui_design_system::omarchy::Environment;
@@ -693,4 +694,106 @@ fn the_new_entry_form_does_not_offer_a_project_it_would_refuse(cx: &mut TestAppC
         !has("vault-project-app", cx),
         "the project is offered on edit"
     );
+}
+
+// ── A dialog opens over the page it is asked from (#1018) ─────────────────────────────────────
+
+/// The vault's section, whichever page is shown: the form is a dialog of the window.
+fn the_vault(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Entity<VaultSection> {
+    shell.read_with(cx, |s, cx| s.vault(cx))
+}
+
+fn selected(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Option<Selection> {
+    shell.read_with(cx, |s, _| s.selected().cloned())
+}
+
+#[gpui_kit::test]
+fn new_entry_on_a_vault_ask_opens_over_the_session(cx: &mut TestAppContext) {
+    let user = user();
+    let id = session(&user, "log my time");
+    let (shell, cx) = window(&user, cx);
+    let (page, at) = card(&shell, &id, cx);
+    assert_eq!(selected(&shell, cx), Some(Selection::Session(id.clone())));
+
+    cx.update(|window, cx| window.click(format!("row-{at}-vault-ask-add"), cx));
+    settle(cx);
+
+    // The form is open, drawn, and nothing else was shown: the session and its card are behind it.
+    let vault = the_vault(&shell, cx);
+    assert!(vault.read_with(cx, |v, _| v.is_open()), "the form is open");
+    assert!(
+        cx.update(|window, _| window.try_find("vault-modal").is_some_and(|f| f.visible())),
+        "the form is drawn"
+    );
+    assert_eq!(
+        selected(&shell, cx),
+        Some(Selection::Session(id.clone())),
+        "the window stays on the session"
+    );
+    assert_eq!(
+        session_page(&shell, cx),
+        page,
+        "the session's page is the one shown"
+    );
+    assert!(
+        has(format!("row-{at}-vault-ask-add"), cx),
+        "its card is still behind"
+    );
+    assert_eq!(
+        shell.read_with(cx, |s, cx| s.modal_stack(cx)),
+        ["vault-modal"]
+    );
+    assert_eq!(value(&vault, VaultSection::name_field, cx), "jira-time");
+    std::fs::write(user.path("fake/release"), "").unwrap();
+}
+
+#[gpui_kit::test]
+fn saving_the_entry_from_a_request_answers_it_and_leaves_the_page_as_it_was(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    let id = session(&user, "log my time");
+    let (shell, cx) = window(&user, cx);
+    let (page, at) = card(&shell, &id, cx);
+    cx.update(|window, cx| window.click(format!("row-{at}-vault-ask-add"), cx));
+    settle(cx);
+    let vault = the_vault(&shell, cx);
+    let secret = vault
+        .read_with(cx, |v, _| v.secret_field().cloned())
+        .expect("the form's secret");
+    cx.update(|window, cx| secret.update(cx, |f, cx| f.set_value(SECRET, window, cx)));
+    let username = vault
+        .read_with(cx, |v, _| v.username_field().cloned())
+        .expect("the form's username");
+    cx.update(|window, cx| username.update(cx, |f, cx| f.set_value("dev@example.com", window, cx)));
+    cx.update(|window, cx| window.click("save-vault-entry", cx));
+    until(&shell, cx, "the request is answered", |cx| {
+        if let Some(why) = vault.read_with(cx, |v, _| v.form_error().map(str::to_owned)) {
+            panic!("the form refused: {why}");
+        }
+        user.call("vault.asks", json!({})).unwrap()["asks"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    });
+    settle(cx);
+
+    // No click on the session was needed to be back on it: it was never left.
+    assert_eq!(selected(&shell, cx), Some(Selection::Session(id.clone())));
+    assert_eq!(session_page(&shell, cx), page);
+    assert!(
+        !vault.read_with(cx, |v, _| v.is_open()),
+        "the form is closed"
+    );
+    assert!(
+        shell.read_with(cx, |s, cx| s.modal_stack(cx)).is_empty(),
+        "no dialog is left open"
+    );
+    until(&shell, cx, "the card folds away", |cx| {
+        settle(cx);
+        !has(format!("row-{at}-vault-ask-add"), cx)
+    });
+    let set = user.call("vault.list", json!({})).unwrap()["entries"][0].clone();
+    assert_eq!(set["name"], "jira-time", "{set}");
+    std::fs::write(user.path("fake/release"), "").unwrap();
 }

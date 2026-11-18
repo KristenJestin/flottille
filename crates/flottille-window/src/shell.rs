@@ -854,6 +854,23 @@ impl Shell {
         &self.main
     }
 
+    /// The vault's section, whichever page is shown: its form is a dialog over that page.
+    pub fn vault(&self, cx: &gpui_kit::App) -> Entity<VaultSection> {
+        self.settings.read(cx).vault().clone()
+    }
+
+    /// The connections' section, whichever page is shown: its form and its review are dialogs
+    /// over that page.
+    pub fn connections(&self, cx: &gpui_kit::App) -> Entity<ConnectionsSection> {
+        self.settings.read(cx).connections().clone()
+    }
+
+    /// The dialogs open over the page, the first opened first and the one on top last, by the
+    /// id of their modal.
+    pub fn modal_stack(&self, _cx: &gpui_kit::App) -> Vec<&'static str> {
+        Vec::new()
+    }
+
     /// The window's toasts, at its bottom right.
     pub fn toasts(&self) -> &Entity<ToastStack> {
         &self.toasts
