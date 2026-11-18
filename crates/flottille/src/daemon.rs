@@ -759,6 +759,10 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
     let mut lines = BufReader::new(read).lines();
     let mut stopping = daemon.stopping.subscribe();
     let mut subscriptions = JoinSet::new();
+    // The requests carried to a machine: ended with the connection, so that a watch carried does
+    // not outlive its client (its stream to the other machine closes, and that machine ends its
+    // subscription).
+    let mut carried = JoinSet::new();
     // The workspaces this connection watches: their forges are read again while it stays open.
     let mut watched: HashMap<(String, String), forge::Watch> = HashMap::new();
     // Held while this connection is a window's.
@@ -768,6 +772,7 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
             line = lines.next_line() => line,
             _ = stopping.wait_for(|stopping| *stopping) => break false,
             _ = watch_dropped.recv() => break true,
+            Some(_) = carried.join_next(), if !carried.is_empty() => continue,
         };
         let Ok(Some(line)) = line else { break true };
         // A request a client signed for a machine it names (`docs/remote.md`, "Requests from
@@ -779,9 +784,10 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
             && request.contains_key("machine")
         {
             let (daemon, out, dropped) = (daemon.clone(), out.clone(), dropped.clone());
-            tokio::spawn(async move {
+            carried.spawn(async move {
                 if crate::link::forward(daemon, Value::Object(request), out).await {
-                    let _ = dropped.send(()).await;
+                    // Full: it is said already.
+                    let _ = dropped.try_send(());
                 }
             });
             continue;
@@ -935,6 +941,7 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
         }
     };
 
+    carried.abort_all();
     // A client that left reads nothing more; a stopping daemon lets subscribers send the rest.
     if client_left {
         subscriptions.abort_all();
