@@ -605,6 +605,11 @@ fn a_machine_message_cannot_carry_a_user_method() {
         .unwrap()
         .parse()
         .unwrap();
+    // pc's daemon is stopped, so that no link of its own takes the one below (two links of one
+    // machine are not kept: the second closes the first, whoever dials again): the key is only
+    // what the test holds.
+    assert!(pc.user.run(&["daemon", "stop"]).status.success());
+    server.wait_for("pc", "offline");
     // pc's machine key, as an agent that read it would hold it: it signs what a machine may
     // send, never what the user asks.
     let machine_key = MachineKey::load_or_make(&pc.folder()).unwrap();
@@ -629,9 +634,6 @@ fn a_machine_message_cannot_carry_a_user_method() {
         .await
         .unwrap()
         .unwrap();
-        // A slow runner: pc's daemon, whose own link this one replaced, dials again within a
-        // second.
-        tokio::time::sleep(Duration::from_secs(3)).await;
         let mut refusals = Vec::new();
         for frame in [
             // A user's request, even one a member's device signed, on the machine side.
