@@ -630,7 +630,7 @@ async fn serve(
     let reason = loop {
         tokio::select! {
             accepted = listener.accept() => match accepted {
-                Ok((stream, _)) => match started_by_an_agent(&stream) {
+                Ok((stream, _)) => match started_by_an_agent(&stream, std::process::id()) {
                     Some(pid) => {
                         eprintln!(
                             "flottille daemon: refused a client started by an agent (pid {pid})"
@@ -693,18 +693,18 @@ async fn wind_down(
     Ok(())
 }
 
-/// The pid of a client that descends from the daemon. Everything the daemon starts is an agent,
+/// The pid of a client that descends from the daemon, `daemon_pid`. Everything the daemon starts is an agent,
 /// a command of one, or a program of the daemon's own (git, a forge's command line, a provider's
 /// `--version`), and none of them is a client of the daemon: such a client was started by an
 /// agent. A client whose ancestry cannot be read is refused too.
-fn started_by_an_agent(stream: &UnixStream) -> Option<u32> {
+fn started_by_an_agent(stream: &UnixStream, daemon_pid: u32) -> Option<u32> {
     let pid = stream
         .peer_cred()
         .ok()
         .and_then(|credentials| credentials.pid())
         .and_then(|pid| u32::try_from(pid).ok())
         .unwrap_or(0);
-    children::descends_from(pid, std::process::id()).then_some(pid)
+    children::descends_from(pid, daemon_pid).then_some(pid)
 }
 
 /// Answers each request of a refused client with the refusal, until it leaves or `REFUSED_FOR`
@@ -1204,6 +1204,58 @@ mod tests {
     use super::*;
 
     const OURS: (u64, u64) = (1, 2);
+
+    /// A client whose credentials the kernel gives as this process's: the two ends of a pair are
+    /// made here. The refusal of a client started by an agent is reached without any run of one,
+    /// which Landlock may keep from the socket where the kernel has it.
+    #[tokio::test]
+    async fn a_client_that_descends_from_the_daemon_is_refused_and_told_why() {
+        let (client, served) = UnixStream::pair().unwrap();
+        // The daemon is this process's parent: this process, the client, descends from it.
+        let daemon = std::os::unix::process::parent_id();
+        assert_eq!(
+            started_by_an_agent(&served, daemon),
+            Some(std::process::id())
+        );
+        // Its own descendant too: a client is no stranger to itself.
+        assert_eq!(
+            started_by_an_agent(&served, std::process::id()),
+            Some(std::process::id())
+        );
+
+        let refusing = tokio::spawn(refuse(served));
+        let (read, mut write) = client.into_split();
+        write
+            .write_all(b"{\"id\":\"1\",\"method\":\"project.list\"}\n")
+            .await
+            .unwrap();
+        let line = BufReader::new(read)
+            .lines()
+            .next_line()
+            .await
+            .unwrap()
+            .unwrap();
+        let answer: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(answer["id"], "1");
+        assert_eq!(answer["error"]["code"], "refused");
+        assert_eq!(answer["error"]["message"], REFUSED_CLIENT);
+        drop(write);
+        refusing.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_client_that_does_not_descend_from_the_daemon_is_served() {
+        let (_client, served) = UnixStream::pair().unwrap();
+        // A process of its own is the daemon here: this one is not its descendant.
+        let mut daemon = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let stranger = started_by_an_agent(&served, daemon.id());
+        let _ = daemon.kill();
+        let _ = daemon.wait();
+        assert_eq!(stranger, None);
+    }
 
     #[test]
     fn only_a_socket_path_that_is_not_found_or_leads_elsewhere_is_gone() {
