@@ -143,13 +143,20 @@ pub fn unwritable(tracker: &ProjectTracker, args: &Value) -> Option<String> {
 
 /// The refusal of a Jira tracker that names no vault entry for its worklogs, and how to set one.
 pub(super) fn no_entry() -> String {
-    "refused: this project names no vault entry to log time with: the user chooses one \
-     in the project's Settings, Tracker (the window offers the way), or creates one \
-     (flottille vault set <name> --username <their Jira account e-mail>, the secret \
-     being a Jira API token) and writes its name in the project's file, [tracker] \
-     worklog_token = \"<name>\"; Flottille never logs time with a sign-in it was not \
-     given"
-        .into()
+    no_entry_to("log time with", "logs time")
+}
+
+/// The same refusal for another use of the entry: `to` completes "no vault entry to …", `never`
+/// is what Flottille never does with a sign-in it was not given.
+pub(super) fn no_entry_to(to: &str, never: &str) -> String {
+    format!(
+        "refused: this project names no vault entry to {to}: the user chooses one \
+         in the project's Settings, Tracker (the window offers the way), or creates one \
+         (flottille vault set <name> --username <their Jira account e-mail>, the secret \
+         being a Jira API token) and writes its name in the project's file, [tracker] \
+         worklog_token = \"<name>\"; Flottille never {never} with a sign-in it was not \
+         given"
+    )
 }
 
 /// What the card says of a worklog, and the refusal of a vault that does not hold the entry: found

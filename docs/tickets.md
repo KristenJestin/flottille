@@ -75,8 +75,11 @@ user's), so that the user's own sign-in works; a call is cut after 30 s.
   quoted, never spliced. A text written is passed as one argument, never through a shell.
 - **Agents never get that sign-in.** An agent's own command runs have the forge tokens emptied and
   `GH_CONFIG_DIR` pointed at an empty folder (`docs/tools.md`), so `gh` has no login there.
-  `acli`'s sign-in lives in the user's home, which no variable of ours moves, so **the gate refuses
-  every `acli` line an agent runs, reads included**; an agent reads the tickets with `tickets`.
+  `acli`'s sign-in lives in the user's home, which no variable of ours moves, so **an `acli` line an
+  agent runs is the gate's**: what only shows or lists passes as a read, as `gh`'s reads do, what
+  writes is judged (the card says it writes to the tracker signed in as the user), and what
+  touches the sign-in is base (`docs/tools.md`, "`acli` in a run"); an agent still reads and
+  writes the tickets with `tickets`.
 
 ## The Jira site
 
@@ -310,7 +313,7 @@ leaves it out.
 
 `tickets {action, …}` (`docs/tools.md`, "The tickets"): `list` every ticket of a state in one call
 (by label, assignee and `updated_within`), `search` with words, `in_comments` or `jql`, `show` the workspace's ticket or another of the
-project's tracker by its key, `types` the work item types of a Jira project, `sprints` the open sprints of its boards, `milestones` the milestones of a GitHub repository or the versions of Jira's projects, `progress` their tickets grouped with the work on each ("Progress" below); `create` (on Jira also under a parent, in a sprint and in a version; on GitHub in a milestone), `milestone_create` and `milestone_edit` (GitHub, "Milestones" below; refused on Jira, "Versions"), `comment`, `log_time` (Jira, "Logging time" below), `time_spent` and `worklogs` (Jira, "Reading worklogs" below), `edit` (labels on both; on GitHub assignees, on Jira the assignee), `close` (on
+project's tracker by its key, `types` the work item types of a Jira project, `fields` the fields of one ("Fields of a type" below), `sprints` the open sprints of its boards, `milestones` the milestones of a GitHub repository or the versions of Jira's projects, `progress` their tickets grouped with the work on each ("Progress" below); `create` (on Jira also under a parent, in a sprint and in a version; on GitHub in a milestone), `milestone_create` and `milestone_edit` (GitHub, "Milestones" below; refused on Jira, "Versions"), `comment`, `log_time` (Jira, "Logging time" below), `time_spent` and `worklogs` (Jira, "Reading worklogs" below), `edit` (labels on both; on GitHub assignees, on Jira the assignee), `close` (on
 GitHub, completed or not planned), `reopen` and `status` (on GitHub, the Status of the issue on its
 Projects board, `docs/tools.md`), each to judge, held in Ask and allowed in Full as the other writes are. A key the
 tracker does not take, or a creation in a Jira project that is not one of the tracker's, is
@@ -517,11 +520,13 @@ refused it, and the new work item went to the project's default assignee.
   labels and the assignee. Keys are a field's id (`customfield_10042`) or a system field's key,
   values are Jira's (a select `{"value": "Major"}`): there is no model of the fields' kinds, so
   every field `acli` or Jira accepts is reachable. A name is not resolved to an id: Jira's REST
-  takes ids, and `acli` lists no create metadata cheaply (`project view` has `issueTypes` names
-  only), so **a type's required fields cannot be listed** and `types` says instead that a refusal
-  names them. A creation `acli` refuses with a message holding `required` answers `acli`'s own
-  words (the field's name, the values it allows, when Jira says them), `nothing was created`, and
-  how to fill each in `fields`; it is not tried again. An edit whose fields `acli` refuses
+  takes ids, and `acli` lists no create metadata (`project view` has `issueTypes` names only), so
+  a type's fields are listed by `fields` from Jira's REST API ("Fields of a type", below) and
+  `types` points to it. A creation `acli` refuses with a message holding `required` answers
+  `acli`'s own words (the field's name, the values it allows, when Jira says them), `nothing was
+  created`, the fields the type requires and `fields` does not set by name and id when the
+  project's vault entry lets them be read, and how to fill each in `fields`; it is not tried
+  again. An edit whose fields `acli` refuses
   writes nothing; one whose fields were set and whose flags `acli` then refused says the fields
   were set. The card says each field and its value. Refused before anything is asked: `fields`
   on GitHub, on an action other than `create` and `edit`, with `fixVersions` beside `milestone`,
@@ -612,6 +617,57 @@ it. **Assumed**, from the same pages, which give flags and no output: `--status`
 or `acli` without regard to case; `create --json` prints the created work item with its `key`; a
 create with no `--type` takes the project's default type; a refused transition ends with a non-zero
 code.
+
+### Fields of a type
+
+Seen in daily use: an agent creating a work item whose type requires custom fields (a severity,
+steps to reproduce) could not find their ids, and asked the user to look them up. `tickets fields
+{kind?, project?}` lists them, and `show` with `detail full` shows what an existing work item of the
+type holds.
+
+- **What `acli` can say.** Its reference
+  (<https://developer.atlassian.com/cloud/acli/reference/commands/jira-field/>) lists `jira field`
+  with `create`, `delete` and `cancel-delete` only, and `jira project view` (<https://developer.atlassian.com/cloud/acli/reference/commands/jira-project-view/>)
+  prints a project, not the fields of its types; `jira workitem view`
+  (<https://developer.atlassian.com/cloud/acli/reference/commands/jira-workitem-view/>) takes
+  `--fields` (`*all`, `*navigable`, any field) and prints one work item's. So `acli` cannot list the
+  fields of a type, and the listing is read from Jira's REST API; `show` is `acli`'s.
+- **`fields` reads the create metadata** with the vault entry the project's `[tracker]
+  worklog_token` names, through the client `log_time` and `worklogs` use ("Logging time", "Reading
+  worklogs"): `GET /rest/api/3/issue/createmeta/<project>/issuetypes` (`issueTypes[]`: `id`,
+  `name`, `subtask`; custom types come with the built-in ones), then, for the type asked,
+  `GET …/issuetypes/<id>` (`fields[]`: `fieldId`, `name`, `required`, `schema.type` and
+  `schema.items`, `allowedValues[]` whose `value` or `name` is said), page by page (`startAt`,
+  `maxResults` 200, `total`, five pages at most). These shapes are those of Jira Cloud's REST
+  documentation (<https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-issues/>,
+  "Get create metadata issue types for a project" and "Get create field metadata for a project and
+  issue type id"). A type is found by its name in any case; one the project has none of is refused
+  naming its types. Without a `kind`, each type's fields are read (30 types at most) and its required ones said, a
+  sub-task marked. `summary`, `project` and `issuetype` are left out: every creation says them.
+- **The same refusals as `log_time`** when the project has no entry, one it does not see, or one
+  without a username (`docs/vault.md`): how to set one, the window's Settings first. The secret goes
+  to the tracker's site alone and is in no answer, log or error (the client masks it out of what
+  the site said, as `worklogs` does). A site that answers an error is said with its status.
+- **A refused creation names the fields it lacks.** A creation `acli` refuses with `required` in
+  its words keeps them, and adds, when the entry lets the metadata be read, `Bug requires, and
+  fields does not give: Steps to reproduce (customfield_10101)`, with the values each allows
+  (`Severity (customfield_10100: Minor, Major)`), the fields the call gave left out. When it cannot
+  be read, the refusal says what it said before and points to `fields`. Nothing is created and
+  nothing is tried again. An `edit` refused for a field says the same words as before: the work
+  item's type is not read for it.
+- **`show` with `detail full`** lists the custom fields (`customfield_…`) of a Jira work item that
+  hold a value, one line each, from the read `show` makes already (`--fields …,*navigable`): the
+  id, the name when the output carries Jira's `names` map, and the value: a text, a number, an
+  option by its `value`, a user by its `displayName`, a list joined with commas, a document as
+  text, each cut at 500 characters and masked. A field without a value is left out, and the
+  sprint field is the sprint's, said under `Sprint:`. **Assumed**, as every shape of this page:
+  `acli` prints Jira's REST work item, whose `fields` hold the custom fields; the reference does
+  not say it prints `names` (the work items of a search were seen with `names: null`), so the name
+  is likely missing and the id, with the value, is what is shown. The maintainer checks it with `show … detail
+  full` on a work item of their site; a different shape shows as no `Custom fields` line, and the
+  fix is in `fields::held_in`.
+- **GitHub**: `fields` answers that an issue has no custom fields and names what it has: labels,
+  assignees, a milestone and a type when the repository has issue types. Nothing is asked of `gh`.
 
 ### Parents and sprints
 

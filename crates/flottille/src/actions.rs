@@ -686,6 +686,7 @@ fn posted_says(args: &Value) -> Vec<String> {
                 | "search"
                 | "show"
                 | "types"
+                | "fields"
                 | "link_types"
                 | "sprints"
                 | "milestones"

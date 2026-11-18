@@ -353,7 +353,7 @@ const SERVED: [Definition; 33] = [
                 "number": {"type": "integer", "minimum": 1, "description": "show, comment, reply, resolve, review, edit, subscribe, unsubscribe: a pull request. subscribe and unsubscribe take it with repository, without workspace, for one that is not your workspace's branch's."},
                 "state": {"type": "string", "enum": ["open", "closed", "merged", "all"]},
                 "branch": {"type": "string", "description": "list: its source branch. pipelines, runs, run: the branch to read or run on; left out, your workspace's, in main the project folder's, which a run says; with a pull request of your own in main, name its branch."},
-                "detail": {"type": "string", "enum": ["short", "full"]},
+                "detail": {"type": "string", "enum": ["short", "full"], "description": "show: full adds the comments, with their ids, and a Jira work item's custom fields (name, id, value)."},
                 "fresh": {"type": "boolean", "description": "show: read the pull request again; one read in the last 30 s is given again otherwise (detail full always reads)."},
                 "title": {"type": "string", "description": "create, edit: the pull request's title. create needs the branch pushed first (git push -u origin <branch>)."},
                 "body": {"type": "string", "description": "create, edit: description; comment: the comment. reply: the reply. review: its words. create without it takes the project's pull request template when it has one (project settings shows it): fill the template in body rather than replace it."},
@@ -400,11 +400,11 @@ const SERVED: [Definition; 33] = [
         name: "tickets",
         title: "Tickets",
         description: "The tracker's tickets (GitHub #123, Jira ABC-123), via the user's gh/acli \
-            (never run them). list: by state (default open), label, assignee, updated_within; search asks the tracker (query), \
+            (never run them). list: by state (default open), label, assignee, updated_within; search (query), \
             on Jira also in_comments, jql; show: a workspace's ticket (in \
             main, name workspace) or ticket, with links; detail full adds comments, \
             with ids; Jira images and files are named, not shown; \
-            types: a Jira project's work item types; link_types; \
+            types: a Jira project's work item types; fields: a type's (kind); link_types; \
             worklogs (Jira: a day's or range's time). \
             Writes, judged, answered at once, the result maybe later: create, comment, reply, edit, close, \
             reopen, status, link, unlink, comment_edit, \
@@ -419,7 +419,7 @@ const SERVED: [Definition; 33] = [
         destructive: false,
         schema: || {
             json!({"type": "object", "properties": {
-                "action": {"type": "string", "enum": ["list", "search", "show", "people", "types", "link_types", "sprints", "milestones", "progress", "subscribe", "unsubscribe", "create", "comment", "reply", "edit", "close", "reopen", "status", "link", "unlink", "comment_edit", "comment_delete", "milestone_create", "milestone_edit", "log_time", "time_spent", "worklogs"]},
+                "action": {"type": "string", "enum": ["list", "search", "show", "people", "types", "fields", "link_types", "sprints", "milestones", "progress", "subscribe", "unsubscribe", "create", "comment", "reply", "edit", "close", "reopen", "status", "link", "unlink", "comment_edit", "comment_delete", "milestone_create", "milestone_edit", "log_time", "time_spent", "worklogs"]},
                 "ticket": {"type": "string", "description": "#123 or ABC-123; the workspace's when left out."},
                 "duration": {"type": "string", "description": "log_time (Jira): the time spent, in Jira's form: 2h 30m, 1d, 45m (weeks, days, hours, minutes)."},
                 "started": {"type": "string", "description": "log_time: when the work started, RFC 3339 with its offset (2026-11-06T09:00:00+01:00); the duration before now when left out."},
@@ -442,17 +442,17 @@ const SERVED: [Definition; 33] = [
                 "remove_assignees": {"type": "array", "items": {"type": "string"}, "description": "edit: logins to remove (GitHub)."},
                 "status": {"type": "string", "description": "status: its name."},
                 "other": {"type": "string", "description": "link, unlink: the other ticket. The link reads ticket, kind, other: ABC-2 blocks ABC-1 is ticket ABC-2, kind blocks, other ABC-1."},
-                "kind": {"type": "string", "description": "link, unlink: a kind link_types lists (blocks, is blocked by, relates to; GitHub: parent of, sub-task of)."},
+                "kind": {"type": "string", "description": "link, unlink: a kind link_types lists (blocks, is blocked by, relates to; GitHub: parent of, sub-task of). fields (Jira): the work item type, one types lists; every type's when left out."},
                 "comment": {"type": "string", "description": "reply: the id show (detail full) gives any comment. comment_edit, comment_delete: one an agent posted, no one else's."},
                 "sprint": {"type": "string", "description": "create on Jira (with type): an open sprint, by the name or id sprints gives. An existing item's sprint cannot be changed (acli)."},
-                "fields": {"type": "object", "description": "create, edit on Jira: any field of the work item, as Jira takes it, passed through acli. Keys: the field's id (customfield_10042) or system key (priority, components). A select: {\"value\": \"Major\"}; a user: {\"accountId\": ...}. A creation refused for a missing required field names it: give it here. create needs type.", "additionalProperties": true},
+                "fields": {"type": "object", "description": "create, edit on Jira: any field of the work item, as Jira takes it, passed through acli. Keys: the field's id (customfield_10042; the action fields lists a type's) or system key (priority, components). A select: {\"value\": \"Major\"}; a user: {\"accountId\": ...}. A creation refused for a missing required field names it: give it here. create needs type.", "additionalProperties": true},
                 "parent": {"type": "string", "description": "create on Jira: the work item it goes under (an epic, or a sub-task's parent). An existing item's parent cannot be changed (acli)."},
                 "milestone": {"type": "string", "description": "A milestone's title or number (GitHub), a version's name or id (Jira); milestones lists them: list, search filter by it; create puts the ticket in it (Jira: with type); edit (GitHub only) moves it; milestone_edit (GitHub): the one to change."},
                 "remove_milestone": {"type": "boolean", "description": "edit (GitHub): take the ticket out of its milestone. Jira's fix version cannot be changed (acli)."},
                 "due": {"type": "string", "description": "milestone_create, milestone_edit: due date, YYYY-MM-DD."},
                 "description": {"type": "string", "description": "milestone_create, milestone_edit: its description."},
                 "board": {"type": "string", "description": "sprints: one board of the project, by name or id; all of them otherwise."},
-                "project": {"type": "string", "description": "create, types, sprints, milestones on Jira: the tracker's project (a version belongs to one; list, search take it with milestone); status: the board."},
+                "project": {"type": "string", "description": "create, types, fields, sprints, milestones on Jira: the tracker's project (a version belongs to one; list, search take it with milestone); status: the board."},
                 "type": {"type": "string", "description": "create on Jira: work item type, one of those types lists."},
                 "events": {"type": "array", "items": {"enum": crate::tickets::EVENTS}},
                 "from": {"type": "string", "description": "subscribe: whose comments count: anyone (the default), or people (no bot nor agent). worklogs: the first day, YYYY-MM-DD."},

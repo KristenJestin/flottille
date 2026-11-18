@@ -851,7 +851,7 @@ pub const FORGE_ACTIONS: &str = "list, show, people, subscribe, unsubscribe, cre
      merge, checks, close, reopen, pipelines, runs, run_view, run_logs, run, follow_run, stop and \
      step";
 /// The actions of `tickets`, as a refusal names them.
-pub const TICKET_ACTIONS: &str = "list, search, show, people, types, link_types, sprints, milestones, subscribe, unsubscribe, \
+pub const TICKET_ACTIONS: &str = "list, search, show, people, types, fields, link_types, sprints, milestones, subscribe, unsubscribe, \
      create, comment, reply, edit, close, reopen, status, link, unlink, comment_edit, \
      comment_delete, milestone_create, milestone_edit, log_time, time_spent and worklogs";
 /// What `tickets close` closes for, as `gh issue close --reason` names it.
@@ -876,7 +876,7 @@ fn tickets(call: &Call) -> Verdict {
     // What the agent wrote, as the card shows it: masked.
     let shown = |key: &str| crate::mcp::masked(&words(key), &call.grant.place);
     let said = match action {
-        "list" | "search" | "show" | "people" | "types" | "link_types" | "sprints"
+        "list" | "search" | "show" | "people" | "types" | "fields" | "link_types" | "sprints"
         | "milestones" | "progress" | "subscribe" | "unsubscribe" | "time_spent" | "worklogs" => {
             return Verdict::Allow;
         }
@@ -1896,11 +1896,16 @@ fn program(call: &Call, layer: &[String]) -> Line {
             "{program} runs a program as another user, root by default, with an environment of \
              its own, without the wall that keeps git from pushing behind the gate"
         )),
-        "acli" => Line::Base(
-            "acli is Atlassian's command line, signed in as the user to Jira: whatever it runs, \
-             it runs with the user's own sign-in"
+        "acli" if acli_signs_in(args) => Line::Base(
+            "acli's sign-in is the user's own: what logs in, out or to another site, or shows the \
+             sign-in, is theirs to run"
                 .into(),
         ),
+        "acli" if acli_reads(args) => Line::Reads,
+        "acli" => Line::Judge(format!(
+            "{} writes to the tracker signed in as the user, or is not one of its reads",
+            shown_words(layer)
+        )),
         "npm" | "pnpm" | "yarn" | "bun" | "cargo" | "poetry" | "flit" | "hatch" | "uv"
             if any(&["publish", "unpublish"]) =>
         {
@@ -3426,6 +3431,66 @@ fn forge_reads(program: &str, args: &[String]) -> bool {
     }
 }
 
+/// The words of an `acli` line that name its command: those before its first option.
+fn acli_path<'a>(words: &[&'a str]) -> Vec<&'a str> {
+    words
+        .iter()
+        .copied()
+        .take_while(|w| !w.starts_with('-'))
+        .collect()
+}
+
+/// Whether an `acli` line only asks for the help of its command: nothing but the command's words,
+/// then `--help`. A `--help` after another option may be that option's value (`--body --help`).
+fn acli_help(words: &[&str]) -> bool {
+    words.split_last().is_some_and(|(last, before)| {
+        ["-h", "--help"].contains(last) && acli_path(before).len() == before.len()
+    })
+}
+
+/// Whether an `acli` line has to do with its sign-in: every `auth` command but `status` (`login`,
+/// `logout`, `switch`, and whatever a version adds, which may show a token), `status` itself given
+/// anything but help, and an option that shows a token.
+fn acli_signs_in(args: &[String]) -> bool {
+    let words: Vec<&str> = args.iter().map(String::as_str).collect();
+    if acli_help(&words) {
+        return false;
+    }
+    match acli_path(&words).as_slice() {
+        [_, "auth", "status"] => words.len() > 3,
+        [_, "auth", ..] => true,
+        _ => words.contains(&"--show-token"),
+    }
+}
+
+/// Whether an `acli` line only shows or lists, from the commands of its reference
+/// (<https://developer.atlassian.com/cloud/acli/reference/commands/>), each on its own page: the
+/// work item, project, board, sprint, dashboard and filter commands that view, search or list,
+/// the status of a sign-in, and the help of any command. `--web` (`-w`) opens a browser on the
+/// desktop: no read.
+fn acli_reads(args: &[String]) -> bool {
+    let words: Vec<&str> = args.iter().map(String::as_str).collect();
+    if acli_help(&words) || words == ["--version"] {
+        return true;
+    }
+    if words.iter().any(|w| ["--web", "-w"].contains(w)) {
+        return false;
+    }
+    matches!(
+        acli_path(&words).as_slice(),
+        ["jira" | "admin" | "rovodev", "auth", "status"]
+            | ["jira", "workitem", "view" | "search", ..]
+            | ["jira", "workitem", "comment", "list" | "visibility", ..]
+            | ["jira", "workitem", "attachment", "list", ..]
+            | ["jira", "workitem", "link", "list" | "type", ..]
+            | ["jira", "project", "list" | "view", ..]
+            | ["jira", "board", "search" | "list-sprints", ..]
+            | ["jira", "sprint", "list-workitems", ..]
+            | ["jira", "dashboard", "search", ..]
+            | ["jira", "filter", "list" | "search", ..]
+    )
+}
+
 fn base(word: &str) -> &str {
     word.rsplit('/').next().unwrap_or(word)
 }
@@ -4918,7 +4983,10 @@ mod tests {
             std::fs::create_dir_all(base.join("home")).unwrap();
             let bin = base.join("bin");
             std::fs::create_dir_all(&bin).unwrap();
-            for program in READS.iter().chain(&["git", "gh", "glab", "less", "more"]) {
+            for program in READS
+                .iter()
+                .chain(&["git", "gh", "glab", "acli", "less", "more"])
+            {
                 installed(&bin.join(program));
             }
             let grant = Grant {
@@ -5120,6 +5188,7 @@ mod tests {
                 ("tickets", "list"),
                 ("tickets", "search"),
                 ("tickets", "show"),
+                ("tickets", "fields"),
                 ("tickets", "link_types"),
                 ("workspace", "list"),
             ] {
@@ -5340,6 +5409,156 @@ mod tests {
                 Some(&fixture.never),
             );
             assert!(to_judge(&verdict), "{action}");
+        }
+    }
+
+    /// What `acli`'s reference lists as only showing or listing
+    /// (<https://developer.atlassian.com/cloud/acli/reference/commands/>), each command from its
+    /// own page, with the flags its page gives.
+    const ACLI_READS: [&str; 26] = [
+        "acli jira workitem view ABC-1",
+        "acli jira workitem view ABC-1 --json --fields summary,comment",
+        "acli jira workitem search --jql 'project = TEAM' --json --paginate",
+        "acli jira workitem search --filter 10001 --count",
+        "acli jira workitem comment list --key ABC-1 --json",
+        "acli jira workitem comment visibility --group",
+        "acli jira workitem attachment list --key ABC-1",
+        "acli jira workitem link list --key ABC-1 --json",
+        "acli jira workitem link type",
+        "acli jira project list --paginate",
+        "acli jira project view --key TEAM --json",
+        "acli jira board search --project TEAM --json",
+        "acli jira board list-sprints --id 123 --state active,closed",
+        "acli jira sprint list-workitems --sprint 1 --board 6",
+        "acli jira dashboard search --name report",
+        "acli jira filter list --my",
+        "acli jira filter search --owner someone@example.com --json",
+        "acli jira auth status",
+        "acli admin auth status",
+        "acli rovodev auth status",
+        "acli --help",
+        "acli jira --help",
+        "acli jira workitem -h",
+        "acli jira workitem delete --help",
+        "acli jira workitem comment create --help",
+        "acli --version",
+    ];
+
+    #[test]
+    fn acli_reads_pass_as_reads() {
+        for fixture in [Fixture::main(), Fixture::workspace()] {
+            for line in ACLI_READS {
+                assert_eq!(fixture.run(line), Verdict::Allow, "{line}");
+            }
+        }
+    }
+
+    #[test]
+    fn acli_writes_are_judged_with_a_card_that_says_who_writes() {
+        for fixture in [Fixture::main(), Fixture::workspace()] {
+            for line in [
+                "acli jira workitem create --project TEAM --type Task --summary x",
+                "acli jira workitem create-bulk --from-json items.json",
+                "acli jira workitem edit --key ABC-1 --summary x --yes",
+                "acli jira workitem transition --key ABC-1 --status Done --yes",
+                "acli jira workitem assign --key ABC-1 --assignee someone@example.com",
+                "acli jira workitem comment create --key ABC-1 --body x",
+                "acli jira workitem comment update --key ABC-1 --id 1 --body x",
+                "acli jira workitem comment delete --key ABC-1 --id 1",
+                "acli jira workitem delete --key ABC-1 --yes",
+                "acli jira workitem archive --key ABC-1",
+                "acli jira workitem clone --key ABC-1",
+                "acli jira workitem link create --out ABC-1 --in ABC-2 --type Blocks --yes",
+                "acli jira workitem link delete --id 10000 --yes",
+                "acli jira workitem attachment delete --id 1",
+                "acli jira workitem watcher remove --key ABC-1 --user someone@example.com",
+                "acli jira project create --key TEAM --name x",
+                "acli jira project delete --key TEAM",
+                "acli jira filter add-favourite --id 1",
+                "acli jira field delete --id customfield_1",
+                "acli admin user deactivate --email someone@example.com",
+                "acli feedback --summary x",
+                "acli",
+                "acli jira workitem frobnicate ABC-1",
+            ] {
+                let verdict = fixture.run(line);
+                assert!(to_judge(&verdict), "{line}: {verdict:?}");
+                let said = reasons(&verdict);
+                assert!(
+                    said.contains("acli") && said.contains("writes to the tracker"),
+                    "{line}: {said}"
+                );
+                assert!(said.contains("signed in as the user"), "{line}: {said}");
+            }
+        }
+    }
+
+    #[test]
+    fn acli_reads_that_open_a_browser_or_take_more_than_a_read_are_judged() {
+        let fixture = Fixture::workspace();
+        for line in [
+            "acli jira workitem view ABC-1 --web",
+            "acli jira workitem search --filter 10001 -w",
+            // A flag after a help flag is a value, not a help: the body is `--help`.
+            "acli jira workitem comment create --key ABC-1 --body --help",
+        ] {
+            let verdict = fixture.run(line);
+            assert!(to_judge(&verdict), "{line}: {verdict:?}");
+        }
+    }
+
+    #[test]
+    fn acli_auth_login_stays_base() {
+        for fixture in [Fixture::main(), Fixture::workspace()] {
+            for line in [
+                "acli jira auth login",
+                "acli jira auth login --site example.atlassian.net --web",
+                "acli jira auth logout",
+                "acli jira auth switch --site example.atlassian.net",
+                "acli admin auth login",
+                "acli admin auth logout",
+                "acli admin auth switch",
+                "acli rovodev auth login",
+                "acli rovodev auth logout",
+                "acli jira auth token",
+                "acli jira auth status --show-token",
+                "env acli jira auth login",
+                "xargs acli jira auth logout",
+            ] {
+                let verdict = fixture.run(line);
+                assert!(base_class(&verdict), "{line}: {verdict:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn an_acli_the_agent_wrote_is_judged() {
+        let fixture = Fixture::workspace();
+        let root = fixture.root.display().to_string();
+        let bin = fixture.root.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        installed(&bin.join("acli"));
+        let mut inside = Fixture::workspace();
+        let system = PathBuf::from(&inside.search);
+        inside.search = std::env::join_paths([inside.root.join("bin"), system]).unwrap();
+        std::fs::create_dir_all(inside.root.join("bin")).unwrap();
+        installed(&inside.root.join("bin/acli"));
+        for (fixture, line) in [
+            (&fixture, "./acli jira workitem view ABC-1".to_owned()),
+            (&fixture, "bin/acli jira project list".to_owned()),
+            (
+                &fixture,
+                format!("{root}/bin/acli jira workitem view ABC-1"),
+            ),
+            (&inside, "acli jira workitem view ABC-1".to_owned()),
+            (&inside, "acli --version".to_owned()),
+        ] {
+            let verdict = fixture.run(&line);
+            assert!(to_judge(&verdict), "{line}: {verdict:?}");
+            assert!(
+                reasons(&verdict).contains("agent's own file"),
+                "{line}: {verdict:?}"
+            );
         }
     }
 
@@ -6075,7 +6294,6 @@ mod tests {
             fixture.run("docker compose down"),
             fixture.run("nice deploy now"),
             fixture.run("bkt pr list"),
-            fixture.run("acli jira workitem view ABC-1"),
             fixture.judge(
                 "forge",
                 json!({"action": "merge", "repository": ".", "waive": "ship it"}),

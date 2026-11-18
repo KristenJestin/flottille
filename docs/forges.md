@@ -665,8 +665,8 @@ from the forges' API documentation, not seen on a real server, and the maintaine
 
 ### Agents never run `bkt`
 
-The gate refuses every `bkt` line an agent runs, reads included, as it does `acli`
-(`docs/tools.md`). `bkt`'s token is in the OS keychain, or in an encrypted file under the user's
+The gate makes every `bkt` line an agent runs a base call, reads included (`acli` and `gh` have
+their reads pass, `docs/tools.md`, "`acli` in a run"). `bkt`'s token is in the OS keychain, or in an encrypted file under the user's
 configuration folder (`internal/secret/store.go:17`, `:295`, `:404`), keyed by the host
 (`host/<host>/token`); no variable of ours moves either. `BKT_CONFIG_DIR` moves only the file
 that lists hosts and contexts (`internal/config/config.go:245-253`), and a configuration that
