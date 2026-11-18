@@ -555,6 +555,11 @@ speak two.
   (within 5 minutes of its clock) and that the nonce was not seen in that window, then that its
   role allows the method ("Roles"), and serves the request as one from a local client, the device
   known: its log and its events name it.
+- **A request carried lasts as long as its client's connection.** A watch (`events.watch`, with its
+  `forge` when the client asked for one) is carried on a stream the carrying daemon holds only while
+  the client's connection is open: when the client leaves, the stream closes and the receiving
+  machine ends its subscription and its forge watch, with or without a new event; its log says
+  `the watch asked by <device> ended`.
 - **What the user sends to a machine that is off is refused**, never kept: a message, an answer to a
   request, a new session. The client says so, with since when (`server is offline since 22:14`). A
   message kept would arrive hours later, after the user forgot it.
