@@ -203,7 +203,7 @@ fn a_launch_in_another_project_is_held_for_the_user_in_every_mode() {
         assert_eq!(listed.len(), 1, "{mode}: {listed:?}");
         let request = &listed[0];
         assert_eq!(request["number"], number);
-        assert_eq!(request["base"], true, "{mode}: {request}");
+        assert_eq!(request["class"], "base", "{mode}: {request}");
         let says = request["says"].to_string();
         for word in [
             "app's session \\\"Release the fonts\\\" asks to start a session in kit",
@@ -306,8 +306,10 @@ fn the_session_started_in_another_project_leads_its_own_sessions() {
     let (lead, mcp) = lead(&user, "auto");
     let (session, kit_mcp) = started_in_kit(&user, &mcp, json!({}));
 
+    // Every tool a root of its project has, as the lead has in its own.
     let names = kit_mcp.names();
-    for tool in ["agent_launch", "session_send", "session_read", "review"] {
+    assert_eq!(names, mcp.names());
+    for tool in ["agent_launch", "session_send", "session_read"] {
         assert!(names.iter().any(|name| name == tool), "{tool}: {names:?}");
     }
     // Its own session in its own project: started as any launched session's is, the user asked
