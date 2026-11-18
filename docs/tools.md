@@ -1193,7 +1193,11 @@ Jira: their account id, else their e-mail). The card shows the names as given.
   another ticket of the same tracker by its key (`#123` or `ABC-123`): its reference, tracker,
   state, title, link and description, masked, and how many comments it has with the newest one's
   author (`Comments: 12, … read them with tickets {"action": "show", "detail": "full"}`); `detail
-  full` gives the comments (the newest 30). A Jira work item's attachments are listed at the end (the first 30), named and not shown, and an image in a text is a line saying so; the description says the user can paste one into the conversation ([`tickets.md`](tickets.md), "Attachments"). A ticket read in the last 30 s is given again, saying
+  full` gives the comments (the newest 30) and, on Jira, the work item's **custom fields that
+  hold a value**, one line each (`Severity (customfield_10100): Major`; a select's chosen option by
+  its text, a list joined, a document as text; the sprint field is the sprint's, said once; the
+  name only when `acli` prints it, the id always: [`tickets.md`](tickets.md), "Fields of a
+  type"). A Jira work item's attachments are listed at the end (the first 30), named and not shown, and an image in a text is a line saying so; the description says the user can paste one into the conversation ([`tickets.md`](tickets.md), "Attachments"). A ticket read in the last 30 s is given again, saying
   how old it is (`fresh: true` and `detail full` read it again; [`tickets.md`](tickets.md), "How
   fast it is read"). A key of the other tracker is refused (`refused:
   ABC-123 is a Jira ticket, and this workspace's tracker is GitHub issues (#123): …`), and nothing
@@ -1270,16 +1274,35 @@ Jira: their account id, else their e-mail). The card shows the names as given.
   one. On GitHub it answers that issues have no type. A Jira `create` that `acli` refuses for its
   `type` answers with the project's types, nothing written, so that a type is never guessed
   twice ([`tickets.md`](tickets.md), "Types and assignment"). Its answer also says what to do
-  for a required field: `acli` lists no type's required fields (`project view` has only
-  names), and Flottille does not call Jira's REST API to read them, so a field a type requires
-  is named by the refusal of a creation that lacks it, and filled with `fields` (below).
+  for a required field: `fields {kind?}` (below) lists a type's fields with their ids, and a
+  creation that lacks one is refused naming it. Custom work item types are covered as the
+  built-in ones: `types` lists every type of the project, and `create` and `fields` take any of
+  them by name.
+- **`fields {kind?, project?}` (#1065)**: the fields of a work item type of a Jira project, so
+  that an agent finds the id of a custom field (`customfield_10042`) without asking the user to
+  look it up in the site's settings. `kind` is the type, spelled as `types` gives it, in any case
+  (`type`, the name `create` takes, is read the same); a name the project has none of is refused,
+  naming its types. With a `kind`: the type's **required** fields first, then the optional ones,
+  each as `customfield_10100: Severity (option), allowed values: Minor, Major` (its id, its name,
+  its type, and the values the site lists for it, 25 at most); without: every type of the
+  project (sub-tasks and custom types included) with the required fields of each. The fields
+  every creation says by itself (`summary`, `project`, `issuetype`) are left out. **It is read
+  with Jira's REST API** (`/rest/api/3/issue/createmeta/<project>/issuetypes`, then
+  `…/<type id>`, 200 fields a page), because `acli` lists no field of a type (`jira field` only
+  creates and deletes one, `workitem view` prints one work item's fields, `project view` the
+  types' names): with **the vault entry `[tracker] worklog_token` names**, by the client
+  `log_time` and `worklogs` use, toward the tracker's site alone, a read never held. A project
+  with no entry, one it does not see, or one without a username is refused with `log_time`'s
+  sentence, how to set one (the window's Settings first; `vault ask` when the entry is named and
+  missing); the secret is in no answer, log or error. On GitHub it answers that an issue has no
+  custom fields and names what it has: labels, assignees, a milestone and, when the repository
+  has issue types, a type (Flottille neither lists nor sets that one).
 - **`fields` on Jira (#1042)**: `create` and `edit` take `fields`, an object of any field of the
   work item, passed through **as given**, with no model of the fields' kinds: its keys are
-  Jira's own, a field's id (`customfield_10042`, found in the site's field settings) or a system
+  Jira's own, a field's id (`customfield_10042`, which `fields` lists) or a system
   field's key (`priority`, `components`), its values as Jira takes them (a select
   `{"value": "Major"}`, a user `{"accountId": "…"}`, a list of them for a multi-select). A name
-  is no key: Jira's REST takes none, and `acli` exposes no create metadata to resolve one
-  cheaply. A **creation** with `fields` is made from a JSON definition (`acli jira workitem create
+  is no key: Jira's REST takes none; `fields` gives the id of a name. A **creation** with `fields` is made from a JSON definition (`acli jira workitem create
   --from-json`, as for a sprint or a version) whose `additionalAttributes` are the fields, so it
   needs `type` (`refused: tickets create with fields needs type: …`, before anything is asked);
   `fixVersions` in `fields` and `milestone` together are refused (both set the fix version). An
@@ -1289,7 +1312,10 @@ Jira: their account id, else their e-mail). The card shows the names as given.
   flags above; a refusal of the fields leaves the rest unwritten, and a refusal of the rest says
   the fields were set. A creation `acli` refuses with a field *required* in Jira's words (`Severity
   is required (allowed values: Minor, Major)`) answers those words, `nothing was created`, and how
-  to give each required field in `fields`, never trying it again by itself. The card shows each
+  to give each required field in `fields`, never trying it again by itself. When the project has
+  the vault entry `fields` reads with, it also names each field the type requires and `fields`
+  does not set, by its name and its id (`Steps to reproduce (customfield_10101)`, with the values
+  it allows); without one it says to use `tickets fields`. The card shows each
   field (`It sets the field customfield_10042: {"value":"Major"}`). On GitHub, and on any action
   but create and edit, `fields` is refused before anything is asked.
 - **`assignee` on Jira**: `create` and `edit` take `"me"` (the user the agent works for: `acli`'s
