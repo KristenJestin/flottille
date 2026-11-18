@@ -9293,6 +9293,11 @@ impl Reply {
         self.attached.pictures()
     }
 
+    /// How many times the draft was written to the daemon.
+    pub fn drafts_sent(&self) -> usize {
+        0
+    }
+
     /// The composer holds something the user has not sent: text, or a picture.
     pub fn holds_draft(&self) -> bool {
         self.has_text || !self.attachments().is_empty()

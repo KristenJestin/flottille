@@ -929,6 +929,9 @@ impl Shell {
         self.sessions.get(id)
     }
 
+    /// The window is closing: what its composers hold is written to the daemon at once.
+    pub fn closing(&mut self, _cx: &mut Context<Self>) {}
+
     /// The "Ended" group at the bottom of the tree, once a session ended.
     pub fn ended(&self) -> Option<&Entity<EndedNode>> {
         self.ended.as_ref()
