@@ -86,6 +86,10 @@ impl Keyring for NoKeyring {
     fn store(&self, _: &str, _: &[(&str, &str)], _: &[u8]) -> Result<(), KeyringError> {
         Err(KeyringError::Absent)
     }
+
+    fn delete(&self, _: &[(&str, &str)]) -> Result<(), KeyringError> {
+        Err(KeyringError::Absent)
+    }
 }
 
 /// A keyring in which another client keeps its own device key at the same moment as this one:
@@ -397,4 +401,93 @@ fn a_private_key_is_never_printed() {
     }
     assert!(format!("{machine:?}").contains(&machine.public().fingerprint()));
     assert!(format!("{device:?}").contains(&device.public().fingerprint()));
+}
+
+/// A keyring that holds as many items of the same attributes as are stored, as the Secret Service
+/// does when two clients store at the same moment, and removes them all.
+#[derive(Default)]
+struct Shelf {
+    items: RefCell<Vec<(Attributes, Vec<u8>)>>,
+}
+
+impl Keyring for Shelf {
+    fn read(
+        &self,
+        attributes: &[(&str, &str)],
+    ) -> Result<Option<Zeroizing<Vec<u8>>>, KeyringError> {
+        let wanted = attributes_of(attributes);
+        let items = self.items.borrow();
+        let found: Vec<_> = items.iter().filter(|(of, _)| *of == wanted).collect();
+        match found.as_slice() {
+            [] => Ok(None),
+            [(_, secret)] => Ok(Some(Zeroizing::new(secret.clone()))),
+            more => Err(KeyringError::Several(more.len())),
+        }
+    }
+
+    fn store(
+        &self,
+        _: &str,
+        attributes: &[(&str, &str)],
+        secret: &[u8],
+    ) -> Result<(), KeyringError> {
+        self.items
+            .borrow_mut()
+            .push((attributes_of(attributes), secret.to_vec()));
+        Ok(())
+    }
+
+    fn delete(&self, attributes: &[(&str, &str)]) -> Result<(), KeyringError> {
+        let wanted = attributes_of(attributes);
+        self.items.borrow_mut().retain(|(of, _)| *of != wanted);
+        Ok(())
+    }
+}
+
+#[test]
+fn two_pending_device_keys_are_removed_and_a_join_goes_on() {
+    let (_dir, folder) = state();
+    let shelf = Shelf::default();
+    for seed in [[1u8; 32], [2u8; 32]] {
+        shelf
+            .store(
+                flottille_link::DEVICE_PENDING_LABEL,
+                &flottille_link::DEVICE_PENDING_ATTRIBUTES,
+                &seed,
+            )
+            .unwrap();
+    }
+
+    // Which one the hub saw cannot be told: neither is sent again, and a new one is made.
+    assert!(DeviceKey::load_pending(&shelf, &folder).unwrap().is_none());
+    assert!(
+        shelf
+            .read(&flottille_link::DEVICE_PENDING_ATTRIBUTES)
+            .unwrap()
+            .is_none()
+    );
+    let new = DeviceKey::make().unwrap();
+    let public = new.public();
+    assert_eq!(new.keep_pending(&shelf, &folder).unwrap().public(), public);
+}
+
+#[test]
+fn a_pending_key_whose_promotion_found_another_kept_stays_pending() {
+    let (_dir, folder) = state();
+    let other = DeviceKey::make()
+        .unwrap()
+        .keep(&NoKeyring, &folder)
+        .unwrap()
+        .public();
+    let pending = DeviceKey::make()
+        .unwrap()
+        .keep_pending(&NoKeyring, &folder)
+        .unwrap();
+    let public = pending.public();
+
+    // Another client kept its key first: this one, maybe a member, is not thrown away.
+    let kept = pending.promote(&NoKeyring, &folder).unwrap();
+    assert_eq!(kept.public(), other);
+    let still = DeviceKey::load_pending(&NoKeyring, &folder).unwrap();
+    assert_eq!(still.map(|key| key.public()), Some(public));
 }
