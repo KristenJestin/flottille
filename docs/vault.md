@@ -42,7 +42,10 @@ all: `https`, or `http` on this machine, does; `http` to any other host does not
 another host (`api.app.example.test` is not `app.example.test`). For a connection an agent proposes,
 a header takes an entry only on its host (`docs/extensions.md`, "Connections"), so two services on
 the same host can both be given the same entry, whatever their ports and paths: the binding does not
-tell them apart. The user's own form binds an entry to any host.
+tell them apart. The user's own form binds an entry to any host. `web`'s calls of an API are
+stricter: for them the binding is the `url`'s **origin**, its scheme, host and port
+(`https://app.example.test:8443/api` is `https://app.example.test:8443`, and `https://app.example.test/`
+another origin), so that another service on another port of the same host is never given the secret.
 
 ## Bound to one use
 
@@ -119,8 +122,9 @@ again as soon as the secret is sent.
 Every value of every entry is added to the masking of everything the daemon stores and shows
 (`flottille_core::secrets`): an agent that came across a secret some other way and writes it in a
 message, a command's output, a tool's arguments, finds it `[masked]` there, raw and in the forms
-a page shows a typed secret in (percent-encoded in an address, escaped in HTML or JSON, and, with
-the entry's username, in base64 as HTTP Basic authentication sends them). The values are read
+a page shows a typed secret in (percent-encoded in an address, escaped in HTML or JSON, `/` written
+`\/` included, and, with the entry's username, in base64 as HTTP Basic authentication sends them,
+with and without its padding, and that base64 in the same forms). The values are read
 from the keyring when the daemon starts, before any agent resumes (the start waits 5 seconds at
 most for a keyring that asks to be unlocked, then goes on), and a new secret is masked as soon as
 it is set. A secret replaced or removed stays masked until the daemon restarts: another entry may
@@ -211,8 +215,11 @@ daemon puts the secret where it goes itself (an HTTP header, a command's standar
 field), with `vault::secret`, which only a tool's own code calls and whose value never leaves that
 use. It never waits for the user: an item of a locked keyring is answered at once that the keyring
 is locked and the user must unlock it, and a keyring that does not answer within 3 seconds is
-answered the same. The first users: `tickets log_time` (`docs/tickets.md`, "Logging time"), with `worklogs` and `fields`
-that read Jira's REST API with the same entry, and
+answered the same. Its users: `tickets log_time` (`docs/tickets.md`, "Logging time"), with `worklogs` and `fields`
+that read Jira's REST API with the same entry, `web`'s calls of an API (`docs/tools.md`, "The web": `entry` names the entry, the daemon signs in with
+HTTP Basic when it has a username, else as a bearer token, and only on the origin of its `url`
+(its scheme, host and port), `https` or `http` on this machine; an entry without a `url`, of another project or bound to
+another use is refused before anything is sent, and a missing one offers `vault ask`), and
 Connections (`docs/extensions.md`, "Connections"): a connection's `env` and `secrets` name entries
 of every project, read when its server starts and put in its environment or on its requests,
 never shown to an agent; an entry tied to one project, or bound to another use, is refused for

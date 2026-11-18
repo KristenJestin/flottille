@@ -203,8 +203,9 @@ with the result sizes, descriptions and annotations of `reference/mcp.md` §4:
 - skills: `skill_read`, one of the project's skills, texts read when relevant (`skills.md`);
 - the web (every agent): `web`, which reads a page (its main content as Markdown, a PDF's text)
   or searches through DuckDuckGo, never this machine nor a private network; a URL the agent was
-  shown passes, one it built is judged, since a GET sends out what the URL holds (`tools.md`,
-  "The web");
+  shown passes, one it built is judged, since a GET sends out what the URL holds; it also calls
+  an API, signed in with a vault entry the agent names and never sees, each write a call to
+  judge (`tools.md`, "The web");
 - tickets (every agent of a project that declares a tracker, in `main` as in a workspace):
   `tickets`, which lists, searches, reads and writes the tracker's tickets, GitHub issues or Jira
   work items, each write a call to judge (`tickets.md`);
@@ -676,7 +677,8 @@ says what kind of call it is, and the session's **mode** says who answers it.
   out of this class.
 - **To judge** is everything else: writing in `main`, reading outside the project, a line the
   rules do not know or whose program is the agent's own file, an option of a reading program
-  that runs one, a commit, a push, a forge write, a change of the project an agent asks for.
+  that runs one, a commit, a push, a forge write, a call of an API that writes (`web`), a change
+  of the project an agent asks for.
 - **Base** calls always come to the user in Ask and Auto, with a strong warning, and pass only in
   Full, the mode the user chose for that: a push forced
   (with a lease or not), rewriting history that is on a remote, discarding work in `main` or
