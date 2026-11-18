@@ -238,9 +238,9 @@ pub fn ready_here() -> Option<String> {
     None
 }
 
-/// Forge tokens and the folders of their command lines' configuration, and any variable named
-/// like a secret: no agent's business, whatever its provider (`docs/agents.md`, "The agent's
-/// environment"). Each provider lets its own sign-in through.
+/// Forge tokens and the folders of their command lines' configuration, the user's SSH agent, and
+/// any variable named like a secret: no agent's business, whatever its provider (`docs/agents.md`,
+/// "The agent's environment"). Each provider lets its own sign-in through.
 pub fn secret_or_forge(name: &str) -> bool {
     const FORGES: [&str; 8] = [
         "GH_TOKEN",
@@ -253,6 +253,7 @@ pub fn secret_or_forge(name: &str) -> bool {
         "GLAB_CONFIG_DIR",
     ];
     FORGES.contains(&name)
+        || name == crate::ssh_agent::VARIABLE
         || ["BITBUCKET_", "BKT_"]
             .iter()
             .any(|prefix| name.starts_with(prefix))

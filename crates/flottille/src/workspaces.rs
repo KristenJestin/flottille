@@ -662,8 +662,8 @@ async fn pushed_to(folder: &Path, branch: &str) -> Option<String> {
             return Some(remote.to_owned());
         }
         let head = format!("refs/heads/{branch}");
-        let listed = ["ls-remote", "--heads", "--end-of-options", remote, &head];
-        if git::output(folder, &listed, Class::Read)
+        let listed = ["--heads", "--end-of-options", remote, &head];
+        if git::output_remote(folder, remote, "ls-remote", &listed, Class::Read)
             .await
             .is_ok_and(|listed| !listed.trim().is_empty())
         {
@@ -1036,9 +1036,11 @@ async fn on_remote(
         true => Err(String::new()),
         false => {
             let head = format!("refs/heads/{branch}");
-            git::output(
+            git::output_remote(
                 main,
-                &["ls-remote", "--heads", "--end-of-options", remote, &head],
+                remote,
+                "ls-remote",
+                &["--heads", "--end-of-options", remote, &head],
                 Class::Read,
             )
             .await
@@ -1048,15 +1050,8 @@ async fn on_remote(
         Ok(listed) if listed.trim().is_empty() => Ok(false),
         Ok(_) => {
             let refspec = format!("+refs/heads/{branch}:{tracking}");
-            let fetch = [
-                "fetch",
-                "--quiet",
-                "--no-tags",
-                "--end-of-options",
-                remote,
-                &refspec,
-            ];
-            git::output(main, &fetch, Class::Read)
+            let fetch = ["--quiet", "--no-tags", "--end-of-options", remote, &refspec];
+            git::output_remote(main, remote, "fetch", &fetch, Class::Read)
                 .await
                 .map_err(|reason| {
                     Failure::refused(format!(
@@ -1084,9 +1079,11 @@ async fn exists_somewhere(main: &Path, remote: &str, branch: &str, offline: bool
     }
     let head = format!("refs/heads/{branch}");
     !offline
-        && git::output(
+        && git::output_remote(
             main,
-            &["ls-remote", "--heads", "--end-of-options", remote, &head],
+            remote,
+            "ls-remote",
+            &["--heads", "--end-of-options", remote, &head],
             Class::Read,
         )
         .await
@@ -1204,9 +1201,11 @@ async fn reaching_base(
         )
     };
     reach.start();
-    let heads = match git::output(
+    let heads = match git::output_remote(
         main,
-        &["ls-remote", "--heads", "--end-of-options", remote],
+        remote,
+        "ls-remote",
+        &["--heads", "--end-of-options", remote],
         Class::Read,
     )
     .await
@@ -1231,7 +1230,7 @@ async fn reaching_base(
         return local_base(main, path, remote, rule, why).await;
     };
     // Every candidate there is, so that the tracking refs are fresh for a later offline creation.
-    let mut fetch: Vec<String> = ["fetch", "--quiet", "--no-tags", "--end-of-options", remote]
+    let mut fetch: Vec<String> = ["--quiet", "--no-tags", "--end-of-options", remote]
         .map(String::from)
         .into();
     fetch.extend(
@@ -1239,7 +1238,8 @@ async fn reaching_base(
             .iter()
             .map(|branch| format!("+refs/heads/{branch}:{}", tracking(branch))),
     );
-    let fetched = git::output(main, &fetch, Class::Read).await;
+    let fetch: Vec<&str> = fetch.iter().map(String::as_str).collect();
+    let fetched = git::output_remote(main, remote, "fetch", &fetch, Class::Read).await;
     reach.stop();
     if let Err(reason) = fetched {
         return after_failed_fetch(main, path, remote, rule, cannot_fetch(reason)).await;

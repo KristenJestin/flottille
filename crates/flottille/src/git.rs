@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::path::Path;
 use std::process::Stdio;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncReadExt};
@@ -55,7 +56,138 @@ pub async fn run_with<S: AsRef<OsStr>>(
 ) -> Result<Output, String> {
     let mut command = command(dir, args);
     command.envs(env.iter().copied());
+    crate::landlock::confined(&mut command);
     bounded(command, dir, args, class.limit(), OUTPUT_LIMIT, None).await
+}
+
+/// [`output`] of `git <subcommand> <args>` that reaches `remote` (`ls-remote`, `fetch`): only the
+/// protocol its URL uses, as git resolves it, and only one of [`FETCHED`], git's own upload
+/// command over the remote's, and the user's SSH agent lent when that protocol is SSH
+/// (`docs/vault.md`, "The runtime folder").
+pub async fn output_remote(
+    dir: &Path,
+    remote: &str,
+    subcommand: &str,
+    args: &[&str],
+    class: Class,
+) -> Result<String, String> {
+    let url = output(
+        dir,
+        &["ls-remote", "--get-url", "--end-of-options", remote],
+        Class::Read,
+    )
+    .await?;
+    let protocol = protocol(url.trim());
+    if !FETCHED.contains(&protocol) {
+        return Err(format!(
+            "{remote} is reached through {protocol}, which runs a program the remote names: \
+             Flottille's own git reaches a remote over {} only",
+            FETCHED.join(", ")
+        ));
+    }
+    // The line's own option, since the first `remote.<name>.uploadpack` git reads is the one it
+    // takes: the repository's, before any given in the environment. No maintenance after it: one
+    // that goes to the background would keep the lent agent past the call.
+    let args: Vec<&str> = [
+        "-c",
+        "maintenance.auto=false",
+        "-c",
+        "gc.auto=0",
+        subcommand,
+        "--upload-pack=git-upload-pack",
+    ]
+    .into_iter()
+    .chain(args.iter().copied())
+    .collect();
+    let mut git = command(dir, &args);
+    git.env("GIT_ALLOW_PROTOCOL", protocol);
+    match crate::ssh_agent::socket().filter(|_| protocol == "ssh") {
+        Some(socket) => crate::landlock::confined_lent(git.env(crate::ssh_agent::VARIABLE, socket)),
+        None => crate::landlock::confined(&mut git),
+    };
+    said(bounded(git, dir, &args, class.limit(), OUTPUT_LIMIT, None).await?)
+}
+
+/// The credential helpers of the user's own settings (the system's, then the user's), each as
+/// its setting's name and the helper it names, read at the daemon's start: never a credential.
+static HELPERS: OnceLock<Vec<(String, String)>> = OnceLock::new();
+
+/// Reads the user's credential helpers, before the daemon reads any repository: git sends a
+/// sign-in to `store` on every helper it knows, a repository's own too.
+pub fn find_helpers() {
+    HELPERS.get_or_init(|| {
+        ["--system", "--global"]
+            .into_iter()
+            .flat_map(|scope| {
+                let listed = crate::children::spawn_std(
+                    std::process::Command::new("git")
+                        .args(["config", scope, "--includes", "--null", "--get-regexp"])
+                        .arg(r"^credential\.(.*\.)?helper$")
+                        .stdin(Stdio::null())
+                        .stdout(Stdio::piped())
+                        .stderr(Stdio::null()),
+                )
+                .and_then(std::process::Child::wait_with_output)
+                .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+                .unwrap_or_default();
+                listed
+                    .split('\0')
+                    .filter_map(|entry| entry.split_once('\n'))
+                    .map(|(name, helper)| (name.to_owned(), helper.to_owned()))
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    });
+}
+
+/// `-c` options that leave git the user's own credential helpers alone: an empty
+/// `credential.helper` empties the list read so far, and the command's scope is read last.
+fn helpers() -> Vec<String> {
+    let mut options = vec!["-c".to_owned(), "credential.helper=".to_owned()];
+    for (name, helper) in HELPERS.get().into_iter().flatten() {
+        options.push("-c".to_owned());
+        options.push(format!("{name}={helper}"));
+    }
+    options
+}
+
+/// The protocols the daemon's own git reaches a remote with: git's own transports. Any other
+/// (`ext::`, a `git-remote-<name>` of the `PATH`) runs a program the remote's URL names.
+const FETCHED: [&str; 5] = ["ssh", "https", "http", "git", "file"];
+
+/// The name `GIT_ALLOW_PROTOCOL` knows the transport of `url` by, read as git reads it: a
+/// helper's `<name>::`, a scheme (`ssh` for its other spellings), `ssh` for `host:path`, `file`
+/// for a path.
+fn protocol(url: &str) -> &str {
+    let scheme = url
+        .find(|c: char| !(c.is_ascii_alphanumeric() || "+.-".contains(c)))
+        .map_or(url, |end| &url[..end]);
+    let rest = &url[scheme.len()..];
+    if !scheme.is_empty() && rest.starts_with("::") {
+        return scheme;
+    }
+    if !scheme.is_empty() && rest.starts_with("://") {
+        return match scheme {
+            "git+ssh" | "ssh+git" => "ssh",
+            scheme => scheme,
+        };
+    }
+    match url.find(':') {
+        Some(colon) if !url[..colon].contains('/') => "ssh",
+        _ => "file",
+    }
+}
+
+/// The `ssh` git runs: the one found at the daemon's start, quoted for the shell git reads
+/// `GIT_SSH_COMMAND` with.
+fn ssh_command() -> OsString {
+    match crate::ssh_agent::ssh() {
+        Some(ssh) => {
+            let quoted = ssh.as_os_str().to_string_lossy().replace('\'', "'\\''");
+            format!("'{quoted}'").into()
+        }
+        None => "ssh".into(),
+    }
 }
 
 /// Runs `words` (`git`, its global options, its command) in `dir` with the environment `env` and
@@ -112,8 +244,20 @@ fn read_in<S: AsRef<OsStr>>(
     command
 }
 
+/// [`command`] of the program `git`, confined, for a caller that cannot wait on the runtime (the
+/// gate, while it judges a line): its caller bounds it in time.
+pub fn blocking<S: AsRef<OsStr>>(git: &OsStr, dir: &Path, args: &[S]) -> std::process::Command {
+    let mut command = command_of(git, dir, args);
+    crate::landlock::confined(&mut command);
+    command.into_std()
+}
+
 fn command<S: AsRef<OsStr>>(dir: &Path, args: &[S]) -> tokio::process::Command {
-    let mut command = tokio::process::Command::new("git");
+    command_of(OsStr::new("git"), dir, args)
+}
+
+fn command_of<S: AsRef<OsStr>>(git: &OsStr, dir: &Path, args: &[S]) -> tokio::process::Command {
+    let mut command = tokio::process::Command::new(git);
     command
         .arg("-C")
         .arg(dir)
@@ -124,11 +268,28 @@ fn command<S: AsRef<OsStr>>(dir: &Path, args: &[S]) -> tokio::process::Command {
             "core.fsmonitor=false",
             "-c",
             "core.hooksPath=/dev/null",
+            "-c",
+            "fetch.recurseSubmodules=false",
+            "-c",
+            "submodule.recurse=false",
         ])
+        .args(helpers())
         .args(args)
         // A fetch that needs credentials fails at once; stored credentials still work.
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GCM_INTERACTIVE", "never")
+        // No SSH agent but where `output_remote` lends it, and the `ssh` found at the start, over
+        // a repository's `core.sshCommand`.
+        .env_remove(crate::ssh_agent::VARIABLE)
+        .env("GIT_SSH_COMMAND", ssh_command())
+        // No remote reached but by `output_remote`, which names its one protocol: not the
+        // promisor remote a partial clone asks for a missing object while it reads.
+        .env("GIT_NO_LAZY_FETCH", "1")
+        .env("GIT_ALLOW_PROTOCOL", "")
+        // Set and empty, they win over the `core.gitProxy` and `core.askPass` a repository's
+        // settings name, and name no program.
+        .env("GIT_PROXY_COMMAND", "")
+        .env("GIT_ASKPASS", "")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -222,7 +383,11 @@ pub async fn output_with<S: AsRef<OsStr>>(
     class: Class,
     env: &[(&str, &OsStr)],
 ) -> Result<String, String> {
-    let output = run_with(dir, args, class, env).await?;
+    said(run_with(dir, args, class, env).await?)
+}
+
+/// What a call that ran to its end gave on success, or its error in git's own words, masked.
+fn said(output: Output) -> Result<String, String> {
     if output.success {
         return Ok(output.stdout);
     }
@@ -309,6 +474,39 @@ pub(crate) mod tests {
         .unwrap();
         assert!(output.success, "{args:?}: {}", output.stderr);
         output.stdout.trim().to_owned()
+    }
+
+    #[test]
+    fn the_protocol_of_a_remote_is_read_as_git_reads_its_url() {
+        for (url, protocol) in [
+            ("git@forge.invalid:acme/app.git", "ssh"),
+            ("forge.invalid:acme/app.git", "ssh"),
+            ("ssh://git@forge.invalid/acme/app.git", "ssh"),
+            ("git+ssh://forge.invalid/acme/app.git", "ssh"),
+            ("https://forge.invalid/acme/app.git", "https"),
+            ("http://127.0.0.1:8080/app.git", "http"),
+            ("git://forge.invalid/app.git", "git"),
+            ("file:///srv/app.git", "file"),
+            ("/srv/app.git", "file"),
+            ("../app.git", "file"),
+            ("./a:b", "file"),
+            ("ext::ssh -W %h:%p forge.invalid", "ext"),
+            ("foo::forge.invalid/app", "foo"),
+            ("foo://forge.invalid/app", "foo"),
+        ] {
+            assert_eq!(super::protocol(url), protocol, "{url}");
+        }
+    }
+
+    #[test]
+    fn a_helper_s_protocol_is_never_fetched() {
+        for url in [
+            "ext::sh -c true",
+            "foo::forge.invalid/app",
+            "foo://forge.invalid",
+        ] {
+            assert!(!FETCHED.contains(&super::protocol(url)), "{url}");
+        }
     }
 
     #[tokio::test]
