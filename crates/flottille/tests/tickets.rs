@@ -932,33 +932,50 @@ fn an_agent_in_the_project_folder_has_no_ticket_read() {
 }
 
 #[test]
-fn an_agent_s_acli_always_asks_the_user_and_never_runs_before() {
+fn an_agent_s_acli_read_runs_and_its_write_asks_the_user() {
     let user = User::with_fake_agent().with_fake_acli();
     fixture(&user);
     jira(&user, json!({"ABC-1": work_item("ABC-1", "Jira")}));
     let mcp = agent_in(&user, Some("login"));
 
-    for line in [
-        "acli jira workitem view ABC-1 --json",
-        "acli jira workitem comment create --key ABC-1 --body hi",
-    ] {
-        let answer = mcp.call("run", json!({"line": line}));
-        assert!(
-            answer.text.starts_with("Waiting for the user's approval"),
-            "{line}: {}",
-            answer.text
-        );
-    }
+    // A read passes as a read: it runs at once.
+    let read = mcp.call(
+        "run",
+        json!({"line": "acli jira workitem view ABC-1 --json"}),
+    );
+    assert!(
+        !read.text.starts_with("Waiting for the user's approval"),
+        "{}",
+        read.text
+    );
+    assert!(
+        calls(user.acli_received()).contains(&"jira workitem view ABC-1 --json".to_owned()),
+        "the fake was not run for the read"
+    );
+
+    // A write waits for the user, and the fake is not run for it.
+    let before = calls(user.acli_received());
+    let write = mcp.call(
+        "run",
+        json!({"line": "acli jira workitem comment create --key ABC-1 --body hi"}),
+    );
+    assert!(
+        write.text.starts_with("Waiting for the user's approval"),
+        "{}",
+        write.text
+    );
+    assert_eq!(
+        calls(user.acli_received()),
+        before,
+        "the fake ran for the write"
+    );
     let requests = user.call("approval.list", json!({})).unwrap()["requests"]
         .as_array()
         .unwrap()
         .clone();
-    assert_eq!(requests.len(), 2);
-    for request in &requests {
-        assert_eq!(request["class"], "base", "{request}");
-        assert!(request.to_string().contains("acli"), "{request}");
-    }
-    assert!(user.acli_received().is_empty(), "the fake was never run");
+    assert_eq!(requests.len(), 1, "{requests:?}");
+    assert_eq!(requests[0]["class"], "judge", "{}", requests[0]);
+    assert!(requests[0].to_string().contains("acli"), "{}", requests[0]);
 }
 
 /// The issue `number` as `gh issue list` and `gh issue view` answer it, changed at `updated`.
