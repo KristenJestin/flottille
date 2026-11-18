@@ -119,14 +119,17 @@ pub fn find_helpers() {
         ["--system", "--global"]
             .into_iter()
             .flat_map(|scope| {
-                let listed = std::process::Command::new("git")
-                    .args(["config", scope, "--includes", "--null", "--get-regexp"])
-                    .arg(r"^credential\.(.*\.)?helper$")
-                    .stdin(Stdio::null())
-                    .stderr(Stdio::null())
-                    .output()
-                    .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
-                    .unwrap_or_default();
+                let listed = crate::children::spawn_std(
+                    std::process::Command::new("git")
+                        .args(["config", scope, "--includes", "--null", "--get-regexp"])
+                        .arg(r"^credential\.(.*\.)?helper$")
+                        .stdin(Stdio::null())
+                        .stdout(Stdio::piped())
+                        .stderr(Stdio::null()),
+                )
+                .and_then(std::process::Child::wait_with_output)
+                .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+                .unwrap_or_default();
                 listed
                     .split('\0')
                     .filter_map(|entry| entry.split_once('\n'))
