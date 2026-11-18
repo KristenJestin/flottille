@@ -12,7 +12,9 @@ here is built but the keys, and the member list, the invitation code and the fou
 and their checks, and the link between two machines with its version check (`crates/flottille-link`,
 `crates/flottille/src/link.rs`), and the hub with its rules, served on the network, the control
 session every machine keeps to it and the first member's setup (`crates/flottille-hub`,
-`crates/flottille-link/src/control.rs`, `crates/flottille/src/hub_session.rs`). What is decided is said as such; the defaults taken are in "Defaults taken, to
+`crates/flottille-link/src/control.rs`, `crates/flottille/src/hub_session.rs`), and pairing
+through the hub: invitations, joining, the four words, adding, renaming and removing members
+from the command line (#812). What is decided is said as such; the defaults taken are in "Defaults taken, to
 confirm"; what is open is in "Open questions". It replaces the proposal of 2026-11-03 (a relay
 every device connects to, on a private network) and the review that put Tailscale and SSH at the
 centre: Flottille stays generic (`AGENTS.md`), and depends on no one network and no account of a
@@ -243,7 +245,23 @@ link.
   `flottille-entry`, a vault entry's: one may be named `device`); on
   a machine with no Secret Service (a headless server), `$XDG_STATE_HOME/flottille/remote/device.key`,
   mode 600, read by the clients only. The daemon never reads it. It signs the user's actions, the
-  member list's changes included.
+  member list's changes included. It is kept once `flottille remote setup` or `join` succeeded with
+  it, never before ("What a compromised hub can still do"). Until then it is **pending**, with the
+  same care: an item `Flottille: device, pending` (`flottille-key = device-pending`), or
+  `device.key.pending` with no Secret Service, written before the hub sees the key, so that a
+  command gone before the end (Ctrl+C, a closed terminal, a lost SSH session, a locked keyring)
+  loses no key the hub took. The next setup or join looks at a pending key first, once a setup or
+  a join the daemon still runs for it ended: it is kept when the list of the hub the machine pinned
+  holds it as a member, and removed otherwise, never sent again; also for a setup that replaces
+  the hub, whose machine is pinned to the old one meanwhile. When the daemon holds a join
+  accepted for it, the join goes on with that join's answer, not with the code typed (the command
+  says so), and the key is kept only once the hub took the machine's declaration. A key is kept
+  only if no other is: one another client kept first is said, and the pending one stays. A declaration
+  that failed because its session ended lets the join go: the next command removes the pending key
+  (the member it names, with no machine, is one the inviter removes). The
+  keyring holding two items of the kept device key (two clients that kept one at the same moment)
+  is refused, never one of them taken: which is the member's cannot be told. Two pending items are
+  both removed, never sent again: at most a member with no key is left, which a member removes.
 - **The phone's device key** is made by the app, kept encrypted under a key of the Android Keystore,
   and never leaves the phone.
 - **The hub's key** is made at its first start, in its own state folder. Devices pin it when they
@@ -390,6 +408,23 @@ up, or submits a change, keeps the list only once the hub sent it back holding i
 rest needs the members to compare the heads of their lists over their links, and to say so when
 they differ: not built (a follow-up issue).
 
+A hub can also try to **slip its own key into a pairing**. The member that invited draws the four
+words from the token it was given itself, and shows only a join request for a token it was given
+and that is still valid: a request the hub pushes for a token it never issued is dropped. That does
+not stop the hub from choosing the token it issues; what makes the choice useless is that it does
+not know the new device's key yet. A device that is not a member makes a new key for each join and
+keeps it only once the join succeeded (`crates/flottille/src/remote_command.rs`), so a hub that
+drops a join on purpose, to be asked a new invitation, has seen a key the next join no longer
+sends. Once it sees the new key, the token is issued already, and what is left is to search a key:
+the words are 44 bits and nothing commits the new device to its key before the hub sees it, so a
+hub may make keys until one gives the same four words with the token and the inviter's key, and
+put it in the request in place of the new device's. That is about 2^44 keys made and hashed (about
+1.8 × 10^13) within the 5 minutes the invitation is valid: out of reach of a machine, not of a
+large fleet rented for it. A device that joins with a key it kept already (a member's, one that
+joins again) sends a key the hub knows: the hub can search a token for it ahead, with no 5 minutes
+to bound it, about 2^44 hashes too, a GPU-hour. A commitment of the new device to its key would
+close both: not built.
+
 ## Pairing
 
 A device is added by a member, through the hub, the user checking on both screens that they talk to
@@ -401,8 +436,8 @@ each other.
    5 minutes of the hub's time, taken once). The hub answers with a token, valid **5 minutes,
    once**. The member shows a QR and the same as a code to copy, holding the hub URL with the hub's
    key, the token, and the inviting member's key fingerprint.
-2. **The new device reads it** (the phone scans the QR; a computer is given the code), makes its key,
-   and connects **to the hub**, not to the inviting member, with the token and its new public key.
+2. **The new device reads it** (the phone scans the QR; a computer is given the code), makes its key
+   (a new one for each join, pending until one succeeded, kept then), and connects **to the hub**, not to the inviting member, with the token and its new public key.
 3. **The hub holds the request** and notifies the inviting member. Both screens show the same **four
    verification words**, drawn from the new device's key, the inviting member's key and the token
    (`maple orbit violet canyon`).
@@ -418,19 +453,55 @@ each other.
    added at 18:42 from pc`, with Remove beside it, so that an addition behind the user's back is
    seen at once.
 
-**A headless machine** joins with `flottille remote join <code>`, the code coming from an
-invitation opened on a human device: it prints the four words, and the user accepts on the device
+**A headless machine** joins with `flottille remote join`, given the code on its standard input (or
+at its prompt), never on the command line, which other users' `ps` and the shell's history keep;
+the code comes from an invitation opened on a human device. It prints the four words, and the user accepts on the device
 that invited it, with the role `runner` chosen there.
 
 **Removing** (Settings, Machines, the row's Remove, `flottille remote remove <name>`) is the same
 kind of signed change, by any member that may add one: every device that hears it removes the
 member and cuts its links at once; one that was off hears it from the hub when it connects again,
-before anything else is exchanged. A removed key cannot join again. **Renaming** is the same kind of
+before anything else is exchanged: at start, a machine accepts and dials no link until it has the
+hub's list, 10 s at most, and goes on with the list it kept only when the hub cannot give it one
+by then. The same holds once its session to the hub is lost (a machine that wakes from a suspend,
+or was offline): no new link is accepted or dialled until the next session's list, 10 s at most
+from the loss, a hub unreachable meanwhile included; the links up already go on. A session may
+look alive for minutes after a suspend, with no heartbeat to say otherwise: every second, the
+daemon compares how far the wall clock moved with how far the monotonic clock did, which does not
+count a suspend, and more than 5 s apart ends the session as lost. A link that comes, or a dial
+due, before that second's round is held the same way: the clocks the round last saw are compared
+then too, and so are they where the session tells its clocks, at a round or at its start, before
+they are stored. Meanwhile, a link from a key
+the list kept does not trust is refused at once, and one from a key it trusts waits, one per key. A removed member's open invitations close with it, and the joins that wait on them end,
+refused. A removed device key cannot join again; the hub refuses removed device keys, not machine
+keys, so a removed member's machine may join again with a new device key, through an invitation
+and its four words like any other. **Renaming** is the same kind of
 signed change. A device that wants to leave removes itself the same way. A role is changed by
 removing the device and adding it again.
 
 A device refuses a link from a key that is not in its list, and a list change not signed by a
 member.
+
+**Built (#812), from the command line**: `flottille remote invite` prints the code on a line of its
+own (the QR holds the same text); `flottille remote join`, given the code on its standard input,
+makes the device key, prints the four words and waits
+until the member that invited accepts or refuses; `flottille remote requests` lists the requests
+that wait for this machine's member with their words; `flottille remote accept <request> --name
+<name> --role runner|controller|viewer` prints the words, then signs the addition; `flottille
+remote refuse <request>`; `flottille remote members`, `rename <name> <new name>` and `remove
+<name>`. A request is named by the new device's fingerprint. The clients sign, with the device key;
+the daemon carries what they signed (`remote.*`, `protocol.md`) and says what changed as events
+(`remote.*`, `events.md`). The window's and the phone's parts are not built.
+
+A machine that joins is no member yet: it reaches the hub with its machine key, pinning the hub's
+key the code holds, and says in its proof the invitation's token and the new device's key. The hub
+welcomes it while its request waits, sends it nothing and takes no ask from it, and tells the
+member that invited the requests that wait for it, over that member's own sessions. Once the
+addition is stored, the hub sends the joining machine the list; the machine checks it
+(`Invitation::check_list`), then the new device declares the machine through the same session, and
+the machine pins the hub (`remote/hub.json`) once the declaration came back. A refused or expired
+request ends the session, saying so. A join the hub recorded spends the token, even when the
+connection then drops before the request is accepted: the member asks a new invitation.
 
 ## Roles
 
@@ -922,6 +993,30 @@ on a real phone, by hand, and reported.
   refusing adds nothing.
 - The hub takes an addition only as the answer to a join request to its signer: a device joins
   through an invitation, never by a change alone.
+- A machine that joins (#812) answers the invitation in its session's proof (`join`: the token
+  and the new device's key), so that a key with no token is still refused at the end of its
+  handshake. While its request waits, its session counts among the 64 places of keys that are no
+  member's, is sent nothing and may ask nothing; it ends with the request (refused, or 5 minutes
+  after the invitation was given). In one of the 8 places kept for members, it is refused before
+  its token is spent. A key removed from the list, or a member's, is refused at once
+  (`… was removed from the member list: a removed device joins again with a new key`).
+- The device that joined declares its machine at once, through the session it joined with: the
+  daemon never holds the device key, so `flottille remote join` waits for the acceptance and signs
+  the declaration then. `remote.join` is refused on a machine set up already: a machine joins one
+  hub.
+- The member that invited is sent the requests that wait for it (`{"requests": [{"token", "key"}]}`)
+  over every session of its device or its machine; the token travels back to the machine that
+  asked for it, so that its clients draw the same four words. A request is named by the new
+  device's fingerprint (`flottille remote accept 3f2a-91bc-0d4e-77a1`).
+- A removal is carried out by every daemon that takes the list holding it: the machines it trusts
+  are written again, and its link to the removed member's machine is cut at once
+  (`remote.disconnected`, `it was removed from the member list`). The removed machine's own session
+  to the hub is refused, so it never sees the removal itself; its links are cut by the others.
+- `remote.connected` and `remote.disconnected` are the machines' links, not the hub's session
+  (its state is `remote.machines`' `hub`).
+- The formats of #820 changed without a version of their own, nothing being released: the
+  device's proof has `join`, the asks `invite` and `refuse`, an answer `token`, and the hub sends
+  `requests`.
 - `flottille-hub setup-code --reset` is refused while a hub uses the state folder, rather than
   told to it: the running hub would keep the old code valid and undo the reset at its next write.
   It reads nothing of the state, so a list that does not check, or a damaged file, does not stop

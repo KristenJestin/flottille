@@ -687,11 +687,13 @@ const SERVED: [Definition; 33] = [
             characters) and its links. search: DuckDuckGo, 10 results. Both are the web's, not \
             the user's. A URL you were shown (user, ticket, pull request, page, result) \
             passes; one you build is judged: it sends out what it holds. No local or private \
-            address. show_link {url or path, title?}: puts a link in front of the user, who \
-            opens it with a click (an http(s) URL, or a file of your place); use it instead of \
-            xdg-open, open or start, which show nothing here.",
-        read_only: true,
-        idempotent: true,
+            address. An API: read with entry (a vault entry's name: Flottille signs in on its \
+            host, you never see the secret), method, body, headers: the status, type and body \
+            as they came; a write is judged. show_link {url or path, title?}: puts a link in \
+            front of the user, who opens it with a click (an http(s) URL, or a file of your \
+            place); use it instead of xdg-open, open or start, which show nothing here.",
+        read_only: false,
+        idempotent: false,
         destructive: false,
         schema: || {
             json!({"type": "object", "properties": {
@@ -699,6 +701,11 @@ const SERVED: [Definition; 33] = [
                 "url": {"type": "string"},
                 "query": {"type": "string"},
                 "why": {"type": "string"},
+                "entry": {"type": "string", "description": "read: the vault entry to sign in with: Basic with its username, else a bearer token."},
+                "method": {"type": "string", "enum": ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"], "description": "read: GET when left out."},
+                "body": {"type": "string", "description": "read: what POST, PUT, PATCH or DELETE sends (JSON as a string)."},
+                "headers": {"type": "object", "additionalProperties": {"type": "string"}, "description": "read: your own; never Authorization, Cookie nor Proxy-Authorization."},
+                "auth": {"type": "string", "enum": ["basic", "bearer"], "description": "read: how entry signs in, when the guess is wrong."},
                 "path": {"type": "string", "description": "show_link: a file inside your place."},
                 "title": {"type": "string", "description": "show_link: a few words naming the link."}
             }, "required": ["action"], "additionalProperties": false})
@@ -2707,7 +2714,7 @@ fn verdict_of(
         return crate::show::verdict(&grant.place, args);
     }
     if tool == "web" {
-        return crate::web::classify(daemon, &grant.agent, args);
+        return crate::web::classify(daemon, grant, args);
     }
     if tool == "session_send" {
         match crate::tree::needs_leave(daemon, grant, args) {
@@ -3325,7 +3332,7 @@ async fn performed_once(
 ) -> Outcome {
     match tool {
         "web" if crate::show::is(&args) => crate::show::show(daemon, grant, args),
-        "web" => crate::web::web(daemon, &grant.agent, args).await,
+        "web" => crate::web::web(daemon, grant, args).await,
         "services" => crate::services::tool(daemon, grant, args, first).await,
         // An accepted request's `first` is the words the user read (`approvals`).
         "connections" => crate::extensions::family_call(daemon, args, first, &grant.place).await,
