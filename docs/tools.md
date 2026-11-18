@@ -607,6 +607,16 @@ pending requests.
   had typed it (`docs/commands.md`, "The environment"). Its task's `ready` and `url` commands
   still run in the sandbox. A push goes where the repository's remote leads now: the remote is
   the user's to change (`docs/commands.md`, "Where the remote leads").
+- **The daemon's own git is walled like a run's**: what it runs for itself on a repository (its
+  reads, its worktrees, the `ls-remote` and `fetch` that find a workspace's base) runs under the
+  same Landlock rules, with no `SSH_AUTH_SOCK`, no hook, no file system monitor, no submodule
+  fetched, no lazy fetch, no proxy or askpass of the repository's, only the user's own credential
+  helpers, the `ssh` found at the daemon's start over `core.sshCommand`, and, for a call that
+  reaches a remote, only the protocol of its URL when it is one of git's own (`GIT_ALLOW_PROTOCOL`;
+  an `ext::` or other helper's URL is not fetched), git's own upload command (`--upload-pack`)
+  and no maintenance after it. A fetch or a listing of an SSH remote alone is lent the user's SSH
+  agent, its socket and nothing else of the runtime folder (`docs/vault.md`, "The runtime
+  folder"). The agent command lines start without `SSH_AUTH_SOCK` too.
 - **A stop ends the run's session, not every descendant.** A run starts in a session of its own
   (`docs/reference/processes.md`). `run_status` with `action stop`, a timeout of the call's client
   and the daemon's stop signal the run's process group (`SIGTERM`, then `SIGKILL` after 5 s), and
