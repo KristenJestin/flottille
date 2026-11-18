@@ -676,17 +676,36 @@ impl User {
         let ssh = self.path("ssh-bin/ssh");
         std::fs::write(&ssh, script).unwrap();
         std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = self
+            .env
+            .iter()
+            .rev()
+            .find(|(name, _)| name == "PATH")
+            .map(|(_, value)| value.clone())
+            .unwrap_or_else(|| std::env::var("PATH").unwrap_or_default());
         let path = format!(
             "{}:{}",
             self.path("ssh-bin").display(),
-            self.env
-                .iter()
-                .rev()
-                .find(|(name, _)| name == "PATH")
-                .map(|(_, value)| value.clone())
-                .unwrap_or_else(|| std::env::var("PATH").unwrap_or_default())
+            self.programs_but_ssh(&path).display()
         );
         self.with_env("PATH", &path)
+    }
+
+    /// A folder of links to every program of `path` but `ssh`, the first of each name: the
+    /// daemon's git prefers an `ssh` owned by root to a fake one, and the machine's is.
+    pub fn programs_but_ssh(&self, path: &str) -> PathBuf {
+        let folder = self.path("programs");
+        std::fs::create_dir(&folder).unwrap();
+        for dir in std::env::split_paths(path) {
+            for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+                let name = entry.file_name();
+                let link = folder.join(&name);
+                if name != "ssh" && std::fs::symlink_metadata(&link).is_err() {
+                    std::os::unix::fs::symlink(entry.path(), link).unwrap();
+                }
+            }
+        }
+        folder
     }
 
     /// The words of every call of the fake `ssh`, the first first.
