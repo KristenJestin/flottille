@@ -3086,14 +3086,10 @@ const PUSHED_WAIT: Duration = Duration::from_secs(5);
 /// when it could not, or not in time (a repository on a network file system that hangs): it is
 /// then killed.
 fn remote_refs(git: &std::ffi::OsStr, folder: &std::path::Path, wait: Duration) -> Option<String> {
+    // The daemon's own git, walled and pinned like every other it runs on a repository.
+    let args = ["for-each-ref", "--format=%(refname)", "refs/remotes"];
     let mut child = crate::children::spawn_std(
-        std::process::Command::new(git)
-            .arg("-C")
-            .arg(folder)
-            .args(["for-each-ref", "--format=%(refname)", "refs/remotes"])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null()),
+        crate::git::blocking(git, folder, &args).stderr(std::process::Stdio::null()),
     )
     .ok()?;
     // Read meanwhile: a long list would fill the pipe and keep git from ending.
@@ -3454,6 +3450,33 @@ pub fn cut(text: &str, limit: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pushed_lists_the_remote_branches_through_the_daemon_s_git() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let done = std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir.path())
+                .args(args)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_AUTHOR_NAME", "Test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.invalid")
+                .env("GIT_COMMITTER_NAME", "Test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.invalid")
+                .output()
+                .unwrap();
+            assert!(done.status.success(), "{args:?}");
+        };
+        git(&["init", "--quiet"]);
+        git(&["commit", "--quiet", "--allow-empty", "-m", "start"]);
+        git(&["update-ref", "refs/remotes/origin/login", "HEAD"]);
+
+        let refs = remote_refs("git".as_ref(), dir.path(), Duration::from_secs(10));
+
+        assert_eq!(refs.as_deref(), Some("refs/remotes/origin/login\n"));
+    }
 
     #[test]
     fn pushed_gives_up_after_its_timeout() {

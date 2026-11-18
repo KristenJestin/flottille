@@ -233,8 +233,20 @@ fn read_in<S: AsRef<OsStr>>(
     command
 }
 
+/// [`command`] of the program `git`, confined, for a caller that cannot wait on the runtime (the
+/// gate, while it judges a line): its caller bounds it in time.
+pub fn blocking<S: AsRef<OsStr>>(git: &OsStr, dir: &Path, args: &[S]) -> std::process::Command {
+    let mut command = command_of(git, dir, args);
+    crate::landlock::confined(&mut command);
+    command.into_std()
+}
+
 fn command<S: AsRef<OsStr>>(dir: &Path, args: &[S]) -> tokio::process::Command {
-    let mut command = tokio::process::Command::new("git");
+    command_of(OsStr::new("git"), dir, args)
+}
+
+fn command_of<S: AsRef<OsStr>>(git: &OsStr, dir: &Path, args: &[S]) -> tokio::process::Command {
+    let mut command = tokio::process::Command::new(git);
     command
         .arg("-C")
         .arg(dir)
