@@ -37,6 +37,14 @@ it (`docs/design.md` §3, §11).
   the socket, then talks to it. The daemon started this way writes its output to
   `$XDG_STATE_HOME/flottille/daemon.log`.
 
+- **A request for another machine** of the user's is a line `{"id", "machine", "signed":
+  {"device", "nonce", "at", "method", "params"}, "sig"}`, signed by the client with the device
+  key (`docs/remote.md`, "Requests from another machine's clients"): the daemon carries it to
+  that machine and writes back its answer, under its `id`, then, for `events.watch`, that
+  machine's events. A machine that is off is answered `unavailable` (`server is offline since
+  22:14`); a request the other machine refuses, `refused`. A client an agent started is refused
+  before any of it.
+
 The protocol is written to travel later over an authenticated network transport (design §12):
 every request is self-contained, identifiers are opaque strings, and nothing assumes the client
 shares the daemon's file system except paths the user typed.

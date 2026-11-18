@@ -14,7 +14,8 @@ and their checks, and the link between two machines with its version check (`cra
 session every machine keeps to it and the first member's setup (`crates/flottille-hub`,
 `crates/flottille-link/src/control.rs`, `crates/flottille/src/hub_session.rs`), and pairing
 through the hub: invitations, joining, the four words, adding, renaming and removing members
-from the command line (#812). What is decided is said as such; the defaults taken are in "Defaults taken, to
+from the command line (#812), and the user's requests to another machine, signed by the client,
+carried by its daemon and checked by the machine they are for (`--machine`, #813). What is decided is said as such; the defaults taken are in "Defaults taken, to
 confirm"; what is open is in "Open questions". It replaces the proposal of 2026-11-03 (a relay
 every device connects to, on a private network) and the review that put Tailscale and SSH at the
 centre: Flottille stays generic (`AGENTS.md`), and depends on no one network and no account of a
@@ -911,8 +912,31 @@ on a real phone, by hand, and reported.
 - The version handshake is the first stream of a link: the dialler sends its hello, the other
   answers its own, and each chooses or refuses by itself; the dialler closes a refused link. A
   link that hears nothing for 15 seconds is lost (each side says something every 5).
-- Until requests from another machine's clients are served (#813), a `client` link is made and
-  every request on it refused (`requests from another machine's clients are not served yet`).
+- A client's request for another machine (#813) is a line of the local socket that holds
+  `machine`: the local daemon carries it as it is, never served here, on a `client` link it dials
+  to that machine (kept, and dialled again once when it failed), one stream per request. What
+  comes back on the stream is the protocol's own lines, `\n`-ended: the answer, then, for
+  `events.watch`, the events; the local daemon writes back only the answer under the request's
+  own `id`, and events after it. A request the receiver refuses is answered `refused` with its
+  sentence. A machine whose link is down is refused at once, `unavailable`, `server is offline
+  since 22:14` (the time the link went down, the local time of day), or `server needs an update:
+  …`; nothing is kept. A request whose `machine` is this machine's own name is checked and
+  served here the same way.
+- The receiving daemon checks a request against the member list of its `hub.json` as last
+  checked, its own member's name as `machine`; then serves it on a connection of its own, as a
+  local client's, which ends with the answer (or, for a watch, when the stream ends). Its log
+  says `agent.start asked by pc from pc` (the method, the member whose device signed it, the
+  machine that carried it), and every event its serving emits has `device`, the member's name
+  (`docs/events.md`). Events emitted later by what it started (an agent's turn) do not.
+- A watch of another machine whose link dropped ends the local connection, so that its client
+  resumes it: `flottille watch --machine server` connects again, every second while the machine
+  is offline (said once), and watches again `after` the last event it printed, a new request
+  signed each time. The window's switcher is a later ticket.
+- `flottille daemon`, `window`, `update`, `mcp`, `bridge` and `remote` are this machine's own and
+  refuse `--machine`; `flottille --machine server daemon stop` asks that daemon to stop.
+- The client's link is dialled by the machine that carries the request: a machine that listens
+  nowhere can be driven only by a machine it can be dialled by today. Carrying the user's
+  requests over a link the other machine dialled is left for the phone.
 
 - A key file holds the 32 bytes of the private key, nothing else; it is made under a temporary
   name with `O_EXCL`, synced, then linked into place, so that two clients making the device key at
@@ -967,8 +991,8 @@ on a real phone, by hand, and reported.
   way, or before the receiving daemon started: the nonces it remembers are in memory only, one
   memory for all its links, and a restart would otherwise let a request be served again. A sender
   whose clock is behind is refused for at most five minutes after a restart
-  (`refused: this request was signed before this machine started: send it again`). Keeping the
-  nonces in the store is left to the daemon's wiring (#813).
+  (`refused: this request was signed before this machine started: send it again`). The daemon
+  keeps them in memory (#813), not in the store: what a restart costs is that refusal.
 - The receiver forgets a nonce once it leaves the window of the latest time its clock gave, and
   keeps at most 4096 per device: past that, the device's requests are refused until the oldest
   leave the window, never forgotten early. The time check reads the clock as it is now, so that a
