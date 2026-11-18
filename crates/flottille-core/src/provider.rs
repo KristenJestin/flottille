@@ -400,6 +400,28 @@ mod tests {
     }
 
     #[test]
+    fn a_dashed_date_is_a_date_not_a_version() {
+        let listed = ["gpt-5-mini-2025-08-07", "gpt-5.1-mini"];
+        assert_eq!(resolved_model(listed, "mini"), Some("gpt-5.1-mini"));
+        assert_eq!(
+            resolved_model(["m-1-2025-08-07", "m-1-2026-01-02"], "m"),
+            Some("m-1-2026-01-02")
+        );
+        // The two ways of writing a date compare as one.
+        assert_eq!(
+            resolved_model(["m-1-20250807", "m-1-2026-01-02"], "m"),
+            Some("m-1-2026-01-02")
+        );
+    }
+
+    #[test]
+    fn two_models_of_one_version_and_date_are_ordered_by_their_id() {
+        for listed in [["a-fable-5", "b-fable-5"], ["b-fable-5", "a-fable-5"]] {
+            assert_eq!(resolved_model(listed, "fable"), Some("b-fable-5"));
+        }
+    }
+
+    #[test]
     fn the_auto_judge_is_read_from_its_table_and_none_is_chosen_by_default() {
         assert_eq!(Settings::default().judge, None);
         let settings = Settings::parse(
