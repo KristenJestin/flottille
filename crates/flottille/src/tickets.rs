@@ -938,10 +938,11 @@ struct TicketsCall {
     /// `reply`: the id of a comment. `comment_edit`, `comment_delete`: one an agent posted.
     comment: Option<String>,
     /// `create`, `edit` on Jira: any field of the work item, keyed by its id or system key and
-    /// valued as Jira takes it, passed through to `acli` as its JSON's `additionalAttributes`.
+    /// valued as Jira takes it: a creation's JSON `additionalAttributes` for `acli`, an edit's `fields` of
+    /// Jira's REST API (`acli`'s edit JSON reads none).
     fields: Option<serde_json::Map<String, Value>>,
-    /// `create` on Jira: the open sprint to put the work item in, by its name or its id, and the
-    /// work item it goes under.
+    /// `create` on Jira: the open sprint to put the work item in, by its name or its id; `create`
+    /// and `edit` on Jira: the work item it goes under.
     sprint: Option<String>,
     parent: Option<String>,
     /// `sprints`: the board whose sprints are listed, by its name or its id.

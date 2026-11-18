@@ -7,8 +7,8 @@
 //! print Jira's REST project with its `versions` (assumed: its page gives no output), `workitem
 //! create --from-json`, whose `additionalAttributes` set a field outside its flags, and JQL's
 //! `fixVersion`. So the versions are read, a work item is created in one, a search filters by one,
-//! and every other write of a version is refused saying so, never done through Jira's REST API
-//! (the sprint's rule, `sprints.rs`: a work item's sprint is refused the same way).
+//! and every other write of a version is refused saying so; only a work item's own fix version
+//! is set, by `edit`, through Jira's REST API (#1067, `tickets.rs` `api_edit`).
 
 use flottille_core::declared::ProjectTracker;
 use flottille_core::project::Project;
