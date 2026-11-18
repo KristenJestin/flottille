@@ -49,7 +49,8 @@ fn socket_at(user: &User, agent: &str) -> PathBuf {
 /// socket its `SSH_AUTH_SOCK` names (`reached <path>`, `refused <path>`, `no agent`), the value
 /// of `FLOTTILLE_PLANTED` it was given (`planted=…`), whether it could list the runtime folder
 /// (`runtime listed`, `runtime unlisted`) and connect to its bus (`bus reached`, `bus refused`),
-/// and serves git's own call from
+/// and what git asked it to run on the remote (`asked git-upload-pack '…'`), and serves git's
+/// own call from
 /// `remotes/<name>`, whatever the host.
 fn fake_ssh(user: User) -> User {
     std::fs::create_dir(user.path("ssh-bin")).unwrap();
@@ -67,6 +68,7 @@ fn fake_ssh(user: User) -> User {
          if {connect} '{runtime}/bus' 2>/dev/null; then echo 'bus reached' >> '{said}'\n\
          else echo 'bus refused' >> '{said}'; fi\n\
          for last; do :; done\n\
+         echo \"asked $last\" >> '{said}'\n\
          service=${{last%% *}}\n\
          repository=$(basename \"$(echo \"${{last#* }}\" | tr -d \"'\")\")\n\
          exec git \"${{service#git-}}\" '{remotes}'/\"$repository\"\n",
@@ -287,9 +289,10 @@ fn credential_helper(user: User) -> User {
     script(
         &helper,
         &format!(
-            "echo \"$1\" >> '{}'\n\
+            "echo \"$1\" >> '{said}'\n\
+             echo \"agent=$SSH_AUTH_SOCK\" >> '{said}'\n\
              if [ \"$1\" = get ]; then echo username=octo; echo password=invented-password; fi\n",
-            user.path("helper-said").display()
+            said = user.path("helper-said").display()
         ),
     );
     std::fs::create_dir_all(user.path("home")).unwrap();
@@ -644,6 +647,16 @@ fn a_planted_ssh_command_does_not_run_in_the_daemon_s_fetch() {
 
     assert!(!user.path("planted-ran").exists(), "the planted ssh ran");
     assert_eq!(base["fetched_now"], true, "{base}");
+    // Git asked for its own upload command, not the remote's.
+    let said = ssh_said(&user);
+    let asked: Vec<_> = said.iter().filter(|s| s.starts_with("asked ")).collect();
+    assert!(!asked.is_empty(), "{said:?}");
+    assert!(
+        asked
+            .iter()
+            .all(|s| s.starts_with("asked git-upload-pack '")),
+        "{said:?}"
+    );
     assert_eq!(base["ref"], "refs/remotes/origin/main", "{base}");
     // The `ssh` found at the daemon's start, lent the agent for this fetch alone.
     let reached = format!("reached {}", lent(&user).display());
@@ -1004,4 +1017,88 @@ fn the_daemon_s_fetch_starts_no_maintenance() {
 
     assert_eq!(base["fetched_now"], true, "{base}");
     assert_eq!(packs(&folder), 2, "the fetch's pack was packed again");
+}
+
+#[test]
+fn an_https_fetch_of_the_daemon_gets_no_ssh_agent() {
+    let (user, _agent, _bus) = user();
+    let user = credential_helper(user);
+    let (_server, url) = http_remote(&user);
+    project(&user, &url);
+
+    let base = created(&user);
+
+    assert_eq!(base["fetched_now"], true, "{base}");
+    let said = helper_said(&user);
+    assert!(said.contains(&"agent=".to_owned()), "{said:?}");
+    assert!(
+        !said
+            .iter()
+            .any(|s| s.starts_with("agent=") && s != "agent="),
+        "{said:?}"
+    );
+}
+
+#[test]
+fn a_file_fetch_of_the_daemon_gets_no_ssh_agent() {
+    let (user, _agent, _bus) = user();
+    // A program of the user's own settings that the remote's side of a fetch runs.
+    let said = user.path("hook-said");
+    let hook = user.path("hooks/pack-objects");
+    script(
+        &hook,
+        &format!(
+            "echo \"agent=$SSH_AUTH_SOCK\" >> '{}'\nexec \"$@\"\n",
+            said.display()
+        ),
+    );
+    std::fs::create_dir_all(user.path("home")).unwrap();
+    let settings = user.path("home/.gitconfig");
+    std::fs::write(
+        &settings,
+        format!("[uploadpack]\n\tpackObjectsHook = {}\n", hook.display()),
+    )
+    .unwrap();
+    let user = user.with_env("GIT_CONFIG_GLOBAL", settings.to_str().unwrap());
+    let remote = user.path("remotes/app.git");
+    project(&user, remote.to_str().unwrap());
+    // A commit to fetch.
+    let seed = user.path("seed");
+    user.git(
+        &user.path(""),
+        &[
+            "clone",
+            "--quiet",
+            "--branch",
+            "main",
+            remote.to_str().unwrap(),
+            seed.to_str().unwrap(),
+        ],
+    );
+    std::fs::write(seed.join("later.txt"), "later\n").unwrap();
+    user.git(&seed, &["add", "later.txt"]);
+    user.git(&seed, &["commit", "--quiet", "-m", "later"]);
+    user.git(&seed, &["push", "--quiet", "origin", "main"]);
+
+    let base = created(&user);
+
+    assert_eq!(base["fetched_now"], true, "{base}");
+    let said = std::fs::read_to_string(&said).unwrap_or_default();
+    assert!(said.contains("agent=\n"), "{said:?}");
+    assert!(!said.contains("agent=/"), "{said:?}");
+}
+
+#[test]
+fn an_agent_socket_outside_the_runtime_folder_is_lent_to_the_daemon_s_fetch() {
+    let (user, _agent, _bus) = user_with("agents/agent.sock");
+    project(&user, SSH_REMOTE);
+
+    let base = created(&user);
+
+    assert_eq!(base["fetched_now"], true, "{base}");
+    let lent = socket_at(&user, "agents/agent.sock")
+        .canonicalize()
+        .unwrap();
+    let reached = format!("reached {}", lent.display());
+    assert!(ssh_said(&user).contains(&reached), "{:?}", ssh_said(&user));
 }
