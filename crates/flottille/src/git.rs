@@ -55,7 +55,75 @@ pub async fn run_with<S: AsRef<OsStr>>(
 ) -> Result<Output, String> {
     let mut command = command(dir, args);
     command.envs(env.iter().copied());
+    crate::landlock::confined(&mut command);
     bounded(command, dir, args, class.limit(), OUTPUT_LIMIT, None).await
+}
+
+/// [`output`] of `git <subcommand> <args>` that reaches `remote` (`ls-remote`, `fetch`): only the
+/// protocol its URL uses, as git resolves it, git's own upload command over the remote's, and the
+/// user's SSH agent lent when that protocol is SSH (`docs/vault.md`, "The runtime folder").
+pub async fn output_remote(
+    dir: &Path,
+    remote: &str,
+    subcommand: &str,
+    args: &[&str],
+    class: Class,
+) -> Result<String, String> {
+    let url = output(
+        dir,
+        &["ls-remote", "--get-url", "--end-of-options", remote],
+        Class::Read,
+    )
+    .await?;
+    let protocol = protocol(url.trim());
+    // The line's own option, since the first `remote.<name>.uploadpack` git reads is the one it
+    // takes: the repository's, before any given in the environment.
+    let args: Vec<&str> = [subcommand, "--upload-pack=git-upload-pack"]
+        .into_iter()
+        .chain(args.iter().copied())
+        .collect();
+    let mut git = command(dir, &args);
+    git.env("GIT_ALLOW_PROTOCOL", protocol);
+    match crate::ssh_agent::socket().filter(|_| protocol == "ssh") {
+        Some(socket) => crate::landlock::confined_lent(git.env(crate::ssh_agent::VARIABLE, socket)),
+        None => crate::landlock::confined(&mut git),
+    };
+    said(bounded(git, dir, &args, class.limit(), OUTPUT_LIMIT, None).await?)
+}
+
+/// The name `GIT_ALLOW_PROTOCOL` knows the transport of `url` by, read as git reads it: a
+/// helper's `<name>::`, a scheme (`ssh` for its other spellings), `ssh` for `host:path`, `file`
+/// for a path.
+fn protocol(url: &str) -> &str {
+    let scheme = url
+        .find(|c: char| !(c.is_ascii_alphanumeric() || "+.-".contains(c)))
+        .map_or(url, |end| &url[..end]);
+    let rest = &url[scheme.len()..];
+    if !scheme.is_empty() && rest.starts_with("::") {
+        return scheme;
+    }
+    if !scheme.is_empty() && rest.starts_with("://") {
+        return match scheme {
+            "git+ssh" | "ssh+git" => "ssh",
+            scheme => scheme,
+        };
+    }
+    match url.find(':') {
+        Some(colon) if !url[..colon].contains('/') => "ssh",
+        _ => "file",
+    }
+}
+
+/// The `ssh` git runs: the one found at the daemon's start, quoted for the shell git reads
+/// `GIT_SSH_COMMAND` with.
+fn ssh_command() -> OsString {
+    match crate::ssh_agent::ssh() {
+        Some(ssh) => {
+            let quoted = ssh.as_os_str().to_string_lossy().replace('\'', "'\\''");
+            format!("'{quoted}'").into()
+        }
+        None => "ssh".into(),
+    }
 }
 
 /// Runs `words` (`git`, its global options, its command) in `dir` with the environment `env` and
@@ -124,11 +192,19 @@ fn command<S: AsRef<OsStr>>(dir: &Path, args: &[S]) -> tokio::process::Command {
             "core.fsmonitor=false",
             "-c",
             "core.hooksPath=/dev/null",
+            "-c",
+            "fetch.recurseSubmodules=false",
+            "-c",
+            "submodule.recurse=false",
         ])
         .args(args)
         // A fetch that needs credentials fails at once; stored credentials still work.
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GCM_INTERACTIVE", "never")
+        // No SSH agent but where `output_remote` lends it, and the `ssh` found at the start, over
+        // a repository's `core.sshCommand`.
+        .env_remove(crate::ssh_agent::VARIABLE)
+        .env("GIT_SSH_COMMAND", ssh_command())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -222,7 +298,11 @@ pub async fn output_with<S: AsRef<OsStr>>(
     class: Class,
     env: &[(&str, &OsStr)],
 ) -> Result<String, String> {
-    let output = run_with(dir, args, class, env).await?;
+    said(run_with(dir, args, class, env).await?)
+}
+
+/// What a call that ran to its end gave on success, or its error in git's own words, masked.
+fn said(output: Output) -> Result<String, String> {
     if output.success {
         return Ok(output.stdout);
     }
@@ -309,6 +389,26 @@ pub(crate) mod tests {
         .unwrap();
         assert!(output.success, "{args:?}: {}", output.stderr);
         output.stdout.trim().to_owned()
+    }
+
+    #[test]
+    fn the_protocol_of_a_remote_is_read_as_git_reads_its_url() {
+        for (url, protocol) in [
+            ("git@forge.invalid:acme/app.git", "ssh"),
+            ("forge.invalid:acme/app.git", "ssh"),
+            ("ssh://git@forge.invalid/acme/app.git", "ssh"),
+            ("git+ssh://forge.invalid/acme/app.git", "ssh"),
+            ("https://forge.invalid/acme/app.git", "https"),
+            ("http://127.0.0.1:8080/app.git", "http"),
+            ("git://forge.invalid/app.git", "git"),
+            ("file:///srv/app.git", "file"),
+            ("/srv/app.git", "file"),
+            ("../app.git", "file"),
+            ("./a:b", "file"),
+            ("ext::ssh -W %h:%p forge.invalid", "ext"),
+        ] {
+            assert_eq!(super::protocol(url), protocol, "{url}");
+        }
     }
 
     #[tokio::test]
