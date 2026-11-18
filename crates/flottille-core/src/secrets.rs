@@ -19,8 +19,14 @@ pub const VAULT_SHORTEST: usize = 6;
 /// typed into it in: an address (a form sent with GET), HTML and JSON. A value is never forgotten:
 /// one replaced or removed stays masked until the daemon restarts, and another entry may hold it.
 pub fn add_vault_value(value: &str) {
+    add_forms(vault_forms(value));
+}
+
+/// The forms of `value` `add_vault_value` masks. JSON may write `/` as `\/`.
+pub fn vault_forms(value: &str) -> Vec<String> {
     let json = serde_json::Value::from(value).to_string();
-    add_forms([
+    let json = json[1..json.len() - 1].to_owned();
+    vec![
         value.to_owned(),
         percent_encoded(value, true),
         percent_encoded(value, false),
@@ -36,20 +42,29 @@ pub fn add_vault_value(value: &str) {
                 ('\'', "&#39;"),
             ],
         ),
-        json[1..json.len() - 1].to_owned(),
-    ]);
+        json.replace('/', "\\/"),
+        json,
+    ]
 }
 
 /// `add_vault_value` for an entry's secret, and, when it has a `username`, the two as HTTP Basic
 /// authentication sends them, in base64.
 pub fn add_vault_login(username: Option<&str>, secret: &str) {
+    add_forms(login_forms(username, secret));
+}
+
+/// The forms `add_vault_login` masks: the secret's, and the base64 of the Basic credential's, with
+/// and without its padding.
+pub fn login_forms(username: Option<&str>, secret: &str) -> Vec<String> {
     use base64::Engine as _;
-    add_vault_value(secret);
+    let mut forms = vault_forms(secret);
     if let Some(username) = username {
-        add_forms([
-            base64::engine::general_purpose::STANDARD.encode(format!("{username}:{secret}"))
-        ]);
+        let encoded =
+            base64::engine::general_purpose::STANDARD.encode(format!("{username}:{secret}"));
+        forms.extend(vault_forms(encoded.trim_end_matches('=')));
+        forms.extend(vault_forms(&encoded));
     }
+    forms
 }
 
 fn add_forms(forms: impl IntoIterator<Item = String>) {
@@ -1257,7 +1272,9 @@ mod tests {
             encoded.contains(['+', '/']) && encoded.ends_with('='),
             "{encoded}"
         );
-        add_vault_login(Some("sam"), secret);
+        // The forms `add_vault_login` registers, given here: the vault's values are this
+        // process's, and its other tests would see them.
+        let forms = login_forms(Some("sam"), secret);
         let unpadded = encoded.trim_end_matches('=');
         let percent = |text: &str| {
             text.replace('+', "%2B")
@@ -1276,7 +1293,7 @@ mod tests {
             slashed(unpadded),
             slashed(secret),
         ] {
-            let masked = mask_also(&format!("said {form} back"), &BTreeMap::new(), &[]);
+            let masked = mask_also(&format!("said {form} back"), &BTreeMap::new(), &forms);
             assert_eq!(masked, "said [masked] back", "{form}");
         }
     }

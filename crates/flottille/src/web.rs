@@ -239,6 +239,13 @@ fn api_of(args: &Arguments) -> Result<Option<Api>, String> {
         if FRAMING_HEADERS.contains(&parsed) {
             return Err(format!("refused: web sets the {name} header itself"));
         }
+        // A part of an answer that echoes the request could hold a part of the secret, which
+        // no mask recognises.
+        if args.entry.is_some() && [header::RANGE, header::IF_RANGE].contains(&parsed) {
+            return Err(format!(
+                "refused: web sends no {name} header with an entry: the answer comes whole"
+            ));
+        }
         let Ok(value) = HeaderValue::from_str(value) else {
             return Err(format!(
                 "refused: the value of the {name} header is no header value: one line of \
@@ -246,6 +253,16 @@ fn api_of(args: &Arguments) -> Result<Option<Api>, String> {
             ));
         };
         headers.push((parsed, value));
+    }
+    // The card shows them whole, as it does the URL and the body.
+    let length: usize = headers
+        .iter()
+        .map(|(name, value)| name.as_str().len() + value.len())
+        .sum();
+    if length > LONGEST {
+        return Err(format!(
+            "refused: these headers are longer than the {LONGEST} characters web sends"
+        ));
     }
     Ok(Some(Api {
         method,
@@ -345,8 +362,8 @@ pub fn verdict(
         Ok(Asked::Read(url, _)) => match pass(&url) {
             Pass::Free => gate::Verdict::Allow,
             Pass::Link(reads) if reads < LINK_READS => gate::Verdict::Allow,
-            Pass::Link(_) => held(OFTEN),
-            Pass::Unseen => held(BUILT),
+            Pass::Link(_) => held(&with_sign_in(OFTEN, signed)),
+            Pass::Unseen => held(&with_sign_in(BUILT, signed)),
         },
         Ok(Asked::Search(_)) if mode == GateMode::Ask => held(SEARCHED),
         Ok(Asked::Search(_)) => gate::Verdict::Allow,
@@ -408,8 +425,9 @@ pub struct Signed {
     name: String,
     username: Option<String>,
     auth: Auth,
-    /// The host of the entry's `url`: the only one its secret goes to.
-    host: String,
+    /// The origin of the entry's `url` (its scheme, host and port): the only one its secret goes
+    /// to.
+    origin: url::Origin,
 }
 
 /// The entry `api` names, if it may sign in at `url` for an agent of the grant's project, or the
@@ -460,7 +478,9 @@ fn signed(
              go to: the user sets its url in Settings, Vault{nothing}"
         ));
     };
-    let Some(host) = crate::extensions::site_of(entry_url) else {
+    let bound = crate::extensions::site_of(entry_url)
+        .zip(Url::parse(entry_url).ok().map(|bound| bound.origin()));
+    let Some((host, origin)) = bound else {
         return Err(format!(
             "refused: the vault entry {name} is for {entry_url}, no web address a secret may go \
              to: https, or http on this machine{nothing}"
@@ -477,6 +497,16 @@ fn signed(
         return Err(format!(
             "refused: this URL is plain http to {asked}, another machine: the secret of the vault \
              entry {name} would travel in clear; use https{nothing}"
+        ));
+    }
+    if url.origin() != origin {
+        let (bound, asked) = (
+            origin.ascii_serialization(),
+            url.origin().ascii_serialization(),
+        );
+        return Err(format!(
+            "refused: the vault entry {name} is for {bound}, and this URL is on {asked}: its \
+             secret goes only to {bound}, its scheme, host and port{nothing}"
         ));
     }
     let username = entry
@@ -501,7 +531,7 @@ fn signed(
         name: name.clone(),
         username,
         auth,
-        host,
+        origin,
     }))
 }
 
@@ -513,19 +543,7 @@ fn card(url: &Url, api: &Api, signed: Option<&Signed>) -> String {
         api.method,
         url.host_str().unwrap_or_default()
     );
-    match signed {
-        Some(Signed {
-            name,
-            username: Some(username),
-            auth: Auth::Basic,
-            ..
-        }) => said.push_str(&format!(" as {username} with the vault entry {name}")),
-        Some(signed) => said.push_str(&format!(
-            " with the vault entry {} as a bearer token",
-            signed.name
-        )),
-        None => {}
-    }
+    said.push_str(&sign_in(signed));
     if !api.headers.is_empty() {
         let headers: Vec<String> = api
             .headers
@@ -546,6 +564,28 @@ fn card(url: &Url, api: &Api, signed: Option<&Signed>) -> String {
         None => {}
     }
     said
+}
+
+/// Who a call signs in as, as its card says it: nothing when it names no entry.
+fn sign_in(signed: Option<&Signed>) -> String {
+    match signed {
+        Some(Signed {
+            name,
+            username: Some(username),
+            auth: Auth::Basic,
+            ..
+        }) => format!(" as {username} with the vault entry {name}"),
+        Some(signed) => format!(" with the vault entry {} as a bearer token", signed.name),
+        None => String::new(),
+    }
+}
+
+/// Why a read is held, and, when it signs in, who as: the judge weighs the secret it carries.
+fn with_sign_in(why: &str, signed: Option<&Signed>) -> String {
+    match signed {
+        Some(_) => format!("{why}; it signs in{}", sign_in(signed)),
+        None => why.to_owned(),
+    }
 }
 
 /// The URL as web reads it, or the refusal saying why it never can: `http` and `https` only, no
@@ -910,24 +950,23 @@ async fn call(
             };
         let value = match signed.auth {
             Auth::Basic => {
-                let credentials = base64::engine::general_purpose::STANDARD.encode(format!(
-                    "{}:{secret}",
-                    signed.username.as_deref().unwrap_or_default()
-                ));
-                let value = format!("Basic {credentials}");
-                masks.push(value.clone());
-                masks.push(credentials);
-                value
+                let username = signed.username.as_deref().unwrap_or_default();
+                let credentials = base64::engine::general_purpose::STANDARD
+                    .encode(format!("{username}:{secret}"));
+                masks.extend(secrets::login_forms(Some(username), &secret));
+                format!("Basic {credentials}")
             }
             Auth::Bearer => {
-                let value = format!("Bearer {secret}");
-                masks.push(value.clone());
-                value
+                masks.extend(secrets::vault_forms(&secret));
+                format!("Bearer {secret}")
             }
         };
-        masks.push(secret);
+        masks.push(value.clone());
         authorization = Some(value);
     }
+    masks.retain(|mask| !mask.is_empty());
+    masks.sort_by_key(|mask| std::cmp::Reverse(mask.len()));
+    masks.dedup();
     let clean = |text: &str| {
         let text = masks.iter().fold(text.to_owned(), |text, mask| {
             text.replace(mask, secrets::MASK)
@@ -952,7 +991,7 @@ async fn call(
         headers: api.headers.clone(),
         body: api.body.clone(),
         authorization,
-        host: signed.map(|signed| signed.host),
+        origin: signed.map(|signed| signed.origin),
     };
     let net = Net::of_env();
     let host = url.host_str().unwrap_or_default().to_owned();
@@ -963,13 +1002,20 @@ async fn call(
         )),
         Ok(Err(Missed::Refused(why))) => Outcome::Refused(clean(&why)),
         Ok(Err(Missed::Failed(why))) => Outcome::Failed(clean(&why)),
-        Ok(Ok((status, page))) => Outcome::Done(clean(&api_answer(status, &page))),
+        Ok(Ok((status, page))) => Outcome::Done(clean(&api_answer(status, &page, &masks, &clean))),
     }
 }
 
 /// A call of an API as the agent reads it: the status, the content type and the body as it came,
-/// inside the block of the web's text.
-fn api_answer(status: StatusCode, page: &Page) -> String {
+/// inside the block of the web's text. The body is masked with `clean` whole, before it is cut,
+/// and a cut body ends in no start of one of the secret's `forms`: a secret the cut falls into
+/// would be shown in part, which no mask recognises.
+fn api_answer(
+    status: StatusCode,
+    page: &Page,
+    forms: &[String],
+    clean: &dyn Fn(&str) -> String,
+) -> String {
     let kind = match page.kind.trim() {
         "" => "none",
         kind => kind,
@@ -992,9 +1038,13 @@ fn api_answer(status: StatusCode, page: &Page) -> String {
             page.bytes.len()
         ),
     };
+    let text = clean(&text);
     let count = text.chars().count();
-    let shown_text = cut_at(&text, TEXT_CHARS);
-    // What the API answered is the web's: its URLs pass as links.
+    let mut shown_text = cut_at(&text, TEXT_CHARS);
+    if count > TEXT_CHARS || page.cut {
+        shown_text = without_a_start_of(&shown_text, forms);
+    }
+    // What the API answered is the web's: its URLs pass as links, those of the masked text.
     shown(&shown_text, Source::Link);
     let mut answer = format!("{head}\n{OPEN}\n{}\n{CLOSE}", contained(&shown_text));
     if count > TEXT_CHARS {
@@ -1010,14 +1060,28 @@ fn api_answer(status: StatusCode, page: &Page) -> String {
     answer
 }
 
+/// `text` with its end masked when it is the start of one of `forms`, the longest such end.
+fn without_a_start_of(text: &str, forms: &[String]) -> String {
+    let start = forms
+        .iter()
+        .flat_map(|form| form.char_indices().skip(1).map(|(at, _)| &form[..at]))
+        .filter(|start| text.ends_with(start))
+        .map(str::len)
+        .max();
+    match start {
+        Some(length) => format!("{}{}", &text[..text.len() - length], secrets::MASK),
+        None => text.to_owned(),
+    }
+}
+
 /// What a request sends: a page's read is a plain GET; a call of an API its method, the agent's
-/// headers, its body and the entry's sign-in, which goes only to `host`.
+/// headers, its body and the entry's sign-in, which goes only to `origin`.
 struct Sending {
     method: Method,
     headers: Vec<(HeaderName, HeaderValue)>,
     body: Option<String>,
     authorization: Option<HeaderValue>,
-    host: Option<String>,
+    origin: Option<url::Origin>,
 }
 
 impl Sending {
@@ -1027,7 +1091,7 @@ impl Sending {
             headers: Vec::new(),
             body: None,
             authorization: None,
-            host: None,
+            origin: None,
         }
     }
 }
@@ -1908,7 +1972,7 @@ async fn fetch(net: &Net, url: Url) -> Result<Page, Missed> {
 }
 
 /// A page and its status, whatever it is, its redirects followed: a write's are not (its answer
-/// is the redirect), and a sign-in's only on its host.
+/// is the redirect), and a sign-in's only on its origin.
 async fn fetch_any(
     net: &Net,
     mut url: Url,
@@ -1924,13 +1988,13 @@ async fn fetch_any(
             return Ok((status, page));
         }
         let next = redirected(&url, &location, &net.open)?;
-        if let Some(host) = &sending.host
-            && next.host_str() != Some(host.as_str())
+        if let Some(origin) = &sending.origin
+            && next.origin() != *origin
         {
             return Err(Missed::Refused(format!(
-                "refused: {url} redirects to {next}, on {}, and the vault entry's secret goes \
-                 only to {host}: web did not follow it",
-                next.host_str().unwrap_or_default()
+                "refused: {url} redirects to {next}, and the vault entry's secret goes only to \
+                 {}: web did not follow it",
+                origin.ascii_serialization()
             )));
         }
         url = next;
