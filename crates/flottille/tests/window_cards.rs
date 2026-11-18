@@ -504,6 +504,9 @@ fn a_long_toast_stays_inside_its_card(cx: &mut TestAppContext) {
 ///
 /// - a question of the agent is docked above the composer, its card never in the conversation,
 ///   which holds one line;
+/// - a connection's card of "review its new actions" (`Block::ConnectionReview`) still draws its
+///   Review button in the conversation: it is a wait and is not moved yet (it needs a listing the
+///   rail can read), so this test does not feed it;
 /// - a link card, a command's result and a diff are results: they hand the user something, and
 ///   nothing waits on them; a led session's question is the pilot's to answer, its card only says
 ///   what was asked.

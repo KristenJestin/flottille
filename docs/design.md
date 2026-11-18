@@ -1271,7 +1271,9 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   rail opens, and the output itself is only there; the rail's own row for a command of the root
   agent does not name it, the conversation being the page it is on), one line for each request that reached the
   user, neutral ("Request #1 · Run pnpm test", which lights its card in the rail, then, once
-  answered, the outcome), each picture sent inside the bubble of its message, above its words, a
+  answered, the outcome), one quiet line, with no button, for each request of the agent for a vault
+  entry (`asked for the vault entry hippocampe-key · waiting for you`, then `… · saved` or `… ·
+  dismissed`, staying in sight: it is the conversation's record of what the user decided), each picture sent inside the bubble of its message, above its words, a
   message another session sent with `session_send` marked with its sender ("from <session>") and
   folded to its first line until a click unfolds it (the card keeps one width while it folds and
   unfolds), and
@@ -1375,7 +1377,12 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   as many lines as it takes, its class
   and the judge's reason, or the first reason it was held, on one line, "Details" unfolding the
   rest (why it was held, one sentence for each reason, and for a base card the sentence that says
-  why it always comes back), and Deny and Allow; a base card stands apart by its "Always asks" tag and its still dot, in the attention tone like the others: a request that waits is never drawn as an error, and a denied one is recorded in the error ink;
+  why it always comes back), and Deny and Allow; an agent's request for a vault entry is a card
+  of the same section (its entry, where the secret goes, its project and its reason on lines,
+  "Details" for what it is for, what it is bound to and who asked, and Dismiss and New entry in
+  the place of Deny and Allow), counted in the section's number, marking its session's row and
+  ringing the bell as a held request does; a card arriving unfolds and one leaving folds away;
+  a base card stands apart by its "Always asks" tag and its still dot, in the attention tone like the others: a request that waits is never drawn as an error, and a denied one is recorded in the error ink;
   an answered card leaves). The
   root's row menu ("⋯") holds End session, the only way the window ends an agent: it ends the root
   and its tree, after a confirmation that counts the agents that end. An ended session leaves its

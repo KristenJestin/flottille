@@ -179,13 +179,19 @@ an entry to the vault, not a request with rules of its own.
   refusal says the entry may be asked for, with the call to make: `tickets log_time` with its
   name, a browser connection's `login` with its name and `for: "connection:<name>"`
   (`docs/extensions.md`, "Connections"). The ask answers at once: nothing waits for the user.
-- **A way in to the vault's own form.** The user sees one card in the session of the agent that
-  asked (and an inbox entry, which names the host and whose entry it is, the project's or every
-  project's, as the form will save it: a login's is the project's unless asked `every`): the
-  entry's name, the host of its URL **on a line of its own** (where the secret
-  will go: the agent chose it; the daemon's reading, never the window's), what it is for, its use,
-  its project and the agent's reason, with **New entry** and **Dismiss** (disabled while
-  its call runs). New entry opens the vault's form of a new entry over the page the user is
+- **A way in to the vault's own form.** The request waits on the user, so it is a card of the
+  session's rail, **Waiting for you**, beside the requests held for the user, and never a card of
+  the conversation, which records it in one quiet line with no button (`asked for the vault entry
+  <name> · waiting for you`, then `… · saved` or `… · dismissed`). The card is in the session of
+  the agent that asked (and an inbox entry, which names the host and whose entry it is, the
+  project's or every project's, as the form will save it: a login's is the project's unless asked
+  `every`); it counts in the section's number, the session's row in the sidebar shows the same
+  "waits for you" mark as for a held request, and the bell rings until it is answered. Its lines:
+  the entry's name, the host of its URL **on a line of its own** (where the secret
+  will go: the agent chose it; the daemon's reading, never the window's), its project and the
+  agent's reason; under **Details**, what it is for, its use and who asked. Its buttons are **New
+  entry** and **Dismiss** (disabled while its call runs). The card leaves once the request is
+  answered. New entry opens the vault's form of a new entry over the page the user is
   on (the session: it is not left), prefilled with all of it, the agent's reason under what it is for, and what it will be bound to ("For …") with the
   host its secret goes to ("Goes to …", under the URL's field, bound or not, while the URL is the
   one asked) and **Remove the binding**: the user changes any field, types the secret and saves,
