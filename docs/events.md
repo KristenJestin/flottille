@@ -357,6 +357,29 @@ agent's ask while it is open: `agent`, `ask` (the request's number), `project`, 
 `vault.ask_answered`, an event of the agent that opened it, closes it: `ask`, `project`, `name`,
 `outcome` (`set` or `dismissed`). Never a secret.
 
+### `remote.join_requested`
+
+A new device answered an invitation of this machine's member, and waits for it to accept or refuse
+(`docs/remote.md`, "Pairing"): `request` (the new device's fingerprint, which names it), `key`,
+`words` (the four verification words the new device shows too) and `inviter` (the member's
+fingerprint).
+
+### `remote.member_added`, `remote.member_removed`, `remote.member_renamed`
+
+The member list this machine checked changed (`docs/remote.md`, "Pairing"), whoever changed it and
+whenever this machine heard it: a machine off when it happened says it when it connects to the hub
+again. `name`, `fingerprint` and `at` (when this machine heard it, in milliseconds since the Unix
+epoch), then: `role` (`runner`, `controller` or `viewer`) and `added_by` (the name of the member
+whose signature added it) for an addition, which a client announces as `New device: pixel (control
+only), added at 18:42 from pc`; `removed_by` for a removal; `from` (the name before) and
+`renamed_by` for a renaming. The machine that joined says its own addition.
+
+### `remote.connected`, `remote.disconnected`
+
+A link to another machine of the user's was made, or ended (`docs/remote.md`, "The transport"):
+`name` and `fingerprint` of the machine, and, when it ended, `reason` (`it was removed from the
+member list`, for a machine whose member was removed: its link is cut at once).
+
 ### `workspace.created`
 
 A workspace was written, before anything is made on disk (`docs/workspaces.md`). Every event of a

@@ -1,21 +1,23 @@
 //! Machines that know each other through the hub (`docs/remote.md`, "The hub", "The first
-//! member", "Architecture", "The transport"): a hub served in the test on 127.0.0.1, and daemons,
-//! each with its own temporary HOME and XDG folders and in-memory keyring. The first machine is
-//! set up with `flottille remote setup`; a second one is added by the test as #812's joining will
-//! add it: an invitation answered on the hub, the root's signed addition, the new device's
-//! declaration of its machine, and its hub file written.
+//! member", "Pairing", "Architecture", "The transport"): a hub served in the test on 127.0.0.1,
+//! and daemons, each with its own temporary HOME and XDG folders and in-memory keyring. The first
+//! machine is set up with `flottille remote setup`; the others join it with `flottille remote
+//! invite`, `join` and `accept`, as the user pairs them.
 
 mod common;
 
+use std::io::{BufRead, BufReader};
 use std::net::SocketAddr;
 use std::path::Path;
+use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use common::User;
 use flottille_hub::{Hub, Served, SystemClock};
 use flottille_link::{
-    Action, Change, Device, DeviceKey, Hello, HubKey, InvitationAsk, Keyring, KeyringError,
-    MachineKey, MemberList, PublicKey, Role, ToDevice,
+    Action, Change, ChangeHash, Device, DeviceKey, Endpoint, Hello, HubKey, InvitationAsk, Keyring,
+    KeyringError, MachineKey, MemberList, PublicKey, Requested, Role, ToDevice, Token, Traffic,
+    verification_words,
 };
 use serde_json::{Value, json};
 use zeroize::Zeroizing;
@@ -110,7 +112,11 @@ struct Machine {
 impl Machine {
     /// A machine with remote on, listening at `listen` (none: it only dials).
     fn new(listen: Option<&str>) -> Machine {
-        let user = User::new();
+        Machine::of(User::new(), listen)
+    }
+
+    /// `user`'s machine, with remote on, listening at `listen`.
+    fn of(user: User, listen: Option<&str>) -> Machine {
         let listen = listen
             .map(|listen| format!("listen = \"{listen}\"\n"))
             .unwrap_or_default();
@@ -192,11 +198,72 @@ impl Machine {
         assert!(self.user.run(&["daemon", "stop"]).status.success());
         self.user.status();
     }
+
+    /// The first join request that waits for this machine's member, once the hub told it.
+    fn wait_until_requested(&self) -> Value {
+        let deadline = Instant::now() + WAIT;
+        loop {
+            let requests = self.user.call("remote.requests", json!({})).unwrap();
+            if let Some(first) = requests.as_array().and_then(|all| all.first()) {
+                return first.clone();
+            }
+            assert!(
+                Instant::now() < deadline,
+                "no join request came\n{}",
+                self.log()
+            );
+            std::thread::sleep(Duration::from_millis(200));
+        }
+    }
+
+    /// The members of the list this machine checked, by name, with their role.
+    fn members(&self) -> Vec<(String, String)> {
+        let members = self.user.call("remote.members", json!({})).unwrap();
+        members["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|member| {
+                (
+                    member["name"].as_str().unwrap().to_owned(),
+                    member["role"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect()
+    }
+
+    /// Waits until the list this machine checked names `name`; its members then.
+    fn wait_for_member(&self, name: &str, present: bool) -> Vec<(String, String)> {
+        let deadline = Instant::now() + WAIT;
+        loop {
+            let members = self.members();
+            if members.iter().any(|(member, _)| member == name) == present {
+                return members;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "{name} is {}in the list: {members:?}\n{}",
+                if present { "not " } else { "still " },
+                self.log()
+            );
+            std::thread::sleep(Duration::from_millis(200));
+        }
+    }
+
+    /// The events this machine's daemon stored named `name`.
+    fn events(&self, name: &str) -> Vec<Value> {
+        self.user
+            .watch(&["--after", "0"])
+            .within(Duration::from_secs(2))
+            .into_iter()
+            .filter(|event| event["name"] == name)
+            .map(|event| event["data"].clone())
+            .collect()
+    }
 }
 
-/// `pc` set up as the hub's first member with `flottille remote setup`, then `server` added by
-/// it, a runner; each machine's addresses told to the hub by its daemon.
-fn members(hub: &TestHub, pc: &Machine, server: &Machine) {
+/// `pc` set up as the hub's first member with `flottille remote setup`.
+fn set_up(hub: &TestHub, pc: &Machine) {
     let output = pc.user.run_with_input(
         &["remote", "setup", &hub.url(), "--name", "pc"],
         &format!("{}\n", hub.code()),
@@ -209,53 +276,88 @@ fn members(hub: &TestHub, pc: &Machine, server: &Machine) {
     );
     let said = String::from_utf8_lossy(&output.stdout);
     assert!(said.contains("the first member"), "{said}");
-    let pc_device = pc.device();
-    let server_device = server.device();
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    let server_machine = server.key();
-    let served = hub.served();
-    served.with_hub(|hub| {
-        let ask = InvitationAsk::sign(&hub.key(), now, &pc_device).unwrap();
-        let token = hub.invite(&ask).unwrap();
-        hub.join(&token, server_device.public()).unwrap();
-        let added = Change::sign(
-            hub.list().head(),
-            Action::Add {
-                key: server_device.public(),
-                name: "server".to_owned(),
-                role: Role::Runner,
-            },
-            &pc_device,
-        );
-        hub.submit(added.clone()).unwrap();
-        hub.submit(
-            Change::sign(
-                added.hash(),
-                Action::Machine {
-                    key: server_device.public(),
-                    machine: server_machine,
-                },
-                &server_device,
-            )
-            .claimed_by(&server.machine_key()),
-        )
+}
+
+/// What a pairing said on both sides.
+struct Paired {
+    /// What `flottille remote join` printed.
+    joined: String,
+    /// What `flottille remote accept` printed.
+    accepted: String,
+    /// The four words of the request, as `remote.requests` on the inviter said them.
+    words: Vec<String>,
+    /// The new device's key, as the request carried it.
+    key: PublicKey,
+}
+
+/// `joiner` joins the hub of `inviter` as the user pairs them: `flottille remote invite` on the
+/// inviter, `flottille remote join` given the code on the new machine, which waits, and `flottille remote
+/// accept` on the inviter once its request is there, as `name` with `role`.
+fn pair(inviter: &Machine, joiner: &Machine, name: &str, role: &str) -> Paired {
+    let invited = inviter.user.run(&["remote", "invite", "--json"]);
+    assert!(
+        invited.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&invited.stderr),
+        inviter.log()
+    );
+    let invited: Value = serde_json::from_slice(&invited.stdout).unwrap();
+    let code = invited["code"].as_str().unwrap().to_owned();
+    let mut joining = joiner
+        .user
+        .command(&["remote", "join"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .unwrap();
-    });
-    // What #812's joining will leave on the new machine: its hub, pinned.
-    let joined = Device {
-        url: hub.url(),
-        hub: hub.key(),
-        root: pc_device.public(),
-        list: Default::default(),
-    };
-    std::fs::write(
-        server.folder().join("hub.json"),
-        serde_json::to_string(&joined).unwrap(),
-    )
-    .unwrap();
+    {
+        let mut input = joining.stdin.take().unwrap();
+        std::io::Write::write_all(&mut input, format!("{code}\n").as_bytes()).unwrap();
+    }
+    let mut out = BufReader::new(joining.stdout.take().unwrap());
+    let mut first = String::new();
+    out.read_line(&mut first).unwrap();
+    let request = inviter.wait_until_requested();
+    let words: Vec<String> = request["words"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|word| word.as_str().unwrap().to_owned())
+        .collect();
+    let key = serde_json::from_value(request["key"].clone()).unwrap();
+    let id = request["request"].as_str().unwrap();
+    let accepted = inviter
+        .user
+        .run(&["remote", "accept", id, "--name", name, "--role", role]);
+    assert!(
+        accepted.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&accepted.stderr),
+        inviter.log()
+    );
+    let mut rest = String::new();
+    std::io::Read::read_to_string(&mut out, &mut rest).unwrap();
+    let ended = joining.wait_with_output().unwrap();
+    assert!(
+        ended.status.success(),
+        "the join failed: {}\n{}",
+        String::from_utf8_lossy(&ended.stderr),
+        joiner.log()
+    );
+    Paired {
+        joined: first + &rest,
+        accepted: String::from_utf8_lossy(&accepted.stdout).into_owned(),
+        words,
+        key,
+    }
+}
+
+/// `pc` set up as the hub's first member, then `server` paired with it, a runner; each machine's
+/// addresses told to the hub by its daemon.
+fn members(hub: &TestHub, pc: &Machine, server: &Machine) {
+    set_up(hub, pc);
+    pair(pc, server, "server", "runner");
 }
 
 #[test]
@@ -408,6 +510,16 @@ struct FakeHub {
 
 impl FakeHub {
     fn new(list: MemberList, answer: fn(usize) -> Option<Option<String>>) -> FakeHub {
+        FakeHub::pushing(list, answer, |_| Vec::new())
+    }
+
+    /// A fake hub that answers an invitation's ask with a token of its own, `ISSUED`, then
+    /// pushes the join requests `requests` makes of it.
+    fn pushing(
+        list: MemberList,
+        answer: fn(usize) -> Option<Option<String>>,
+        requests: fn(Token) -> Vec<Requested>,
+    ) -> FakeHub {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
@@ -448,13 +560,21 @@ impl FakeHub {
                                 }
                                 _ => Some(None),
                             };
+                            let invited = matches!(asked.ask, flottille_link::Ask::Invite { .. });
                             if let Some(refused) = answer {
                                 let answer = ToDevice::Answer {
                                     id: asked.id,
                                     refused,
                                     proof: None,
+                                    token: invited.then_some(ISSUED),
                                 };
                                 if session.send(&answer).await.is_err() {
+                                    return;
+                                }
+                            }
+                            if invited {
+                                let pushed = ToDevice::Requests(requests(ISSUED));
+                                if session.send(&pushed).await.is_err() {
                                     return;
                                 }
                             }
@@ -478,6 +598,9 @@ impl FakeHub {
             .load(std::sync::atomic::Ordering::SeqCst)
     }
 }
+
+/// The token a fake hub gives for an invitation.
+const ISSUED: Token = Token([7; 16]);
 
 /// The list a fake hub sends `machine`: its device the root, declaring its machine, and a laptop
 /// the root added, with a machine of its own.
@@ -551,6 +674,109 @@ fn the_daemon_takes_the_hub_s_news_while_its_ask_waits() {
             .any(|machine| machine["name"] == "laptop")
     });
     assert!(hub.asked() >= 1);
+    drop(hub.runtime);
+}
+
+/// The join requests a hub that lies pushes once the pc asked for an invitation: one for the
+/// token it issued, from a tablet, and one for a token it never issued, from a phone, which it
+/// searched so that the pc's words would match the phone's.
+fn lying_requests(issued: Token) -> Vec<Requested> {
+    vec![
+        Requested {
+            token: issued,
+            key: seeded(41).public(),
+        },
+        Requested {
+            token: Token([9; 16]),
+            key: seeded(42).public(),
+        },
+    ]
+}
+
+/// `pc`, pinned to a hub that pushes `lying_requests`, asks for an invitation; the requests it
+/// shows then.
+fn invited_by_a_lying_hub(pc: &Machine) -> (FakeHub, Vec<Value>) {
+    let hub = FakeHub::pushing(list_for(pc), |_| Some(None), lying_requests);
+    pin(pc, &hub);
+    pc.wait_until("the pc does not take the hub's list", |seen| {
+        seen["machines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|machine| machine["name"] == "laptop")
+    });
+    let invited = pc.user.run(&["remote", "invite", "--json"]);
+    assert!(
+        invited.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&invited.stderr),
+        pc.log()
+    );
+    pc.wait_until_requested();
+    // Both were pushed at once: what the first one shows, the second would by now.
+    let requests = pc.user.call("remote.requests", json!({})).unwrap();
+    (hub, requests.as_array().unwrap().clone())
+}
+
+#[test]
+fn a_request_for_a_token_this_member_never_issued_is_dropped() {
+    let pc = Machine::new(None);
+    let (hub, requests) = invited_by_a_lying_hub(&pc);
+    let phone = seeded(42).public();
+    assert_eq!(requests.len(), 1, "{requests:#?}");
+    assert_eq!(requests[0]["key"], json!(seeded(41).public()));
+    let told = pc.events("remote.join_requested");
+    assert!(
+        told.iter().all(|event| event["key"] != json!(phone)),
+        "{told:#?}"
+    );
+    assert!(
+        pc.user
+            .run(&["remote", "refuse", &phone.fingerprint()])
+            .status
+            .code()
+            != Some(0)
+    );
+    drop(hub.runtime);
+}
+
+#[test]
+fn a_request_for_an_expired_invitation_is_dropped() {
+    let pc = Machine::new(None);
+    let hub = FakeHub::pushing(list_for(&pc), |_| Some(None), lying_requests);
+    pin(&pc, &hub);
+    pc.wait_until("the pc does not take the hub's list", |seen| {
+        seen["machines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|machine| machine["name"] == "laptop")
+    });
+    // An invitation asked 270 s ago: valid 30 s more, room enough to see its request first.
+    let ask = InvitationAsk::sign(&hub.key, unix_now() - 270, &pc.device()).unwrap();
+    pc.user.call("remote.invite", json!({"ask": ask})).unwrap();
+    let request = pc.wait_until_requested();
+    assert_eq!(request["key"], json!(seeded(41).public()));
+
+    // Past its 5 minutes, the request for it is no longer shown, though the hub still tells it.
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while pc.user.call("remote.requests", json!({})).unwrap() != json!([]) {
+        assert!(
+            Instant::now() < deadline,
+            "the expired request is still shown"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    drop(hub.runtime);
+}
+
+#[test]
+fn the_inviters_words_come_from_the_token_it_issued() {
+    let pc = Machine::new(None);
+    let (hub, requests) = invited_by_a_lying_hub(&pc);
+    let tablet = seeded(41).public();
+    let words = verification_words(&tablet, &pc.device().public(), &ISSUED);
+    assert_eq!(requests[0]["words"], json!(words), "{requests:#?}");
     drop(hub.runtime);
 }
 
@@ -638,6 +864,59 @@ fn the_setup_code_is_read_from_the_standard_input_never_from_the_command_line() 
     );
 }
 
+#[test]
+fn the_invitation_code_is_read_from_the_standard_input_never_from_the_command_line() {
+    let hub = TestHub::new();
+    let (pc, server) = (Machine::new(None), Machine::new(None));
+    set_up(&hub, &pc);
+    // The invitation prints its code on a line of its own, never in a command to copy.
+    let invited = pc.user.run(&["remote", "invite"]);
+    assert!(invited.status.success());
+    let said = String::from_utf8_lossy(&invited.stdout);
+    let code = said
+        .lines()
+        .map(str::trim)
+        .find(|line| line.len() > 100 && !line.contains(' '))
+        .unwrap_or_else(|| panic!("no code on a line of its own: {said}"))
+        .to_owned();
+    assert!(
+        said.lines()
+            .filter(|line| line.contains("flottille remote join"))
+            .all(|line| !line.contains(&code)),
+        "{said}"
+    );
+    let output = server.user.run(&["remote", "join", &code]);
+    assert!(
+        !output.status.success(),
+        "an invitation code was taken from the command line"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("unexpected argument"),
+        "the refusal does not say the argument is not one"
+    );
+    // From the standard input, the join goes as far as the hub, where it waits for pc.
+    let mut joining = server
+        .user
+        .command(&["remote", "join"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    {
+        let mut input = joining.stdin.take().unwrap();
+        std::io::Write::write_all(&mut input, format!("{code}\n").as_bytes()).unwrap();
+    }
+    let mut first = String::new();
+    BufReader::new(joining.stdout.take().unwrap())
+        .read_line(&mut first)
+        .unwrap();
+    assert!(first.starts_with("Verification words: "), "{first}");
+    pc.wait_until_requested();
+    let _ = joining.kill();
+    let _ = joining.wait();
+}
+
 /// A port nobody uses now on loopback: the system's choice, let go at once.
 fn free_port() -> u16 {
     std::net::UdpSocket::bind("127.0.0.1:0")
@@ -645,4 +924,1147 @@ fn free_port() -> u16 {
         .local_addr()
         .unwrap()
         .port()
+}
+
+#[test]
+fn a_headless_machine_joins_with_the_code_and_is_in_every_list() {
+    let hub = TestHub::new();
+    let (pc, server) = (
+        Machine::new(Some("127.0.0.1:0")),
+        Machine::new(Some("127.0.0.1:0")),
+    );
+    set_up(&hub, &pc);
+    let paired = pair(&pc, &server, "server", "runner");
+    assert!(
+        paired.joined.contains("server joined the hub at"),
+        "{}",
+        paired.joined
+    );
+    assert!(
+        paired.joined.contains("as a runner, added by pc"),
+        "{}",
+        paired.joined
+    );
+
+    // In every list: the hub's, the inviter's, its own.
+    let expected = vec![
+        ("pc".to_owned(), "runner".to_owned()),
+        ("server".to_owned(), "runner".to_owned()),
+    ];
+    let names: Vec<String> = hub.served().with_hub(|hub| {
+        hub.members()
+            .unwrap()
+            .members()
+            .iter()
+            .map(|member| member.name.clone())
+            .collect()
+    });
+    assert_eq!(names, ["pc", "server"]);
+    assert_eq!(pc.wait_for_member("server", true), expected);
+    assert_eq!(server.members(), expected);
+    let this = server.user.call("remote.members", json!({})).unwrap()["this"].clone();
+    assert_eq!(this, "server");
+    // And the two link, through what the hub told.
+    pc.wait_for("server", "online");
+    server.wait_for("pc", "online");
+}
+
+#[test]
+fn a_second_join_from_the_same_machine_uses_a_new_device_key() {
+    let hub = TestHub::new();
+    let (pc, server) = (Machine::new(None), Machine::new(None));
+    set_up(&hub, &pc);
+
+    // A first join that does not succeed: refused here, as a hub that dropped it would leave it.
+    let invited = pc.user.run(&["remote", "invite", "--json"]);
+    assert!(invited.status.success());
+    let invited: Value = serde_json::from_slice(&invited.stdout).unwrap();
+    let joining = server
+        .user
+        .command(&["remote", "join"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    {
+        let mut input = joining.stdin.as_ref().unwrap();
+        std::io::Write::write_all(
+            &mut input,
+            format!("{}\n", invited["code"].as_str().unwrap()).as_bytes(),
+        )
+        .unwrap();
+    }
+    let request = pc.wait_until_requested();
+    let first: PublicKey = serde_json::from_value(request["key"].clone()).unwrap();
+    let refused = pc
+        .user
+        .run(&["remote", "refuse", request["request"].as_str().unwrap()]);
+    assert!(
+        refused.status.success(),
+        "{}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    let ended = joining.wait_with_output().unwrap();
+    assert!(!ended.status.success());
+    // The key of a join that failed is not kept.
+    assert!(!server.folder().join("device.key").exists());
+    let deadline = Instant::now() + WAIT;
+    while pc.user.call("remote.requests", json!({})).unwrap() != json!([]) {
+        assert!(Instant::now() < deadline, "the refused request stays");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    // The next join sends a key the hub never saw, and that one is kept.
+    let paired = pair(&pc, &server, "server", "runner");
+    assert_ne!(paired.key, first);
+    assert_eq!(server.device().public(), paired.key);
+}
+
+#[test]
+fn both_sides_show_the_same_four_words() {
+    let hub = TestHub::new();
+    let (pc, server) = (Machine::new(None), Machine::new(None));
+    set_up(&hub, &pc);
+    let paired = pair(&pc, &server, "server", "controller");
+    let words = paired.words.join(" ");
+    assert_eq!(paired.words.len(), 4);
+    assert!(
+        paired
+            .joined
+            .starts_with(&format!("Verification words: {words}\n")),
+        "{}",
+        paired.joined
+    );
+    assert!(
+        paired
+            .accepted
+            .starts_with(&format!("Verification words: {words}\n")),
+        "{}",
+        paired.accepted
+    );
+}
+
+#[test]
+fn an_addition_is_announced_as_an_event_on_every_machine() {
+    let hub = TestHub::new();
+    let (pc, server, laptop) = (Machine::new(None), Machine::new(None), Machine::new(None));
+    set_up(&hub, &pc);
+    pair(&pc, &server, "server", "runner");
+    pair(&pc, &laptop, "laptop", "viewer");
+    server.wait_for_member("laptop", true);
+    for machine in [&pc, &server, &laptop] {
+        let added: Vec<Value> = machine
+            .events("remote.member_added")
+            .into_iter()
+            .filter(|event| event["name"] == "laptop")
+            .collect();
+        assert_eq!(added.len(), 1, "{added:?}\n{}", machine.log());
+        assert_eq!(added[0]["role"], "viewer");
+        assert_eq!(added[0]["added_by"], "pc");
+        assert!(added[0]["at"].is_u64());
+        assert_eq!(
+            added[0]["fingerprint"],
+            laptop.device().public().fingerprint()
+        );
+    }
+    // The inviter was told of the request first.
+    let requested = pc.events("remote.join_requested");
+    assert_eq!(requested.len(), 2, "{requested:?}");
+}
+
+#[test]
+fn a_removed_device_is_cut_at_once_and_cannot_join_again() {
+    let hub = TestHub::new();
+    let (pc, server) = (
+        Machine::new(Some("127.0.0.1:0")),
+        Machine::new(Some("127.0.0.1:0")),
+    );
+    members(&hub, &pc, &server);
+    pc.wait_for("server", "online");
+    server.wait_for("pc", "online");
+
+    let removed = pc.user.run(&["remote", "remove", "server"]);
+    assert!(
+        removed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&removed.stderr)
+    );
+    // Cut at once, on both sides, without waiting for the link to fall silent.
+    let cut = Instant::now();
+    pc.wait_until("pc still trusts the server", |seen| {
+        !seen["machines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|machine| machine["name"] == "server")
+    });
+    server.wait_until("the server still says pc is online", |seen| {
+        seen["machines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|machine| machine["state"] != "online")
+    });
+    assert!(
+        cut.elapsed() < Duration::from_secs(10),
+        "{:?}",
+        cut.elapsed()
+    );
+    let disconnected = pc.events("remote.disconnected");
+    assert!(
+        disconnected.iter().any(|event| event["name"] == "server"),
+        "{disconnected:?}"
+    );
+    let removal = pc.events("remote.member_removed");
+    assert_eq!(removal.len(), 1, "{removal:?}");
+    assert_eq!(removal[0]["name"], "server");
+    assert_eq!(removal[0]["removed_by"], "pc");
+
+    // Its key cannot join again: the hub refuses the request.
+    let invited = pc.user.run(&["remote", "invite", "--json"]);
+    assert!(invited.status.success());
+    let invited: Value = serde_json::from_slice(&invited.stdout).unwrap();
+    std::fs::remove_file(server.folder().join("hub.json")).unwrap();
+    let again = server.user.run_with_input(
+        &["remote", "join"],
+        &format!("{}\n", invited["code"].as_str().unwrap()),
+    );
+    assert!(!again.status.success());
+    let said = String::from_utf8_lossy(&again.stderr);
+    assert!(said.contains("was removed from the member list"), "{said}");
+}
+
+#[test]
+fn the_daemon_never_reads_the_device_key() {
+    let hub = TestHub::new();
+    let (pc, server) = (Machine::new(None), Machine::new(None));
+    // Each machine's device key file is there, as a client without a Secret Service keeps it;
+    // what signs here is the test's, as a client's would, so that any open of the file is the
+    // daemon's.
+    for machine in [&pc, &server] {
+        std::fs::write(machine.folder().join("device.key"), [7u8; 32]).unwrap();
+    }
+    let watchers: Vec<std::fs::File> = [&pc, &server]
+        .iter()
+        .map(|machine| watch_opens(&machine.folder()))
+        .collect();
+    let (pc_device, server_device) = (seeded(41), seeded(42));
+
+    let mut list = MemberList::start("pc", &pc_device).unwrap();
+    list.sign(
+        Action::Machine {
+            key: pc_device.public(),
+            machine: pc.key(),
+        },
+        &pc_device,
+    );
+    pc.user
+        .call(
+            "remote.setup",
+            json!({"url": hub.url(), "code": hub.code(), "changes": list.changes()}),
+        )
+        .unwrap();
+    let ask = InvitationAsk::sign(&hub.key(), unix_now(), &pc_device).unwrap();
+    let invited = pc.user.call("remote.invite", json!({"ask": ask})).unwrap();
+    let code = invited["code"].as_str().unwrap().to_owned();
+    std::thread::scope(|scope| {
+        let joining = scope.spawn(|| {
+            server.user.call_within(
+                "remote.join",
+                json!({"code": code, "key": server_device.public()}),
+                Duration::from_secs(60),
+            )
+        });
+        let request = pc.wait_until_requested();
+        let members = pc.user.call("remote.members", json!({})).unwrap();
+        let head: ChangeHash = serde_json::from_value(members["head"].clone()).unwrap();
+        let added = Change::sign(
+            head,
+            Action::Add {
+                key: serde_json::from_value(request["key"].clone()).unwrap(),
+                name: "server".to_owned(),
+                role: Role::Runner,
+            },
+            &pc_device,
+        );
+        pc.user
+            .call("remote.change", json!({"change": added}))
+            .unwrap();
+        let accepted = joining.join().unwrap().unwrap();
+        let head: ChangeHash = serde_json::from_value(accepted["head"].clone()).unwrap();
+        let declared = Change::sign(
+            head,
+            Action::Machine {
+                key: server_device.public(),
+                machine: server.key(),
+            },
+            &server_device,
+        );
+        server
+            .user
+            .call("remote.declare", json!({"change": declared}))
+            .unwrap();
+    });
+    pc.wait_for_member("server", true);
+    let removal = Change::sign(
+        serde_json::from_value(pc.user.call("remote.members", json!({})).unwrap()["head"].clone())
+            .unwrap(),
+        Action::Remove {
+            key: server_device.public(),
+        },
+        &pc_device,
+    );
+    pc.user
+        .call("remote.change", json!({"change": removal}))
+        .unwrap();
+
+    for (watcher, machine) in watchers.iter().zip([&pc, &server]) {
+        let seen = opened(watcher);
+        assert!(
+            seen.iter().any(|name| name == "hub.json"),
+            "the daemon's own reads were not seen: {seen:?}"
+        );
+        assert!(
+            !seen.iter().any(|name| name == "device.key"),
+            "the daemon opened the device key: {seen:?}\n{}",
+            machine.log()
+        );
+    }
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+}
+
+/// An inotify instance watching the opens and reads of what is in `folder`, by any process.
+fn watch_opens(folder: &Path) -> std::fs::File {
+    use std::os::fd::{FromRawFd, OwnedFd};
+    use std::os::unix::ffi::OsStrExt;
+    // SAFETY: inotify_init1 has no precondition; its result is checked.
+    let fd = unsafe { libc::inotify_init1(libc::IN_NONBLOCK | libc::IN_CLOEXEC) };
+    assert!(fd >= 0, "{}", std::io::Error::last_os_error());
+    // SAFETY: `fd` was just returned to this process and is owned by nothing else.
+    let watcher = std::fs::File::from(unsafe { OwnedFd::from_raw_fd(fd) });
+    let path = std::ffi::CString::new(folder.as_os_str().as_bytes()).unwrap();
+    // SAFETY: `path` is a valid C string that outlives the call.
+    let watch =
+        unsafe { libc::inotify_add_watch(fd, path.as_ptr(), libc::IN_OPEN | libc::IN_ACCESS) };
+    assert!(watch >= 0, "{}", std::io::Error::last_os_error());
+    watcher
+}
+
+/// The names of the files opened or read since the last call.
+fn opened(mut watcher: &std::fs::File) -> Vec<String> {
+    use std::io::Read;
+    let mut names = Vec::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = match watcher.read(&mut buffer) {
+            Ok(read) => read,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return names,
+            Err(error) => panic!("{error}"),
+        };
+        // Each event: wd (i32), mask, cookie, len (u32), then `len` bytes of name, padded.
+        let mut at = 0;
+        while at + 16 <= read {
+            let len = u32::from_ne_bytes(buffer[at + 12..at + 16].try_into().unwrap()) as usize;
+            let name = &buffer[at + 16..at + 16 + len];
+            let name = name.split(|byte| *byte == 0).next().unwrap_or_default();
+            names.push(String::from_utf8_lossy(name).into_owned());
+            at += 16 + len;
+        }
+    }
+}
+
+#[test]
+fn a_machine_off_during_a_removal_never_links_to_the_removed_machine() {
+    let hub = TestHub::new();
+    let (pc, server, laptop) = (
+        Machine::new(Some("127.0.0.1:0")),
+        Machine::new(Some("127.0.0.1:0")),
+        Machine::new(Some("127.0.0.1:0")),
+    );
+    members(&hub, &pc, &server);
+    pair(&pc, &laptop, "laptop", "runner");
+    server.wait_for("laptop", "online");
+    laptop.wait_for("server", "online");
+    let linked_to_laptop = |events: Vec<Value>| {
+        events
+            .iter()
+            .filter(|event| event["name"] == "laptop")
+            .count()
+    };
+
+    // The server is off while the laptop is removed; the laptop, which the hub now refuses, still
+    // trusts the server by the list it kept, and dials it.
+    let before = linked_to_laptop(server.events("remote.connected"));
+    assert!(server.user.run(&["daemon", "stop"]).status.success());
+    let removed = pc.user.run(&["remote", "remove", "laptop"]);
+    assert!(
+        removed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&removed.stderr)
+    );
+    pc.wait_for_member("laptop", false);
+
+    // On again, with the hub reachable: it hears the removal before it links to anything.
+    server.user.status();
+    server.wait_for_member("laptop", false);
+    server.wait_for("pc", "online");
+    assert_eq!(
+        linked_to_laptop(server.events("remote.connected")),
+        before,
+        "the server linked to the removed laptop\n{}",
+        server.log()
+    );
+}
+
+/// A fake hub whose sessions the test cuts, which then sends the list it holds by then; a session
+/// after the first waits `HELD` before it sends it, as a hub slow to answer a machine that comes
+/// back. It pushes nothing else: a list changed meanwhile is sent at the next session.
+struct CuttingHub {
+    runtime: tokio::runtime::Runtime,
+    address: SocketAddr,
+    key: PublicKey,
+    list: std::sync::Arc<std::sync::Mutex<MemberList>>,
+    sessions: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// When a session after the first sent its list, the first time.
+    sent: std::sync::Arc<std::sync::Mutex<Option<Instant>>>,
+    cut: tokio::sync::watch::Sender<usize>,
+    _folder: tempfile::TempDir,
+}
+
+/// How long a cutting hub's session after the first waits before it sends the list: well within
+/// the 10 s a machine holds its links for one.
+const HELD: Duration = Duration::from_secs(5);
+
+impl CuttingHub {
+    fn new(list: MemberList) -> CuttingHub {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let folder = tempfile::tempdir().unwrap();
+        let key = HubKey::load_or_make(&folder.path().join("hub")).unwrap();
+        let public = key.public();
+        let list = std::sync::Arc::new(std::sync::Mutex::new(list));
+        let sessions = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let sent = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let cut = tokio::sync::watch::Sender::new(0);
+        let (held, counted, cuts, told) =
+            (list.clone(), sessions.clone(), cut.clone(), sent.clone());
+        let address = runtime.block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let key = std::sync::Arc::new(key);
+            tokio::spawn(async move {
+                while let Ok((stream, _)) = listener.accept().await {
+                    let (key, held, counted, told) =
+                        (key.clone(), held.clone(), counted.clone(), told.clone());
+                    let mut cut = cuts.subscribe();
+                    let generation = *cut.borrow_and_update();
+                    tokio::spawn(async move {
+                        let Ok(arriving) =
+                            flottille_link::arrive(Box::new(stream), &key, &Hello::ours("0.4.0"))
+                                .await
+                        else {
+                            return;
+                        };
+                        let mut session = arriving.welcome().await.unwrap();
+                        let n = counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                        let mut sent = false;
+                        loop {
+                            let asked = tokio::select! {
+                                asked = session.ask() => asked,
+                                _ = cut.wait_for(|now| *now > generation) => return,
+                            };
+                            let Ok(asked) = asked else {
+                                return;
+                            };
+                            if !sent {
+                                sent = true;
+                                if n > 1 {
+                                    tokio::time::sleep(HELD).await;
+                                }
+                                let list = held.lock().unwrap().clone();
+                                if session.send(&ToDevice::List(list)).await.is_err() {
+                                    return;
+                                }
+                                if n > 1 {
+                                    told.lock().unwrap().get_or_insert_with(Instant::now);
+                                }
+                            }
+                            let answer = ToDevice::Answer {
+                                id: asked.id,
+                                refused: None,
+                                proof: None,
+                                token: None,
+                            };
+                            if session.send(&answer).await.is_err() {
+                                return;
+                            }
+                        }
+                    });
+                }
+            });
+            address
+        });
+        CuttingHub {
+            runtime,
+            address,
+            key: public,
+            list,
+            sessions,
+            sent,
+            cut,
+            _folder: folder,
+        }
+    }
+
+    fn sessions(&self) -> usize {
+        self.sessions.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Waits until the hub had `n` sessions.
+    fn wait_for_sessions(&self, n: usize, pc: &Machine) {
+        let deadline = Instant::now() + WAIT;
+        while self.sessions() < n {
+            assert!(Instant::now() < deadline, "no session {n}\n{}", pc.log());
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    fn sent(&self) -> Option<Instant> {
+        *self.sent.lock().unwrap()
+    }
+}
+
+/// The pc's list through a cutting hub: its device and machine, and the laptop's, a member whose
+/// machine's key is `laptop`.
+struct Trusting {
+    hub: CuttingHub,
+    list: MemberList,
+    device: DeviceKey,
+    laptop: DeviceKey,
+}
+
+impl Trusting {
+    /// `pc` pinned to a cutting hub whose list holds the laptop's machine `laptop`, once the pc
+    /// trusts it.
+    fn new(pc: &Machine, laptop: &MachineKey) -> Trusting {
+        let (device, laptop_device) = (pc.device(), seeded(31));
+        let mut list = MemberList::start("pc", &device).unwrap();
+        list.declare(&device, &pc.machine_key());
+        list.sign(
+            Action::Add {
+                key: laptop_device.public(),
+                name: "laptop".to_owned(),
+                role: Role::Runner,
+            },
+            &device,
+        );
+        list.declare(&laptop_device, laptop);
+        let hub = CuttingHub::new(list.clone());
+        let pinned = Device {
+            url: format!("http://{}", hub.address),
+            hub: hub.key,
+            root: device.public(),
+            list: MemberList::default(),
+        };
+        std::fs::write(
+            pc.folder().join("hub.json"),
+            serde_json::to_string(&pinned).unwrap(),
+        )
+        .unwrap();
+        pc.restart();
+        pc.wait_until("the pc does not trust the laptop of its list", |seen| {
+            trusts_laptop(seen)
+        });
+        Trusting {
+            hub,
+            list,
+            device,
+            laptop: laptop_device,
+        }
+    }
+
+    /// The laptop removed from the hub's list, which the hub sends at its next session.
+    fn remove_laptop(&mut self) {
+        self.list.sign(
+            Action::Remove {
+                key: self.laptop.public(),
+            },
+            &self.device,
+        );
+        *self.hub.list.lock().unwrap() = self.list.clone();
+    }
+
+    /// The pc's session cut, and the next one started, its list held back.
+    fn cut(&self, pc: &Machine) {
+        self.hub.cut.send_modify(|cut| *cut += 1);
+        self.hub.wait_for_sessions(2, pc);
+    }
+}
+
+fn trusts_laptop(seen: &Value) -> bool {
+    seen["machines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|machine| machine["name"] == "laptop")
+}
+
+/// The address `machine` listens on, on 127.0.0.1.
+fn local_address(machine: &Machine) -> String {
+    machine.remote()["this"]["addresses"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|address| address["address"].as_str().unwrap().to_owned())
+        .find(|address| address.starts_with("127.0.0.1:"))
+        .unwrap()
+}
+
+/// A machine key of a machine that runs no daemon: the test dials with it.
+fn machine_key_apart() -> (tempfile::TempDir, MachineKey) {
+    let dir = tempfile::tempdir().unwrap();
+    let key = MachineKey::load_or_make(&dir.path().join("remote")).unwrap();
+    (dir, key)
+}
+
+/// Dials `pc` at `at` as the machine whose key is `key`: whether a link was made, or why not.
+fn dial_as(key: &MachineKey, pc: PublicKey, at: &str) -> Result<(), String> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let endpoint = Endpoint::dialler(key).map_err(|error| error.to_string())?;
+        let made = endpoint
+            .connect(
+                pc,
+                &[at.parse().unwrap()],
+                Traffic::Machine,
+                &Hello::ours(env!("CARGO_PKG_VERSION")),
+                "pc",
+            )
+            .await;
+        endpoint.close().await;
+        made.map(|_| ()).map_err(|error| error.to_string())
+    })
+}
+
+#[test]
+fn a_link_while_the_session_is_lost_is_judged_by_the_next_list() {
+    let pc = Machine::new(Some("127.0.0.1:0"));
+    let (_laptop_dir, laptop) = machine_key_apart();
+    let mut trusting = Trusting::new(&pc, &laptop);
+    let at = local_address(&pc);
+
+    // The laptop is removed while the pc's session is cut: the list the pc kept still trusts it.
+    trusting.remove_laptop();
+    trusting.cut(&pc);
+
+    // Meanwhile, the laptop dials the pc, which waits for the next session's list to judge it.
+    assert!(
+        trusting.hub.sent().is_none(),
+        "the hub sent the next list before the laptop dialled: nothing was held\n{}",
+        pc.log()
+    );
+    let dialled = dial_as(&laptop, pc.key(), &at);
+    let ended = Instant::now();
+    let error = dialled.expect_err("the pc linked to the removed laptop by the list it kept");
+    assert!(error.contains("not one of the user's"), "{error}");
+    let sent = trusting
+        .hub
+        .sent()
+        .expect("the pc refused the laptop before the hub sent the next list");
+    assert!(
+        ended >= sent,
+        "the pc refused the laptop before the next list came\n{}",
+        pc.log()
+    );
+    let linked = pc.events("remote.connected");
+    assert!(
+        linked.iter().all(|event| event["name"] != "laptop"),
+        "the pc linked to the removed laptop by the list it kept: {linked:#?}\n{}",
+        pc.log()
+    );
+    drop(trusting.hub.runtime);
+}
+
+#[test]
+fn a_machine_whose_session_is_lost_dials_no_one_until_the_next_list() {
+    let (pc, laptop) = (
+        Machine::new(Some("127.0.0.1:0")),
+        Machine::new(Some("127.0.0.1:0")),
+    );
+    // The laptop, with no hub, takes a link from the pc; it never dials the pc itself.
+    let peers = json!({"machines": [{"name": "pc", "key": pc.key(), "addresses": []}]});
+    std::fs::write(laptop.folder().join("peers.json"), peers.to_string()).unwrap();
+    let mut trusting = Trusting::new(&pc, &laptop.machine_key());
+
+    // While the next list is held back, the pc learns where the laptop is, by the list it kept.
+    trusting.remove_laptop();
+    trusting.cut(&pc);
+    let peers = json!({"machines": [{
+        "name": "laptop",
+        "key": laptop.key(),
+        "addresses": [local_address(&laptop)],
+    }]});
+    std::fs::write(pc.folder().join("peers.json"), peers.to_string()).unwrap();
+    let deadline = Instant::now() + WAIT;
+    while trusting.hub.sent().is_none() {
+        assert!(Instant::now() < deadline, "no next list\n{}", pc.log());
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    pc.wait_until("the pc still trusts the removed laptop", |seen| {
+        !trusts_laptop(seen)
+    });
+    // A dial of the next round, if one was due, has had its time.
+    std::thread::sleep(Duration::from_secs(2));
+
+    let linked = pc.events("remote.connected");
+    assert!(
+        linked.iter().all(|event| event["name"] != "laptop"),
+        "the pc dialled the removed laptop by the list it kept: {linked:#?}\n{}",
+        pc.log()
+    );
+    drop(trusting.hub.runtime);
+}
+
+#[test]
+fn a_machine_that_wakes_from_a_suspend_judges_links_by_the_next_list() {
+    let user = User::new();
+    let ahead = user.path("wall-ahead");
+    let pc = Machine::of(
+        user.with_env("FLOTTILLE_TEST_WALL_AHEAD_FILE", ahead.to_str().unwrap()),
+        Some("127.0.0.1:0"),
+    );
+    let (_laptop_dir, laptop) = machine_key_apart();
+    let mut trusting = Trusting::new(&pc, &laptop);
+    let at = local_address(&pc);
+
+    // The laptop is removed while the pc sleeps: the hub's session looks alive on its waking, and
+    // the list it kept still trusts the laptop, which dials the pc in the first second.
+    trusting.remove_laptop();
+    std::fs::write(&ahead, "60").unwrap();
+    let dialled = dial_as(&laptop, pc.key(), &at);
+
+    let error = dialled.expect_err("the pc linked to the removed laptop by the list it kept");
+    assert!(error.contains("not one of the user's"), "{error}");
+    assert!(
+        trusting.hub.sessions() >= 2,
+        "the pc kept the session it had before it slept\n{}",
+        pc.log()
+    );
+    let linked = pc.events("remote.connected");
+    assert!(
+        linked.iter().all(|event| event["name"] != "laptop"),
+        "the pc linked to the removed laptop by the list it kept: {linked:#?}\n{}",
+        pc.log()
+    );
+    drop(trusting.hub.runtime);
+}
+
+/// `flottille remote join` on `joiner`, given `code`, left running: it waits for the member that
+/// invited.
+fn join_in_background(joiner: &Machine, code: &str) -> std::process::Child {
+    let joining = joiner
+        .user
+        .command(&["remote", "join"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = joining.stdin.as_ref().unwrap();
+    std::io::Write::write_all(&mut input, format!("{code}\n").as_bytes()).unwrap();
+    joining
+}
+
+/// An invitation's code, from `flottille remote invite` on `inviter`.
+fn invitation(inviter: &Machine) -> String {
+    let invited = inviter.user.run(&["remote", "invite", "--json"]);
+    assert!(
+        invited.status.success(),
+        "{}",
+        String::from_utf8_lossy(&invited.stderr)
+    );
+    let invited: Value = serde_json::from_slice(&invited.stdout).unwrap();
+    invited["code"].as_str().unwrap().to_owned()
+}
+
+#[test]
+fn a_join_whose_command_was_gone_keeps_its_key_on_the_next_try() {
+    let hub = TestHub::new();
+    let (pc, server) = (Machine::new(None), Machine::new(None));
+    set_up(&hub, &pc);
+
+    // The command that joins is gone (its terminal closed) while it waits; the member accepts the
+    // request all the same, and the server's daemon takes the answer.
+    let code = invitation(&pc);
+    let mut joining = join_in_background(&server, &code);
+    let request = pc.wait_until_requested();
+    let key: PublicKey = serde_json::from_value(request["key"].clone()).unwrap();
+    joining.kill().unwrap();
+    joining.wait().unwrap();
+    let accepted = pc.user.run(&[
+        "remote",
+        "accept",
+        request["request"].as_str().unwrap(),
+        "--name",
+        "server",
+        "--role",
+        "runner",
+    ]);
+    assert!(
+        accepted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&accepted.stderr)
+    );
+
+    // Joining again goes on with the key the hub took, and keeps it: the member has a key that
+    // signs for it.
+    let again = server
+        .user
+        .run_with_input(&["remote", "join"], &format!("{code}\n"));
+    assert!(
+        again.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&again.stderr),
+        server.log()
+    );
+    assert_eq!(server.device().public(), key);
+    pc.wait_for_member("server", true);
+    let this = server.user.call("remote.members", json!({})).unwrap()["this"].clone();
+    assert_eq!(this, "server");
+}
+
+#[test]
+fn a_pending_key_from_a_refused_join_is_never_sent_again() {
+    let hub = TestHub::new();
+    let (pc, server) = (Machine::new(None), Machine::new(None));
+    set_up(&hub, &pc);
+
+    // The command that joins is gone while it waits, and the member refuses the request.
+    let mut joining = join_in_background(&server, &invitation(&pc));
+    let request = pc.wait_until_requested();
+    let first: PublicKey = serde_json::from_value(request["key"].clone()).unwrap();
+    joining.kill().unwrap();
+    joining.wait().unwrap();
+    let refused = pc
+        .user
+        .run(&["remote", "refuse", request["request"].as_str().unwrap()]);
+    assert!(
+        refused.status.success(),
+        "{}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    let deadline = Instant::now() + WAIT;
+    while pc.user.call("remote.requests", json!({})).unwrap() != json!([]) {
+        assert!(Instant::now() < deadline, "the refused request stays");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    // The next join sends a key the hub never saw, and keeps that one.
+    let paired = pair(&pc, &server, "server", "runner");
+    assert_ne!(paired.key, first);
+    assert_eq!(server.device().public(), paired.key);
+}
+
+/// A way to the hub that is slow on purpose: each connection waits `delay` before it is carried
+/// on, so that a command can be gone while its daemon's exchange with the hub still runs.
+struct SlowWay {
+    runtime: tokio::runtime::Runtime,
+    address: SocketAddr,
+    connections: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl SlowWay {
+    fn new(to: SocketAddr, delay: Duration) -> SlowWay {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let connections = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = connections.clone();
+        let address = runtime.block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            tokio::spawn(async move {
+                while let Ok((mut stream, _)) = listener.accept().await {
+                    counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    tokio::spawn(async move {
+                        tokio::time::sleep(delay).await;
+                        let Ok(mut hub) = tokio::net::TcpStream::connect(to).await else {
+                            return;
+                        };
+                        let _ = tokio::io::copy_bidirectional(&mut stream, &mut hub).await;
+                    });
+                }
+            });
+            address
+        });
+        SlowWay {
+            runtime,
+            address,
+            connections,
+        }
+    }
+
+    fn url(&self) -> String {
+        format!("http://{}", self.address)
+    }
+
+    fn connections(&self) -> usize {
+        self.connections.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+/// The device key this machine's clients kept, `None` when there is none: read, never made.
+fn kept_key(machine: &Machine) -> Option<PublicKey> {
+    DeviceKey::load(&NoKeyring, &machine.folder())
+        .unwrap()
+        .map(|key| key.public())
+}
+
+/// The device key a setup or a join of this machine left pending, `None` when there is none.
+fn pending_key(machine: &Machine) -> Option<PublicKey> {
+    DeviceKey::load_pending(&NoKeyring, &machine.folder())
+        .unwrap()
+        .map(|key| key.public())
+}
+
+#[test]
+fn a_setup_whose_command_was_gone_keeps_its_root_key_on_the_next_try() {
+    let hub = TestHub::new();
+    let slow = SlowWay::new(hub.address, Duration::from_secs(4));
+    let pc = Machine::new(None);
+    let code = format!("{}\n", hub.code());
+
+    // The command that sets up is gone (its terminal closed) while its daemon still talks to the
+    // hub, and it is asked again at once.
+    let mut first = pc
+        .user
+        .command(&["remote", "setup", &slow.url(), "--name", "pc"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::io::Write::write_all(&mut first.stdin.as_ref().unwrap(), code.as_bytes()).unwrap();
+    let deadline = Instant::now() + WAIT;
+    while slow.connections() == 0 {
+        assert!(
+            Instant::now() < deadline,
+            "the setup never reached the hub\n{}",
+            pc.log()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    first.kill().unwrap();
+    first.wait().unwrap();
+    let again = pc
+        .user
+        .run_with_input(&["remote", "setup", &slow.url(), "--name", "pc"], &code);
+    let said = String::from_utf8_lossy(&again.stderr);
+
+    // The daemon's setup ended with the first key: that one is kept, the root, which signs for
+    // the pc.
+    let members = pc.user.call("remote.members", json!({})).unwrap();
+    let root: PublicKey = serde_json::from_value(
+        members["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|member| member["name"] == "pc")
+            .unwrap()["key"]
+            .clone(),
+    )
+    .unwrap();
+    assert_eq!(kept_key(&pc), Some(root), "{said}\n{}", pc.log());
+    assert_eq!(pending_key(&pc), None, "{said}");
+    drop(slow.runtime);
+}
+
+#[test]
+fn a_declaration_the_hub_never_took_leaves_the_key_pending() {
+    let mut hub = TestHub::new();
+    let (pc, server) = (Machine::new(None), Machine::new(None));
+    set_up(&hub, &pc);
+
+    // The join is accepted while its command is gone, and the server's daemon takes the answer.
+    let code = invitation(&pc);
+    let mut joining = join_in_background(&server, &code);
+    let request = pc.wait_until_requested();
+    let key: PublicKey = serde_json::from_value(request["key"].clone()).unwrap();
+    joining.kill().unwrap();
+    joining.wait().unwrap();
+    let accepted = pc.user.run(&[
+        "remote",
+        "accept",
+        request["request"].as_str().unwrap(),
+        "--name",
+        "server",
+        "--role",
+        "runner",
+    ]);
+    assert!(
+        accepted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&accepted.stderr)
+    );
+    let deadline = Instant::now() + WAIT;
+    while server
+        .user
+        .call("remote.join", json!({"key": key, "resume": true}))
+        .unwrap()
+        .is_null()
+    {
+        assert!(
+            Instant::now() < deadline,
+            "no answer came\n{}",
+            server.log()
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    // The hub is gone before the declaration: the join goes on with the key, which is not kept,
+    // since the machine is not pinned with it.
+    hub.down();
+    let again = server
+        .user
+        .run_with_input(&["remote", "join"], &format!("{code}\n"));
+    assert!(!again.status.success());
+    let said = String::from_utf8_lossy(&again.stderr);
+    assert!(server.remote()["hub"].is_null());
+    assert_eq!(kept_key(&server), None, "{said}\n{}", server.log());
+    assert_eq!(pending_key(&server), Some(key), "{said}");
+    assert!(
+        said.contains("waits for the member who invited it"),
+        "the resumed join said nothing of what it waits for: {said}"
+    );
+}
+
+#[test]
+fn a_replaced_setup_whose_command_was_gone_keeps_its_root_key() {
+    let (old, new) = (TestHub::new(), TestHub::new());
+    let slow = SlowWay::new(new.address, Duration::from_secs(4));
+    let pc = Machine::new(None);
+    set_up(&old, &pc);
+    // No device key is kept any more, as after a keyring cleared: the next setup makes one.
+    std::fs::remove_file(pc.folder().join(flottille_link::DEVICE_FILE)).unwrap();
+    assert_eq!(kept_key(&pc), None);
+    let code = format!("{}\n", new.code());
+
+    // The command that replaces the hub is gone while its daemon still talks to the new hub, and
+    // it is asked again at once: the machine is pinned to the old hub meanwhile.
+    let mut first = pc
+        .user
+        .command(&["remote", "setup", &slow.url(), "--name", "pc", "--replace"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::io::Write::write_all(&mut first.stdin.as_ref().unwrap(), code.as_bytes()).unwrap();
+    let deadline = Instant::now() + WAIT;
+    while slow.connections() == 0 {
+        assert!(
+            Instant::now() < deadline,
+            "the setup never reached the hub\n{}",
+            pc.log()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    first.kill().unwrap();
+    first.wait().unwrap();
+    let again = pc.user.run_with_input(
+        &["remote", "setup", &slow.url(), "--name", "pc", "--replace"],
+        &code,
+    );
+    let said = String::from_utf8_lossy(&again.stderr);
+
+    // The daemon's setup ended with the first key, the new hub's root: that one is kept.
+    let members = pc.user.call("remote.members", json!({})).unwrap();
+    let root: PublicKey = serde_json::from_value(
+        members["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|member| member["name"] == "pc")
+            .unwrap()["key"]
+            .clone(),
+    )
+    .unwrap();
+    assert_eq!(kept_key(&pc), Some(root), "{said}\n{}", pc.log());
+    assert_eq!(pending_key(&pc), None, "{said}");
+    drop(slow.runtime);
+}
+
+#[test]
+fn a_declaration_lost_on_a_dead_session_is_not_resumed_again() {
+    let mut hub = TestHub::new();
+    let (pc, server) = (Machine::new(None), Machine::new(None));
+    set_up(&hub, &pc);
+
+    // The join is accepted while its command is gone, and the server's daemon takes the answer.
+    let code = invitation(&pc);
+    let mut joining = join_in_background(&server, &code);
+    let request = pc.wait_until_requested();
+    let key: PublicKey = serde_json::from_value(request["key"].clone()).unwrap();
+    joining.kill().unwrap();
+    joining.wait().unwrap();
+    let accepted = pc.user.run(&[
+        "remote",
+        "accept",
+        request["request"].as_str().unwrap(),
+        "--name",
+        "server",
+        "--role",
+        "runner",
+    ]);
+    assert!(
+        accepted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&accepted.stderr)
+    );
+    let deadline = Instant::now() + WAIT;
+    while server
+        .user
+        .call("remote.join", json!({"key": key, "resume": true}))
+        .unwrap()
+        .is_null()
+    {
+        assert!(
+            Instant::now() < deadline,
+            "no answer came\n{}",
+            server.log()
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    // The hub is gone before the declaration, which fails on the dead session: the join is not
+    // held for the commands after it, each of which would fail the same way.
+    hub.down();
+    let again = server
+        .user
+        .run_with_input(&["remote", "join"], &format!("{code}\n"));
+    assert!(!again.status.success());
+    let resumed = server
+        .user
+        .call("remote.join", json!({"key": key, "resume": true}))
+        .unwrap();
+    assert!(
+        resumed.is_null(),
+        "the join whose session ended is resumed again\n{}",
+        server.log()
+    );
 }

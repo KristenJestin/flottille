@@ -521,7 +521,16 @@ async fn serve(
     ));
     watchdog::start(&daemon.watch)?;
     if let Some(key) = machine_key {
-        let link = crate::link::start(paths, key, daemon.stopping.subscribe());
+        // Held weakly: the daemon holds the link, which must not hold the daemon.
+        let emitting = Arc::downgrade(&daemon);
+        let emit: crate::link::Emit = Arc::new(move |name: &str, data: Value| {
+            if let Some(daemon) = emitting.upgrade()
+                && let Err(error) = daemon.emit(name, data)
+            {
+                eprintln!("flottille daemon: the event {name} was not stored: {error}");
+            }
+        });
+        let link = crate::link::start(paths, key, daemon.stopping.subscribe(), emit);
         if let Err(why) = &link {
             eprintln!("flottille daemon: the link is not up: {why}");
         }

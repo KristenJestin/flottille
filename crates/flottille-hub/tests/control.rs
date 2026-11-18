@@ -975,6 +975,7 @@ async fn answering_hub(key: HubKey, code: Option<&str>, frames: Vec<ToDevice>) -
                         id: asked.id,
                         refused: None,
                         proof,
+                        token: None,
                     };
                     if session.send(&answer).await.is_err() {
                         return;

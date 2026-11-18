@@ -1974,7 +1974,7 @@ turn it runs anyway, and costs no quota.
 
 | Tool | |
 |---|---|
-| `web {action, url?, query?, why?, path?, title?}` | A page read or a search, through the daemon: the only way an agent reaches the web (`docs/design.md` §4.2); `show_link`, a link put in front of the user ("Showing a link", below). Every agent has it, in `main` as in a workspace. |
+| `web {action, url?, query?, why?, entry?, method?, body?, headers?, auth?, path?, title?}` | A page read, a call of an API or a search, through the daemon: the only way an agent reaches the web (`docs/design.md` §4.2); `show_link`, a link put in front of the user ("Showing a link", below). Every agent has it, in `main` as in a workspace. |
 
 - **`read {url}`**: fetches the page and answers its main content: HTML as Markdown (the `dom_smoothie`
   crate, Readability ported to Rust, its navigation, banners and footers left out), a PDF as its
@@ -2009,6 +2009,49 @@ turn it runs anyway, and costs no quota.
   kernel lets an unprivileged user have them; when it does not (AppArmor on Ubuntu may refuse
   them), the daemon says so once in its log and the filter alone keeps the reader off the
   network.
+- **`read {url, entry?, method?, body?, headers?, auth?}`: a call of an API.** A read that names
+  any of them calls the URL as an API: `method` is `GET` (by default), `HEAD`, `POST`, `PUT`,
+  `PATCH` or `DELETE`; `body` is text (JSON as a string), sent by `POST`, `PUT`, `PATCH` and
+  `DELETE` only, as `application/json` when it parses as JSON and `text/plain` otherwise unless
+  the agent's headers say its type, and refused past 8,000 characters (the judge is given it
+  whole); `headers` are the agent's own, never `Authorization`, `Cookie` nor
+  `Proxy-Authorization` (`refused: web sends no Authorization header of yours: a sign-in goes
+  with entry, …`), nor `Host`, `Content-Length`, `Transfer-Encoding`, `Connection`, `TE` or
+  `Upgrade`, which web sets itself; with an entry, nor `Range` and `If-Range` (a part of an answer
+  that echoes the request could hold a part of the secret). Their names and values are 8,000
+  characters at most in all, as the body. The answer is the final URL, the status, the content type and
+  the body as it came (JSON is not turned into Markdown), any status included, inside the web's
+  block, cut at 30,000 characters as a page's text is; a body that is not text is named, not
+  shown. A write's redirect is answered as it came, never followed.
+- **Signed in with a vault entry**: `entry` names an entry of the vault (`docs/vault.md`, "How a
+  secret is used"), and the daemon adds the sign-in itself: HTTP Basic with the entry's
+  `username` and its secret when the entry has a username, else `Authorization: Bearer
+  <secret>`; `auth` (`basic` or `bearer`) overrides the guess. The secret goes **only to the
+  entry's origin**, the scheme, host and port of its `url` (`https`, or `http` on this machine): a
+  URL on another host is refused before anything is sent, naming both hosts (`refused: the vault
+  entry tracker-key is for api.example.test, and this URL is on other.example.test: …; nothing was
+  sent`), and so are plain `http` to another machine and another port of the host; a redirect is
+  followed with the credential only on that origin, and one that leads elsewhere is refused,
+  saying where it led. An entry
+  without a `url`, one the agent's project does not see, or one bound to another use (`for`) is
+  refused with the vault's sentences; a name the vault does not hold offers `vault ask` with the
+  URL's origin, when the agent has the vault tool. The secret is read from the keyring at the
+  moment the call is sent, never waited for. Every form of it (raw, the Basic credentials, the
+  header's value, and their encoded forms, `docs/vault.md`) is masked in the answer, as every vault
+  value is in what is stored and shown: the whole body is masked before it is cut, and a cut body
+  never ends in the start of one of those forms (that end is masked too), so that no padding of an
+  echo shows a secret in part; the links the agent is shown are those of the masked text. Nothing
+  logs the request's headers. The address rules below hold for an API as for a page.
+- **The gate on a call of an API**: `GET` and `HEAD` are reads, passed or judged as a page's URL
+  is; a method that writes (`POST`, `PUT`, `PATCH`, `DELETE`), with or without an entry, is **to
+  judge**, and so is a `GET` or `HEAD` that sends headers of the agent's, which carry out what
+  they hold as a URL does. The card says the method, the URL, the host and, with an entry, who it
+  signs in as and with which entry, then the agent's headers and the body: `it sends POST
+  https://api.example.test/rest/api/3/issue to api.example.test as robin@example.test with the
+  vault entry tracker-key, its body: {…}` (a bearer token: `with the vault entry tracker-key as
+  a bearer token`), masked. A signed `GET` held as a URL the agent built, or a link of a site read
+  often, says the same after its reason: `…; it signs in as robin@example.test with the vault
+  entry tracker-key`. An entry that cannot sign the call in is refused before any card.
 - **`search {query}`**: DuckDuckGo's HTML page (`https://html.duckduckgo.com/html/?q=…`, no key,
   no account): at most 10 results, each its title, its URL (out of DuckDuckGo's redirect) and its
   excerpt, ads left out. A page that asks to prove a human is there, or any answer with no
@@ -2019,10 +2062,11 @@ turn it runs anyway, and costs no quota.
   text, the page's title included, sits in an `<untrusted_web_content>` block nothing in it can
   close. It is masked of the
   daemon's and the place's secrets, and escaped, like every result.
-- **How it fetches**: `http` and `https` only, GET only, with a fixed user agent that names
+- **How it fetches**: `http` and `https` only, a page by GET, with a fixed user agent that names
   the app and no one (`Mozilla/5.0 (compatible; Flottille)`: the same for every user and version,
   no link nor version that would tell a site who browses), no cookies, no
-  credentials, no header of the agent's, no proxy, and the URL's fragment never sent. At most
+  credentials but a vault entry's on a call of an API, no header of the agent's but on a call of
+  an API, no proxy, and the URL's fragment never sent. At most
   5 MiB downloaded (a longer page stops there and says so; a PDF cut is not read), 30 seconds in
   all, 5 redirects, none from `https` to `http`.
 - **Never this machine nor a private network**, in every mode, the user's answer and Full

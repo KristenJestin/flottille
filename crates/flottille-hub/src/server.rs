@@ -4,10 +4,15 @@
 //!
 //! A session sends the device the member list, the addresses the members' machines told, and, to
 //! a runner, the presence of the members' clients; then sends them again whenever they change. The
-//! device's asks (the first member's setup, a member's change, its addresses, its presence) go
-//! through the hub's rules (`Hub`), each checked again against the members as they are when it
-//! comes in. The hub carries no link's bytes: a session holds no message and no queue, only the
-//! list, the addresses and the presence.
+//! device's asks (the first member's setup, a member's change, an invitation, the refusal of a
+//! join request, its addresses, its presence) go through the hub's rules (`Hub`), each checked
+//! again against the members as they are when it comes in. The hub carries no link's bytes: a
+//! session holds no message and no queue, only the list, the addresses and the presence.
+//!
+//! A machine that is no member yet may answer an invitation (`flottille_link::Joining`): its
+//! session is welcome while its join request waits, and is sent nothing; once the member that
+//! invited added its device, it is sent the list and may declare its machine. The member that
+//! invited is sent the requests that wait for it.
 //!
 //! What someone with no key may hold of the hub is bounded: at most `MOST_ARRIVING` connections
 //! that have not proved a member's key at once (a setup's session among them), then
@@ -22,14 +27,14 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use flottille_link::{
-    Action, Address, Ask, Change, Hello, HubSession, MemberList, PresenceOf, Role, SetupCode,
-    SetupProof, ToDevice, Told, Transcript, arrive,
+    Action, Address, Ask, Change, Hello, HubSession, Joining, MemberList, PresenceOf, PublicKey,
+    Requested, Role, SetupCode, SetupProof, ToDevice, Token, Told, Transcript, arrive,
 };
 use tokio::net::TcpListener;
 use tokio::sync::{Semaphore, watch};
 use tokio::task::JoinSet;
 
-use crate::{Clock, Hub, HubError, Presence, not_the_code};
+use crate::{Clock, Hub, HubError, Presence, Standing, not_the_code};
 
 /// Where the hub listens unless told otherwise: loopback, behind a reverse proxy on the same
 /// host. Another address takes TLS, or `--plain` for a proxy elsewhere.
@@ -188,20 +193,38 @@ async fn accept<C: Clock + Send + 'static>(
             };
             let device = arriving.device();
             let (welcome, setting_up) = {
-                let hub = shared.hub.lock().unwrap();
-                (
-                    hub.welcome(&device, arriving.pinned()),
-                    hub.members().is_none(),
-                )
+                let mut hub = shared.hub.lock().unwrap();
+                let welcome = hub.welcome(&device, arriving.pinned());
+                // A machine that is no member answers an invitation: its request waits. In a
+                // place kept for members it is not taken, and the invitation stays unanswered.
+                let welcome = match (welcome, arriving.joining()) {
+                    (Err(_), Some(_)) if members_only => Err(Box::new((
+                        "the hub is busy: try again in a moment".to_owned(),
+                        false,
+                    ))),
+                    (Err(_), Some(joining)) => hub
+                        .join(&joining.token, joining.key)
+                        .map(|()| Some(joining))
+                        .map_err(|error| Box::new((error.to_string(), false))),
+                    (welcome, _) => welcome.map(|()| None),
+                };
+                (welcome, hub.members().is_none())
             };
-            if let Err(refusal) = welcome {
-                let (reason, reset) = *refusal;
-                eprintln!(
-                    "flottille-hub: refused {} from {from}: {reason}",
-                    device.fingerprint()
-                );
-                arriving.refuse(&reason, reset).await;
-                return;
+            let joining = match welcome {
+                Ok(joining) => joining,
+                Err(refusal) => {
+                    let (reason, reset) = *refusal;
+                    eprintln!(
+                        "flottille-hub: refused {} from {from}: {reason}",
+                        device.fingerprint()
+                    );
+                    arriving.refuse(&reason, reset).await;
+                    return;
+                }
+            };
+            if joining.is_some() {
+                // The member that invited is told the request.
+                shared.changed.send_modify(|at| *at += 1);
             }
             // `welcome` takes anyone while no member exists: a setup is no member's.
             if members_only && setting_up {
@@ -210,16 +233,18 @@ async fn accept<C: Clock + Send + 'static>(
                     .await;
                 return;
             }
-            // A member's session is not counted; a setup's is, while it lasts.
-            let _permit = setting_up.then_some(permit);
+            // A member's session is not counted; a setup's or a joining machine's is, while it
+            // lasts.
+            let _permit = (setting_up || joining.is_some()).then_some(permit);
             let Ok(session) = arriving.welcome().await else {
                 return;
             };
             eprintln!(
-                "flottille-hub: {} connected from {from}",
-                device.fingerprint()
+                "flottille-hub: {} connected from {from}{}",
+                device.fingerprint(),
+                if joining.is_some() { " to join" } else { "" }
             );
-            let why = run(session, &shared, stopping).await;
+            let why = run(session, joining, &shared, stopping).await;
             eprintln!("flottille-hub: {} left: {why}", device.fingerprint());
         });
     }
@@ -232,11 +257,45 @@ struct Sent {
     list: Option<MemberList>,
     addresses: Option<Vec<Told>>,
     presence: Option<Vec<PresenceOf>>,
+    requests: Option<Vec<Requested>>,
+}
+
+/// Whether a session may go on, as the members are now: a member's (or a setup's), or a joining
+/// machine's, whose request waits (it is sent nothing and may ask nothing) or was accepted.
+enum Welcome {
+    Member,
+    Waiting { left: u64 },
+}
+
+/// Where `device`'s session stands, or the refusal that ends it.
+fn standing<C: Clock>(
+    hub: &mut Hub<C>,
+    device: &PublicKey,
+    pinned: Option<flottille_link::ChangeHash>,
+    joining: Option<&Joining>,
+) -> Result<Welcome, (String, bool)> {
+    let refusal = match hub.welcome(device, pinned) {
+        Ok(()) => return Ok(Welcome::Member),
+        Err(refusal) => *refusal,
+    };
+    let Some(joining) = joining else {
+        return Err(refusal);
+    };
+    match hub.joined(&joining.token, &joining.key) {
+        Standing::Added => Ok(Welcome::Member),
+        Standing::Waiting { left } => Ok(Welcome::Waiting { left }),
+        Standing::Over => Err((
+            "this join request was refused, or its invitation expired: ask for a new one"
+                .to_owned(),
+            false,
+        )),
+    }
 }
 
 /// One device's session, until it ends; why it ended.
 async fn run<C: Clock + Send + 'static>(
     mut session: HubSession,
+    joining: Option<Joining>,
     shared: &Shared<C>,
     mut stopping: watch::Receiver<bool>,
 ) -> String {
@@ -248,16 +307,26 @@ async fn run<C: Clock + Send + 'static>(
     let setup_ends = tokio::time::Instant::now() + SETUP_IDLE;
     loop {
         let frames = {
-            let hub = shared.hub.lock().unwrap();
-            hub.welcome(&device, pinned)
-                .map(|()| (news(&hub, &device, &mut sent), hub.members().is_none()))
+            let mut hub = shared.hub.lock().unwrap();
+            standing(&mut hub, &device, pinned, joining.as_ref()).map(|standing| match standing {
+                Welcome::Member => (
+                    news(&hub, &device, joining.as_ref(), &mut sent),
+                    hub.members().is_none(),
+                    None,
+                ),
+                Welcome::Waiting { left } => (Vec::new(), false, Some(left)),
+            })
         };
-        let (frames, setting_up) = match frames {
+        let (frames, setting_up, waiting) = match frames {
             Ok(frames) => frames,
-            Err(refusal) => {
-                let (reason, reset) = *refusal;
+            Err((reason, reset)) => {
                 let _ = session.send(&ToDevice::Refused { reason, reset }).await;
                 session.close().await;
+                if joining.is_some() {
+                    // The member that invited is told the request is over.
+                    shared.changed.send_modify(|at| *at += 1);
+                    return "its join request is over".to_owned();
+                }
                 return "it is not a member any more".to_owned();
             }
         };
@@ -273,6 +342,13 @@ async fn run<C: Clock + Send + 'static>(
                 std::future::pending::<()>().await;
             }
         };
+        // A request that waits ends with its invitation: looked at again then.
+        let expiry = async {
+            match waiting {
+                Some(left) => tokio::time::sleep(Duration::from_secs(left)).await,
+                None => std::future::pending::<()>().await,
+            }
+        };
         tokio::select! {
             asked = session.ask() => {
                 let asked = match asked {
@@ -280,16 +356,23 @@ async fn run<C: Clock + Send + 'static>(
                     Err(why) => return why,
                 };
                 let transcript = *session.transcript();
-                let (refused, proof) = match handle(shared, &transcript, pinned, asked.ask) {
-                    Ok(proof) => (None, proof),
-                    Err(error) => (Some(error.to_string()), None),
+                let handled = handle(shared, &transcript, pinned, joining.as_ref(), asked.ask);
+                let (refused, extra) = match handled {
+                    Ok(extra) => (None, extra),
+                    Err(error) => (Some(error.to_string()), Extra::default()),
                 };
-                let answer = ToDevice::Answer { id: asked.id, refused, proof };
+                let answer = ToDevice::Answer {
+                    id: asked.id,
+                    refused,
+                    proof: extra.proof,
+                    token: extra.token,
+                };
                 if session.send(&answer).await.is_err() {
                     return "it closed the connection".to_owned();
                 }
             }
             _ = changed.changed() => {}
+            _ = expiry => {}
             _ = idle => {
                 let reason = format!(
                     "no setup came within {} s of this session",
@@ -310,7 +393,8 @@ async fn run<C: Clock + Send + 'static>(
 /// What `device` was not sent yet of the hub's state.
 fn news<C: Clock>(
     hub: &Hub<C>,
-    device: &flottille_link::PublicKey,
+    device: &PublicKey,
+    joining: Option<&Joining>,
     sent: &mut Sent,
 ) -> Vec<ToDevice> {
     let mut frames = Vec::new();
@@ -337,10 +421,25 @@ fn news<C: Clock>(
         frames.push(ToDevice::Addresses(addresses.clone()));
         sent.addresses = Some(addresses);
     }
-    let runner = members
+    let member = members
         .get(device)
         .or_else(|| members.by_machine(device))
-        .is_some_and(|member| member.role == Role::Runner);
+        .or_else(|| joining.and_then(|joining| members.get(&joining.key)));
+    if let Some(member) = member {
+        let requests: Vec<Requested> = hub
+            .pending(&member.key)
+            .into_iter()
+            .map(|request| Requested {
+                token: request.token,
+                key: request.key,
+            })
+            .collect();
+        if sent.requests.as_ref() != Some(&requests) {
+            frames.push(ToDevice::Requests(requests.clone()));
+            sent.requests = Some(requests);
+        }
+    }
+    let runner = member.is_some_and(|member| member.role == Role::Runner);
     if runner {
         let presence: Vec<PresenceOf> = members
             .members()
@@ -369,20 +468,41 @@ fn handle<C: Clock>(
     shared: &Shared<C>,
     transcript: &Transcript,
     pinned: Option<flottille_link::ChangeHash>,
+    joining: Option<&Joining>,
     ask: Ask,
-) -> Result<Option<SetupProof>, HubError> {
+) -> Result<Extra, HubError> {
     let device = &transcript.device;
     let mut hub = shared.hub.lock().unwrap();
-    if let Err(refusal) = hub.welcome(device, pinned) {
-        let (reason, _) = *refusal;
-        return Err(HubError(reason));
+    match standing(&mut hub, device, pinned, joining) {
+        Ok(Welcome::Member) => {}
+        Ok(Welcome::Waiting { .. }) => {
+            return Err(HubError(
+                "this device waits for its join request to be accepted: it may ask nothing yet"
+                    .to_owned(),
+            ));
+        }
+        Err((reason, _)) => return Err(HubError(reason)),
     }
-    let mut proof = None;
+    // The member this session is: its device's, its machine's, or, for a joining machine, the
+    // new device's once added.
+    let member = hub.members().and_then(|members| {
+        members
+            .get(device)
+            .or_else(|| members.by_machine(device))
+            .or_else(|| joining.and_then(|joining| members.get(&joining.key)))
+            .map(|member| member.key)
+    });
+    let mut extra = Extra::default();
     let done = match ask {
         Ask::Setup {
             proof: theirs,
             changes,
-        } => setup(&mut hub, transcript, &theirs, changes).map(|ours| proof = Some(ours)),
+        } => setup(&mut hub, transcript, &theirs, changes).map(|ours| extra.proof = Some(ours)),
+        Ask::Invite { ask } => hub.invite(&ask).map(|token| extra.token = Some(token)),
+        Ask::Refuse { token } => match member {
+            Some(member) => hub.refuse(&token, &member),
+            None => Err(HubError("this device is not a member".to_owned())),
+        },
         Ask::Submit { change } => {
             if hub.members().is_none() {
                 Err(HubError(
@@ -405,24 +525,24 @@ fn handle<C: Clock>(
                 hub.tell_addresses(device, addresses)
             }
         }
-        Ask::Presence { active, last_input } => {
-            let member = hub.members().and_then(|members| {
-                members
-                    .get(device)
-                    .or_else(|| members.by_machine(device))
-                    .map(|member| member.key)
-            });
-            match member {
-                Some(member) => hub.tell_presence(&member, Presence { active, last_input }),
-                None => Err(HubError("this device is not a member".to_owned())),
-            }
-        }
+        Ask::Presence { active, last_input } => match member {
+            Some(member) => hub.tell_presence(&member, Presence { active, last_input }),
+            None => Err(HubError("this device is not a member".to_owned())),
+        },
     };
     drop(hub);
     if done.is_ok() {
         shared.changed.send_modify(|at| *at += 1);
     }
-    done.map(|()| proof)
+    done.map(|()| extra)
+}
+
+/// What an answer carries besides a yes: the hub's proof of the setup code, an invitation's
+/// token.
+#[derive(Default)]
+struct Extra {
+    proof: Option<SetupProof>,
+    token: Option<Token>,
 }
 
 /// The first member: its own entry and the declaration of the machine that presents the code,
