@@ -1125,16 +1125,21 @@ pub fn unwritable(project: &Project, args: &Value) -> Option<String> {
     // A fix version is set once: by the milestone, by taking it away, or by the fields.
     if ["create", "edit"].contains(&action)
         && fields.is_some_and(|fields| fields.contains_key("fixVersions"))
-        && (args["milestone"]
+    {
+        let other = if args["milestone"]
             .as_str()
             .is_some_and(|name| !name.trim().is_empty())
-            || args["remove_milestone"] == true)
-    {
-        return Some(
-            "refused: fields.fixVersions and milestone (or remove_milestone) both set the fix \
-             version: give one of them"
-                .into(),
-        );
+        {
+            Some("milestone")
+        } else {
+            (args["remove_milestone"] == true).then_some("remove_milestone")
+        };
+        if let Some(other) = other {
+            return Some(format!(
+                "refused: fields.fixVersions and {other} both set the fix version: give one of \
+                 them"
+            ));
+        }
     }
     if let Some(Err(why)) = args["ticket"].as_str().map(|text| accepted(project, text)) {
         return Some(format!("refused: {why}"));
