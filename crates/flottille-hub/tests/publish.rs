@@ -38,6 +38,8 @@ fn with_fakes(folder: &Path, script: &str, args: &[&str]) -> Output {
         .args(args)
         .env("PATH", path)
         .env("HOME", folder)
+        .env("HUB_CHECK_PAUSE", "0")
+        .env("HUB_CHECK_TRIES", "3")
         .output()
         .unwrap_or_else(|error| panic!("{script}: {error}"))
 }
@@ -192,6 +194,7 @@ fn the_static_binary_runs_with_no_shared_library() {
 /// A `docker` that runs a container the way the check needs it, and a `curl` that answers as
 /// the hub does to a request that asks no upgrade (`426 Upgrade Required`).
 fn fake_docker(folder: &Path, logs: &str, code: &str) {
+    std::fs::write(folder.join("logs.txt"), format!("{logs}\n")).unwrap();
     fake(
         folder,
         "docker",
@@ -199,7 +202,7 @@ fn fake_docker(folder: &Path, logs: &str, code: &str) {
             r#"echo "$*" >> "$HOME/docker.log"
 case "$1" in
   run) echo container-id ;;
-  logs) printf '%s\n' '{logs}' ;;
+  logs) cat "$HOME/logs.txt" ;;
   port) echo '127.0.0.1:49153' ;;
   inspect) echo true ;;
   rm | stop) ;;
@@ -317,7 +320,7 @@ fn the_compose_example_is_valid() {
         !compose.contains("ghcr.io/KristenJestin") && !compose.contains("ghcr.io/kristenjestin")
     );
     // Where the setup code is, and the port to open.
-    assert!(compose.contains("docker compose logs"), "{compose}");
+    assert!(compose.contains("logs hub"), "{compose}");
 
     let workflow = text(".github/workflows/ci.yml");
     let hub = job(&workflow, "hub");
@@ -381,7 +384,10 @@ fn the_hub_jobs_run_on_a_pull_request_only_when_the_hub_or_the_release_changes()
 
     // A pull request elsewhere runs none of it; a push runs it, since a push publishes.
     let hub = job(&workflow, "hub");
-    assert!(hub.contains("needs.changes.outputs.hub == 'true'"), "{hub}");
+    assert!(
+        hub.contains("needs.changes.outputs.hub != 'false'"),
+        "{hub}"
+    );
     assert!(hub.contains("github.event_name == 'pull_request'"), "{hub}");
     assert!(hub.contains("needs.build.result == 'success'"), "{hub}");
 
@@ -419,7 +425,7 @@ fn the_release_carries_the_hub_archives_and_its_image_is_pushed_by_a_job_that_ru
         publish.contains("needs.hub.result == 'success'"),
         "{publish}"
     );
-    assert!(publish.contains("name: hub-archives"), "{publish}");
+    assert!(publish.contains("pattern: hub-assets-*"), "{publish}");
     assert_eq!(
         publish.matches("hub/assets/*").count(),
         publish.matches("release/assets/*").count(),
@@ -439,7 +445,7 @@ fn the_release_carries_the_hub_archives_and_its_image_is_pushed_by_a_job_that_ru
     );
     assert!(image.contains("docker load"), "{image}");
     assert!(
-        !image.contains("docker build") && !image.contains("actions/checkout"),
+        !image.contains("docker build ") && !image.contains("actions/checkout"),
         "{image}"
     );
     assert!(!image.contains("ghcr.io/KristenJestin") && !image.contains("ghcr.io/kristenjestin"));
@@ -468,7 +474,7 @@ fn the_docs_say_what_is_published_and_how_to_run_it() {
         "ghcr.io/<owner>/<repository>-hub",
         "crates/flottille-hub/compose.example.yml",
         "crates/flottille-hub/flottille-hub.service",
-        "docker compose logs",
+        "logs hub",
         "journalctl -u flottille-hub",
         "7448",
     ] {

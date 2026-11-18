@@ -1,0 +1,32 @@
+# Flottille's hub as a systemd service (docs/releases.md, "What CI publishes"). Put the binary of
+# the archive at /usr/local/bin/flottille-hub and this file in /etc/systemd/system/, then:
+#
+#   systemctl daemon-reload && systemctl enable --now flottille-hub
+#
+# The first start makes the hub's key and a setup code, and prints the code once in the journal:
+#
+#   journalctl -u flottille-hub
+#
+# It listens on the loopback, for a reverse proxy on this host that holds the certificate and
+# passes HTTP upgrades on (open 443 for the proxy, nothing for the hub). To reach it directly,
+# give a certificate (--tls-cert, --tls-key) and another --listen address, and open its port.
+[Unit]
+Description=Flottille hub
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/flottille-hub --listen 127.0.0.1:7448 --state /var/lib/flottille-hub
+# Its own user and its own state folder (/var/lib/flottille-hub), the key and the member list.
+DynamicUser=yes
+StateDirectory=flottille-hub
+StateDirectoryMode=0700
+Restart=on-failure
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+
+[Install]
+WantedBy=multi-user.target
