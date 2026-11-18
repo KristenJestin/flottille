@@ -263,6 +263,10 @@ fn command<S: AsRef<OsStr>>(dir: &Path, args: &[S]) -> tokio::process::Command {
         // promisor remote a partial clone asks for a missing object while it reads.
         .env("GIT_NO_LAZY_FETCH", "1")
         .env("GIT_ALLOW_PROTOCOL", "")
+        // Set and empty, they win over the `core.gitProxy` and `core.askPass` a repository's
+        // settings name, and name no program.
+        .env("GIT_PROXY_COMMAND", "")
+        .env("GIT_ASKPASS", "")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
