@@ -60,9 +60,7 @@ fn lead(user: &User, mode: &str) -> (String, Mcp) {
 }
 
 fn idle(user: &User, agent: &str) {
-    eventually("the turn's end", || {
-        shown(user, agent)["state"] == "idle"
-    });
+    eventually("the turn's end", || shown(user, agent)["state"] == "idle");
 }
 
 fn eventually(what: &str, check: impl Fn() -> bool) {
@@ -320,7 +318,9 @@ fn the_session_started_in_another_project_leads_its_own_sessions() {
     ));
     answer(&user, number, "approval.approve");
     eventually("its own led session", || {
-        agents(&user).iter().any(|a| a["title"] == "Tag the release")
+        agents(&user)
+            .iter()
+            .any(|a| a["title"] == "Tag the release")
     });
     let own = agents(&user)
         .into_iter()
@@ -380,7 +380,10 @@ fn the_first_message_to_the_session_started_in_another_project_asks_the_user_onc
     let number = held(&send(&mcp, &session, "Use the tokens."));
     let says = requests(&user)[0]["says"].to_string();
     assert!(says.contains("kit"), "{says}");
-    assert!(says.contains("Its first message: Use the tokens."), "{says}");
+    assert!(
+        says.contains("Its first message: Use the tokens."),
+        "{says}"
+    );
     assert!(
         !written_to(&user, &session)
             .iter()
@@ -466,7 +469,11 @@ fn a_session_of_another_project_is_read_a_page_at_a_time() {
     // The session it started reads freely: no leave is asked.
     let page = mcp.call("session_read", json!({"session": session, "last": 1}));
     assert!(!page.error, "{}", page.text);
-    assert!(page.text.contains("another session of project kit"), "{}", page.text);
+    assert!(
+        page.text.contains("another session of project kit"),
+        "{}",
+        page.text
+    );
     assert!(page.text.contains("Message 1 of 1"), "{}", page.text);
     assert!(page.text.contains("Earlier messages: "), "{}", page.text);
     assert!(requests(&user).is_empty(), "{:?}", requests(&user));
@@ -498,7 +505,11 @@ fn a_child_is_never_launched_in_another_project() {
     );
 
     assert!(refused.error, "{}", refused.text);
-    assert!(refused.text.starts_with("refused: a child"), "{}", refused.text);
+    assert!(
+        refused.text.starts_with("refused: a child"),
+        "{}",
+        refused.text
+    );
     assert!(refused.text.contains("kit"), "{}", refused.text);
     assert!(requests(&user).is_empty());
     assert!(agents(&user).iter().all(|a| a["title"] != "worker"));
@@ -511,7 +522,11 @@ fn a_title_names_a_session_of_the_caller_s_project_only() {
     let (in_app, _) = root(&user, "app");
     let (in_kit, _) = root(&user, "kit");
     let (only_kit, _) = root(&user, "kit");
-    for (id, title) in [(&in_app, "Fonts"), (&in_kit, "Fonts"), (&only_kit, "Tokens")] {
+    for (id, title) in [
+        (&in_app, "Fonts"),
+        (&in_kit, "Fonts"),
+        (&only_kit, "Tokens"),
+    ] {
         user.call("agent.rename", json!({"agent": id, "title": title}))
             .unwrap();
     }
@@ -546,7 +561,11 @@ fn agent_stop_ends_the_session_it_leads_in_another_project_and_holds_any_other()
 
     let ended = mcp.call("agent_stop", json!({"agent_id": session}));
     assert!(!ended.error, "{}", ended.text);
-    assert!(ended.text.starts_with("Ended the session"), "{}", ended.text);
+    assert!(
+        ended.text.starts_with("Ended the session"),
+        "{}",
+        ended.text
+    );
     eventually("its end", || shown(&user, &session)["state"] == "ended");
 
     let number = held(&mcp.call("agent_stop", json!({"agent_id": other})));
