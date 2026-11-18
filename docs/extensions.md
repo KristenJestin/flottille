@@ -1285,7 +1285,7 @@ entry the declaration names, with the entry's host (its `url`, or "no address") 
 differ, under a warning (an entry that names no address is said as such, `bound to no address`, and
 tagged `No address`, not as another host), and **Accept**, **Edit** and **Refuse** (a quiet button that answers at
 once, as the rail's Deny: it writes nothing, so nothing is confirmed). **Edit** opens the server's
-form with the agent's values, the secrets of its requests among them, and says it answers the
+form over the page the user is on (the session: it is not left) with the agent's values, the secrets of its requests among them, and says it answers the
 request `#N`: its Save writes the user's values and answers the request, its Cancel leaves it
 waiting (`connection.add`/`.edit` with `request`), which it decides under the file's lock before it
 writes: a request accepted meanwhile is refused to the Save, and only one of them writes. That Save
@@ -1298,8 +1298,9 @@ unfold under **Where its secrets go**, and fold away once the user mended it. Wh
 shows a **New entry…** button per missing entry beside that answer (only that one: no other
 failure offers them, and they fold away with their block when it goes): it opens the vault's own entry
 dialog on the entry's name and, as its address, the host the request sends it to, the secret left
-for the user to type there (the request's dialog never holds it); saved or closed, the request's
-dialog is back, and Accept goes through once the entry exists. **Accepting a request whose write needs a review leads into that review** (#1031). The edit is
+for the user to type there (the request's dialog never holds it); it opens over the request's
+dialog, which stays under it: Escape or Cancel returns to it, and once the entry is saved it
+reads the request again, and Accept goes through once the entry exists. **Accepting a request whose write needs a review leads into that review** (#1031). The edit is
 pinned only once read, so an accepted `add` or `edit` whose server now announces an action nobody
 read (a new one, or one that changed) is written and then waits **awaiting review**. The daemon's
 answer to the Accept says so (`approval.approve` waits for a connection's write, as the user's own

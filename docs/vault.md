@@ -67,9 +67,9 @@ An entry made for one precise feature is that feature's alone. `for` names it:
   use of each entry on its row (`For the worklog of the project app alone`).
 - **Seen from a project.** A project's Settings has a Vault tab: the entries that project sees (its
   own first, then every project's, marked as such), each the row of Settings, Vault. "New entry"
-  there opens Settings, Vault's own dialog with "Seen by agents of" set to the project, and a click
-  on a row edits the entry in it (the dialog says when the entry is every project's); closed, the
-  window goes back to the tab. The tab follows the vault live.
+  there opens the vault's own dialog over the tab with "Seen by agents of" set to the project, and
+  a click on a row edits the entry in it (the dialog says when the entry is every project's); the
+  tab is never left. The tab follows the vault live.
 - **A worklog's entry is its project's.** Bound to `worklog:<project>`, an entry is that project's
   (its `project` is set to it when it names none; an entry of another project is refused), so no
   other project's agent lists it, and the `vault` tool never tells an agent the use of an entry.
@@ -181,8 +181,8 @@ an entry to the vault, not a request with rules of its own.
   entry's name, the host of its URL **on a line of its own** (where the secret
   will go: the agent chose it; the daemon's reading, never the window's), what it is for, its use,
   its project and the agent's reason, with **New entry** and **Dismiss** (disabled while
-  its call runs). New entry opens Settings, Vault's form of a new entry, prefilled with all
-  of it, the agent's reason under what it is for, and what it will be bound to ("For …") with the
+  its call runs). New entry opens the vault's form of a new entry over the page the user is
+  on (the session: it is not left), prefilled with all of it, the agent's reason under what it is for, and what it will be bound to ("For …") with the
   host its secret goes to ("Goes to …", under the URL's field, bound or not, while the URL is the
   one asked) and **Remove the binding**: the user changes any field, types the secret and saves,
   with the checks of that form (a connection's entry refused for a URL login cannot read, in the
