@@ -902,6 +902,37 @@ Only the workspaces made afterwards follow a change; none is moved. `workspaces_
 `workspaces_folder.changed` with `{"project"}` (`null` for the default). The user's door alone
 reaches them: no tool of an agent does.
 
+### The draft and window methods
+
+What the user leaves in the window and has not finished, kept by the daemon so that it survives
+the window and the daemon's restart and is the same in every window of the machine (`docs/design.md`
+§10). The user's door alone reaches them: no tool of an agent does. A draft is the user's own
+words: no event says one, no log holds one, and no agent is ever given one.
+
+- `draft.get {kind, target}` answers `{"draft": null}` or `{"draft": {"text", "images": [{"mime",
+  "data"}]}}` (the pictures in base64): `kind` is `session` (`target` is the agent's id, a
+  session's composer) or `project` (`target` is the project's name, the first message of a new
+  session). `not-found` when the agent or the project does not exist, `invalid-params` for
+  another `kind`.
+- `draft.set {kind, target, text, images?}` keeps the draft, in place of the one there was, and
+  answers `{"kept"}`. `images` replaces the pictures (the composer's limits hold: 20, 5 MiB each,
+  png, jpeg, gif or webp); left out, those the draft has stay. A draft with no text beyond
+  blanks and no picture is forgotten (`{"kept": false}`), which is how emptying a composer is
+  said. The text is 1 MiB at most.
+- `draft.clear {kind, target}` forgets the draft and its pictures; a session or a project that is
+  gone is forgotten all the same.
+- `draft.list` answers `{"drafts": ["session:<agent>", "project:<name>"]}`: which composers hold
+  one, never what.
+- `window.get` answers `{"state": {<key>: <json>}}`: the window's own state, a key-value of the
+  window's. The sidebar's folds are under `sidebar`: `{"projects": {<name>: <unfolded>},
+  "leads": {<agent>: <unfolded>}, "ended": <unfolded>}`, each node as the user left it; one that is
+  not in it keeps its default (a project and a lead unfolded, the "Ended" group folded).
+- `window.set {key, value}` keeps one key (`null` forgets it) and answers `{}`.
+
+The pictures of a draft are files of the daemon's state folder (`drafts/`, mode 0700, one folder by
+composer): they go with the draft, with the session that is forgotten, and with the project that
+is removed, which takes the drafts of its sessions, its own and what the sidebar kept of them.
+
 ### The vault methods
 
 The user's secrets, kept by the keyring, that agents use and never see (`docs/vault.md`). No
