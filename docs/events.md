@@ -84,8 +84,9 @@ An edit of `providers.toml` by hand is not announced: it is read again at the ne
 
 The daemon read a provider's models with no prompt (`docs/agents.md`, "The models"): at its
 start, when the provider was enabled, or when its program (path or modification time), the names
-of its API keys set or the presence of its sign-in file changed. The window reads the providers
-again.
+of its API keys set or the presence of its sign-in file changed; and when a session's start finds
+the list changed (#1076), so that the window's pickers never keep a model the agent dropped. The
+window reads the providers again.
 
 | Field | |
 |---|---|
@@ -930,6 +931,19 @@ refusal is none: the change stays pending.
 |---|---|
 | `agent` | |
 | `reason` | A sentence naming what the agent offers. |
+
+#### `agent.options_replaced`
+
+At a session's start, the model or the effort it was stored on is not one the agent offers (#1076):
+it runs on the newest offered model of the same family, else on the provider's default, and its
+effort is let go. The session is not failed and its message is sent; the agent's `chosen` and
+`taken` follow (`agent.options_taken`), so that it is said once. Its conversation shows the
+sentence (`docs/agents.md`, "The options").
+
+| Field | |
+|---|---|
+| `agent` | |
+| `reason` | `the model fable is no longer offered by the agent: running claude-fable-5-2`, or `the agent does not offer the model fable: running opus, its default`. |
 
 #### `agent.resumed`
 

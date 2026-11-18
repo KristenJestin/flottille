@@ -174,12 +174,25 @@ efforts are read; the tree, the deliveries, the gate and the store know nothing 
   (`docs/developer.md`) and changes nothing: the models stay as they were, and are not asked again
   before the state of the provider changes or it is enabled again. A read is announced by
   `provider.models_read` (`docs/events.md`). Until a listing or a session said them, they are
-  `null`, an agent may ask any model and effort, and one its session does not offer fails the agent
-  ("The options", below). Once they are known, a model or an effort they do not hold is refused
+  `null`, an agent may ask any model and effort, and one its session does not offer is replaced at
+  its start (below), never a failure. Once they are known, a model or an effort they do not hold is refused
   at once, naming those the provider offers. A model asked as a listed model's id without its
   date suffix (`-YYYYMMDD`) is that model (`claude-haiku-4-5` for `claude-haiku-4-5-20251001`),
   and its agent's choice, the Auto judge's (`provider.set_judge`) and the session's own check
-  hold the listed id. An id that two listed models answer to is taken for none. The efforts of a model are `null` until a session
+  hold the listed id. An id that two listed models answer to is taken for none. A model the list
+  does not hold as it is (an alias the provider's update dropped, `fable`, or an id it replaced,
+  `claude-fable-5-1`) is the newest listed model of its family (#1076): the ids whose words end
+  with its own (`claude-fable-*` for `fable`), ordered by the version in the id (`5-2` before
+  `5-1` before `5`) and then by its date, never by the list's order. No family listed, it is
+  refused when the models are known; at a session's start, the session runs on the provider's
+  default model instead. Either way the start goes on: the session's `chosen` and `taken` become
+  the model that runs, the user's message is sent, and `agent.options_replaced` says why once in
+  its conversation (`the model fable is no longer offered by the agent: running
+  claude-fable-5-2`). An effort the model does not offer at start is let go the same way, said
+  the same way. A change of the effort alone is checked against the model the agent runs on
+  resolved so, never refused because that model left the list. A session's start that finds the
+  provider's list changed announces it (`provider.models_read`), so that the window's pickers
+  never offer a model the list no longer holds. The efforts of a model are `null` until a session
   had that model, or, for Claude, until a listing or any session said them all: its bridge gives
   every model's from `claude`'s answer to `initialize`, so that no model is ever set to learn
   them. Setting a model is no free probe: `claude` may check a model id it has not checked yet
@@ -188,7 +201,7 @@ efforts are read; the tree, the deliveries, the gate and the store know nothing 
   state of the provider; the window shows the effort picker's skeleton while a listing runs
   (`models_learning` of `provider.list`, `provider.models_learning`). An effort asked without a model is checked against the default model's
   efforts, when they are known; until then it is taken, and a session that does not offer it
-  fails the agent.
+  lets it go at its start, said (`agent.options_replaced`).
 - **Refusals** name what is available: `there is no provider gemini: the providers are claude,
   opencode, codex`; `provider opencode is not enabled (…); the ready providers are claude`; `provider
   opencode is not ready: `opencode` is not on PATH (…); no provider is ready: see `flottille
@@ -246,7 +259,7 @@ efforts are read; the tree, the deliveries, the gate and the store know nothing 
   before the next prompt. A change asked while the previous one is being set is merged with it
   and kept: only the values set leave `pending`. A model change makes a pending effort the new
   model is known not to offer go, said in the answer (`dropped`). A value the agent's session
-  refuses never fails the agent, unlike at start: it goes on with its previous options, that value
+  refuses never fails the agent, nor at start: it goes on with its previous options, that value
   leaves `pending`, and `agent.options_refused` says why. A value it replaces with another is
   what it has now. An error that is not a refusal (its process or its service failing) leaves the
   change pending, logged, and it is tried again before the next prompt. What the agent has once
