@@ -358,6 +358,12 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         Command::Mcp => Some("mcp"),
         Command::Bridge { .. } => Some("bridge"),
         Command::Remote { .. } => Some("remote"),
+        // These check this machine alone (its `claude`, its keyring's login, its page reader).
+        Command::Doctor { .. } => Some("doctor"),
+        Command::Vault {
+            action: VaultAction::Provide { .. },
+        } => Some("vault provide"),
+        Command::ReadPage { .. } => Some("read-page"),
         _ => None,
     };
     let flagged = cli.machine.clone().filter(|name| !name.is_empty());
