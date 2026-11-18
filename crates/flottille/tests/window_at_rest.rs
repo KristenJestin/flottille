@@ -2436,7 +2436,7 @@ fn the_window_draws_no_frame_at_rest_on_the_connection_form_over_a_session(
 fn the_window_draws_no_frame_at_rest_on_a_session_whose_rail_holds_a_vault_ask(
     cx: &mut TestAppContext,
 ) {
-    let user = User::with_fake_agent();
+    let user = User::with_fake_agent().with_fake_acli();
     user.fake_script(json!({"turns": [
         {"when": "hello", "do": [{"say": "ok"}]},
         {"when": "log my time", "do": [
@@ -2445,6 +2445,19 @@ fn the_window_draws_no_frame_at_rest_on_a_session_whose_rail_holds_a_vault_ask(
             {"say": "Asked."}]}
     ]}));
     let id = idle_session(&user);
+    // The tracker names an entry the vault lacks: the agent may ask for it.
+    user.git(
+        &user.path("work/app"),
+        &["remote", "add", "origin", "git@github.com:acme/app.git"],
+    );
+    user.call(
+        "project.set_settings",
+        json!({"name": "app",
+            "repositories": [{"path": ".", "forge": {"kind": "github", "repository": "acme/app"}}],
+            "tracker": {"kind": "jira", "site": "example.atlassian.net", "projects": ["ABC"],
+                "worklog_token": "hippocampe-key"}}),
+    )
+    .unwrap();
     user.call("agent.send", json!({"agent": id, "message": "log my time"}))
         .unwrap();
     eventually("the ask is open", || {
