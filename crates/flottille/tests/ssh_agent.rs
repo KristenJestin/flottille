@@ -750,3 +750,36 @@ fn a_remote_rewritten_to_ssh_is_still_fetched_with_the_agent() {
     let reached = format!("reached {}", lent(&user).display());
     assert!(ssh_said(&user).contains(&reached), "{:?}", ssh_said(&user));
 }
+
+#[test]
+fn an_ext_remote_runs_nothing_in_the_daemon_s_fetch() {
+    let (user, _agent, _bus) = user();
+    let ran = user.path("helper-ran");
+    // `ext::` runs the command its URL names, `% ` a space in it.
+    project(
+        &user,
+        &format!("ext::sh -c echo% ext% >>% {}", ran.display()),
+    );
+
+    let base = created(&user);
+
+    assert!(!ran.exists(), "the remote's command ran");
+    assert_eq!(base["fetched_now"], false, "{base}");
+}
+
+#[test]
+fn a_remote_helper_of_the_path_runs_nothing_in_the_daemon_s_fetch() {
+    let (user, _agent, _bus) = user();
+    let ran = user.path("helper-ran");
+    // `foo::` and `foo://` run `git-remote-foo`, found on the daemon's `PATH`.
+    script(
+        &user.path("ssh-bin/git-remote-foo"),
+        &format!("echo foo >> '{}'\nexit 1\n", ran.display()),
+    );
+    project(&user, "foo::forge.invalid/acme/app");
+
+    let base = created(&user);
+
+    assert!(!ran.exists(), "git-remote-foo ran");
+    assert_eq!(base["fetched_now"], false, "{base}");
+}
