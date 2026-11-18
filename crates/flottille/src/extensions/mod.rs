@@ -358,8 +358,8 @@ pub enum Kind {
         of: &'static [&'static str],
         default: &'static [&'static str],
     },
-    /// On or off: a boolean, off when none is set.
-    Switch,
+    /// On or off: a boolean, `default` when none is set.
+    Switch { default: bool },
     /// A model slot: `{provider, model?, effort?}`, each checked when it is used; none set leaves
     /// the choice to the extension (`null`). `rule` says what the extension does with a slot left
     /// unset, and `gives` the model it then runs on for a provider: what `extension.list` says of
@@ -480,7 +480,7 @@ fn checked(kind: Kind, value: &Value) -> Result<Value, String> {
                     .collect::<Vec<_>>()
             ))
         }
-        Kind::Switch => match value.as_bool() {
+        Kind::Switch { .. } => match value.as_bool() {
             Some(on) => Ok(json!(on)),
             None => Err(format!("must be true or false, not {value}")),
         },
@@ -534,7 +534,7 @@ fn default_of(kind: Kind) -> Value {
         Kind::Language => json!(user_language()),
         Kind::Choice { default, .. } => json!(default),
         Kind::Subset { default, .. } => json!(default),
-        Kind::Switch => json!(false),
+        Kind::Switch { default } => json!(default),
         Kind::Model { .. } => Value::Null,
     }
 }
@@ -561,7 +561,7 @@ fn kind_word(kind: Kind) -> Value {
             "line": choice.line,
         })).collect::<Vec<_>>()}),
         Kind::Subset { of, .. } => json!({"subset": of}),
-        Kind::Switch => json!("switch"),
+        Kind::Switch { .. } => json!("switch"),
         Kind::Model { .. } => json!("model"),
     }
 }

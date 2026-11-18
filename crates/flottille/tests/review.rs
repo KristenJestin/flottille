@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use common::User;
-use common::mcp::{Answer, Mcp};
+use common::mcp::{Answer, Mcp, server_of};
 use serde_json::{Value, json};
 
 /// The review's agents hang in their turn, so that a test acts as them; every other prompt is
@@ -1014,13 +1014,34 @@ fn review_tool(mcp: &Mcp) -> Option<Value> {
 }
 
 #[test]
-fn by_default_agents_are_not_given_review_start() {
+fn a_root_is_given_the_review_tool_by_default() {
     let user = user();
     let (session, mcp) = changed_session(&user);
+
+    let tool = review_tool(&mcp).expect("the review tool, by default");
+    let description = tool["description"].as_str().unwrap();
+    assert!(
+        description.contains("only when the user asks for one"),
+        "{description}"
+    );
+    let text = ok(mcp.call("review", json!({"action": "start"})));
+    assert!(text.contains("round 1"), "{text}");
+    assert_eq!(reviews(&user, &session).len(), 1);
+}
+
+#[test]
+fn a_project_that_turned_agents_start_off_keeps_it_off() {
+    let user = user();
+    let (session, mcp) = changed_session(&user);
+
+    switch(&user, Some("app"), "agents_start", false);
 
     assert!(review_tool(&mcp).is_none(), "{:?}", mcp.names());
     assert!(mcp.call("review", json!({"action": "start"})).error);
     assert!(reviews(&user, &session).is_empty());
+    // Settings' own value on does not win over the project's off.
+    switch(&user, None, "agents_start", true);
+    assert!(review_tool(&mcp).is_none(), "{:?}", mcp.names());
 
     // The pilot of a review the user asked for keeps `run_pass` and `report`.
     start(&user, &session);
@@ -1036,6 +1057,7 @@ fn by_default_agents_are_not_given_review_start() {
 fn with_the_switch_on_agents_can_start_a_review() {
     let user = user();
     let (session, mcp) = changed_session(&user);
+    switch(&user, None, "agents_start", false);
     assert!(review_tool(&mcp).is_none());
 
     switch(&user, None, "agents_start", true);
@@ -1080,7 +1102,7 @@ fn slash_review_and_the_cli_start_a_review_whatever_the_switches() {
 }
 
 #[test]
-fn the_switches_are_off_by_default_and_take_only_a_boolean() {
+fn the_pull_request_switch_is_off_agents_start_on_by_default_and_both_take_a_boolean() {
     let user = user();
     project(&user);
 
@@ -1091,7 +1113,7 @@ fn the_switches_are_off_by_default_and_take_only_a_boolean() {
         .iter()
         .find(|extension| extension["name"] == "review")
         .unwrap();
-    for key in ["auto_on_pull_request", "agents_start"] {
+    for (key, default) in [("auto_on_pull_request", false), ("agents_start", true)] {
         let setting = review["settings"]
             .as_array()
             .unwrap()
@@ -1099,7 +1121,7 @@ fn the_switches_are_off_by_default_and_take_only_a_boolean() {
             .find(|setting| setting["key"] == key)
             .unwrap_or_else(|| panic!("no setting {key}"));
         assert_eq!(setting["kind"], "switch", "{setting}");
-        assert_eq!(setting["value"], false, "{setting}");
+        assert_eq!(setting["value"], default, "{setting}");
         assert_eq!(setting["set"], false, "{setting}");
         assert_eq!(setting["per_project"], true, "{setting}");
         assert!(!setting["label"].as_str().unwrap().is_empty());
@@ -1120,9 +1142,9 @@ fn the_switches_are_off_by_default_and_take_only_a_boolean() {
         .unwrap_err();
     assert!(message.contains("agent_start"), "{message}");
 
-    switch(&user, Some("app"), "agents_start", true);
+    switch(&user, Some("app"), "agents_start", false);
     let file = std::fs::read_to_string(user.project_file("app")).unwrap();
-    assert!(file.contains("agents_start = true"), "{file}");
+    assert!(file.contains("agents_start = false"), "{file}");
 }
 
 /// A Ready spec of project `app` developed by a session in a workspace of its own, which made a
@@ -1684,4 +1706,216 @@ fn review_show_set_reset_take_a_part() {
         )
         .unwrap_err();
     assert!(message.contains("4000"), "{message}");
+}
+
+// A lead and the sessions it leads (`agent_launch` `led`): the lead works in the project folder,
+// the session it leads in a workspace, under it in the window.
+
+/// A lead the user started in the project folder, in Full so that its launch is not held: its id
+/// and its MCP session.
+fn lead(user: &User) -> (String, Mcp) {
+    let opened = user.received_requests("session/new").len();
+    let answer = user
+        .call(
+            "agent.run",
+            json!({"project": "app", "message": "lead the login"}),
+        )
+        .unwrap();
+    let id = answer["agent"]["id"].as_str().unwrap().to_owned();
+    let (url, authorization) = server_of(user, opened);
+    user.call("agent.mode", json!({"agent": id, "mode": "full"}))
+        .unwrap();
+    eventually("the lead's first turn", || state(user, &id) == "idle");
+    (id, Mcp::initialize(&url, &authorization))
+}
+
+/// The session `title` the lead starts in workspace `w` and leads, its first turn ended: its id.
+fn led(user: &User, lead: &Mcp, title: &str) -> String {
+    ok(lead.call(
+        "agent_launch",
+        json!({"kind": "led", "title": title, "brief": "Build the login.", "workspace": "w"}),
+    ));
+    let mut id = None;
+    eventually("the led session", || {
+        id = agents(user)
+            .into_iter()
+            .find(|agent| agent["title"] == title)
+            .and_then(|agent| agent["id"].as_str().map(str::to_owned));
+        id.is_some()
+    });
+    let id = id.unwrap();
+    eventually("its first turn", || state(user, &id) == "idle");
+    id
+}
+
+/// A workspace `w` with a change, a lead in the project folder and the session `Login` it leads
+/// in `w`: the lead's id and MCP session, and the led session's id.
+fn lead_and_led(user: &User) -> (String, Mcp, String) {
+    let folder = project(user);
+    change(user, &folder);
+    let (lead_id, mcp) = lead(user);
+    let led = led(user, &mcp, "Login");
+    (lead_id, mcp, led)
+}
+
+#[test]
+fn a_lead_starts_the_review_of_a_session_it_leads() {
+    let user = user();
+    let (lead, mcp, led) = lead_and_led(&user);
+
+    let text = ok(mcp.call("review", json!({"action": "start", "agent": led})));
+
+    assert!(text.contains("round 1"), "{text}");
+    assert!(text.contains(&led), "names the session: {text}");
+    let all = reviews(&user, &led);
+    assert_eq!(all.len(), 1, "{all:?}");
+    assert_eq!(all[0]["workspace"], "w");
+    let pilot = show(&user, all[0]["pilot"].as_str().unwrap())["agent"].clone();
+    assert_eq!(pilot["parent"], led.as_str());
+    assert_eq!(pilot["depth"], 1);
+    assert!(reviews(&user, &lead).is_empty());
+    // The diff is the led session's workspace's, from its base.
+    let pilot = pilot_mcp_ready(&user);
+    let brief = prompted(&user, &["of the change of workspace w"]);
+    assert!(brief.contains("login.rs"), "{brief}");
+    drop(pilot);
+}
+
+#[test]
+fn a_lead_cannot_start_the_review_of_a_session_it_does_not_lead() {
+    let user = user();
+    let (_, mcp, _) = lead_and_led(&user);
+    // A session the user started in the same workspace, and one another lead leads.
+    let (other, _) = session(&user);
+    let (_, second_lead) = lead(&user);
+    let theirs = led(&user, &second_lead, "Signup");
+
+    for agent in [&other, &theirs] {
+        let refusal = refused(mcp.call("review", json!({"action": "start", "agent": agent})));
+        assert!(refusal.contains("you do not lead"), "{refusal}");
+        assert!(reviews(&user, agent).is_empty());
+    }
+    let refusal = refused(mcp.call(
+        "review",
+        json!({"action": "start", "agent": "0123456789ab"}),
+    ));
+    assert!(refusal.contains("0123456789ab"), "{refusal}");
+}
+
+#[test]
+fn review_typed_in_a_child_s_composer_reviews_the_child() {
+    let user = user();
+    let (lead, _, led) = lead_and_led(&user);
+
+    let answer = user
+        .call("agent.send", json!({"agent": led, "message": "/review"}))
+        .unwrap();
+
+    assert!(answer["delivery"].is_null(), "{answer}");
+    assert_eq!(answer["command"]["session"], led.as_str(), "{answer}");
+    assert_eq!(reviews(&user, &led).len(), 1);
+    assert!(reviews(&user, &lead).is_empty());
+    // From a terminal too: the same session's review, which runs already.
+    let output = user.run(&["review", &led]);
+    assert!(!output.status.success(), "one runs already: {output:?}");
+    let said = String::from_utf8_lossy(&output.stderr);
+    assert!(said.contains("runs already"), "{said}");
+}
+
+#[test]
+fn a_pull_request_of_a_child_s_workspace_starts_its_review_when_the_switch_is_on() {
+    let user = User::with_fake_agent()
+        .with_fake_gh()
+        .with_fetcher()
+        .with_env("GIT_SSH_COMMAND", "false");
+    user.fake_script(script());
+    let folder = project(&user);
+    change(&user, &folder);
+    switch(&user, None, "auto_on_pull_request", true);
+    on_github(&user);
+    user.call(
+        "project.set_settings",
+        json!({"name": "app",
+            "repositories": [{"path": ".", "forge": {"kind": "github", "repository": "acme/app"}}]}),
+    )
+    .unwrap();
+    user.call("items.refresh", json!({"project": "app"}))
+        .unwrap();
+    let (lead, mcp) = lead(&user);
+    let led = led(&user, &mcp, "Login");
+    let branch = user
+        .call("workspace.show", json!({"project": "app", "name": "w"}))
+        .unwrap()["branch"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    user.gh_script(json!({"pulls": {"acme/app": {branch.clone(): pull(7, &branch)}}}));
+    user.call("items.refresh", json!({"project": "app"}))
+        .unwrap();
+
+    eventually("the review", || reviews(&user, &led).len() == 1);
+    assert!(reviews(&user, &lead).is_empty());
+}
+
+#[test]
+fn the_findings_of_a_child_s_review_go_to_the_child_and_the_lead_is_told() {
+    let user = user();
+    let (_, mcp, led) = lead_and_led(&user);
+    ok(mcp.call("review", json!({"action": "start", "agent": led})));
+    let pilot = pilot(&user);
+
+    ok(report(
+        &pilot,
+        json!([finding(
+            "high",
+            "confirmed",
+            "login() accepts an empty password."
+        )]),
+    ));
+
+    let to_led = prompted(&user, &["[flottille:review]", "The review of your change"]);
+    assert!(to_led.contains("empty password"), "{to_led}");
+    let to_lead = prompted(&user, &["[flottille:review]", "the session you lead"]);
+    assert!(to_lead.contains(&led), "names it: {to_lead}");
+    assert!(to_lead.contains("\"Login\""), "{to_lead}");
+    assert!(to_lead.contains("empty password"), "{to_lead}");
+    assert!(to_lead.contains("1 finding"), "{to_lead}");
+}
+
+#[test]
+fn the_passes_of_a_child_s_review_count_in_the_children_cap() {
+    let user = user();
+    let (_, mcp, led) = lead_and_led(&user);
+    let file = user.project_file("app");
+    let text = std::fs::read_to_string(&file).unwrap();
+    std::fs::write(&file, text.replace("max_children = 12", "max_children = 2")).unwrap();
+    ok(mcp.call("review", json!({"action": "start", "agent": led})));
+    let pilot = pilot(&user);
+    ok(pilot.call("review", json!({"action": "run_pass", "pass": "bugs"})));
+
+    let refusal = refused(pilot.call("review", json!({"action": "run_pass", "pass": "standards"})));
+
+    assert!(refusal.contains("cap of 2 children"), "{refusal}");
+    assert_eq!(
+        reviews(&user, &led)[0]["agents"].as_array().unwrap().len(),
+        2
+    );
+    // The lead's own children count them too.
+    assert!(
+        mcp.call(
+            "agent_launch",
+            json!({"kind": "child", "title": "x", "brief": "y"})
+        )
+        .error
+    );
+    // Stopped with the tree: the led session's stop ends its review, deepest first.
+    user.call("agent.stop", json!({"agent": led})).unwrap();
+    eventually("the review's agents end", || {
+        reviews(&user, &led)[0]["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|agent| state(&user, agent["agent"].as_str().unwrap()) == "ended")
+    });
 }
