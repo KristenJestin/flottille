@@ -87,7 +87,7 @@ fn labelled(
         .text_size(px(12.))
         .aria_label(SharedString::from(said));
     match stacked {
-        true => line.flex_col().gap(px(2.)),
+        true => line.flex_col().gap(space::XS),
         false => line.gap(space::SM),
     }
     .child(
