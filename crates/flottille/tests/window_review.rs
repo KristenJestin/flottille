@@ -795,9 +795,10 @@ fn the_usage_line_shows_while_review_is_off(cx: &mut TestAppContext) {
     let usage = label(cx, "review-usage").unwrap();
     assert!(usage.contains("/review"), "{usage}");
     assert!(usage.contains("flottille review <session>"), "{usage}");
-    // Both switches are off by default: the usage says the user's doors alone.
+    // The pull request's switch is off by default, the agents' on: the usage says the user's
+    // doors and the agents'.
     assert!(!usage.contains("pull request"), "{usage}");
-    assert!(!usage.contains("agent"), "{usage}");
+    assert!(usage.contains("agent may ask"), "{usage}");
     // Off, the page is that block alone.
     assert!(!present(cx, "review-checks"));
     assert!(!present(cx, "review-guidance-text"));
