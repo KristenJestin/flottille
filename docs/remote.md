@@ -252,10 +252,13 @@ link.
   command gone before the end (Ctrl+C, a closed terminal, a lost SSH session, a locked keyring)
   loses no key the hub took. The next setup or join looks at a pending key first, once a setup or
   a join the daemon still runs for it ended: it is kept when the list of the hub the machine pinned
-  holds it as a member, and removed otherwise, never sent again. When the daemon holds a join
+  holds it as a member, and removed otherwise, never sent again; also for a setup that replaces
+  the hub, whose machine is pinned to the old one meanwhile. When the daemon holds a join
   accepted for it, the join goes on with that join's answer, not with the code typed (the command
   says so), and the key is kept only once the hub took the machine's declaration. A key is kept
-  only if no other is: one another client kept first is said, and the pending one stays. The
+  only if no other is: one another client kept first is said, and the pending one stays. A declaration
+  that failed because its session ended lets the join go: the next command removes the pending key
+  (the member it names, with no machine, is one the inviter removes). The
   keyring holding two items of the kept device key (two clients that kept one at the same moment)
   is refused, never one of them taken: which is the member's cannot be told. Two pending items are
   both removed, never sent again: at most a member with no key is left, which a member removes.
@@ -467,7 +470,8 @@ look alive for minutes after a suspend, with no heartbeat to say otherwise: ever
 daemon compares how far the wall clock moved with how far the monotonic clock did, which does not
 count a suspend, and more than 5 s apart ends the session as lost. A link that comes, or a dial
 due, before that second's round is held the same way: the clocks the round last saw are compared
-then too. Meanwhile, a link from a key
+then too, and so are they where the session tells its clocks, at a round or at its start, before
+they are stored. Meanwhile, a link from a key
 the list kept does not trust is refused at once, and one from a key it trusts waits, one per key. A removed member's open invitations close with it, and the joins that wait on them end,
 refused. A removed device key cannot join again; the hub refuses removed device keys, not machine
 keys, so a removed member's machine may join again with a new device key, through an invitation
