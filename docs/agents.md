@@ -787,6 +787,8 @@ For Claude:
 - **Forge tokens and their configuration**: `GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN`,
   `GITHUB_ENTERPRISE_TOKEN`, `GITLAB_TOKEN`, `GL_TOKEN`, `BITBUCKET_*`, `BKT_*`, `GH_CONFIG_DIR`,
   `GLAB_CONFIG_DIR`.
+- **The user's SSH agent**: `SSH_AUTH_SOCK`, for every provider (`docs/vault.md`, "The runtime
+  folder").
 - **Any other variable whose name ends in** `_TOKEN`, `_SECRET`, `_PASSWORD` or `_API_KEY`,
   **except the agent's own sign-in**: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`,
   `CLAUDE_CODE_OAUTH_TOKEN`.
@@ -801,13 +803,13 @@ certificate variables (`HTTPS_PROXY`, `NO_PROXY`, `SSL_CERT_FILE`, `NODE_EXTRA_C
 the rest of the user's environment (`PATH`, `HOME`, locale). This means that a sign-in through a
 cloud provider's own variables (`CLAUDE_CODE_USE_BEDROCK`, for one) does not reach the agent.
 
-For OpenCode: the same forge tokens and secret-looking names, except the API keys it takes
+For OpenCode: the same forge tokens, SSH agent and secret-looking names, except the API keys it takes
 (above), every `OPENCODE_*` variable of the user's (`OPENCODE_CONFIG`, `OPENCODE_CONFIG_DIR`,
 `OPENCODE_PERMISSION`…), which would undo its bare mode (Flottille sets the ones it needs), and
 every `OTEL_*` one, which would send OpenCode's traces to the user's collector, its headers with
 them (`core/src/observability/otlp.ts`).
 
-For Codex: the same forge tokens and secret-looking names, except `CODEX_ACCESS_TOKEN`, its
+For Codex: the same forge tokens, SSH agent and secret-looking names, except `CODEX_ACCESS_TOKEN`, its
 sign-in, and every `CODEX_*` variable of the user's (`CODEX_HOME`, which Flottille sets,
 `CODEX_SQLITE_HOME`, `CODEX_API_KEY`…), `OPENAI_*` (a key the app server would use for the
 realtime voice, not for its models), `AWS_*` (a cloud's models) and `OTEL_*`.

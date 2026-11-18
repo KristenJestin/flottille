@@ -83,6 +83,8 @@ pub fn run(paths: &Paths) -> Result<()> {
     crate::display::clean(paths);
     // Before anything runs: where the SSH agent's socket is, which every run is kept from.
     crate::ssh_agent::find();
+    // Before any repository is read: the user's own credential helpers, the only ones it runs.
+    crate::git::find_helpers();
     let machine_key = crate::remote::machine_key(paths)?;
     children::say_sessions_in(paths.sessions())?;
     let _store_lock = hold_store(paths)?;
