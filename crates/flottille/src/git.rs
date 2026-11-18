@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::path::Path;
 use std::process::Stdio;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncReadExt};
@@ -97,6 +98,46 @@ pub async fn output_remote(
         None => crate::landlock::confined(&mut git),
     };
     said(bounded(git, dir, &args, class.limit(), OUTPUT_LIMIT, None).await?)
+}
+
+/// The credential helpers of the user's own settings (the system's, then the user's), each as
+/// its setting's name and the helper it names, read at the daemon's start: never a credential.
+static HELPERS: OnceLock<Vec<(String, String)>> = OnceLock::new();
+
+/// Reads the user's credential helpers, before the daemon reads any repository: git sends a
+/// sign-in to `store` on every helper it knows, a repository's own too.
+pub fn find_helpers() {
+    HELPERS.get_or_init(|| {
+        ["--system", "--global"]
+            .into_iter()
+            .flat_map(|scope| {
+                let listed = std::process::Command::new("git")
+                    .args(["config", scope, "--includes", "--null", "--get-regexp"])
+                    .arg(r"^credential\.(.*\.)?helper$")
+                    .stdin(Stdio::null())
+                    .stderr(Stdio::null())
+                    .output()
+                    .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+                    .unwrap_or_default();
+                listed
+                    .split('\0')
+                    .filter_map(|entry| entry.split_once('\n'))
+                    .map(|(name, helper)| (name.to_owned(), helper.to_owned()))
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    });
+}
+
+/// `-c` options that leave git the user's own credential helpers alone: an empty
+/// `credential.helper` empties the list read so far, and the command's scope is read last.
+fn helpers() -> Vec<String> {
+    let mut options = vec!["-c".to_owned(), "credential.helper=".to_owned()];
+    for (name, helper) in HELPERS.get().into_iter().flatten() {
+        options.push("-c".to_owned());
+        options.push(format!("{name}={helper}"));
+    }
+    options
 }
 
 /// The protocols the daemon's own git reaches a remote with: git's own transports. Any other
@@ -209,6 +250,7 @@ fn command<S: AsRef<OsStr>>(dir: &Path, args: &[S]) -> tokio::process::Command {
             "-c",
             "submodule.recurse=false",
         ])
+        .args(helpers())
         .args(args)
         // A fetch that needs credentials fails at once; stored credentials still work.
         .env("GIT_TERMINAL_PROMPT", "0")
