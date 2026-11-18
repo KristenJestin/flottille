@@ -577,3 +577,250 @@ fn agent_stop_ends_the_session_it_leads_in_another_project_and_holds_any_other()
         .unwrap();
     assert_ne!(shown(&user, &other)["state"], "ended");
 }
+
+/// A user whose judge takes a while to allow every call, with the projects `app` and `kit`.
+fn user_with_a_slow_judge() -> User {
+    let user = User::with_fake_agent().with_judge(json!([
+        {"wait": 1500},
+        {"say": "{\"verdict\": \"allow\", \"reason\": \"It fits the task.\"}"}
+    ]));
+    project(&user, "app");
+    project(&user, "kit");
+    user
+}
+
+#[test]
+fn a_session_handed_over_in_another_project_is_the_users_and_asks_the_leave_for_its_first_message()
+{
+    let user = user();
+    let (lead, mcp) = lead(&user, "auto");
+
+    let number = held(&mcp.call(
+        "agent_launch",
+        in_kit(json!({"kind": "handed", "title": "Tag the release"})),
+    ));
+    let opened = user.received_requests("session/new").len();
+    let done = answer(&user, number, "approval.approve");
+    assert!(done.contains("handed over"), "{done}");
+    assert!(done.contains("of project kit"), "{done}");
+    let (_url, _authorization) = server_of(&user, opened);
+    let session = agents(&user)
+        .into_iter()
+        .find(|a| a["title"] == "Tag the release")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let agent = shown(&user, &session);
+    assert_eq!(agent["project"], "kit", "{agent}");
+    assert!(agent["parent"].is_null(), "{agent}");
+    assert_eq!(agent["launched_by"], lead.as_str(), "{agent}");
+    assert!(agent["led_by"].is_null(), "handed over, not led: {agent}");
+    // Handed over, it is the user's: the caller's first message to it still asks the user.
+    held(&send(&mcp, &session, "Which tag?"));
+}
+
+#[test]
+fn a_session_started_in_another_project_by_an_auto_caller_runs_in_auto() {
+    let user = user();
+    let (_, mcp) = lead(&user, "auto");
+
+    let (session, _) = started_in_kit(&user, &mcp, json!({}));
+
+    assert_eq!(shown(&user, &session)["gate_mode"], "auto");
+}
+
+#[test]
+fn the_reminder_of_a_session_led_in_another_project_never_invites_removing_a_workspace_of_the_pilots_project()
+ {
+    let user = user();
+    user.fake_script(json!({"turns": [
+        {"when": "Make the fonts settable.", "do": [
+            {"mcp": {"tool": "report", "arguments": {"text": "The fonts are settable."}}},
+            {"say": "Reported."}]}
+    ]}));
+    let (lead, mcp) = lead(&user, "auto");
+    // Both projects hold a workspace of the same name: the pilot's workspace tool reaches its own.
+    user.call(
+        "workspace.create",
+        json!({"project": "app", "name": "fonts"}),
+    )
+    .unwrap();
+    let (session, _) = started_in_kit(&user, &mcp, json!({"new_workspace": "fonts"}));
+    eventually("the pilot woken", || {
+        !delivered(&user, &lead, "session-turn-ended").is_empty()
+    });
+    idle(&user, &lead);
+    idle(&user, &session);
+    std::thread::sleep(Duration::from_millis(500));
+    let folder = std::path::PathBuf::from(shown(&user, &session)["folder"].as_str().unwrap());
+    std::fs::write(folder.join("fonts.rs"), "fn fonts() {}\n").unwrap();
+    user.git(&folder, &["add", "."]);
+    user.git(&folder, &["commit", "--quiet", "-m", "settable fonts"]);
+    let branch = user.git_output(&folder, &["branch", "--show-current"]);
+    let kit = user.path("work/kit");
+    user.git(
+        &kit,
+        &["merge", "--quiet", "--no-ff", "-m", "merge", branch.trim()],
+    );
+
+    user.call("agent.send", json!({"agent": lead, "message": "Go on."}))
+        .unwrap();
+
+    eventually("the reminder", || {
+        !delivered(&user, &lead, "led-integrated").is_empty()
+    });
+    let reminder = delivered(&user, &lead, "led-integrated").remove(0);
+    assert!(reminder.contains("stop it"), "{reminder}");
+    assert!(reminder.contains("project kit"), "{reminder}");
+    assert!(
+        !reminder.contains("remove its workspace?"),
+        "it invites the pilot to remove a workspace: {reminder}"
+    );
+    assert!(!reminder.contains("workspace remove"), "{reminder}");
+    // The pilot's own workspace of the same name is still there.
+    assert!(
+        user.call("workspace.show", json!({"project": "app", "name": "fonts"}))
+            .is_ok()
+    );
+}
+
+#[test]
+fn a_pending_read_leave_and_a_write_for_the_same_pair_are_one_card() {
+    let user = user();
+    let (_, mcp) = lead(&user, "full");
+    let (other, _) = root(&user, "kit");
+
+    let read = held(&mcp.call("session_read", json!({"session": other})));
+    let write = send(&mcp, &other, "Is the release out?");
+
+    assert!(write.error, "{}", write.text);
+    assert!(
+        write
+            .text
+            .contains(&format!("request #{read} already asks")),
+        "{}",
+        write.text
+    );
+    assert_eq!(requests(&user).len(), 1, "{:?}", requests(&user));
+    user.call("approval.deny", json!({"number": read})).unwrap();
+
+    // And the other way round.
+    let write = held(&send(&mcp, &other, "Is the release out?"));
+    let read = mcp.call("session_read", json!({"session": other}));
+    assert!(read.error, "{}", read.text);
+    assert!(
+        read.text
+            .contains(&format!("request #{write} already asks")),
+        "{}",
+        read.text
+    );
+    assert_eq!(requests(&user).len(), 1, "{:?}", requests(&user));
+}
+
+#[test]
+fn a_leave_withdrawn_while_a_read_of_another_project_is_judged_stops_it() {
+    let user = user_with_a_slow_judge();
+    let (lead, mcp) = root(&user, "app");
+    let (other, _) = root(&user, "kit");
+    let number = held(&mcp.call("session_read", json!({"session": other})));
+    answer(&user, number, "approval.approve");
+    eventually("the leave", || !leaves(&user, &other).is_empty());
+
+    let judged = std::thread::scope(|scope| {
+        let reading = scope.spawn(|| mcp.call("session_read", json!({"session": other})));
+        eventually("the judge asked", || judge_prompts(&user) > 0);
+        user.call("leave.withdraw", json!({"writer": lead, "session": other}))
+            .unwrap();
+        reading.join().unwrap()
+    });
+
+    assert!(judged.error, "{}", judged.text);
+    assert!(
+        judged.text.contains("withdrew your leave"),
+        "{}",
+        judged.text
+    );
+    assert!(
+        !judged.text.contains("Message 1"),
+        "the conversation was read: {}",
+        judged.text
+    );
+}
+
+#[test]
+fn the_card_of_a_launch_in_another_project_says_the_services_of_that_project_s_setup() {
+    let user = user();
+    let folder = user.path("home/tools/db");
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(
+        user.path("config/flottille/services.toml"),
+        format!(
+            "[services.db]\nfolder = \"{}\"\nline = \"{} --wait 0 --listen 0\"\nneeds = []\nready = {{ line = \"listening on\" }}\n",
+            folder.display(),
+            common::fake_server().display()
+        ),
+    )
+    .unwrap();
+    // Only kit has the task, which needs the service, and its setup runs it.
+    user.call(
+        "task.add",
+        json!({"project": "kit", "name": "api", "line": "git status --short", "needs": ["db"]}),
+    )
+    .unwrap();
+    user.call(
+        "setup.add",
+        json!({"project": "kit", "step": {"task": "api"}}),
+    )
+    .unwrap();
+    let (_, mcp) = lead(&user, "auto");
+
+    held(&mcp.call("agent_launch", in_kit(json!({"new_workspace": "fonts"}))));
+
+    let says = requests(&user)[0]["says"].to_string();
+    assert!(says.contains("the service db"), "{says}");
+}
+
+#[test]
+fn a_setup_step_the_gate_refuses_in_the_other_project_refuses_the_launch() {
+    let user = user();
+    let file = user.project_file("kit");
+    let mut text = std::fs::read_to_string(&file).unwrap();
+    text.push_str("\n[[setup]]\nrun = \"tmux new-session\"\n");
+    std::fs::write(&file, text).unwrap();
+    let (_, mcp) = lead(&user, "auto");
+
+    let refused = mcp.call("agent_launch", in_kit(json!({"new_workspace": "fonts"})));
+
+    assert!(refused.error, "{}", refused.text);
+    assert!(refused.text.starts_with("refused: "), "{}", refused.text);
+    assert!(refused.text.contains("tmux"), "{}", refused.text);
+    assert!(requests(&user).is_empty(), "{:?}", requests(&user));
+}
+
+#[test]
+fn the_first_approved_message_to_the_session_started_in_another_project_is_counted() {
+    let user = user();
+    let (_, mcp) = lead(&user, "auto");
+    let (session, _) = started_in_kit(&user, &mcp, json!({}));
+    let exchanges = || {
+        store(&user)
+            .subscriptions()
+            .unwrap()
+            .into_iter()
+            .find(|s| s.target["session"] == session.as_str())
+            .map(|s| s.seen["exchanges"].as_u64().unwrap_or(0))
+    };
+    assert_eq!(exchanges(), Some(0));
+
+    let number = held(&send(&mcp, &session, "Use the tokens."));
+    answer(&user, number, "approval.approve");
+
+    eventually("the first message", || {
+        written_to(&user, &session)
+            .iter()
+            .any(|b| b.contains("Use the tokens."))
+    });
+    eventually("it is counted", || exchanges() == Some(1));
+}
