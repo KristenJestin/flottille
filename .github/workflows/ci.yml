@@ -468,7 +468,7 @@ jobs:
       - name: Build the image
         run: |
           context="$RUNNER_TEMP/hub-image"
-          mkdir -p "$context/state"
+          mkdir -p "$context/lib/flottille-hub"
           install -m 0755 "$BINARY" "$context/flottille-hub"
           docker build --platform linux/${{ matrix.platform }} --build-arg SOURCE=https://github.com/${{ github.repository }} -f crates/flottille-hub/Dockerfile -t flottille-hub:linux-${{ matrix.platform }} "$context"
       - name: the_image_starts_prints_a_setup_code_and_answers_on_its_port
