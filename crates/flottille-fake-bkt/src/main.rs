@@ -47,6 +47,9 @@
 //! the call started at, so that a test sees which calls ran together.
 //! `step_fail` (`{"acme/api": {"publish": "Error: 502 Bad Gateway"}}`) makes `pr comment`,
 //! `edit`, `decline`, `publish` or `approve` of that repository alone fail that way.
+//! `edit_starts` (`{"acme/api": {"12": [{"state": "INPROGRESS", "name": "build"}]}}`) adds those
+//! statuses to what `pr checks` answers for that pull request once a `pr edit` or `pr publish`
+//! was received: the checks a change starts.
 //! `comment_fail` (`{"acme/api": {"Typo.": "Error: 502 Bad Gateway"}}`) makes `pr comment` fail
 //! that way when its `--text` holds the key, the other comments posting.
 //! `pr approve <id>` prints `✓ Approved pull request #N` for a pull request of `pulls`, and
@@ -272,6 +275,13 @@ fn answer(script: &Value, args: &[String]) -> i32 {
                 Value::String(shape) if shape == "unreadable" => {}
                 statuses => payload["statuses"] = statuses.clone(),
             }
+            if written_yet()
+                && let Some(started) = script["edit_starts"][&key][*id].as_array()
+            {
+                let mut statuses = payload["statuses"].as_array().cloned().unwrap_or_default();
+                statuses.extend(started.iter().cloned());
+                payload["statuses"] = Value::from(statuses);
+            }
         }
         ["pipeline", "list"] => {
             if let Some(failure) = script["pipeline_fail"][&key].as_str() {
@@ -484,6 +494,21 @@ fn data_center_comment(script: &Value, method: &str, path: &str, input: Option<&
             2
         }
     }
+}
+
+/// Whether a `pr edit` or `pr publish` was received.
+fn written_yet() -> bool {
+    std::env::var_os("FLOTTILLE_FAKE_BKT_DIR")
+        .and_then(|dir| std::fs::read_to_string(PathBuf::from(dir).join("received.jsonl")).ok())
+        .is_some_and(|record| {
+            record
+                .lines()
+                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                .any(|call| {
+                    call["args"][0] == "pr"
+                        && matches!(call["args"][1].as_str(), Some("edit" | "publish"))
+                })
+        })
 }
 
 /// Whether a `pr merge` was received, this one included.

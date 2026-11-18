@@ -22,7 +22,7 @@ use flottille_core::project::Project;
 use flottille_core::protocol::WorkspaceForge;
 use flottille_core::secrets;
 use flottille_core::store::now_ms;
-use flottille_core::workspace::{Base, Workspace};
+use flottille_core::workspace::Workspace;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -44,6 +44,7 @@ mod logs;
 pub(crate) mod people;
 mod pipelines;
 mod review;
+mod started;
 mod threads;
 mod yaml;
 
@@ -228,9 +229,8 @@ async fn ssh_host(host: &str) -> Result<String, String> {
     }
 }
 
-/// Where a repository's remote leads, as a workspace records it and a push and `forge`'s writes
-/// check it: its fetch and push URLs as git uses them (`insteadOf` applied), credentials taken
-/// out, sorted; empty when git names none.
+/// Where a repository's remote leads: its fetch and push URLs as git uses them (`insteadOf`
+/// applied), credentials taken out, sorted; empty when git names none.
 pub async fn urls_of(folder: &Path, remote: &str) -> Vec<String> {
     let mut urls = Vec::new();
     for push in [&[][..], &["--push"][..]] {
@@ -251,35 +251,6 @@ pub async fn urls_of(folder: &Path, remote: &str) -> Vec<String> {
 }
 
 pub(crate) use flottille_core::declared::without_credentials;
-
-/// Refuses unless the repository's remote leads where it led when the workspace was created: an
-/// agent never changes it, and a push or a forge write an agent makes goes nowhere else.
-pub async fn remote_kept(folder: &Path, base: &Base) -> Result<(), String> {
-    if base.urls.is_empty() {
-        return Err(format!(
-            "refused: this workspace was created before Flottille recorded where its remote {} \
-             leads, and an agent's push or forge write goes only where that is known: say \
-             what should be done, and the user does it",
-            base.remote
-        ));
-    }
-    let now = urls_of(folder, &base.remote).await;
-    if now != base.urls {
-        return Err(format!(
-            "refused: the remote {} no longer leads where it led when the workspace was created \
-             ({}): it leads to {}; nothing was sent: say so, and the user checks the \
-             repository's remotes",
-            base.remote,
-            masked(&base.urls.join(", ")),
-            if now.is_empty() {
-                "nothing".to_owned()
-            } else {
-                masked(&now.join(", "))
-            }
-        ));
-    }
-    Ok(())
-}
 
 /// A commit a forge said, kept only as a hash: it is given to git as a revision, never anything
 /// that could read as an option.
@@ -1470,12 +1441,12 @@ pub async fn forge(daemon: &Arc<Daemon>, agent: &str, place: &Place, args: Value
             written
         }
         ("comment" | "edit", _) => {
-            let written = forge_note(daemon, place, asked).await;
+            let written = forge_note(daemon, agent, place, asked).await;
             daemon.forges.pulls.drop_all();
             written
         }
         ("close" | "reopen", _) => {
-            let written = forge_close(daemon, place, asked).await;
+            let written = forge_close(daemon, agent, place, asked).await;
             daemon.forges.pulls.drop_all();
             written
         }
@@ -1930,7 +1901,7 @@ fn checks_when_subscribed(daemon: &Daemon, agent: &str, path: &str, pull: &Pull)
         .map(|(name, _)| name.as_str())
         .collect();
     let mut text = match running.is_empty() {
-        true => "\nNo check of it was running as you subscribed.".to_owned(),
+        true => "\nNo check runs on it now; you will be told if one starts.".to_owned(),
         false => format!(
             "\nIts checks running as you subscribed: {}.",
             masked(&running.join(", "))
@@ -2445,7 +2416,12 @@ async fn attached(forge: &Forge, pull: &mut Pull, full: bool) {
 
 /// `forge comment` and `forge edit`: a comment on a pull request of one repository of the place,
 /// or a new title or description of it.
-async fn forge_note(daemon: &Daemon, place: &Place, mut asked: ForgeCall) -> Outcome {
+async fn forge_note(
+    daemon: &Arc<Daemon>,
+    agent: &str,
+    place: &Place,
+    mut asked: ForgeCall,
+) -> Outcome {
     let verb = asked.action.clone();
     let action = verb.as_str();
     let Some(number) = asked.number else {
@@ -2546,6 +2522,11 @@ async fn forge_note(daemon: &Daemon, place: &Place, mut asked: ForgeCall) -> Out
     {
         return refusal;
     }
+    // What the checks were before a change that may start some, to tell what started after it.
+    let before = match action == "edit" {
+        true => Some(started::Before::read(&forge, asked.number.unwrap_or_default()).await),
+        false => None,
+    };
     // The id of the comment, where the forge answers one: `gh` prints its link, `bkt` none.
     let done = match (&forge, action) {
         (Forge::Bitbucket { .. }, "comment") => {
@@ -2593,9 +2574,13 @@ async fn forge_note(daemon: &Daemon, place: &Place, mut asked: ForgeCall) -> Out
             if let Some(body) = body {
                 crate::posts::record_body(daemon, on, body);
             }
-            Outcome::Done(format!(
-                "Pull request #{number} of {slug} was changed.{reviewers_said}"
-            ))
+            let mut said = format!("Pull request #{number} of {slug} was changed.{reviewers_said}");
+            if let Some(before) = before {
+                let target = json!({"project": place.project, "repository": checkout.path,
+                    "number": number.parse::<u64>().unwrap_or_default()});
+                said.push_str(&started::after_change(daemon, agent, &target, &forge, before).await);
+            }
+            Outcome::Done(said)
         }
     }
 }
@@ -2743,7 +2728,12 @@ async fn seen_of(forge: &Forge, number: u64) -> Result<Seen, Outcome> {
 /// `forge close` and `reopen` of a pull request of a repository of the place, by its number: only
 /// an open one is closed and only a closed one reopened, the refusal saying its state. The
 /// branch is deleted on request, unless a workspace is still on it.
-async fn forge_close(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcome {
+async fn forge_close(
+    daemon: &Arc<Daemon>,
+    agent: &str,
+    place: &Place,
+    asked: ForgeCall,
+) -> Outcome {
     let action = asked.action.as_str();
     let Some(number) = asked.number else {
         return Outcome::Refused(format!(
@@ -2819,6 +2809,11 @@ async fn forge_close(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcom
         }
     }
     let delete = delete_branch && left.is_none();
+    // A reopened pull request may run its checks again: what they were is read before.
+    let before = match action == "reopen" {
+        true => Some(started::Before::read(&forge, number).await),
+        false => None,
+    };
     let done = if bitbucket {
         bitbucket::decline(&forge, &numbered, comment, delete).await
     } else {
@@ -2856,9 +2851,13 @@ async fn forge_close(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcom
         (false, Some(why)) => format!("; its branch {branch} was left: {why}"),
         (false, None) => String::new(),
     };
-    Outcome::Done(format!(
-        "The pull request #{number} of {slug} was {verb}{tail}."
-    ))
+    let mut said = format!("The pull request #{number} of {slug} was {verb}{tail}.");
+    if let Some(before) = before {
+        let target = json!({"project": place.project, "repository": checkout.path,
+            "number": number});
+        said.push_str(&started::after_change(daemon, agent, &target, &forge, before).await);
+    }
+    Outcome::Done(said)
 }
 
 /// `forge show` without a number: the pull requests of a workspace's branch, their checks and
@@ -3081,9 +3080,6 @@ async fn forge_write(daemon: &Daemon, place: &Place, asked: ForgeCall) -> Outcom
             "refused: {asked_repository} is on no branch (detached at {hash}): switch to a \
              branch first"
         ));
-    }
-    if let Err(refusal) = remote_kept(&checkout.folder, &repository.base).await {
-        return Outcome::Refused(refusal);
     }
     let forge = match declared_forge(checkout).await {
         Ok(forge) => forge,

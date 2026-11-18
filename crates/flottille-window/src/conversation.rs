@@ -120,6 +120,10 @@ pub enum Block {
     /// names the entry, prefilled, and its reason. `open` until the daemon says it was answered
     /// (`vault.ask_answered`).
     VaultAsk(VaultAsk),
+    /// A connection waits for the user's review of the new actions the agent's accepted request
+    /// gave it (`connection.review_waits`), until it is reviewed, removed or turned off
+    /// (`connection.review_done`).
+    ConnectionReview(ConnectionReview),
     /// A command's result.
     Command(CommandCard),
     /// A request whose answer came as a card below: the line that told it was asked and decided
@@ -150,6 +154,18 @@ pub struct VaultAsk {
     /// The connection it is for: the entry is every project's.
     pub connection: Option<String>,
     pub why: String,
+    pub open: bool,
+}
+
+/// A connection waiting for the user's review after an accepted request of the agent, as its
+/// card shows it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConnectionReview {
+    /// The number of the request that led to it.
+    pub request: u64,
+    pub name: String,
+    /// The new or changed actions the server announces.
+    pub actions: Vec<String>,
     pub open: bool,
 }
 
@@ -1059,6 +1075,38 @@ impl Conversation {
                     Some(at) => {
                         if let Block::VaultAsk(ask) = &mut self.blocks[at] {
                             ask.open = false;
+                        }
+                        vec![Change::Changed(at)]
+                    }
+                    None => Vec::new(),
+                }
+            }
+            "connection.review_waits" => {
+                let mut changes = self.close(Some(event.at));
+                changes.extend(
+                    self.push(Block::ConnectionReview(ConnectionReview {
+                        request: data["request"].as_u64().unwrap_or_default(),
+                        name: text("name"),
+                        actions: data["actions"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|action| action.as_str().map(str::to_owned))
+                            .collect(),
+                        open: true,
+                    })),
+                );
+                changes
+            }
+            "connection.review_done" => {
+                let request = data["request"].as_u64();
+                let at = self.blocks.iter().position(|block| {
+                    matches!(block, Block::ConnectionReview(review) if Some(review.request) == request)
+                });
+                match at {
+                    Some(at) => {
+                        if let Block::ConnectionReview(review) = &mut self.blocks[at] {
+                            review.open = false;
                         }
                         vec![Change::Changed(at)]
                     }

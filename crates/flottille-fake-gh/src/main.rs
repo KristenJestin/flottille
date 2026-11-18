@@ -107,6 +107,14 @@
 //! it, and `run cancel <id>` that the cancel was asked. `run list --branch <b>` keeps the runs whose
 //! `headBranch` is that branch (a run with none is kept).
 //!
+//! `edit_starts` (`{"acme/app": {"12": [{"__typename": "CheckRun", "name": "build", …}]}}`) adds
+//! those checks to the `statusCheckRollup` that `pr view` answers for that pull request once a
+//! `pr edit`, `pr ready` or `pr reopen` was received: the checks a change starts (a workflow
+//! that runs on it), none for a repository whose workflows ignore it.
+//!
+//! `view_fail_after_write` (`{"acme/app": "HTTP 502: Bad Gateway"}`) makes `pr view` of that
+//! repository fail that way once such a write was received.
+//!
 //! `issue list` keeps the issues of `--state` (`open` by default), with a `--label` and an
 //! `--assignee` (`labels[].name`, `assignees[].login`) when given and, for `--search`, those whose
 //! title or body hold its words (a simplification of GitHub's search; an `in:title,body,comments`
@@ -164,6 +172,21 @@ fn main() {
         .and_then(|text| serde_json::from_str(&text).ok())
         .unwrap_or_else(|| json!({}));
     std::process::exit(answer(&script, &args));
+}
+
+/// Whether a `pr edit`, `pr ready` or `pr reopen` was received.
+fn written_yet() -> bool {
+    std::env::var_os("FLOTTILLE_FAKE_GH_DIR")
+        .and_then(|dir| std::fs::read_to_string(PathBuf::from(dir).join("received.jsonl")).ok())
+        .is_some_and(|record| {
+            record
+                .lines()
+                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                .any(|call| {
+                    call["args"][0] == "pr"
+                        && matches!(call["args"][1].as_str(), Some("edit" | "ready" | "reopen"))
+                })
+        })
 }
 
 /// The fields `--json` asks of each object that it has (`number` when none is asked), and
@@ -1091,6 +1114,12 @@ fn answer(script: &Value, args: &[String]) -> i32 {
             if let Some(ms) = script["view_delay_ms"].as_u64() {
                 std::thread::sleep(std::time::Duration::from_millis(ms));
             }
+            if written_yet()
+                && let Some(failure) = script["view_fail_after_write"][repository].as_str()
+            {
+                eprintln!("{failure}");
+                return 1;
+            }
             let number: u64 = rest.first().and_then(|n| n.parse().ok()).unwrap_or(0);
             let found = pulls
                 .as_object()
@@ -1111,6 +1140,17 @@ fn answer(script: &Value, args: &[String]) -> i32 {
                         if let Some(field) = omitted.as_str() {
                             pull.as_object_mut().map(|fields| fields.remove(field));
                         }
+                    }
+                    if written_yet()
+                        && let Some(started) =
+                            script["edit_starts"][repository][number.to_string()].as_array()
+                    {
+                        let mut rollup = pull["statusCheckRollup"]
+                            .as_array()
+                            .cloned()
+                            .unwrap_or_default();
+                        rollup.extend(started.iter().cloned());
+                        pull["statusCheckRollup"] = Value::from(rollup);
                     }
                     println!("{pull}");
                     0

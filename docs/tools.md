@@ -573,14 +573,15 @@ pending requests.
   environment above: it runs outside the sandbox (no Landlock), with the daemon's own
   environment and `core.hooksPath=/dev/null`, and none of the place's variables, as if the user
   had typed it (`docs/commands.md`, "The environment"). Its task's `ready` and `url` commands
-  still run in the sandbox. A push from a workspace is also refused, before
-  git runs, when a repository's remote no longer leads where it did when the workspace was made
-  (`docs/commands.md`, "Where the remote leads").
+  still run in the sandbox. A push goes where the repository's remote leads now: the remote is
+  the user's to change (`docs/commands.md`, "Where the remote leads").
 - **A stop ends the run's session, not every descendant.** A run starts in a session of its own
   (`docs/reference/processes.md`). `run_status` with `action stop`, a timeout of the call's client
   and the daemon's stop signal the run's process group (`SIGTERM`, then `SIGKILL` after 5 s), and
   what the run left in its session is killed when its own process ends, even in a process group
-  of its own (what pnpm starts). A process that left the session (`setsid`, a daemon that forks
+  of its own (what pnpm starts), each process through a pidfd of its own: once the run's process
+  is reaped its pid, and its group's number, may be a stranger's, so nothing is signalled by
+  them. A process that left the session (`setsid`, a daemon that forks
   and detaches) escapes all of this and keeps running; Flottille does not stop it. It stays the
   daemon's descendant, though: the daemon is the subreaper of what it starts, so a process
   orphaned there is taken in by the daemon rather than by init, waited for when it ends, and
@@ -703,7 +704,7 @@ pending requests.
   30 min: …` when nothing did) and the subscription ends; without it there is none. The answer
   carries the line `show` gives about how long the repository's CI runs take, as information
   ([`forges.md`](forges.md), "How long CI takes"). It also says the pull request's checks running as it subscribed
-  (`Its checks running as you subscribed: test.`, or that none was), that `checks` is the end of
+  (`Its checks running as you subscribed: test.`, or `No check runs on it now; you will be told if one starts.` when none runs or waits), that `checks` is the end of
   those and that a run started on its branch outside them is followed by `run` or `follow_run`, not by the
   subscription, and each run the agent already follows on that branch (`You already follow the
   run #43 of api (custom: nightly on app/login): its end wakes you on its own.`): a short
@@ -813,6 +814,18 @@ pending requests.
   anything is written (`refused: the pull request #7 of acme/app is merged, not open; nothing was
   written: …`). A `title` on `comment` is refused before anything is asked (`refused: forge
   comment takes no title: title is for edit and create`).
+- **After a change, the answer says whether checks started (#1045).** `edit` and `reopen` read the
+  pull request's checks before the change, then after it (a first read 3 s later, a second 3 s
+  after if nothing new came; the whole is cut at 12 s, `FLOTTILLE_CHECKS_WAIT_MS` shortens the
+  wait in tests), and say what the forge shows: `Checks started since the change: test (running).`,
+  or `No check started since the change: a repository's workflows may not run on a change of this
+  kind, so do not wait for one.` (with those that were already running before it), or that the
+  checks could not be read. A check is new when its name and start time were not among those read
+  before, so a check of the old head that passed is not told as started. It is information
+  only: nothing is refused and nothing waits for a human. When none started, each other agent that
+  follows the pull request's `checks` is told once (a delivery, its subscription going on); the
+  agent that made the change has it in its answer. On Bitbucket the same through `bkt pr checks`;
+  a push is not read yet: `forge show` reads the checks again.
 - **Review threads** ([`forges.md`](forges.md), "Review threads"): `show` with `detail full`
   gives each comment on a line of the diff with its replies as a thread: its id, file, line (or
   range), side (`new` or `old`), whether it is resolved or outdated, then its comments in order
@@ -972,7 +985,7 @@ has no field for a secret, and an argument it does not know is refused.
 
 | Tool | Arguments | |
 |---|---|---|
-| `connections` | `action list \| show \| add \| edit \| remove \| set \| on \| off`, `name?`, `about?`, `command?`, `url?`, `env?`, `headers?`, `only?`, `settings?` | The user's connections (`docs/extensions.md`, "Connections"), for every agent, whether Connections is on or off. `list` gives one line each: `- <name> (conn_<name>): <state>, <n> actions. <sentence>`, and why its server fails; `show` gives one with its command or URL, its variables and headers by vault entry name, its limits, the server's name and version as accepted and each action's setting. **Never a secret**: a variable is the name of its vault entry. **Every write is held for the user, in every mode, Full included** (a connection's command runs with the user's rights and its tool reaches every agent of every project): the call is answered at once that it is held, the result comes later as a delivery. `add` and `edit` take `command` as one line split without a shell (shell syntax refused, as a task's line), or `url` (`https://`, or `http://` on this machine); `env` (for a command) and `headers` (for a URL) map a name to a vault entry's name, which must exist (a URL's may be one the user is to make) and be every project's; a header's entry must have a `url` of the connection URL's own host; an entry another project holds alone is refused; one that is the agent's project's alone, bound to no `url` or to another host leaves the request held and its Accept waiting, naming both hosts, until the user shares or binds it from the request (the agent cannot), and the held answer says so, with the `vault` ask that names the connection; `only` maps an argument to the values it may take; `env`, `headers` and `only` take `null` to remove them in an edit. The excepted projects, the OAuth client id and the switch are the user's (the switch through `on` and `off`). `set` takes `settings`, an action's name to `judged`, `passes`, `asked` or `off`, and is refused while the connection waits for the user's review. A declaration that does not fit is refused before the user is asked. The request's words are the declaration whole, an edit's changed fields with their old value; allowed, it is done only if those words are still what the declaration makes, by the path of the user's own Save (an add is given at once, every action judged). A child's write is refused, pointing it to `ask`. |
+| `connections` | `action list \| show \| add \| edit \| remove \| set \| on \| off`, `name?`, `about?`, `command?`, `url?`, `env?`, `headers?`, `only?`, `settings?` | The user's connections (`docs/extensions.md`, "Connections"), for every agent, whether Connections is on or off. `list` gives one line each: `- <name> (conn_<name>): <state>, <n> actions. <sentence>`, and why its server fails; `show` gives one with its command or URL, its variables and headers by vault entry name, its limits, the server's name and version as accepted and each action's setting. **Never a secret**: a variable is the name of its vault entry. **Every write is held for the user, in every mode, Full included** (a connection's command runs with the user's rights and its tool reaches every agent of every project): the call is answered at once that it is held, the result comes later as a delivery. `add` and `edit` take `command` as one line split without a shell (shell syntax refused, as a task's line), or `url` (`https://`, or `http://` on this machine); `env` (for a command) and `headers` (for a URL) map a name to a vault entry's name, which must exist (a URL's may be one the user is to make) and be every project's; a header's entry must have a `url` of the connection URL's own host; an entry another project holds alone is refused; one that is the agent's project's alone, bound to no `url` or to another host leaves the request held and its Accept waiting, naming both hosts, until the user shares or binds it from the request (the agent cannot), and the held answer says so, with the `vault` ask that names the connection; `only` maps an argument to the values it may take; `env`, `headers` and `only` take `null` to remove them in an edit. The excepted projects, the OAuth client id and the switch are the user's (the switch through `on` and `off`). `set` takes `settings`, an action's name to `judged`, `passes`, `asked` or `off`, and is held like any write: while the connection waits for the user's review (and its server starts), its card offers the review first and its Accept waits for it (settings are given to what the user read); a connection that is off, disabled, cut off or signed out has no review to wait for, and the set goes through as it did. A declaration that does not fit is refused before the user is asked. The request's words are the declaration whole, an edit's changed fields with their old value; allowed, it is done only if those words are still what the declaration makes, by the path of the user's own Save (an add is given at once, every action judged). **An accepted `add` or `edit` whose server now announces actions nobody read** (a new one, or one that changed) is written, and the connection waits for the user's review, its tool given to no agent: the user's window leads into the review at once, and the answer to the agent says so, naming the actions (`the actions link, new or changed`), that the user is shown the review and asked for it, and that **a second delivery** (`connections`, id `connection-review-<request>`) tells it once the user reviewed it (the actions are given: it may use them) or left it off (removed, or turned off). Only a connection awaiting its review is promised that delivery: one cut off or signed out is told what is true (nothing of it is given until the user accepts or signs in again). A second accepted edit meanwhile leaves one card and one delivery, for the request that stands. It is never told to send the user looking for a menu, and a request made meanwhile is held like any other. A child's write is refused, pointing it to `ask`. |
 
 `conn_<name> {action, arguments?, for?}`: one tool per MCP server the user declared and reviewed
 (`docs/extensions.md`, "Connections"), given to every agent of every project but those its

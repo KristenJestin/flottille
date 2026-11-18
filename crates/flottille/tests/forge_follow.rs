@@ -971,3 +971,78 @@ fn following_a_run_its_repository_does_not_have_is_refused() {
         refused.text
     );
 }
+
+/// The fake `gh` with the pull request #12 of `web` on `app/login`, its rollup `checks`.
+fn gh_with_pull(user: &User, checks: Value) {
+    let mut script = gh_script();
+    script["pulls"] = json!({"acme/web": {"app/login": {
+        "number": 12, "title": "Add the login page", "state": "OPEN", "isDraft": false,
+        "headRefName": "app/login", "headRefOid": "aaaaaaa1", "baseRefName": "main",
+        "url": "https://github.com/acme/web/pull/12",
+        "statusCheckRollup": checks, "comments": [], "reviews": []
+    }}});
+    user.gh_script(script);
+}
+
+#[test]
+fn following_a_pull_request_with_no_check_says_so() {
+    let (user, id, mcp) = setup();
+    // A check that ended is no check that runs or waits.
+    gh_with_pull(
+        &user,
+        json!([{"__typename": "CheckRun", "name": "build", "status": "COMPLETED",
+            "conclusion": "SUCCESS"}]),
+    );
+    set_mode(&user, &id, "full");
+    idle(&user, &id);
+
+    let answer = read(
+        &mcp,
+        json!({"action": "subscribe", "repository": "web", "events": ["checks"]}),
+    );
+
+    assert!(
+        answer.contains("No check runs on it now; you will be told if one starts."),
+        "{answer}"
+    );
+    assert!(!answer.contains("running as you subscribed"), "{answer}");
+}
+
+#[test]
+fn a_follow_tells_once_that_nothing_started_after_a_change() {
+    let (user, follower, mcp) = setup();
+    gh_with_pull(&user, json!([]));
+    set_mode(&user, &follower, "full");
+    idle(&user, &follower);
+    read(
+        &mcp,
+        json!({"action": "subscribe", "repository": "web", "number": 12, "events": ["checks"]}),
+    );
+    // Another agent of the project changes the pull request's title: its workflows ignore it.
+    let (writer, other) = agent(&user);
+    set_mode(&user, &writer, "full");
+    idle(&user, &writer);
+
+    let answer = read(
+        &other,
+        json!({"action": "edit", "repository": "web", "number": 12, "title": "feat: login page"}),
+    );
+    assert!(
+        answer.contains("No check started since the change"),
+        "{answer}"
+    );
+
+    let told = |user: &User| {
+        delivered(user, &follower)
+            .into_iter()
+            .filter(|body| body.contains("No check started since the change"))
+            .count()
+    };
+    eventually("the follower told", || told(&user) == 1);
+    // A round later, nothing more: once for the change.
+    a_round(&user);
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(told(&user), 1, "{:?}", delivered(&user, &follower));
+    // The follow goes on: a check that starts later still wakes it.
+    assert_eq!(subscriptions(&user).len(), 1);
+}

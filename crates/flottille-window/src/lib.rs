@@ -10,6 +10,7 @@ pub mod claude;
 pub mod commands;
 pub mod commit_checks;
 pub mod composer;
+pub mod connection_review;
 pub mod conventions;
 pub mod conversation;
 pub mod extensions;

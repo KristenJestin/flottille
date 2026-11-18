@@ -593,6 +593,9 @@ const TREE_EVENTS: &[&str] = &[
     // A request for a vault entry, and its answer, which folds its card away.
     "vault.asked",
     "vault.ask_answered",
+    // A connection waits for the user's review after an accepted request, and is reviewed.
+    "connection.review_waits",
+    "connection.review_done",
     // The rail's gauge of each agent's context.
     "agent.usage",
     // The line that says the session runs an older list of tools.

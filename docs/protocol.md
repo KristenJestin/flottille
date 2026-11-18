@@ -186,14 +186,16 @@ folder is what `workspaces_root` then is. `not-found` when there is none,
 #### `project.detect`
 
 `{"folder", "name"?}`. What `project.add` would register, written nowhere: `{"name", "folder",
-"repositories"}`. `folder` is absolute, as the client's user typed it; the result's `folder` is its
-resolved form (links followed). `name` is a slug of the folder's name when left out. The repositories
-are the folder itself (`.`) if it holds a `.git` (a folder or a file), then the folders one or two
-levels down that do, alphabetically; hidden folders and links are not looked into.
+"repositories"}`. `folder` is absolute, or `~` or starting with `~/` (the home of the user the
+daemon runs for, `HOME`), as the client's user typed it; the result's `folder` is its resolved
+form (the `~` expanded, links followed), the one the project file holds. `~other` is not
+expanded. `name` is a slug of the folder's name when left out. The repositories are the folder
+itself (`.`) if it holds a `.git` (a folder or a file), then the folders one or two levels down
+that do, alphabetically; hidden folders and links are not looked into.
 
-`refused` when the folder is not absolute, does not exist or is not a folder; when no name can be
-made from it or the one given is not a name; when it holds no repository; when a project already
-has that name or that folder.
+`refused` when the folder is not absolute (once a `~` is expanded), does not exist or is not a
+folder; when no name can be made from it or the one given is not a name; when it holds no
+repository; when a project already has that name or that folder.
 
 #### `project.add`
 
@@ -626,6 +628,8 @@ setting}]`, `setting` being `judged`, `passes`, `asked` or `off`).
   `to_bind` when Accept waits for the entry, usable for the connection, to be bound to the
   connection's host; `entry_url` the entry's `url`; `origin` the connection's scheme, host and
   port),
+  `review` whether the connection waits for the user's review (a server that does not start waits for
+  no one): its card offers the review first, and a `set`'s Accept waits for it (`waits` says so),
   `current` whether it is still what the request says: one that is not is not done once allowed
   (`why` says why, when it can no longer be done at all; an entry that is not right yet is no such
   change), and `waits`, why Accept waits, if it does.
@@ -1057,7 +1061,7 @@ A workspace is one worktree per repository, on one branch, prepared by the proje
   "variables": {"STORE": "{workspace.path}/.store"},
   "repositories": [
     {"path": "api", "base": {"branch": "develop", "remote": "origin", "ref": "refs/remotes/origin/develop",
-      "urls": ["git@git.example.com:acme/api.git"], "commit": "503144c9654d6762b17fd670ddc9f88aa39ecfaf",
+      "commit": "503144c9654d6762b17fd670ddc9f88aa39ecfaf",
       "fetched_now": true, "fetched_at": 1792843730790,
       "fetch": {"started_at": 1792843729905, "duration_ms": 885, "outcome": "fetched"}}},
     {"path": "lib", "base": {"branch": "main", "remote": "origin", "ref": "refs/heads/main",
@@ -1084,8 +1088,7 @@ creation, not yet filled. A base's `fetched_now` is false when the workspace was
 says why in one line (`no remote origin: started from the local main`, `origin could not be
 fetched (…): started from origin/develop as last fetched`, `…: started from the local main`);
 `fetched_at` (milliseconds since the Unix epoch) is when its tracking ref was last updated, `null`
-when unknown. Its `urls` are where its remote led at creation, fetch and push, credentials taken
-out (`docs/commands.md`); absent for a workspace created before they were recorded. A step's `kind` is `worktree`, `copy` (`globs`), `link` (`path`), `root_entries`
+when unknown. A step's `kind` is `worktree`, `copy` (`globs`), `link` (`path`), `root_entries`
 (`except`: the top-level names of the project's repositories) or `run` (`line`, `time_limit` in
 seconds, and `task` when it is one of the project's tasks); its `state` is `pending`, `running`, `done`, `skipped` or
 `failed`, and `failure` is there only on a failed step. `repository` is `null` for a step done in
@@ -2275,7 +2278,12 @@ there is no such agent).
 `discard`, `true` for a workspace's removal only (`refused` for any other request), removes it
 even with what would be lost (`docs/workspaces.md`, "Removal"). Answered `{"request"}` once it
 is decided; the call is then checked again, performed in the background, and its answer stored for
-the agent (`approval.settled`). An `action` is done only while what it `says` still holds (a
+the agent (`approval.settled`), except a `connections` write, which the call waits for (the user's
+own Save does the same, up to 30 seconds for a server's tools) and whose answer then also says what
+became of the connection: `{"request", "outcome", "failure"?, "connection": {"name", "state", "review"}}`,
+`outcome` being how the write ended (`done`, or what it was not: `failed`, `refused`, `not_executed`,
+with `failure`, the sentence that says why), `review` being `true` when the connection now waits for a
+review the user can make, which the window opens at once, once the write is `done`. An `action` is done only while what it `says` still holds (a
 command edited meanwhile is not written). `not-found` when there is no such request; `refused` when it is held by an agent, or already
 decided.
 

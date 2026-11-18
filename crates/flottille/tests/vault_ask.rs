@@ -224,7 +224,8 @@ fn an_agent_asks_for_an_entry_no_feature_names() {
     assert_eq!(request["for"], Value::Null, "{request}");
     let number = request["ask"].as_u64().unwrap();
 
-    // A use asked for: a connection's entry is every project's.
+    // A login's entry asked for: the login reads it for the agent's project, so it is this
+    // project's, as asked.
     let bound = mcp.call(
         "vault",
         json!({"action": "ask", "name": "shop-test", "why": "to sign in to the shop",
@@ -236,7 +237,8 @@ fn an_agent_asks_for_an_entry_no_feature_names() {
         .find(|ask| ask["name"] == "shop-test")
         .unwrap();
     assert_eq!(shop["for"], "connection:browser", "{shop}");
-    assert_eq!(shop["every"], true, "{shop}");
+    assert_eq!(shop["every"], false, "{shop}");
+    assert_eq!(shop["connection"], Value::Null, "{shop}");
 
     // A use the agent's project cannot have is refused.
     let refused = mcp.call(

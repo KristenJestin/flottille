@@ -2731,3 +2731,161 @@ fn once_an_ask_is_answered_the_focus_goes_to_the_next_card(cx: &mut TestAppConte
     );
     at_rest(cx);
 }
+
+/// The control in the card's header that folds it, and what it says it does.
+fn fold_label(ask: u64, cx: &mut VisualTestContext) -> Option<String> {
+    label(format!("ask-{ask}-question-fold"), cx)
+}
+
+/// Whether the card of `ask` shows its questions (the options of the first one).
+fn unfolded(ask: u64, cx: &mut VisualTestContext) -> bool {
+    has(format!("ask-{ask}-question-0-option-0"), cx)
+}
+
+#[gpui_kit::test]
+fn a_question_card_folds_to_its_header_and_unfolds(cx: &mut TestAppContext) {
+    let user = user();
+    let (_, _, page, at, cx) = three_asked(&user, cx);
+    let ask = seq_of(&page, at, cx);
+    assert_eq!(fold_label(ask, cx).as_deref(), Some("Fold the question"));
+    let open_height = bounds(format!("ask-{ask}-question-text"), cx).size.height;
+
+    cx.update(|window, cx| window.click(format!("ask-{ask}-question-fold"), cx));
+    settle(cx);
+    // Folded: the questions, the steps and the footer are gone; the header keeps the title, the
+    // "asks you" chip and the count, and the control says what it does now.
+    assert!(!unfolded(ask, cx), "the questions fold away");
+    assert!(
+        !has(format!("ask-{ask}-question-step"), cx),
+        "so do the steps"
+    );
+    assert!(!has(format!("ask-{ask}-answer-send"), cx), "and the footer");
+    assert_eq!(
+        label(format!("ask-{ask}-question-tag"), cx).as_deref(),
+        Some("asks you")
+    );
+    assert_eq!(
+        label(format!("ask-{ask}-question-count"), cx).as_deref(),
+        Some("0 of 3 answered")
+    );
+    assert!(has(format!("ask-{ask}-question-title"), cx));
+    assert_eq!(fold_label(ask, cx).as_deref(), Some("Unfold the question"));
+    let folded_height = bounds(format!("ask-{ask}-question-text"), cx).size.height;
+    assert!(
+        folded_height < open_height / 2.,
+        "the conversation gets the room back: {folded_height:?} against {open_height:?}"
+    );
+    at_rest(cx);
+
+    cx.update(|window, cx| window.click(format!("ask-{ask}-question-fold"), cx));
+    settle(cx);
+    assert!(unfolded(ask, cx), "the questions are back");
+    assert!(has(format!("ask-{ask}-question-step"), cx));
+    assert_eq!(fold_label(ask, cx).as_deref(), Some("Fold the question"));
+    assert_eq!(
+        bounds(format!("ask-{ask}-question-text"), cx).size.height,
+        open_height
+    );
+    at_rest(cx);
+}
+
+#[gpui_kit::test]
+fn a_folded_question_card_keeps_what_was_chosen(cx: &mut TestAppContext) {
+    let user = user();
+    let (_, shell, page, at, cx) = three_asked(&user, cx);
+    let ask = seq_of(&page, at, cx);
+    let card = card_of(&shell, &page, at, cx);
+    click(format!("ask-{ask}-question-0-option-0"), cx);
+    settle(cx);
+    write(&shell, &page, at, 1, "Export orders as CSV", cx);
+    click(format!("ask-{ask}-question-2-option-0"), cx);
+    click(format!("ask-{ask}-question-2-option-2"), cx);
+    settle(cx);
+    let before = card.read_with(cx, |card, cx| card.answers(cx));
+    assert_eq!(card.read_with(cx, |card, cx| card.answered_count(cx)), 3);
+
+    cx.update(|window, cx| window.click(format!("ask-{ask}-question-fold"), cx));
+    settle(cx);
+    assert!(!unfolded(ask, cx));
+    // Everything is answered: the Answer button stays one click away, folded.
+    assert!(
+        has(format!("ask-{ask}-answer-send"), cx),
+        "Answer stays in sight"
+    );
+    assert_eq!(
+        label(format!("ask-{ask}-question-count"), cx).as_deref(),
+        Some("3 of 3 answered")
+    );
+    assert_eq!(card.read_with(cx, |card, cx| card.answers(cx)), before);
+
+    cx.update(|window, cx| window.click(format!("ask-{ask}-question-fold"), cx));
+    settle(cx);
+    assert_eq!(card.read_with(cx, |card, cx| card.answers(cx)), before);
+    assert_eq!(
+        chosen(format!("ask-{ask}-question-0-option-0"), cx),
+        Some(true),
+        "the choice is still marked"
+    );
+    show(ask, 1, cx);
+    let words = card.read_with(cx, |card, _| card.field(1).clone());
+    assert_eq!(
+        words.read_with(cx, |field, _| field.value().to_string()),
+        "Export orders as CSV"
+    );
+}
+
+#[gpui_kit::test]
+fn a_new_question_card_arrives_unfolded(cx: &mut TestAppContext) {
+    let user = user();
+    let id = session(&user, "full", "ask twice");
+    let (shell, page, cx) = open_session(&user, &id, cx);
+    until(&shell, cx, "two asks, the oldest docked", |cx| {
+        let open = questions(&page, cx);
+        open.len() == 2 && card_shows(&page, open[0].0, cx)
+    });
+    settle(cx);
+    let (first, second) = (questions(&page, cx)[0].0, questions(&page, cx)[1].0);
+    let (first_ask, second_ask) = (seq_of(&page, first, cx), seq_of(&page, second, cx));
+    // A question with no options: its words are the field.
+    assert!(has(format!("ask-{first_ask}-answer-0-frame"), cx));
+    cx.update(|window, cx| window.click(format!("ask-{first_ask}-question-fold"), cx));
+    settle(cx);
+    assert!(
+        !has(format!("ask-{first_ask}-answer-0-frame"), cx),
+        "the first card is folded"
+    );
+
+    answer(&shell, &page, first, "Drop it.", cx);
+    release(&user);
+    until(&shell, cx, "the second card comes", |cx| {
+        settle(cx);
+        card_shows(&page, second, cx) && !card_shows(&page, first, cx)
+    });
+    settle(cx);
+    assert!(
+        has(format!("ask-{second_ask}-answer-0-frame"), cx),
+        "its question shows"
+    );
+    assert_eq!(
+        fold_label(second_ask, cx).as_deref(),
+        Some("Fold the question")
+    );
+}
+
+#[gpui_kit::test]
+fn the_line_in_the_conversation_unfolds_a_folded_question_card(cx: &mut TestAppContext) {
+    let user = user();
+    let (_, shell, page, at, cx) = four_asked(&user, cx);
+    let ask = seq_of(&page, at, cx);
+    let card = card_of(&shell, &page, at, cx);
+    cx.update(|window, cx| window.click(format!("ask-{ask}-question-fold"), cx));
+    settle(cx);
+    assert!(!unfolded(ask, cx));
+
+    cx.update(|window, cx| window.click(format!("row-{at}-question-line"), cx));
+    cx.run_until_parked();
+    settle(cx);
+    assert!(unfolded(ask, cx), "asking for the card unfolds it");
+    assert_eq!(fold_label(ask, cx).as_deref(), Some("Fold the question"));
+    assert!(cx.update(|window, cx| card.read(cx).has_focus(window)));
+}

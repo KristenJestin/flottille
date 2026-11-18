@@ -171,12 +171,12 @@ hooks (a commit message check) do not run for an agent's commits. What they chec
 the repository's **commit checks**, the user's own lines, run before the agent's `git commit`
 without a shell (`docs/projects.md`, "Commit checks"); the hooks are only read to propose them.
 
-**Where the remote leads.** A workspace records, at its creation, the URLs its repositories'
-remotes lead to (fetch and push, `insteadOf` applied, credentials taken out: the `urls` of each
-base, `docs/protocol.md`). An agent never changes them (`git remote` and `git config` writes are
-refused, `docs/tools.md`), and a push from a workspace or a write of `forge` (`create`, `merge`, `checks`) is refused, before git or
-`gh` runs, when the remote leads anywhere else now. A workspace created before they were recorded
-gets no push nor forge write.
+**Where the remote leads.** The remote is the user's to change, in their own clone, and a
+workspace holds nothing of where it led when it was made: a push goes where the repository's
+remote leads now, and a write of `forge` (`create`, `merge`, `checks`) asks the forge the
+repository is declared on, which must be where the remote leads (below). An agent never changes the
+remote (`git remote` and `git config` writes are to judge, `docs/tools.md`); the push itself is
+the gate's, and once it lets it through it runs as the user's own (above).
 
 ## `forge`
 

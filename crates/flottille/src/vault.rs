@@ -275,7 +275,15 @@ pub async fn call(
             Ok(json!({"entries": entries
                 .iter()
                 .filter(|entry| project.as_deref().is_none_or(|project| entry.seen_by(project)))
-                .map(Entry::to_json)
+                .map(|entry| {
+                    // The window offers no project Save would refuse (`bound_checked`).
+                    let mut json = entry.to_json();
+                    json["every_project_only"] = json!(entry.bound.as_deref().is_some_and(
+                        |bound| crate::extensions::bound_given_to_server(&daemon, bound, &entry.name)
+                            .unwrap_or(true)
+                    ));
+                    json
+                })
                 .collect::<Vec<_>>()}))
         }
         "vault.set" => {
@@ -410,7 +418,13 @@ async fn set(daemon: &std::sync::Arc<Daemon>, params: Value) -> Result<Value, Fa
     let url = given(asked.url);
     // A worklog's entry is its project's alone: no other project's agent learns it exists.
     let project = match &bound {
-        Some(bound) => bound_checked(daemon, bound, project.as_deref(), url.as_deref())?,
+        Some(bound) => bound_checked(
+            daemon,
+            &asked.name,
+            bound,
+            project.as_deref(),
+            url.as_deref(),
+        )?,
         None => project,
     };
     let username = given(asked.username);
@@ -513,10 +527,13 @@ fn rewritten(
 
 /// The project an entry bound to `bound` has, if Flottille knows the use and it fits the entry's
 /// `project`: a project's worklog reads only an entry that project sees, so the entry is the
-/// project's; a connection reads only an entry of every project, whose `url` is no plain `http`
-/// to another machine (its login would type the password there in clear).
+/// project's; a connection's entry is any project's when its login reads it for the calling
+/// agent's project, every project's when its server is given it at its start (that server serves
+/// every project's agents), and its `url` is no plain `http` to another machine (its login would
+/// type the password there in clear).
 fn bound_checked(
     daemon: &Daemon,
+    name: &str,
     bound: &str,
     project: Option<&str>,
     url: Option<&str>,
@@ -563,10 +580,20 @@ fn bound_checked(
             "an entry the project {own} alone sees cannot be bound to {said}"
         ))),
         (Some(("worklog", of)), _) => Ok(Some(of.to_owned())),
-        (Some(("connection", _)), Some(own)) => Err(Failure::refused(format!(
-            "an entry bound to {said} is every project's: a connection is given to all, and \
-             the project {own} cannot be its only one"
-        ))),
+        (Some(("connection", _)), Some(own)) => {
+            match crate::extensions::bound_given_to_server(daemon, bound, name) {
+                Ok(false) => Ok(Some(own.to_owned())),
+                Ok(true) => Err(Failure::refused(format!(
+                    "the server of {said} is given the entry {name} when it starts, and serves \
+                     every project's agents: the entry is every project's, not the project \
+                     {own}'s alone"
+                ))),
+                Err(why) => Err(Failure::refused(format!(
+                    "whether the server of {said} is given the entry {name} cannot be told, so \
+                     it cannot be the project {own}'s alone: {why}"
+                ))),
+            }
+        }
         _ => Ok(project.map(str::to_owned)),
     }
 }
@@ -1066,7 +1093,15 @@ fn ask(daemon: &Daemon, grant: &Grant, asked: Asked) -> Outcome {
                 Err(why) => return Outcome::Refused(format!("refused: {why}")),
             }
         }
-        None => crate::extensions::wanting(daemon, &grant.agent, &name),
+        // A use asked for a connection whose server is given the entry is that connection's;
+        // any other (a login's) keeps the project asked.
+        None => crate::extensions::wanting(daemon, &grant.agent, &name).or_else(|| {
+            let connection = bound.as_deref()?.strip_prefix("connection:")?;
+            match crate::extensions::asked_for(daemon, &grant.agent, connection, &name) {
+                Ok(Some(origin)) => Some((connection.to_owned(), origin)),
+                Ok(None) | Err(_) => None,
+            }
+        }),
     };
     let project_asked = given(asked.project);
     if connection.is_some() && project_asked.as_deref() == Some("this") {
@@ -1076,25 +1111,15 @@ fn ask(daemon: &Daemon, grant: &Grant, asked: Asked) -> Outcome {
                 .into(),
         );
     }
-    // A connection is given to every project: its entry is every project's.
+    // A connection's server is given to every project: its entry is every project's.
     let every = match (project_asked.as_deref(), &bound) {
         (Some("every"), Some(b)) if b.starts_with("worklog:") => {
             return Outcome::Refused(
                 "refused: an entry for this project's worklog is this project's alone".into(),
             );
         }
-        (Some("this"), Some(b)) if b.starts_with("connection:") => {
-            return Outcome::Refused(
-                "refused: a connection's entry is every project's: leave project out".into(),
-            );
-        }
         (Some("every"), _) => true,
-        (None | Some("this"), _) => {
-            connection.is_some()
-                || bound
-                    .as_deref()
-                    .is_some_and(|b| b.starts_with("connection:"))
-        }
+        (None | Some("this"), _) => connection.is_some(),
         (Some(other), _) => {
             return Outcome::Refused(format!("refused: project is this or every, not {other}"));
         }

@@ -82,7 +82,11 @@
 //! on its error output, and it fails; the form is filled first, as a page that refused it keeps it).
 //! With `open` among its arguments (and no `mcp`), it plays `agent-browser open <url>`: its log line
 //! `open` says its arguments and folder, and it empties the form, as a page loaded afresh does;
-//! `open_fail` in `login` makes it fail instead. `--url` and `--item` are read as `--url <url>` or
+//! `open_fail` in `login` makes it fail instead. It keeps the address of the page it lands on
+//! beside the form (`lands_on` in `login`: a page that redirects there), and `auth login
+//! --no-navigate` checks that page's origin against `--url`'s, as agent-browser does, failing
+//! before the plugin is asked. `asks_for` in `login` asks the plugin for that URL instead of
+//! `--url`'s. `--url` and `--item` are read as `--url <url>` or
 //! `--url=<url>`. Its log line, `login`, says its
 //! arguments, its folder and what the plugin answered, never a password. The lines `start`, `login`
 //! and `open` carry `config`, the JSON of the file `--config` names when the line was written.
@@ -945,10 +949,8 @@ fn login(args: &[String], script: &Value, log: &Option<String>) {
         .find(|words| words[0] == "auth" && words[1] == "login")
         .map(|words| words[2].clone())
         .unwrap_or_default();
-    let config: Value = option("--config")
-        .and_then(|file| std::fs::read_to_string(file).ok())
-        .and_then(|text| serde_json::from_str(&text).ok())
-        .unwrap_or_default();
+    // The first `--config <file>`, as agent-browser reads it (never `--config=<file>`).
+    let config = loaded_config(args);
     let provider = option("--credential-provider").unwrap_or_default();
     let plugin = config["plugins"]
         .as_array()
@@ -961,9 +963,36 @@ fn login(args: &[String], script: &Value, log: &Option<String>) {
                     .is_some_and(|c| c.iter().any(|c| c == "credential.read"))
         })
         .cloned();
+    // `--no-navigate`, as agent-browser 0.43.0 does it: the page that is open must be of the
+    // origin of `--url`, or nothing is asked nor filled.
+    if args.iter().any(|arg| arg == "--no-navigate") {
+        let page = behaviour["form"]
+            .as_str()
+            .and_then(|form| std::fs::read_to_string(page_file(form)).ok())
+            .unwrap_or_default();
+        let expected = option("--url").unwrap_or_default();
+        if page.is_empty() || origin(&page) != origin(&expected) {
+            write_log(
+                log,
+                json!({"event": "login", "args": args, "config": loaded_config(args),
+                "cwd": std::env::current_dir().ok(), "page": page}),
+            );
+            eprintln!(
+                "✗ Current page origin {} does not match credential origin {}",
+                origin(&page),
+                origin(&expected)
+            );
+            std::process::exit(1);
+        }
+    }
+    // `asks_for`: the plugin is asked for another page than `--url`.
+    let url = behaviour["asks_for"]
+        .as_str()
+        .map(str::to_owned)
+        .or_else(|| option("--url"));
     let request = json!({"protocol": "agent-browser.plugin.v1", "type": "credential.resolve",
         "capability": "credential.read", "request": {"profileName": name,
-            "itemRef": option("--item"), "url": option("--url")}});
+            "itemRef": option("--item"), "url": url}});
     let token = std::env::var("FLOTTILLE_VAULT_TOKEN").ok();
     let ask = |plugin: &Value| -> Value {
         let mut command = std::process::Command::new(plugin["command"].as_str().unwrap_or("?"));
@@ -1065,6 +1094,32 @@ fn open(args: &[String], script: &Value, log: &Option<String>) {
     }
     if let Some(form) = behaviour["form"].as_str() {
         let _ = std::fs::remove_file(form);
+        // The page it lands on: `lands_on` when the page redirects elsewhere.
+        let url = behaviour["lands_on"]
+            .as_str()
+            .map(str::to_owned)
+            .or_else(|| {
+                args.iter()
+                    .position(|arg| arg == "open")
+                    .and_then(|at| args.get(at + 1))
+                    .cloned()
+            })
+            .unwrap_or_default();
+        std::fs::write(page_file(form), url).unwrap();
     }
     println!("✓ opened");
+}
+
+/// Where the fake browser keeps the address of the page that is open, beside the form.
+fn page_file(form: &str) -> String {
+    format!("{form}.page")
+}
+
+/// The origin of `url`: its scheme, host and port, as agent-browser compares them.
+fn origin(url: &str) -> String {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return String::new();
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    format!("{scheme}://{authority}")
 }

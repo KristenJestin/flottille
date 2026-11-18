@@ -1295,7 +1295,12 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   the session's, not its page's, so what the user chose and wrote stays while a sub-agent's
   conversation is shown (the dock still shows) and when the page is left and opened again. At its
   place in the conversation, one short line, `Asked you 4 questions · answer below`, a link that
-  brings the focus to the card, whose ring lights once. Once the agent took the answers, the dock
+  brings the focus to the card, whose ring lights once, and unfolds it if it is folded. A control
+  in the card's header ("Fold the question" / "Unfold the question", its chevron turning) folds
+  the card to that header, so that a long card leaves the message above it in sight: the title,
+  the `asks you` tag and the count stay, the steps, the questions and the footer fold away, and
+  what was chosen or written is kept; once every question has an answer the footer stays, so
+  Answer is one click away. The fold is the card's own, and a new card comes unfolded. Once the agent took the answers, the dock
   folds away and the line becomes the card folded to the answers (each question and what was
   chosen). Several asks waiting, the dock shows the oldest, `1 of 2 asks` above it, the next
   sliding in once it is answered; a page opened while an ask waits (the sidebar's "needs you")

@@ -13,7 +13,7 @@ use flottille_window::Shell;
 use flottille_window::link::Connect;
 use flottille_window::vault::VaultSection;
 use gpui_kit::test::TestWindowExt;
-use gpui_kit::{Entity, TestAppContext, VisualTestContext, px, size};
+use gpui_kit::{Entity, Focusable as _, TestAppContext, VisualTestContext, px, size};
 use serde_json::{Value, json};
 
 /// The secret typed in the dialog, which the window never shows again.
@@ -404,4 +404,72 @@ fn a_prefilled_form_says_why_it_was_asked(cx: &mut TestAppContext) {
     section.update_in(cx, |section, window, cx| section.add(window, cx));
     settle(cx);
     assert!(!shown("vault-description-field-hint", cx));
+}
+
+#[gpui_kit::test]
+fn a_refused_save_keeps_the_secret_typed(cx: &mut TestAppContext) {
+    let user = User::new();
+    let (shell, cx) = window(&user, cx);
+    let section = open_vault(&shell, cx);
+    click("add-vault-entry", cx);
+    settle(cx);
+    // A name the daemon refuses: the refusal comes after the secret was typed.
+    type_in(&section, VaultSection::name_field, "not a name", cx);
+    type_in(&section, VaultSection::secret_field, SECRET, cx);
+    type_in(&section, VaultSection::username_field, "me@example.com", cx);
+    click("save-vault-entry", cx);
+    until(&shell, cx, "the save is refused", |cx| {
+        section.read_with(cx, |s, _| s.form_error().is_some())
+    });
+    settle(cx);
+    assert!(shown("vault-error", cx), "the refusal is said in the form");
+    let value = |field: fn(&VaultSection) -> Option<&Entity<gpui_kit::base::input::InputState>>,
+                 cx: &mut VisualTestContext| {
+        section.read_with(cx, |s, cx| field(s).unwrap().read(cx).value().to_string())
+    };
+    // Every field as typed, the secret included: nothing to type again.
+    assert_eq!(value(VaultSection::secret_field, cx), SECRET);
+    assert_eq!(value(VaultSection::name_field, cx), "not a name");
+    assert_eq!(value(VaultSection::username_field, cx), "me@example.com");
+    assert_eq!(listed(&user), json!([]), "nothing is stored");
+
+    // A field changed: the refusal folds away, moving, and the secret typed saves as it is.
+    type_in(&section, VaultSection::name_field, "shop-login", cx);
+    // Typed as the user does, in the username's field.
+    let username = section.read_with(cx, |s, _| s.username_field().unwrap().clone());
+    cx.update(|window, cx| {
+        let focus = username.read(cx).focus_handle(cx);
+        window.focus(&focus, cx);
+    });
+    cx.simulate_input(".org");
+    assert_eq!(
+        value(VaultSection::username_field, cx),
+        "me@example.com.org"
+    );
+    assert_eq!(
+        section.read_with(cx, |s, _| s.form_error().map(str::to_owned)),
+        None
+    );
+    cx.executor().advance_clock(Duration::from_millis(60));
+    cx.update(|window, cx| window.simulate_next_frame(cx));
+    assert!(
+        shown("vault-error", cx),
+        "the refusal leaves without moving"
+    );
+    settle(cx);
+    assert!(!shown("vault-error", cx));
+    click("save-vault-entry", cx);
+    until(&shell, cx, "the entry is listed", |cx| {
+        section.read_with(cx, |s, _| s.entries().is_some_and(|e| e.len() == 1))
+    });
+    assert_eq!(listed(&user)[0]["name"], "shop-login");
+    assert!(
+        !section.read_with(cx, |s, _| s.is_open()),
+        "the dialog closed"
+    );
+    assert_eq!(
+        value(VaultSection::secret_field, cx),
+        "",
+        "the field lets go of the secret once it is saved"
+    );
 }

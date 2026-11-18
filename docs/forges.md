@@ -417,9 +417,9 @@ server (nothing here calls Bitbucket). Files are the repository's, lines those o
 ### `forge`'s writes on Bitbucket
 
 The three actions of [`commands.md`](commands.md), under the same classes and the same checks
-(the remote leads where it led when the workspace was created; the repository is one of the
-workspace's; the pull request is the workspace's own branch's, from the repository itself, into
-the base the repository started from: its rule's, or the `base` the workspace was made with,
+(the remote leads where the forge is declared; the repository is one of the workspace's; the
+pull request is the workspace's own branch's, from the repository itself, into the base the
+repository started from: its rule's, or the `base` the workspace was made with,
 `docs/workspaces.md`, "The base of each branch"):
 
 - `create`: `bkt pr create … --source <branch> --target <base>`, a `--reviewer` for each of

@@ -117,6 +117,7 @@ pub const EXTENSION: Extension = Extension {
     }),
     needs_you: &[
         ("connection.cut_off", cut_off_text),
+        ("connection.awaiting_review", awaiting_review_text),
         ("connection.version_moved", version_moved_text),
         ("connection.signed_out", signed_out_text),
         ("connection.tokens_unsaved", tokens_unsaved_text),
@@ -176,9 +177,6 @@ pub struct Declaration {
     pub except: Vec<String>,
     /// The OAuth client id the user registered with the server's authorization server, for a URL.
     pub client_id: Option<String>,
-    /// Hosts the user adds to the sites an adapter keeps the browser to, beside those of the
-    /// vault entries: a single sign-on's, which a sign-in goes through.
-    pub sites: Vec<String>,
     /// Whether an adapter's browser is shown: its server also gets the daemon's display
     /// variables, and the adapter writes `headed` in the configuration it writes.
     pub headed: bool,
@@ -520,6 +518,8 @@ const KEYS: &[&str] = &[
     "only",
     "except",
     "client_id",
+    // Read and ignored: it added hosts to a list of the browser's sites that is gone (#1041), and
+    // a declaration written while it existed still loads.
     "sites",
     "headed",
 ];
@@ -708,24 +708,6 @@ impl Declaration {
                 return Err(format!("{at}.client_id: must be a client id, on one line"));
             }
         }
-        let sites = match table.get("sites") {
-            None => Vec::new(),
-            Some(value) => value
-                .as_array()
-                .and_then(|hosts| {
-                    hosts
-                        .iter()
-                        .map(|host| host.as_str().map(str::to_owned))
-                        .collect::<Option<Vec<String>>>()
-                })
-                .ok_or_else(|| format!("{at}.sites: must be a list of hosts"))?,
-        };
-        if let Some(host) = sites.iter().find(|host| !adapters::is_site(host)) {
-            return Err(format!(
-                "{at}.sites: {host:?} is no host of a site: one host each, as \"sso.example.com\", \
-                 in lower case, with no scheme, port, path, comma, wildcard or space"
-            ));
-        }
         let headed = match table.get("headed") {
             None => false,
             Some(value) => value
@@ -742,7 +724,6 @@ impl Declaration {
             only,
             except,
             client_id,
-            sites,
             headed,
         })
     }
@@ -791,17 +772,14 @@ impl Declaration {
         if let Some(id) = &self.client_id {
             table["client_id"] = json!(id);
         }
-        if !self.sites.is_empty() {
-            table["sites"] = json!(self.sites);
-        }
         if self.headed {
             table["headed"] = json!(true);
         }
         table
     }
 
-    /// What trust is given to: how the server is reached, what it is given, the limits, and the
-    /// hosts an adapter adds to the browser's sites, and whether it is shown. An edit of any of them is another server as
+    /// What trust is given to: how the server is reached, what it is given, the limits, and
+    /// whether an adapter's browser is shown. An edit of any of them is another server as
     /// far as trust goes; the sentence, the switch and the projects left out are not.
     fn digest(&self) -> String {
         let reach = match &self.reach {
@@ -822,12 +800,7 @@ impl Declaration {
         if let Some(others) = json.get("secrets") {
             trusted["secrets"] = others.clone();
         }
-        // Only when there are some: the digest of a connection without sites, pinned before
-        // they existed, stays the one it was pinned for.
-        if !self.sites.is_empty() {
-            trusted["sites"] = json!(self.sites);
-        }
-        // As the sites: a connection that is not shown keeps the digest it was pinned for.
+        // Only when it is: a connection that is not shown keeps the digest it was pinned for.
         if self.headed {
             trusted["headed"] = json!(true);
         }
@@ -1930,6 +1903,27 @@ fn cut_off(daemon: &Daemon, name: &str, changed: &[String]) {
     changed_event(daemon, name, Some(&why));
 }
 
+/// An edit an agent asked for was accepted and its server now announces actions nobody read: the
+/// connection gives agents none of them until the user reviews it (#1031).
+fn awaiting_review_text(data: &Value) -> String {
+    let name = data["name"].as_str().unwrap_or_default();
+    let actions: Vec<&str> = data["actions"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    let what = match actions.is_empty() {
+        true => "its change".to_owned(),
+        false => format!("its new actions ({})", actions.join(", ")),
+    };
+    format!(
+        "The connection {name} waits for your review of {what}: until then agents get none of \
+         them. Review it (`flottille connection review {name}`), or in Settings, Features, \
+         Connections."
+    )
+}
+
 fn cut_off_text(data: &Value) -> String {
     let name = data["name"].as_str().unwrap_or_default();
     let changed: Vec<&str> = data["changed"]
@@ -2060,7 +2054,8 @@ fn call(daemon: Arc<Daemon>, method: String, params: Value) -> super::Answered {
             Value::Null => json!({}),
             params => params,
         };
-        match method.as_str() {
+        let name = params["name"].as_str().map(str::to_owned);
+        let answered = match method.as_str() {
             "connection.list" => list(&daemon),
             "connection.add" => add(&daemon, params).await,
             "connection.edit" => edit(&daemon, params).await,
@@ -2076,7 +2071,19 @@ fn call(daemon: Arc<Daemon>, method: String, params: Value) -> super::Answered {
                 "unknown-method",
                 format!("unknown method `{method}`"),
             )),
+        };
+        // A connection that waited for a review an agent's request led to, and is now reviewed,
+        // removed or turned off: the agent is told.
+        if answered.is_ok()
+            && matches!(
+                method.as_str(),
+                "connection.add" | "connection.edit" | "connection.remove" | "connection.accept"
+            )
+            && let Some(name) = name
+        {
+            requests::review_closed(&daemon, &name);
         }
+        answered
     })
 }
 
@@ -2188,6 +2195,17 @@ pub fn names(daemon: &Daemon, name: &str, entry: &str) -> std::result::Result<bo
     Ok(declarations(&daemon.paths)?
         .iter()
         .any(|declaration| declaration.name == name && declaration.entries().any(|e| e == entry)))
+}
+
+/// Whether the server of the connection `name` is given the vault entry `entry` when it starts
+/// (its declaration names it, or it holds the tokens of its OAuth sign-in): that server serves
+/// every project's agents, so it cannot check whose agent the secret is for.
+pub fn given_to_server(
+    daemon: &Daemon,
+    name: &str,
+    entry: &str,
+) -> std::result::Result<bool, String> {
+    Ok(entry == oauth::entry(name) || names(daemon, name, entry)?)
 }
 
 fn table_of(declaration: &Declaration) -> std::result::Result<toml_edit::Table, Failure> {
@@ -2495,16 +2513,8 @@ async fn review(daemon: &Arc<Daemon>, params: Value) -> std::result::Result<Valu
     changed_event(daemon, &name, None);
     let row = row(daemon, &name);
     let config = adapters::config_of(daemon, &name);
-    let sites = adapters::sites(daemon, &declaration);
     let in_clear = adapters::in_clear_entries(daemon, &declaration);
-    Ok(diff(
-        &declaration,
-        &row,
-        &listing,
-        &config,
-        &sites,
-        &in_clear,
-    ))
+    Ok(diff(&declaration, &row, &listing, &config, &in_clear))
 }
 
 /// The review: the pin against what the server announces now, each action whole where it is new,
@@ -2516,7 +2526,6 @@ fn diff(
     row: &Row,
     now: &Listing,
     config: &std::path::Path,
-    sites: &[String],
     in_clear: &[String],
 ) -> Value {
     let empty = Listing::default();
@@ -2574,7 +2583,7 @@ fn diff(
         "actions": actions,
         "refused": now.refused,
         "limits": limits,
-        "adapter": adapter_said(declaration, now, &proposed, config, sites, in_clear),
+        "adapter": adapter_said(declaration, now, &proposed, config, in_clear),
     })
 }
 
@@ -2586,7 +2595,6 @@ fn adapter_said(
     now: &Listing,
     proposed: &BTreeMap<String, String>,
     config: &std::path::Path,
-    sites: &[String],
     in_clear: &[String],
 ) -> Value {
     match adapters::of(&now.server) {
@@ -2611,8 +2619,7 @@ fn adapter_said(
             }
             if let Reach::Command(words) = &declaration.reach
                 && let Some(why) = adapter
-                    .drops_allowlist(words, &declaration.env)
-                    .or_else(|| adapter.own_config(words, &declaration.env))
+                    .own_config(words)
                     .or_else(|| adapter.sends_elsewhere(words, &declaration.env))
             {
                 said.push_str(&format!(" {why}."));
@@ -2622,7 +2629,7 @@ fn adapter_said(
             }
             json!({"name": adapter.server, "range": adapter.range, "applies": true,
                 "actions": adapter.actions.iter().map(|own| own.name).collect::<Vec<_>>(),
-                "changed": adapter.changed(config, sites, declaration.headed), "said": said})
+                "changed": adapter.changed(config, declaration.headed), "said": said})
         }
         adapters::Found::OtherVersion(adapter) => json!({"name": adapter.server,
         "range": adapter.range, "applies": false,

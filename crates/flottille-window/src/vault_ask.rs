@@ -26,6 +26,8 @@ fn prefilled(ask: &VaultAsk) -> VaultEntry {
         username: ask.username.clone(),
         project: (!ask.every).then(|| ask.project.clone()),
         bound: ask.bound.clone(),
+        // The form is told by `connection`, which `add_asked` hands it.
+        every_project_only: false,
     }
 }
 
@@ -61,7 +63,8 @@ pub fn card(
         .bound
         .as_deref()
         .map(|bound| flottille_core::vault::use_said(bound).unwrap_or_else(|| bound.to_owned()));
-    // An entry for a connection is every project's, and the card says why.
+    // Whose entry it will be, as the form saves it: an entry a connection's server is given is
+    // every project's, and the card says why; a login's keeps the project asked.
     let project = match (&ask.connection, ask.every) {
         (Some(connection), _) => format!("For the connection {connection} (every project)"),
         (None, true) => EVERY_PROJECT.to_owned(),

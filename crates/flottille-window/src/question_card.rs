@@ -10,16 +10,21 @@
 //! whole card, once every question has a choice or words: the daemon sends the agent one message
 //! quoting each question with its answer under it (`agent.answer`). Once the agent took it, the
 //! card folds to its answers: each question on one line, what the user chose and wrote under it.
+//! A control in the header folds the card to that header (its title, its `asks you` tag and its
+//! count) while the user reads the message above it; what was chosen and written stays, and the
+//! footer stays as long as every question is answered, so that Answer is one click away.
 
 use std::cell::Cell;
 use std::collections::HashSet;
+use std::f32::consts::FRAC_PI_2;
 use std::rc::Rc;
 use std::time::Duration;
 
 use flottille_core::question::{Answer, Question};
 use gpui_design_system::{
     Block, Button, Card, ChoiceRow, Dots, Field, Icon, Toast, Type as _, changing, fade, icon,
-    palette, presence, quoted_title, sliding, space, tipped_when_cut, toast,
+    palette, presence, pressable, quoted_title, sliding, space, tipped, tipped_when_cut, toast,
+    turning,
 };
 use gpui_kit::base::input::{InputEvent, TextareaState};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -27,7 +32,7 @@ use gpui_kit::{
     AnyElement, App, AppContext as _, Bounds, Context, ElementId, Entity, FocusHandle,
     Focusable as _, FontWeight, Hsla, InteractiveElement, IntoElement, KeyDownEvent, ParentElement,
     Pixels, Render, SharedString, StatefulInteractiveElement as _, Styled, Subscription, Task,
-    TestSupportExt as _, WeakEntity, Window, canvas, div, px,
+    TestSupportExt as _, Transformation, WeakEntity, Window, canvas, div, px, radians,
 };
 
 use crate::commands::{spaced, stack};
@@ -88,6 +93,8 @@ pub struct QuestionCard {
     answered: bool,
     /// The question shown, from 0.
     current: usize,
+    /// The card is folded to its header: its own, per ask, and a new card comes unfolded.
+    folded: bool,
     /// The card was asked for from the conversation: its ring lights once, then fades.
     pulsing: bool,
     _pulse: Option<Task<()>>,
@@ -176,6 +183,7 @@ impl QuestionCard {
             focus: cx.focus_handle(),
             answered: false,
             current: 0,
+            folded: false,
             pulsing: false,
             _pulse: None,
             room: 0.,
@@ -287,8 +295,23 @@ impl QuestionCard {
         }
     }
 
-    /// Brings the focus to the card, which lights its ring once.
+    /// Whether the card is folded to its header.
+    pub fn is_folded(&self) -> bool {
+        self.folded
+    }
+
+    /// Folds the card to its header, or unfolds it: what was chosen and written stays.
+    pub fn fold(&mut self, folded: bool, cx: &mut Context<Self>) {
+        if self.folded != folded {
+            self.folded = folded;
+            cx.notify();
+        }
+    }
+
+    /// Brings the focus to the card, which lights its ring once: a folded card unfolds, the user
+    /// asked for what it holds.
     pub fn summon(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.folded = false;
         window.focus(&self.focus, cx);
         self.pulsing = true;
         self._pulse = Some(cx.spawn(async move |this, cx| {
@@ -645,6 +668,58 @@ impl QuestionCard {
             .test_support()
     }
 
+    /// The control in the header that folds the card to it and unfolds it: a chevron that turns,
+    /// its hover and press faded, its tooltip saying what a click does.
+    fn fold_control(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = palette(cx);
+        let id = ElementId::Name(format!("{}-question-fold", self.prefix()).into());
+        let tip = match self.folded {
+            true => "Unfold the question",
+            false => "Fold the question",
+        };
+        let turned = turning(
+            ElementId::Name(format!("{}-question-fold-chevron", self.prefix()).into()),
+            !self.folded,
+            window,
+            cx,
+        );
+        let button = div()
+            .id(id.clone())
+            .aria_label(tip)
+            .aria_expanded(!self.folded)
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_center()
+            .size(px(28.))
+            .rounded(px(8.))
+            .cursor_pointer()
+            .child(
+                icon(Icon::Chevron)
+                    .size(px(15.))
+                    .with_transformation(Transformation::rotate(radians(-FRAC_PI_2 * turned))),
+            )
+            .on_click(cx.listener(|this, _, _, cx| this.fold(!this.folded, cx)));
+        let button = pressable(button, move |d, hover, press| {
+            d.bg(p.hover.opacity((hover + press * 0.5).min(1.)))
+                .text_color(gpui_design_system::color::mix(p.mute, p.text, hover))
+        });
+        let frame = div()
+            .id(ElementId::Name(
+                format!("{}-question-fold-tip", self.prefix()).into(),
+            ))
+            .flex_none()
+            .child(button);
+        // The button is taller than the header's line: it overflows into the header's padding,
+        // so that the card is as tall as it was before it could fold.
+        div()
+            .flex_none()
+            .h(px(20.))
+            .flex()
+            .items_center()
+            .child(tipped(frame, tip, 28., window, cx))
+    }
+
     /// "n of m answered", faint: it fades back in when the count changes.
     fn count(&self, cx: &App) -> impl IntoElement {
         let p = palette(cx);
@@ -677,6 +752,14 @@ impl Render for QuestionCard {
         let id = |part: &str| ElementId::Name(format!("{prefix}-{part}").into());
         let sent = self.is_sent(cx);
         let ready = self.is_ready(cx);
+        let trailing = div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(space::SM)
+            .child(self.count(cx))
+            .child(self.fold_control(window, cx))
+            .into_any_element();
         let mut card = Card::new()
             .title(head(
                 &prefix,
@@ -684,7 +767,7 @@ impl Render for QuestionCard {
                 &self.title,
                 "asks you",
                 (p.wait, p.wait_bg),
-                Some(self.count(cx).into_any_element()),
+                Some(trailing),
             ))
             .meta(self.when.clone());
         let current = self.current;
@@ -698,7 +781,11 @@ impl Render for QuestionCard {
                 self.scrolled(id(&format!("question-{current}-scroll")), question),
             ),
         );
-        card = card.block(Block::new().child(self.measured(questions)));
+        card = card.block(
+            Block::new()
+                .present(id("question-block"), !self.folded)
+                .child(self.measured(questions)),
+        );
         let why = if ready {
             "Sent to the agent as one message."
         } else {
@@ -751,7 +838,12 @@ impl Render for QuestionCard {
             .child(presence(id("answer-open"), !sent, send))
             .child(presence(id("answer-sent"), sent, waits))
             .test_support();
-        card = card.block(Block::new().child(footer));
+        // Folded, the footer stays once every question is answered: Answer is one click away.
+        card = card.block(
+            Block::new()
+                .present(id("answer-block"), !self.folded || ready)
+                .child(footer),
+        );
         let ring = fade(id("question-pulse"), self.pulsing, PULSE, window, cx);
         div()
             .id(id("question-text"))
