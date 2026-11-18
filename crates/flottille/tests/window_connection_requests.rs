@@ -505,10 +505,7 @@ fn edit_opens_the_servers_form_with_the_agents_values(cx: &mut TestAppContext) {
     });
     settle(cx);
     assert!(!visible(cx, "connection-request"));
-    let section = shell.read_with(cx, |s, cx| {
-        let page = s.main().read(cx).settings_page().cloned().unwrap();
-        page.read(cx).connections().clone()
-    });
+    let section = shell.read_with(cx, |s, cx| s.connections(cx));
     let fields = section.read_with(cx, |s, _| s.form_fields().unwrap());
     let about = fields.about.read_with(cx, |f, _| f.value().to_string());
     assert_eq!(about, "Notes.", "the agent's values");
@@ -569,10 +566,7 @@ fn connections_section(
     shell: &Entity<Shell>,
     cx: &mut VisualTestContext,
 ) -> Entity<flottille_window::extensions::connections::ConnectionsSection> {
-    shell.read_with(cx, |s, cx| {
-        let page = s.main().read(cx).settings_page().cloned().unwrap();
-        page.read(cx).connections().clone()
-    })
+    shell.read_with(cx, |s, cx| s.connections(cx))
 }
 
 /// The agent's request to add `notes`, whose requests carry a bearer secret from `notes-key`.
@@ -675,7 +669,20 @@ fn the_form_opened_from_a_request_says_it_answers_it_and_cancel_leaves_it_waitin
     });
     assert_eq!(pending(&user), 1, "the request is still waiting");
     assert!(connection(&user, "almanac").is_none());
-    // A form opened on its own is not said to answer anything.
+    // The form stayed over the session; the page is where it was, and a form opened on its own,
+    // from Connections' page, is not said to answer anything.
+    click(cx, "settings");
+    until(&shell, cx, "the settings page is shown", |cx| {
+        present(cx, "settings-tabs-features")
+    });
+    click(cx, "settings-tabs-features");
+    until(&shell, cx, "Connections is a row", |cx| {
+        present(cx, "features-connections")
+    });
+    click(cx, "features-connections");
+    until(&shell, cx, "its page is in", |cx| {
+        present(cx, "new-connection")
+    });
     click(cx, "new-connection");
     until(&shell, cx, "the form opens", |cx| {
         visible(cx, "connection-modal")
@@ -757,20 +764,14 @@ fn a_missing_entry_is_made_from_the_request_s_dialog_then_accept_goes_through(
 
     // The vault's own dialog, on the entry's name and the host the request sends it to.
     click(cx, "connection-request-new-entry-notes-key");
-    until(&shell, cx, "Settings is shown", |cx| {
-        shell.read_with(cx, |s, cx| s.main().read(cx).settings_page().is_some())
-    });
-    let vault = shell.read_with(cx, |s, cx| {
-        let page = s.main().read(cx).settings_page().cloned().unwrap();
-        page.read(cx).vault().clone()
-    });
+    let vault = shell.read_with(cx, |s, cx| s.vault(cx));
     until(&shell, cx, "the vault's dialog opens", |cx| {
         vault.read_with(cx, |v, _| v.is_open())
     });
     settle(cx);
     assert!(
-        !visible(cx, "connection-request"),
-        "no dialog over a dialog"
+        visible(cx, "connection-request"),
+        "the request's dialog stays, under the entry's"
     );
     let (name, url, secret) = vault.read_with(cx, |v, _| {
         (
@@ -968,15 +969,8 @@ fn ask_row(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Option<usize> {
 }
 
 fn vault_form(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Entity<VaultSection> {
-    shell.read_with(cx, |s, cx| {
-        s.main()
-            .read(cx)
-            .settings_page()
-            .expect("Settings is shown")
-            .read(cx)
-            .vault()
-            .clone()
-    })
+    // Over the page shown, whichever it is: the form is a dialog of the window.
+    shell.read_with(cx, |s, cx| s.vault(cx))
 }
 
 fn url_of(vault: &Entity<VaultSection>, cx: &mut VisualTestContext) -> String {

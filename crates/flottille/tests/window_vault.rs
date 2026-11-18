@@ -388,7 +388,7 @@ fn a_prefilled_form_says_why_it_was_asked(cx: &mut TestAppContext) {
         ..Default::default()
     };
     section.update_in(cx, |section, window, cx| {
-        section.add_prefilled(&asked, Some("to read the tickets".into()), None, window, cx)
+        section.add_prefilled(&asked, Some("to read the tickets".into()), window, cx)
     });
     settle(cx);
     assert_eq!(

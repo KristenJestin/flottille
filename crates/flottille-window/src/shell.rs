@@ -37,6 +37,7 @@ use crate::extensions::connections::ConnectionsSection;
 use crate::extensions::specs::SpecPage;
 use crate::history::{History, Way};
 use crate::link::{self, Connect, Seen, Update};
+use crate::modals::Modals;
 use crate::model::{BellItem, Forged, LinkShown, News, Place, Preparation, Snapshot};
 use crate::open::Opener;
 use crate::page::{MainArea, Page};
@@ -141,6 +142,8 @@ pub struct Shell {
     toasts: Entity<ToastStack>,
     /// The dialog of an agent's request to write a connection, opened from its card.
     connection_request: Entity<ConnectionRequest>,
+    /// The host of the dialogs, drawn over whatever page is shown.
+    modals: Entity<Modals>,
     /// The requests for a vault entry whose dismissal was sent: their Dismiss waits for the
     /// daemon's answer.
     dismissing: HashSet<u64>,
@@ -299,8 +302,10 @@ impl Shell {
         let judge_guidance = cx.new(|_| RulesEditor::judge(this.clone()));
         let compaction_guidance = cx.new(|_| RulesEditor::compaction(this.clone()));
         let workspaces = cx.new(|_| WorkspacesFolder::new(this.clone(), None));
-        let vault = cx.new(|_| VaultSection::new(this.clone()));
-        let connections = cx.new(|_| ConnectionsSection::new(this.clone(), vault.clone()));
+        let modals = cx.new(|_| Modals::new());
+        let vault = cx.new(|_| VaultSection::new(this.clone(), modals.clone()));
+        let connections =
+            cx.new(|_| ConnectionsSection::new(this.clone(), vault.clone(), modals.clone()));
         {
             let reading = connections.clone();
             cx.defer(move |cx| reading.update(cx, |section, cx| section.read(cx)));
@@ -328,6 +333,40 @@ impl Shell {
         let bell = cx.new(|_| BellList::new(this.clone()));
         let toasts = cx.new(ToastStack::new);
         let connection_request = cx.new(|_| ConnectionRequest::new(this.clone()));
+        // The dialogs of the window, in the order they are first drawn: each is the kit's modal,
+        // and opens through the host over whichever page is shown.
+        modals.update(cx, |modals, cx| {
+            modals.add(
+                crate::vault::MODAL,
+                &vault,
+                |vault, window, cx| vault.dialog(window, cx),
+                VaultSection::is_open,
+                VaultSection::focus_handle,
+                cx,
+            );
+            modals.add(
+                crate::extensions::connections::FORM_MODAL,
+                &connections,
+                |section, window, cx| section.form_dialog(window, cx),
+                ConnectionsSection::form_is_open,
+                ConnectionsSection::form_focus,
+                cx,
+            );
+            modals.add(
+                crate::extensions::connections::REVIEW_MODAL,
+                &connections,
+                |section, window, cx| section.review_dialog(window, cx),
+                ConnectionsSection::review_is_open,
+                |_, _| None,
+                cx,
+            );
+            modals.add_view(
+                crate::extensions::connection_request::MODAL,
+                &connection_request,
+                ConnectionRequest::is_open,
+                cx,
+            );
+        });
         let add_project = {
             let this = this.clone();
             cx.new(|cx| AddProject::new(this, window, cx))
@@ -337,6 +376,7 @@ impl Shell {
             cx.new(|cx| RenameSession::new(this, window, cx))
         };
         let focus = cx.focus_handle();
+        modals.update(cx, |modals, _| modals.fallback(focus.clone()));
         let switcher = {
             let (this, focus) = (this.clone(), focus.clone());
             cx.new(|cx| Switcher::new(this, focus, window, cx))
@@ -375,6 +415,7 @@ impl Shell {
             bell,
             toasts,
             connection_request,
+            modals,
             dismissing: HashSet::new(),
             bell_open: false,
             bell_shown: Motion::settled(0.0),
@@ -867,8 +908,8 @@ impl Shell {
 
     /// The dialogs open over the page, the first opened first and the one on top last, by the
     /// id of their modal.
-    pub fn modal_stack(&self, _cx: &gpui_kit::App) -> Vec<&'static str> {
-        Vec::new()
+    pub fn modal_stack(&self, cx: &gpui_kit::App) -> Vec<&'static str> {
+        self.modals.read(cx).stack(cx)
     }
 
     /// The window's toasts, at its bottom right.
@@ -1492,12 +1533,8 @@ impl Shell {
             Outcome::VaultWritten { refused } => {
                 let section = self.settings.read(cx).vault().clone();
                 section.update(cx, |section, cx| section.written(refused, window, cx));
-                // An entry made from a project's Tracker or Vault tab: back to it.
-                if let Some((project, at)) = section.update(cx, |section, _| section.take_return())
-                {
-                    self.open_project_settings_at(&project, at, window, cx);
-                }
-                // An entry made for an agent's request to write a connection: back to it.
+                // An entry made for an agent's request to write a connection: its dialog, still
+                // open under the entry's, reads the request again.
                 if let Some(number) = section.update(cx, |section, _| section.take_request_return())
                 {
                     self.open_connection_request(number, cx);
@@ -1535,7 +1572,7 @@ impl Shell {
                 self.connection_request
                     .update(cx, |dialog, cx| dialog.answered(then, answer, cx));
                 if let Some(name) = review {
-                    self.review_connection(&name, window, cx);
+                    self.review_connection(&name, cx);
                 }
             }
             Outcome::Asked { then, answer } => {
@@ -2770,48 +2807,36 @@ impl Shell {
         }
     }
 
-    /// "New entry" in Settings' Vault, its dialog prefilled with `prefill` (a project's Tracker, a
-    /// project's Vault tab, an agent's request), `why` the agent's reason when it is one. Closed,
-    /// the window goes back to `back`, the project page it came from.
+    /// "New entry", the vault's dialog prefilled with `prefill` (a project's Tracker, a project's
+    /// Vault tab), `why` the agent's reason when it is one. It opens over the page the user is
+    /// on, and closing it leaves them there.
     pub fn add_vault_entry(
         &mut self,
         prefill: &crate::vault::VaultEntry,
         why: Option<String>,
-        back: Option<(String, crate::project_settings::Reveal)>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.open_settings_at(crate::settings::Reveal::Vault, window, cx);
-        let vault = self.settings.read(cx).vault().clone();
+        let vault = self.vault(cx);
         vault.update(cx, |vault, cx| {
-            vault.add_prefilled(prefill, why, back, window, cx)
+            vault.add_prefilled(prefill, why, window, cx)
         });
     }
 
-    /// A row of a project's Vault tab: Settings, Vault, the entry in its own dialog; closed, it
-    /// goes back to that tab. An entry gone since the row was drawn leaves nothing to open: the
-    /// window stays on the tab.
+    /// A row of a project's Vault tab: the entry in its own dialog, over the tab. An entry gone
+    /// since the row was drawn leaves nothing to open.
     pub fn replace_vault_entry_for(
         &mut self,
-        project: &str,
         name: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.open_settings_at(crate::settings::Reveal::Vault, window, cx);
-        let vault = self.settings.read(cx).vault().clone();
-        if !vault.update(cx, |vault, cx| vault.replace_in(project, name, window, cx)) {
-            self.open_project_settings_at(
-                project,
-                crate::project_settings::Reveal::Vault,
-                window,
-                cx,
-            );
-        }
+        let vault = self.vault(cx);
+        vault.update(cx, |vault, cx| vault.replace_of_project(name, window, cx));
     }
 
-    /// An agent's request for a vault entry, from its card: Settings, Vault, on a new entry
-    /// prefilled with it.
+    /// An agent's request for a vault entry, from its card: a new entry prefilled with it, over
+    /// the session.
     pub fn add_asked_vault_entry(
         &mut self,
         entry: crate::vault::VaultEntry,
@@ -2821,16 +2846,16 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.open_settings_at(crate::settings::Reveal::Vault, window, cx);
-        let vault = self.settings.read(cx).vault().clone();
+        let vault = self.vault(cx);
         vault.update(cx, |vault, cx| {
             vault.add_asked(&entry, why, host, connection, window, cx)
         });
     }
 
     /// "New entry…" on the dialog of an agent's request to write a connection, which names the
-    /// entry `name` that is not made: Settings, Vault, on a new entry named so, its address the
-    /// `host` the request sends it to. Saved or closed, the request's dialog is back.
+    /// entry `name` that is not made: a new entry named so, its address the `host` the request
+    /// sends it to, stacked over the request's dialog, which reads the request again once it is
+    /// saved.
     pub fn add_vault_entry_for_request(
         &mut self,
         number: u64,
@@ -2839,8 +2864,7 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.open_settings_at(crate::settings::Reveal::Vault, window, cx);
-        let vault = self.settings.read(cx).vault().clone();
+        let vault = self.vault(cx);
         vault.update(cx, |vault, cx| {
             vault.add_for_request(number, name, host, window, cx)
         });
@@ -2860,25 +2884,16 @@ impl Shell {
         self.dismissing.contains(&ask)
     }
 
-    /// A connection's review `Edit entry`: Settings, Vault, on the entry's dialog.
-    pub fn replace_vault_entry(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
-        self.open_settings_at(crate::settings::Reveal::Vault, window, cx);
-        let vault = self.settings.read(cx).vault().clone();
-        vault.update(cx, |vault, cx| vault.replace(name, window, cx));
-    }
-
     /// Opens the dialog of an agent's request to write a connection.
     pub fn open_connection_request(&mut self, number: u64, cx: &mut Context<Self>) {
         self.connection_request
             .update(cx, |dialog, cx| dialog.open(number, cx));
     }
 
-    /// The review of the connection `name`, over the page the user is on: Connections' page,
-    /// where the review opens (the kit's modal, as the form's Save leads to it).
-    pub fn review_connection(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let at = crate::settings::Reveal::Feature(crate::extensions::connections::NAME.into());
-        self.open_settings_at(at, window, cx);
-        let section = self.settings.read(cx).connections().clone();
+    /// The review of the connection `name`, over the page the user is on (the kit's modal, as
+    /// the form's Save leads to it).
+    pub fn review_connection(&mut self, name: &str, cx: &mut Context<Self>) {
+        let section = self.connections(cx);
         section.update(cx, |section, cx| {
             section.open_review_after_request(name, cx)
         });
@@ -2889,8 +2904,8 @@ impl Shell {
         &self.connection_request
     }
 
-    /// "Edit" on a request's dialog: Connections' page, the server's form filled with the agent's
-    /// values, whose Save answers the request `number`.
+    /// "Edit" on a request's dialog: the server's form filled with the agent's values, over the
+    /// page the user is on, whose Save answers the request `number`.
     pub fn answer_connection_request(
         &mut self,
         number: u64,
@@ -2899,9 +2914,7 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let at = crate::settings::Reveal::Feature(crate::extensions::connections::NAME.into());
-        self.open_settings_at(at, window, cx);
-        let section = self.settings.read(cx).connections().clone();
+        let section = self.connections(cx);
         section.update(cx, |section, cx| {
             section.answer_request(number, server, adding, window, cx)
         });
@@ -3285,6 +3298,15 @@ impl Render for Shell {
                     this.toggle_switcher(window, cx);
                     return;
                 }
+                // A key no field of an open dialog took: Escape closes the one on top, whichever
+                // dialog it is and wherever the focus went when the one above it closed.
+                if event.keystroke.key == "escape"
+                    && event.keystroke.modifiers == Modifiers::default()
+                    && dismiss_top_overlay(window, cx)
+                {
+                    cx.stop_propagation();
+                    return;
+                }
                 let way = match event.keystroke.key.as_str() {
                     "left" => Way::Back,
                     "right" => Way::Forward,
@@ -3332,7 +3354,7 @@ impl Render for Shell {
                         .child(self.bell.clone()),
                 )
             })
-            .child(self.connection_request.clone())
+            .child(self.modals.clone())
             .child(self.toasts.clone())
     }
 }

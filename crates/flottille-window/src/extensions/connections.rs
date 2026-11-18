@@ -19,7 +19,7 @@ use gpui_design_system::{
 };
 use gpui_kit::base::input::{Input, InputEvent, InputState};
 use gpui_kit::{
-    AnyElement, AppContext as _, Context, ElementId, Entity, FocusHandle, Focusable as _,
+    AnyElement, App, AppContext as _, Context, ElementId, Entity, FocusHandle, Focusable as _,
     InteractiveElement, IntoElement, KeyDownEvent, MouseButton, ParentElement, Render,
     SharedString, StatefulInteractiveElement, Styled, Subscription, TestSupportExt as _,
     WeakEntity, Window, div, px, relative,
@@ -30,11 +30,17 @@ use crate::actions::Command;
 use crate::commands::{
     boxed, line_field, perform_later, problem_line, section_blocks, spaced, stack,
 };
+use crate::modals::Modals;
 use crate::shell::Shell;
 use crate::vault::{VaultEntry, VaultSection};
 
 /// Its name in `extension.list`.
 pub const NAME: &str = "connections";
+
+/// The ids of the section's two dialogs, the ones the window's host holds: the server's form, and
+/// the review of a connection.
+pub const FORM_MODAL: &str = "connection-modal";
+pub const REVIEW_MODAL: &str = "connection-review";
 
 /// What the list of servers is for.
 pub const SENTENCE: &str = "Each server is one tool of every agent once you have reviewed what \
@@ -899,6 +905,8 @@ fn entry_options(
 
 pub struct ConnectionsSection {
     shell: WeakEntity<Shell>,
+    /// The window's host of dialogs: the form and the review open through it, over any page.
+    modals: Entity<Modals>,
     vault: Entity<VaultSection>,
     listed: Option<Vec<Server>>,
     rows: Listing<Server>,
@@ -940,9 +948,14 @@ pub struct ConnectionsSection {
 }
 
 impl ConnectionsSection {
-    pub fn new(shell: WeakEntity<Shell>, vault: Entity<VaultSection>) -> Self {
+    pub fn new(
+        shell: WeakEntity<Shell>,
+        vault: Entity<VaultSection>,
+        modals: Entity<Modals>,
+    ) -> Self {
         Self {
             shell,
+            modals,
             vault,
             listed: None,
             rows: Listing::default(),
@@ -1429,7 +1442,27 @@ impl ConnectionsSection {
         .read(cx)
         .focus_handle(cx);
         window.focus(&focus, cx);
+        // Over whatever page is shown, above the dialogs already open.
+        self.modals
+            .update(cx, |modals, cx| modals.open(FORM_MODAL, cx));
         cx.notify();
+    }
+
+    /// Whether the server's form is open.
+    pub fn form_is_open(&self) -> bool {
+        self.form != Form::Closed
+    }
+
+    /// Whether a connection's review is open.
+    pub fn review_is_open(&self) -> bool {
+        self.review_open
+    }
+
+    /// Where the focus goes when the form is the dialog on top: its first field.
+    pub fn form_focus(&self, cx: &App) -> Option<FocusHandle> {
+        self.fields
+            .as_ref()
+            .map(|fields| fields.name.read(cx).focus_handle(cx))
     }
 
     /// "Edit" on the dialog of an agent's request: the form on the declaration it proposes, a new
@@ -1767,6 +1800,8 @@ impl ConnectionsSection {
             folding: HashMap::new(),
         });
         self.review_open = true;
+        self.modals
+            .update(cx, |modals, cx| modals.open(REVIEW_MODAL, cx));
         // The entry a refused header names is listed by the time its dialog is asked for.
         self.vault.update(cx, |vault, cx| vault.read(cx));
         self.ask(
@@ -1813,15 +1848,8 @@ impl ConnectionsSection {
         self.review_open = false;
         self.review_after_request = false;
         let entry = entry.to_owned();
-        // After this update: the shell opens Settings, which holds this section.
-        let shell = self.shell.clone();
-        window.defer(cx, move |window, cx| {
-            shell
-                .update(cx, |shell, cx| {
-                    shell.replace_vault_entry(&entry, window, cx)
-                })
-                .ok();
-        });
+        self.vault
+            .update(cx, |vault, cx| vault.replace(&entry, window, cx));
         cx.notify();
     }
 
@@ -2182,7 +2210,8 @@ impl ConnectionsSection {
             .into_any_element()
     }
 
-    fn modal(&mut self, window: &Window, cx: &mut Context<Self>) -> Modal {
+    /// The server's form, open or closing: the window's host draws it over the page shown.
+    pub fn form_dialog(&mut self, window: &Window, cx: &mut Context<Self>) -> Modal {
         let p = palette(cx);
         let this = cx.entity().downgrade();
         let title = match &self.form {
@@ -2200,7 +2229,7 @@ impl ConnectionsSection {
             ),
             None => (title, FORM_SENTENCE.to_owned()),
         };
-        let modal = Modal::new("connection-modal", title)
+        let modal = Modal::new(FORM_MODAL, title)
             .wide()
             .open(self.form != Form::Closed)
             .on_close(move |_, cx| {
@@ -3394,13 +3423,15 @@ impl ConnectionsSection {
         }
     }
 
-    fn review_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Modal {
+    /// The review of a connection, open or closing: the window's host draws it over the page
+    /// shown.
+    pub fn review_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Modal {
         let this = cx.entity().downgrade();
         let title = self
             .review
             .as_ref()
             .map_or_else(String::new, |r| format!("Review {}", r.name));
-        let modal = Modal::new("connection-review", title)
+        let modal = Modal::new(REVIEW_MODAL, title)
             .wide()
             .takes_focus()
             .open(self.review_open)
@@ -3665,7 +3696,7 @@ impl ConnectionsSection {
 }
 
 impl Render for ConnectionsSection {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
         if let Some(listed) = self.listed.clone() {
             let now = cx.background_executor().now();
@@ -3689,8 +3720,6 @@ impl Render for ConnectionsSection {
         }
         let count = self.rows.len();
         let empty = self.listed.as_ref().is_some_and(Vec::is_empty);
-        let modal = self.modal(window, cx);
-        let review = self.review_modal(window, cx);
         let section = Section::new("connection-servers", "Servers")
             .count(count.to_string())
             .sentence(SENTENCE)
@@ -3723,8 +3752,6 @@ impl Render for ConnectionsSection {
         div()
             .text_color(p.text)
             .child(section)
-            .child(modal)
-            .child(review)
             .child(self.confirm(cx))
     }
 }

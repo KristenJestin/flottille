@@ -225,15 +225,8 @@ fn card(
 }
 
 fn vault_form(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Entity<VaultSection> {
-    shell.read_with(cx, |s, cx| {
-        s.main()
-            .read(cx)
-            .settings_page()
-            .expect("Settings is shown")
-            .read(cx)
-            .vault()
-            .clone()
-    })
+    // Over the page shown, whichever it is: the form is a dialog of the window.
+    shell.read_with(cx, |s, cx| s.vault(cx))
 }
 
 fn value(
