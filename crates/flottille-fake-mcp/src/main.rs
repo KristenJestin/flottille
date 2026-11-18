@@ -276,7 +276,7 @@ fn main() {
                 let tool = params["name"].as_str().unwrap_or_default().to_owned();
                 let started = now_ms();
                 write_log(&log, json!({"event": "received", "tool": tool}));
-                browser(&args, &log, "call");
+                browser(&log, "call");
                 let answer = script["answers"][&tool].clone();
                 if let Some(message) = answer["rpc_error"].as_str() {
                     send(&json!({"jsonrpc": "2.0", "id": id,
@@ -355,7 +355,7 @@ fn display_environment() -> Value {
 
 /// The browser on `AGENT_BROWSER_SOCKET_DIR`, started by this command when none runs there: what
 /// agent-browser's daemon does, which then serves every command of that folder until it is closed.
-fn browser(args: &[String], log: &Option<String>, by: &str) {
+fn browser(log: &Option<String>, by: &str) {
     let Some(folder) = std::env::var_os("AGENT_BROWSER_SOCKET_DIR") else {
         return;
     };
@@ -1050,7 +1050,7 @@ fn login(args: &[String], script: &Value, log: &Option<String>) {
         eprintln!("✗ no credential provider {provider}");
         std::process::exit(1);
     };
-    browser(args, log, "login");
+    browser(log, "login");
     let answer = ask(&plugin);
     let success = answer["success"] == true && answer["protocol"] == "agent-browser.plugin.v1";
     let mut line = json!({"event": "login", "args": args, "config": loaded_config(args),

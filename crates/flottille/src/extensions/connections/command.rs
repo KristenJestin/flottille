@@ -46,12 +46,6 @@ pub enum ConnectionAction {
         /// Turn it off: its tool leaves every session
         #[arg(long)]
         off: bool,
-        /// Show the browser an adapter runs, on your screen
-        #[arg(long, conflicts_with = "headless")]
-        headed: bool,
-        /// Run the browser without showing it
-        #[arg(long)]
-        headless: bool,
         #[arg(long)]
         json: bool,
     },
@@ -245,8 +239,6 @@ pub fn run(paths: &Paths, action: ConnectionAction) -> Result<ExitCode> {
             given,
             on,
             off,
-            headed,
-            headless,
             json,
         } => {
             let mut params = Map::new();
@@ -256,9 +248,6 @@ pub fn run(paths: &Paths, action: ConnectionAction) -> Result<ExitCode> {
             }
             if on || off {
                 params.insert("enabled".into(), json!(on));
-            }
-            if headed || headless {
-                params.insert("headed".into(), json!(headed));
             }
             declared(&mut params, reach, given)?;
             let answer = client.request("connection.edit", Value::Object(params))?;
