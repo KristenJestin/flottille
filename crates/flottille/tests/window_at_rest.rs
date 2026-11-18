@@ -2431,3 +2431,46 @@ fn the_window_draws_no_frame_at_rest_on_the_connection_form_over_a_session(
     settle(&shell, cx);
     assert_eq!(frames_at_rest(&shell, cx), (0, 0), "(drawn, asked)");
 }
+
+#[gpui_kit::test]
+fn the_window_draws_no_frame_at_rest_on_a_session_whose_rail_holds_a_vault_ask(
+    cx: &mut TestAppContext,
+) {
+    let user = User::with_fake_agent();
+    user.fake_script(json!({"turns": [
+        {"when": "hello", "do": [{"say": "ok"}]},
+        {"when": "log my time", "do": [
+            {"mcp": {"tool": "vault", "arguments":
+                {"action": "ask", "name": "hippocampe-key", "why": "to read the notes"}}},
+            {"say": "Asked."}]}
+    ]}));
+    let id = idle_session(&user);
+    user.call("agent.send", json!({"agent": id, "message": "log my time"}))
+        .unwrap();
+    eventually("the ask is open", || {
+        !user.call("vault.asks", json!({})).unwrap()["asks"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    });
+    let number = user.call("vault.asks", json!({})).unwrap()["asks"][0]["ask"]
+        .as_u64()
+        .unwrap();
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the session is in the tree", |cx| {
+        cx.update(|window, _| window.try_find(session_id(&id)).is_some())
+    });
+    cx.update(|window, cx| window.click(session_id(&id), cx));
+    // The card of "Waiting for you", and the line that records it in the conversation.
+    until(&shell, cx, "the card is in the rail", |cx| {
+        cx.update(|window, _| {
+            window
+                .try_find(format!("vault-ask-{number}-add"))
+                .is_some()
+        })
+    });
+    past_the_pulse(&shell, cx);
+    let (frames, asked) = frames_at_rest(&shell, cx);
+    assert_eq!(asked, 0, "no animation frame asked");
+    assert_eq!(frames, 0, "the card and the line draw no frame at rest");
+}

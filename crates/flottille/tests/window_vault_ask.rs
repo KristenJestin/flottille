@@ -795,3 +795,167 @@ fn saving_the_entry_from_a_request_answers_it_and_leaves_the_page_as_it_was(
     assert_eq!(set["name"], "jira-time", "{set}");
     std::fs::write(user.path("fake/release"), "").unwrap();
 }
+
+/// The number of the request the daemon holds open.
+fn open_ask(user: &User) -> u64 {
+    user.call("vault.asks", json!({})).unwrap()["asks"][0]["ask"]
+        .as_u64()
+        .expect("an open request")
+}
+
+/// Opens the session `id` and waits for the request's card in "Waiting for you": its number.
+fn waiting_card(
+    user: &User,
+    shell: &Entity<Shell>,
+    id: &str,
+    cx: &mut VisualTestContext,
+) -> (Entity<SessionPage>, u64) {
+    let number = open_ask(user);
+    until(shell, cx, "the session is in the tree", |cx| {
+        has(session_id(id), cx)
+    });
+    settle(cx);
+    cx.update(|window, cx| window.click(session_id(id), cx));
+    until(shell, cx, "the card of Waiting for you", |cx| {
+        has(format!("vault-ask-{number}-add"), cx)
+    });
+    settle(cx);
+    (session_page(shell, cx), number)
+}
+
+/// The conversation's row for the request: the line that records it.
+fn line_of(page: &Entity<SessionPage>, cx: &mut VisualTestContext) -> Option<String> {
+    let at = ask_row(page, cx)?;
+    label(format!("row-{at}-vault-ask-line"), cx)
+}
+
+#[gpui_kit::test]
+fn a_vault_ask_is_a_card_of_waiting_for_you_not_of_the_conversation(cx: &mut TestAppContext) {
+    let user = user();
+    let id = session(&user, "log my time");
+    let (shell, cx) = window(&user, cx);
+    let (page, number) = waiting_card(&user, &shell, &id, cx);
+
+    // Its entry, project and why are lines of the card; New entry and Dismiss are its two buttons.
+    assert_eq!(
+        label(format!("vault-ask-{number}-name"), cx).as_deref(),
+        Some("Entry: jira-time")
+    );
+    assert_eq!(
+        label(format!("vault-ask-{number}-project"), cx).as_deref(),
+        Some("Project: app")
+    );
+    assert_eq!(
+        label(format!("vault-ask-{number}-why"), cx),
+        Some(format!("Why: {WHY}"))
+    );
+    assert_eq!(
+        label(format!("vault-ask-{number}-add"), cx).as_deref(),
+        Some("New entry")
+    );
+    assert_eq!(
+        label(format!("vault-ask-{number}-dismiss"), cx).as_deref(),
+        Some("Dismiss")
+    );
+    assert!(has("rail-waiting", cx), "the section is shown");
+
+    // The conversation holds no card of it: no line of the card, no button.
+    let at = ask_row(&page, cx).expect("the conversation records the ask");
+    for part in ["add", "dismiss", "name", "project", "why"] {
+        assert!(
+            !has(format!("row-{at}-vault-ask-{part}"), cx),
+            "the conversation draws {part}"
+        );
+    }
+    std::fs::write(user.path("fake/release"), "").unwrap();
+}
+
+#[gpui_kit::test]
+fn the_conversation_says_a_vault_ask_was_made_without_a_button(cx: &mut TestAppContext) {
+    let user = user();
+    let id = session(&user, "log my time");
+    let (shell, cx) = window(&user, cx);
+    let (page, _) = waiting_card(&user, &shell, &id, cx);
+
+    assert_eq!(
+        line_of(&page, cx).as_deref(),
+        Some("asked for the vault entry jira-time · waiting for you")
+    );
+    let at = ask_row(&page, cx).unwrap();
+    assert!(!has(format!("row-{at}-vault-ask-add"), cx), "no button");
+    assert!(!has(format!("row-{at}-vault-ask-dismiss"), cx), "no button");
+    std::fs::write(user.path("fake/release"), "").unwrap();
+}
+
+#[gpui_kit::test]
+fn saving_the_entry_answers_the_card_and_it_leaves(cx: &mut TestAppContext) {
+    let user = user();
+    let id = session(&user, "log my time");
+    let (shell, cx) = window(&user, cx);
+    let (page, number) = waiting_card(&user, &shell, &id, cx);
+
+    cx.update(|window, cx| window.click(format!("vault-ask-{number}-add"), cx));
+    settle(cx);
+    let vault = the_vault(&shell, cx);
+    let secret = vault
+        .read_with(cx, |v, _| v.secret_field().cloned())
+        .expect("the form's secret");
+    cx.update(|window, cx| secret.update(cx, |f, cx| f.set_value(SECRET, window, cx)));
+    let username = vault
+        .read_with(cx, |v, _| v.username_field().cloned())
+        .expect("the form's username");
+    cx.update(|window, cx| username.update(cx, |f, cx| f.set_value("dev@example.com", window, cx)));
+    cx.update(|window, cx| window.click("save-vault-entry", cx));
+    until(&shell, cx, "the card leaves", |cx| {
+        settle(cx);
+        !has(format!("vault-ask-{number}-add"), cx)
+    });
+    assert_eq!(
+        line_of(&page, cx).as_deref(),
+        Some("asked for the vault entry jira-time · saved")
+    );
+    std::fs::write(user.path("fake/release"), "").unwrap();
+}
+
+#[gpui_kit::test]
+fn dismissing_a_vault_ask_leaves_the_card_and_says_it_in_the_conversation(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    let id = session(&user, "log my time");
+    let (shell, cx) = window(&user, cx);
+    let (page, number) = waiting_card(&user, &shell, &id, cx);
+
+    cx.update(|window, cx| window.click(format!("vault-ask-{number}-dismiss"), cx));
+    until(&shell, cx, "the card leaves", |cx| {
+        settle(cx);
+        !has(format!("vault-ask-{number}-add"), cx)
+    });
+    assert_eq!(
+        line_of(&page, cx).as_deref(),
+        Some("asked for the vault entry jira-time · dismissed")
+    );
+    assert!(
+        !has("rail-waiting", cx),
+        "nothing waits: the section folds away"
+    );
+    std::fs::write(user.path("fake/release"), "").unwrap();
+}
+
+#[gpui_kit::test]
+fn a_vault_ask_marks_the_session_as_waiting_in_the_sidebar(cx: &mut TestAppContext) {
+    let user = user();
+    let id = session(&user, "log my time");
+    let (shell, cx) = window(&user, cx);
+
+    // The session is not opened: its row says it waits for the user, and the bell rings.
+    until(&shell, cx, "the row says it waits", |cx| {
+        shell.read_with(cx, |shell, cx| {
+            shell.session(&id).and_then(|row| row.read(cx).mark())
+        }) == Some(flottille_window::state::AgentState::NeedsYou)
+    });
+    until(&shell, cx, "the bell rings", |cx| {
+        shell.read_with(cx, |shell, cx| shell.bell_sessions(cx).len()) == 1
+    });
+    std::fs::write(user.path("fake/release"), "").unwrap();
+}
