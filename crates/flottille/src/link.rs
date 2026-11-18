@@ -51,6 +51,8 @@ const SAID_AGAIN: Duration = Duration::from_secs(60);
 const MOST_SAID: usize = 16;
 /// How often the addresses one machine told are written, at most: the latest told is kept.
 const LEARN_EVERY: Duration = Duration::from_secs(2);
+/// How long the links wait at start for the hub's list, before they go on with the one kept.
+const FIRST_LIST: Duration = Duration::from_secs(10);
 /// What a client's request over a link is answered, until they are served (#813).
 const NOT_SERVED: &str = "requests from another machine's clients are not served yet";
 
@@ -156,6 +158,12 @@ impl Seen {
     }
 }
 
+/// Emits an event of the daemon's (`docs/events.md`), from the link and the hub's session.
+pub(crate) type Emit = Arc<dyn Fn(&str, Value) + Send + Sync>;
+
+/// Why a link to a machine removed from the member list is closed.
+const REMOVED: &str = "it was removed from the member list";
+
 /// The daemon's side of the link.
 pub struct Remote {
     endpoint: Endpoint,
@@ -175,6 +183,20 @@ pub struct Remote {
     writing: Mutex<()>,
     /// The control session to the hub.
     control: std::sync::OnceLock<Arc<crate::hub_session::Control>>,
+    /// `None` once the hub's list was taken, or the hub could not give one at start; since when
+    /// the daemon waits for one, at start and after the session to the hub was lost (a machine
+    /// that wakes from a suspend). Meanwhile, `first_list` at most, no link is accepted or
+    /// dialled, so that a machine off during a removal never links to the removed machine by the
+    /// list it kept.
+    heard: tokio::sync::watch::Sender<Option<tokio::time::Instant>>,
+    /// `FIRST_LIST`; shorter in a test.
+    first_list: Duration,
+    /// The machines a link of which waits for the hub's list.
+    waiting: Mutex<HashSet<[u8; 32]>>,
+    /// The clocks as the session to the hub last saw them: a machine that woke from a suspend is
+    /// told at once, before the session's next round sees it and ends.
+    awake: Mutex<crate::hub_session::Awake>,
+    emit: Emit,
 }
 
 /// Starts the link: the endpoint, the loop that accepts and the one that dials. A link that
@@ -183,6 +205,7 @@ pub fn start(
     paths: &Paths,
     key: MachineKey,
     stopping: tokio::sync::watch::Receiver<bool>,
+    emit: Emit,
 ) -> Result<Arc<Remote>, String> {
     let endpoint = match crate::remote::listen(paths)? {
         Some(listen) => Endpoint::bind(&key, listen),
@@ -195,12 +218,17 @@ pub fn start(
             "flottille daemon: the link listens nowhere ([remote] listen in daemon.toml); it dials"
         ),
     }
-    let remote = Arc::new(Remote::new(endpoint, crate::remote::folder(paths)));
+    let remote = Arc::new(Remote::new(
+        endpoint,
+        crate::remote::folder(paths),
+        emit.clone(),
+    ));
     // Read before the first link comes in, which is judged by the file as last read.
     remote.peers();
     let control = Arc::new(crate::hub_session::Control::new(
         key,
         crate::remote::folder(paths),
+        emit,
     ));
     let _ = remote.control.set(control.clone());
     tokio::spawn(accept(remote.clone()));
@@ -214,6 +242,19 @@ pub fn start(
 }
 
 /// This build's hello; a test build may make it another's.
+/// The wall clock; in a test build, as far ahead as the file a test names says, in seconds, to
+/// play a suspend.
+pub(crate) fn wall_now() -> SystemTime {
+    let now = SystemTime::now();
+    let ahead = cfg!(debug_assertions)
+        .then(|| std::env::var_os("FLOTTILLE_TEST_WALL_AHEAD_FILE"))
+        .flatten()
+        .and_then(|file| std::fs::read_to_string(file).ok())
+        .and_then(|text| text.trim().parse().ok())
+        .map(Duration::from_secs);
+    ahead.map_or(now, |ahead| now + ahead)
+}
+
 pub(crate) fn hello() -> Hello {
     cfg!(debug_assertions)
         .then(|| std::env::var("FLOTTILLE_TEST_LINK_HELLO").ok())
@@ -230,7 +271,7 @@ fn now() -> u64 {
 }
 
 impl Remote {
-    fn new(endpoint: Endpoint, folder: PathBuf) -> Remote {
+    fn new(endpoint: Endpoint, folder: PathBuf, emit: Emit) -> Remote {
         Remote {
             endpoint,
             folder,
@@ -247,6 +288,11 @@ impl Remote {
             learning: Mutex::new(HashMap::new()),
             writing: Mutex::new(()),
             control: std::sync::OnceLock::new(),
+            heard: tokio::sync::watch::Sender::new(Some(tokio::time::Instant::now())),
+            first_list: FIRST_LIST,
+            waiting: Mutex::new(HashSet::new()),
+            awake: Mutex::new(crate::hub_session::Awake::now()),
+            emit,
         }
     }
 
@@ -257,9 +303,12 @@ impl Remote {
 
     /// The machines the member list says this one trusts: `(name, key, addresses)`, the addresses
     /// those the hub told, or, when it told none, those kept. Written over the peers' file, the
-    /// addresses each machine told kept beside; a machine no longer there is let go at the next
+    /// addresses each machine told kept beside; the link to a machine no longer there is cut at
+    /// once, and it is let go at the next
     /// round.
     pub(crate) fn trust_machines(&self, machines: Vec<(String, PublicKey, Option<Vec<String>>)>) {
+        let trusted: HashSet<[u8; 32]> =
+            machines.iter().map(|(_, key, _)| *key.as_bytes()).collect();
         let file = self.folder.join(PEERS_FILE);
         {
             let _writing = self.writing.lock().unwrap();
@@ -291,6 +340,74 @@ impl Remote {
             }
         }
         self.peers();
+        // A machine removed from the list: its link is cut now, not when it next says something.
+        for (key, seen) in self.seen.lock().unwrap().iter() {
+            if !trusted.contains(key)
+                && let Some((_, link, _)) = &seen.link
+            {
+                link.close(REMOVED);
+            }
+        }
+    }
+
+    /// The hub's list was taken, or the hub cannot give one now: the links go on.
+    pub(crate) fn heard_hub(&self) {
+        self.heard.send_replace(None);
+    }
+
+    /// The session to the hub was lost: the links wait for the next list again.
+    pub(crate) fn lost_hub(&self) {
+        self.heard.send_replace(Some(tokio::time::Instant::now()));
+    }
+
+    /// The clocks the session to the hub saw at its round.
+    /// A sleep since the pair stored is judged before it is overwritten: the session's round or
+    /// start would otherwise hide it from `holding`.
+    pub(crate) fn awake_at(&self, awake: crate::hub_session::Awake) {
+        let slept = {
+            let mut stored = self.awake.lock().unwrap();
+            let slept = stored.slept_until(&awake);
+            *stored = awake;
+            slept
+        };
+        if slept {
+            self.lost_hub();
+        }
+    }
+
+    /// Whether new links wait for the hub's list now: also when the machine slept since the
+    /// session's last round, the list it kept having missed what changed meanwhile.
+    fn holding(&self) -> bool {
+        let slept = {
+            let mut awake = self.awake.lock().unwrap();
+            let now = crate::hub_session::Awake::now();
+            let slept = awake.slept_until(&now);
+            if slept {
+                *awake = now;
+            }
+            slept
+        };
+        if slept {
+            self.lost_hub();
+        }
+        self.heard
+            .borrow()
+            .is_some_and(|since| since.elapsed() < self.first_list)
+    }
+
+    /// Until the hub was heard, `first_list` at most from when the daemon started waiting.
+    async fn hub_heard(&self) {
+        let mut heard = self.heard.subscribe();
+        loop {
+            let Some(since) = *heard.borrow_and_update() else {
+                return;
+            };
+            let until = since + self.first_list;
+            match tokio::time::timeout_at(until, heard.changed()).await {
+                Ok(Ok(())) => continue,
+                _ => return,
+            }
+        }
     }
 
     /// Closes every link, telling the other machines.
@@ -495,6 +612,10 @@ impl Remote {
             "flottille daemon: linked to {name} (protocol {})",
             link.protocol()
         );
+        (self.emit)(
+            "remote.connected",
+            json!({"name": name, "fingerprint": link.peer().fingerprint()}),
+        );
         tokio::spawn(tell(link.clone(), self.told_addresses()));
         tokio::spawn(serve(self.clone(), link, name, generation));
     }
@@ -642,13 +763,29 @@ async fn accept(remote: Arc<Remote>) {
         .map(Duration::from_millis);
     while let Some(accepting) = remote.endpoint.accept().await {
         let key = accepting.peer();
-        let Some(peer) = remote.trusted(&key) else {
+        // A key the list kept does not trust is refused now, whatever comes: a machine the next
+        // list adds dials again. Only one it trusts waits, so that no one piles up waiting links.
+        if remote.trusted(&key).is_none() {
             remote.say_refused(&key);
             accepting.refuse(NOT_TRUSTED);
             continue;
-        };
+        }
         let remote = remote.clone();
         tokio::spawn(async move {
+            // Judged by the hub's list, not by the one kept, while one is on its way: one link of
+            // a key waits at most.
+            if remote.holding() {
+                let Some(_waiting) = Waiting::of(&remote, &key) else {
+                    accepting.refuse(WAITS_ALREADY);
+                    return;
+                };
+                remote.hub_heard().await;
+            }
+            let Some(peer) = remote.trusted(&key) else {
+                remote.say_refused(&key);
+                accepting.refuse(NOT_TRUSTED);
+                return;
+            };
             let traffic = accepting.traffic();
             match accepting.handshake(&remote.hello, &peer.name).await {
                 Ok(link) if traffic == Traffic::Machine => {
@@ -661,6 +798,31 @@ async fn accept(remote: Arc<Remote>) {
                 Err(error) => remote.failed(*key.as_bytes(), &peer.name, &error),
             }
         });
+    }
+}
+
+/// Why a second link of a machine whose first one waits for the hub's list is refused.
+const WAITS_ALREADY: &str = "a link from this machine waits already for the hub's list";
+
+/// A key whose link waits for the hub's list, until the link is judged.
+struct Waiting<'a> {
+    remote: &'a Remote,
+    key: [u8; 32],
+}
+
+impl<'a> Waiting<'a> {
+    /// `None` when a link of `key` waits already.
+    fn of(remote: &'a Remote, key: &PublicKey) -> Option<Waiting<'a>> {
+        let key = *key.as_bytes();
+        let first = remote.waiting.lock().unwrap().insert(key);
+        // Made only for the first: the guard of another would let the first one's key go.
+        first.then(|| Waiting { remote, key })
+    }
+}
+
+impl Drop for Waiting<'_> {
+    fn drop(&mut self) {
+        self.remote.waiting.lock().unwrap().remove(&self.key);
     }
 }
 
@@ -684,6 +846,10 @@ async fn serve(remote: Arc<Remote>, link: Link, name: String, generation: u64) {
             .is_some_and(|(at, _, _)| *at == generation)
     {
         eprintln!("flottille daemon: the link to {name} ended: {why}");
+        (remote.emit)(
+            "remote.disconnected",
+            json!({"name": name, "fingerprint": link.peer().fingerprint(), "reason": why}),
+        );
         seen.link = None;
         seen.set(PeerState::Offline, Some(why));
         seen.next_try = Instant::now();
@@ -705,6 +871,9 @@ async fn dial(remote: Arc<Remote>, mut stopping: tokio::sync::watch::Receiver<bo
         tokio::select! {
             _ = round.tick() => {}
             _ = stopping.wait_for(|stopping| *stopping) => return,
+        }
+        if remote.holding() {
+            continue;
         }
         remote.tell_if_changed();
         for line in remote.refused_lines(None, Instant::now()) {
@@ -852,6 +1021,47 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Result<Va
                 .await
                 .map_err(Failure::refused)
         }
+        "remote.members" => control_of(&remote)?.members().map_err(Failure::refused),
+        "remote.requests" => control_of(&remote)?.requests().map_err(Failure::refused),
+        "remote.invite" => {
+            let ask: flottille_link::InvitationAsk = param(&params, "ask")?;
+            control_of(&remote)?
+                .invite(ask)
+                .await
+                .map_err(Failure::refused)
+        }
+        "remote.refuse" => {
+            let request: String = param(&params, "request")?;
+            control_of(&remote)?
+                .refuse(&request)
+                .await
+                .map_err(Failure::refused)
+        }
+        "remote.change" => {
+            let change: flottille_link::Change = param(&params, "change")?;
+            control_of(&remote)?
+                .change(change)
+                .await
+                .map_err(Failure::refused)
+        }
+        "remote.join" => {
+            let key: PublicKey = param(&params, "key")?;
+            let control = control_of(&remote)?;
+            // The answer of the join accepted for `key`, which a command gone did not take; no
+            // join is asked.
+            if params["resume"] == json!(true) {
+                return Ok(control.accepted(&key).await);
+            }
+            let code: String = param(&params, "code")?;
+            control.join(&code, key).await.map_err(Failure::refused)
+        }
+        "remote.declare" => {
+            let change: flottille_link::Change = param(&params, "change")?;
+            control_of(&remote)?
+                .declare(change)
+                .await
+                .map_err(Failure::refused)
+        }
         "remote.address.add" | "remote.address.remove" => {
             let text = params["address"].as_str().unwrap_or_default();
             let address = Address::parse(text)
@@ -894,6 +1104,24 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Result<Va
             format!("unknown method `{method}`"),
         )),
     }
+}
+
+/// The parameter `name` of a method, as `T`.
+fn param<T: for<'de> Deserialize<'de>>(params: &Value, name: &str) -> Result<T, Failure> {
+    serde_json::from_value(params.get(name).cloned().unwrap_or(Value::Null)).map_err(|error| {
+        Failure::new(
+            flottille_protocol::code::INVALID_PARAMS,
+            format!("{name}: {error}"),
+        )
+    })
+}
+
+fn control_of(remote: &Remote) -> Result<Arc<crate::hub_session::Control>, Failure> {
+    remote
+        .control
+        .get()
+        .cloned()
+        .ok_or_else(|| Failure::new(flottille_protocol::code::UNAVAILABLE, "the link is not up"))
 }
 
 fn remote_of(daemon: &Daemon) -> Result<Arc<Remote>, Failure> {
@@ -974,7 +1202,10 @@ mod tests {
         };
         write_json(&folder.join(PEERS_FILE), &peers).unwrap();
         let endpoint = Endpoint::dialler(&key).unwrap();
-        (Remote::new(endpoint, folder.to_owned()), keys)
+        (
+            Remote::new(endpoint, folder.to_owned(), Arc::new(|_: &str, _| {})),
+            keys,
+        )
     }
 
     fn told(folder: &Path, key: &PublicKey) -> Vec<String> {
@@ -986,6 +1217,137 @@ mod tests {
             "the given addresses are kept"
         );
         peer.told.clone()
+    }
+
+    /// Whether `remote` would let a link go on within `within`.
+    async fn released(remote: &Remote, within: Duration) -> bool {
+        tokio::time::timeout(within, remote.hub_heard())
+            .await
+            .is_ok()
+    }
+
+    #[tokio::test]
+    async fn after_the_hub_session_is_lost_links_wait_for_the_next_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let (remote, _) = remote_in(dir.path(), 1);
+        let remote = Arc::new(remote);
+        remote.heard_hub();
+        assert!(released(&remote, Duration::from_millis(100)).await);
+
+        // The session is lost, as on a machine that wakes from a suspend: no link is accepted or
+        // dialled by the list kept until the hub sends one.
+        remote.lost_hub();
+        assert!(remote.holding());
+        assert!(!released(&remote, Duration::from_millis(500)).await);
+        let waiting = tokio::spawn({
+            let remote = remote.clone();
+            async move { remote.hub_heard().await }
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!waiting.is_finished());
+        remote.heard_hub();
+        tokio::time::timeout(Duration::from_millis(500), waiting)
+            .await
+            .expect("the list releases the links at once")
+            .unwrap();
+        assert!(!remote.holding());
+    }
+
+    #[tokio::test]
+    async fn a_sleep_between_two_rounds_is_taken_where_the_clocks_are_told() {
+        let dir = tempfile::tempdir().unwrap();
+        let (remote, _) = remote_in(dir.path(), 1);
+        let (wall, steady) = (std::time::SystemTime::now(), std::time::Instant::now());
+        let at = |seconds: u64, ran: u64| {
+            crate::hub_session::Awake::new(
+                wall + Duration::from_secs(seconds),
+                steady + Duration::from_secs(ran),
+            )
+        };
+        remote.heard_hub();
+        remote.awake_at(at(0, 0));
+        // Rounds a second apart: the hub's list is trusted.
+        remote.awake_at(at(1, 1));
+        assert!(!remote.holding());
+
+        // The clocks told after a suspend, at a round or at a session's start: the stored pair is
+        // not overwritten before the sleep is judged, so the links wait for the next list.
+        remote.awake_at(at(3601, 2));
+        assert!(remote.holding());
+    }
+
+    #[tokio::test]
+    async fn links_are_released_when_the_hub_sends_no_list_within_the_bound() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut remote, _) = remote_in(dir.path(), 1);
+        remote.first_list = Duration::from_secs(3);
+        // As at start, then after a session lost: held until the bound, then released with no
+        // list. The hold starts here, not when the remote was made, so that the wait for it is
+        // not what a loaded machine took to make it.
+        for _ in 0..2 {
+            remote.lost_hub();
+            assert!(remote.holding());
+            assert!(!released(&remote, Duration::from_millis(100)).await);
+            assert!(released(&remote, Duration::from_secs(20)).await);
+            assert!(!remote.holding());
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unknown_key_is_refused_at_once_during_a_hold() {
+        let dir = tempfile::tempdir().unwrap();
+        let (remote, _) = remote_in(dir.path(), 1);
+        let key = MachineKey::load_or_make(&dir.path().join("key")).unwrap();
+        let mut remote = Remote {
+            endpoint: Endpoint::bind(&key, "127.0.0.1:0".parse().unwrap()).unwrap(),
+            ..remote
+        };
+        // A hold far longer than any of the waits below: a link that waits for it is told apart
+        // from one refused at once, however loaded the machine is.
+        remote.first_list = Duration::from_secs(120);
+        let remote = Arc::new(remote);
+        remote.peers();
+        remote.lost_hub();
+        let at = [remote.endpoint.listening().unwrap()];
+        let public = key.public();
+        tokio::spawn(accept(remote.clone()));
+        let dial = |from: MachineKey| async move {
+            let endpoint = Endpoint::dialler(&from).unwrap();
+            endpoint
+                .connect(public, &at, Traffic::Machine, &hello(), "this")
+                .await
+        };
+
+        // A key the list kept does not trust: refused now, not once the hold ends.
+        let stranger = MachineKey::load_or_make(&dir.path().join("stranger")).unwrap();
+        let refused = tokio::time::timeout(Duration::from_secs(5), dial(stranger))
+            .await
+            .expect("an unknown key waits for the hold");
+        assert!(
+            matches!(refused, Err(LinkError::Refused { .. })),
+            "{:?}",
+            refused.err()
+        );
+
+        // A key it trusts waits for the list; a second link of the same key meanwhile does not.
+        let trusted = || MachineKey::load_or_make(&dir.path().join("peer-0")).unwrap();
+        let waiting = tokio::spawn(dial(trusted()));
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(!waiting.is_finished());
+        let again = tokio::time::timeout(Duration::from_secs(5), dial(trusted()))
+            .await
+            .expect("a second link of a key that waits waits too");
+        assert!(
+            matches!(again, Err(LinkError::Refused { .. })),
+            "{:?}",
+            again.err()
+        );
+        remote.heard_hub();
+        let linked = tokio::time::timeout(Duration::from_secs(5), waiting)
+            .await
+            .expect("the list releases the link waiting")
+            .unwrap();
+        assert!(linked.is_ok(), "{:?}", linked.err());
     }
 
     #[tokio::test]

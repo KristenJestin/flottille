@@ -988,6 +988,41 @@ with the reason. No method answers a private key.
   `invalid-params` for what is not an address; one declared already changes nothing.
 - `remote.address.remove {address}` removes one, answers and tells as `add` does; `not-found` when
   it was not declared.
+- `remote.members` answers the member list as this machine last checked it: `{"hub", "root",
+  "head", "this", "members": [{"name", "key", "fingerprint", "role", "added_by", "machine"}]}`,
+  `head` the hash of its last change (what a client signs its next change after), `this` the name
+  of the member whose machine this is (`null` when none is), `added_by` the name of the member
+  whose signature added it, `machine` the fingerprint of the machine it declared, or `null`.
+  `refused` when this machine is not set up with a hub.
+- `remote.invite {ask}` carries a member's signed ask for an invitation
+  (`flottille_link::InvitationAsk`, signed by the client with the device key) to the hub, and
+  answers `{"code", "url", "hub", "inviter", "fingerprint", "expires"}`: the invitation's code,
+  which is also the QR's text (`docs/remote.md`, "Pairing"), valid 5 minutes, once, `expires` in
+  milliseconds since the Unix epoch. `refused` with the hub's sentence (a viewer may not invite,
+  an ask signed more than 5 minutes from the hub's time, or taken already).
+- `remote.requests` answers the join requests that wait for this machine's member: `[{"request",
+  "key", "words", "inviter"}]`, `request` the new device's fingerprint, which names it, `words`
+  the four verification words the new device shows too.
+- `remote.refuse {request}` refuses one; it answers `{"refused": <request>}`.
+- `remote.change {change}` carries a member's signed change of the list (`flottille_link::Change`:
+  an addition, which accepts a join request with the new device's name and role, a removal or a
+  renaming), signed by the client after `remote.members`' `head`. It answers `remote.members` once
+  the hub sent back a list that holds it and this machine checked it; `refused` with the hub's
+  sentence, or when the hub withheld it (`the hub withheld this change: …`).
+- `remote.join {code, key}` makes this machine, set up with no hub, join with the invitation
+  `code`, `key` being the new device's public key, which its client made. The daemon reaches the
+  invitation's hub with its machine key, pinning the hub's key the code holds, and waits until the
+  member that invited accepts or refuses the request, 5 minutes at most. It answers once a list
+  came that checks back to its own root and holds the device's entry, signed by the member of the
+  invitation: `{"head", "name", "role", "added_by", "hub"}`. `refused` when the request was refused
+  or expired, when the code is not one, when the key was removed from the list, or when the
+  machine is set up already. With `{key, "resume": true}`, no join is asked: the answer of the
+  join this daemon accepted for `key`, which a command gone did not take (a join still waiting is
+  waited for), `null` when none holds it as a member. Its class is `Local`.
+- `remote.declare {change}` then carries the declaration of this machine (`machine`), signed by
+  the device that joined after `head`; the daemon claims it with the machine key, pins the hub
+  (`remote/hub.json`) once the hub sent it back, and keeps the session. It answers `{"url", "hub",
+  "root", "name"}`. `Local`.
 
 ### The skill methods
 

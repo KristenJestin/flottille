@@ -429,6 +429,11 @@ impl Members {
         self.members.iter().find(|member| member.key == *key)
     }
 
+    /// Whether `key` was a member once and was removed: it is never added again.
+    pub fn was_removed(&self, key: &PublicKey) -> bool {
+        self.removed.contains(key)
+    }
+
     /// The member whose machine holds `machine`.
     pub fn by_machine(&self, machine: &PublicKey) -> Option<&Member> {
         self.members
