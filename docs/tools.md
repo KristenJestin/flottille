@@ -1705,7 +1705,9 @@ itself (`fs_*`, `run`, `workspace`, git stay its own project's); the session doe
   …`; with `new_workspace`, the workspace it makes in that project, as `workspace create` says
   it). A project that is not registered, a workspace that project does not have, and a child
   (`refused: a child works in your project, never in another: …`) are refused before anything is
-  asked. Refused by the user, nothing starts and the caller is told so.
+  asked. With `new_workspace`, the other project's setup steps are checked as within a project: a
+  step the gate refuses refuses the launch, and the services its tasks start are said as that
+  project's place reaches them. Refused by the user, nothing starts and the caller is told so.
 - **A real session of that project**: a root of it (`launched_by`, `led_by` as for any session an
   agent starts), in that project's `workspace`, `new_workspace` or `main` (its folder, when
   neither is named), shown in that project in the sidebar, where its row says which session of
@@ -1718,11 +1720,13 @@ itself (`fs_*`, `run`, `workspace`, git stay its own project's); the session doe
 - **Writing to it asks the user once**, though the caller started it: the caller's first
   `session_send` to it is held for the user's leave as a first message to a session it did not
   start is ("Sessions that talk to each other"); allowed, the caller writes to it from then on
-  without asking, until the leave is withdrawn. It reads it freely, as within a project, and
-  ends it as its own (`agent_stop`) while it leads it.
+  without asking, until the leave is withdrawn; a leave withdrawn while a call is judged stops
+  that call, a read as a message. One leave covers reading and writing: a read and a message for
+  the same pair wait on one card, not two. It reads it freely, as within a project, and ends it
+  as its own (`agent_stop`) while it leads it.
 - The answer says where it went (`… in main, the project folder of project kit.`) and that the
-  first message asks the user once; the window's step names the project (`started session
-  Make the fonts settable in kit`).
+  first message asks the user once; the window's step names the project when it is another one
+  than the caller's (`started the session "Make the fonts settable" in kit`).
 
 #### Following a session
 
@@ -1755,7 +1759,11 @@ remove`: a branch held by another local branch is *not lost*, which is no claim 
 integrated, "The workspace").
 When a led session has reported, is idle, and its work is integrated, the pilot is reminded once
 per session, by a delivery `led-integrated` checked at the end of a turn of either: `"Login"
-(agent …) reported and its branch is in main: stop it and remove its workspace?`. Integrated means
+(agent …) reported and its branch is in main: stop it and remove its workspace?`. For a session
+led in another project the reminder only says to stop it, and that its workspace is in that
+project, which the pilot's `workspace` tool does not reach: it is that session's, or that
+project's, to remove, never one of the pilot's own (a workspace of the same name in the pilot's
+project is none of it). Integrated means
 in **every** repository that holds commits of its own: its pull request is merged and the branch
 is no further than the commit it merged (the base is the branch the pull request aimed at), or it
 has none and the branch is contained in the base the workspace started from. Another branch

@@ -370,7 +370,9 @@ user.
 A led session stays open after its report: once its work is integrated, its pilot stops it and
 removes its workspace. When a led session reported, is idle and its work is integrated, its
 pilot is reminded once, by `led-integrated` (`"Login" (agent …) reported and its branch is in
-main: stop it and remove its workspace?`), checked at the end of a turn of either. Integrated
+main: stop it and remove its workspace?`; for a session led in another project, only to stop it:
+its workspace is in that project, which the pilot's tools do not reach), checked at the end of a
+turn of either. Integrated
 means in the **base** the work goes into, never in any other branch (a second session's branch
 started from this one holds it too): in every repository that holds commits of its own, the forge
 says its pull request is merged and the branch is no further than the commit it merged (the
