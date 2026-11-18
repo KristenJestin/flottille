@@ -91,6 +91,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       rust: ${{ steps.decide.outputs.rust }}
+      hub: ${{ steps.hub.outputs.hub }}
     steps:
       - if: github.event_name == 'pull_request'
         uses: actions/checkout@v4
@@ -125,6 +126,38 @@ jobs:
           if [ -z "$files" ]; then rust=true; fi
           if [ "$rust" = false ]; then echo "::notice::Only apps/android/ and site/ changed: the Rust suite does not run."; fi
           echo "rust=$rust" >> "$GITHUB_OUTPUT"
+      # The hub's jobs (`hub`) are not in every pull request's CI: only in one that changes the hub,
+      # what it is built from, or the files that build and publish it. A push always runs them: a
+      # push publishes. A failure here says nothing (`hub` stays empty): they then run.
+      - name: Does the hub have to be built and checked
+        id: hub
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if [ "$EVENT_NAME" != pull_request ]; then
+            echo "::notice::$EVENT_NAME: the hub is built."
+            echo "hub=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          files=$(git diff --name-only --no-renames "$BASE...$HEAD")
+          hub=false
+          while IFS= read -r path; do
+            case "$path" in
+              crates/flottille-hub/* | crates/flottille-link/* | crates/flottille-protocol/* | \
+                Cargo.toml | Cargo.lock | LICENSE | \
+                .github/workflows/ci.yml | .github/workflows/release.yml | \
+                tools/package-hub.sh | tools/check-static.sh | tools/check-hub-image.sh)
+                echo "::notice::$path: the hub is built."
+                hub=true
+                break
+                ;;
+            esac
+          done <<< "$files"
+          if [ -z "$files" ]; then hub=true; fi
+          if [ "$hub" = false ]; then echo "::notice::Nothing of the hub or its release changed: it is not built."; fi
+          echo "hub=$hub" >> "$GITHUB_OUTPUT"
 
   # No real agent, no real configuration: the suites run against a fake ACP agent and throwaway
   # repositories (see AGENTS.md, Testing).
@@ -209,7 +242,7 @@ jobs:
   # partitions (failed, cancelled, never started), so that it never waits on a job skipped.
   # `check` and `test` skipped are a pass only when `changes` said the suite is not needed.
   verify:
-    needs: [verified-on-dev, changes, check, test]
+    needs: [verified-on-dev, changes, check, test, hub]
     # Skipped only when this commit passed it on dev (on main, see `verified-on-dev`).
     if: ${{ always() && needs.verified-on-dev.outputs.verified != 'true' }}
     runs-on: ubuntu-latest
@@ -220,7 +253,14 @@ jobs:
           CHECK: ${{ needs.check.result }}
           TEST: ${{ needs.test.result }}
           RUST: ${{ needs.changes.outputs.rust }}
+          HUB: ${{ needs.hub.result }}
         run: |
+          # `publish` needs `hub`: a red hub check merged would stop every release. Skipped (a pull
+          # request that leaves the hub alone) is fine.
+          if [ "$HUB" = failure ] || [ "$HUB" = cancelled ]; then
+            echo "::error::hub: $HUB."
+            exit 1
+          fi
           if [ "$CHECK" = success ] && [ "$TEST" = success ]; then exit 0; fi
           if [ "$RUST" = false ] && [ "$CHECK" = skipped ] && [ "$TEST" = skipped ]; then
             echo "::notice::The Rust suite was not needed for this change."
@@ -359,14 +399,111 @@ jobs:
           path: ${{ runner.temp }}/release
           retention-days: 1
 
+  # The hub (docs/releases.md, "What CI publishes"): its static binary for both architectures,
+  # the archives and the image, and the three scenarios of its release as steps. On a pull request
+  # that changes the hub or its release (`changes`), and on every push that publishes, where it
+  # holds the files `publish` puts beside Flottille's archives. Like `build`, it runs the branch's
+  # code with a token that can only read, and it publishes nothing.
+  hub:
+    needs: [changes, build]
+    # `build` is skipped on a pull request: `!cancelled()` keeps that from skipping this job. On a
+    # push, it follows `build` (the version), and is skipped when `build` publishes nothing.
+    if: >-
+      !cancelled()
+      && needs.changes.outputs.hub != 'false'
+      && (github.event_name == 'pull_request'
+        || (needs.build.result == 'success' && needs.build.outputs.skip != 'true'))
+    # The runner Flottille's own build uses.
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            target: x86_64-unknown-linux-musl
+            platform: amd64
+          # Cross-compiled by the C compiler of the other architecture: nothing is emulated.
+          - arch: aarch64
+            target: aarch64-unknown-linux-musl
+            platform: arm64
+    env:
+      CARGO_INCREMENTAL: 0
+      # `ring`, under the hub's TLS, has C and assembly to build for the target. No linker is set for
+      # x86_64: `musl-gcc` is a wrapper that links dynamically, whatever Rust asks, and the target's
+      # own linking is static.
+      CC_x86_64_unknown_linux_musl: musl-gcc
+      CC_aarch64_unknown_linux_musl: aarch64-linux-gnu-gcc
+      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: aarch64-linux-gnu-gcc
+      # A pull request's archives carry no real version: they are only made, to be checked.
+      VERSION: ${{ needs.build.outputs.version || '0.0.0-ci' }}
+      BINARY: target/${{ matrix.target }}/release/flottille-hub
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Have the musl and the cross compilers, and the target
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools gcc-aarch64-linux-gnu
+          rustup target add ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v1-rust
+          shared-key: hub-${{ matrix.target }}
+      - name: Build the hub
+        run: cargo build --release --locked -p flottille-hub --target ${{ matrix.target }}
+      - name: the_static_binary_runs_with_no_shared_library
+        run: tools/check-static.sh "$BINARY"
+      # The architecture of the runner: the binary that is static runs. The other one is not run.
+      - name: Run the hub it built
+        if: matrix.arch == 'x86_64'
+        run: |
+          "$BINARY" --version
+          "$BINARY" --help > /dev/null
+      - name: Package, with its sum
+        run: tools/package-hub.sh "$VERSION" ${{ matrix.arch }} "$BINARY" "$RUNNER_TEMP/hub/assets"
+      # `scratch` and a COPY: the image of the other architecture is made here too, with nothing run.
+      - name: Build the image
+        run: |
+          context="$RUNNER_TEMP/hub-image"
+          mkdir -p "$context/lib/flottille-hub"
+          install -m 0755 "$BINARY" "$context/flottille-hub"
+          docker build --platform linux/${{ matrix.platform }} --build-arg SOURCE=https://github.com/${{ github.repository }} -f crates/flottille-hub/Dockerfile -t flottille-hub:linux-${{ matrix.platform }} "$context"
+      - name: the_image_starts_prints_a_setup_code_and_answers_on_its_port
+        if: matrix.arch == 'x86_64'
+        run: tools/check-hub-image.sh flottille-hub:linux-amd64
+      - name: the_compose_example_is_valid
+        if: matrix.arch == 'x86_64'
+        env:
+          FLOTTILLE_HUB_IMAGE: flottille-hub:linux-amd64
+        run: docker compose -f crates/flottille-hub/compose.example.yml config
+      - name: Keep the image for the job that pushes it
+        if: github.event_name != 'pull_request'
+        run: docker save flottille-hub:linux-${{ matrix.platform }} --output "$RUNNER_TEMP/hub-image-${{ matrix.platform }}.tar"
+      - if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: hub-assets-${{ matrix.arch }}
+          path: ${{ runner.temp }}/hub
+          retention-days: 1
+      - if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: hub-image-${{ matrix.platform }}
+          path: ${{ runner.temp }}/hub-image-${{ matrix.platform }}.tar
+          retention-days: 1
+
   publish:
-    needs: [verified-on-dev, verify, build]
+    needs: [verified-on-dev, verify, build, hub]
     # `verify` passed here, or was skipped because this commit passed it on dev: never on a commit
     # no `verify` passed on. A failed or skipped `build` publishes nothing.
     if: >-
       !cancelled()
       && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
       && needs.build.result == 'success' && needs.build.outputs.skip != 'true'
+      && needs.hub.result == 'success'
       && (needs.verify.result == 'success'
         || (needs.verify.result == 'skipped' && needs.verified-on-dev.outputs.verified == 'true'))
     runs-on: ubuntu-latest
@@ -383,6 +520,12 @@ jobs:
         with:
           name: release
           path: release
+      # The hub's archives and their sums: in the one `gh release create` below, beside Flottille's.
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: hub-assets-*
+          path: hub
+          merge-multiple: true
       - name: Publish
         id: publish
         env:
@@ -412,7 +555,7 @@ jobs:
           # The files go with the release in this one call: an immutable release takes none after.
           if [ "$CHANNEL" = stable ] && [ "$GITHUB_REF_NAME" = main ]; then
             # On the commit released, the same on main and on dev: the next betas count from it.
-            gh release create "$TAG" release/assets/* --target "$GITHUB_SHA" --title "$title" --notes-file release/notes.md --latest
+            gh release create "$TAG" release/assets/* hub/assets/* --target "$GITHUB_SHA" --title "$title" --notes-file release/notes.md --latest
           elif [ "$CHANNEL" = stable ]; then
             # A line's, on its tag: the stable channel takes the latest release, so it is marked
             # latest when above the one marked (the newest line's fix reaches its users), never
@@ -425,7 +568,60 @@ jobs:
             elif ! grep -q 'HTTP 404' "$RUNNER_TEMP/latest.err"; then
               cat "$RUNNER_TEMP/latest.err" >&2; exit 1
             fi
-            gh release create "$TAG" release/assets/* --target "$GITHUB_SHA" --title "$title" --notes-file release/notes.md "$latest"
+            gh release create "$TAG" release/assets/* hub/assets/* --target "$GITHUB_SHA" --title "$title" --notes-file release/notes.md "$latest"
           else
-            gh release create "$TAG" release/assets/* --target "$GITHUB_SHA" --title "$title" --notes-file release/notes.md --prerelease --latest=false
+            gh release create "$TAG" release/assets/* hub/assets/* --target "$GITHUB_SHA" --title "$title" --notes-file release/notes.md --prerelease --latest=false
           fi
+
+  # The hub's image (docs/releases.md): once its release is published, the image the `hub` job made
+  # is pushed to the repository's container registry under the release's version, and `latest` when
+  # that release is the latest. It loads what `hub` saved and pushes it: no Dockerfile, no build and
+  # no code of the branch runs here, where the token that writes packages is. No alpha has one: they
+  # would pile up, one per push.
+  hub-image:
+    needs: [build, hub, publish]
+    if: >-
+      !cancelled()
+      && needs.publish.result == 'success' && needs.hub.result == 'success'
+      && needs.build.outputs.channel != 'alpha'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: hub-image-*
+          path: images
+          merge-multiple: true
+      - name: Push the image
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.build.outputs.version }}
+          TAG: ${{ needs.build.outputs.tag }}
+        run: |
+          # Only a release that stands has its image: a branch that moved on publishes nothing.
+          if ! draft=$(gh release view "$TAG" --json isDraft --jq .isDraft 2> /dev/null) || [ "$draft" = true ]; then
+            echo "::notice::$TAG is not published: no image."
+            exit 0
+          fi
+          # The registry wants a lowercase path: the repository's own, `-hub` after it.
+          image=ghcr.io/${GITHUB_REPOSITORY,,}-hub
+          echo "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          # Nothing is replaced: a version already pushed stays as it is.
+          if docker buildx imagetools inspect "$image:$VERSION" > /dev/null 2>&1; then
+            echo "::notice::$image:$VERSION is already pushed."
+            exit 0
+          fi
+          for platform in amd64 arm64; do
+            docker load --input "images/hub-image-$platform.tar"
+            docker tag "flottille-hub:linux-$platform" "$image:$VERSION-$platform"
+            docker push "$image:$VERSION-$platform"
+          done
+          tags=(--tag "$image:$VERSION")
+          if [ "$(gh release view "$TAG" --json isLatest --jq .isLatest)" = true ]; then
+            tags+=(--tag "$image:latest")
+          fi
+          # One name for both architectures: the registry's manifest, joined from the two pushed.
+          docker buildx imagetools create "${tags[@]}" "$image:$VERSION-amd64" "$image:$VERSION-arm64"
