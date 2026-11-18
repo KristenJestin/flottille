@@ -1196,10 +1196,10 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   14); a feature off in Settings is a faded row whose line, Off in Settings, is a link. **Vault**
   (the last of the six, Usage later) lists the entries the project sees, its own first, then every
   project's marked "Every project", each the row of Settings, Vault (its name, its project, what
-  it is for, never a value; one list pattern), with **New entry**, which opens Settings, Vault's
-  own dialog with "Seen by agents of" set to the project (still changeable), and a click on a row,
-  which edits the entry in that same dialog (an entry of every project says so on it); closed, the
-  dialog brings the window back to this tab. The list follows the vault's changes live, its rows
+  it is for, never a value; one list pattern), with **New entry**, which opens the vault's
+  own dialog over this tab with "Seen by agents of" set to the project (still changeable), and a
+  click on a row, which edits the entry in that same dialog (an entry of every project says so on
+  it); the tab is never left, so closing the dialog leaves the user on it. The list follows the vault's changes live, its rows
   unfolding and folding away, and an empty list says so. A field saved
   on its own shows its Save only once it changed (rule 4);
 - Settings, in tabs by subject (`reference/gpui.md`, rule 13): **Agents**, **Approvals**,
@@ -1419,6 +1419,19 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   server is forgotten. The conversation draws a run as one line, its ANSI colours turned into the
   palette's in the panel (the stored output keeps the program's bytes, masked); a call that came
   back through an approval is the same line with "allowed by you", never the daemon's raw text;
+- **a dialog opens over the page it is asked from**, whichever page that is (#1018): the window
+  never goes to a page only to open a dialog there. An agent's request for a vault entry, **New
+  entry**, an agent's request to write a connection, **Edit** or **Review**, a project's
+  Tracker or Vault tab, and the pages of Settings all open the same dialogs (the vault's entry,
+  a connection's server and its review), and the user is on the page they were on when the dialog
+  closes, the session, its conversation and the request they were answering as they were. One
+  host of dialogs in the shell draws them above the page, each the kit's modal over its own
+  scrim, in the order they were opened: a dialog that opens another (the request's dialog, then
+  the vault's form for the entry it names) has it stacked over it, Escape and Cancel close the
+  one on top and the focus returns to the one below, which reads again what changed (the request
+  reads itself again once the entry is saved). A page that really is a destination (a project's
+  settings from "Set up time logging", Settings from a notice) is a navigation, and opens no
+  dialog;
 - narrow and portrait windows: the rail, then the left tree, become drawers.
 - a history of the pages shown (project pages, sessions with the agent shown in them, settings),
   as a browser keeps one: it lives as long as the window and is not stored. The mouse's back and

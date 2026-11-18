@@ -4078,3 +4078,61 @@ fn a_secret_s_name_and_prefix_fold_away_where_they_do_not_apply(cx: &mut TestApp
         "{after}"
     );
 }
+
+// ── A dialog opens over the page it is asked from (#1018) ─────────────────────────────────────
+
+fn stack(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Vec<&'static str> {
+    shell.read_with(cx, |s, cx| s.modal_stack(cx))
+}
+
+#[gpui_kit::test]
+fn the_vault_page_and_the_connections_page_open_their_forms_through_the_host(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    turn_on(&user);
+    let (shell, cx) = window(&user, cx);
+    open_page(&shell, cx);
+    assert!(stack(&shell, cx).is_empty(), "nothing is open yet");
+
+    // Connections' own "New server": the host holds its form.
+    click(cx, "new-connection");
+    until(&shell, cx, "the form opens", |cx| {
+        visible(cx, "connection-modal")
+    });
+    assert_eq!(stack(&shell, cx), ["connection-modal"]);
+    click(cx, "connection-modal-cancel");
+    until(&shell, cx, "the form closes", |cx| {
+        !visible(cx, "connection-modal")
+    });
+    assert!(stack(&shell, cx).is_empty(), "closed, it leaves the host");
+
+    // The vault page's "New entry", then a row's Edit: the host holds the entry's dialog.
+    user.call(
+        "vault.set",
+        json!({"name": "jira", "secret": "pa55-for-the-test"}),
+    )
+    .unwrap();
+    click(cx, "settings-tabs-vault");
+    until(&shell, cx, "the vault page is shown", |cx| {
+        present(cx, "add-vault-entry")
+    });
+    click(cx, "add-vault-entry");
+    until(&shell, cx, "the dialog opens", |cx| {
+        visible(cx, "vault-modal")
+    });
+    assert_eq!(stack(&shell, cx), ["vault-modal"]);
+    click(cx, "vault-modal-cancel");
+    until(&shell, cx, "the dialog closes", |cx| {
+        !visible(cx, "vault-modal")
+    });
+    assert!(stack(&shell, cx).is_empty());
+    until(&shell, cx, "the entry is listed", |cx| {
+        present(cx, "vault-jira")
+    });
+    click(cx, "vault-jira");
+    until(&shell, cx, "its dialog opens", |cx| {
+        visible(cx, "vault-modal")
+    });
+    assert_eq!(stack(&shell, cx), ["vault-modal"]);
+}

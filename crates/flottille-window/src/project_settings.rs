@@ -2495,8 +2495,7 @@ impl ProjectSettingsPage {
                                         bound: Some(flottille_core::vault::worklog(&project)),
                                         ..VaultEntry::default()
                                     };
-                                    let back = Some((project.clone(), Reveal::Tracker));
-                                    shell.add_vault_entry(&prefill, None, back, window, cx)
+                                    shell.add_vault_entry(&prefill, None, window, cx)
                                 })
                                 .ok();
                         }),
@@ -2617,7 +2616,7 @@ impl ProjectSettingsPage {
             .collect();
         let mut list = ListCard::new("project-vault-list");
         for (key, placement, entry) in drawn {
-            let (shell, project, name) = (self.shell.clone(), self.name.clone(), key.clone());
+            let (shell, name) = (self.shell.clone(), key.clone());
             let row = crate::vault::entry_row(
                 ElementId::Name(format!("project-vault-{key}").into()),
                 &entry,
@@ -2626,7 +2625,7 @@ impl ProjectSettingsPage {
             .on_click(move |_, window, cx| {
                 shell
                     .update(cx, |shell, cx| {
-                        shell.replace_vault_entry_for(&project, &name, window, cx)
+                        shell.replace_vault_entry_for(&name, window, cx)
                     })
                     .ok();
             });
@@ -2652,8 +2651,7 @@ impl ProjectSettingsPage {
                                     project: Some(project.clone()),
                                     ..VaultEntry::default()
                                 };
-                                let back = Some((project.clone(), Reveal::Vault));
-                                shell.add_vault_entry(&prefill, None, back, window, cx)
+                                shell.add_vault_entry(&prefill, None, window, cx)
                             })
                             .ok();
                     }),

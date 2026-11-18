@@ -146,13 +146,8 @@ fn open_vault_tab(
 }
 
 fn vault_section(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Entity<VaultSection> {
-    shell.read_with(cx, |s, cx| {
-        s.main()
-            .read(cx)
-            .settings_page()
-            .map(|page| page.read(cx).vault().clone())
-            .expect("Settings is shown")
-    })
+    // The form is a dialog of the window: the section is the same whichever page is shown.
+    shell.read_with(cx, |s, cx| s.vault(cx))
 }
 
 #[gpui_kit::test]
@@ -253,7 +248,14 @@ fn new_entry_from_a_project_opens_the_vault_form_set_to_that_project(cx: &mut Te
     open_vault_tab(&shell, "atlas", cx);
     click("project-vault-add", cx);
     settle(cx);
-    // Settings' own form, in Settings, its project chosen.
+    // The vault's own form, over the project's page, its project chosen.
+    assert!(
+        shell.read_with(
+            cx,
+            |s, _| matches!(s.selected(), Some(Selection::ProjectSettings(name)) if name == "atlas")
+        ),
+        "the window stays on the project's page"
+    );
     let section = vault_section(&shell, cx);
     assert!(
         section.read_with(cx, |s, _| s.is_open()),
@@ -269,7 +271,7 @@ fn new_entry_from_a_project_opens_the_vault_form_set_to_that_project(cx: &mut Te
         Some("atlas".to_owned()),
         "Seen by agents of is this project"
     );
-    // Saved: the entry is the project's, and the window goes back to its Vault tab.
+    // Saved: the entry is the project's, and the tab it was asked from is where the user is.
     let (name, secret) = section.read_with(cx, |s, _| {
         (
             s.name_field().unwrap().clone(),
@@ -284,7 +286,7 @@ fn new_entry_from_a_project_opens_the_vault_form_set_to_that_project(cx: &mut Te
     until(
         &shell,
         cx,
-        "the window is back on the project's tab",
+        "the new entry is listed on the project's tab",
         |cx| shown("project-vault-tracker", cx),
     );
     let entries = user.call("vault.list", json!({})).unwrap()["entries"].clone();
@@ -310,12 +312,9 @@ fn editing_an_every_project_entry_from_a_project_says_so(cx: &mut TestAppContext
     assert!(section.read_with(cx, |s, _| s.is_open()));
     assert!(!shown("vault-every-project-note", cx));
     section.update_in(cx, |section, window, cx| section.close(window, cx));
-    until(
-        &shell,
-        cx,
-        "the window is back on the project's Vault tab",
-        |cx| shown("project-vault-shared", cx),
-    );
+    until(&shell, cx, "the project's Vault tab is still shown", |cx| {
+        shown("project-vault-shared", cx)
+    });
     settle(cx);
     // An every-project entry says on the form that it is every project's.
     click("project-vault-shared", cx);
@@ -446,8 +445,8 @@ fn editing_an_entry_that_is_gone_comes_back_to_the_tab(cx: &mut TestAppContext) 
     cx.update(|window, cx| window.simulate_next_frame(cx));
     assert!(shown("project-vault-jira", cx), "the row is still drawn");
     click("project-vault-jira", cx);
-    // Nothing to edit: the user is not left in Settings, without a form, but back on the tab.
-    until(&shell, cx, "the window is back on the tab", |cx| {
+    // Nothing to edit: no form opens, and the user stays on the tab.
+    until(&shell, cx, "the tab is still shown", |cx| {
         shown("project-vault-keep", cx)
     });
     settle(cx);

@@ -12,15 +12,16 @@ use gpui_design_system::{
 };
 use gpui_kit::base::input::{Input, InputEvent, InputState};
 use gpui_kit::{
-    App, AppContext as _, Context, ElementId, Entity, Focusable as _, InteractiveElement,
-    IntoElement, ParentElement, Render, SharedString, StatefulInteractiveElement, Styled,
-    Subscription, TestSupportExt as _, WeakEntity, Window, div, px,
+    App, AppContext as _, Context, ElementId, Entity, FocusHandle, Focusable as _,
+    InteractiveElement, IntoElement, ParentElement, Render, SharedString,
+    StatefulInteractiveElement, Styled, Subscription, TestSupportExt as _, WeakEntity, Window, div,
+    px,
 };
 use serde_json::Value;
 
 use crate::actions::{Command, VaultWrite};
 use crate::commands::{boxed, line_field, menu_of, perform_later, problem_line, spaced};
-use crate::project_settings::Reveal as ProjectReveal;
+use crate::modals::Modals;
 use crate::shell::Shell;
 
 /// What the section says the vault is for.
@@ -106,8 +107,13 @@ enum Writing {
     Removed(String),
 }
 
+/// The id of the entry's dialog, the one the window's host holds.
+pub const MODAL: &str = "vault-modal";
+
 pub struct VaultSection {
     shell: WeakEntity<Shell>,
+    /// The window's host of dialogs: the entry's form opens through it, over any page.
+    modals: Entity<Modals>,
     listed: Option<Vec<VaultEntry>>,
     /// The rows as drawn: a removed entry folds away before it is gone.
     rows: Listing<VaultEntry>,
@@ -136,11 +142,8 @@ pub struct VaultSection {
     writing: Option<Writing>,
     form_error: Option<SharedString>,
     confirming: Option<String>,
-    /// The project page the dialog was opened from (its Tracker, or its Vault tab): once it is
-    /// closed, the window goes back there.
-    come_back: Option<(String, ProjectReveal)>,
     /// The agent's request to write a connection the dialog was opened from, its missing entry:
-    /// once it is saved or closed, the request's dialog is back.
+    /// its dialog stays open under this one, and reads the request again once the entry is saved.
     request_back: Option<u64>,
     /// The entry opened from a project's Vault tab is every project's: the form says so.
     every_project: bool,
@@ -201,9 +204,10 @@ pub fn entry_row(id: ElementId, entry: &VaultEntry, cx: &App) -> ListRow {
 }
 
 impl VaultSection {
-    pub fn new(shell: WeakEntity<Shell>) -> Self {
+    pub fn new(shell: WeakEntity<Shell>, modals: Entity<Modals>) -> Self {
         Self {
             shell,
+            modals,
             listed: None,
             rows: Listing::default(),
             menus: HashMap::new(),
@@ -220,7 +224,6 @@ impl VaultSection {
             writing: None,
             form_error: None,
             confirming: None,
-            come_back: None,
             request_back: None,
             every_project: false,
             asked: String::new(),
@@ -343,13 +346,11 @@ impl VaultSection {
 
     /// "New entry", the dialog on `prefill` (its name, metadata, project and use) with the secret
     /// to type: what a project's Tracker or Vault tab, or an agent's request, already knows of it.
-    /// `why` is an agent's reason, said under what it is for; `back` is the project page to go
-    /// back to once the dialog is closed.
+    /// `why` is an agent's reason, said under what it is for. It opens over the page shown.
     pub fn add_prefilled(
         &mut self,
         prefill: &VaultEntry,
         why: Option<String>,
-        back: Option<(String, ProjectReveal)>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -357,26 +358,15 @@ impl VaultSection {
         self.form = Form::Editing(None);
         self.bound = prefill.bound.clone();
         self.why = why;
-        self.come_back = back;
     }
 
-    /// A row of a project's Vault tab: the entry in the same dialog, and back to that tab once it
-    /// is closed. An entry of every project says so on the form. Whether it opened: the entry may
-    /// be gone since the row was drawn.
-    pub fn replace_in(
-        &mut self,
-        project: &str,
-        name: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> bool {
+    /// A row of a project's Vault tab: the entry in the same dialog, over the tab. An entry of
+    /// every project says so on the form.
+    pub fn replace_of_project(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.replace(name, window, cx);
-        let opened = self.is_open();
-        if opened {
+        if self.is_open() {
             self.every_project = self.project.is_none();
-            self.come_back = Some((project.to_owned(), ProjectReveal::Vault));
         }
-        opened
     }
 
     /// "New entry" from an agent's request (`vault_ask.rs`): `entry` prefilled, `why` under what it
@@ -392,7 +382,7 @@ impl VaultSection {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.add_prefilled(entry, Some(why), None, window, cx);
+        self.add_prefilled(entry, Some(why), window, cx);
         self.host = host.zip(entry.url.clone());
         self.connection = connection;
     }
@@ -412,23 +402,15 @@ impl VaultSection {
             url: host.clone(),
             ..VaultEntry::default()
         };
-        self.add_prefilled(&prefill, None, None, window, cx);
+        self.add_prefilled(&prefill, None, window, cx);
         self.host = host.zip(prefill.url);
         self.request_back = Some(number);
     }
 
-    /// The request whose dialog to open again, once the entry made for it is saved.
+    /// The request whose dialog reads it again, once the entry made for it is saved.
     pub fn take_request_return(&mut self) -> Option<u64> {
         match self.form {
             Form::Closed => self.request_back.take(),
-            Form::Editing(_) => None,
-        }
-    }
-
-    /// The project page to go back to, once the dialog it was opened for is closed (an entry set).
-    pub fn take_return(&mut self) -> Option<(String, ProjectReveal)> {
-        match self.form {
-            Form::Closed => self.come_back.take(),
             Form::Editing(_) => None,
         }
     }
@@ -447,7 +429,6 @@ impl VaultSection {
     }
 
     fn fill(&mut self, entry: Option<&VaultEntry>, window: &mut Window, cx: &mut Context<Self>) {
-        self.come_back = None;
         self.request_back = None;
         self.every_project = false;
         self.bound = None;
@@ -493,7 +474,16 @@ impl VaultSection {
         .read(cx)
         .focus_handle(cx);
         window.focus(&focus, cx);
+        // Over whatever page is shown, above the dialogs already open.
+        self.modals.update(cx, |modals, cx| modals.open(MODAL, cx));
         cx.notify();
+    }
+
+    /// Where the focus goes when this dialog is the one on top: its first field.
+    pub fn focus_handle(&self, cx: &App) -> Option<FocusHandle> {
+        self.fields
+            .as_ref()
+            .map(|fields| fields.name.read(cx).focus_handle(cx))
     }
 
     pub fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -501,19 +491,9 @@ impl VaultSection {
         self.form_error = None;
         self.sent_secret = None;
         self.clear_secret(window, cx);
+        // Closed unsaved, the request's dialog under it has nothing to read again.
+        self.request_back = None;
         cx.notify();
-        if let Some((project, at)) = self.come_back.take() {
-            self.shell
-                .update(cx, |shell, cx| {
-                    shell.open_project_settings_at(&project, at, window, cx)
-                })
-                .ok();
-        }
-        if let Some(number) = self.request_back.take() {
-            self.shell
-                .update(cx, |shell, cx| shell.open_connection_request(number, cx))
-                .ok();
-        }
     }
 
     /// The secret leaves the field as soon as it is sent, or the dialog closed.
@@ -815,12 +795,13 @@ impl VaultSection {
         .space(space::XS)
     }
 
-    fn modal(&mut self, window: &Window, cx: &mut Context<Self>) -> Modal {
+    /// The entry's dialog, open or closing: the window's host draws it over the page shown.
+    pub fn dialog(&mut self, window: &Window, cx: &mut Context<Self>) -> Modal {
         let p = palette(cx);
         let this = cx.entity().downgrade();
         let open = self.form != Form::Closed;
         let title = self.form_title().unwrap_or_else(|| "New entry".to_owned());
-        let modal = Modal::new("vault-modal", title)
+        let modal = Modal::new(MODAL, title)
             .open(open)
             .on_close(move |window, cx| {
                 this.update(cx, |this, cx| this.close(window, cx)).ok();
@@ -969,7 +950,7 @@ impl VaultSection {
 }
 
 impl Render for VaultSection {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
         if let Some(listed) = self.listed.clone() {
             let now = cx.background_executor().now();
@@ -993,7 +974,6 @@ impl Render for VaultSection {
         }
         let count = self.rows.len();
         let empty = self.listed.as_ref().is_some_and(Vec::is_empty);
-        let modal = self.modal(window, cx);
         let section = Section::new("vault", "Vault")
             .count(count.to_string())
             .sentence(SENTENCE)
@@ -1031,7 +1011,6 @@ impl Render for VaultSection {
         div()
             .text_color(p.text)
             .child(section)
-            .child(modal)
             .child(self.confirm(cx))
     }
 }
