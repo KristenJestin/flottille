@@ -2119,13 +2119,13 @@ fn a_types_required_fields_are_said() {
         mcp.call("tickets", json!({"action": "types", "project": "ABC"})),
     );
 
-    // acli lists no required field of a type (nor does Flottille call Jira's REST API): what is
-    // said is how a creation says them, and how to give them.
+    // `fields` lists a type's fields with their ids (#1065); a creation refused for one says it
+    // too, and how to give it.
+    assert!(said.contains("tickets fields"), "{said}");
     assert!(
-        said.contains("acli lists no type's required fields"),
+        !said.contains("acli lists no type's required fields"),
         "{said}"
     );
-    assert!(said.contains("fields"), "{said}");
     assert!(said.contains("customfield_"), "{said}");
 }
 

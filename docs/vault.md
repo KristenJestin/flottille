@@ -211,7 +211,8 @@ daemon puts the secret where it goes itself (an HTTP header, a command's standar
 field), with `vault::secret`, which only a tool's own code calls and whose value never leaves that
 use. It never waits for the user: an item of a locked keyring is answered at once that the keyring
 is locked and the user must unlock it, and a keyring that does not answer within 3 seconds is
-answered the same. The first users: `tickets log_time` (`docs/tickets.md`, "Logging time") and
+answered the same. The first users: `tickets log_time` (`docs/tickets.md`, "Logging time"), with `worklogs` and `fields`
+that read Jira's REST API with the same entry, and
 Connections (`docs/extensions.md`, "Connections"): a connection's `env` and `secrets` name entries
 of every project, read when its server starts and put in its environment or on its requests,
 never shown to an agent; an entry tied to one project, or bound to another use, is refused for

@@ -851,7 +851,7 @@ pub const FORGE_ACTIONS: &str = "list, show, people, subscribe, unsubscribe, cre
      merge, checks, close, reopen, pipelines, runs, run_view, run_logs, run, follow_run, stop and \
      step";
 /// The actions of `tickets`, as a refusal names them.
-pub const TICKET_ACTIONS: &str = "list, search, show, people, types, link_types, sprints, milestones, subscribe, unsubscribe, \
+pub const TICKET_ACTIONS: &str = "list, search, show, people, types, fields, link_types, sprints, milestones, subscribe, unsubscribe, \
      create, comment, reply, edit, close, reopen, status, link, unlink, comment_edit, \
      comment_delete, milestone_create, milestone_edit, log_time, time_spent and worklogs";
 /// What `tickets close` closes for, as `gh issue close --reason` names it.
@@ -876,7 +876,7 @@ fn tickets(call: &Call) -> Verdict {
     // What the agent wrote, as the card shows it: masked.
     let shown = |key: &str| crate::mcp::masked(&words(key), &call.grant.place);
     let said = match action {
-        "list" | "search" | "show" | "people" | "types" | "link_types" | "sprints"
+        "list" | "search" | "show" | "people" | "types" | "fields" | "link_types" | "sprints"
         | "milestones" | "progress" | "subscribe" | "unsubscribe" | "time_spent" | "worklogs" => {
             return Verdict::Allow;
         }
@@ -5120,6 +5120,7 @@ mod tests {
                 ("tickets", "list"),
                 ("tickets", "search"),
                 ("tickets", "show"),
+                ("tickets", "fields"),
                 ("tickets", "link_types"),
                 ("workspace", "list"),
             ] {
