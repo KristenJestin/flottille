@@ -283,6 +283,9 @@ pub struct Session {
     pub runs: String,
     /// The session of the agent that leads it, whose row it sits under.
     pub pilot: Option<String>,
+    /// Whether the agent that leads it works in another project: its row sits among its own
+    /// project's and names it.
+    pub led_from_elsewhere: bool,
 }
 
 /// One thing that waits for the user. Choosing it opens its session.
@@ -809,6 +812,20 @@ impl Snapshot {
                 .entry(root_of(&parents, agent))
                 .or_insert((said, line));
         }
+        // An agent of another project than the session it started or leads is named with its
+        // project: the session is that project's, its pilot is not.
+        let across = |session: &Value, id: &str| {
+            let name = name_of(id);
+            let theirs = agents
+                .iter()
+                .find(|a| a["id"].as_str() == Some(id))
+                .and_then(|a| a["project"].as_str())
+                .filter(|theirs| Some(*theirs) != session["project"].as_str());
+            match theirs {
+                Some(project) => format!("{name} in {project}"),
+                None => name,
+            }
+        };
         let mut sessions: Vec<Session> = agents
             .iter()
             .filter(|agent| agent["parent"].is_null())
@@ -883,12 +900,18 @@ impl Snapshot {
                     ended_at: agent["ended_at"].as_u64().unwrap_or(active_at),
                     created_at: number(agent, "created_at"),
                     commands: commands_of("root", &id),
-                    started_by: agent["launched_by"].as_str().map(name_of),
-                    led_by: agent["led_by"].as_str().map(name_of),
+                    started_by: agent["launched_by"].as_str().map(|by| across(agent, by)),
+                    led_by: agent["led_by"].as_str().map(|by| across(agent, by)),
                     runs: runs_on(&agent["runs_on"]),
                     pilot: agent["led_by"]
                         .as_str()
                         .map(|pilot| root_of(&parents, pilot).to_owned()),
+                    led_from_elsewhere: agent["led_by"].as_str().is_some_and(|pilot| {
+                        agents
+                            .iter()
+                            .find(|a| a["id"].as_str() == Some(pilot))
+                            .is_some_and(|a| a["project"] != agent["project"])
+                    }),
                     id,
                 }
             })
@@ -1413,6 +1436,32 @@ mod tests {
         assert_eq!(by("r2").as_deref(), Some("Lead the work"));
         assert_eq!(by("r3").as_deref(), Some("planner"));
         assert_eq!(by("r1"), None, "a session the user started names nobody");
+    }
+
+    #[test]
+    fn a_session_led_from_another_project_names_its_pilot_s_project() {
+        let mut pilot = agent("r1", None, "idle", None);
+        pilot["title"] = json!("Release the fonts");
+        let mut led = agent("r2", None, "idle", None);
+        led["project"] = json!("kit");
+        led["launched_by"] = json!("r1");
+        led["led_by"] = json!("r1");
+        let mut near = agent("r3", None, "idle", None);
+        near["launched_by"] = json!("r1");
+        near["led_by"] = json!("r1");
+        let snapshot = build(
+            json!({"agents": [pilot, led, near]}),
+            json!({"requests": []}),
+            &[],
+        );
+        let led = snapshot.session("r2").unwrap();
+        assert_eq!(led.project, "kit");
+        assert_eq!(led.led_by.as_deref(), Some("Release the fonts in app"));
+        assert_eq!(led.started_by.as_deref(), Some("Release the fonts in app"));
+        assert!(led.led_from_elsewhere);
+        let near = snapshot.session("r3").unwrap();
+        assert_eq!(near.led_by.as_deref(), Some("Release the fonts"));
+        assert!(!near.led_from_elsewhere);
     }
 
     fn workspace_json(steps: Value) -> Value {

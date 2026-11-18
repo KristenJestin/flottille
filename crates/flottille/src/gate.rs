@@ -523,6 +523,30 @@ pub fn root_launch(grant: &Grant, args: &Value) -> Verdict {
     found.verdict(Kind::Action)
 }
 
+/// Why a launch in another project comes to the user, every time: it starts a lead in a project
+/// the caller does not work in, with that project's tools, settings and vault entries.
+pub const LAUNCH_ELSEWHERE: &str = "it starts a session in another project, a lead there with \
+    that project's tools: the user decides, every time, in every mode, Full included";
+
+/// `agent_launch` of a session in another project: base, never judged, and held in Full
+/// (`asks_launch_elsewhere`). Its first message is shown whole to the user.
+pub fn launch_elsewhere(grant: &Grant, args: &Value) -> Verdict {
+    let mut found = Found::default();
+    found.base(LAUNCH_ELSEWHERE.into());
+    if grant.launched {
+        found.base(LAUNCHED_LAUNCH.into());
+    }
+    if let Err(refused) = texts(grant, args, &["brief"], &mut found) {
+        return refused;
+    }
+    found.verdict(Kind::Action)
+}
+
+/// Whether a held call starts a session in another project: only the user answers it.
+pub fn asks_launch_elsewhere(ask: &Ask) -> bool {
+    ask.reasons.iter().any(|reason| reason == LAUNCH_ELSEWHERE)
+}
+
 /// Why the gate holds `session_send`.
 pub const SESSION_SEND: &str = "it writes to another session, the user's, as this agent: what it \
     sends steers that session's work";
@@ -531,6 +555,21 @@ pub const SESSION_SEND: &str = "it writes to another session, the user's, as thi
 /// mode: what the user allows with it is every later one of the pair.
 pub const LEAVE: &str = "this session has not written to that one before: the user lets it, \
     once for the pair and one way, in every mode, Full included";
+
+/// Why the first read of another project's session the caller did not start comes to the user,
+/// in every mode: what the user allows with it is every later read and message of the pair.
+pub const READ_LEAVE: &str = "this session has not reached that one, of another project, \
+    before: the user lets it read and write to it, once for the pair and one way, in every mode, \
+    Full included";
+
+/// The first read of another project's session the caller did not start: the user's leave,
+/// which never reaches the judge and which Full does not let through (`asks_leave`).
+pub fn read_leave() -> Verdict {
+    let mut found = Found::default();
+    found.base(READ_LEAVE.into());
+    found.judge(SESSION_READ.into());
+    found.verdict(Kind::Action)
+}
 
 /// Why the gate holds `session_read`: each read of another session is judged.
 pub const SESSION_READ: &str = "it reads another session's conversation: what the user said to \
@@ -633,7 +672,9 @@ pub fn asks_end(ask: &Ask) -> bool {
 
 /// Whether a held call asks the user's leave for a pair of sessions: only the user answers it.
 pub fn asks_leave(ask: &Ask) -> bool {
-    ask.reasons.iter().any(|reason| reason == LEAVE)
+    ask.reasons
+        .iter()
+        .any(|reason| reason == LEAVE || reason == READ_LEAVE)
 }
 
 /// The texts a write posts or sends, which the user's card and the judge show whole: one longer

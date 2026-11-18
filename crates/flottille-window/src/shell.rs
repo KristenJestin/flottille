@@ -3996,7 +3996,18 @@ fn nested(
         if row.read(cx).led_by() != led_by {
             row.update(cx, |row, cx| row.set_led_by(led_by, cx));
         }
-        let runs = led_by.map_or_else(String::new, |_| live[at].runs.clone());
+        // A session led from another project sits among its own project's rows, and says who
+        // leads it there, with that project (`model`), before what it runs on.
+        let runs = match (led_by, pilots[at], live[at].led_by.as_deref()) {
+            (Some(_), _, _) => live[at].runs.clone(),
+            (None, None, Some(by)) if live[at].led_from_elsewhere => {
+                match live[at].runs.is_empty() {
+                    true => format!("led by {by}"),
+                    false => format!("led by {by} · {}", live[at].runs),
+                }
+            }
+            _ => String::new(),
+        };
         if row.read(cx).runs() != runs {
             row.update(cx, |row, cx| row.set_runs(&runs, cx));
         }

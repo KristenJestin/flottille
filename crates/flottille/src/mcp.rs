@@ -96,6 +96,11 @@ const GUIDE: &str = include_str!("../roles/guide.md");
 const LEAVE_WITHDRAWN: &str = "refused: the user withdrew your leave to write to that session \
     while this message was judged; send it again to ask them";
 
+/// A `session_read` of another project's session the judge allowed while the user withdrew the
+/// leave it was judged under.
+const READ_LEAVE_WITHDRAWN: &str = "refused: the user withdrew your leave to read and write to \
+    that session while this read was judged; read it again to ask them";
+
 /// An `agent_stop` allowed as the end of a session the caller leads, which it no longer leads:
 /// the user detached it, or it was handed, meanwhile.
 const NO_LONGER_LED: &str = "refused: this agent no longer leads that session, the user took it over while this call was decided; ask again and the user decides";
@@ -732,6 +737,7 @@ const SERVED: [Definition; 33] = [
         schema: || {
             json!({"type": "object", "properties": {
                 "kind": {"type": "string", "enum": ["child", "led", "handed"], "description": "child: a part of your task, in your place, that reports to you. led: an autonomous session you pilot, which asks you and wakes you. handed: a session you start for the user and let go."},
+                "project": {"type": "string", "description": "With led or handed: another registered project to start the session in, a full lead of its own there; yours when left out. Always held for the user."},
                 "title": {"type": "string", "description": "The task in a few words: how you and the user will name this session or child."},
                 "brief": {"type": "string", "description": "Everything the session or the child needs to know."},
                 "provider": {"type": "string", "description": "The provider it runs on: yours when left out."},
@@ -2450,6 +2456,7 @@ async fn played_in(
                                 && !removes_own_workspace(grant, tool, &args)
                                 && !gate::asks_leave(&ask)
                                 && !gate::asks_end(&ask)
+                                && !gate::asks_launch_elsewhere(&ask)
                                 && !crate::services::stops(tool, &args)
                                 && !crate::extensions::held_for_the_user(tool, &args)
                                 && !gate::asks_review(&ask)
@@ -2478,10 +2485,14 @@ async fn played_in(
                                 // or a session ended, stops the message it was judging.
                                 let lost = (tool == "session_send")
                                     .then(|| crate::tree::needs_leave(daemon, grant, &args));
+                                // A read of another project's session is under the same leave.
+                                let read_lost = tool == "session_read"
+                                    && crate::session_read::needs_leave(daemon, grant, &args);
                                 match (lost, stale(daemon, grant, tool)) {
                                     (_, Some(refused)) => refused,
                                     (Some(Err(why)), _) => Outcome::Refused(why),
                                     (Some(Ok(true)), _) => Outcome::Refused(LEAVE_WITHDRAWN.into()),
+                                    _ if read_lost => Outcome::Refused(READ_LEAVE_WITHDRAWN.into()),
                                     _ if no_longer_led(daemon, grant, tool, &args) => {
                                         Outcome::Refused(NO_LONGER_LED.into())
                                     }
@@ -2723,11 +2734,21 @@ fn verdict_of(
             Ok(false) => {}
         }
     }
+    if tool == "session_read" && crate::session_read::needs_leave(daemon, grant, args) {
+        return gate::read_leave();
+    }
     if tool == "agent_stop" && crate::tree::ends_session(daemon, grant, args) {
         return gate::end_session();
     }
     if tool == "agent_stop" && crate::tree::ends_led(daemon, grant, args) {
         return gate::end_led();
+    }
+    // A launch in another project is the user's, every time: its setup steps are that
+    // project's, played once the user allowed the session.
+    if tool == "agent_launch"
+        && let Some(elsewhere) = crate::tree::launched_elsewhere(&grant.place.project, args)
+    {
+        return launch_elsewhere_verdict(daemon, grant, elsewhere, args, first);
     }
     // A new workspace's launch is classified by its steps below, but its brief is held to the
     // judge's limit like any other launch's.
@@ -2816,6 +2837,41 @@ fn verdict_of(
         class,
         kind: Kind::Action,
     })
+}
+
+/// A launch in another project: the user's, every time (`gate::launch_elsewhere`), and, with a new
+/// workspace, its setup steps checked as the other project's own launch is: a step the gate
+/// refuses refuses the launch, and the reasons of the others are shown to the user.
+fn launch_elsewhere_verdict(
+    daemon: &Daemon,
+    grant: &Grant,
+    elsewhere: &str,
+    args: &Value,
+    first: &[String],
+) -> gate::Verdict {
+    let verdict = gate::launch_elsewhere(grant, args);
+    // A project that is not registered is refused when the card is made.
+    let Ok(project) = projects::load_project(daemon, elsewhere) else {
+        return verdict;
+    };
+    let there = Grant {
+        place: Place::main(&project, project.folder.clone()),
+        ..grant.clone()
+    };
+    if crate::actions::plays(daemon, &there, "agent_launch", args).is_none() {
+        return verdict;
+    }
+    match (
+        verdict_of(daemon, &there, "agent_launch", args, first),
+        verdict,
+    ) {
+        (gate::Verdict::Deny(why), _) => gate::Verdict::Deny(why),
+        (gate::Verdict::Ask(steps), gate::Verdict::Ask(mut ask)) => {
+            ask.reasons.extend(steps.reasons);
+            gate::Verdict::Ask(ask)
+        }
+        (_, verdict) => verdict,
+    }
 }
 
 fn classified(daemon: &Daemon, grant: &Grant, tool: &str, args: &Value) -> gate::Verdict {

@@ -371,7 +371,7 @@ fn a_session_started_by_an_agent_is_said_as_a_session(cx: &mut TestAppContext) {
     let page = session_page(&shell, cx);
     until(&shell, cx, "the session is said", |cx| {
         blocks(&page, cx).iter().any(|b| {
-            matches!(b, Block::Notice { kind, text } if kind == STARTED_SESSION_KIND && text == "Docs")
+            matches!(b, Block::Notice { kind, text } if kind == STARTED_SESSION_KIND && text == "\"Docs\"")
         })
     });
     assert!(
