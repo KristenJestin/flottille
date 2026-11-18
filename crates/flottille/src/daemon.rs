@@ -922,6 +922,13 @@ fn handle(daemon: &Arc<Daemon>, request: Request) -> (Message, Option<Subscripti
             },
             None,
         ),
+        method if method.starts_with("draft.") || method.starts_with("window.") => (
+            match crate::drafts::call(daemon, method, request.params) {
+                Ok(result) => Message::result(id, result),
+                Err(failure) => failure.answer(Some(id)),
+            },
+            None,
+        ),
         method if method.starts_with("sessions.") => (
             match crate::inactive::call(daemon, method, request.params) {
                 Ok(result) => Message::result(id, result),

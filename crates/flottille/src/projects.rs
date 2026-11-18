@@ -468,6 +468,9 @@ async fn remove_marked(
         return Err(done.partway(name, "its file is gone already"));
     }
     projects.known.remove(name);
+    drop(projects);
+    let sessions: Vec<String> = all.iter().map(|agent| agent.id.clone()).collect();
+    crate::drafts::forget_project(daemon, name, &sessions);
     emit(daemon, "project.removed", json!({"name": name}))?;
     Ok(json!({
         "removed": name,

@@ -772,6 +772,23 @@ const MIGRATIONS: &[&str] = &[
     -- \"How long it took\").
     ALTER TABLE workspace_steps ADD COLUMN duration_ms INTEGER;
 ",
+    "
+    -- What the user left in a composer of the window and did not send (`docs/design.md` §10):
+    -- the text, and the names of its pictures' files, which are in the daemon's state folder and
+    -- go with the draft. `key` is `session:<agent>` or `project:<name>`. The user's own words:
+    -- no event, no log and no agent ever reads them.
+    CREATE TABLE drafts (
+        key        TEXT PRIMARY KEY,
+        text       TEXT NOT NULL,
+        pictures   TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+    ) STRICT;
+    -- The window's own small state, one JSON value by key (what the sidebar has folded).
+    CREATE TABLE window_state (
+        key   TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+    ) STRICT;
+",
 ];
 
 /// How many of each extension's own migrations were applied (`docs/extensions.md`, "Data"): its
@@ -2761,6 +2778,82 @@ impl Store {
         )?;
         transaction.commit()?;
         Ok((Some(removed), Some(event)))
+    }
+
+    /// The draft of the composer `key` (`session:<agent>`, `project:<name>`): its text and the
+    /// names of its pictures' files; `None` when it holds none.
+    pub fn draft(&self, key: &str) -> Result<Option<(String, Vec<String>)>> {
+        let found = self
+            .connection
+            .query_row(
+                "SELECT text, pictures FROM drafts WHERE key = ?1",
+                params![key],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?;
+        found
+            .map(|(text, pictures)| Ok((text, serde_json::from_str(&pictures)?)))
+            .transpose()
+    }
+
+    /// Keeps `text` and the files of `pictures` as the draft of `key`, in place of the one it
+    /// had; the names of the pictures that one had, which the caller removes. No event: a draft
+    /// is the user's own words.
+    pub fn put_draft(&mut self, key: &str, text: &str, pictures: &[String]) -> Result<Vec<String>> {
+        let before = self.draft(key)?.map(|(_, pictures)| pictures);
+        self.connection.execute(
+            "INSERT INTO drafts (key, text, pictures, updated_at) VALUES (?1, ?2, ?3, ?4) \
+             ON CONFLICT (key) DO UPDATE SET text = ?2, pictures = ?3, updated_at = ?4",
+            params![key, text, serde_json::to_string(pictures)?, now_ms()],
+        )?;
+        Ok(before.unwrap_or_default())
+    }
+
+    /// Forgets the draft of `key`: the names of the pictures it had, which the caller removes.
+    pub fn forget_draft(&mut self, key: &str) -> Result<Vec<String>> {
+        let before = self.draft(key)?.map(|(_, pictures)| pictures);
+        self.connection
+            .execute("DELETE FROM drafts WHERE key = ?1", params![key])?;
+        Ok(before.unwrap_or_default())
+    }
+
+    /// The keys of the drafts the composers hold.
+    pub fn draft_keys(&self) -> Result<Vec<String>> {
+        let mut statement = self
+            .connection
+            .prepare_cached("SELECT key FROM drafts ORDER BY key")?;
+        let rows = statement.query_map([], |row| row.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// The window's own state: each key with its JSON value.
+    pub fn window_state(&self) -> Result<Vec<(String, Value)>> {
+        let mut statement = self
+            .connection
+            .prepare_cached("SELECT key, value FROM window_state ORDER BY key")?;
+        let rows = statement.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        rows.map(|row| {
+            let (key, value) = row?;
+            Ok((key, serde_json::from_str(&value)?))
+        })
+        .collect()
+    }
+
+    /// Keeps `value` for `key` of the window's state; `None` forgets it.
+    pub fn set_window_state(&mut self, key: &str, value: Option<&Value>) -> Result<()> {
+        match value {
+            Some(value) => self.connection.execute(
+                "INSERT INTO window_state (key, value) VALUES (?1, ?2) \
+                 ON CONFLICT (key) DO UPDATE SET value = ?2",
+                params![key, value.to_string()],
+            )?,
+            None => self
+                .connection
+                .execute("DELETE FROM window_state WHERE key = ?1", params![key])?,
+        };
+        Ok(())
     }
 
     /// The user takes the leave back, with its `leave.withdrawn` event; `None` when there was

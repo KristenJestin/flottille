@@ -27,6 +27,7 @@ mod deliveries;
 mod desktop;
 mod developer;
 mod display;
+mod drafts;
 mod extensions;
 mod files;
 mod follow;
