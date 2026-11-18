@@ -938,10 +938,11 @@ struct TicketsCall {
     /// `reply`: the id of a comment. `comment_edit`, `comment_delete`: one an agent posted.
     comment: Option<String>,
     /// `create`, `edit` on Jira: any field of the work item, keyed by its id or system key and
-    /// valued as Jira takes it, passed through to `acli` as its JSON's `additionalAttributes`.
+    /// valued as Jira takes it: a creation's JSON `additionalAttributes` for `acli`, an edit's `fields` of
+    /// Jira's REST API (`acli`'s edit JSON reads none).
     fields: Option<serde_json::Map<String, Value>>,
-    /// `create` on Jira: the open sprint to put the work item in, by its name or its id, and the
-    /// work item it goes under.
+    /// `create` on Jira: the open sprint to put the work item in, by its name or its id; `create`
+    /// and `edit` on Jira: the work item it goes under.
     sprint: Option<String>,
     parent: Option<String>,
     /// `sprints`: the board whose sprints are listed, by its name or its id.
@@ -1121,18 +1122,24 @@ pub fn unwritable(project: &Project, args: &Value) -> Option<String> {
             "refused: tickets {action} on GitHub takes no fields: they are Jira's"
         ));
     }
-    // A fix version is set once: by the milestone, or by the fields.
-    if action == "create"
+    // A fix version is set once: by the milestone, by taking it away, or by the fields.
+    if ["create", "edit"].contains(&action)
         && fields.is_some_and(|fields| fields.contains_key("fixVersions"))
-        && args["milestone"]
+    {
+        let other = if args["milestone"]
             .as_str()
             .is_some_and(|name| !name.trim().is_empty())
-    {
-        return Some(
-            "refused: fields.fixVersions and milestone both set the fix version: give one of \
-             them"
-                .into(),
-        );
+        {
+            Some("milestone")
+        } else {
+            (args["remove_milestone"] == true).then_some("remove_milestone")
+        };
+        if let Some(other) = other {
+            return Some(format!(
+                "refused: fields.fixVersions and {other} both set the fix version: give one of \
+                 them"
+            ));
+        }
     }
     if let Some(Err(why)) = args["ticket"].as_str().map(|text| accepted(project, text)) {
         return Some(format!("refused: {why}"));
@@ -1142,6 +1149,12 @@ pub fn unwritable(project: &Project, args: &Value) -> Option<String> {
     }
     if action == "log_time" {
         return worklog::unwritable(tracker, args);
+    }
+    if action == "edit"
+        && worklog::through_api(args)
+        && let Some(why) = worklog::unwritable_edit(tracker)
+    {
+        return Some(why);
     }
     let named = args["status"]
         .as_str()
@@ -1199,16 +1212,15 @@ fn unplannable(
     };
     let nothing = "; nothing was written";
     match (action, given("parent"), given("sprint")) {
-        ("edit", Some(_), _) if jira => Some(format!(
-            "refused: acli's workitem edit has no parent (only workitem create --parent has): \
-             changing the parent of an existing work item needs Jira's REST API, which Flottille \
-             does not call yet (#382); the user changes it in Jira{nothing}"
-        )),
         ("edit", _, Some(_)) if jira => Some(format!(
             "refused: acli's workitem edit takes no sprint (it sets no custom field): moving an \
              existing work item to a sprint needs Jira's REST API, which Flottille does not call \
              yet (#382); the user moves it on the board{nothing}"
         )),
+        // A parent is set through Jira's REST API, the work item it goes under a Jira key.
+        ("edit", Some(parent), None) if jira => accepted(project, parent)
+            .err()
+            .map(|why| format!("refused: parent: {why}")),
         ("create", parent, sprint) if !jira && (parent.is_some() || sprint.is_some()) => {
             Some(format!(
                 "refused: tickets create on GitHub takes no {}: GitHub issues have no sprint, \
@@ -2392,12 +2404,13 @@ async fn write(daemon: &Daemon, project: &Project, asked: &TicketsCall, key: &Ke
                 && asked.milestone_named().is_none()
                 && !asked.remove_milestone
                 && asked.fields_given().is_none()
+                && asked.parent.as_deref().is_none_or(|parent| parent.trim().is_empty())
                 // `null` takes a Jira assignee away; GitHub's are `assignees`.
                 && !(matches!(key, Key::Jira(_)) && asked.assignment().is_some()) =>
         {
             // Fields are Jira's.
             let what = match key {
-                Key::Jira(_) => "title, body, labels, assignees, milestone or fields",
+                Key::Jira(_) => "title, body, labels, assignees, milestone, parent or fields",
                 Key::Issue(_) => "title, body, labels, assignees or milestone",
             };
             return Outcome::Refused(format!("refused: tickets edit needs {what}: what changes"));
@@ -2414,7 +2427,7 @@ async fn write(daemon: &Daemon, project: &Project, asked: &TicketsCall, key: &Ke
             ("--labels", flagged[0].1.join(",")),
             ("--remove-labels", flagged[1].1.join(",")),
         ];
-        return write_work_item(daemon, on, site, asked, (body, title), &labels).await;
+        return write_work_item(daemon, project, on, site, asked, (body, title), &labels).await;
     };
     let forge = match issues_of(project).await {
         Ok(forge) => forge,
@@ -2927,6 +2940,7 @@ async fn create_work_item(
 /// checked to be signed in to the tracker's site.
 async fn write_work_item(
     daemon: &Daemon,
+    project: &Project,
     on: (&str, &str, &str, &str),
     site: &str,
     asked: &TicketsCall,
@@ -2944,14 +2958,25 @@ async fn write_work_item(
         "edit" => args.extend(["edit", "--key", key]),
         _ => return transition(site, key, asked).await,
     }
-    // The fields go first, from a JSON definition of their own (`edit --from-json` takes no other
-    // flag): a refusal of them leaves the rest unwritten.
+    // The fields, the parent and the fix version go first, through Jira's REST API (`acli` takes
+    // none of them on an edit): a refusal of them leaves the rest unwritten.
     let mut fielded = false;
-    if let (true, Some(fields)) = (action == "edit", asked.fields_given()) {
-        if let Err(refusal) = edited_fields(daemon, key, fields).await {
-            return Outcome::Failed(refusal);
+    let mut set = String::new();
+    if action == "edit" {
+        let through_api = match api_edit(project, asked, key).await {
+            Ok(through_api) => through_api,
+            Err(outcome) => return outcome,
+        };
+        if let Some(through_api) = through_api {
+            set = set_said(&through_api);
+            if let Err(refusal) = edited_through_api(daemon, project, site, key, through_api).await
+            {
+                return Outcome::Failed(refusal);
+            }
+            fielded = true;
         }
-        fielded = true;
+    }
+    if fielded {
         let more = title.is_some()
             || body.is_some()
             || asked.assignment().is_some()
@@ -3017,50 +3042,101 @@ async fn write_work_item(
         Err(why) => Outcome::Failed(why),
     };
     match outcome {
-        // What the fields set stays set: said, so that the work item is not taken for untouched.
+        // What the API set stays set: said, so that the work item is not taken for untouched.
         Outcome::Failed(why) if fielded => Outcome::Failed(format!(
-            "{why}; its fields were set before: they are changed, the rest is not"
+            "{why}; {set} before: they are changed, the rest is not"
         )),
         other => other,
     }
 }
 
-/// `acli jira workitem edit --from-json`: the fields of a work item set as given, or why `acli`
-/// did not set them. Its JSON is assumed to be `{"issues": [key], "additionalAttributes": {...}}`,
-/// as a creation's is (`acli jira workitem edit --generate-json` shows it).
-async fn edited_fields(
-    daemon: &Daemon,
-    key: &str,
-    fields: &serde_json::Map<String, Value>,
-) -> Result<(), String> {
-    let definition = AdfFile::json(
-        daemon,
-        &json!({"issues": [key], "additionalAttributes": fields}),
-    )?;
-    let said = acli_run(&[
-        "jira",
-        "workitem",
-        "edit",
-        "--from-json",
-        definition.path(),
-        "--yes",
-    ])
-    .await
-    .map_err(|why| format!("{why}; nothing was written"))?;
-    // A bulk command: it ends with 0 on a work item it could not change.
-    match said.lines().find(|l| l.trim_start().starts_with('✗')) {
-        Some(failure) => {
-            let mut why = format!(
-                "acli did not change the fields of {key}: {}; nothing was written",
-                masked(failure.trim())
-            );
-            if required_said(failure) {
-                why = format!("{why}; {REQUIRED_FIELDS}");
-            }
-            Err(why)
-        }
-        None => Ok(()),
+/// What a `PUT` of `fields` sets, for "was set before": the fields as given, the parent and the
+/// fix version, each said once.
+fn set_said(fields: &serde_json::Map<String, Value>) -> String {
+    let mut named = Vec::new();
+    if fields
+        .keys()
+        .any(|key| key != "parent" && key != "fixVersions")
+    {
+        named.push("its fields");
     }
+    if fields.contains_key("parent") {
+        named.push("its parent");
+    }
+    if fields.contains_key("fixVersions") {
+        named.push("its fix version");
+    }
+    format!(
+        "{} {}",
+        and_listed(&named),
+        if named.len() > 1 {
+            "were set"
+        } else {
+            "was set"
+        }
+    )
+}
+
+/// What an edit of a Jira work item sets through the REST API, as its `fields`: the fields as
+/// given, the parent and the fix version (what the dedicated arguments set is theirs, as on a
+/// creation). None when the edit sets none of them. The version is found among those of the work
+/// item's project first: `Err` is the outcome, before anything is written: a refusal of what was
+/// asked, a failure of what was read to know it.
+async fn api_edit(
+    project: &Project,
+    asked: &TicketsCall,
+    key: &str,
+) -> Result<Option<serde_json::Map<String, Value>>, Outcome> {
+    let mut fields = asked.fields_given().cloned().unwrap_or_default();
+    if let Some(parent) = asked
+        .parent
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+    {
+        let parent = accepted(project, parent)
+            .map_err(|why| Outcome::Refused(format!("refused: parent: {why}")))?;
+        fields.insert("parent".into(), json!({"key": parent.text()}));
+    }
+    if let Some(named) = asked.milestone_named() {
+        let Some(ProjectTracker::Jira { site, .. }) = &project.tracker else {
+            return Ok(None);
+        };
+        let version = versions::chosen_among(site, key.split('-').next().unwrap_or(key), named)
+            .await
+            .map_err(|why| Outcome::Failed(format!("{why}; nothing was written")))?
+            .map_err(|why| Outcome::Refused(format!("refused: {why}; nothing was written")))?;
+        fields.insert("fixVersions".into(), json!([{"name": version.name}]));
+    } else if asked.remove_milestone {
+        fields.insert("fixVersions".into(), json!([]));
+    }
+    Ok((!fields.is_empty()).then_some(fields))
+}
+
+/// `PUT /rest/api/3/issue/<key>` with the project's tracker entry: the fields of a work item set
+/// as given, or why Jira did not set them. The daemon puts the secret; it goes to the tracker's
+/// site alone and is in no answer.
+async fn edited_through_api(
+    daemon: &Daemon,
+    project: &Project,
+    site: &str,
+    key: &str,
+    fields: serde_json::Map<String, Value>,
+) -> Result<(), String> {
+    let (jira, _, _) = worklogs::signed_in(
+        daemon,
+        project,
+        site,
+        worklog::no_entry_to(
+            "change a work item's fields or parent with",
+            "changes work items",
+        ),
+    )
+    .await
+    // Nothing was sent: a refusal before the request says it, and `put` says what it knows.
+    .map_err(|why| format!("{why}; nothing was written"))?;
+    jira.put(&format!("issue/{key}"), &json!({"fields": fields}))
+        .await
 }
 
 /// The id of the comment just posted with `text` on the work item `on`, from a read right after

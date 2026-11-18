@@ -282,6 +282,14 @@ impl Provider {
         let listed = provider::listed_model(models.iter().map(|m| m.id.as_str()), id)?;
         models.iter().find(|m| m.id == listed)
     }
+
+    /// The model a stored id runs on (`provider::resolved_model`): the one listed as it is, else
+    /// the newest listed of its family, as the daemon starts a session on it.
+    pub fn resolved_model(&self, id: &str) -> Option<&Model> {
+        let models = self.models.as_ref()?;
+        let listed = provider::resolved_model(models.iter().map(|m| m.id.as_str()), id)?;
+        models.iter().find(|m| m.id == listed)
+    }
 }
 
 impl Providers {

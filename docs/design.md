@@ -137,7 +137,11 @@ without a prompt (Codex's `model/list` with no thread; Claude's and OpenCode's a
 for a session, with no user message): at the daemon's start, when the provider is enabled, and
 when its program (path or modification time), the names of its API keys set or the presence of
 its sign-in file change. The first session can be given a model (`docs/agents.md`, "The
-models").
+models"). A model a session was stored on that the agent's list no longer holds (an alias its
+update dropped) runs as the newest offered of its family, by the version in its id, else as the
+provider's default; a model the user asks is never replaced, only refused. A model
+or an effort the agent does not offer never ends a session nor drops its message: the session
+starts on what replaces it and its conversation says why, once.
 
 Handshake, session open order (resume, else load, else new), model/effort/mode options, event
 mapping, cancel, idle release of processes and death handling follow `reference/hemera.md` §1.
@@ -1338,7 +1342,7 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   `[Image 1: photo.png]`, and the agent reads each picture right after its marker (the ACP blocks
   interleave: text, image, text); a message in the conversation, and one that waits, shows the
   chips in its text, a click on a picture's chip opening it as its thumbnail does. A draft keeps
-  its chips (the composer of a session lives as long as the window), and a message taken back
+  its chips (and survives the window, "What survives a close" below), and a message taken back
   comes back with them, its markers read back as chips. A long text pasted (more than 4,000
   characters or more than 80 lines) is not put in the field: it is attached as a text file, a chip
   `pasted-text.txt` with its size where it was pasted (removed as one, like the others), and a
@@ -1446,6 +1450,29 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   as a browser keeps one: it lives as long as the window and is not stored. The mouse's back and
   forward buttons and `Alt+Left` / `Alt+Right` move in it; an open list, modal or drawer takes
   the button first and closes; a page that no longer exists is skipped.
+- **what survives a close of the window** (#1070): the draft of each composer, and what the
+  sidebar has folded, both kept by the daemon (`draft.*` and `window.*`, `docs/protocol.md`, "The
+  draft and window methods"), so that they survive the window, a restart of the daemon and are the
+  same in every window of the machine. A draft is the text a session's composer or a project's
+  first message holds and did not send, with its pictures (the picture strip and the markers'
+  chips; a large pasted text, attached as a file, is not kept): the window writes it 500 ms after
+  the last change, at once when the message is sent, which forgets it, as emptying the composer
+  does, and when the program ends however it ends (the window closed, the desktop's quit, a
+  signal); it reads it when the composer is made, which takes it only if the user has not typed
+  meanwhile (what they typed is then written over it), and without taking the focus. What the
+  daemon did not answer is asked again, later (a wait that doubles up to 30 s): a write the daemon
+  did not take is not taken as kept, a read it did not answer is not taken as "no draft", so that
+  nothing is written over a draft the window never saw, and the text typed before the read
+  answered is written once it does, or at the close once the daemon answers a read of its own.
+  The row of a session says its pencil as soon as the window opens (`draft.list`), without its
+  page being opened. A session that is forgotten and a
+  project that is removed take their drafts with them; the pictures are files of the daemon's
+  state folder (mode 0700) that go with the draft. A draft is the user's own words: never given to
+  an agent, never logged, in no event, and drawn nowhere but in its composer. The sidebar keeps
+  which projects, which leads (the chevron of a pilot's row) and whether the "Ended" group are
+  unfolded or folded; read before the first snapshot, so that the tree is made as it was left:
+  **nothing animates at opening**, and every fold or unfold afterwards is animated as always. A
+  project or a lead that no longer exists is forgotten.
 
 Motion: **everything that moves is animated**, with the grammar of `reference/gpui.md` (ease-out
 cubic, the durations of the kit's `src/motion.rs`, `gpui-design-system`: hover 140 ms, press 90 ms,

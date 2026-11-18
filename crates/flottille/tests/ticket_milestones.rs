@@ -573,12 +573,11 @@ fn milestone_writes_are_refused_on_jira_where_acli_makes_no_version() {
     let mcp = root_in(&user);
 
     // A Jira milestone is a version (`ticket_versions.rs`): read, and a work item created in one;
-    // acli makes, changes and releases none, and its edit moves none.
+    // acli makes, changes and releases none (a work item's own is set by `edit`, through the API,
+    // `ticket_edit_rest.rs`).
     for args in [
         json!({"action": "milestone_create", "title": "v1"}),
         json!({"action": "milestone_edit", "milestone": "v1", "state": "closed"}),
-        json!({"action": "edit", "ticket": "ABC-1", "milestone": "v1"}),
-        json!({"action": "edit", "ticket": "ABC-1", "remove_milestone": true}),
     ] {
         let said = refused_at_once(&user, &mcp, args.clone());
         assert!(

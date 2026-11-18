@@ -980,6 +980,7 @@ fn show_text(shown: &Value) -> String {
                 data["effort"].as_str().unwrap_or("the model's default")
             ),
             "agent.options_refused" => format!("[change refused: {}]", text(data, "reason")),
+            "agent.options_replaced" => format!("[{}]", text(data, "reason")),
             _ => continue,
         };
         speaking = None;

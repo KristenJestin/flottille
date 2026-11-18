@@ -1309,6 +1309,7 @@ async fn agent_task(daemon: Arc<Daemon>, id: String, orders: mpsc::UnboundedRece
         (provider.forget_agent)(&daemon.paths, &agent.id);
     }
     deliveries::forget_images(&daemon.paths, &id);
+    crate::drafts::forget_session(&daemon, &id);
 }
 
 /// Forgets the sessions of the ended roots kept longer than `tree::KEPT_MS`: they are resumed no
@@ -1339,6 +1340,7 @@ pub fn forget_kept_sessions(daemon: &Daemon) {
         else {
             continue;
         };
+        crate::drafts::forget_session(daemon, &agent.id);
         let paths = daemon.paths.clone();
         tokio::task::spawn_blocking(move || {
             (provider.forget_session)(&paths, &native);
@@ -2469,6 +2471,29 @@ impl acp::Events for Recorder {
                 json!({"reason": reason}),
                 false,
             );
+        }
+    }
+
+    fn effort_dropped(&self) {
+        let result = self.daemon.write(|store| {
+            let Some(agent) = store.agent(&self.agent)? else {
+                return Ok(((), None));
+            };
+            let (_, event) = store.change_agent(
+                &self.agent,
+                AgentChange {
+                    chosen: Some(Choices {
+                        effort: None,
+                        ..agent.chosen
+                    }),
+                    ..AgentChange::default()
+                },
+                None,
+            )?;
+            Ok(((), event))
+        });
+        if let Err(error) = result {
+            eprintln!("flottille daemon: agent {}: {error}", self.agent);
         }
     }
 

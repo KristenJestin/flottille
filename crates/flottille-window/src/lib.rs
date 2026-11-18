@@ -18,6 +18,7 @@ pub mod glyphs;
 pub mod history;
 pub mod instance;
 pub mod items;
+pub mod kept;
 pub mod leaves;
 pub mod link;
 pub mod links_card;
@@ -112,9 +113,12 @@ pub fn run(connect: Connect, instance: Option<Instance>) {
                 ..Default::default()
             };
             let window = gpui_kit::open_window(options, cx, |window, cx| {
+                let shell = cx.new(|cx| Shell::new(connect, window, cx));
                 // Closing the window ends the program (GPUI Fast differs from GPUI on
-                // `on_window_closed`).
-                window.on_window_should_close(cx, |_, cx| {
+                // `on_window_closed`), once what its composers hold is with the daemon.
+                let closing = shell.clone();
+                window.on_window_should_close(cx, move |_, cx| {
+                    closing.update(cx, |shell, cx| shell.closing(cx));
                     cx.quit();
                     true
                 });
@@ -122,7 +126,7 @@ pub fn run(connect: Connect, instance: Option<Instance>) {
                 if let Some(instance) = instance {
                     raise_on_request(instance, window, cx);
                 }
-                cx.new(|cx| Shell::new(connect, window, cx))
+                shell
             });
             if let Err(error) = window {
                 eprintln!("flottille: the window cannot open: {error}");

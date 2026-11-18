@@ -154,8 +154,10 @@
 //! ["Minor", "Major"]}}}}`. A `create` of such a type that does not carry each of them in the
 //! JSON's `additionalAttributes` (a creation by flags carries none) ends with 1 saying every
 //! missing one by name (`✗ Error: Severity is required (allowed values: Minor, Major)`). `workitem
-//! edit --from-json F --yes` reads `{"issues": [K, …], "additionalAttributes": {…}}` from F
-//! (recorded under `files` as `json`) and ends with 0 saying `✓ Work item K updated` for each.
+//! edit --from-json F --yes` reads `{"issues": [K, …], …}` from F (recorded under `files` as
+//! `json`) and ends with 0 saying `✓ Work item K updated` for each; a JSON with
+//! `additionalAttributes`, which only a creation reads, ends with 1 (`✗ Error: json: unknown field
+//! "additionalAttributes"`), as the real command does.
 //!
 //! A transition that ends with 0 moves the work item: a later `view` shows the status as the
 //! script spells it in `transitions` (kept in `moved.json`). Three more script keys, each a list
@@ -787,6 +789,11 @@ fn answer(dir: &Path, script: &Value, args: &[String]) -> i32 {
             let Some(item) = value(rest, "--from-json").and_then(file_text) else {
                 return not_run(&words);
             };
+            // As measured on the real command: its edit JSON is not a creation's.
+            if item.get("additionalAttributes").is_some() {
+                eprintln!("✗ Error: json: unknown field \"additionalAttributes\"");
+                return 1;
+            }
             for key in item["issues"].as_array().into_iter().flatten() {
                 let key = key.as_str().unwrap_or_default();
                 if script["items"].get(key).is_none() && script["created"] != key {

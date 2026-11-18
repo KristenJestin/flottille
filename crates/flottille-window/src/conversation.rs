@@ -376,6 +376,7 @@ pub fn in_sight(block: &Block) -> bool {
                 "failed"
                     | "ended"
                     | "resumed"
+                    | REPLACED_KIND
                     | COMPACTED_KIND
                     | COMPACTION_FAILED_KIND
                     | TIME_LOGGING_KIND
@@ -392,6 +393,10 @@ pub const TIME_LOGGING_KIND: &str = "time logging";
 /// What that line says: the window first, the file second (`docs/tickets.md`, "Logging time").
 const TIME_LOGGING_TEXT: &str = "Not logged: this project has no vault entry to log time with. \
     Choose one in its Settings, Tracker, or write worklog_token in its file.";
+
+/// The kind of the line that says the session runs on another model or effort than the one it
+/// was stored on: the agent no longer offers that one.
+pub const REPLACED_KIND: &str = "replaced";
 
 /// The kind of the line a compaction of the conversation is.
 pub const COMPACTED_KIND: &str = "compacted";
@@ -1210,6 +1215,12 @@ impl Conversation {
             "agent.resumed" => self.push(Block::Notice {
                 kind: "resumed".into(),
                 text: "by you, on its own session".into(),
+            }),
+            // A model or an effort the agent no longer offers: the session runs on what replaced
+            // it, said once.
+            "agent.options_replaced" => self.push(Block::Notice {
+                kind: REPLACED_KIND.into(),
+                text: text("reason"),
             }),
             _ => Vec::new(),
         }

@@ -715,3 +715,73 @@ fn a_model_switch_that_drops_the_effort_shows_the_new_effort_by_name(cx: &mut Te
     );
     assert_no_effort_reads_default(&shell, &id, cx);
 }
+
+/// The picker after the agent's list dropped the alias the session was stored on (#1076): every
+/// row it offers sends an id the daemon accepts, and none is the alias that left.
+#[gpui_kit::test]
+fn every_row_of_the_picker_sends_a_model_the_daemon_accepts(cx: &mut TestAppContext) {
+    let user = User::with_fake_agent().with_env("FLOTTILLE_IDLE_RELEASE_MS", "300");
+    user.fake_script(json!({
+        "models": ["claude-fable-5-1", "fable", "claude-fable-5-2", "sonnet"],
+        "efforts": ["low", "high"]
+    }));
+    std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
+    project(&user, "app");
+    let answer = user
+        .call(
+            "agent.start",
+            json!({"project": "app", "message": "hello", "model": "fable"}),
+        )
+        .unwrap();
+    let id = answer["agent"]["id"].as_str().unwrap().to_owned();
+    let after = answer["after"].as_u64().unwrap().to_string();
+    user.watch(&["--after", &after])
+        .until(|e| e["data"]["agent"] == id.as_str() && e["name"] == "agent.released");
+    let (shell, cx) = open_session(&user, &id, cx);
+    // The agent's update dropped the alias; the session's next process opens on the new list.
+    user.fake_script(json!({
+        "models": ["claude-fable-5-1", "claude-fable-5-2", "sonnet"],
+        "efforts": ["low", "high"]
+    }));
+    user.call("agent.send", json!({"agent": id, "message": "again"}))
+        .unwrap();
+
+    let rows = |cx: &mut VisualTestContext| {
+        options(&shell, &id, cx).read_with(cx, |o, _| {
+            o.entries(flottille_window::composer::Menu::Model)
+                .into_iter()
+                .filter(|e| e.id.starts_with("model-choice-"))
+                .collect::<Vec<_>>()
+        })
+    };
+    until(&shell, cx, "the picker offers the agent's new list", |cx| {
+        settle(cx);
+        let ids: Vec<String> = rows(cx).into_iter().map(|e| e.id).collect();
+        !ids.contains(&"model-choice-fable".to_owned())
+            && ids.contains(&"model-choice-claude-fable-5-2".to_owned())
+    });
+    eventually("the second turn ends", || {
+        shown(&user, &id)["state"] == "idle" && shown(&user, &id)["pending"]["model"].is_null()
+    });
+
+    for row in rows(cx) {
+        let options = options(&shell, &id, cx);
+        options.update(cx, |o, cx| {
+            o.choose(
+                flottille_window::composer::Menu::Model,
+                row.pick.as_ref().unwrap(),
+                cx,
+            )
+        });
+        settle(cx);
+        let model = row.id.trim_start_matches("model-choice-").to_owned();
+        until(&shell, cx, "the daemon answers the pick", |cx| {
+            settle(cx);
+            let agent = shown(&user, &id);
+            agent["taken"]["model"] == model.as_str()
+                || agent["pending"]["model"] == model.as_str()
+                || !toasts(&shell, cx).is_empty()
+        });
+        assert_eq!(toasts(&shell, cx), [], "{} refused", row.id);
+    }
+}
