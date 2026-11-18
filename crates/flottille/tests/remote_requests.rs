@@ -782,3 +782,32 @@ fn a_watch_of_this_machine_by_its_name_ends_with_its_client_too() {
     drop(watch);
     eventually("the subscription to end", || pc.log().contains(WATCH_ENDED));
 }
+
+#[test]
+fn an_exported_machine_does_not_stop_the_local_daemon_from_starting() {
+    let (_hub, pc, server) = pc_and_server(User::new());
+    let pid = server.user.status()["pid"].clone();
+    // No daemon runs here: the command starts one, which must not read the variable the command
+    // was given.
+    assert!(pc.user.run(&["daemon", "stop"]).status.success());
+    eventually(
+        "the server's status read through a daemon the command started",
+        || {
+            let output = pc
+                .user
+                .command(&["status", "--json"])
+                .env("FLOTTILLE_MACHINE", "server")
+                .output()
+                .unwrap();
+            serde_json::from_slice::<Value>(&output.stdout).is_ok_and(|status| status["pid"] == pid)
+        },
+    );
+    // `daemon` itself ignores the variable and refuses the flag.
+    let refused = pc.user.run(&["--machine", "server", "daemon"]);
+    assert!(!refused.status.success());
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("this machine's own"),
+        "{}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+}
