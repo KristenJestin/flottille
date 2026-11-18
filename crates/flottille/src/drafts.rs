@@ -58,7 +58,19 @@ fn folder(paths: &Paths, key: &str) -> PathBuf {
     paths.state.join("drafts").join(hex)
 }
 
-/// The key of the composer `target` of `kind`, once the thing it belongs to is known.
+/// Whether the agent's session is forgotten: it ended and cannot be resumed (it never could, or
+/// its kept week is over). No composer holds a draft of it, and nothing of it is kept.
+fn forgotten(agent: &flottille_core::agent::Agent) -> bool {
+    agent.state.is_final() && !crate::tree::keeps_session(agent)
+}
+
+/// Whether no project of that name is known (a project whose file cannot be read is not gone).
+fn project_gone(daemon: &Daemon, name: &str) -> bool {
+    crate::projects::load_project(daemon, name).is_err_and(|failure| failure.code == "not-found")
+}
+
+/// The key of the composer `target` of `kind`, once the thing it belongs to is known: a session
+/// that was forgotten, or whose project is gone, and a project that is gone, have no composer.
 fn key_of(daemon: &Daemon, kind: &str, target: &str) -> Result<String, Failure> {
     if target.is_empty() || target.len() > 200 {
         return Err(Failure::refused("a draft's target is 1 to 200 bytes"));
@@ -66,8 +78,11 @@ fn key_of(daemon: &Daemon, kind: &str, target: &str) -> Result<String, Failure> 
     match kind {
         "session" => {
             let known = daemon.read(|store| store.agent(target))?;
-            if known.is_none() {
+            let Some(agent) = known else {
                 return Err(Failure::new("not-found", format!("no agent {target}")));
+            };
+            if forgotten(&agent) || project_gone(daemon, &agent.project) {
+                return Err(Failure::new("not-found", format!("no session {target}")));
             }
         }
         "project" => {
@@ -188,6 +203,50 @@ pub fn forget_project(daemon: &Daemon, name: &str, agents: &[String]) {
     });
 }
 
+/// Every draft whose session or project is gone, and every folder of pictures no draft names, is
+/// forgotten: what a daemon that was stopped, or a write that ended halfway, left behind.
+pub fn sweep_orphans(daemon: &Daemon) {
+    for key in daemon.read(|store| store.draft_keys()).unwrap_or_default() {
+        let orphan = match key.split_once(':') {
+            Some(("session", id)) => match daemon.read(|store| store.agent(id)) {
+                Ok(Some(agent)) => forgotten(&agent) || project_gone(daemon, &agent.project),
+                Ok(None) => true,
+                Err(_) => false,
+            },
+            Some(("project", name)) => project_gone(daemon, name),
+            _ => false,
+        };
+        if orphan {
+            forget(daemon, &key);
+        }
+    }
+    let Ok(keys) = daemon.read(|store| store.draft_keys()) else {
+        return;
+    };
+    let named: Vec<PathBuf> = keys.iter().map(|key| folder(&daemon.paths, key)).collect();
+    let Ok(folders) = std::fs::read_dir(daemon.paths.state.join("drafts")) else {
+        return;
+    };
+    for entry in folders.flatten() {
+        if !named.contains(&entry.path()) {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
+/// Answers a `draft.*` request off the runtime's threads: it decodes up to twenty pictures and
+/// writes their files, which no request answered inline may do.
+pub async fn answer(
+    daemon: std::sync::Arc<Daemon>,
+    method: &str,
+    params: Value,
+) -> Result<Value, Failure> {
+    let method = method.to_owned();
+    tokio::task::spawn_blocking(move || call(&daemon, &method, params))
+        .await
+        .map_err(|e| Failure::new("unavailable", format!("a draft was not answered: {e}")))?
+}
+
 /// Answers a `draft.*` or `window.*` request of the user. No tool of an agent reaches them.
 pub fn call(daemon: &Daemon, method: &str, params: Value) -> Result<Value, Failure> {
     let params = if params.is_null() { json!({}) } else { params };
@@ -215,35 +274,34 @@ pub fn call(daemon: &Daemon, method: &str, params: Value) -> Result<Value, Failu
                 )));
             }
             let key = key_of(daemon, &kind, &target)?;
-            let before = daemon.read(|store| store.draft(&key))?;
-            let names = match &images {
-                Some(images) => keep_pictures(&daemon.paths, &key, images)?,
-                None => before.map(|(_, names)| names).unwrap_or_default(),
+            let written = match &images {
+                Some(images) => Some(keep_pictures(&daemon.paths, &key, images)?),
+                None => None,
             };
-            // Nothing to send is no draft.
-            if text.trim().is_empty() && names.is_empty() {
-                forget(daemon, &key);
-                return Ok(json!({"kept": false}));
-            }
-            let replaced = daemon.write(|store| {
-                Ok((
-                    store.put_draft(&key, &text, &names)?,
-                    None::<flottille_core::protocol::Event>,
-                ))
+            let session = (kind == "session").then_some(target.as_str());
+            // What it replaces is read and written in one transaction, and the session is looked
+            // at again in it: one forgotten since `key_of` looked is not written.
+            let done = daemon.write(|store| {
+                if let Some(agent) = session
+                    && store.agent(agent)?.is_some_and(|agent| forgotten(&agent))
+                {
+                    return Ok((None, None::<flottille_core::protocol::Event>));
+                }
+                let set = store.set_draft(&key, &text, written.as_deref())?;
+                Ok((Some(set), None))
             });
-            match replaced {
-                Ok(replaced) => {
-                    let gone: Vec<String> = replaced
-                        .into_iter()
-                        .filter(|name| !names.contains(name))
-                        .collect();
-                    remove_files(&daemon.paths, &key, &gone);
-                    Ok(json!({"kept": true}))
+            match done {
+                // The pictures it held and this one does not go once the transaction is over.
+                Ok(Some((kept, replaced))) => {
+                    remove_files(&daemon.paths, &key, &replaced);
+                    Ok(json!({"kept": kept}))
+                }
+                Ok(None) => {
+                    remove_files(&daemon.paths, &key, &written.unwrap_or_default());
+                    Err(Failure::new("not-found", format!("no session {target}")))
                 }
                 Err(error) => {
-                    if images.is_some() {
-                        remove_files(&daemon.paths, &key, &names);
-                    }
+                    remove_files(&daemon.paths, &key, &written.unwrap_or_default());
                     Err(error.into())
                 }
             }

@@ -6,8 +6,9 @@
 
 mod common;
 
-use std::sync::Arc;
+use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use common::User;
@@ -148,20 +149,41 @@ fn window<'a>(
     window_via(user, Arc::new(user.connector()), cx)
 }
 
-/// A window whose connections the test can refuse: while `down` is set, a connection the window
-/// has not made yet is refused, as the connections of a daemon that does not answer are. The ones
-/// it holds already go on.
-fn refusing(user: &User, down: &Arc<AtomicBool>) -> Connect {
-    let (inner, down) = (user.connector(), down.clone());
-    Arc::new(move || {
-        if down.load(Ordering::SeqCst) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::ConnectionRefused,
-                "the daemon does not answer",
-            ));
+/// A daemon that stops answering: [`Silence::fall`] ends the connections the window holds and
+/// refuses the ones it makes next, until [`Silence::rise`]. What the window asks of it fails, as
+/// it does when the daemon is restarting.
+#[derive(Clone, Default)]
+struct Silence {
+    down: Arc<AtomicBool>,
+    held: Arc<Mutex<Vec<UnixStream>>>,
+}
+
+impl Silence {
+    fn connect(&self, user: &User) -> Connect {
+        let (inner, silence) = (user.connector(), self.clone());
+        Arc::new(move || {
+            if silence.down.load(Ordering::SeqCst) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::ConnectionRefused,
+                    "the daemon does not answer",
+                ));
+            }
+            let stream = inner()?;
+            silence.held.lock().unwrap().push(stream.try_clone()?);
+            Ok(stream)
+        })
+    }
+
+    fn fall(&self) {
+        self.down.store(true, Ordering::SeqCst);
+        for stream in self.held.lock().unwrap().drain(..) {
+            let _ = stream.shutdown(std::net::Shutdown::Both);
         }
-        inner()
-    })
+    }
+
+    fn rise(&self) {
+        self.down.store(false, Ordering::SeqCst);
+    }
 }
 
 fn window_via<'a>(
@@ -578,7 +600,7 @@ fn draft_with_picture(user: &User, id: &str) {
 fn a_session_ended_for_good_forgets_its_draft(cx: &mut TestAppContext) {
     // Its agent cannot resume: once it ended, nothing of it is kept (`agent_task`).
     let user = User::with_fake_agent();
-    user.fake_script(json!({"resume": false}));
+    user.fake_script(json!({"load": false, "resume": false}));
     project(&user, "app");
     let id = start(&user, "app", "first");
     draft_with_picture(&user, &id);
@@ -911,19 +933,18 @@ fn the_restored_sidebar_draws_no_animation_at_opening(
     );
 }
 
-/// A window whose daemon does not take the connections the window has not made yet, on the
-/// session `id` it has a row for: the session's page is opened while the daemon does not answer.
+/// A window on the session `id`'s row, whose page is opened while the daemon does not answer.
 fn window_with_a_daemon_that_does_not_answer<'a>(
     user: &User,
     id: &str,
-    down: &Arc<AtomicBool>,
+    silence: &Silence,
     cx: &'a mut TestAppContext,
 ) -> (Entity<Shell>, &'a mut VisualTestContext) {
-    let (shell, cx) = window_via(user, refusing(user, down), cx);
+    let (shell, cx) = window_via(user, silence.connect(user), cx);
     until(&shell, cx, "the session's row", |cx| {
         cx.update(|window, _| window.try_find(session_id(id)).is_some())
     });
-    down.store(true, Ordering::SeqCst);
+    silence.fall();
     open_unread(id, &shell, cx);
     (shell, cx)
 }
@@ -938,15 +959,15 @@ fn a_draft_read_that_failed_is_asked_again_and_not_taken_for_no_draft(cx: &mut T
         json!({"kind": "session", "target": id, "text": "what the daemon keeps"}),
     )
     .unwrap();
-    let down = Arc::new(AtomicBool::new(false));
-    let (shell, cx) = window_with_a_daemon_that_does_not_answer(&user, &id, &down, cx);
+    let silence = Silence::default();
+    let (shell, cx) = window_with_a_daemon_that_does_not_answer(&user, &id, &silence, cx);
 
     // Said nothing yet, the composer is empty and may be typed in: it does not know the draft.
     assert!(!shell.read_with(cx, |s, cx| {
         s.reply_of(&id).unwrap().read(cx).draft_was_read()
     }));
     assert_eq!(reply_text(&id, &shell, cx), "");
-    down.store(false, Ordering::SeqCst);
+    silence.rise();
     until_later(
         &shell,
         cx,
@@ -971,8 +992,8 @@ fn a_text_typed_before_the_draft_was_read_is_kept_when_the_window_closes(cx: &mu
         json!({"kind": "session", "target": id, "text": "older words"}),
     )
     .unwrap();
-    let down = Arc::new(AtomicBool::new(false));
-    let (shell, cx) = window_with_a_daemon_that_does_not_answer(&user, &id, &down, cx);
+    let silence = Silence::default();
+    let (shell, cx) = window_with_a_daemon_that_does_not_answer(&user, &id, &silence, cx);
     cx.update(|window, cx| window.click("reply-field", cx));
     cx.simulate_input("typed meanwhile");
     assert!(!shell.read_with(cx, |s, cx| {
@@ -980,7 +1001,7 @@ fn a_text_typed_before_the_draft_was_read_is_kept_when_the_window_closes(cx: &mu
     }));
 
     // The daemon is back, and the window closes before the read was asked again.
-    down.store(false, Ordering::SeqCst);
+    silence.rise();
     close(&shell, cx);
     eventually("the daemon keeps what was typed", || {
         kept(&user, "session", &id) == Some(("typed meanwhile".to_owned(), 0))
@@ -997,15 +1018,15 @@ fn a_text_typed_while_the_daemon_does_not_answer_never_replaces_its_draft(cx: &m
         json!({"kind": "session", "target": id, "text": "older words"}),
     )
     .unwrap();
-    let down = Arc::new(AtomicBool::new(false));
-    let (shell, cx) = window_with_a_daemon_that_does_not_answer(&user, &id, &down, cx);
+    let silence = Silence::default();
+    let (shell, cx) = window_with_a_daemon_that_does_not_answer(&user, &id, &silence, cx);
     cx.update(|window, cx| window.click("reply-field", cx));
     cx.simulate_input("typed meanwhile");
 
     // The window closes while the daemon is still silent: nothing is known of its draft, so
     // nothing is written over it.
     close(&shell, cx);
-    down.store(false, Ordering::SeqCst);
+    silence.rise();
     assert_eq!(
         kept(&user, "session", &id),
         Some(("older words".to_owned(), 0))
@@ -1045,7 +1066,7 @@ fn a_draft_the_daemon_did_not_take_is_asked_again(cx: &mut TestAppContext) {
     );
     assert_eq!(
         kept(&user, "session", &id).map(|(text, _)| text),
-        Some("a picture follows ".to_owned())
+        Some("a picture follows [Image 1: image.png]".to_owned())
     );
 }
 

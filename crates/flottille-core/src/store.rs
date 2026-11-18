@@ -2796,17 +2796,46 @@ impl Store {
             .transpose()
     }
 
-    /// Keeps `text` and the files of `pictures` as the draft of `key`, in place of the one it
-    /// had; the names of the pictures that one had, which the caller removes. No event: a draft
-    /// is the user's own words.
-    pub fn put_draft(&mut self, key: &str, text: &str, pictures: &[String]) -> Result<Vec<String>> {
-        let before = self.draft(key)?.map(|(_, pictures)| pictures);
-        self.connection.execute(
-            "INSERT INTO drafts (key, text, pictures, updated_at) VALUES (?1, ?2, ?3, ?4) \
-             ON CONFLICT (key) DO UPDATE SET text = ?2, pictures = ?3, updated_at = ?4",
-            params![key, text, serde_json::to_string(pictures)?, now_ms()],
-        )?;
-        Ok(before.unwrap_or_default())
+    /// Keeps `text` as the draft of `key`, with the files of `pictures` (the ones it has when
+    /// there are none given), in place of the draft it had: read and written in one transaction,
+    /// so that a second window's write cannot slip between them. Text and pictures that are
+    /// nothing forget the draft. What comes back is whether a draft is kept, and the names of the
+    /// pictures the one it had held and this one does not, which the caller removes once the
+    /// transaction is over. No event: a draft is the user's own words.
+    pub fn set_draft(
+        &mut self,
+        key: &str,
+        text: &str,
+        pictures: Option<&[String]>,
+    ) -> Result<(bool, Vec<String>)> {
+        let transaction = self.connection.transaction()?;
+        let before: Vec<String> = transaction
+            .query_row(
+                "SELECT pictures FROM drafts WHERE key = ?1",
+                params![key],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .map(|names| serde_json::from_str(&names))
+            .transpose()?
+            .unwrap_or_default();
+        let names = pictures.map_or_else(|| before.clone(), <[String]>::to_vec);
+        let kept = !(text.trim().is_empty() && names.is_empty());
+        if kept {
+            transaction.execute(
+                "INSERT INTO drafts (key, text, pictures, updated_at) VALUES (?1, ?2, ?3, ?4) \
+                 ON CONFLICT (key) DO UPDATE SET text = ?2, pictures = ?3, updated_at = ?4",
+                params![key, text, serde_json::to_string(&names)?, now_ms()],
+            )?;
+        } else {
+            transaction.execute("DELETE FROM drafts WHERE key = ?1", params![key])?;
+        }
+        transaction.commit()?;
+        let gone = before
+            .into_iter()
+            .filter(|name| !kept || !names.contains(name))
+            .collect();
+        Ok((kept, gone))
     }
 
     /// Forgets the draft of `key`: the names of the pictures it had, which the caller removes.
@@ -5044,6 +5073,43 @@ mod tests {
         let (leave, event) = store.grant_leave(&writer.id, &session.id, 8).unwrap();
         assert_eq!(leave.map(|l| l.request), Some(8));
         assert_eq!(event.unwrap().name, "leave.granted");
+    }
+
+    #[test]
+    fn a_draft_is_replaced_in_one_step_and_says_the_pictures_it_no_longer_holds() {
+        let mut store = Store::open_in_memory().unwrap();
+        let names = |names: &[&str]| names.iter().map(|n| (*n).to_owned()).collect::<Vec<_>>();
+        assert_eq!(
+            store
+                .set_draft("session:a", "one", Some(&names(&["a.png", "b.png"])))
+                .unwrap(),
+            (true, vec![])
+        );
+        // No pictures given: it keeps the ones it has.
+        assert_eq!(
+            store.set_draft("session:a", "two", None).unwrap(),
+            (true, vec![])
+        );
+        assert_eq!(
+            store.draft("session:a").unwrap(),
+            Some(("two".into(), names(&["a.png", "b.png"])))
+        );
+        // Others given: the ones it no longer holds are said, to be removed once this is over.
+        assert_eq!(
+            store
+                .set_draft("session:a", "three", Some(&names(&["b.png", "c.png"])))
+                .unwrap(),
+            (true, names(&["a.png"]))
+        );
+        // Nothing left to send: the draft is forgotten, with all its pictures.
+        assert_eq!(
+            store
+                .set_draft("session:a", "  ", Some(&names(&[])))
+                .unwrap(),
+            (false, names(&["b.png", "c.png"]))
+        );
+        assert_eq!(store.draft("session:a").unwrap(), None);
+        assert!(store.draft_keys().unwrap().is_empty());
     }
 
     #[test]
