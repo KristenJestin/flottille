@@ -201,10 +201,6 @@ fn store(user: &User) -> Store {
     Store::open_read_only(&user.path("state/flottille/flottille.db")).unwrap()
 }
 
-fn eventually(what: &str, check: impl Fn() -> bool) {
-    eventually_for(Duration::from_secs(15), what, check);
-}
-
 fn eventually_for(long: Duration, what: &str, check: impl Fn() -> bool) {
     let deadline = Instant::now() + long;
     while !check() {
