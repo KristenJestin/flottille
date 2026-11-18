@@ -1123,6 +1123,11 @@ impl Session {
         self.pushed.recv().await
     }
 
+    /// Whether the session ended already.
+    pub fn has_ended(&self) -> bool {
+        self.ended.lock().unwrap().is_some()
+    }
+
     /// Why the session ended.
     pub fn ended(&self) -> String {
         lost(&self.authority, &self.ended).to_string()

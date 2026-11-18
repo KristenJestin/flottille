@@ -436,10 +436,20 @@ impl Control {
                     .to_owned(),
             );
         }
-        let members = device
+        let submitted = device
             .submit(&mut joined.session, change.claimed_by(&self.key))
-            .await
-            .map_err(|error| error.to_string())?;
+            .await;
+        let members = match submitted {
+            Ok(members) => members,
+            Err(error) => {
+                // A dead session cannot take a declaration: the join is let go, not resumed by
+                // every command after this one.
+                if joined.session.has_ended() {
+                    *joining = None;
+                }
+                return Err(error.to_string());
+            }
+        };
         self.keep(device)
             .map_err(|error| format!("{} cannot be written: {error}", self.file().display()))?;
         let device = device.clone();
