@@ -1968,7 +1968,9 @@ turn it runs anyway, and costs no quota.
   whole); `headers` are the agent's own, never `Authorization`, `Cookie` nor
   `Proxy-Authorization` (`refused: web sends no Authorization header of yours: a sign-in goes
   with entry, …`), nor `Host`, `Content-Length`, `Transfer-Encoding`, `Connection`, `TE` or
-  `Upgrade`, which web sets itself. The answer is the final URL, the status, the content type and
+  `Upgrade`, which web sets itself; with an entry, nor `Range` and `If-Range` (a part of an answer
+  that echoes the request could hold a part of the secret). Their names and values are 8,000
+  characters at most in all, as the body. The answer is the final URL, the status, the content type and
   the body as it came (JSON is not turned into Markdown), any status included, inside the web's
   block, cut at 30,000 characters as a page's text is; a body that is not text is named, not
   shown. A write's redirect is answered as it came, never followed.
@@ -1976,17 +1978,21 @@ turn it runs anyway, and costs no quota.
   secret is used"), and the daemon adds the sign-in itself: HTTP Basic with the entry's
   `username` and its secret when the entry has a username, else `Authorization: Bearer
   <secret>`; `auth` (`basic` or `bearer`) overrides the guess. The secret goes **only to the
-  entry's host**, the host of its `url` (`https`, or `http` on this machine): a URL on another
-  host is refused before anything is sent, naming both hosts (`refused: the vault entry
-  tracker-key is for api.example.test, and this URL is on other.example.test: …; nothing was
-  sent`), and so is plain `http` to another machine; a redirect is followed with the credential
-  only on that host, and one that leads elsewhere is refused, saying where it led. An entry
+  entry's origin**, the scheme, host and port of its `url` (`https`, or `http` on this machine): a
+  URL on another host is refused before anything is sent, naming both hosts (`refused: the vault
+  entry tracker-key is for api.example.test, and this URL is on other.example.test: …; nothing was
+  sent`), and so are plain `http` to another machine and another port of the host; a redirect is
+  followed with the credential only on that origin, and one that leads elsewhere is refused,
+  saying where it led. An entry
   without a `url`, one the agent's project does not see, or one bound to another use (`for`) is
   refused with the vault's sentences; a name the vault does not hold offers `vault ask` with the
   URL's origin, when the agent has the vault tool. The secret is read from the keyring at the
   moment the call is sent, never waited for. Every form of it (raw, the Basic credentials, the
-  header's value) is masked in the answer, as every vault value is in what is stored and shown;
-  nothing logs the request's headers. The address rules below hold for an API as for a page.
+  header's value, and their encoded forms, `docs/vault.md`) is masked in the answer, as every vault
+  value is in what is stored and shown: the whole body is masked before it is cut, and a cut body
+  never ends in the start of one of those forms (that end is masked too), so that no padding of an
+  echo shows a secret in part; the links the agent is shown are those of the masked text. Nothing
+  logs the request's headers. The address rules below hold for an API as for a page.
 - **The gate on a call of an API**: `GET` and `HEAD` are reads, passed or judged as a page's URL
   is; a method that writes (`POST`, `PUT`, `PATCH`, `DELETE`), with or without an entry, is **to
   judge**, and so is a `GET` or `HEAD` that sends headers of the agent's, which carry out what
@@ -1994,7 +2000,9 @@ turn it runs anyway, and costs no quota.
   signs in as and with which entry, then the agent's headers and the body: `it sends POST
   https://api.example.test/rest/api/3/issue to api.example.test as robin@example.test with the
   vault entry tracker-key, its body: {…}` (a bearer token: `with the vault entry tracker-key as
-  a bearer token`), masked. An entry that cannot sign the call in is refused before any card.
+  a bearer token`), masked. A signed `GET` held as a URL the agent built, or a link of a site read
+  often, says the same after its reason: `…; it signs in as robin@example.test with the vault
+  entry tracker-key`. An entry that cannot sign the call in is refused before any card.
 - **`search {query}`**: DuckDuckGo's HTML page (`https://html.duckduckgo.com/html/?q=…`, no key,
   no account): at most 10 results, each its title, its URL (out of DuckDuckGo's redirect) and its
   excerpt, ads left out. A page that asks to prove a human is there, or any answer with no
