@@ -270,7 +270,10 @@ new key, the inviting member's and the invitation's token, and waits until the m
 accepts or refuses the request (5 minutes at most). Once it is accepted, it signs the declaration
 of this machine, which the daemon claims with the machine's key, and the machine pins the hub. A
 machine set up with a hub already is refused. A join the hub recorded spends the invitation, even
-when the connection then drops: ask a new one. `remote.join`, `remote.declare`.
+when the connection then drops: ask a new one. The new key is pending until the join succeeded: a
+join whose command was gone (a closed terminal) and that the member accepted all the same goes on,
+given the code again, with the key the hub took; any other pending key is removed and a new one
+made. `remote.join`, `remote.declare`.
 
 ```
 $ flottille remote join

@@ -1013,7 +1013,9 @@ with the reason. No method answers a private key.
   came that checks back to its own root and holds the device's entry, signed by the member of the
   invitation: `{"head", "name", "role", "added_by", "hub"}`. `refused` when the request was refused
   or expired, when the code is not one, when the key was removed from the list, or when the
-  machine is set up already. Its class is `Local`.
+  machine is set up already. With `{key, "resume": true}`, no join is asked: the answer of the
+  join this daemon accepted for `key`, which a command gone did not take (a join still waiting is
+  waited for), `null` when none holds it as a member. Its class is `Local`.
 - `remote.declare {change}` then carries the declaration of this machine (`machine`), signed by
   the device that joined after `head`; the daemon claims it with the machine key, pins the hub
   (`remote/hub.json`) once the hub sent it back, and keeps the session. It answers `{"url", "hub",

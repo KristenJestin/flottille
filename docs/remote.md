@@ -246,7 +246,14 @@ link.
   a machine with no Secret Service (a headless server), `$XDG_STATE_HOME/flottille/remote/device.key`,
   mode 600, read by the clients only. The daemon never reads it. It signs the user's actions, the
   member list's changes included. It is kept once `flottille remote setup` or `join` succeeded with
-  it, never before ("What a compromised hub can still do").
+  it, never before ("What a compromised hub can still do"). Until then it is **pending**, with the
+  same care: an item `Flottille: device, pending` (`flottille-key = device-pending`), or
+  `device.key.pending` with no Secret Service, written before the hub sees the key, so that a
+  command gone before the end (Ctrl+C, a closed terminal, a lost SSH session, a locked keyring)
+  loses no key the hub took. The next setup or join looks at a pending key first: it is kept when
+  the daemon's list, pinned or of the join it accepted, holds it as a member, and removed otherwise,
+  never sent again. The keyring holding two items of the device key (two clients that kept one at
+  the same moment) is refused, never one of them taken: which is the member's cannot be told.
 - **The phone's device key** is made by the app, kept encrypted under a key of the Android Keystore,
   and never leaves the phone.
 - **The hub's key** is made at its first start, in its own state folder. Devices pin it when they
@@ -422,7 +429,7 @@ each other.
    once**. The member shows a QR and the same as a code to copy, holding the hub URL with the hub's
    key, the token, and the inviting member's key fingerprint.
 2. **The new device reads it** (the phone scans the QR; a computer is given the code), makes its key
-   (a new one for each join, kept only once one succeeded), and connects **to the hub**, not to the inviting member, with the token and its new public key.
+   (a new one for each join, pending until one succeeded, kept then), and connects **to the hub**, not to the inviting member, with the token and its new public key.
 3. **The hub holds the request** and notifies the inviting member. Both screens show the same **four
    verification words**, drawn from the new device's key, the inviting member's key and the token
    (`maple orbit violet canyon`).
@@ -450,7 +457,11 @@ before anything else is exchanged: at start, a machine accepts and dials no link
 hub's list, 10 s at most, and goes on with the list it kept only when the hub cannot give it one
 by then. The same holds once its session to the hub is lost (a machine that wakes from a suspend,
 or was offline): no new link is accepted or dialled until the next session's list, 10 s at most
-from the loss, a hub unreachable meanwhile included; the links up already go on. A removed member's open invitations close with it, and the joins that wait on them end,
+from the loss, a hub unreachable meanwhile included; the links up already go on. A session may
+look alive for minutes after a suspend, with no heartbeat to say otherwise: every second, the
+daemon compares how far the wall clock moved with how far the monotonic clock did, which does not
+count a suspend, and more than 5 s apart ends the session as lost. Meanwhile, a link from a key
+the list kept does not trust is refused at once, and one from a key it trusts waits, one per key. A removed member's open invitations close with it, and the joins that wait on them end,
 refused. A removed device key cannot join again; the hub refuses removed device keys, not machine
 keys, so a removed member's machine may join again with a new device key, through an invitation
 and its four words like any other. **Renaming** is the same kind of
