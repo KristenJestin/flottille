@@ -4468,7 +4468,7 @@ fn publish_never_runs_on_a_commit_no_verify_passed_on() {
     // `publish` needs `verify` to have passed, or to have been skipped for that reason.
     let publish = job("publish");
     assert!(
-        publish.contains("needs: [verified-on-dev, verify, build]"),
+        publish.contains("needs: [verified-on-dev, verify, build, hub]"),
         "{publish}"
     );
     let condition: String = publish.split_whitespace().collect::<Vec<_>>().join(" ");
