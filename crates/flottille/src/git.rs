@@ -60,8 +60,9 @@ pub async fn run_with<S: AsRef<OsStr>>(
 }
 
 /// [`output`] of `git <subcommand> <args>` that reaches `remote` (`ls-remote`, `fetch`): only the
-/// protocol its URL uses, as git resolves it, git's own upload command over the remote's, and the
-/// user's SSH agent lent when that protocol is SSH (`docs/vault.md`, "The runtime folder").
+/// protocol its URL uses, as git resolves it, and only one of [`FETCHED`], git's own upload
+/// command over the remote's, and the user's SSH agent lent when that protocol is SSH
+/// (`docs/vault.md`, "The runtime folder").
 pub async fn output_remote(
     dir: &Path,
     remote: &str,
@@ -76,6 +77,13 @@ pub async fn output_remote(
     )
     .await?;
     let protocol = protocol(url.trim());
+    if !FETCHED.contains(&protocol) {
+        return Err(format!(
+            "{remote} is reached through {protocol}, which runs a program the remote names: \
+             Flottille's own git reaches a remote over {} only",
+            FETCHED.join(", ")
+        ));
+    }
     // The line's own option, since the first `remote.<name>.uploadpack` git reads is the one it
     // takes: the repository's, before any given in the environment.
     let args: Vec<&str> = [subcommand, "--upload-pack=git-upload-pack"]
@@ -90,6 +98,10 @@ pub async fn output_remote(
     };
     said(bounded(git, dir, &args, class.limit(), OUTPUT_LIMIT, None).await?)
 }
+
+/// The protocols the daemon's own git reaches a remote with: git's own transports. Any other
+/// (`ext::`, a `git-remote-<name>` of the `PATH`) runs a program the remote's URL names.
+const FETCHED: [&str; 5] = ["ssh", "https", "http", "git", "file"];
 
 /// The name `GIT_ALLOW_PROTOCOL` knows the transport of `url` by, read as git reads it: a
 /// helper's `<name>::`, a scheme (`ssh` for its other spellings), `ssh` for `host:path`, `file`
@@ -406,8 +418,21 @@ pub(crate) mod tests {
             ("../app.git", "file"),
             ("./a:b", "file"),
             ("ext::ssh -W %h:%p forge.invalid", "ext"),
+            ("foo::forge.invalid/app", "foo"),
+            ("foo://forge.invalid/app", "foo"),
         ] {
             assert_eq!(super::protocol(url), protocol, "{url}");
+        }
+    }
+
+    #[test]
+    fn a_helper_s_protocol_is_never_fetched() {
+        for url in [
+            "ext::sh -c true",
+            "foo::forge.invalid/app",
+            "foo://forge.invalid",
+        ] {
+            assert!(!FETCHED.contains(&super::protocol(url)), "{url}");
         }
     }
 
