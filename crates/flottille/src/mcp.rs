@@ -2264,6 +2264,16 @@ pub async fn with_pictures<T>(call: impl Future<Output = T>) -> (T, Vec<String>)
         .await
 }
 
+/// [`with_pictures`] for a call that runs in a blocking thread, where a task's locals do not
+/// reach: the caller gives each picture to the task itself (`picture_served`).
+pub fn with_pictures_blocking<T>(call: impl FnOnce() -> T) -> (T, Vec<String>) {
+    PICTURES.sync_scope(Mutex::default(), || {
+        let result = call();
+        let pictures = PICTURES.with(|pictures| pictures.lock().unwrap().clone());
+        (result, pictures)
+    })
+}
+
 /// Gives the call in progress a picture to carry in its result, a file of the agent's folder of
 /// images. Every call runs in a scope that carries them (`played`, or `with_pictures` for a call
 /// the user allowed later, whose answer is a message with its images).
@@ -3319,7 +3329,7 @@ async fn performed_once(
 ) -> Outcome {
     match tool {
         "web" if crate::show::is(&args) => crate::show::show(daemon, grant, args),
-        "web" => crate::web::web(args).await,
+        "web" => crate::web::web(daemon, &grant.agent, args).await,
         "services" => crate::services::tool(daemon, grant, args, first).await,
         // An accepted request's `first` is the words the user read (`approvals`).
         "connections" => crate::extensions::family_call(daemon, args, first, &grant.place).await,
@@ -3353,26 +3363,36 @@ async fn performed_once(
             let (daemon, grant, tool) = (daemon.clone(), grant.clone(), tool.to_owned());
             let call = call.map(str::to_owned);
             let done = tokio::task::spawn_blocking(move || {
-                let cx = Context {
-                    daemon: &daemon,
-                    agent: &grant.agent,
-                    place: &grant.place,
-                    approved,
-                    call: call.as_deref(),
-                    epoch: grant.epoch,
-                };
-                match tool.as_str() {
-                    "fs_read" => files::fs_read(&cx, args),
-                    "fs_list" => files::fs_list(&cx, args),
-                    "search" => files::search(&cx, args),
-                    "fs_write" => files::fs_write(&cx, args),
-                    "fs_edit" => files::fs_edit(&cx, args),
-                    "skill_read" => skills::skill_read(&cx, args),
-                    other => Outcome::Failed(format!("{other} is not served")),
-                }
+                with_pictures_blocking(|| {
+                    let cx = Context {
+                        daemon: &daemon,
+                        agent: &grant.agent,
+                        place: &grant.place,
+                        approved,
+                        call: call.as_deref(),
+                        epoch: grant.epoch,
+                    };
+                    match tool.as_str() {
+                        "fs_read" => files::fs_read(&cx, args),
+                        "fs_list" => files::fs_list(&cx, args),
+                        "search" => files::search(&cx, args),
+                        "fs_write" => files::fs_write(&cx, args),
+                        "fs_edit" => files::fs_edit(&cx, args),
+                        "skill_read" => skills::skill_read(&cx, args),
+                        other => Outcome::Failed(format!("{other} is not served")),
+                    }
+                })
             })
             .await;
-            done.unwrap_or_else(|error| Outcome::Failed(error.to_string()))
+            match done {
+                Ok((outcome, pictures)) => {
+                    for name in &pictures {
+                        picture_served(name);
+                    }
+                    outcome
+                }
+                Err(error) => Outcome::Failed(error.to_string()),
+            }
         }
     }
 }

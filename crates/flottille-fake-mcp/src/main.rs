@@ -61,8 +61,8 @@
 //! (`"sampling"`, `"elicitation"` or `"roots"`: sends that request to the client and answers with
 //! what it got back), `reload` (reads the script again and says its tools changed), `env` (the
 //! value of that variable), `echo` (the arguments, as JSON), `text`; `image` adds a picture after
-//! the text, `images` that many pictures of `image_bytes` bytes each (a PNG's signature, then
-//! zeros), `image_data` one picture of those base64 bytes, of the type `image_mime` (png by
+//! the text, `images` that many pictures of `image_bytes` bytes each (a real 1×1 PNG, or GIF with
+//! `image_mime`, then zeros), `image_data` one picture of those base64 bytes, of the type `image_mime` (png by
 //! default), `audio` a sound and `resource` a resource link after it, `error` answers that text as
 //! an error. `rpc_error` answers that text as a JSON-RPC
 //! error instead, on stdio. `big` (`{"bytes": 1000, "chunk": 100, "pause_ms": 5}`) answers a text of
@@ -478,13 +478,23 @@ fn call(
     }
     if let Some(count) = answer["images"].as_u64() {
         use base64::Engine as _;
-        let mut bytes = vec![0u8; answer["image_bytes"].as_u64().unwrap_or(64) as usize];
-        let signature = b"\x89PNG\r\n\x1a\n";
-        let kept = signature.len().min(bytes.len());
-        bytes[..kept].copy_from_slice(&signature[..kept]);
+        // A real picture, as a provider reads it, then zeros up to `image_bytes`: a PNG, which is
+        // scaled down when over the cap, or a GIF (`image_mime`), which is never scaled.
+        let mime = answer["image_mime"].as_str().unwrap_or("image/png");
+        let picture = match mime {
+            "image/gif" => "R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7",
+            _ => {
+                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
+            }
+        };
+        let mut bytes = base64::engine::general_purpose::STANDARD
+            .decode(picture)
+            .unwrap();
+        let size = answer["image_bytes"].as_u64().unwrap_or(0) as usize;
+        bytes.resize(bytes.len().max(size), 0);
         let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
         for _ in 0..count {
-            content.push(json!({"type": "image", "mimeType": "image/png", "data": data}));
+            content.push(json!({"type": "image", "mimeType": mime, "data": data}));
         }
     }
     json!({"content": content})
