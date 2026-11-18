@@ -229,17 +229,21 @@ Flottille's own tools:
   that root was itself started by an agent (`tools.md`, "Sessions an agent starts"): a `led`
   session is piloted by the caller, asks it its questions and wakes it when it asks, reports or
   ends; a `handed` one is the user's, and the caller hears nothing more of it. It answers at once
-  with the id.
+  with the id. With `project`, a `led` or `handed` session is started in another registered
+  project, held for the user every time, in every mode (§7.2): a full lead of that project, in its
+  places, with its tools, settings and vault entries; a child never is.
 - `session_send {session, text}` (a root): a message to a session the caller started, to the
-  agent that started it, or to any other session of its project once the user gave their leave
-  for that pair (asked with the first message, in every mode, §7.2), judged as a write is; it
+  agent that started it, or to any other session, of its project or another, once the user gave
+  their leave for that pair (asked with the first message, in every mode, §7.2; across projects
+  even to a session the caller started), judged as a write is; it
   arrives as a delivery labelled with its sender, never as the user's, and the answer comes back
   the same way.
 - `session_read {session?, last?, since?, until?, cursor?}` (a root): a page of the conversation
   of another session of the caller's project (the user's messages to it and its agent's replies,
   with their times), the last messages or those between two dates, with a cursor to the next page,
   and the mode of that session's tree; framed as that session's data, never instructions; judged
-  in Ask and Auto; a session of another project is refused. Without `session` (or with the
+  in Ask and Auto; a session of another project the caller did not start is read with the user's
+  leave for the pair, asked once (§7.2). Without `session` (or with the
   caller's own id) it reads this session: its id, its role and its tree's mode, asked of nobody.
 - `session_title {title}` (a root): names its session for the user, 3 to 8 words on one line, at
   most 60 characters, in its first turn and again when the work changes, until the user renames
@@ -716,7 +720,10 @@ whatever agent of it is named); no tool of an agent does, and a session an agent
 user (`agent_launch` with `kind` `led` or `handed`) takes the mode of the tree that started it, Full included, never
 above it: an agent in Full can already do what the session would do, the session caps still apply,
 and the rules refused in every mode stay refused in it. Each tree keeps its own mode afterwards: a
-switch of the launcher's tree does not reach it. It is kept when the session resumes. An agent
+switch of the launcher's tree does not reach it. It is kept when the session resumes. A session an
+agent starts in another project (`agent_launch` with `project`) takes the mode that project gives a
+new session, Auto, never above the caller's tree's: Ask stays Ask, and Full is never carried to
+another project. An agent
 reads its mode, never sets it: `session_read` with no `session` (its own id is not told to it)
 answers with its id, its role and its tree's mode, and the text Flottille starts every session
 with says so. Reading another session says the mode of that session's tree too.
@@ -941,7 +948,11 @@ who asked:
   reaches the judge; allowing it delivers the message and lets that session write to the other
   from then on, one way, each message then judged as a write is, until either session ends or
   the user withdraws it where the session's rights are shown (`docs/tools.md`, "Sessions that
-  talk to each other").
+  talk to each other"). Across projects the leave is asked even of a session the caller started,
+  and the first read of another project's session it did not start asks it too: one leave, to
+  read and write, per pair.
+  **A launch in another project** (`agent_launch` with `project`) is held for the user the same
+  way, in every mode, Full included, never judged, and every time.
   Ending a session that is not the agent's own child (`agent_stop`) is held for the user the same
   way, in every mode, Full included, and every time: nothing is kept (`docs/tools.md`, "Ending
   another session"). The one exception is a session the agent itself started as `led`, which it
