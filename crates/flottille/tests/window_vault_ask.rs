@@ -344,6 +344,30 @@ fn the_card_of_a_vault_ask_opens_the_vault_form_prefilled(cx: &mut TestAppContex
     );
 }
 
+/// What a card says of the entry once "Details" is open, a feature's own description included
+/// (the Jira one runs to two hundred characters), must not push Dismiss and New entry out of
+/// the rail's sight: the user answers from the card without scrolling to the buttons.
+#[gpui_kit::test]
+fn the_buttons_of_a_card_stay_in_sight_once_its_details_are_open(cx: &mut TestAppContext) {
+    let user = user();
+    let id = session(&user, "log my time");
+    let (shell, cx) = window(&user, cx);
+    let (_, at) = waiting_card(&user, &shell, &id, cx);
+
+    cx.update(|window, cx| window.click(format!("vault-ask-{at}-details"), cx));
+    settle(cx);
+    cx.update(|window, _| {
+        for part in ["what", "source", "dismiss", "add"] {
+            let id = format!("vault-ask-{at}-{part}");
+            let found = window.try_find(id.clone());
+            assert!(
+                found.is_some_and(|found| found.visible()),
+                "{id} is in the rail's sight with Details open"
+            );
+        }
+    });
+}
+
 #[gpui_kit::test]
 fn the_card_shows_the_host_the_secret_goes_to(cx: &mut TestAppContext) {
     let user = user();
