@@ -376,7 +376,10 @@ fn the_systemd_unit_example_runs_the_hub_as_a_service_of_its_own() {
     }
     // `DynamicUser=yes` already implies these: said once, as a comment.
     for line in ["NoNewPrivileges=yes", "ProtectSystem=strict"] {
-        assert!(!unit.lines().any(|l| l == line), "{line} is implied: {unit}");
+        assert!(
+            !unit.lines().any(|l| l == line),
+            "{line} is implied: {unit}"
+        );
     }
     let exec = unit
         .lines()
@@ -441,7 +444,10 @@ fn the_hub_jobs_run_on_a_pull_request_only_when_the_hub_or_the_release_changes()
         !hub.contains("CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER"),
         "{hub}"
     );
-    assert!(hub.contains("CC_x86_64_unknown_linux_musl: musl-gcc"), "{hub}");
+    assert!(
+        hub.contains("CC_x86_64_unknown_linux_musl: musl-gcc"),
+        "{hub}"
+    );
     // The image names its repository: the build is given it.
     assert!(
         hub.contains("--build-arg SOURCE=https://github.com/${{ github.repository }}"),
