@@ -752,3 +752,33 @@ fn a_client_started_by_an_agent_is_still_refused_with_machine() {
     server.user.status();
     assert!(!server.log().contains(SERVED), "{}", server.log());
 }
+
+/// What a machine's log says when a watch it served for a device ends.
+const WATCH_ENDED: &str = "the watch asked by pc ended";
+
+#[test]
+fn a_watch_of_another_machine_ends_with_its_client_on_a_quiet_machine() {
+    let (_hub, pc, server) = pc_and_server(User::new());
+    let pid = server.user.status()["pid"].clone();
+    let watch = pc.user.watch(&["--machine", "server", "--after", "0"]);
+    watch.until(|event| event["name"] == "daemon.started" && event["data"]["pid"] == pid);
+    assert!(!server.log().contains(WATCH_ENDED), "{}", server.log());
+
+    // The client leaves; nothing happens on the server meanwhile, so no event is sent that
+    // could tell the carrying daemon its client is gone.
+    drop(watch);
+    eventually("the server's subscription to end", || {
+        server.log().contains(WATCH_ENDED)
+    });
+}
+
+#[test]
+fn a_watch_of_this_machine_by_its_name_ends_with_its_client_too() {
+    let (_hub, pc, _server) = pc_and_server(User::new());
+    let watch = pc.user.watch(&["--machine", "pc", "--after", "0"]);
+    watch.until(|event| event["name"] == "daemon.started");
+    assert!(!pc.log().contains(WATCH_ENDED), "{}", pc.log());
+
+    drop(watch);
+    eventually("the subscription to end", || pc.log().contains(WATCH_ENDED));
+}
