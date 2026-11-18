@@ -247,28 +247,59 @@ fn a_refused_model_never_ends_the_session_and_its_message_is_sent() {
     assert_eq!(show(&user, &id)["state"], "idle");
 }
 
-#[test]
-fn a_session_ended_by_a_refused_model_resumes() {
-    let user = User::with_fake_claude();
-    user.claude_script(json!({ "models": with_fable() }));
-    project(&user);
-    let (id, after) = start(&user, "fable", "hello");
-    until_settled(&user, &id, after);
-    user.call("agent.stop", json!({"agent": id})).unwrap();
-    let watch = user.watch(&["--after", &after.to_string()]);
-    watch.until(|e| of(&id)(e) && e["name"] == "agent.ended");
-    // The agent's update dropped the alias the session was stored on.
-    user.claude_script(json!({ "models": without_fable() }));
+/// The list without the alias, where the model of the family that replaces it has no effort to
+/// choose.
+fn without_fable_nor_effort() -> Value {
+    let mut models = without_fable();
+    for model in models.as_array_mut().unwrap() {
+        if model["value"] == "claude-fable-5-2" {
+            model["supportsEffort"] = false.into();
+        }
+    }
+    models
+}
 
-    let resumed = user.resume(&id);
+/// Resumes the agent, sends it `message` and waits for its turn: its events from the resume on.
+fn resume_and_send(user: &User, id: &str, message: &str) -> Vec<Value> {
+    let resumed = user.resume(id);
     let sent = user
-        .call("agent.send", json!({"agent": id, "message": "again"}))
+        .call("agent.send", json!({"agent": id, "message": message}))
         .unwrap();
     let from = resumed["after"]
         .as_u64()
         .or(sent["after"].as_u64())
         .unwrap();
-    let events = until_settled(&user, &id, from);
+    until_settled(user, id, from)
+}
+
+#[test]
+fn a_session_ended_by_a_refused_model_resumes() {
+    let user = User::with_fake_claude();
+    user.claude_script(json!({ "models": with_fable() }));
+    project(&user);
+    let answer = user
+        .call(
+            "agent.run",
+            json!({"project": "app", "message": "hello", "model": "fable", "effort": "max"}),
+        )
+        .unwrap();
+    let id = answer["agent"]["id"].as_str().unwrap().to_owned();
+    until_settled(&user, &id, answer["after"].as_u64().unwrap());
+    // The agent's update dropped the alias the session was stored on, and the daemon before this
+    // fix refused it as the session opened: the session failed, as the report shows.
+    assert!(user.run(&["daemon", "stop"]).status.success());
+    let db = rusqlite::Connection::open(user.path("state/flottille/flottille.db")).unwrap();
+    let failed = db
+        .execute(
+            "UPDATE agents SET state = 'failed', ended_at = updated_at WHERE id = ?1",
+            [&id],
+        )
+        .unwrap();
+    assert_eq!(failed, 1);
+    drop(db);
+    user.claude_script(json!({ "models": without_fable_nor_effort() }));
+
+    let events = resume_and_send(&user, &id, "again");
 
     assert!(
         names(&events).contains(&"agent.turn_ended"),
@@ -281,7 +312,33 @@ fn a_session_ended_by_a_refused_model_resumes() {
         names(&events)
     );
     assert_eq!(set_models(&user).last().unwrap(), "claude-fable-5-2");
-    assert_eq!(show(&user, &id)["chosen"]["model"], "claude-fable-5-2");
+    let agent = show(&user, &id);
+    assert_eq!(agent["chosen"]["model"], "claude-fable-5-2");
+    assert_eq!(
+        agent["chosen"]["effort"],
+        Value::Null,
+        "the effort refused goes"
+    );
+    assert_eq!(
+        replaced(&events),
+        [
+            "the model fable is no longer offered by the agent: running claude-fable-5-2",
+            "the agent has no effort option: it cannot take max"
+        ]
+    );
+
+    // Said once: a second resume runs on what replaced them, with no notice.
+    let seen = events.last().unwrap()["seq"].as_u64().unwrap();
+    user.call("agent.stop", json!({"agent": id})).unwrap();
+    let watch = user.watch(&["--after", &seen.to_string()]);
+    watch.until(|e| of(&id)(e) && e["name"] == "agent.ended");
+    let events = resume_and_send(&user, &id, "once more");
+    assert!(
+        names(&events).contains(&"agent.turn_ended"),
+        "{:?}",
+        names(&events)
+    );
+    assert!(replaced(&events).is_empty(), "{:?}", replaced(&events));
 }
 
 /// A session on `fable` that ran, then a second session that learned the list without it: the
@@ -352,4 +409,28 @@ fn an_explicit_pick_of_a_model_not_offered_is_refused_naming_what_is_offered() {
         assert_eq!(code, "refused", "{why}");
         assert!(why.contains(&format!("offers no model {model}")), "{why}");
     }
+}
+
+#[test]
+fn the_newest_of_its_family_refused_runs_on_the_default_said_once() {
+    let user = User::with_fake_agent();
+    user.fake_script(json!({
+        "models": ["fake-small", "fake-large-5"],
+        "refuse": ["fake-large-5"]
+    }));
+    project(&user);
+
+    let (id, after) = start(&user, "fake-large", "hello");
+    let events = until_settled(&user, &id, after);
+
+    assert!(
+        names(&events).contains(&"agent.turn_ended"),
+        "{:?}",
+        names(&events)
+    );
+    assert_eq!(
+        replaced(&events),
+        ["the agent does not offer the model fake-large: running fake-small, its default"]
+    );
+    assert_eq!(show(&user, &id)["chosen"]["model"], "fake-small");
 }
