@@ -769,6 +769,11 @@ fn saving_the_entry_from_a_request_answers_it_and_leaves_the_page_as_it_was(
             .unwrap()
             .is_empty()
     });
+    // The daemon answered the request when it stored the entry; the window learns it from the
+    // reply to its write, on a later poll: the form closes then, not before.
+    until(&shell, cx, "the form closes", |cx| {
+        !vault.read_with(cx, |v, _| v.is_open())
+    });
     settle(cx);
 
     // No click on the session was needed to be back on it: it was never left.
