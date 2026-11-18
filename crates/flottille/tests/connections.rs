@@ -2054,13 +2054,13 @@ fn an_image_past_the_cap_is_left_out_with_its_line() {
     let user = user();
     let (_, text, images) = pictured(
         &user,
-        json!({"text": "a screenshot", "images": 1, "image_bytes": 3 * MIB}),
+        json!({"text": "a screenshot", "images": 1, "image_bytes": 3 * MIB, "image_mime": "image/gif"}),
     );
     assert!(images.is_empty(), "no image goes");
     assert!(text.contains("a screenshot"), "{text}");
     assert!(
         text.contains(&format!(
-            "[an image (image/png, about {} bytes) left out: over 2 MiB]",
+            "[an image (image/gif, about {} bytes) left out: over 2 MiB]",
             3 * MIB
         )),
         "{text}"
@@ -2339,7 +2339,7 @@ fn the_images_of_a_result_past_its_total_are_left_out_with_their_line() {
     // Three of 1.9 MiB: two make 3.8 MiB, the third would make 5.7, over the 5 MiB of a result.
     let (_, text, images) = pictured(
         &user,
-        json!({"text": "shots", "images": 3, "image_bytes": 19 * MIB / 10}),
+        json!({"text": "shots", "images": 3, "image_bytes": 19 * MIB / 10, "image_mime": "image/gif"}),
     );
     assert_eq!(images.len(), 2, "{text}");
     assert_eq!(text.matches("left out").count(), 1, "{text}");

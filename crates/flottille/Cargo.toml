@@ -67,7 +67,7 @@ zeroize = "1.9.1"
 flottille-hub = { version = "0.1.0", path = "../flottille-hub" }
 flate2 = "1.1.10"
 # To make real pictures, and read the size of the one that was stored.
-image = { version = "0.25.10", default-features = false, features = ["png"] }
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
 # The window's scenarios run on GPUI's test platform, in front of a real daemon.
 gpui-design-system = { git = "https://github.com/KristenJestin/gpui-design-system", tag = "v0.2.0-beta.18" }
 gpui-kit = { version = "=0.8.0", default-features = false, features = ["assets", "test-support"] }

@@ -186,14 +186,16 @@ folder is what `workspaces_root` then is. `not-found` when there is none,
 #### `project.detect`
 
 `{"folder", "name"?}`. What `project.add` would register, written nowhere: `{"name", "folder",
-"repositories"}`. `folder` is absolute, as the client's user typed it; the result's `folder` is its
-resolved form (links followed). `name` is a slug of the folder's name when left out. The repositories
-are the folder itself (`.`) if it holds a `.git` (a folder or a file), then the folders one or two
-levels down that do, alphabetically; hidden folders and links are not looked into.
+"repositories"}`. `folder` is absolute, or `~` or starting with `~/` (the home of the user the
+daemon runs for, `HOME`), as the client's user typed it; the result's `folder` is its resolved
+form (the `~` expanded, links followed), the one the project file holds. `~other` is not
+expanded. `name` is a slug of the folder's name when left out. The repositories are the folder
+itself (`.`) if it holds a `.git` (a folder or a file), then the folders one or two levels down
+that do, alphabetically; hidden folders and links are not looked into.
 
-`refused` when the folder is not absolute, does not exist or is not a folder; when no name can be
-made from it or the one given is not a name; when it holds no repository; when a project already
-has that name or that folder.
+`refused` when the folder is not absolute (once a `~` is expanded), does not exist or is not a
+folder; when no name can be made from it or the one given is not a name; when it holds no
+repository; when a project already has that name or that folder.
 
 #### `project.add`
 
@@ -520,7 +522,8 @@ is off globally, the projects' switches kept.
   `settings` each `{"key", "label", "hint", "kind", "per_project", "value", "set", "default"}` with its
   global value (its default when not `set`), `kind` being `"language"`, `"model"` (a slot,
   `{"provider", "model"?, "effort"?}`, `null` for the extension's own choice), `"switch"` (`true` or
-  `false`, `false` when none is set: Review's `auto_on_pull_request` and `agents_start`), `{"subset": [...]}`
+  `false`, the setting's default when none is set: `false` for Review's `auto_on_pull_request`,
+  `true` for its `agents_start`), `{"subset": [...]}`
   (some of those values, in their order) or `{"choice": [{"value", "label", "line"}, ...]}` (one of
   those values, each with the words that say it, in their order); `default` is `null` except for a `"model"` slot, where it
   says what the slot gives left unset, `{"rule", "gives"}`: `rule` the extension's rule in words

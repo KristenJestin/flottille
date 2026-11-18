@@ -270,11 +270,43 @@ Paths are shown relative to the place's top.
 
 | Tool | Arguments | |
 |---|---|---|
-| `fs_read` | `path`, `repository?`, `range? {offset?, length? 1..32768}`, `again?` | A page of a file, lines numbered `%6d\t`, then `(bytes a-b of N; the next page starts at offset M)` or `(…, the end of the file)`, then `{"offset", "end", "size", "next"}`. A page holds at most 32 KiB and ends after its last newline (else on a character); an offset inside a character starts at the next one. A page is cut shorter to keep the result under the limit (a file of empty lines). A page the session already read, whose file has not changed since and with no compaction of the session since, is answered in one line (see "Unchanged files"). |
+| `fs_read` | `path`, `repository?`, `range? {offset?, length? 1..32768}`, `again?` | A page of a file, lines numbered `%6d\t`, then `(bytes a-b of N; the next page starts at offset M)` or `(…, the end of the file)`, then `{"offset", "end", "size", "next"}`. A page holds at most 32 KiB and ends after its last newline (else on a character); an offset inside a character starts at the next one. A page is cut shorter to keep the result under the limit (a file of empty lines). A page the session already read, whose file has not changed since and with no compaction of the session since, is answered in one line (see "Unchanged files"). A file that is a PNG, a JPEG, a GIF or a WebP is answered as an image (see "Images"). |
 | `fs_list` | `path`, `repository?`, `depth? 1..5` | The entries, sorted, a folder's after it: `path  file  size`, `path/  folder`, `path  link  -> target`. `.git` is left out. It stops at 1000 entries, or shorter to stay under the limit, and says so. |
 | `search` | `pattern`, `repository?`, `glob?`, `cursor?` | A case-insensitive substring, not a pattern. A sorted, depth-first walk that never enters `.git` or `node_modules` nor follows a link; the top `.gitignore` applies (simple patterns: no `!`, a pattern with a `/` is anchored, a trailing `/` is a folder). A file `fs_read` refuses, a login's place (The gate, 1), is never searched. `glob` keeps to the files it matches (on the name alone without a `/`; `**` for any folders). A file with a NUL byte in its first 64 KiB is skipped and named (20 at most). Hits are `path:line: text`, trimmed and cut at 200 characters. It stops at 100 matches, 1 MiB read or the size limit, with a cursor `path:line` that resumes it. The head says the count, the stop and its cursor, the limits, the skipped files. |
 | `fs_write` | `path`, `content`, `repository?`, `why?` | The whole file, made with its folders when new. |
 | `fs_edit` | `path`, `edits [1..50] {old, new}`, `repository?`, `why?` | Each `old` must appear exactly once (overlapping occurrences count) when its turn comes, else `refused: the anchor of edit N appears K time(s) in X; it must appear exactly once. Nothing was changed`. Edits apply in order, spliced (never as a pattern: `$&` is text), all or none. |
+
+**Images.** A file whose first bytes are those of a PNG, a JPEG, a GIF or a WebP (its
+name does not matter: a text file named `.png` is read as text) is answered as the image itself, as
+the MCP `image` content of the result, beside one text line that names it: `[image: photo.jpg,
+3.1 MB JPEG, 4032×3024; scaled to 410 KB JPEG, 2000×1500, is attached]`, or `[image: piano.png,
+12 KB PNG, 800×600, is attached]` when it was sent as it is. The agent sees it as it sees a
+picture pasted in the conversation. The same gate and places apply as to any `fs_read`.
+
+- **The bound** is the one of a connection's images (`docs/extensions.md`, "Connections", "A
+  result"): at most 2 MiB sent (about 2.8 MB in base64), whatever the result's text limit says, which
+  is about text. One larger than 2000 px on its long side is scaled down, as a message's picture
+  is; one still over 2 MiB is scaled again, its long side halved down to 500 px, a PNG being tried
+  as a JPEG at each size (a JPEG of a phone's camera becomes a JPEG of 2000 px). A GIF and a WebP
+  are never scaled: past 2 MiB, or over 8000 px on a side (what the providers read), they are
+  left out. A file over 32 MiB is not opened. The size is read from the header before anything is
+  decoded: a PNG or a JPEG that declares more than 64 megapixels (8000 × 8000), or more than
+  16384 px on a side, is left out, as a small file can declare gigabytes (and scaling one row of
+  64 million pixels asks a gigabyte of buffer a time), and what is decoded is given at most
+  320 MiB.
+- **When it is not shown** the line says why, in place of "is attached" (`[image: photo.gif,
+  8.0 MB GIF, left out: over 2 MiB]`): a file over a limit, one that cannot be read (its header
+  is unreadable, or a PNG is cut short or damaged, which the provider would refuse and keep in
+  the history, breaking every later turn), and an agent whose provider reads no image in the
+  result of a tool (OpenCode). Nothing is refused that `fs_read` allowed. Claude
+  and Codex pass the image of a tool's result to their model.
+- **Only the start of the file is read** (`range.offset` 0, the default): a `range` that starts
+  further reads bytes as text, as it always did. An image read at offset 0 is read whole,
+  whatever the length asked: `run "head -n 3 logo.png"`, which becomes an `fs_read` with offset 0
+  and a length, answers the image. Any other file, binary or not, is read as before.
+- The image is kept as a connection's is (a file of the agent's folder of images, its name in
+  `pictures` of the call's `agent.tool_served`, `docs/events.md`). **It is not scanned for
+  secrets**: masking reads text.
 
 **Unchanged files.** `fs_read` of the same range of a file (the same `range.offset` and
 `range.length`), by the same session, whose fingerprint (its SHA-256) is the one of that read, and
@@ -1452,9 +1484,11 @@ change" says, and called through the gate as every other.
 ## Review
 
 With Review active in a project (`docs/extensions.md`, "Review"), each root of the project has the
-`review` tool with the action `start` **only while the project lets agents start a review** (the
-setting `agents_start`, off by default: a review starts when the user asks, with `/review` or
-`flottille review`, which no switch touches), and the pilot of a review has it with `run_pass` and
+`review` tool with the action `start` **while the project lets agents start a review** (the
+setting `agents_start`, on by default since #1061; `/review` and `flottille review`, the user's,
+no switch touches). The tool's description says to start a review only when the user asks for one,
+or when the project's instructions say to, never on its own: the decision of #783 rests on that
+sentence, not on withholding the tool. The pilot of a review has it with `run_pass` and
 `report`; a pass, the verifier and any other child have none of it. Turning the switch on or off,
 in Settings or in the project's file, adds or removes `review` from the lists of the roots through
 "When the tools change"; a call of it made after it left is refused as a call of any tool the agent
@@ -1465,7 +1499,7 @@ what the user asked for when they asked for a review, within the children cap.
 
 | Tool | |
 |---|---|
-| `review {action: start}` (a root, while `agents_start` is on) | Does what the user's `/review` does: reviews the caller's own change: its workspace's diff from its base, read by a pilot launched as the caller's child. Its description says so. Refused, before any agent starts, for a session in the project folder, while a review of it runs, when the diff is empty (`nothing to review: workspace w has no change from its base (main)`), after two rounds, and at the children cap. The findings come later as a delivery, `[flottille:review]`: the call waits for no one. The session's `agent_*` tools do not reach the review's agents, and it is told nothing of them as of its children. |
+| `review {action: start, agent?}` (a root, while `agents_start` is on) | Does what the user's `/review` does: reviews the caller's own change: its workspace's diff from its base, read by a pilot launched as the caller's child. Its description says so. With `agent`, a session the caller leads (`agent_launch` `led`, "Sessions an agent starts"): that session's change, its pilot that session's child, its findings delivered to it, and the lead told of them (`The review of "Login" (agent …), the session you lead, round 1 of 2, is done: 1 finding, delivered to it…`) or of a review that ended without them. Naming any other agent is refused (`agent … is not a session you lead`), and so is an agent that does not exist. Refused, before any agent starts, for a session in the project folder, while a review of it runs, when the diff is empty (`nothing to review: workspace w has no change from its base (main)`), after two rounds, and at the children cap. The findings come later as a delivery, `[flottille:review]`: the call waits for no one. The session's `agent_*` tools do not reach the review's agents, and it is told nothing of them as of its children. |
 | `review {action: run_pass, pass, brief?}` (the pilot) | Runs one pass of its review as the pilot's own child (depth 2): `spec` (only for a session that develops a spec), `bugs`, `standards`, `security`, among those Review's settings enable for the project, or the `verifier`; each once. Its instructions are Review's fixed text for that pass and the user's guidance; the standards pass's add the project's `CLAUDE.md` else `AGENTS.md` read from the base branch, never from the workspace. Its first message is the diff (each repository's `git diff <from>` and the files it changes), the spec's `C` and `D` when there is one, and `brief`. Its report comes to the pilot as `[flottille:child-report]`. Refused above the project's children cap (`the project app runs its cap of 2 children: wait for one of them to end`), never queued. |
 | `review {action: report, summary?, findings, previous?}` (the pilot) | The findings, once: each `{severity, confidence, file?, lines?, concerns, quote?, text, case?}`, `severity` `high`, `medium`, `low` or `info`, `confidence` the verifier's (`confirmed`, `plausible`, or `rejected`, which is left out), `concerns` `code` or a `C` or `D` of the spec, `file` a file of the diff. A `high` or `medium` finding without its place (`file`, `lines`) and its failing case (`case`) is refused, and so is one naming a `C` or `D` the spec does not have, or a file the diff does not change: nothing is kept then. In a second round, `previous` gives each open finding of the first by its identifier, `fixed` or `open`. Kept, each finding takes the session's next identifier (`F1`, `F2`…); the confirmed and plausible ones, `info` left out, are delivered to the session, with what changed in the workspace during the review when something did; the pilot's session ends with its turn, its passes still running stop. |
 
@@ -1898,8 +1932,15 @@ turn it runs anyway, and costs no quota.
   text (`pdf_oxide`), plain text, JSON and XML as they are. At most 30,000
   characters of text, under the result's limit, then up to 60 of the page's links, absolute;
   a longer text is cut and says so (`(cut: the text has N characters, the first 30000 are
-  shown)`). The answer names the final URL and the page's title. Another kind of content
-  (an image, an archive) fails, saying which kinds are read.
+  shown)`). The answer names the final URL and the page's title. A page that is a PNG, a JPEG,
+  a GIF or a WebP is answered as the image, as `fs_read` answers an image file ("Files",
+  "Images": the same bound, scaling and line), inside the web's own frame: `[image: <url>, 12 KB
+  PNG, 60×20, is attached]`. Another kind of content (an archive, an SVG's like) fails, saying
+  which kinds are read. The image is decoded by the daemon, not by the reader's process: the
+  bytes of a page are at most the web's download cap, and the decoding runs in a blocking thread,
+  never on the async runtime. What it decodes is bounded by the header, read before a byte is
+  decoded: a PNG or a JPEG declaring more than 64 megapixels, or more than 16384 px on a side,
+  is left out ("Files", "Images"), and the decoder is given at most 320 MiB.
 - **A page is read apart from the daemon**: HTML and PDF are made into text by a child process,
   the daemon's own program run again (`flottille read-page`, hidden), the page on its standard
   input, with no environment, no way to gain a privilege (`no_new_privs`), at most 512 MiB of

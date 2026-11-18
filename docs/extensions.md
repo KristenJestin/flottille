@@ -177,7 +177,7 @@ As built: a tool is a `Tool` of the declaration, its MCP definition, `given` (wh
 for now, and the actions of its `action` argument each may call), `harmless` (the actions that
 read or write Flottille's store and nothing else, as the core's own reads: they pass in every
 mode), `offered` (whether the project's settings still give it to those `given` names: Review's
-`agents_start` withholds `review` from the roots, and it leaves their lists as any tool does),
+`agents_start`, turned off, withholds `review` from the roots, and it leaves their lists as any tool does),
 a `gate` function (the extension's refusal of a call, or none) and a `call` function.
 `agents::tools_of` adds the tools of the extensions active in the project; the server serves them
 as its own; the gate refuses an action the caller is not given and what the extension's `gate`
@@ -680,11 +680,21 @@ or without a spec. Project-scoped.
 
 - **Launched** when the user asks: `/review` in a session's composer (a Flottille command, never
   sent to the agent) and `flottille review <session>`, which always work. No button. Two doors
-  more exist for whoever wants them, **both off by default** and set in Review's settings, in
-  Settings or per project: `auto_on_pull_request`, a review of the session when its pull request is
-  opened, and `agents_start`, the `review` tool's `start` a root calls on itself. A review does not
-  start on its own (the maintainer's decision of 2026-11-12, #783): an agent that started one on
-  its whole branch, unasked, was not wanted.
+  more exist, each a switch of Review's settings, in Settings or per project:
+  `auto_on_pull_request`, a review of the session when its pull request is opened, **off by
+  default**, and `agents_start`, the `review` tool's `start` a root calls on itself or on a session
+  it leads, **on by default** (#1061). A review does not start on its own (the maintainer's
+  decision of 2026-11-12, #783): an agent that started one on its whole branch, unasked, was not
+  wanted. That decision rests on the tool's description (start one only when the user asks for
+  one, or when the project's instructions say to), not on withholding the tool: withheld, a lead
+  asked by the user for a review of a session it leads answered it had no review tool and built a
+  review of its own with `agent_launch`.
+- **A session a lead leads** (`agent_launch` `led`, `tools.md`, "Sessions an agent starts") is a
+  root of its own, in its own workspace, which the window shows under its lead: every door reviews
+  it as any session (`/review` in its composer, `flottille review <session>`, its pull request),
+  and its lead may start its review with `review {action: start, agent}`. Its findings go to it,
+  which made the change; its lead is told of them, or of a review that ended without them. The
+  pilot is that session's child, so the depth is the one below: nothing gains depth.
 - **A pilot**: the review is a child of the reviewed session. It reads the diff, decides which
   passes to run, runs them as its own children through `review`, then a verifier child; it
   dedupes and delivers the confirmed findings to the session. The depth exception of "Agents an
@@ -725,12 +735,13 @@ As built (#338):
 - **Doors.** The user's, whatever the switches: `review.start {agent}` (and `extension.act`),
   `/review` alone in a session's composer (`agent.send` runs it and answers with no delivery: the
   word is never sent to the agent; with more text it is a message like any other) and `flottille
-  review <session>`. Behind a switch each, both `false` by default (an existing project's file
-  without them reads `false`, a project's own value wins over Settings'): the Core event
+  review <session>`. Behind a switch each (a project's own value wins over Settings'; one that sets
+  none reads the default, `false` for `auto_on_pull_request`, `true` for `agents_start`): the Core event
   `item.opened` of a pull request whose head is the branch of a workspace a session runs in, while
   `auto_on_pull_request` is on (refused at the cap, the session is told, `[flottille:review]`;
   refused for another reason, nothing is said; off, it starts nothing), and the `review` tool's
-  `start` for a root, while `agents_start` is on (off, the root is not given the `review` tool at
+  `start {agent?}` for a root, on itself or on a session it leads (`tree::leads`), while
+  `agents_start` is on (off, the root is not given the `review` tool at
   all, it leaves its list through `docs/tools.md`, "When the tools change", and the pilot keeps
   `run_pass` and `report`). A session in the project folder has no base to read a diff from:
   refused.
@@ -758,9 +769,9 @@ As built (#338):
   <session>**.", then a sentence for each switch below that is on ("It also starts when a session's
   pull request opens.", "A session's agent may ask for one too.").
 - **When it starts**, one card above the checks, two switches, each with its label and its help
-  line, both off by default: **Start a review when a session's pull request opens** ("Off, a review
-  starts only when you ask for one.") and **Let agents start a review** ("Off, an agent cannot ask
-  for a review of its own change: only you can."). In a project's page they are the project's,
+  line: **Start a review when a session's pull request opens** ("Off, a review starts only when
+  you ask for one."), off by default, and **Let agents start a review** ("Off, an agent cannot ask
+  for a review: only you can."), on by default. In a project's page they are the project's,
   Settings' value when it sets none, and one it sets carries the dot and its way back.
 - **What it checks**: one card, a line per pass, each with its switch, its name, one line of what
   it looks for and its model on the right (a compact `ModelChoice`): **The spec** ("Each expected
@@ -1101,7 +1112,8 @@ Its cost in the agent's context is about one tool line:
   holds the bytes, is stripped of them before it becomes an event). The call's card in the window
   shows it. **An image is not scanned**: masking reads text, and it cannot read a picture, so a
   secret a screenshot shows reaches the agent as it is. A provider that cannot take an image in a
-  tool result (OpenCode) gets the line. A call the user allowed later (`tools.md`, "The gate")
+  tool result (OpenCode) gets the line. `fs_read` of an image file and `web` `read` of an image
+  page give their image the same way, with the same limits (`tools.md`, "Files", "Images"). A call the user allowed later (`tools.md`, "The gate")
   is answered by a message: its image goes with it, as the pictures of any message of the agent.
   A **sound** and a **resource** have no place in a result: each is left out with one line saying
   what it was and how big.

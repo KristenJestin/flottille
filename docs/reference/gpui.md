@@ -60,6 +60,10 @@ measured on a 16-core Linux machine with a 165 Hz screen. Keep them; they cost a
   timer at a few Hz in a separate view to a continuous `with_animation` loop (340 ms of drawing
   per second against 22).
 - Never notify or write a global during prepaint or paint, nor on every frame.
+- **An animation that is not the work itself settles.** A running agent's spinner turns as long
+  as it runs; a wait's pulse (`PULSE_SPAN`) is three cycles and ends on its still dot, and its
+  ticker ends with it (#1036: two pulses ticking at 15 Hz drew a page with a request pending
+  300 times in ten seconds).
 - **A ticker runs only while its view is drawn.** A page the window keeps but no longer shows
   keeps its views alive, and a view notified while off screen still draws the window. Measured
   (#444): fourteen skeletons' pulses left ticking drew a settled session page 140 times a

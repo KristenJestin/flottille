@@ -1079,7 +1079,9 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   (`Needs you: a permission`, `Waiting: checks of #1`, `Running`, `New since you looked: opened a
   pull request`); the dot is cleared when the session is opened and lives as long as the window.
   A state is drawn by its shape as well as its colour: a spinner for running, a pulsing dot for
-  waits for the user, a **clock** in the palette's `pend` colour for waiting (between turns for
+  waits for the user (it pulses for three cycles, 5.4 s, while the wait is new, then rests as a
+  still dot: a page that waits for the user draws no frame at rest), a **clock** in the palette's
+  `pend` colour for waiting (between turns for
   something outside: a pull request's checks or a review, a session it leads, a wake, its quota's
   reset), and the quiet ring, in the faint grey, only for rest (idle, denied, stopped). `pend`
   is a violet of its own in both themes, neither the orange of "needs you" nor the blue of
@@ -1293,7 +1295,12 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   the session's, not its page's, so what the user chose and wrote stays while a sub-agent's
   conversation is shown (the dock still shows) and when the page is left and opened again. At its
   place in the conversation, one short line, `Asked you 4 questions · answer below`, a link that
-  brings the focus to the card, whose ring lights once. Once the agent took the answers, the dock
+  brings the focus to the card, whose ring lights once, and unfolds it if it is folded. A control
+  in the card's header ("Fold the question" / "Unfold the question", its chevron turning) folds
+  the card to that header, so that a long card leaves the message above it in sight: the title,
+  the `asks you` tag and the count stay, the steps, the questions and the footer fold away, and
+  what was chosen or written is kept; once every question has an answer the footer stays, so
+  Answer is one click away. The fold is the card's own, and a new card comes unfolded. Once the agent took the answers, the dock
   folds away and the line becomes the card folded to the answers (each question and what was
   chosen). Several asks waiting, the dock shows the oldest, `1 of 2 asks` above it, the next
   sliding in once it is answered; a page opened while an ask waits (the sidebar's "needs you")
