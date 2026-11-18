@@ -272,15 +272,29 @@ repository's settings could otherwise turn into a program of theirs: `core.hooks
 `core.fsmonitor=false`, `fetch.recurseSubmodules=false` and `submodule.recurse=false` on its line
 (the command's scope, which wins over the repository's settings and what they include: git cannot
 be told to skip an `include.path`, so what it brings is overridden instead), and
-`GIT_SSH_COMMAND` naming the `ssh` the daemon's `PATH` led to at its start, which wins over
-`core.sshCommand` and `GIT_SSH`. A call that reaches a remote also gets:
+`GIT_SSH_COMMAND` naming the `ssh` found at its start, which wins over `core.sshCommand` and
+`GIT_SSH`: the first `ssh` of the daemon's `PATH` that root owns in a folder root owns, else the
+first one (said once in the daemon's log), and in either case the program its links lead to
+then, so that a link pointed elsewhere later changes nothing. On the same line,
+`credential.helper=` empties the list of credential helpers the repository's settings built,
+and the user's own (the system's and the user's settings, read at the daemon's start, their
+names alone) follow it: git hands a sign-in to `store` on every helper it knows, and a
+repository's own would get it. Its environment sets `GIT_NO_LAZY_FETCH=1` (a partial clone
+asks its promisor remote for no missing object while the daemon reads it), an empty
+`GIT_ALLOW_PROTOCOL` (no remote reached at all), and an empty `GIT_PROXY_COMMAND` and
+`GIT_ASKPASS`, which win over the `core.gitProxy` and `core.askPass` a repository names. A call
+that reaches a remote also gets:
 
 - `GIT_ALLOW_PROTOCOL` set to the one protocol the remote's URL uses, as git resolves it
-  (`ls-remote --get-url`, so after `url.*.insteadOf`): `ssh`, `https`, `file`…, so no `ext::` or
-  other helper the settings slip in;
+  (`ls-remote --get-url`, so after `url.*.insteadOf`), and only if it is one of git's own
+  transports: `ssh`, `https`, `http`, `git` or `file`. A URL through a helper (`ext::<command>`,
+  `<name>::` or `<name>://` for a `git-remote-<name>` of the `PATH`) runs a program it names:
+  it is not fetched, and the workspace starts from the base as last fetched, saying why;
 - `--upload-pack=git-upload-pack` on its line: git takes the first `remote.<name>.uploadpack` it
   reads, the repository's, so only the line's own option wins over it. The daemon never pushes,
   so no `receivepack` is ever read;
+- `maintenance.auto=false` and `gc.auto=0`: no maintenance after the fetch, which could go on in
+  the background with the lent agent;
 - when that protocol is SSH, the user's SSH agent, lent as to nothing else: `SSH_AUTH_SOCK` names
   the socket found at the start, and from Landlock's ninth ABI a rule on that socket alone grants
   connecting to it, the rest of the runtime folder (the bus) staying denied. An HTTPS remote gets
@@ -336,6 +350,14 @@ The gaps, where the platform does not allow more:
   lent agent (`ProxyCommand`, `Match exec`), as a push does; and the remote's URL is read just
   before the call, so a run that rewrites it in between sends that call to another host of the
   same protocol;
+- the daemon's own git still runs the filters and the `textconv` a repository's attributes and
+  settings name (`filter.<name>.smudge`, `clean`, `process`, `diff.<name>.textconv`) when it
+  checks a worktree out or reads a file: git has no switch that keeps them all off. They run
+  confined, as a run does, with no agent and no remote;
+- a worktree the daemon makes checks out with no `SSH_AUTH_SOCK`: a Git LFS smudge filter that
+  signs in over SSH (`git-lfs-authenticate`) cannot, and the worktree then gets LFS pointers or
+  an error in place of the files. The agent is not lent to it: a filter is a program the
+  repository names;
 - the daemon's own fetch of an HTTPS remote runs its credential helper confined: one that reads a
   file signs in, one that asks the keyring over the session bus (`gh auth git-credential` with
   its token in the keyring, `git-credential-libsecret`) cannot, and the workspace then starts

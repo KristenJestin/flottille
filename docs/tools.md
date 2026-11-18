@@ -610,9 +610,11 @@ pending requests.
 - **The daemon's own git is walled like a run's**: what it runs for itself on a repository (its
   reads, its worktrees, the `ls-remote` and `fetch` that find a workspace's base) runs under the
   same Landlock rules, with no `SSH_AUTH_SOCK`, no hook, no file system monitor, no submodule
-  fetched, the `ssh` found at the daemon's start over `core.sshCommand`, and, for a call that
-  reaches a remote, only the protocol of its URL (`GIT_ALLOW_PROTOCOL`) and git's own upload
-  command (`--upload-pack`). A fetch or a listing of an SSH remote alone is lent the user's SSH
+  fetched, no lazy fetch, no proxy or askpass of the repository's, only the user's own credential
+  helpers, the `ssh` found at the daemon's start over `core.sshCommand`, and, for a call that
+  reaches a remote, only the protocol of its URL when it is one of git's own (`GIT_ALLOW_PROTOCOL`;
+  an `ext::` or other helper's URL is not fetched), git's own upload command (`--upload-pack`)
+  and no maintenance after it. A fetch or a listing of an SSH remote alone is lent the user's SSH
   agent, its socket and nothing else of the runtime folder (`docs/vault.md`, "The runtime
   folder"). The agent command lines start without `SSH_AUTH_SOCK` too.
 - **A stop ends the run's session, not every descendant.** A run starts in a session of its own
