@@ -2404,6 +2404,23 @@ mod tests {
     }
 
     #[test]
+    fn a_cut_answer_ends_in_no_start_of_the_secret() {
+        let forms = vec!["Basic c2FtOnB3Lzl4".to_owned(), "pw/9xQ2v".to_owned()];
+        let page = |body: &str| Page {
+            url: Url::parse("https://api.example/echo").unwrap(),
+            kind: "text/plain".into(),
+            location: None,
+            bytes: body.as_bytes().to_vec(),
+            cut: true,
+        };
+        let answer = |body: &str| api_answer(StatusCode::OK, &page(body), &forms, &|t| t.into());
+        assert!(answer("said Basic c2FtO").contains("said [masked]\n"));
+        assert!(answer("said pw/9").contains("said [masked]\n"));
+        // An end that starts no form is left.
+        assert!(answer("said pw-9").contains("said pw-9\n"));
+    }
+
+    #[test]
     fn a_seen_url_passes_a_built_one_is_judged_and_a_search_only_in_ask() {
         let seen = |url: &Url| match url.as_str() {
             "https://docs.rs/tokio" => Pass::Free,
