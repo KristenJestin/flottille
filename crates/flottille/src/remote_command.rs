@@ -174,13 +174,13 @@ pub fn run(paths: &Paths, action: RemoteAction) -> Result<ExitCode> {
             let code = read_code("The invitation's code: ", "no invitation code")?;
             let invitation = flottille_link::Invitation::from_code(&code)?;
             let resumed = settle_pending(paths, &mut ask)?;
-            let (mut device, new) = device_key_to_join(paths)?;
             let machine: flottille_link::PublicKey =
                 serde_json::from_value(ask("remote.machines", json!({}))?["this"]["key"].clone())?;
-            // A join accepted while its command was gone goes on with its answer.
-            let accepted = match resumed {
-                Some(accepted) => accepted,
+            // A join accepted while its command was gone goes on with its answer and its key.
+            let (device, new, accepted) = match resumed {
+                Some((accepted, pending)) => (pending, true, accepted),
                 None => {
+                    let (device, new) = device_key_to_join(paths)?;
                     let words = invitation.words(&device.public());
                     if json {
                         println!("{}", json!({"words": words}));
@@ -192,15 +192,13 @@ pub fn run(paths: &Paths, action: RemoteAction) -> Result<ExitCode> {
                         );
                     }
                     std::io::Write::flush(&mut std::io::stdout())?;
-                    ask(
+                    let accepted = ask(
                         "remote.join",
                         json!({"code": code.as_str(), "key": device.public()}),
-                    )?
+                    )?;
+                    (device, new, accepted)
                 }
             };
-            if new {
-                device = keep_new(paths, device)?;
-            }
             let head: flottille_link::ChangeHash =
                 serde_json::from_value(accepted["head"].clone())?;
             // Claimed by the machine's daemon, which holds its key.
@@ -213,6 +211,11 @@ pub fn run(paths: &Paths, action: RemoteAction) -> Result<ExitCode> {
                 &device,
             );
             let joined = ask("remote.declare", json!({"change": declared}))?;
+            // Kept only once the machine is pinned with it: a declaration the hub did not take
+            // leaves it pending, for the next command to settle by the daemon's list.
+            if new {
+                keep_new(paths, device)?;
+            }
             if json {
                 println!("{}", json!({"accepted": accepted, "joined": joined}));
             } else {
@@ -521,13 +524,14 @@ const ANOTHER_CLIENT: &str = "another client kept a device key at the same momen
                               remote members to see which one is a member";
 
 /// The pending key a setup or a join left when its command was gone before it ended (`keep_new`
-/// was never reached): kept when the daemon's list, pinned or of the join it accepted, holds it
-/// as a member, removed otherwise, so that a key the hub saw in a join that did not succeed is
-/// never sent again. When the daemon holds a join accepted for it, that join's answer.
+/// was never reached): kept when the list of the hub this machine pinned holds it as a member,
+/// removed otherwise, so that a key the hub saw in a join or a setup that did not succeed is never
+/// sent again. When the daemon holds a join accepted for it, that join's answer and the key, still
+/// pending until its declaration is taken. A setup or a join the daemon still runs is waited for.
 fn settle_pending(
     paths: &Paths,
     ask: &mut impl FnMut(&str, Value) -> Result<Value>,
-) -> Result<Option<Value>> {
+) -> Result<Option<(Value, flottille_link::DeviceKey)>> {
     let Some(pending) = with_keyring(paths, |keyring, folder| {
         flottille_link::DeviceKey::load_pending(keyring, folder)
     })?
@@ -535,31 +539,33 @@ fn settle_pending(
         return Ok(None);
     };
     let key = pending.public();
-    let member = if ask("remote.machines", json!({}))?["hub"].is_null() {
+    if ask("remote.machines", json!({}))?["hub"].is_null() {
         // Not set up: a member only of a join the daemon accepted, its declaration still to come.
+        eprintln!(
+            "A setup or a join of this device whose command was gone is looked for: a join \
+             waits for the member who invited it to accept or refuse it, and goes on with the \
+             code it was given, not the one typed now..."
+        );
         let accepted = ask("remote.join", json!({"key": key, "resume": true}))?;
-        (!accepted.is_null()).then_some(Some(accepted))
-    } else {
-        let members = ask("remote.members", json!({}))?;
-        let listed = members["members"]
+        if !accepted.is_null() {
+            return Ok(Some((accepted, pending)));
+        }
+    }
+    // Pinned now, before or by a setup the daemon ended meanwhile: its list says.
+    let listed = !ask("remote.machines", json!({}))?["hub"].is_null()
+        && ask("remote.members", json!({}))?["members"]
             .as_array()
             .into_iter()
             .flatten()
             .any(|member| member["key"] == json!(key));
-        listed.then_some(None)
-    };
-    match member {
-        Some(accepted) => {
-            keep_new(paths, pending)?;
-            Ok(accepted)
-        }
-        None => {
-            with_keyring(paths, |keyring, folder| {
-                flottille_link::DeviceKey::discard_pending(keyring, folder)
-            })?;
-            Ok(None)
-        }
+    if listed {
+        keep_new(paths, pending)?;
+    } else {
+        with_keyring(paths, |keyring, folder| {
+            flottille_link::DeviceKey::discard_pending(keyring, folder)
+        })?;
     }
+    Ok(None)
 }
 
 /// `act` on the keyring of this session's clients, and the key folder.
@@ -727,13 +733,7 @@ impl flottille_link::Keyring for SessionKeyring {
                 [] => return Ok(None),
                 [item] => item,
                 // Two clients kept one at the same moment: which is the member's cannot be told.
-                more => {
-                    return Err(flottille_link::KeyringError::Failed(format!(
-                        "{} items of the keyring hold a device key of Flottille's; one at most \
-                         may: flottille remote members says which key is a member",
-                        more.len()
-                    )));
-                }
+                more => return Err(flottille_link::KeyringError::Several(more.len())),
             };
             if item.is_locked().await.map_err(failed)? {
                 return Err(flottille_link::KeyringError::Failed(
