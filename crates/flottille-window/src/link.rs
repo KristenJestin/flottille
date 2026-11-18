@@ -32,6 +32,9 @@ pub type Connect = Arc<dyn Fn() -> std::io::Result<UnixStream> + Send + Sync>;
 pub enum Update {
     /// A fresh read of everything the shell shows.
     Snapshot(Snapshot),
+    /// What the daemon keeps of the window (the sidebar's folds), read once, before the first
+    /// snapshot: the tree is made as it was left, not animated from its default.
+    Kept(crate::kept::Folds),
     /// The connection broke, with why; the link is connecting again.
     Disconnected(String),
     /// Flottille has not answered the link for `NOT_ANSWERING`: since when it was asked, in ms
@@ -232,6 +235,16 @@ fn follow(
     if after.is_none() {
         seen.last_seq
             .store(started["after"].as_u64().unwrap_or(0), Ordering::Relaxed);
+    }
+    // Before the first snapshot, so that the nodes of the tree are made unfolded or folded as the
+    // user left them. A daemon that cannot say leaves every fold at its default.
+    if seen.connections.load(Ordering::Relaxed) == 1
+        && let Ok(state) = conn.request("window.get", json!({}))
+        && updates
+            .unbounded_send(Update::Kept(crate::kept::Folds::of(&state["state"])))
+            .is_err()
+    {
+        return Ok(());
     }
     // When what the shell shows, and the providers, were first known to be stale.
     let mut stale = Some(Instant::now());

@@ -596,7 +596,9 @@ fn a_project_removed_forgets_its_fold(cx: &mut TestAppContext) {
 
     user.call("project.remove", json!({"name": "other"}))
         .unwrap();
+    // Its row folds away: the clock moves while the window waits for it.
     until(&shell, cx, "the project is gone from the window", |cx| {
+        cx.executor().advance_clock(Duration::from_millis(50));
         cx.update(|window, _| window.try_find(project_id("other")).is_none())
     });
     eventually("the daemon forgets its fold", || {
@@ -612,44 +614,48 @@ fn the_restored_sidebar_draws_no_animation_at_opening(
 ) {
     let user = user();
     project(&user, "app");
+    project(&user, "other");
     let (lead, led) = lead_and_led(&user, "app");
 
     let (shell, cx) = window(&user, first);
     until(&shell, cx, "the led row", |cx| {
         cx.update(|window, _| window.try_find(session_id(&led)).is_some())
     });
-    cx.update(|window, cx| window.click(toggle_id(project_id("app")), cx));
+    cx.update(|window, cx| window.click(toggle_id(project_id("other")), cx));
     cx.update(|window, cx| window.click(toggle_id(session_id(&lead)), cx));
     settle(cx);
     eventually("the daemon keeps the folds", || {
         let state = sidebar(&user);
-        state["projects"]["app"] == false && state["leads"][&lead] == false
+        state["projects"]["other"] == false && state["leads"][&lead] == false
     });
 
-    // The first frame the folded project is drawn in is its folded one: no frame is spent
-    // closing it from the default, and the clock is never advanced meanwhile.
+    // Every frame of the new window, the clock moving, shows the folded project folded and the
+    // folded lead without its led row: nothing is drawn open on its way to being folded.
     let (shell, cx) = window(&user, second);
     let deadline = Instant::now() + Duration::from_secs(25);
-    loop {
+    let mut seen = 0;
+    while seen < 40 {
         shell.update_in(cx, |shell, window, cx| shell.poll(window, cx));
         cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_millis(16));
         cx.update(|window, cx| window.simulate_next_frame(cx));
         cx.run_until_parked();
-        if let Some(fold) = cx.update(|window, _| window.try_find("fold-project-app")) {
+        assert!(
+            cx.update(|window, _| window.try_find(session_id(&led)).is_none()),
+            "the led row is never drawn: its lead was left folded"
+        );
+        if let Some(fold) = cx.update(|window, _| window.try_find("fold-project-other")) {
             assert_eq!(fold.expanded(), Some(false), "folded from its first frame");
             assert_eq!(
-                cx.update(|window, _| window.find("fold-project-app").bounds().size.height),
+                cx.update(|window, _| window.find("fold-project-other").bounds().size.height),
                 px(0.),
                 "its height is never seen open"
             );
-            break;
+            seen += 1;
         }
         assert!(Instant::now() < deadline, "the project is never drawn");
-        std::thread::sleep(Duration::from_millis(25));
+        std::thread::sleep(Duration::from_millis(10));
     }
-    assert_eq!(
-        cx.update(|window, cx| window.simulate_next_frame(cx)),
-        0,
-        "it asks for no frame to fold"
-    );
+    // The lead's row itself was drawn, folded: its chevron says so.
+    assert!(cx.update(|window, _| window.try_find(session_id(&lead)).is_some()));
 }

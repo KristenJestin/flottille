@@ -60,6 +60,7 @@ use crate::conversation::{
     ConnectionReview, Conversation, DiffLine, Ending, STARTED_SESSION_KIND, Summary,
     TIME_LOGGING_KIND, USER, VaultAsk, WOKEN_BY_KIND, in_sight, is_hidden,
 };
+use crate::kept::{Draft, DraftKey, Keeping};
 use crate::leaves::LeaveList;
 use crate::link::{Connect, Update};
 use crate::links_card::{LinksCard, Open};
@@ -9143,6 +9144,8 @@ pub struct Reply {
     activity: Option<Activity>,
     /// The pictures that go with the next message.
     attached: Attachments,
+    /// What the daemon keeps of the draft, and the wait before it is written.
+    keeping: Keeping,
     renders: usize,
     _subscriptions: Vec<Subscription>,
 }
@@ -9164,13 +9167,15 @@ impl Reply {
         });
         let subscriptions = vec![
             cx.subscribe(&tokens, |this: &mut Self, _, event: &TokenEvent, cx| {
-                this.attached.chip_changed(event, cx)
+                this.attached.chip_changed(event, cx);
+                this.draft_changed(cx);
             }),
             cx.subscribe_in(
                 &field,
                 window,
                 |this, field, event, window, cx| match event {
                     InputEvent::Change => {
+                        this.draft_changed(cx);
                         let text = field.read(cx).value().to_string();
                         let has_text = !text.trim().is_empty();
                         if this.has_text != has_text {
@@ -9199,6 +9204,7 @@ impl Reply {
         let options = cx.new(|_| SessionOptions::new(shell.clone(), session.clone()));
         let reply = Self {
             shell,
+            keeping: Keeping::new(DraftKey::Session(session.clone())),
             session,
             project,
             commands: None,
@@ -9295,7 +9301,52 @@ impl Reply {
 
     /// How many times the draft was written to the daemon.
     pub fn drafts_sent(&self) -> usize {
-        0
+        self.keeping.sent()
+    }
+
+    /// The composer as the daemon keeps it: its text and its pictures.
+    fn draft_now(&self, cx: &App) -> Draft {
+        let (text, pictures) = self.attached.draft(cx);
+        Draft { text, pictures }
+    }
+
+    /// The draft changed: it is written 500 ms after the last change.
+    fn draft_changed(&mut self, cx: &mut Context<Self>) {
+        self.keeping.changed(cx, Self::keep_draft_now);
+    }
+
+    /// Writes the draft to the daemon now, when it does not hold it already.
+    fn keep_draft_now(&mut self, cx: &mut Context<Self>) {
+        if let Some(write) = self.draft_to_write(cx) {
+            self.shell.update(cx, |shell, _| shell.perform(write)).ok();
+        }
+    }
+
+    /// What the daemon must be asked to keep the draft as it is now (the window is closing, or
+    /// the shell asks for it), if it does not hold it.
+    pub fn draft_to_write(&mut self, cx: &mut Context<Self>) -> Option<Command> {
+        let now = self.draft_now(cx);
+        self.keeping.write(now)
+    }
+
+    /// The daemon answered the read of the draft: a composer still empty takes it, a field the
+    /// user typed in meanwhile keeps their words, and is written.
+    pub fn draft_read(
+        &mut self,
+        found: Option<Draft>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let typed = !self.draft_now(cx).is_empty();
+        self.keeping.answered(found.clone());
+        match found {
+            Some(draft) if !typed => {
+                let Draft { text, pictures } = draft;
+                self.restore_all(&text, pictures, Vec::new(), false, window, cx);
+            }
+            _ if typed => self.draft_changed(cx),
+            _ => {}
+        }
     }
 
     /// The composer holds something the user has not sent: text, or a picture.
@@ -9350,11 +9401,13 @@ impl Reply {
     /// Attaches a picture, or says in a toast why not; the text in the field stays.
     pub fn attach(&mut self, image: gpui_kit::Image, cx: &mut Context<Self>) {
         self.attached.attach(image, cx, Self::attached_of);
+        self.draft_changed(cx);
     }
 
     /// Attaches the picture a file holds (a file dropped on the composer, or picked).
     pub fn attach_file(&mut self, path: &std::path::Path, cx: &mut Context<Self>) {
         self.attached.attach_file(path, cx, Self::attached_of);
+        self.draft_changed(cx);
     }
 
     /// Attaches a large text as a file, as a paste of it does (#848).
@@ -9364,6 +9417,7 @@ impl Reply {
 
     pub fn detach(&mut self, at: usize, window: &mut Window, cx: &mut Context<Self>) {
         self.attached.detach(at, window, cx);
+        self.draft_changed(cx);
     }
 
     /// The root runs a turn.
@@ -9985,6 +10039,9 @@ impl Reply {
         self.tokens
             .update(cx, |field, cx| field.set_value(Vec::new(), window, cx).ok());
         self.typed("", cx);
+        // Sent: its draft goes now, not 500 ms later, so that a window closed right after does
+        // not bring the sent words back.
+        self.keep_draft_now(cx);
         self.ask(key, cx);
     }
 
@@ -10050,7 +10107,7 @@ impl Reply {
                 bytes: image.bytes.clone(),
             })
             .collect();
-        self.restore_all(&pending.text, pictures, pending.texts, window, cx);
+        self.restore_all(&pending.text, pictures, pending.texts, true, window, cx);
     }
 
     /// The message `key` is recorded: it is shown as the daemon has it now.
@@ -10069,7 +10126,7 @@ impl Reply {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.restore_all(text, pictures, Vec::new(), window, cx);
+        self.restore_all(text, pictures, Vec::new(), true, window, cx);
     }
 
     /// [`Reply::restore`], with the pasted texts the message carried: their markers become their
@@ -10079,6 +10136,7 @@ impl Reply {
         text: &str,
         pictures: Vec<Picture>,
         pasted: Vec<Pasted>,
+        focus: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -10110,8 +10168,11 @@ impl Reply {
         self.dismissed = self.slash.is_some();
         self.rechip = true;
         self.list_commands(cx);
-        let focus = self.field.read(cx).focus_handle(cx);
-        window.focus(&focus, cx);
+        // A draft read at opening does not take the focus from where the user put it.
+        if focus {
+            let focus = self.field.read(cx).focus_handle(cx);
+            window.focus(&focus, cx);
+        }
         cx.notify();
     }
 

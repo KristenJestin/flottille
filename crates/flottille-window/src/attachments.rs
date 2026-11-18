@@ -514,6 +514,25 @@ impl Attachments {
     /// after the text, where the daemon marks it. A chip copied again in the text is its label:
     /// the picture goes once, at its first chip.
     pub fn message(&self, cx: &gpui_kit::App) -> String {
+        self.marked(true, cx)
+    }
+
+    /// What the composer holds as a draft, to be kept by the daemon: the text with its pictures'
+    /// markers, and the pictures in that order. A large pasted text is not part of it (its
+    /// marker is left out, the text it stands for is not kept).
+    pub fn draft(&self, cx: &gpui_kit::App) -> (String, Vec<Picture>) {
+        let pictures = self
+            .images
+            .iter()
+            .map(|a| Picture {
+                mime: a.image.format.mime_type().to_owned(),
+                bytes: a.image.bytes.clone(),
+            })
+            .collect();
+        (self.marked(false, cx), pictures)
+    }
+
+    fn marked(&self, with_pasted: bool, cx: &gpui_kit::App) -> String {
         let Some(field) = &self.field else {
             return String::new();
         };
@@ -523,6 +542,9 @@ impl Attachments {
         tokens::sent_text(&pieces, |id| {
             // A pasted text's chip is its marker, numbered in the order of the chips.
             if let Some(id) = tokens::pasted_of(id) {
+                if !with_pasted {
+                    return None;
+                }
                 let pasted = self.texts.iter().find(|t| t.id == id)?;
                 if texts.contains(&id) {
                     return None;
