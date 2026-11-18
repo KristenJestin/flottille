@@ -86,11 +86,19 @@ pub async fn output_remote(
         ));
     }
     // The line's own option, since the first `remote.<name>.uploadpack` git reads is the one it
-    // takes: the repository's, before any given in the environment.
-    let args: Vec<&str> = [subcommand, "--upload-pack=git-upload-pack"]
-        .into_iter()
-        .chain(args.iter().copied())
-        .collect();
+    // takes: the repository's, before any given in the environment. No maintenance after it: one
+    // that goes to the background would keep the lent agent past the call.
+    let args: Vec<&str> = [
+        "-c",
+        "maintenance.auto=false",
+        "-c",
+        "gc.auto=0",
+        subcommand,
+        "--upload-pack=git-upload-pack",
+    ]
+    .into_iter()
+    .chain(args.iter().copied())
+    .collect();
     let mut git = command(dir, &args);
     git.env("GIT_ALLOW_PROTOCOL", protocol);
     match crate::ssh_agent::socket().filter(|_| protocol == "ssh") {
