@@ -123,16 +123,6 @@ fn cannot_make(what: &str) -> String {
     )
 }
 
-/// The refusal of a fix version changed on a work item that exists.
-fn cannot_move() -> String {
-    format!(
-        "refused: acli's workitem edit takes no fix version (it has no flag for it, and its JSON \
-         takes no additionalAttributes): changing the fix version of an existing work item needs \
-         Jira's REST API, which Flottille does not call; the user changes it in Jira (the work \
-         item's Fix versions field, or {IN_JIRA}); nothing was written"
-    )
-}
-
 /// A text the agent gave, trimmed, none when it is blank.
 fn given<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
     args[key]
@@ -167,7 +157,6 @@ pub(super) fn unusable(project: &Project, action: &str, args: &Value) -> Option<
     if matches!(project.tracker, Some(ProjectTracker::Jira { .. })) {
         match action {
             "milestone_create" | "milestone_edit" => return Some(cannot_make(action)),
-            "edit" => return Some(cannot_move()),
             _ => {}
         }
     }

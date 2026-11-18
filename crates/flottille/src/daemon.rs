@@ -570,6 +570,9 @@ async fn serve(
     crate::subscriptions::resume_at_start(&daemon);
     approvals::settle_at_start(&daemon);
     projects::migrate_files(&daemon);
+    // The drafts whose session or project went while no daemon ran, and their pictures.
+    let sweeping = daemon.clone();
+    let _ = tokio::task::spawn_blocking(move || crate::drafts::sweep_orphans(&sweeping)).await;
     // Before the agents' tools are served: a call would start a connection's server.
     extensions::close_left_at_start(&daemon).await;
     let picking = daemon.clone();
@@ -753,6 +756,7 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
             "workspace.",
             "agent.",
             "approval.",
+            "draft.",
             "test.",
             "provider.",
             "run.",
@@ -788,6 +792,8 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
                     agents::call(daemon, &request.method, request.params).await
                 } else if request.method.starts_with("approval.") {
                     approvals::call(daemon, &request.method, request.params).await
+                } else if request.method.starts_with("draft.") {
+                    crate::drafts::answer(daemon, &request.method, request.params).await
                 } else if request.method.starts_with("run.") {
                     run_methods::call(daemon, &request.method, request.params).await
                 } else if request.method.starts_with("service.") {
@@ -928,6 +934,13 @@ fn handle(daemon: &Arc<Daemon>, request: Request) -> (Message, Option<Subscripti
         ),
         method if method.starts_with("appearance.") => (
             match crate::appearance::call(daemon, method, request.params) {
+                Ok(result) => Message::result(id, result),
+                Err(failure) => failure.answer(Some(id)),
+            },
+            None,
+        ),
+        method if method.starts_with("window.") => (
+            match crate::drafts::call(daemon, method, request.params) {
                 Ok(result) => Message::result(id, result),
                 Err(failure) => failure.answer(Some(id)),
             },

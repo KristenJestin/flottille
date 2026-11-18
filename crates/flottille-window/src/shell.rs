@@ -36,6 +36,7 @@ use crate::extensions::connection_request::ConnectionRequest;
 use crate::extensions::connections::ConnectionsSection;
 use crate::extensions::specs::SpecPage;
 use crate::history::{History, Way};
+use crate::kept::{DraftKey, Folds, Written};
 use crate::link::{self, Connect, Seen, Update};
 use crate::modals::Modals;
 use crate::model::{BellItem, Forged, LinkShown, News, Place, Preparation, Snapshot};
@@ -153,6 +154,23 @@ pub struct Shell {
     projects: HashMap<String, Entity<ProjectNode>>,
     /// The "Ended" group at the bottom of the tree, made when a session first ends.
     ended: Option<Entity<EndedNode>>,
+    /// What the daemon keeps of what the sidebar has folded: read once at opening, which makes
+    /// the nodes as they were left, then what was last written. `None` until it is read: nothing
+    /// is written before, which would replace it with the defaults.
+    kept: Folds,
+    kept_read: bool,
+    /// What was last asked of the daemon to keep and it did not answer yet (or refused): the same
+    /// state is not asked twice.
+    kept_asked: Option<Folds>,
+    /// How many writes of the sidebar's state in a row the daemon did not take, and the wait that
+    /// ends with the next try.
+    kept_failures: u32,
+    kept_retry: Option<Task<()>>,
+    /// The sessions the daemon kept a draft of when the window opened: their rows say it before
+    /// their pages are opened.
+    listed_drafts: HashSet<String>,
+    /// What the composers hold went to the daemon already (the window closes once).
+    closed: bool,
     sessions: HashMap<String, Entity<SessionRow>>,
     /// The pull request of each workspace (its project and name) as a project page last read it:
     /// a session's row says it on its second line. The sidebar asks the forge for none of them.
@@ -421,6 +439,13 @@ impl Shell {
             bell_shown: Motion::settled(0.0),
             projects: HashMap::new(),
             ended: None,
+            kept: Folds::default(),
+            kept_read: false,
+            kept_asked: None,
+            kept_failures: 0,
+            kept_retry: None,
+            listed_drafts: HashSet::new(),
+            closed: false,
             sessions: HashMap::new(),
             pulls: HashMap::new(),
             forged: Vec::new(),
@@ -435,7 +460,12 @@ impl Shell {
             _chose: None,
             replies: HashMap::new(),
             docks: HashMap::new(),
-            _drafts: Vec::new(),
+            // Whatever way the program ends (the window closed, the desktop's quit, a signal),
+            // what the composers hold is with the daemon first.
+            _drafts: vec![cx.on_app_quit(|shell, cx| {
+                shell.closing(cx);
+                async {}
+            })],
             providers: Providers::default(),
             providers_read: 0,
             last_pick: None,
@@ -494,6 +524,7 @@ impl Shell {
             return None;
         };
         let this = cx.entity().downgrade();
+        let made = !self.forms.contains_key(name);
         let forms = self.forms.entry(name.clone()).or_insert_with(|| {
             let (a, b) = (this.clone(), this);
             (
@@ -501,6 +532,12 @@ impl Shell {
                 cx.new(|cx| NewWorkspace::new(b, name.clone(), window, cx)),
             )
         });
+        if made {
+            // What the daemon keeps of its draft comes back as an `Outcome::Draft`.
+            self.actions.send(Command::DraftRead {
+                key: DraftKey::Project(name.clone()),
+            });
+        }
         let forms = forms.clone();
         // Shown, the composer is on Auto: a mode chosen for one session never reaches the next.
         forms.0.update(cx, |composer, cx| composer.reset_mode(cx));
@@ -670,13 +707,28 @@ impl Shell {
         (self.follow.opener)(std::path::Path::new(url));
     }
 
+    /// Whether the session's composer holds a draft: what the field holds once its page was
+    /// opened and the daemon answered, what the daemon kept when the window opened until then.
+    fn draft_held(&self, session: &str, cx: &App) -> bool {
+        let listed = self.listed_drafts.contains(session);
+        self.replies.get(session).map_or(listed, |reply| {
+            let reply = reply.read(cx);
+            reply.holds_draft() || (!reply.draft_was_read() && listed)
+        })
+    }
+
+    /// Every row says whether its composer holds a draft.
+    fn say_drafts(&self, cx: &mut Context<Self>) {
+        let ids: Vec<String> = self.sessions.keys().cloned().collect();
+        for id in ids {
+            self.say_draft(&id, cx);
+        }
+    }
+
     /// Tells a session's row whether its composer holds a draft; the row says it as a pencil
     /// while the session is not the open one.
     fn say_draft(&self, session: &str, cx: &mut Context<Self>) {
-        let held = self
-            .replies
-            .get(session)
-            .is_some_and(|reply| reply.read(cx).holds_draft());
+        let held = self.draft_held(session, cx);
         if let Some(row) = self.sessions.get(session)
             && row.read(cx).draft() != held
         {
@@ -756,6 +808,10 @@ impl Shell {
                     shell.say_draft(&session, cx);
                 }));
                 self.replies.insert(id.clone(), reply.clone());
+                // What the daemon keeps of its draft comes back as an `Outcome::Draft`.
+                self.actions.send(Command::DraftRead {
+                    key: DraftKey::Session(id.clone()),
+                });
                 reply
             }
         };
@@ -929,6 +985,102 @@ impl Shell {
         self.sessions.get(id)
     }
 
+    /// The window is closing, or the program is ending: what its composers hold is written to the
+    /// daemon at once, and the process waits (a moment at most) until it is.
+    pub fn closing(&mut self, cx: &mut Context<Self>) {
+        if std::mem::replace(&mut self.closed, true) {
+            return;
+        }
+        let replies: Vec<_> = self.replies.values().cloned().collect();
+        let composers: Vec<_> = self
+            .forms
+            .values()
+            .map(|(composer, _)| composer.clone())
+            .collect();
+        let mut writes: Vec<Command> = Vec::new();
+        for reply in replies {
+            writes.extend(reply.update(cx, |reply, cx| reply.draft_to_write(cx, true)));
+        }
+        for composer in composers {
+            writes.extend(composer.update(cx, |composer, cx| composer.draft_to_write(cx, true)));
+        }
+        for write in writes {
+            self.perform(write);
+        }
+        self.kept_asked = None;
+        self.sidebar_changed(cx);
+        self.actions.flush(std::time::Duration::from_secs(2));
+    }
+
+    /// What the sidebar has folded, as its nodes show it now.
+    fn folds_now(&self, cx: &Context<Self>) -> Folds {
+        Folds {
+            projects: self
+                .projects
+                .iter()
+                .map(|(name, node)| (name.clone(), node.read(cx).is_open()))
+                .collect(),
+            leads: self
+                .sessions
+                .iter()
+                .filter(|(_, row)| row.read(cx).leads() > 0)
+                .map(|(id, row)| (id.clone(), row.read(cx).is_open()))
+                .collect(),
+            ended: self
+                .ended
+                .as_ref()
+                .map(|group| group.read(cx).is_open())
+                .or(self.kept.ended),
+        }
+    }
+
+    /// A node of the sidebar was folded or unfolded, or one is gone: the daemon keeps what is
+    /// folded now, and forgets the projects and the leads that no longer exist. What it did not
+    /// take is asked again (`kept_written`).
+    pub fn sidebar_changed(&mut self, cx: &mut Context<Self>) {
+        if !self.kept_read {
+            return;
+        }
+        let now = self.folds_now(cx);
+        if now == self.kept || self.kept_asked.as_ref() == Some(&now) {
+            return;
+        }
+        self.perform(Command::WindowSet {
+            key: "sidebar".into(),
+            value: now.to_json(),
+        });
+        self.kept_asked = Some(now);
+    }
+
+    /// The daemon answered a write of the sidebar's state: it is what the daemon keeps once it
+    /// took it, and it is asked again, later, when it could not.
+    fn kept_written(&mut self, value: serde_json::Value, result: Written, cx: &mut Context<Self>) {
+        let value = Folds::of(&serde_json::json!({"sidebar": value}));
+        match result {
+            Written::Kept => {
+                self.kept_failures = 0;
+                if self.kept_asked.as_ref() == Some(&value) {
+                    self.kept_asked = None;
+                }
+                self.kept = value;
+            }
+            Written::Retry => {
+                if self.kept_asked.as_ref() == Some(&value) {
+                    self.kept_asked = None;
+                }
+                let wait = (crate::kept::DEBOUNCE * 2u32.pow(self.kept_failures.min(6)))
+                    .min(Duration::from_secs(30));
+                self.kept_failures += 1;
+                self.kept_retry = Some(cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(wait).await;
+                    this.update(cx, |shell, cx| shell.sidebar_changed(cx)).ok();
+                }));
+            }
+            // Refused for good, or gone: asking again would be answered the same.
+            Written::Gone | Written::Refused => {}
+        }
+    }
+
     /// The "Ended" group at the bottom of the tree, once a session ended.
     pub fn ended(&self) -> Option<&Entity<EndedNode>> {
         self.ended.as_ref()
@@ -967,6 +1119,12 @@ impl Shell {
                 if std::mem::take(&mut self.texts_due) {
                     self.read_texts(cx);
                 }
+            }
+            Update::Kept(folds, drafts) => {
+                self.kept = folds;
+                self.kept_read = true;
+                self.listed_drafts = drafts;
+                self.say_drafts(cx);
             }
             Update::Done(outcome) => self.done(outcome, window, cx),
             Update::Providers(read, providers) => self.set_providers(read, providers, cx),
@@ -1592,6 +1750,46 @@ impl Shell {
                         .update(cx, |registry, cx| registry.answered(then, answer, cx)),
                 }
             }
+            // A read that failed is not "no draft": the composer writes nothing, and the read is
+            // asked again.
+            Outcome::Draft { key, found } => match key {
+                DraftKey::Session(id) => {
+                    if let Some(reply) = self.replies.get(&id).cloned() {
+                        match found {
+                            Ok(found) => {
+                                reply.update(cx, |reply, cx| reply.draft_read(found, window, cx))
+                            }
+                            Err(_) => reply.update(cx, |reply, cx| reply.draft_read_failed(cx)),
+                        }
+                    }
+                }
+                DraftKey::Project(name) => {
+                    let composer = self.forms.get(&name).map(|(composer, _)| composer.clone());
+                    if let Some(composer) = composer {
+                        match found {
+                            Ok(found) => composer
+                                .update(cx, |composer, cx| composer.draft_read(found, window, cx)),
+                            Err(_) => {
+                                composer.update(cx, |composer, cx| composer.draft_read_failed(cx))
+                            }
+                        }
+                    }
+                }
+            },
+            Outcome::DraftWritten { key, result } => match key {
+                DraftKey::Session(id) => {
+                    if let Some(reply) = self.replies.get(&id).cloned() {
+                        reply.update(cx, |reply, cx| reply.draft_written(result, cx));
+                    }
+                }
+                DraftKey::Project(name) => {
+                    let composer = self.forms.get(&name).map(|(composer, _)| composer.clone());
+                    if let Some(composer) = composer {
+                        composer.update(cx, |composer, cx| composer.draft_written(result, cx));
+                    }
+                }
+            },
+            Outcome::WindowKept { value, result } => self.kept_written(value, result, cx),
             Outcome::ToolResults { written, shown } => {
                 self.settings.update(cx, |page, cx| {
                     page.tool_results_answered(shown, written, cx)
@@ -2322,8 +2520,12 @@ impl Shell {
                 let id = session.id.clone();
                 // A session opened before the tree showed it (one just started).
                 let selected = self.selected == Some(Selection::Session(session.id.clone()));
+                let open = self.kept.leads.get(&session.id).copied();
                 cx.new(|cx| {
                     let mut row = SessionRow::new(id, this, cx);
+                    if let Some(open) = open {
+                        row.restore_open(open);
+                    }
                     row.set_selected(selected, cx);
                     row
                 })
@@ -2346,10 +2548,7 @@ impl Shell {
             if row.read(cx).commands() != session.commands {
                 row.update(cx, |row, cx| row.set_commands(session.commands, cx));
             }
-            let held = self
-                .replies
-                .get(&session.id)
-                .is_some_and(|reply| reply.read(cx).holds_draft());
+            let held = self.draft_held(&session.id, cx);
             if row.read(cx).draft() != held {
                 row.update(cx, |row, cx| row.set_draft(held, cx));
             }
@@ -2396,7 +2595,8 @@ impl Shell {
             let node = self.projects.remove(&project.name).unwrap_or_else(|| {
                 let name = project.name.clone();
                 let this = this.clone();
-                cx.new(|cx| ProjectNode::new(name, this, cx))
+                let open = self.kept.projects.get(&name).copied().unwrap_or(true);
+                cx.new(|cx| ProjectNode::new(name, this, open, cx))
             });
             let mark = AgentState::strongest(marks);
             if !node.read(cx).holds(&rows, mark, cx) {
@@ -2414,7 +2614,8 @@ impl Shell {
         let rows = self.session_rows(ended.iter().copied(), &mut sessions, &mut marks, now, cx);
         let present = !rows.is_empty();
         if self.ended.is_none() && present {
-            self.ended = Some(cx.new(EndedNode::new));
+            let open = self.kept.ended.unwrap_or(false);
+            self.ended = Some(cx.new(|cx| EndedNode::new(this.clone(), open, cx)));
         }
         if let Some(group) = self.ended.clone() {
             if !group.read(cx).holds(&rows, cx) {
@@ -2425,6 +2626,7 @@ impl Shell {
         }
         self.projects = projects;
         self.sessions = sessions;
+        self.sidebar_changed(cx);
         if self.sidebar.read(cx).projects() != project_nodes {
             self.sidebar
                 .update(cx, |sidebar, cx| sidebar.set_projects(project_nodes, cx));

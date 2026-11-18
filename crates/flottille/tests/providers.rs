@@ -253,11 +253,12 @@ fn an_unknown_model_is_refused_naming_the_provider_s_models() {
     user.fake_script(json!({"models": ["fake-small", "fake-large"], "efforts": ["low", "high"]}));
     project(&user);
 
-    // Before any session the models are not known: the agent fails once its session says so,
-    // and what it offered is kept.
+    // Before any session the models are not known: the agent's session says what it offers,
+    // which is kept, and it starts on the default instead (#1076).
     let first = id(&start(&user, json!({"message": "hello", "model": "fake-huge"})).unwrap());
-    eventually("the first agent failing", || {
-        agent(&user, &first)["state"] == "failed"
+    eventually("the first agent on the default", || {
+        agent(&user, &first)["state"] == "idle"
+            && agent(&user, &first)["taken"]["model"] == "fake-small"
     });
 
     let (code, message) =
