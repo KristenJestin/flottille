@@ -231,6 +231,14 @@ fn the_image_starts_prints_a_setup_code_and_answers_on_its_port() {
     // Its port published on loopback only, and the container removed whatever happened.
     assert!(calls.contains("127.0.0.1::7448"), "{calls}");
     assert!(calls.contains("rm -f"), "{calls}");
+    // Started as compose.example.yml starts it: the hardening must not stop the image.
+    for flag in [
+        "--read-only",
+        "--cap-drop ALL",
+        "--security-opt no-new-privileges:true",
+    ] {
+        assert!(calls.contains(flag), "{flag}: {calls}");
+    }
     // The code is never printed by the check: CI logs are public.
     assert!(!said(&output).contains("482-193-775"), "{}", said(&output));
 
@@ -295,6 +303,17 @@ fn the_image_holds_the_binary_only_and_runs_as_nobody() {
         assert!(command.contains(part), "{command}");
     }
     assert!(!lines.iter().any(|l| l.starts_with("RUN")), "{lines:?}");
+    // GHCR makes a new package private unless the image says which repository it comes from: the
+    // value is given by the build (the repository's own), never written in the file.
+    assert!(
+        lines.contains(&"ARG SOURCE"),
+        "an ARG for the repository: {lines:?}"
+    );
+    assert!(
+        lines.contains(&"LABEL org.opencontainers.image.source=${SOURCE}"),
+        "{lines:?}"
+    );
+    assert!(!dockerfile.contains("github.com/"), "{dockerfile}");
 }
 
 #[test]
@@ -312,6 +331,13 @@ fn the_compose_example_is_valid() {
         "{compose}"
     );
     assert!(compose.contains("restart: unless-stopped"));
+    // Nothing the hub does needs more than its own port and its state volume.
+    assert!(compose.contains("read_only: true"), "{compose}");
+    assert!(compose.contains("cap_drop: [ALL]"), "{compose}");
+    assert!(
+        compose.contains("security_opt: [no-new-privileges:true]"),
+        "{compose}"
+    );
     // The image is named by the one who runs it: no account of the repository's is written in.
     assert!(compose.contains("${FLOTTILLE_HUB_IMAGE:?"), "{compose}");
     assert!(
@@ -341,9 +367,16 @@ fn the_systemd_unit_example_runs_the_hub_as_a_service_of_its_own() {
         "StateDirectory=flottille-hub",
         "StateDirectoryMode=0700",
         "Restart=on-failure",
-        "NoNewPrivileges=yes",
+        "CapabilityBoundingSet=",
+        "RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX",
+        "SystemCallFilter=@system-service",
+        "MemoryDenyWriteExecute=yes",
     ] {
         assert!(unit.lines().any(|l| l == line), "{line}: {unit}");
+    }
+    // `DynamicUser=yes` already implies these: said once, as a comment.
+    for line in ["NoNewPrivileges=yes", "ProtectSystem=strict"] {
+        assert!(!unit.lines().any(|l| l == line), "{line} is implied: {unit}");
     }
     let exec = unit
         .lines()
@@ -402,6 +435,18 @@ fn the_hub_jobs_run_on_a_pull_request_only_when_the_hub_or_the_release_changes()
         assert!(hub.contains(part), "{part}: {hub}");
     }
     assert!(!hub.contains("qemu"), "{hub}");
+    // `musl-gcc` as the x86_64 linker is a wrapper that links dynamically, whatever Rust asks: the
+    // target's own (static) linking stays. Only `ring`'s C compiler is `musl-gcc`.
+    assert!(
+        !hub.contains("CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER"),
+        "{hub}"
+    );
+    assert!(hub.contains("CC_x86_64_unknown_linux_musl: musl-gcc"), "{hub}");
+    // The image names its repository: the build is given it.
+    assert!(
+        hub.contains("--build-arg SOURCE=https://github.com/${{ github.repository }}"),
+        "{hub}"
+    );
     // It holds no right to write, and uploads on a push only.
     assert!(hub.contains("contents: read"), "{hub}");
     assert!(!hub.contains("write"), "{hub}");
@@ -464,6 +509,45 @@ fn the_release_carries_the_hub_archives_and_its_image_is_pushed_by_a_job_that_ru
 }
 
 #[test]
+fn verify_fails_when_the_hub_job_ran_and_failed() {
+    let workflow = text(".github/workflows/ci.yml");
+    let verify = job(&workflow, "verify");
+    // `publish` needs `hub`: a red hub check merged would stop every release.
+    assert!(
+        verify.contains("needs: [verified-on-dev, changes, check, test, hub]"),
+        "{verify}"
+    );
+    assert!(verify.contains("HUB: ${{ needs.hub.result }}"), "{verify}");
+    let script = verify
+        .split("run: |\n")
+        .nth(1)
+        .expect("the verdict's script")
+        .lines()
+        .map(|l| l.strip_prefix("          ").unwrap_or(l))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let work = tempfile::tempdir().unwrap();
+    let run = |hub: &str| {
+        Command::new("bash")
+            .args(["-e", "-c", &script])
+            .current_dir(work.path())
+            .env("CHECK", "success")
+            .env("TEST", "success")
+            .env("RUST", "true")
+            .env("HUB", hub)
+            .output()
+            .unwrap()
+            .status
+            .success()
+    };
+    // Skipped (a pull request elsewhere) and success are fine; a failed or cancelled run is not.
+    assert!(run("success"));
+    assert!(run("skipped"));
+    assert!(!run("failure"));
+    assert!(!run("cancelled"));
+}
+
+#[test]
 fn the_docs_say_what_is_published_and_how_to_run_it() {
     let releases = text("docs/releases.md");
     for part in [
@@ -475,6 +559,11 @@ fn the_docs_say_what_is_published_and_how_to_run_it() {
         "logs hub",
         "journalctl -u flottille-hub",
         "7448",
+        // The first release's image is private until the package is switched to public, once.
+        "org.opencontainers.image.source",
+        "switched to public once",
+        // Cross-compiled, the aarch64 binary is built and checked static, never run.
+        "The aarch64 binary is never run",
     ] {
         assert!(releases.contains(part), "{part}");
     }

@@ -4458,7 +4458,7 @@ fn publish_never_runs_on_a_commit_no_verify_passed_on() {
     // `verify` is skipped only when the commit passed it on dev.
     let verify = job("verify");
     assert!(
-        verify.contains("needs: [verified-on-dev, changes, check, test]"),
+        verify.contains("needs: [verified-on-dev, changes, check, test, hub]"),
         "{verify}"
     );
     assert!(
