@@ -4657,6 +4657,52 @@ fn a_project_with_a_model_and_no_provider_shows_that_model_and_its_efforts_and_s
     assert_eq!(shown["chosen"]["model"], "fake-large");
 }
 
+/// A project's model the agent's list dropped (#1076): the composer picks the model of its family
+/// a session starts on, its row is the one picked and the project's, and nothing is refused.
+#[gpui_kit::test]
+fn a_project_model_the_list_dropped_is_picked_as_the_model_of_its_family(cx: &mut TestAppContext) {
+    let user = providers_user();
+    project(&user, "atlas");
+    learn_models(&user, "atlas", "claude", "fake-large");
+    let file = user.project_file("atlas");
+    let text = std::fs::read_to_string(&file).unwrap();
+    std::fs::write(&file, format!("model = \"large\"\n{text}")).unwrap();
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    open_project(&shell, "atlas", cx);
+    let composer = composer_of(&shell, "atlas", cx);
+    until(
+        &shell,
+        cx,
+        "the composer starts on the model of the family",
+        |cx| {
+            composer.read_with(cx, |c, _| {
+                c.pick().model.as_deref() == Some("fake-large") && c.entries(Menu::Model).len() > 1
+            })
+        },
+    );
+    assert_eq!(model_shown(&composer, cx), "fake-large · the project's");
+    assert!(composer.read_with(cx, |c, _| c.model_refused()).is_none());
+    let row = composer
+        .read_with(cx, |c, _| c.entries(Menu::Model))
+        .into_iter()
+        .find(|e| e.id == "model-choice-fake-large")
+        .unwrap();
+    assert!(row.on, "the row of the model it runs on is picked");
+    assert_eq!(row.note.as_deref(), Some("the project's"));
+
+    // A pick the list dropped is the model of its family too.
+    composer.update(cx, |c, cx| c.pick_model(Some("small".into()), cx));
+    assert_eq!(
+        composer
+            .read_with(cx, |c, _| c.pick().model.clone())
+            .as_deref(),
+        Some("fake-small")
+    );
+    composer.update(cx, |c, cx| c.pick_model(Some("large".into()), cx));
+    let shown = start_from_composer(&shell, &user, cx);
+    assert_eq!(shown["chosen"]["model"], "fake-large");
+}
+
 /// A window on atlas whose composer starts on what the new-session setting `chosen` gives,
 /// Claude's models and efforts known.
 fn composer_on_setting<'a>(
