@@ -540,6 +540,11 @@ pub fn fs_read(cx: &Context, args: Value) -> Outcome {
         Ok(path) => path,
         Err(refusal) => return refusal,
     };
+    if offset == 0
+        && let Some(outcome) = image_read(cx, &path)
+    {
+        return outcome;
+    }
     // A page is sized so that its result is not cut (`docs/tools.md`, "Long results"): the
     // session knows the file's fingerprint once it read a page, and a page it was shown only in
     // part would let it write over text it never saw.
@@ -548,6 +553,40 @@ pub fn fs_read(cx: &Context, args: Value) -> Outcome {
         Ok(outcome) => outcome,
         Err(error) => failed(&path, error),
     }
+}
+
+/// The biggest image file `fs_read` opens as an image, in bytes: a phone photo is a dozen of
+/// them, and what is read is decoded to be scaled.
+const IMAGE_FILE_BYTES: u64 = 32 * 1024 * 1024;
+
+/// The file as an image, when its first bytes are those of a PNG, a JPEG, a GIF or a WebP: the
+/// image itself in the result, scaled to fit, with a line naming the file (`docs/tools.md`,
+/// "Files"). `None` for any other file, which is read as text, and for one that cannot be opened,
+/// which the page reports.
+fn image_read(cx: &Context, path: &Resolved) -> Option<Outcome> {
+    use crate::pictures::{Pictures, described, kind_said, size_said};
+    let mut file = open_regular(&path.path).ok()?;
+    let mut start = [0u8; 12];
+    let got = file.read(&mut start).ok()?;
+    let mime = crate::pictures::sniffed(&start[..got])?;
+    let size = file.metadata().ok()?.len();
+    let shown = &path.shown;
+    let named = format!("{shown}, {} {}", size_said(size as usize), kind_said(mime));
+    if size > IMAGE_FILE_BYTES {
+        let why = format!("over {} MiB", IMAGE_FILE_BYTES >> 20);
+        return Some(Outcome::Done(described(&named, None, &Err(why))));
+    }
+    let mut bytes = Vec::new();
+    file.seek(SeekFrom::Start(0)).ok()?;
+    file.read_to_end(&mut bytes).ok()?;
+    // What the session read is the file whole, whether or not an agent could look at it.
+    if let Err(outcome) = cx.remember(&path.path, &sha256(&bytes), None) {
+        return Some(outcome);
+    }
+    let mut pictures = Pictures::of_result(cx.daemon, cx.agent, false);
+    let before = flottille_core::images::dimensions(mime, &bytes);
+    let taken = pictures.take(mime, || Ok(bytes));
+    Some(Outcome::Done(described(&named, before, &taken)))
 }
 
 /// The lines of a file a command that only prints some of it asks for.

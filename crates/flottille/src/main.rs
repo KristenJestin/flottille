@@ -50,6 +50,7 @@ mod models;
 mod nofollow;
 mod opencode;
 mod people;
+mod pictures;
 mod pilot;
 mod place;
 mod posts;

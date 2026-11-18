@@ -1112,7 +1112,8 @@ Its cost in the agent's context is about one tool line:
   holds the bytes, is stripped of them before it becomes an event). The call's card in the window
   shows it. **An image is not scanned**: masking reads text, and it cannot read a picture, so a
   secret a screenshot shows reaches the agent as it is. A provider that cannot take an image in a
-  tool result (OpenCode) gets the line. A call the user allowed later (`tools.md`, "The gate")
+  tool result (OpenCode) gets the line. `fs_read` of an image file and `web` `read` of an image
+  page give their image the same way, with the same limits (`tools.md`, "Files", "Images"). A call the user allowed later (`tools.md`, "The gate")
   is answered by a message: its image goes with it, as the pictures of any message of the agent.
   A **sound** and a **resource** have no place in a result: each is left out with one line saying
   what it was and how big.

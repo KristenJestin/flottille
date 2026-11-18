@@ -511,10 +511,41 @@ pub fn urls_in(text: &str) -> Vec<String> {
 }
 
 /// Performs a call the gate let through.
-pub async fn web(args: Value) -> Outcome {
+pub async fn web(
+    daemon: &std::sync::Arc<crate::daemon::Daemon>,
+    agent: &str,
+    args: Value,
+) -> Outcome {
     match asked(&args) {
         Err(why) => Outcome::Refused(why),
-        Ok(Asked::Read(url)) => read(&Net::of_env(), url).await,
+        Ok(Asked::Read(url)) => {
+            let net = Net::of_env();
+            match fetched(&net, url).await {
+                Err(outcome) => outcome,
+                Ok(page) => match image_of(&page) {
+                    Some(mime) => {
+                        // Decoded, scaled and stored off the async runtime, as `fs_read` does it.
+                        let (daemon, agent) = (daemon.clone(), agent.to_owned());
+                        let done = tokio::task::spawn_blocking(move || {
+                            crate::mcp::with_pictures_blocking(|| {
+                                image_answer(&page, mime, &daemon, &agent)
+                            })
+                        })
+                        .await;
+                        match done {
+                            Ok((text, pictures)) => {
+                                for name in &pictures {
+                                    crate::mcp::picture_served(name);
+                                }
+                                Outcome::Done(text)
+                            }
+                            Err(error) => Outcome::Failed(error.to_string()),
+                        }
+                    }
+                    None => text_of(&net, page).await,
+                },
+            }
+        }
         Ok(Asked::Search(query)) => search(&Net::of_env(), &query).await,
     }
 }
@@ -543,17 +574,30 @@ impl From<Missed> for Outcome {
     }
 }
 
+/// A URL read as text, as the unit tests of the readers call it; `web` looks at what the page is
+/// first, for an image has no text.
+#[cfg(test)]
 async fn read(net: &Net, url: Url) -> Outcome {
-    let page = match tokio::time::timeout(TOTAL, fetch(net, url)).await {
-        Err(_) => {
-            return Outcome::Failed(format!(
-                "the page did not come within {} seconds",
-                TOTAL.as_secs()
-            ));
-        }
-        Ok(Err(missed)) => return missed.into(),
-        Ok(Ok(page)) => page,
-    };
+    match fetched(net, url).await {
+        Err(outcome) => outcome,
+        Ok(page) => text_of(net, page).await,
+    }
+}
+
+/// The page a URL gives, or the outcome that says why it did not.
+async fn fetched(net: &Net, url: Url) -> Result<Page, Outcome> {
+    match tokio::time::timeout(TOTAL, fetch(net, url)).await {
+        Err(_) => Err(Outcome::Failed(format!(
+            "the page did not come within {} seconds",
+            TOTAL.as_secs()
+        ))),
+        Ok(Err(missed)) => Err(missed.into()),
+        Ok(Ok(page)) => Ok(page),
+    }
+}
+
+/// A page that is not an image, read as text.
+async fn text_of(net: &Net, page: Page) -> Outcome {
     let read = match kind_of(&page) {
         Ok(Body::Text) => Ok(Extracted {
             title: None,
@@ -579,6 +623,60 @@ async fn read(net: &Net, url: Url) -> Outcome {
         }
         Err(why) => Outcome::Failed(format!("the page could not be read: {why}")),
     }
+}
+
+/// The type of a page that is a PNG, a JPEG, a GIF or a WebP: what its first bytes say, or what
+/// the page says it is (its bytes are then checked as any image's). Any other page, SVG and the
+/// other kinds of image included, is read as before.
+fn image_of(page: &Page) -> Option<&'static str> {
+    let declared = page
+        .kind
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    if !declared.starts_with("image/") {
+        return None;
+    }
+    crate::pictures::sniffed(&page.bytes).or_else(|| {
+        crate::deliveries::IMAGE_TYPES
+            .iter()
+            .map(|(mime, _)| *mime)
+            .find(|mime| *mime == declared)
+    })
+}
+
+/// An image page as the agent reads it: the image itself goes with the result, the text names it,
+/// framed as the web's own, as any page is.
+fn image_answer(
+    page: &Page,
+    mime: &'static str,
+    daemon: &crate::daemon::Daemon,
+    agent: &str,
+) -> String {
+    use crate::pictures::{Pictures, described, kind_said, size_said};
+    let named = format!(
+        "{}, {} {}",
+        page.url,
+        size_said(page.bytes.len()),
+        kind_said(mime)
+    );
+    let taken = if page.cut {
+        Err(format!(
+            "the image is over the {} MiB web downloads",
+            DOWNLOAD_BYTES / 1024 / 1024
+        ))
+    } else {
+        let bytes = page.bytes.clone();
+        Pictures::of_result(daemon, agent, false).take(mime, || Ok(bytes))
+    };
+    let before = flottille_core::images::dimensions(mime, &page.bytes);
+    format!(
+        "{UNTRUSTED}\nURL: {}\n{OPEN}\n{}\n{CLOSE}",
+        page.url,
+        contained(&described(&named, before, &taken))
+    )
 }
 
 /// What a page is, as web reads it.
