@@ -62,7 +62,7 @@ struct Entry {
 }
 
 /// The calls to the tracker's site, with the entry's credentials.
-struct Site<'a> {
+pub(super) struct Site<'a> {
     site: &'a str,
     authorization: String,
     secrets: [String; 3],
@@ -70,7 +70,7 @@ struct Site<'a> {
 
 impl Site<'_> {
     /// A text of the site's, with the token out of it as far as anything of ours goes, masked.
-    fn clean(&self, text: &str) -> String {
+    pub(super) fn clean(&self, text: &str) -> String {
         let mut text = text.to_owned();
         for secret in &self.secrets {
             text = text.replace(secret, "***");
@@ -79,7 +79,7 @@ impl Site<'_> {
     }
 
     /// `GET /rest/api/3/<path>?<query>`: what Jira answered, as JSON.
-    async fn get(&self, path: &str, query: &[(&str, &str)]) -> Result<Value, String> {
+    pub(super) async fn get(&self, path: &str, query: &[(&str, &str)]) -> Result<Value, String> {
         let mut url = rest_url(self.site, path)?;
         url.query_pairs_mut().extend_pairs(query);
         let answer = tokio::time::timeout(
@@ -158,12 +158,8 @@ fn zone_said(zone: &TimeZone, at: Timestamp) -> String {
 
 /// `tickets worklogs {from, to?, ticket?, author?}`.
 pub async fn worklogs(daemon: &Daemon, project: &Project, asked: &TicketsCall) -> Outcome {
-    let (site, worklog_token) = match &project.tracker {
-        Some(ProjectTracker::Jira {
-            site,
-            worklog_token,
-            ..
-        }) => (site, worklog_token),
+    let site = match &project.tracker {
+        Some(ProjectTracker::Jira { site, .. }) => site,
         Some(ProjectTracker::Github { .. }) => {
             return Outcome::Refused(
                 "refused: tickets worklogs is for Jira: GitHub has no worklogs".into(),
@@ -199,31 +195,9 @@ pub async fn worklogs(daemon: &Daemon, project: &Project, asked: &TicketsCall) -
         },
         None => None,
     };
-    if worklog_token.is_none() {
-        return Outcome::Refused(no_entry());
-    }
-    let (name, email, stamp) = match entry_of(daemon, project) {
-        Ok(entry) => entry,
+    let (jira, name, stamp) = match signed_in(daemon, project, site, no_entry()).await {
+        Ok(signed) => signed,
         Err(why) => return Outcome::Refused(why),
-    };
-    // The secret is read as `log_time` reads it, for the worklog's use alone.
-    let secret = match vault::secret(
-        daemon,
-        &project.name,
-        &flottille_core::vault::worklog(&project.name),
-        &name,
-    )
-    .await
-    {
-        Ok(secret) => secret,
-        Err(why) => return Outcome::Refused(format!("refused: {why}")),
-    };
-    let credentials = base64::engine::general_purpose::STANDARD.encode(format!("{email}:{secret}"));
-    let authorization = format!("Basic {credentials}");
-    let jira = Site {
-        site,
-        secrets: [secret, credentials, authorization.clone()],
-        authorization,
     };
     match read(project, &jira, (&name, stamp), (from, to), ticket, asked).await {
         Ok(text) => Outcome::Done(text),
@@ -232,6 +206,44 @@ pub async fn worklogs(daemon: &Daemon, project: &Project, asked: &TicketsCall) -
         }
         Err(other) => other,
     }
+}
+
+/// The calls to `site` as the project's vault entry signs them: the client, the entry's name and
+/// the moment it was last set, or the refusal (`none` when the project names no entry) that says
+/// how to set one. The secret is read for the worklog's use alone, as `log_time` reads it, and
+/// goes to the tracker's site and nowhere else.
+pub(super) async fn signed_in<'a>(
+    daemon: &Daemon,
+    project: &Project,
+    site: &'a str,
+    none: String,
+) -> Result<(Site<'a>, String, u64), String> {
+    if !matches!(
+        &project.tracker,
+        Some(ProjectTracker::Jira {
+            worklog_token: Some(_),
+            ..
+        })
+    ) {
+        return Err(none);
+    }
+    let (name, email, stamp) = entry_of(daemon, project)?;
+    let secret = vault::secret(
+        daemon,
+        &project.name,
+        &flottille_core::vault::worklog(&project.name),
+        &name,
+    )
+    .await
+    .map_err(|why| format!("refused: {why}"))?;
+    let credentials = base64::engine::general_purpose::STANDARD.encode(format!("{email}:{secret}"));
+    let authorization = format!("Basic {credentials}");
+    let jira = Site {
+        site,
+        secrets: [secret, credentials, authorization.clone()],
+        authorization,
+    };
+    Ok((jira, name, stamp))
 }
 
 /// Whose worklogs are read: the account, and how the answer names it.
