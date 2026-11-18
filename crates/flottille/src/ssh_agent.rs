@@ -5,8 +5,8 @@
 //! own fetch or listing of an SSH remote is lent it, with the `ssh` found at the start
 //! (`git::remote`).
 
-use std::os::unix::fs::FileTypeExt;
-use std::path::PathBuf;
+use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 pub const VARIABLE: &str = "SSH_AUTH_SOCK";
@@ -15,14 +15,23 @@ pub const VARIABLE: &str = "SSH_AUTH_SOCK";
 /// resolved then.
 static FOUND: OnceLock<Option<PathBuf>> = OnceLock::new();
 
-/// The `ssh` the daemon's own `PATH` led to at its start: what the daemon's git runs, whatever a
-/// repository's settings name. Not resolved through its links: a multi-call program reads its
-/// name.
+/// The `ssh` the daemon's own `PATH` led to at its start, its links followed: what the daemon's
+/// git runs, whatever a repository's settings name, and whatever a link is later pointed at.
 static SSH: OnceLock<Option<PathBuf>> = OnceLock::new();
 
 /// Finds the user's SSH agent and `ssh` at the daemon's start, before anything runs.
 pub fn find() {
-    SSH.get_or_init(|| crate::providers::find_program("ssh"));
+    SSH.get_or_init(|| {
+        let (ssh, rooted) = chosen(candidates())?;
+        if !rooted {
+            eprintln!(
+                "flottille daemon: no ssh of the PATH is owned by root in a folder owned by \
+                 root: the daemon's git runs {}",
+                ssh.display()
+            );
+        }
+        Some(ssh)
+    });
     FOUND.get_or_init(|| {
         let path = PathBuf::from(std::env::var_os(VARIABLE)?)
             .canonicalize()
@@ -30,6 +39,31 @@ pub fn find() {
         let socket = std::fs::symlink_metadata(&path).ok()?;
         socket.file_type().is_socket().then_some(path)
     });
+}
+
+/// Every `ssh` of the daemon's `PATH`, in its order, each the program its links lead to.
+fn candidates() -> Vec<PathBuf> {
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    std::env::split_paths(&path)
+        .filter(|dir| dir.is_absolute())
+        .filter_map(|dir| dir.join("ssh").canonicalize().ok())
+        .filter(|ssh| {
+            std::fs::metadata(ssh).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        })
+        .collect()
+}
+
+/// The first of `candidates` that only root may change (its file and its folder are root's),
+/// else the first, said not to be (`false`): open by default, as the user's own `PATH` is.
+fn chosen(candidates: Vec<PathBuf>) -> Option<(PathBuf, bool)> {
+    let root = |path: &Path| std::fs::metadata(path).is_ok_and(|m| m.uid() == 0);
+    if let Some(rooted) = candidates
+        .iter()
+        .find(|ssh| root(ssh) && ssh.parent().is_some_and(root))
+    {
+        return Some((rooted.clone(), true));
+    }
+    candidates.into_iter().next().map(|ssh| (ssh, false))
 }
 
 /// The socket found at the start, which every run is kept from.
@@ -40,4 +74,26 @@ pub fn socket() -> Option<&'static std::path::Path> {
 /// The `ssh` found at the start.
 pub fn ssh() -> Option<&'static std::path::Path> {
     SSH.get()?.as_deref()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_ssh_owned_by_root_is_chosen_over_one_earlier_in_the_path() {
+        let sh = Path::new("/bin/sh").canonicalize().unwrap();
+        // SAFETY: getuid has no precondition.
+        if unsafe { libc::getuid() } == 0 || std::fs::metadata(&sh).unwrap().uid() != 0 {
+            eprintln!("skipped: the tests run as root, or /bin/sh is not root's");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let users = dir.path().join("ssh");
+        std::fs::write(&users, "").unwrap();
+
+        assert_eq!(chosen(vec![users.clone(), sh.clone()]), Some((sh, true)));
+        assert_eq!(chosen(vec![users.clone()]), Some((users, false)));
+        assert_eq!(chosen(Vec::new()), None);
+    }
 }
