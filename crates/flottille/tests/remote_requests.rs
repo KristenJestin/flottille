@@ -477,6 +477,32 @@ fn a_request_of_a_removed_device_is_refused() {
     let answer = pc.raw(&signed(&device, "1", "server", "project.list", json!({})));
     assert!(answer["result"]["projects"].is_array(), "{answer}");
 
+    // A client link laptop's machine key opened before its removal, kept open by a machine that
+    // does not let it go.
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let server_key: PublicKey =
+        serde_json::from_value(server.remote()["this"]["key"].clone()).unwrap();
+    let address: SocketAddr = server.remote()["this"]["listening"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let endpoint = runtime.block_on(async {
+        Endpoint::dialler(&MachineKey::load_or_make(&laptop.folder()).unwrap()).unwrap()
+    });
+    let kept = runtime
+        .block_on(endpoint.connect(
+            server_key,
+            &[address],
+            Traffic::Client,
+            &Hello::ours("0.4.1"),
+            "server",
+        ))
+        .unwrap();
+
     let removed = pc.user.run(&["remote", "remove", "laptop"]);
     assert!(
         removed.status.success(),
@@ -489,6 +515,22 @@ fn a_request_of_a_removed_device_is_refused() {
         error_of(&answer),
         "refused: this request is not signed by a member"
     );
+    let line = signed(&pc.device(), "3", "server", "project.list", json!({}));
+    let refused = runtime.block_on(async {
+        let request = Message::Client(serde_json::from_str(&line).unwrap());
+        match kept.ask(&request).await {
+            Ok(mut answers) => answers
+                .next()
+                .await
+                .map(|answer| answer.map_err(|e| e.to_string())),
+            Err(error) => Some(Err(error.to_string())),
+        }
+    });
+    assert!(
+        matches!(&refused, Some(Err(why)) if why.contains("removed from the member list")),
+        "{refused:?}"
+    );
+    runtime.block_on(endpoint.close());
 }
 
 #[test]
