@@ -1345,9 +1345,15 @@ Jira: their account id, else their e-mail). The card shows the names as given.
   edit is refused before anything is asked, saying it needs the entry (and offering `vault ask`
   when the entry is named and missing), then the title, the description, the labels and the
   assignee by the flags above; a refusal of the fields leaves the rest unwritten, and a refusal of
-  the rest says the fields were set. A `parent` and a `milestone` (or `remove_milestone`) on an
-  edit go the same way, as `fields.parent` and `fields.fixVersions`; they win over the same key in
-  `fields`. A creation `acli` refuses with a field *required* in Jira's words (`Severity
+  the rest says what was set (its fields, its parent, its fix version). A `parent` and a
+  `milestone` (or `remove_milestone`) on an edit go the same way, as `fields.parent` and
+  `fields.fixVersions`; they win over the same key in `fields`. **`fixVersions` replaces every
+  fix version the work item has** (`[{"name": "1.1"}]` leaves it in 1.1 alone, as `milestone`
+  does), and `remove_milestone` with `fields.fixVersions` is refused as `milestone` with it is.
+  The other refusals of an edit (`assignees`, `reason` on Jira; `assignee` on GitHub) hold beside
+  these. A failure of the PUT after it was sent (a time-out, a broken connection) says the change
+  is not confirmed and to check the work item, never that nothing was written: that is said of a
+  refusal before the request and of a status that is no success. A creation `acli` refuses with a field *required* in Jira's words (`Severity
   is required (allowed values: Minor, Major)`) answers those words, `nothing was created`, and how
   to give each required field in `fields`, never trying it again by itself. When the project has
   the vault entry `fields` reads with, it also names each field the type requires and `fields`

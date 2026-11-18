@@ -445,9 +445,9 @@ const SERVED: [Definition; 33] = [
                 "kind": {"type": "string", "description": "link, unlink: a kind link_types lists (blocks, is blocked by, relates to; GitHub: parent of, sub-task of). fields (Jira): the work item type, one types lists; every type's when left out."},
                 "comment": {"type": "string", "description": "reply: the id show (detail full) gives any comment. comment_edit, comment_delete: one an agent posted, no one else's."},
                 "sprint": {"type": "string", "description": "create on Jira (with type): an open sprint, by the name or id sprints gives. An existing item's sprint cannot be changed (acli)."},
-                "fields": {"type": "object", "description": "create, edit on Jira: any field of the work item, as Jira takes it (create: through acli; edit: through Jira's API with the project's tracker entry). Keys: the field's id (customfield_10042; the action fields lists a type's) or system key (priority, components). A select: {\"value\": \"Major\"}; a user: {\"accountId\": ...}. A creation refused for a missing required field names it: give it here. create needs type.", "additionalProperties": true},
+                "fields": {"type": "object", "description": "create, edit on Jira: any field of the work item, as Jira takes it (create: through acli; edit: through Jira's API with the project's tracker entry). Keys: the field's id (customfield_10042; the action fields lists a type's) or system key (priority, components). A select: {\"value\": \"Major\"}; a user: {\"accountId\": ...}. fixVersions: [{\"name\": ...}] replaces every fix version the work item has. A creation refused for a missing required field names it: give it here. create needs type.", "additionalProperties": true},
                 "parent": {"type": "string", "description": "create, edit on Jira: the work item it goes under (an epic, or a sub-task's parent); edit moves an existing item under it, through Jira's API with the project's tracker entry."},
-                "milestone": {"type": "string", "description": "A milestone's title or number (GitHub), a version's name or id (Jira); milestones lists them: list, search filter by it; create puts the ticket in it (Jira: with type); edit moves it (Jira: sets the fix version through Jira's API with the project's tracker entry); milestone_edit (GitHub): the one to change."},
+                "milestone": {"type": "string", "description": "A milestone's title or number (GitHub), a version's name or id (Jira); milestones lists them: list, search filter by it; create puts the ticket in it (Jira: with type); edit moves it (Jira: sets the fix version through Jira's API with the project's tracker entry, replacing every fix version the item has); milestone_edit (GitHub): the one to change."},
                 "remove_milestone": {"type": "boolean", "description": "edit: take the ticket out of its milestone (Jira: empties its fix versions)."},
                 "due": {"type": "string", "description": "milestone_create, milestone_edit: due date, YYYY-MM-DD."},
                 "description": {"type": "string", "description": "milestone_create, milestone_edit: its description."},
@@ -3604,6 +3604,7 @@ mod tests {
             "customfield_",
             "{\"value\": \"Major\"}",
             "as Jira takes it",
+            "replaces every fix version",
         ] {
             assert!(said.contains(word), "{word}: {said}");
         }

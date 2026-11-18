@@ -533,9 +533,15 @@ refused it, and the new work item went to the project's default assignee.
   anything is asked**, saying it needs the entry and how to set one (or to ask the user for it,
   `vault ask`), never a Jira that did not refuse. An edit whose fields Jira refuses writes
   nothing, says Jira's words and `nothing was written`; one whose fields were set and whose flags
-  `acli` then refused says the fields were set. The card says each field and its value. Refused before anything is asked: `fields`
-  on GitHub, on an action other than `create` and `edit`, with `fixVersions` beside `milestone`,
-  or on a `create` without `type`.
+  `acli` then refused says what was set (its fields, its parent, its fix version). A call Jira
+  may have applied (a time-out, a connection that broke after the request) says the change is not
+  confirmed and to check the work item, never `nothing was written`. The card says each field and
+  its value, and that the change is written through Jira's API with the vault entry's name. Refused
+  before anything is asked: `fields` on GitHub, on an action other than `create` and `edit`, with
+  `fixVersions` beside `milestone` or `remove_milestone`, or on a `create` without `type`; the
+  other refusals of an edit (`assignees`, `reason` on Jira; `assignee` on GitHub) are not skipped
+  because the edit also sets fields, a parent or a version. `fixVersions` replaces every fix
+  version the work item has.
 - **`assignee`** on Jira `create` (`--assignee`) and `edit` (`--assignee`; `assignee: null` is
   `--remove-assignee`): `"me"`, an email or an account id, **as `acli` takes them**. `me` is the
   user the agent works for, sent as `acli`'s `@me` (`"@me"` is taken too), which `acli` resolves
