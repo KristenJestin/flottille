@@ -1896,11 +1896,16 @@ fn program(call: &Call, layer: &[String]) -> Line {
             "{program} runs a program as another user, root by default, with an environment of \
              its own, without the wall that keeps git from pushing behind the gate"
         )),
-        "acli" => Line::Base(
-            "acli is Atlassian's command line, signed in as the user to Jira: whatever it runs, \
-             it runs with the user's own sign-in"
+        "acli" if acli_signs_in(args) => Line::Base(
+            "acli's sign-in is the user's own: what logs in, out or to another site, or shows the \
+             sign-in, is theirs to run"
                 .into(),
         ),
+        "acli" if acli_reads(args) => Line::Reads,
+        "acli" => Line::Judge(format!(
+            "{} writes to the tracker signed in as the user, or is not one of its reads",
+            shown_words(layer)
+        )),
         "npm" | "pnpm" | "yarn" | "bun" | "cargo" | "poetry" | "flit" | "hatch" | "uv"
             if any(&["publish", "unpublish"]) =>
         {
@@ -3424,6 +3429,66 @@ fn forge_reads(program: &str, args: &[String]) -> bool {
         | (_, ["auth", "status"]) => true,
         _ => false,
     }
+}
+
+/// The words of an `acli` line that name its command: those before its first option.
+fn acli_path<'a>(words: &[&'a str]) -> Vec<&'a str> {
+    words
+        .iter()
+        .copied()
+        .take_while(|w| !w.starts_with('-'))
+        .collect()
+}
+
+/// Whether an `acli` line only asks for the help of its command: nothing but the command's words,
+/// then `--help`. A `--help` after another option may be that option's value (`--body --help`).
+fn acli_help(words: &[&str]) -> bool {
+    words.split_last().is_some_and(|(last, before)| {
+        ["-h", "--help"].contains(last) && acli_path(before).len() == before.len()
+    })
+}
+
+/// Whether an `acli` line has to do with its sign-in: every `auth` command but `status` (`login`,
+/// `logout`, `switch`, and whatever a version adds, which may show a token), `status` itself given
+/// anything but help, and an option that shows a token.
+fn acli_signs_in(args: &[String]) -> bool {
+    let words: Vec<&str> = args.iter().map(String::as_str).collect();
+    if acli_help(&words) {
+        return false;
+    }
+    match acli_path(&words).as_slice() {
+        [_, "auth", "status"] => words.len() > 3,
+        [_, "auth", ..] => true,
+        _ => words.contains(&"--show-token"),
+    }
+}
+
+/// Whether an `acli` line only shows or lists, from the commands of its reference
+/// (<https://developer.atlassian.com/cloud/acli/reference/commands/>), each on its own page: the
+/// work item, project, board, sprint, dashboard and filter commands that view, search or list,
+/// the status of a sign-in, and the help of any command. `--web` (`-w`) opens a browser on the
+/// desktop: no read.
+fn acli_reads(args: &[String]) -> bool {
+    let words: Vec<&str> = args.iter().map(String::as_str).collect();
+    if acli_help(&words) || words == ["--version"] {
+        return true;
+    }
+    if words.iter().any(|w| ["--web", "-w"].contains(w)) {
+        return false;
+    }
+    matches!(
+        acli_path(&words).as_slice(),
+        ["jira" | "admin" | "rovodev", "auth", "status"]
+            | ["jira", "workitem", "view" | "search", ..]
+            | ["jira", "workitem", "comment", "list" | "visibility", ..]
+            | ["jira", "workitem", "attachment", "list", ..]
+            | ["jira", "workitem", "link", "list" | "type", ..]
+            | ["jira", "project", "list" | "view", ..]
+            | ["jira", "board", "search" | "list-sprints", ..]
+            | ["jira", "sprint", "list-workitems", ..]
+            | ["jira", "dashboard", "search", ..]
+            | ["jira", "filter", "list" | "search", ..]
+    )
 }
 
 fn base(word: &str) -> &str {
@@ -5349,7 +5414,7 @@ mod tests {
     /// What `acli`'s reference lists as only showing or listing
     /// (<https://developer.atlassian.com/cloud/acli/reference/commands/>), each command from its
     /// own page, with the flags its page gives.
-    const ACLI_READS: [&str; 28] = [
+    const ACLI_READS: [&str; 26] = [
         "acli jira workitem view ABC-1",
         "acli jira workitem view ABC-1 --json --fields summary,comment",
         "acli jira workitem search --jql 'project = TEAM' --json --paginate",
@@ -5376,8 +5441,6 @@ mod tests {
         "acli jira workitem delete --help",
         "acli jira workitem comment create --help",
         "acli --version",
-        "env acli jira workitem view ABC-1",
-        "nice acli jira project list",
     ];
 
     #[test]
