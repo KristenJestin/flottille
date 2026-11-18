@@ -813,3 +813,62 @@ fn a_repository_s_credential_helper_never_sees_the_user_s_sign_in() {
     let planted_said = std::fs::read_to_string(&said).unwrap_or_default();
     assert_eq!(planted_said, "", "the repository's helper was asked");
 }
+
+#[test]
+fn a_partial_clone_fetches_nothing_lazily_in_the_daemon_s_git() {
+    let (user, _agent, _bus) = user();
+    let ran = user.path("helper-ran");
+    script(
+        &user.path("ssh-bin/git-remote-foo"),
+        &format!("echo foo >> '{}'\nexit 1\n", ran.display()),
+    );
+    let remote = user.path("remotes/app.git");
+    let seed = user.path("seed");
+    user.git_init(&seed);
+    std::fs::write(seed.join("README.md"), "app\n").unwrap();
+    user.git(&seed, &["add", "README.md"]);
+    user.git(&seed, &["commit", "--quiet", "-m", "start"]);
+    user.git(
+        &user.path(""),
+        &["init", "--quiet", "--bare", remote.to_str().unwrap()],
+    );
+    user.git(&remote, &["config", "uploadpack.allowFilter", "true"]);
+    user.git(
+        &seed,
+        &["push", "--quiet", remote.to_str().unwrap(), "main"],
+    );
+    let folder = user.path("work/app");
+    user.git(
+        &user.path(""),
+        &[
+            "clone",
+            "--quiet",
+            "--filter=blob:none",
+            &format!("file://{}", remote.display()),
+            folder.to_str().unwrap(),
+        ],
+    );
+    // A commit whose file the clone has not got: its promisor remote would be asked for it.
+    std::fs::write(seed.join("later.txt"), "later\n").unwrap();
+    user.git(&seed, &["add", "later.txt"]);
+    user.git(&seed, &["commit", "--quiet", "-m", "later"]);
+    user.git(
+        &seed,
+        &["push", "--quiet", remote.to_str().unwrap(), "main"],
+    );
+    user.git(&folder, &["fetch", "--quiet", "origin"]);
+    // The promisor remote, as a run could rewrite it: a helper of the `PATH`.
+    user.git(
+        &folder,
+        &["remote", "set-url", "origin", "foo::forge.invalid/acme/app"],
+    );
+    user.call("project.add", json!({"folder": folder, "name": "app"}))
+        .unwrap();
+
+    let _ = user.call(
+        "workspace.create",
+        json!({"project": "app", "name": "login"}),
+    );
+
+    assert!(!ran.exists(), "the promisor remote's helper ran");
+}
