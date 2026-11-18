@@ -198,8 +198,7 @@ fn fake_docker(folder: &Path, logs: &str, code: &str) {
     fake(
         folder,
         "docker",
-        &format!(
-            r#"echo "$*" >> "$HOME/docker.log"
+        r#"echo "$*" >> "$HOME/docker.log"
 case "$1" in
   run) echo container-id ;;
   logs) cat "$HOME/logs.txt" ;;
@@ -207,8 +206,7 @@ case "$1" in
   inspect) echo true ;;
   rm | stop) ;;
   *) echo "unexpected: $*" >&2; exit 2 ;;
-esac"#
-        ),
+esac"#,
     );
     fake(folder, "curl", &format!("echo {code}"));
 }
