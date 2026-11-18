@@ -93,7 +93,8 @@
 //!
 //! With `AGENT_BROWSER_SOCKET_DIR` set, a login and each tool call reach the browser agent-browser's
 //! daemon runs there, which outlives the command that started it: the file `browser.json` in that
-//! folder, written by the first one with the mode (`headed`, from the configuration) and the
+//! folder, written by the first one with the mode (`headed`: true when it was given a display, `WAYLAND_DISPLAY`
+//! or `DISPLAY`, null without one, as a call of `open` with `headed` is told to show it) and the
 //! `XDG_RUNTIME_DIR` it started in, and found again by the next; the log line `browser` says which
 //! (`by`: `login` or `call`, `started` or not). With `close` among its arguments (and no `mcp`), it
 //! plays `agent-browser close`: the file is removed, and the log line `close` says its arguments.
@@ -364,7 +365,9 @@ fn browser(args: &[String], log: &Option<String>, by: &str) {
         .and_then(|text| serde_json::from_str::<Value>(&text).ok());
     let started = running.is_none();
     let browser = running.unwrap_or_else(|| {
-        let browser = json!({"headed": loaded_config(args)["headed"],
+        let shown =
+            std::env::var_os("WAYLAND_DISPLAY").is_some() || std::env::var_os("DISPLAY").is_some();
+        let browser = json!({"headed": shown.then_some(true),
             "XDG_RUNTIME_DIR": std::env::var("XDG_RUNTIME_DIR").ok()});
         std::fs::write(&file, browser.to_string()).unwrap();
         browser
