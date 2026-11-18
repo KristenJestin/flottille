@@ -236,7 +236,7 @@ pub(super) async fn chosen(project: &str, named: &str) -> Result<Sprint, String>
 static FIELDS: LazyLock<Mutex<HashMap<String, String>>> = LazyLock::new(Mutex::default);
 
 /// Whether a field's value is Jira's list of sprints.
-fn holds_sprints(value: &Value) -> bool {
+pub(super) fn holds_sprints(value: &Value) -> bool {
     value[0]["boardId"].is_number() && value[0]["name"].is_string()
 }
 
