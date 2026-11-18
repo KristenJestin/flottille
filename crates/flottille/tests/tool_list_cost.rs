@@ -167,7 +167,8 @@ fn kinds(user: &User) -> Vec<Kind> {
             .unwrap();
         }
     }
-    // The roots of `app` are given `review` only while the user lets agents start a review.
+    // The roots of `app` are given `review` while agents may start a review: on by default, said
+    // here so that the measure does not hang on the default.
     user.call(
         "extension.set",
         json!({"name": "review", "settings": {"agents_start": true}}),
