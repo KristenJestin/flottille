@@ -956,15 +956,19 @@ fn session_page(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Option<Ent
     shell.read_with(cx, |s, cx| s.main().read(cx).session_page().cloned())
 }
 
-/// The row of the card of the request for a vault entry, in the session shown.
-fn ask_row(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Option<usize> {
+/// The number of the request for a vault entry the session shown records: its card is in the
+/// rail's "Waiting for you", named by it.
+fn ask_row(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Option<u64> {
     let page = session_page(shell, cx)?;
     page.read_with(cx, |page, cx| {
         page.conversation()
             .read(cx)
             .blocks()
             .iter()
-            .position(|block| matches!(block, Block::VaultAsk(_)))
+            .find_map(|block| match block {
+                Block::VaultAsk(ask) => Some(ask.seq),
+                _ => None,
+            })
     })
 }
 
@@ -984,23 +988,23 @@ fn new_entry_from_the_ask(
     shell: &Entity<Shell>,
     cx: &mut VisualTestContext,
     lead: &str,
-) -> (usize, Entity<VaultSection>) {
+) -> (u64, Entity<VaultSection>) {
     until(shell, cx, "the session is in the tree", |cx| {
         present(cx, &format!("session-{lead}"))
     });
     click(cx, &format!("session-{lead}"));
     until(shell, cx, "the card of the ask", |cx| {
-        ask_row(shell, cx).is_some_and(|at| present(cx, &format!("row-{at}-vault-ask-add")))
+        ask_row(shell, cx).is_some_and(|at| present(cx, &format!("vault-ask-{at}-add")))
     });
     settle(cx);
     let at = ask_row(shell, cx).unwrap();
-    let said = label(cx, &format!("row-{at}-vault-ask-project")).unwrap_or_default();
+    let said = label(cx, &format!("vault-ask-{at}-project")).unwrap_or_default();
     assert!(
         said.to_lowercase()
             .contains("for the connection hippocampe (every project)"),
         "{said}"
     );
-    click(cx, &format!("row-{at}-vault-ask-add"));
+    click(cx, &format!("vault-ask-{at}-add"));
     let vault = vault_form(shell, cx);
     assert!(vault.read_with(cx, |v, _| v.is_open()), "the form is open");
     (at, vault)

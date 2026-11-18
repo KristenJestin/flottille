@@ -198,32 +198,6 @@ fn ask_row(page: &Entity<SessionPage>, cx: &mut VisualTestContext) -> Option<usi
     })
 }
 
-/// Opens the session `id` and waits for its request's card: its row.
-fn card(
-    shell: &Entity<Shell>,
-    id: &str,
-    cx: &mut VisualTestContext,
-) -> (Entity<SessionPage>, usize) {
-    until(shell, cx, "the session is in the tree", |cx| {
-        has(session_id(id), cx)
-    });
-    settle(cx);
-    cx.update(|window, cx| window.click(session_id(id), cx));
-    until(shell, cx, "the card", |cx| {
-        let page = session_page(shell, cx);
-        ask_row(&page, cx).is_some_and(|at| has(format!("row-{at}-vault-ask-add"), cx))
-    });
-    let page = session_page(shell, cx);
-    let at = ask_row(&page, cx).unwrap();
-    // It unfolds into the conversation: it moves before it rests.
-    assert!(
-        cx.update(|window, cx| window.simulate_next_frame(cx)) > 0,
-        "the card enters without moving"
-    );
-    settle(cx);
-    (page, at)
-}
-
 fn vault_form(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Entity<VaultSection> {
     // Over the page shown, whichever it is: the form is a dialog of the window.
     shell.read_with(cx, |s, cx| s.vault(cx))
@@ -246,7 +220,7 @@ fn save(
     user: &User,
     shell: &Entity<Shell>,
     vault: &Entity<VaultSection>,
-    (id, at): (&str, usize),
+    (id, at): (&str, u64),
     cx: &mut VisualTestContext,
 ) {
     let secret = vault
@@ -282,8 +256,8 @@ fn save(
                 .read(cx)
                 .blocks()
                 .iter()
-                .any(|block| matches!(block, Block::VaultAsk(ask) if !ask.open))
-        }) && !has(format!("row-{at}-vault-ask-add"), cx)
+                .any(|block| matches!(block, Block::VaultAsk(ask) if !ask.open()))
+        }) && !has(format!("vault-ask-{at}-add"), cx)
     });
 }
 
@@ -292,37 +266,45 @@ fn the_card_of_a_vault_ask_opens_the_vault_form_prefilled(cx: &mut TestAppContex
     let user = user();
     let id = session(&user, "log my time");
     let (shell, cx) = window(&user, cx);
-    let (_, at) = card(&shell, &id, cx);
+    let (_, at) = waiting_card(&user, &shell, &id, cx);
 
     // What the feature prefilled and the agent's reason, each with its visible label.
     assert_eq!(
-        label(format!("row-{at}-vault-ask-name"), cx).as_deref(),
+        label(format!("vault-ask-{at}-name"), cx).as_deref(),
         Some("Entry: jira-time")
     );
     assert_eq!(
-        label(format!("row-{at}-vault-ask-project"), cx).as_deref(),
+        label(format!("vault-ask-{at}-project"), cx).as_deref(),
         Some("Project: app")
     );
+    // What is for and who asked are under Details.
+    cx.update(|window, cx| window.click(format!("vault-ask-{at}-details"), cx));
+    settle(cx);
     assert_eq!(
-        label(format!("row-{at}-vault-ask-for"), cx).as_deref(),
+        label(format!("vault-ask-{at}-for"), cx).as_deref(),
         Some("For: the worklog of the project app")
     );
+    assert!(
+        label(format!("vault-ask-{at}-source"), cx)
+            .is_some_and(|said| said.starts_with("asked by the conversation")),
+        "who asked"
+    );
     assert_eq!(
-        label(format!("row-{at}-vault-ask-why"), cx),
+        label(format!("vault-ask-{at}-why"), cx),
         Some(format!("Why: {WHY}"))
     );
     assert_eq!(
-        label(format!("row-{at}-vault-ask-add"), cx).as_deref(),
+        label(format!("vault-ask-{at}-add"), cx).as_deref(),
         Some("New entry")
     );
     assert_eq!(
-        label(format!("row-{at}-vault-ask-dismiss"), cx).as_deref(),
+        label(format!("vault-ask-{at}-dismiss"), cx).as_deref(),
         Some("Dismiss")
     );
     // No field of its own: the card is a way in to the vault's form.
-    assert!(!has(format!("row-{at}-vault-ask-secret"), cx));
+    assert!(!has(format!("vault-ask-{at}-secret"), cx));
 
-    cx.update(|window, cx| window.click(format!("row-{at}-vault-ask-add"), cx));
+    cx.update(|window, cx| window.click(format!("vault-ask-{at}-add"), cx));
     settle(cx);
     let vault = vault_form(&shell, cx);
     assert!(vault.read_with(cx, |v, _| v.is_open()), "the form is open");
@@ -362,28 +344,52 @@ fn the_card_of_a_vault_ask_opens_the_vault_form_prefilled(cx: &mut TestAppContex
     );
 }
 
+/// What a card says of the entry once "Details" is open, a feature's own description included
+/// (the Jira one runs to two hundred characters), must not push Dismiss and New entry out of
+/// the rail's sight: the user answers from the card without scrolling to the buttons.
+#[gpui_kit::test]
+fn the_buttons_of_a_card_stay_in_sight_once_its_details_are_open(cx: &mut TestAppContext) {
+    let user = user();
+    let id = session(&user, "log my time");
+    let (shell, cx) = window(&user, cx);
+    let (_, at) = waiting_card(&user, &shell, &id, cx);
+
+    cx.update(|window, cx| window.click(format!("vault-ask-{at}-details"), cx));
+    settle(cx);
+    cx.update(|window, _| {
+        for part in ["what", "source", "dismiss", "add"] {
+            let id = format!("vault-ask-{at}-{part}");
+            let found = window.try_find(id.clone());
+            assert!(
+                found.is_some_and(|found| found.visible()),
+                "{id} is in the rail's sight with Details open"
+            );
+        }
+    });
+}
+
 #[gpui_kit::test]
 fn the_card_shows_the_host_the_secret_goes_to(cx: &mut TestAppContext) {
     let user = user();
     let id = session(&user, "sign in to staging");
     let (shell, cx) = window(&user, cx);
-    let (_, at) = card(&shell, &id, cx);
+    let (_, at) = waiting_card(&user, &shell, &id, cx);
 
     // The host on its own line, without the port or the path the agent wrote.
     assert_eq!(
-        label(format!("row-{at}-vault-ask-host"), cx).as_deref(),
+        label(format!("vault-ask-{at}-host"), cx).as_deref(),
         Some("Goes to: staging.example.com")
     );
     assert_eq!(
-        label(format!("row-{at}-vault-ask-name"), cx).as_deref(),
+        label(format!("vault-ask-{at}-name"), cx).as_deref(),
         Some("Entry: staging-login")
     );
     assert_eq!(
-        label(format!("row-{at}-vault-ask-why"), cx),
+        label(format!("vault-ask-{at}-why"), cx),
         Some(format!("Why: {STAGING}"))
     );
 
-    cx.update(|window, cx| window.click(format!("row-{at}-vault-ask-add"), cx));
+    cx.update(|window, cx| window.click(format!("vault-ask-{at}-add"), cx));
     settle(cx);
     let vault = vault_form(&shell, cx);
     assert_eq!(value(&vault, VaultSection::name_field, cx), "staging-login");
@@ -447,10 +453,10 @@ fn an_ask_with_a_backslash_url_shows_the_host_login_would_use(cx: &mut TestAppCo
     let asked = user.call("vault.asks", json!({})).unwrap()["asks"][0].clone();
     assert_eq!(asked["host"], "evil.example", "{asked}");
     let (shell, cx) = window(&user, cx);
-    let (_, at) = card(&shell, &id, cx);
+    let (_, at) = waiting_card(&user, &shell, &id, cx);
 
     assert_eq!(
-        label(format!("row-{at}-vault-ask-host"), cx).as_deref(),
+        label(format!("vault-ask-{at}-host"), cx).as_deref(),
         Some("Goes to: evil.example")
     );
     std::fs::write(user.path("fake/release"), "").unwrap();
@@ -461,14 +467,14 @@ fn the_vault_form_shows_the_binding_and_its_host(cx: &mut TestAppContext) {
     let user = user();
     let id = session(&user, "sign in to the shop");
     let (shell, cx) = window(&user, cx);
-    let (_, at) = card(&shell, &id, cx);
+    let (_, at) = waiting_card(&user, &shell, &id, cx);
 
     // A login's entry: the login reads it for the agent's project, so it is that project's.
     assert_eq!(
-        label(format!("row-{at}-vault-ask-project"), cx).as_deref(),
+        label(format!("vault-ask-{at}-project"), cx).as_deref(),
         Some("Project: app")
     );
-    cx.update(|window, cx| window.click(format!("row-{at}-vault-ask-add"), cx));
+    cx.update(|window, cx| window.click(format!("vault-ask-{at}-add"), cx));
     settle(cx);
     let vault = vault_form(&shell, cx);
     assert!(vault.read_with(cx, |v, _| v.is_open()), "the form is open");
@@ -514,9 +520,9 @@ fn the_vault_form_says_where_an_unbound_secret_goes(cx: &mut TestAppContext) {
     let user = user();
     let id = session(&user, "sign in to the bank");
     let (shell, cx) = window(&user, cx);
-    let (_, at) = card(&shell, &id, cx);
+    let (_, at) = waiting_card(&user, &shell, &id, cx);
 
-    cx.update(|window, cx| window.click(format!("row-{at}-vault-ask-add"), cx));
+    cx.update(|window, cx| window.click(format!("vault-ask-{at}-add"), cx));
     settle(cx);
     let vault = vault_form(&shell, cx);
     assert!(vault.read_with(cx, |v, _| v.is_open()), "the form is open");
@@ -539,9 +545,9 @@ fn the_goes_to_line_folds_with_the_url(cx: &mut TestAppContext) {
     let user = user();
     let id = session(&user, "sign in to the bank");
     let (shell, cx) = window(&user, cx);
-    let (_, at) = card(&shell, &id, cx);
+    let (_, at) = waiting_card(&user, &shell, &id, cx);
 
-    cx.update(|window, cx| window.click(format!("row-{at}-vault-ask-add"), cx));
+    cx.update(|window, cx| window.click(format!("vault-ask-{at}-add"), cx));
     settle(cx);
     let vault = vault_form(&shell, cx);
     let url = vault
@@ -592,20 +598,20 @@ fn dismiss_is_disabled_while_its_call_runs(cx: &mut TestAppContext) {
     let user = user();
     let id = session(&user, "sign in to staging");
     let (shell, cx) = window(&user, cx);
-    let (_, at) = card(&shell, &id, cx);
+    let (_, at) = waiting_card(&user, &shell, &id, cx);
     let number = user.call("vault.asks", json!({})).unwrap()["asks"][0]["ask"]
         .as_u64()
         .unwrap();
 
     // A second click before the daemon answered sends nothing more.
-    cx.update(|window, cx| window.click(format!("row-{at}-vault-ask-dismiss"), cx));
+    cx.update(|window, cx| window.click(format!("vault-ask-{at}-dismiss"), cx));
     cx.run_until_parked();
     cx.update(|window, cx| window.simulate_next_frame(cx));
     assert!(
         shell.read_with(cx, |s, _| s.is_dismissing(number)),
         "Dismiss is not disabled"
     );
-    cx.update(|window, cx| window.click(format!("row-{at}-vault-ask-dismiss"), cx));
+    cx.update(|window, cx| window.click(format!("vault-ask-{at}-dismiss"), cx));
     until(&shell, cx, "the request is dismissed", |_| {
         user.call("vault.asks", json!({})).unwrap()["asks"]
             .as_array()
@@ -635,14 +641,14 @@ fn the_new_entry_form_does_not_offer_a_project_it_would_refuse(cx: &mut TestAppC
     let user = user();
     let id = session(&user, "read the notes");
     let (shell, cx) = window(&user, cx);
-    let (_, at) = card(&shell, &id, cx);
+    let (_, at) = waiting_card(&user, &shell, &id, cx);
     // The card says whose entry it will be, as the form saves it.
     assert_eq!(
-        label(format!("row-{at}-vault-ask-project"), cx).as_deref(),
+        label(format!("vault-ask-{at}-project"), cx).as_deref(),
         Some("Project: For the connection notes (every project)")
     );
 
-    cx.update(|window, cx| window.click(format!("row-{at}-vault-ask-add"), cx));
+    cx.update(|window, cx| window.click(format!("vault-ask-{at}-add"), cx));
     settle(cx);
     let vault = vault_form(&shell, cx);
     assert_eq!(
@@ -705,10 +711,10 @@ fn new_entry_on_a_vault_ask_opens_over_the_session(cx: &mut TestAppContext) {
     let user = user();
     let id = session(&user, "log my time");
     let (shell, cx) = window(&user, cx);
-    let (page, at) = card(&shell, &id, cx);
+    let (page, at) = waiting_card(&user, &shell, &id, cx);
     assert_eq!(selected(&shell, cx), Some(Selection::Session(id.clone())));
 
-    cx.update(|window, cx| window.click(format!("row-{at}-vault-ask-add"), cx));
+    cx.update(|window, cx| window.click(format!("vault-ask-{at}-add"), cx));
     settle(cx);
 
     // The form is open, drawn, and nothing else was shown: the session and its card are behind it.
@@ -729,7 +735,7 @@ fn new_entry_on_a_vault_ask_opens_over_the_session(cx: &mut TestAppContext) {
         "the session's page is the one shown"
     );
     assert!(
-        has(format!("row-{at}-vault-ask-add"), cx),
+        has(format!("vault-ask-{at}-add"), cx),
         "its card is still behind"
     );
     assert_eq!(
@@ -747,8 +753,8 @@ fn saving_the_entry_from_a_request_answers_it_and_leaves_the_page_as_it_was(
     let user = user();
     let id = session(&user, "log my time");
     let (shell, cx) = window(&user, cx);
-    let (page, at) = card(&shell, &id, cx);
-    cx.update(|window, cx| window.click(format!("row-{at}-vault-ask-add"), cx));
+    let (page, at) = waiting_card(&user, &shell, &id, cx);
+    cx.update(|window, cx| window.click(format!("vault-ask-{at}-add"), cx));
     settle(cx);
     let vault = the_vault(&shell, cx);
     let secret = vault
@@ -789,9 +795,174 @@ fn saving_the_entry_from_a_request_answers_it_and_leaves_the_page_as_it_was(
     );
     until(&shell, cx, "the card folds away", |cx| {
         settle(cx);
-        !has(format!("row-{at}-vault-ask-add"), cx)
+        !has(format!("vault-ask-{at}-add"), cx)
     });
     let set = user.call("vault.list", json!({})).unwrap()["entries"][0].clone();
     assert_eq!(set["name"], "jira-time", "{set}");
+    std::fs::write(user.path("fake/release"), "").unwrap();
+}
+
+/// The number of the request the daemon holds open.
+fn open_ask(user: &User) -> u64 {
+    user.call("vault.asks", json!({})).unwrap()["asks"][0]["ask"]
+        .as_u64()
+        .expect("an open request")
+}
+
+/// Opens the session `id` and waits for the request's card in "Waiting for you": its number.
+fn waiting_card(
+    user: &User,
+    shell: &Entity<Shell>,
+    id: &str,
+    cx: &mut VisualTestContext,
+) -> (Entity<SessionPage>, u64) {
+    let number = open_ask(user);
+    until(shell, cx, "the session is in the tree", |cx| {
+        has(session_id(id), cx)
+    });
+    settle(cx);
+    cx.update(|window, cx| window.click(session_id(id), cx));
+    until(shell, cx, "the card of Waiting for you", |cx| {
+        has(format!("vault-ask-{number}-add"), cx)
+    });
+    until(shell, cx, "the conversation's line", |cx| {
+        line_of(&session_page(shell, cx), cx).is_some()
+    });
+    settle(cx);
+    (session_page(shell, cx), number)
+}
+
+/// The conversation's row for the request: the line that records it.
+fn line_of(page: &Entity<SessionPage>, cx: &mut VisualTestContext) -> Option<String> {
+    let at = ask_row(page, cx)?;
+    label(format!("row-{at}-vault-ask-line"), cx)
+}
+
+#[gpui_kit::test]
+fn a_vault_ask_is_a_card_of_waiting_for_you_not_of_the_conversation(cx: &mut TestAppContext) {
+    let user = user();
+    let id = session(&user, "log my time");
+    let (shell, cx) = window(&user, cx);
+    let (page, number) = waiting_card(&user, &shell, &id, cx);
+
+    // Its entry, project and why are lines of the card; New entry and Dismiss are its two buttons.
+    assert_eq!(
+        label(format!("vault-ask-{number}-name"), cx).as_deref(),
+        Some("Entry: jira-time")
+    );
+    assert_eq!(
+        label(format!("vault-ask-{number}-project"), cx).as_deref(),
+        Some("Project: app")
+    );
+    assert_eq!(
+        label(format!("vault-ask-{number}-why"), cx),
+        Some(format!("Why: {WHY}"))
+    );
+    assert_eq!(
+        label(format!("vault-ask-{number}-add"), cx).as_deref(),
+        Some("New entry")
+    );
+    assert_eq!(
+        label(format!("vault-ask-{number}-dismiss"), cx).as_deref(),
+        Some("Dismiss")
+    );
+    assert!(has("rail-waiting", cx), "the section is shown");
+
+    // The conversation holds no card of it: no line of the card, no button.
+    let at = ask_row(&page, cx).expect("the conversation records the ask");
+    for part in ["add", "dismiss", "name", "project", "why"] {
+        assert!(
+            !has(format!("row-{at}-vault-ask-{part}"), cx),
+            "the conversation draws {part}"
+        );
+    }
+    std::fs::write(user.path("fake/release"), "").unwrap();
+}
+
+#[gpui_kit::test]
+fn the_conversation_says_a_vault_ask_was_made_without_a_button(cx: &mut TestAppContext) {
+    let user = user();
+    let id = session(&user, "log my time");
+    let (shell, cx) = window(&user, cx);
+    let (page, _) = waiting_card(&user, &shell, &id, cx);
+
+    assert_eq!(
+        line_of(&page, cx).as_deref(),
+        Some("asked for the vault entry jira-time · waiting for you")
+    );
+    let at = ask_row(&page, cx).unwrap();
+    assert!(!has(format!("row-{at}-vault-ask-add"), cx), "no button");
+    assert!(!has(format!("row-{at}-vault-ask-dismiss"), cx), "no button");
+    std::fs::write(user.path("fake/release"), "").unwrap();
+}
+
+#[gpui_kit::test]
+fn saving_the_entry_answers_the_card_and_it_leaves(cx: &mut TestAppContext) {
+    let user = user();
+    let id = session(&user, "log my time");
+    let (shell, cx) = window(&user, cx);
+    let (_, number) = waiting_card(&user, &shell, &id, cx);
+
+    cx.update(|window, cx| window.click(format!("vault-ask-{number}-add"), cx));
+    settle(cx);
+    let vault = the_vault(&shell, cx);
+    let secret = vault
+        .read_with(cx, |v, _| v.secret_field().cloned())
+        .expect("the form's secret");
+    cx.update(|window, cx| secret.update(cx, |f, cx| f.set_value(SECRET, window, cx)));
+    let username = vault
+        .read_with(cx, |v, _| v.username_field().cloned())
+        .expect("the form's username");
+    cx.update(|window, cx| username.update(cx, |f, cx| f.set_value("dev@example.com", window, cx)));
+    cx.update(|window, cx| window.click("save-vault-entry", cx));
+    until(&shell, cx, "the card leaves", |cx| {
+        settle(cx);
+        !has(format!("vault-ask-{number}-add"), cx)
+    });
+    assert_eq!(
+        line_of(&session_page(&shell, cx), cx).as_deref(),
+        Some("asked for the vault entry jira-time · saved")
+    );
+    std::fs::write(user.path("fake/release"), "").unwrap();
+}
+
+#[gpui_kit::test]
+fn dismissing_a_vault_ask_leaves_the_card_and_says_it_in_the_conversation(cx: &mut TestAppContext) {
+    let user = user();
+    let id = session(&user, "log my time");
+    let (shell, cx) = window(&user, cx);
+    let (_, number) = waiting_card(&user, &shell, &id, cx);
+
+    cx.update(|window, cx| window.click(format!("vault-ask-{number}-dismiss"), cx));
+    until(&shell, cx, "the card leaves", |cx| {
+        settle(cx);
+        !has(format!("vault-ask-{number}-add"), cx)
+    });
+    assert_eq!(
+        line_of(&session_page(&shell, cx), cx).as_deref(),
+        Some("asked for the vault entry jira-time · dismissed")
+    );
+    assert!(
+        !has("rail-waiting", cx),
+        "nothing waits: the section folds away"
+    );
+    std::fs::write(user.path("fake/release"), "").unwrap();
+}
+
+#[gpui_kit::test]
+fn a_vault_ask_marks_the_session_as_waiting_in_the_sidebar(cx: &mut TestAppContext) {
+    let user = user();
+    let id = session(&user, "log my time");
+    let (shell, cx) = window(&user, cx);
+
+    // The session is not opened: its row says it waits for the user, and the bell rings.
+    until(&shell, cx, "the row says it waits", |cx| {
+        shell.read_with(cx, |shell, cx| {
+            shell.session(&id).and_then(|row| row.read(cx).mark())
+        }) == Some(flottille_window::state::AgentState::NeedsYou)
+    });
+    until(&shell, cx, "the bell rings", |cx| {
+        shell.read_with(cx, |shell, cx| shell.bell_sessions(cx).len()) == 1
+    });
     std::fs::write(user.path("fake/release"), "").unwrap();
 }

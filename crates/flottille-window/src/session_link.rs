@@ -21,7 +21,7 @@ use futures::channel::mpsc::UnboundedSender;
 use serde_json::{Value, json};
 
 use crate::actions::{Changes, RepositoryStatus};
-use crate::conversation::one_line;
+use crate::conversation::{VaultAsk, one_line};
 use crate::leaves::LeaveRow;
 use crate::link::{Conn, Connect, Update, quiet_wait};
 use crate::model::OpenQuestion;
@@ -502,6 +502,9 @@ pub enum SessionUpdate {
     /// The requests an agent of the session asked that reached the user, pending or decided,
     /// oldest first.
     Requests(Vec<Request>),
+    /// The requests for a vault entry that wait for the user, those an agent of the session asked,
+    /// oldest first.
+    VaultAsks(Vec<VaultAsk>),
     /// A request of the session was decided (`deny`, `once`, `tree`) or cancelled (`cancelled`).
     Decided {
         number: u64,
@@ -774,7 +777,7 @@ impl Link {
             .last
             .get_or_insert(started["after"].as_u64().unwrap_or(0));
         let mut tree = self.read_tree(&mut conn)?;
-        self.read_requests(&mut conn)?;
+        self.read_requests(&mut conn, &tree)?;
         if !resume.read {
             let (events, earlier) = self.read_history(&mut conn, after)?;
             if !self.send(SessionUpdate::History { events, earlier }) {
@@ -808,7 +811,7 @@ impl Link {
                     tree = self.read_tree(&mut conn)?;
                 }
                 if stale.requests {
-                    self.read_requests(&mut conn)?;
+                    self.read_requests(&mut conn, &tree)?;
                 }
                 if stale.place {
                     self.read_place(&mut conn, &mut resume.known)?;
@@ -875,7 +878,12 @@ impl Link {
             if name == "agent.created" {
                 tree.insert(agent.to_owned());
             }
-            let approval = name.starts_with("approval.");
+            // A request for a vault entry asked or answered moves the rail's cards as a request does.
+            let approval = name.starts_with("approval.")
+                || matches!(
+                    name,
+                    "vault.asked" | "vault.ask_answered" | "vault.ask_joined"
+                );
             // A subscription opened or ended changes the list, and whether the agent waits.
             let subscription = name.starts_with("subscription.") || following;
             stale.subscriptions |= subscription;
@@ -948,7 +956,7 @@ impl Link {
         Ok(ids)
     }
 
-    fn read_requests(&self, conn: &mut Conn) -> Result<(), String> {
+    fn read_requests(&self, conn: &mut Conn, tree: &HashSet<String>) -> Result<(), String> {
         let answer = conn.request("approval.list", json!({"tree": self.root}))?;
         let requests = answer["requests"]
             .as_array()
@@ -957,6 +965,20 @@ impl Link {
             .map(Request::of)
             .collect();
         self.send(SessionUpdate::Requests(requests));
+        // The requests for a vault entry wait for the user too; the daemon lists every open one.
+        let answer = conn.request("vault.asks", json!({}))?;
+        let asks = answer["asks"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|ask| {
+                ask["agent"]
+                    .as_str()
+                    .is_some_and(|agent| tree.contains(agent))
+            })
+            .map(|ask| VaultAsk::of(ask["ask"].as_u64().unwrap_or_default(), ask))
+            .collect();
+        self.send(SessionUpdate::VaultAsks(asks));
         Ok(())
     }
 

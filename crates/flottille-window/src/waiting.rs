@@ -1,8 +1,9 @@
 //! The rail's "Waiting for you" section, pinned at the rail's bottom: each request that reached
-//! the user is a compact card with Details, Deny and Allow. The conversation keeps one neutral
-//! line per request, which lights its card here; an answered request leaves the rail and its line
-//! says the outcome. The section folds away when nothing waits: it is where the page says, once,
-//! that the user is needed.
+//! the user is a compact card with Details, Deny and Allow, and so is each request of an agent for
+//! a vault entry (`vault_ask.rs`), with Details, Dismiss and New entry. The conversation keeps one
+//! neutral line per request, which lights its card here; an answered request leaves the rail and
+//! its line says the outcome. The section folds away when nothing waits: it is where the page
+//! says, once, that the user is needed.
 //!
 //! The text of a card is what the daemon gave (`says`, the class, the judge's reason, the reasons
 //! it was held, who asked); the window only joins the reasons into sentences.
@@ -28,8 +29,17 @@ use gpui_kit::{
 
 use crate::actions::Answer;
 use crate::commands::spaced;
+use crate::conversation::VaultAsk;
 use crate::runs::rail_label;
 use crate::session::{ApprovalCard, SessionPage};
+
+/// What waits for the user, as the section lists it: a request held for them, or an agent's
+/// request for a vault entry with who asked it.
+#[derive(Clone, Debug, PartialEq)]
+enum Held {
+    Request(ApprovalCard),
+    Vault(VaultAsk, String),
+}
 
 /// How long a card the user was sent to stays lit.
 const POINTED: Duration = Duration::from_millis(1600);
@@ -59,7 +69,10 @@ pub struct Waiting {
     page: WeakEntity<SessionPage>,
     /// The requests that wait, in the order they were asked.
     cards: Vec<ApprovalCard>,
-    list: Listing<ApprovalCard>,
+    /// The requests for a vault entry that wait, each with who asked it, in the order they were
+    /// asked, after the requests.
+    asks: Vec<(VaultAsk, String)>,
+    list: Listing<Held>,
     /// Answers sent and not yet taken.
     busy: HashSet<u64>,
     /// What the daemon said when it refused an answer.
@@ -68,6 +81,8 @@ pub struct Waiting {
     pointed: Option<u64>,
     /// The cards whose details are unfolded.
     open: HashSet<u64>,
+    /// The requests for a vault entry whose details are unfolded.
+    open_asks: HashSet<u64>,
     /// The pulsing dot of a request to judge.
     dot: Entity<StateIcon>,
     scroll: ScrollHandle,
@@ -81,11 +96,13 @@ impl Waiting {
         Self {
             page,
             cards: Vec::new(),
+            asks: Vec::new(),
             list: Listing::default(),
             busy: HashSet::new(),
             errors: HashMap::new(),
             pointed: None,
             open: HashSet::new(),
+            open_asks: HashSet::new(),
             dot: cx.new(|cx| StateIcon::new(status, cx)),
             scroll: ScrollHandle::new(),
             _lit: None,
@@ -96,6 +113,11 @@ impl Waiting {
     /// The requests that wait for the user.
     pub fn cards(&self) -> &[ApprovalCard] {
         &self.cards
+    }
+
+    /// The requests for a vault entry that wait for the user.
+    pub fn asks(&self) -> impl Iterator<Item = &VaultAsk> {
+        self.asks.iter().map(|(ask, _)| ask)
     }
 
     pub fn renders(&self) -> usize {
@@ -117,6 +139,17 @@ impl Waiting {
             .retain(|n, _| cards.iter().any(|c| c.number == *n));
         self.open.retain(|n| cards.iter().any(|c| c.number == *n));
         self.cards = cards;
+        cx.notify();
+    }
+
+    /// The requests for a vault entry that wait now, each with who asked it; one answered leaves.
+    pub fn set_asks(&mut self, asks: Vec<(VaultAsk, String)>, cx: &mut Context<Self>) {
+        if self.asks == asks {
+            return;
+        }
+        self.open_asks
+            .retain(|n| asks.iter().any(|(ask, _)| ask.seq == *n));
+        self.asks = asks;
         cx.notify();
     }
 
@@ -165,6 +198,14 @@ impl Waiting {
     pub fn toggle_details(&mut self, number: u64, cx: &mut Context<Self>) {
         if !self.open.remove(&number) {
             self.open.insert(number);
+        }
+        cx.notify();
+    }
+
+    /// Opens or folds the rest of a request for a vault entry.
+    pub fn toggle_ask_details(&mut self, number: u64, cx: &mut Context<Self>) {
+        if !self.open_asks.remove(&number) {
+            self.open_asks.insert(number);
         }
         cx.notify();
     }
@@ -325,26 +366,13 @@ impl Waiting {
                         .test_support(),
                 )
             });
-        let toggle = {
-            let row = div()
-                .id(id("approval-details"))
-                .aria_expanded(open)
-                .aria_label("Details")
-                .flex()
-                .items_center()
-                .gap(space::XS)
-                .text_size(px(12.))
-                .cursor_pointer()
-                .child("Details")
-                .child(
-                    icon(Icon::Chevron)
-                        .size(px(11.))
-                        .text_color(p.faint)
-                        .with_transformation(Transformation::rotate(radians(PI * (1.0 - turn)))),
-                )
-                .on_click(cx.listener(move |this, _, _, cx| this.toggle_details(number, cx)));
-            hoverable(row, move |d, t| d.text_color(mix(p.faint, p.text, t)))
-        };
+        let toggle = details_toggle(
+            id("approval-details"),
+            open,
+            turn,
+            p,
+            cx.listener(move |this, _, _, cx| this.toggle_details(number, cx)),
+        );
         let body = div()
             .id(id("approval-card"))
             .flex()
@@ -448,6 +476,126 @@ impl Waiting {
             .into_any_element()
     }
 
+    /// The card of a request for a vault entry: its entry, where the secret goes, its project and
+    /// its reason on lines, "Details" for the rest, then Dismiss and New entry in the place of
+    /// Deny and Allow.
+    fn vault_card(
+        &self,
+        ask: &VaultAsk,
+        source: &str,
+        p: Palette,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let number = ask.seq;
+        let open = self.open_asks.contains(&number);
+        let turn = turning(
+            ElementId::Name(format!("vault-ask-details-{number}").into()),
+            open,
+            window,
+            cx,
+        );
+        let Some(shell) = self.page.upgrade().map(|page| page.read(cx).shell()) else {
+            return div().into_any_element();
+        };
+        let (dismiss, add) = crate::vault_ask::buttons(number, ask, shell, cx);
+        let head = div()
+            .flex()
+            .items_center()
+            .gap(space::SM)
+            .child(
+                div()
+                    .flex_none()
+                    .w(px(16.))
+                    .flex()
+                    .justify_center()
+                    .child(self.mark(false, p)),
+            )
+            .child(
+                div()
+                    .id(crate::vault_ask::part(number, "title"))
+                    .flex_1()
+                    .min_w_0()
+                    .text_size(px(13.))
+                    .semibold()
+                    .aria_label("Asks for a vault entry")
+                    .child("Asks for a vault entry")
+                    .test_support(),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .mono(11.)
+                    .text_color(p.faint)
+                    .child(SharedString::from(format!("#{number}"))),
+            );
+        let details = div()
+            .id(crate::vault_ask::part(number, "more"))
+            .pt(space::XS)
+            .flex()
+            .flex_col()
+            .gap(space::SM)
+            .text_size(px(12.))
+            .text_color(p.mute)
+            .children(crate::vault_ask::details(
+                number,
+                ask,
+                format!("asked by {source} · #{number}"),
+                p,
+            ));
+        let toggle = details_toggle(
+            crate::vault_ask::part(number, "details"),
+            open,
+            turn,
+            p,
+            cx.listener(move |this, _, _, cx| this.toggle_ask_details(number, cx)),
+        );
+        let body = div()
+            .id(crate::vault_ask::part(number, "card"))
+            .flex()
+            .flex_col()
+            .px(space::MD)
+            .py(space::SM)
+            .rounded(px(12.))
+            .bg(p.card)
+            .border_1()
+            .border_color(held_tones(p).card_edge)
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(space::XS)
+                    .child(head)
+                    .children(crate::vault_ask::lines(number, ask, p)),
+            )
+            .child(
+                presence(
+                    ElementId::Name(format!("vault-ask-more-block-{number}").into()),
+                    open,
+                    details,
+                )
+                .space(space::XS),
+            )
+            .child(spaced(
+                space::XS,
+                div()
+                    .pt(space::XS)
+                    .flex()
+                    .items_center()
+                    .gap(space::SM)
+                    .child(div().flex_1().child(toggle))
+                    .child(dismiss)
+                    .child(add),
+            ));
+        div()
+            .id(ElementId::Name(format!("vault-ask-{number}").into()))
+            .p(space::XS)
+            .rounded(px(14.))
+            .child(body)
+            .test_support()
+            .into_any_element()
+    }
+
     /// The card's mark: the pulsing dot of what waits for the user, or the still one of a base request.
     fn mark(&self, base: bool, p: Palette) -> AnyElement {
         match base {
@@ -466,21 +614,32 @@ impl Render for Waiting {
         self.renders += 1;
         let at = cx.background_executor().now();
         self.list.sync(
-            self.cards.iter().map(|c| (c.number.to_string(), c.clone())),
+            self.cards
+                .iter()
+                .map(|c| (c.number.to_string(), Held::Request(c.clone())))
+                .chain(self.asks.iter().map(|(ask, source)| {
+                    (
+                        format!("vault-{}", ask.seq),
+                        Held::Vault(ask.clone(), source.clone()),
+                    )
+                })),
             at,
             cx.reduce_motion(),
         );
         let p = palette(cx);
         let present = !self.list.is_empty();
-        let listed: Vec<(String, ApprovalCard, Placement)> = self
+        let listed: Vec<(String, Held, Placement)> = self
             .list
             .rows()
             .map(|row| (row.key.to_owned(), row.value.clone(), row.placement))
             .collect();
         let cards: Vec<AnyElement> = listed
             .into_iter()
-            .map(|(key, card, placement)| {
-                let content = self.card(&card, p, window, cx);
+            .map(|(key, held, placement)| {
+                let content = match &held {
+                    Held::Request(card) => self.card(card, p, window, cx),
+                    Held::Vault(ask, source) => self.vault_card(ask, source, p, window, cx),
+                };
                 Item::new(
                     ElementId::Name(format!("waiting-item-{key}").into()),
                     placement,
@@ -490,7 +649,7 @@ impl Render for Waiting {
                 .into_any_element()
             })
             .collect();
-        let count = self.cards.len();
+        let count = self.cards.len() + self.asks.len();
         let section = div()
             .id("rail-waiting")
             .flex()
@@ -529,6 +688,34 @@ impl Render for Waiting {
             .test_support();
         presence("rail-waiting-presence", present, section)
     }
+}
+
+/// The "Details" row of a card: its chevron turns as it opens, its ink fades on the hover.
+fn details_toggle(
+    id: ElementId,
+    open: bool,
+    turn: f32,
+    p: Palette,
+    on_click: impl Fn(&gpui_kit::ClickEvent, &mut Window, &mut gpui_kit::App) + 'static,
+) -> impl IntoElement {
+    let row = div()
+        .id(id)
+        .aria_expanded(open)
+        .aria_label("Details")
+        .flex()
+        .items_center()
+        .gap(space::XS)
+        .text_size(px(12.))
+        .cursor_pointer()
+        .child("Details")
+        .child(
+            icon(Icon::Chevron)
+                .size(px(11.))
+                .text_color(p.faint)
+                .with_transformation(Transformation::rotate(radians(PI * (1.0 - turn)))),
+        )
+        .on_click(on_click);
+    hoverable(row, move |d, t| d.text_color(mix(p.faint, p.text, t)))
 }
 
 /// The most the cards take of the rail's height before they scroll.
