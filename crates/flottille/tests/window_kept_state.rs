@@ -174,14 +174,24 @@ impl Silence {
                 ));
             }
             let stream = inner()?;
-            silence.held.lock().unwrap().push(stream.try_clone()?);
+            // Under the lock `fall` takes: a connection is held before the silence falls (and
+            // ended by it) or sees it fallen (and is refused), never made in between and alive.
+            let mut held = silence.held.lock().unwrap();
+            if silence.down.load(Ordering::SeqCst) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::ConnectionRefused,
+                    "the daemon does not answer",
+                ));
+            }
+            held.push(stream.try_clone()?);
             Ok(stream)
         })
     }
 
     fn fall(&self) {
+        let mut held = self.held.lock().unwrap();
         self.down.store(true, Ordering::SeqCst);
-        for stream in self.held.lock().unwrap().drain(..) {
+        for stream in held.drain(..) {
             let _ = stream.shutdown(std::net::Shutdown::Both);
         }
     }
