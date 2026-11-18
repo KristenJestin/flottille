@@ -261,6 +261,21 @@ mod tests {
     }
 
     #[test]
+    fn the_drafts_and_the_window_s_state_are_of_the_machine_alone() {
+        // What the user left in the window is not read by a device that follows over a link.
+        for method in [
+            "draft.get",
+            "draft.set",
+            "draft.clear",
+            "draft.list",
+            "window.get",
+            "window.set",
+        ] {
+            assert_eq!(class(method), Some(Local), "{method}");
+        }
+    }
+
+    #[test]
     fn a_method_the_daemon_does_not_answer_has_no_class() {
         assert_eq!(class("agent.nope"), None);
         assert_eq!(class("agent"), None);

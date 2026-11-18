@@ -9304,6 +9304,11 @@ impl Reply {
         self.keeping.sent()
     }
 
+    /// Whether the daemon answered the read of the draft.
+    pub fn draft_was_read(&self) -> bool {
+        self.keeping.was_read()
+    }
+
     /// The composer as the daemon keeps it: its text and its pictures.
     fn draft_now(&self, cx: &App) -> Draft {
         let (text, pictures) = self.attached.draft(cx);

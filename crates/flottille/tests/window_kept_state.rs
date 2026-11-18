@@ -7,12 +7,13 @@
 mod common;
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use common::User;
 use flottille_window::Shell;
 use flottille_window::link::Connect;
-use flottille_window::tree::{ended_id, project_id, session_id};
+use flottille_window::tree::{ended_id, project_id, session_draft_id, session_id};
 use gpui_design_system::omarchy::Environment;
 use gpui_design_system::toggle_id;
 use gpui_kit::test::TestWindowExt;
@@ -144,12 +145,35 @@ fn window<'a>(
     user: &User,
     cx: &'a mut TestAppContext,
 ) -> (Entity<Shell>, &'a mut VisualTestContext) {
+    window_via(user, Arc::new(user.connector()), cx)
+}
+
+/// A window whose connections the test can refuse: while `down` is set, a connection the window
+/// has not made yet is refused, as the connections of a daemon that does not answer are. The ones
+/// it holds already go on.
+fn refusing(user: &User, down: &Arc<AtomicBool>) -> Connect {
+    let (inner, down) = (user.connector(), down.clone());
+    Arc::new(move || {
+        if down.load(Ordering::SeqCst) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::ConnectionRefused,
+                "the daemon does not answer",
+            ));
+        }
+        inner()
+    })
+}
+
+fn window_via<'a>(
+    user: &User,
+    connect: Connect,
+    cx: &'a mut TestAppContext,
+) -> (Entity<Shell>, &'a mut VisualTestContext) {
     let env = Environment {
         os_release: user.path("os-release"),
         state_home: user.path("state"),
     };
     cx.update(|cx| flottille_window::init_with(env, cx));
-    let connect: Connect = Arc::new(user.connector());
     let (shell, cx) = cx.add_window_view(|window, cx| Shell::new_polled(connect, window, cx));
     cx.simulate_resize(size(px(1280.), px(800.)));
     (shell, cx)
@@ -175,6 +199,21 @@ fn until(
     }
 }
 
+/// [`until`], the test platform's clock moving `tick` at each try: what the window asks again
+/// after a wait is asked again.
+fn until_later(
+    shell: &Entity<Shell>,
+    cx: &mut VisualTestContext,
+    what: &str,
+    tick: Duration,
+    check: impl Fn(&mut VisualTestContext) -> bool,
+) {
+    until(shell, cx, what, |cx| {
+        cx.executor().advance_clock(tick);
+        check(cx)
+    });
+}
+
 /// The clock and the frames of a window at rest, to the last frame of any motion.
 fn settle(cx: &mut VisualTestContext) {
     for _ in 0..90 {
@@ -185,8 +224,9 @@ fn settle(cx: &mut VisualTestContext) {
     cx.update(|window, cx| window.draw(cx).clear(cx));
 }
 
-/// Opens a session from its row and waits for its composer, and for what the daemon kept of it.
-fn open(id: &str, shell: &Entity<Shell>, cx: &mut VisualTestContext) {
+/// Opens a session from its row and waits for its composer, without waiting for what the daemon
+/// kept of it.
+fn open_unread(id: &str, shell: &Entity<Shell>, cx: &mut VisualTestContext) {
     until(shell, cx, "the session's row", |cx| {
         cx.update(|window, _| window.try_find(session_id(id)).is_some())
     });
@@ -197,6 +237,17 @@ fn open(id: &str, shell: &Entity<Shell>, cx: &mut VisualTestContext) {
     settle(cx);
 }
 
+/// [`open_unread`], then waits until the daemon answered the read of the draft: what a test types
+/// next is typed in a composer that knows what the daemon holds.
+fn open(id: &str, shell: &Entity<Shell>, cx: &mut VisualTestContext) {
+    open_unread(id, shell, cx);
+    until(shell, cx, "the daemon answered the read of the draft", |cx| {
+        shell.read_with(cx, |s, cx| {
+            s.reply_of(id).is_some_and(|r| r.read(cx).draft_was_read())
+        })
+    });
+}
+
 /// A window on the project's page, its composer made.
 fn open_project(name: &str, shell: &Entity<Shell>, cx: &mut VisualTestContext) {
     until(shell, cx, "the project's row", |cx| {
@@ -205,6 +256,12 @@ fn open_project(name: &str, shell: &Entity<Shell>, cx: &mut VisualTestContext) {
     cx.update(|window, cx| window.click(project_id(name), cx));
     until(shell, cx, "the project's composer is made", |cx| {
         shell.read_with(cx, |s, _| s.composer_of(name).is_some())
+    });
+    until(shell, cx, "the daemon answered the read of the draft", |cx| {
+        shell.read_with(cx, |s, cx| {
+            s.composer_of(name)
+                .is_some_and(|c| c.read(cx).draft_was_read())
+        })
     });
     settle(cx);
 }
@@ -470,31 +527,168 @@ fn a_draft_is_never_logged_nor_in_an_event(cx: &mut TestAppContext) {
     let _ = cx;
 }
 
-#[gpui_kit::test]
-fn a_session_ended_for_good_forgets_its_draft(cx: &mut TestAppContext) {
-    let user = user();
-    project(&user, "app");
-    let id = start(&user, "app", "first");
+/// The daemon's answer to `draft.set` on a session: the code of its refusal, `None` when it kept
+/// the draft.
+fn refusal(user: &User, id: &str, text: &str) -> Option<String> {
+    user.call(
+        "draft.set",
+        json!({"kind": "session", "target": id, "text": text}),
+    )
+    .err()
+    .map(|(code, _)| code)
+}
+
+/// Whether the daemon keeps a draft of the session, whatever it answers a composer of its own.
+fn listed(user: &User, id: &str) -> bool {
+    user.call("draft.list", json!({})).unwrap()["drafts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|key| *key == format!("session:{id}"))
+}
+
+fn picture_files(user: &User) -> usize {
+    std::fs::read_dir(user.path("state/flottille/drafts"))
+        .map(|folders| folders.count())
+        .unwrap_or(0)
+}
+
+/// A draft with a picture, for a session.
+fn draft_with_picture(user: &User, id: &str) {
     user.call(
         "draft.set",
         json!({"kind": "session", "target": id, "text": "to be forgotten",
                "images": [{"mime": "image/png", "data": PNG_BASE64}]}),
     )
     .unwrap();
-    let folder = user.path("state/flottille/drafts");
-    assert!(
-        std::fs::read_dir(&folder).unwrap().next().is_some(),
-        "the picture is a file of the daemon's state folder"
+    assert_eq!(picture_files(user), 1, "the picture is a file of the state");
+}
+
+#[gpui_kit::test]
+fn a_session_ended_for_good_forgets_its_draft(cx: &mut TestAppContext) {
+    // Its agent cannot resume: once it ended, nothing of it is kept (`agent_task`).
+    let user = User::with_fake_agent();
+    user.fake_script(json!({"resume": false}));
+    project(&user, "app");
+    let id = start(&user, "app", "first");
+    draft_with_picture(&user, &id);
+
+    user.call("agent.stop", json!({"agent": id})).unwrap();
+    eventually("the draft goes with its session", || !listed(&user, &id));
+    assert_eq!(picture_files(&user), 0, "the picture goes with its draft");
+    // A debounce, the close of a window or a composer still open writes it again: refused.
+    assert_eq!(refusal(&user, &id, "too late").as_deref(), Some("not-found"));
+    assert!(!listed(&user, &id), "a forgotten session gets no draft");
+    let _ = cx;
+}
+
+#[gpui_kit::test]
+fn a_session_forgotten_after_its_kept_week_forgets_its_draft(cx: &mut TestAppContext) {
+    // Its agent resumes: its session is kept 7 days after it ended (`forget_kept_sessions`).
+    let user = User::with_fake_agent().with_env("FLOTTILLE_TEST_CLOCK", "1");
+    user.fake_script(json!({"images": true}));
+    project(&user, "app");
+    let id = start(&user, "app", "first");
+    draft_with_picture(&user, &id);
+    user.call("agent.stop", json!({"agent": id})).unwrap();
+    user.call("test.advance", json!({"ms": 6 * 24 * 3_600_000_u64}))
+        .unwrap();
+    assert!(listed(&user, &id), "kept while it can still be resumed");
+
+    user.call("test.advance", json!({"ms": 2 * 24 * 3_600_000_u64}))
+        .unwrap();
+    assert!(!listed(&user, &id), "the draft goes with the kept session");
+    assert_eq!(picture_files(&user), 0, "the picture goes with its draft");
+    assert_eq!(refusal(&user, &id, "too late").as_deref(), Some("not-found"));
+    assert!(!listed(&user, &id));
+    let _ = cx;
+}
+
+#[gpui_kit::test]
+fn a_resumable_ended_session_keeps_its_draft(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "app");
+    let id = start(&user, "app", "first");
+    draft_with_picture(&user, &id);
+
+    user.call("agent.stop", json!({"agent": id})).unwrap();
+    eventually("the session ended", || {
+        user.call("agent.show", json!({"agent": id})).unwrap()["agent"]["state"] == "ended"
+    });
+    // It can be resumed, and the user may be writing to it: the draft stays, and takes changes.
+    assert_eq!(kept(&user, "session", &id).map(|d| d.1), Some(1));
+    assert_eq!(refusal(&user, &id, "still writing"), None);
+    assert_eq!(
+        kept(&user, "session", &id),
+        Some(("still writing".to_owned(), 1))
     );
+    let _ = cx;
+}
+
+#[gpui_kit::test]
+fn a_removed_project_forgets_its_sessions_drafts_and_takes_no_other(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "app");
+    let id = start(&user, "app", "first");
+    draft_with_picture(&user, &id);
+    user.call(
+        "draft.set",
+        json!({"kind": "project", "target": "app", "text": "a first message"}),
+    )
+    .unwrap();
 
     user.call("project.remove", json!({"name": "app"})).unwrap();
-    eventually("the draft goes with the project's sessions", || {
-        kept(&user, "session", &id).is_none()
+    eventually("the drafts go with the project", || {
+        user.call("draft.list", json!({})).unwrap()["drafts"]
+            .as_array()
+            .unwrap()
+            .is_empty()
     });
-    assert!(
-        std::fs::read_dir(&folder).unwrap().next().is_none(),
-        "the picture goes with its draft"
+    assert_eq!(picture_files(&user), 0);
+    // Its agents' rows are kept, but their project is gone: nothing of them is written again.
+    assert_eq!(refusal(&user, &id, "too late").as_deref(), Some("not-found"));
+    let again = user.call(
+        "draft.set",
+        json!({"kind": "project", "target": "app", "text": "too late"}),
     );
+    assert_eq!(again.unwrap_err().0, "not-found");
+    let _ = cx;
+}
+
+#[gpui_kit::test]
+fn the_drafts_left_without_their_session_are_swept_when_the_daemon_starts(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    project(&user, "app");
+    project(&user, "other");
+    let id = start(&user, "app", "first");
+    let kept_id = start(&user, "other", "second");
+    draft_with_picture(&user, &id);
+    user.call(
+        "draft.set",
+        json!({"kind": "session", "target": kept_id, "text": "stays"}),
+    )
+    .unwrap();
+    user.call(
+        "draft.set",
+        json!({"kind": "project", "target": "app", "text": "first of app"}),
+    )
+    .unwrap();
+    user.call("daemon.stop", json!({})).unwrap();
+    eventually("the daemon is gone", || {
+        !user.path("runtime/flottille/daemon.sock").exists()
+    });
+    // The project's file goes while the daemon is down: its drafts are left without it. A folder
+    // of pictures no draft names is left too (a write that ended halfway).
+    std::fs::remove_file(user.path("config/flottille/projects/app.toml")).unwrap();
+    let stray = user.path("state/flottille/drafts/6162");
+    std::fs::create_dir_all(&stray).unwrap();
+    std::fs::write(stray.join("a-0.png"), png()).unwrap();
+
+    let drafts = user.call("draft.list", json!({})).unwrap()["drafts"].clone();
+    assert_eq!(drafts, json!([format!("session:{kept_id}")]));
+    assert_eq!(picture_files(&user), 0, "no picture is left without its draft");
     let _ = cx;
 }
 
@@ -616,25 +810,38 @@ fn the_restored_sidebar_draws_no_animation_at_opening(
     project(&user, "app");
     project(&user, "other");
     let (lead, led) = lead_and_led(&user, "app");
+    // The folded project has a session: unfolded, its fold has a height to see.
+    start(&user, "other", "a session to fold away");
+    let gone = start(&user, "app", "an ordinary one");
+    user.call("agent.stop", json!({"agent": gone})).unwrap();
+    eventually("the session ended", || {
+        user.call("agent.show", json!({"agent": gone})).unwrap()["agent"]["state"] == "ended"
+    });
 
     let (shell, cx) = window(&user, first);
-    until(&shell, cx, "the led row", |cx| {
-        cx.update(|window, _| window.try_find(session_id(&led)).is_some())
+    until(&shell, cx, "the led row and the Ended group", |cx| {
+        cx.update(|window, _| {
+            window.try_find(session_id(&led)).is_some() && window.try_find(ended_id()).is_some()
+        })
     });
     cx.update(|window, cx| window.click(toggle_id(project_id("other")), cx));
     cx.update(|window, cx| window.click(toggle_id(session_id(&lead)), cx));
+    cx.update(|window, cx| window.click(ended_id(), cx));
     settle(cx);
     eventually("the daemon keeps the folds", || {
         let state = sidebar(&user);
-        state["projects"]["other"] == false && state["leads"][&lead] == false
+        state["projects"]["other"] == false
+            && state["leads"][&lead] == false
+            && state["ended"] == true
     });
 
-    // Every frame of the new window, the clock moving, shows the folded project folded and the
-    // folded lead without its led row: nothing is drawn open on its way to being folded.
+    // Every frame of the new window, the clock moving, shows the folded project folded, the
+    // folded lead without its led row and the "Ended" group left open open: nothing is drawn on
+    // its way to what it was left as.
     let (shell, cx) = window(&user, second);
     let deadline = Instant::now() + Duration::from_secs(25);
-    let mut seen = 0;
-    while seen < 40 {
+    let (mut seen, mut ended) = (0, 0);
+    while seen < 40 || ended < 40 {
         shell.update_in(cx, |shell, window, cx| shell.poll(window, cx));
         cx.run_until_parked();
         cx.executor().advance_clock(Duration::from_millis(16));
@@ -653,9 +860,220 @@ fn the_restored_sidebar_draws_no_animation_at_opening(
             );
             seen += 1;
         }
-        assert!(Instant::now() < deadline, "the project is never drawn");
+        if let Some(fold) = cx.update(|window, _| window.try_find("fold-ended")) {
+            assert_eq!(fold.expanded(), Some(true), "unfolded from its first frame");
+            assert!(
+                cx.update(|window, _| window.find("fold-ended").bounds().size.height) > px(0.),
+                "its height is never seen closed"
+            );
+            ended += 1;
+        }
+        assert!(Instant::now() < deadline, "the folds are never drawn");
         std::thread::sleep(Duration::from_millis(10));
     }
     // The lead's row itself was drawn, folded: its chevron says so.
     assert!(cx.update(|window, _| window.try_find(session_id(&lead)).is_some()));
+
+    // Restored without motion, the folds still move when the user folds them: a project
+    // unfolded is seen part of the way, not all at once.
+    settle(cx);
+    cx.update(|window, cx| window.click(toggle_id(project_id("other")), cx));
+    cx.executor().advance_clock(Duration::from_millis(40));
+    cx.update(|window, cx| window.simulate_next_frame(cx));
+    cx.run_until_parked();
+    let part = cx.update(|window, _| window.find("fold-project-other").bounds().size.height);
+    settle(cx);
+    let whole = cx.update(|window, _| window.find("fold-project-other").bounds().size.height);
+    assert!(
+        part > px(0.) && part < whole,
+        "a later unfold is animated: {part:?} of {whole:?} after 40 ms"
+    );
+}
+
+/// A window whose daemon does not take the connections the window has not made yet, on the
+/// session `id` it has a row for: the session's page is opened while the daemon does not answer.
+fn window_with_a_daemon_that_does_not_answer<'a>(
+    user: &User,
+    id: &str,
+    down: &Arc<AtomicBool>,
+    cx: &'a mut TestAppContext,
+) -> (Entity<Shell>, &'a mut VisualTestContext) {
+    let (shell, cx) = window_via(user, refusing(user, down), cx);
+    until(&shell, cx, "the session's row", |cx| {
+        cx.update(|window, _| window.try_find(session_id(id)).is_some())
+    });
+    down.store(true, Ordering::SeqCst);
+    open_unread(id, &shell, cx);
+    (shell, cx)
+}
+
+#[gpui_kit::test]
+fn a_draft_read_that_failed_is_asked_again_and_not_taken_for_no_draft(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "app");
+    let id = start(&user, "app", "first");
+    user.call(
+        "draft.set",
+        json!({"kind": "session", "target": id, "text": "what the daemon keeps"}),
+    )
+    .unwrap();
+    let down = Arc::new(AtomicBool::new(false));
+    let (shell, cx) = window_with_a_daemon_that_does_not_answer(&user, &id, &down, cx);
+
+    // Said nothing yet, the composer is empty and may be typed in: it does not know the draft.
+    assert!(!shell.read_with(cx, |s, cx| s.reply_of(&id).unwrap().read(cx).draft_was_read()));
+    assert_eq!(reply_text(&id, &shell, cx), "");
+    down.store(false, Ordering::SeqCst);
+    until_later(
+        &shell,
+        cx,
+        "the draft is read again and comes back",
+        Duration::from_secs(1),
+        |cx| reply_text(&id, &shell, cx) == "what the daemon keeps",
+    );
+    assert_eq!(
+        kept(&user, "session", &id),
+        Some(("what the daemon keeps".to_owned(), 0)),
+        "nothing replaced what the daemon holds"
+    );
+}
+
+#[gpui_kit::test]
+fn a_text_typed_before_the_draft_was_read_is_kept_when_the_window_closes(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    project(&user, "app");
+    let id = start(&user, "app", "first");
+    user.call(
+        "draft.set",
+        json!({"kind": "session", "target": id, "text": "older words"}),
+    )
+    .unwrap();
+    let down = Arc::new(AtomicBool::new(false));
+    let (shell, cx) = window_with_a_daemon_that_does_not_answer(&user, &id, &down, cx);
+    cx.update(|window, cx| window.click("reply-field", cx));
+    cx.simulate_input("typed meanwhile");
+    assert!(!shell.read_with(cx, |s, cx| s.reply_of(&id).unwrap().read(cx).draft_was_read()));
+
+    // The daemon is back, and the window closes before the read was asked again.
+    down.store(false, Ordering::SeqCst);
+    close(&shell, cx);
+    eventually("the daemon keeps what was typed", || {
+        kept(&user, "session", &id) == Some(("typed meanwhile".to_owned(), 0))
+    });
+}
+
+#[gpui_kit::test]
+fn a_text_typed_while_the_daemon_does_not_answer_never_replaces_its_draft(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    project(&user, "app");
+    let id = start(&user, "app", "first");
+    user.call(
+        "draft.set",
+        json!({"kind": "session", "target": id, "text": "older words"}),
+    )
+    .unwrap();
+    let down = Arc::new(AtomicBool::new(false));
+    let (shell, cx) = window_with_a_daemon_that_does_not_answer(&user, &id, &down, cx);
+    cx.update(|window, cx| window.click("reply-field", cx));
+    cx.simulate_input("typed meanwhile");
+
+    // The window closes while the daemon is still silent: nothing is known of its draft, so
+    // nothing is written over it.
+    close(&shell, cx);
+    down.store(false, Ordering::SeqCst);
+    assert_eq!(
+        kept(&user, "session", &id),
+        Some(("older words".to_owned(), 0))
+    );
+}
+
+#[gpui_kit::test]
+fn a_draft_the_daemon_did_not_take_is_asked_again(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "app");
+    let id = start(&user, "app", "first");
+    let (shell, cx) = window(&user, cx);
+    open(&id, &shell, cx);
+    let reply = shell.read_with(cx, |s, _| s.reply_of(&id).cloned().unwrap());
+    // The folder of the pictures cannot be written: the daemon cannot keep this draft yet.
+    let folder = user.path("state/flottille/drafts");
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::set_permissions(&folder, std::os::unix::fs::PermissionsExt::from_mode(0o500)).unwrap();
+    cx.update(|window, cx| window.click("reply-field", cx));
+    cx.simulate_input("a picture follows ");
+    reply.update(cx, |reply, cx| {
+        reply.attach(Image::from_bytes(ImageFormat::Png, png()), cx)
+    });
+    settle(cx);
+    debounced(cx);
+    let sent = |cx: &mut VisualTestContext| reply.read_with(cx, |r, _| r.drafts_sent());
+    until(&shell, cx, "the write is asked", |cx| sent(cx) >= 1);
+    assert_eq!(kept(&user, "session", &id), None, "the daemon could not");
+
+    std::fs::set_permissions(&folder, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
+    until_later(
+        &shell,
+        cx,
+        "the draft is asked again, and kept",
+        Duration::from_secs(1),
+        |_| kept(&user, "session", &id).is_some_and(|(_, pictures)| pictures == 1),
+    );
+    assert_eq!(
+        kept(&user, "session", &id).map(|(text, _)| text),
+        Some("a picture follows ".to_owned())
+    );
+}
+
+#[gpui_kit::test]
+fn a_quit_that_is_not_a_window_close_keeps_what_the_composers_hold(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "app");
+    let id = start(&user, "app", "first");
+    let (shell, cx) = window(&user, cx);
+    type_in_reply(&id, "typed a moment ago", &shell, cx);
+    assert_eq!(kept(&user, "session", &id), None, "the 500 ms are not over");
+
+    // The program ends by its own way, the desktop's quit or a signal: no close of the window.
+    cx.quit();
+    eventually("the daemon keeps what was typed", || {
+        kept(&user, "session", &id) == Some(("typed a moment ago".to_owned(), 0))
+    });
+}
+
+#[gpui_kit::test]
+fn a_row_says_its_draft_at_once_after_reopening_without_opening_the_session(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    project(&user, "app");
+    let with = start(&user, "app", "first");
+    let without = start(&user, "app", "second");
+    user.call(
+        "draft.set",
+        json!({"kind": "session", "target": with, "text": "left half written"}),
+    )
+    .unwrap();
+
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the rows", |cx| {
+        cx.update(|window, _| {
+            window.try_find(session_id(&with)).is_some()
+                && window.try_find(session_id(&without)).is_some()
+        })
+    });
+    until(&shell, cx, "the pencil of the session with a draft", |cx| {
+        cx.update(|window, _| window.try_find(session_draft_id(&with)).is_some())
+    });
+    assert!(
+        shell.read_with(cx, |s, _| s.reply_of(&with).is_none()),
+        "its page was not opened"
+    );
+    assert!(
+        cx.update(|window, _| window.try_find(session_draft_id(&without)).is_none()),
+        "the other session has no pencil"
+    );
 }
