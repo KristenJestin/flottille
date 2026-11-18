@@ -116,9 +116,9 @@ pub enum Block {
         text: String,
         moved: bool,
     },
-    /// The agent asked the user for a vault entry (`vault.asked`): what it, or the feature that
-    /// names the entry, prefilled, and its reason. `open` until the daemon says it was answered
-    /// (`vault.ask_answered`).
+    /// The agent asked the user for a vault entry (`vault.asked`): the conversation records it in
+    /// one line and the card, with its buttons, is in the rail's "Waiting for you". `outcome`
+    /// once the daemon says it was answered (`vault.ask_answered`).
     VaultAsk(VaultAsk),
     /// A connection waits for the user's review of the new actions the agent's accepted request
     /// gave it (`connection.review_waits`), until it is reviewed, removed or turned off
@@ -138,6 +138,8 @@ pub enum Block {
 pub struct VaultAsk {
     /// The number of its `vault.asked` event: the request's number.
     pub seq: u64,
+    /// The agent that asked.
+    pub agent: String,
     pub name: String,
     /// The project of the agent that asked.
     pub project: String,
@@ -154,7 +156,66 @@ pub struct VaultAsk {
     /// The connection it is for: the entry is every project's.
     pub connection: Option<String>,
     pub why: String,
-    pub open: bool,
+    /// How it ended, once answered.
+    pub outcome: Option<VaultOutcome>,
+}
+
+/// How a request for a vault entry was answered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VaultOutcome {
+    /// The user saved the entry.
+    Saved,
+    /// The user dismissed the request.
+    Dismissed,
+}
+
+impl VaultOutcome {
+    fn of(data: &Value) -> Self {
+        match data["outcome"].as_str() {
+            Some("dismissed") => Self::Dismissed,
+            _ => Self::Saved,
+        }
+    }
+}
+
+impl VaultAsk {
+    /// Waiting for the user.
+    pub fn open(&self) -> bool {
+        self.outcome.is_none()
+    }
+
+    /// A request as the daemon lists it (`vault.asks`, or the `vault.asked` event): never a secret.
+    /// `seq` is its number.
+    pub fn of(seq: u64, data: &Value) -> Self {
+        let text = |field: &str| data[field].as_str().unwrap_or_default().to_owned();
+        let option = |field: &str| data[field].as_str().map(str::to_owned);
+        VaultAsk {
+            seq,
+            agent: text("agent"),
+            name: text("name"),
+            project: text("project"),
+            every: data["every"] == true,
+            description: option("description"),
+            url: option("url"),
+            host: option("host"),
+            username: option("username"),
+            bound: option("for"),
+            connection: option("connection"),
+            why: text("why"),
+            outcome: None,
+        }
+    }
+
+    /// The one line the conversation keeps of it, in its own style: no button, the card being in
+    /// the rail while it waits.
+    pub fn said(&self) -> String {
+        let end = match self.outcome {
+            None => "waiting for you",
+            Some(VaultOutcome::Saved) => "saved",
+            Some(VaultOutcome::Dismissed) => "dismissed",
+        };
+        format!("asked for the vault entry {} · {end}", self.name)
+    }
 }
 
 /// A connection waiting for the user's review after an accepted request of the agent, as its
@@ -510,6 +571,8 @@ pub struct Conversation {
     me: String,
     /// Its parent's name; `None` for the root.
     parent: Option<String>,
+    /// The project the agent works in, once known: a session started in another is said with it.
+    project: Option<String>,
     /// The names of the agents of the tree, by id, to say which child reported.
     names: HashMap<String, String>,
     /// A child was launched since the last row that was not a tool call: its list follows the
@@ -569,6 +632,7 @@ impl Conversation {
             last_at: None,
             me,
             parent,
+            project: None,
             names: HashMap::new(),
             launched: false,
             has_sub_agents: false,
@@ -654,6 +718,11 @@ impl Conversation {
             }
         }
         Activity::Thinking
+    }
+
+    /// The project the agent works in.
+    pub fn set_project(&mut self, project: String) {
+        self.project = Some(project);
     }
 
     pub fn set_names(&mut self, names: HashMap<String, String>) {
@@ -1056,20 +1125,7 @@ impl Conversation {
             }
             "vault.asked" => {
                 let mut changes = self.close(Some(event.at));
-                changes.extend(self.push(Block::VaultAsk(VaultAsk {
-                    seq: event.seq,
-                    name: text("name"),
-                    project: text("project"),
-                    every: data["every"] == true,
-                    description: data["description"].as_str().map(str::to_owned),
-                    url: data["url"].as_str().map(str::to_owned),
-                    host: data["host"].as_str().map(str::to_owned),
-                    username: data["username"].as_str().map(str::to_owned),
-                    bound: data["for"].as_str().map(str::to_owned),
-                    connection: data["connection"].as_str().map(str::to_owned),
-                    why: text("why"),
-                    open: true,
-                })));
+                changes.extend(self.push(Block::VaultAsk(VaultAsk::of(event.seq, data))));
                 changes
             }
             "vault.ask_answered" => {
@@ -1079,7 +1135,7 @@ impl Conversation {
                 match at {
                     Some(at) => {
                         if let Block::VaultAsk(ask) = &mut self.blocks[at] {
-                            ask.open = false;
+                            ask.outcome = Some(VaultOutcome::of(data));
                         }
                         vec![Change::Changed(at)]
                     }
@@ -1183,8 +1239,19 @@ impl Conversation {
     /// `kind`), which is not one.
     fn launch(&mut self, id: String, input: &Value) {
         if input["root"] == true || matches!(input["kind"].as_str(), Some("led" | "handed")) {
-            let title = input["title"].as_str().unwrap_or_default().to_owned();
-            self.sessions.insert(id.clone(), title);
+            // `Started the session "X" in kit`: the project is named only when it is another one
+            // than the project this conversation's agent works in (its own is said by the page).
+            let title =
+                gpui_design_system::quoted_title(input["title"].as_str().unwrap_or_default());
+            let said = match input["project"].as_str().map(str::trim) {
+                Some(project)
+                    if !project.is_empty() && self.project.as_deref() != Some(project) =>
+                {
+                    format!("\"{title}\" in {project}")
+                }
+                _ => format!("\"{title}\""),
+            };
+            self.sessions.insert(id.clone(), said);
             if self.child_launches.remove(&id) && self.child_launches.is_empty() {
                 self.launched = false;
             }
@@ -1706,19 +1773,22 @@ fn sent_to(text: &str) -> Option<(String, Option<String>)> {
     Some(peer_of(named))
 }
 
-/// What `agent_launch` answers when it started a session for the user (`tree.rs`).
-const STARTED_SESSION: &str = "Started a session for the user";
+/// What `agent_launch` answers when it started a session for the user, handed or led
+/// (`tree.rs`).
+const STARTED_SESSION: &str = "Started a session ";
 
 /// The kind of the line that says what woke the agent: the only notice that folds its text.
 pub const WOKEN_BY_KIND: &str = "woken by";
 
 /// The kind of the line that says a session was started for the user, before its title.
-pub const STARTED_SESSION_KIND: &str = "started session";
+pub const STARTED_SESSION_KIND: &str = "started the session";
 
-fn started_session(title: String) -> Block {
+/// The notice of a started session: its title as `launch` said it, with its project when it is
+/// another's.
+fn started_session(said: String) -> Block {
     Block::Notice {
         kind: STARTED_SESSION_KIND.into(),
-        text: gpui_design_system::quoted_title(&title),
+        text: said,
     }
 }
 
@@ -2464,8 +2534,65 @@ mod tests {
             c.blocks()[1],
             Block::Notice {
                 kind: STARTED_SESSION_KIND.into(),
-                text: "Docs".into()
+                text: "\"Docs\"".into()
             }
+        );
+    }
+
+    #[test]
+    fn a_session_started_in_another_project_is_said_with_that_project() {
+        let mut c = Conversation::new("the conversation".into(), None);
+        c.set_project("app".into());
+        c.apply(&event(
+            1,
+            "agent.tool_call",
+            json!({"id": "l", "title": "mcp__flottille__agent_launch", "status": "in_progress",
+                "raw_input": {"kind": "led", "project": "kit",
+                    "title": "Make the fonts settable", "brief": "Go"}}),
+        ));
+        c.apply(&event(
+            2,
+            "agent.tool_call",
+            json!({"id": "l", "update": true, "status": "completed",
+                "raw_output": "Waiting for the user's approval, request #4."}),
+        ));
+        c.apply(&event(
+            3,
+            "agent.prompted",
+            json!({"text": "[flottille:approval]\nRequest #4 (agent_launch) was approved by the user, and Flottille has now done it. Its result:\n\nStarted a session led by you, \"Make the fonts settable\" (agent 0123456789ab), on Claude, in main, the project folder of project kit."}),
+        ));
+        assert_eq!(
+            c.blocks().last(),
+            Some(&Block::Notice {
+                kind: STARTED_SESSION_KIND.into(),
+                text: "\"Make the fonts settable\" in kit".into()
+            })
+        );
+    }
+
+    #[test]
+    fn a_session_started_in_the_conversation_s_own_project_is_not_said_with_it() {
+        let mut c = Conversation::new("the conversation".into(), None);
+        c.set_project("kit".into());
+        c.apply(&event(
+            1,
+            "agent.tool_call",
+            json!({"id": "l", "title": "mcp__flottille__agent_launch", "status": "in_progress",
+                "raw_input": {"kind": "led", "project": "kit",
+                    "title": "Make the fonts settable", "brief": "Go"}}),
+        ));
+        c.apply(&event(
+            2,
+            "agent.tool_call",
+            json!({"id": "l", "update": true, "status": "completed",
+                "raw_output": "Started a session led by you, \"Make the fonts settable\" (agent 0123456789ab), on Claude, in main."}),
+        ));
+        assert_eq!(
+            c.blocks().last(),
+            Some(&Block::Notice {
+                kind: STARTED_SESSION_KIND.into(),
+                text: "\"Make the fonts settable\"".into()
+            })
         );
     }
 
@@ -2496,7 +2623,7 @@ mod tests {
             c.blocks().last(),
             Some(&Block::Notice {
                 kind: STARTED_SESSION_KIND.into(),
-                text: "Docs".into()
+                text: "\"Docs\"".into()
             })
         );
     }

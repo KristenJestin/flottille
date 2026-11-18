@@ -131,10 +131,16 @@ pub fn ask(
                 _ => format!("agent {session}"),
             };
             return (
-                Outcome::Refused(format!(
-                    "refused: request #{number} already asks the user to let you write to \
-                     {named}; this message was not sent: send it once its answer came"
-                )),
+                Outcome::Refused(match tool {
+                    "session_read" => format!(
+                        "refused: request #{number} already asks the user to let you read \
+                         {named}; read it once its answer came"
+                    ),
+                    _ => format!(
+                        "refused: request #{number} already asks the user to let you write to \
+                         {named}; this message was not sent: send it once its answer came"
+                    ),
+                }),
                 None,
             );
         }
@@ -186,10 +192,15 @@ fn asking_leave(store: &Store, asked: &Request) -> flottille_core::Result<Option
         .into_iter()
         .chain(store.unsettled_requests()?)
         .find(|request| {
+            // One leave covers reading and writing across projects: a read and a message for the
+            // same pair are one card.
             request.agent == asked.agent
-                && request.tool == asked.tool
+                && matches!(request.tool.as_str(), "session_send" | "session_read")
                 && request.arguments["session"] == asked.arguments["session"]
-                && request.reasons.iter().any(|reason| reason == gate::LEAVE)
+                && request
+                    .reasons
+                    .iter()
+                    .any(|reason| reason == gate::LEAVE || reason == gate::READ_LEAVE)
                 && (request.call_key.is_none() || request.call_key != asked.call_key)
         })
         .map(|request| request.number))
@@ -532,8 +543,11 @@ async fn performed(
     .await;
     // The user allowed the first message of a pair: the leave is the pair's from now on.
     if matches!(outcome, Outcome::Done(_))
-        && tool == "session_send"
-        && request.reasons.iter().any(|reason| reason == gate::LEAVE)
+        && matches!(tool, "session_send" | "session_read")
+        && request
+            .reasons
+            .iter()
+            .any(|reason| reason == gate::LEAVE || reason == gate::READ_LEAVE)
         && let Some(session) = request.arguments["session"].as_str()
     {
         tree::grant_leave(daemon, &request.agent, session, number);

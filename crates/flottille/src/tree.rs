@@ -10,7 +10,7 @@ use std::ffi::OsString;
 use std::sync::Arc;
 use std::time::Duration;
 
-use flottille_core::agent::{Agent, AgentState};
+use flottille_core::agent::{Agent, AgentState, GateMode};
 use flottille_core::approval::{self, Decision, Request};
 use flottille_core::protocol::AgentTrees;
 use flottille_core::question;
@@ -138,6 +138,9 @@ struct Launch {
     base: Option<workspaces::BaseChoice>,
     /// Which agent the launch starts (`docs/tools.md`, "The tree's tools"): never guessed.
     kind: Option<LaunchKind>,
+    /// With `led` or `handed`: the registered project the session is started in, the caller's
+    /// when left out (`docs/tools.md`, "Sessions an agent starts").
+    project: Option<String>,
 }
 
 /// What `agent_launch` starts: a child in the caller's place, a session the caller leads, or a
@@ -209,9 +212,29 @@ pub fn names_main(daemon: &Daemon, project: &str, name: &str) -> bool {
 
 /// The refusals of a launch that need nothing looked up but the caller's place: checked before
 /// the gate is asked, and again when the launch is performed.
-pub fn launch_refusal(workspace: Option<&str>, args: &Value) -> Result<(), Outcome> {
+pub fn launch_refusal(project: &str, workspace: Option<&str>, args: &Value) -> Result<(), Outcome> {
     let asked = Launch::of(args.clone())?;
+    asked.elsewhere_refusal(project)?;
     asked.place(workspace).map(|_| ())
+}
+
+/// The other project a launch starts its session in, when it names one that is not the caller's
+/// (`docs/tools.md`, "Sessions an agent starts"): held for the user in every mode.
+pub fn launched_elsewhere<'a>(caller_project: &str, args: &'a Value) -> Option<&'a str> {
+    args["project"]
+        .as_str()
+        .map(str::trim)
+        .filter(|project| !project.is_empty() && *project != caller_project)
+}
+
+/// The mode of a session an agent starts in another project: the mode that project gives a new
+/// session, never above the caller's tree's (`docs/design.md` §7.1). A project gives a new
+/// session Auto; Full is the user's choice for one tree, never carried to another project.
+pub fn mode_elsewhere(caller: GateMode) -> GateMode {
+    match caller {
+        GateMode::Ask => GateMode::Ask,
+        GateMode::Auto | GateMode::Full => GateMode::default(),
+    }
 }
 
 impl Launch {
@@ -230,6 +253,23 @@ impl Launch {
 
     fn kind(&self) -> LaunchKind {
         self.kind.unwrap_or(LaunchKind::Child)
+    }
+
+    /// A child works in its parent's project: only a session is started in another.
+    fn elsewhere_refusal(&self, caller_project: &str) -> Result<(), Outcome> {
+        let elsewhere = self
+            .project
+            .as_deref()
+            .map(str::trim)
+            .filter(|project| !project.is_empty() && *project != caller_project);
+        match elsewhere {
+            Some(project) if !self.session() => Err(refused(format!(
+                "refused: a child works in your project, never in another: project {project} is \
+                 for a session there, agent_launch {{\"kind\": \"led\", \"project\": \
+                 \"{project}\", \"title\": \"...\", \"brief\": \"...\"}}, held for the user"
+            ))),
+            _ => Ok(()),
+        }
     }
 
     /// Whether it starts a session rather than a child.
@@ -299,6 +339,13 @@ async fn launch(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
         return Err(refused(crate::actions::CHILD_ROOTS));
     }
     let led = asked.kind() == LaunchKind::Led;
+    asked.elsewhere_refusal(&caller.project)?;
+    let elsewhere = asked
+        .project
+        .as_deref()
+        .map(str::trim)
+        .filter(|project| !project.is_empty() && *project != caller.project)
+        .map(str::to_owned);
     let choice = asked.place(caller.workspace.as_deref())?;
     if !session && caller.depth + 1 > DEPTH_LIMIT {
         return Err(refused(format!(
@@ -322,7 +369,11 @@ async fn launch(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
             asked.role.as_deref().unwrap_or_default()
         ))
     })?;
-    let project = projects::load_project(daemon, &caller.project).map_err(|f| failed(f.message))?;
+    let project = match &elsewhere {
+        Some(name) => projects::load_project(daemon, name)
+            .map_err(|f| refused(format!("refused: {}", f.message)))?,
+        None => projects::load_project(daemon, &caller.project).map_err(|f| failed(f.message))?,
+    };
     // A child runs on its parent's provider unless it names another.
     let provider = asked.provider.or_else(|| Some(caller.provider.clone()));
     let asked_provider = providers::Asked {
@@ -340,7 +391,10 @@ async fn launch(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
     };
     let in_main = matches!(&choice, WorkspaceChoice::Existing(name)
         if names_main(daemon, &project.name, name));
+    // In another project, the caller's own place is none of that project's: its folder is meant.
+    let in_main = in_main || (elsewhere.is_some() && matches!(choice, WorkspaceChoice::Own));
     let (workspace, preparing) = match choice {
+        WorkspaceChoice::Own if elsewhere.is_some() => (None, false),
         WorkspaceChoice::Own => (caller.workspace.clone(), false),
         WorkspaceChoice::Existing(_) if in_main => (None, false),
         WorkspaceChoice::Existing(name) => (Some(name), false),
@@ -391,7 +445,10 @@ async fn launch(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
             // A child's is not read: a tree runs in its root's mode (`judge::mode`). A new root
             // takes the mode of the tree that started it, never a looser one: in Full, the caller
             // could already do all the new session would do.
-            gate_mode: Some(crate::judge::mode(daemon, &caller.id)),
+            gate_mode: Some(match &elsewhere {
+                Some(_) => mode_elsewhere(crate::judge::mode(daemon, &caller.id)),
+                None => crate::judge::mode(daemon, &caller.id),
+            }),
             launched_by: session.then(|| caller.id.clone()),
             led,
             launched: None,
@@ -415,6 +472,19 @@ async fn launch(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
         (_, true) => "main, the project folder".to_owned(),
         (Some(w), _) => format!("workspace {w}"),
         (None, _) => "your own place".to_owned(),
+    };
+    // A session of another project: its place is that project's, and writing to it asks the user
+    // once, though the caller started it.
+    let (place, leave) = match &elsewhere {
+        Some(name) => (
+            format!("{place} of project {name}"),
+            format!(
+                " It is a session of project {name}, a lead there with that project's tools: you \
+                 do not act in its places yourself, and your first message to it with \
+                 session_send asks the user once."
+            ),
+        ),
+        None => (place, String::new()),
     };
     // What the answer says it runs on is what its session took: a model or an effort left out is
     // the agent's own to take, which only its session says.
@@ -448,7 +518,7 @@ async fn launch(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
              it. It asks you its questions: a delivery [flottille:session-turn-ended] wakes you \
              when it asks, reports or ends, with its last message. Answer with session_send, \
              relay to the user with ask, or do nothing; forge unsubscribe with its session stops \
-             the wakes.",
+             the wakes.{leave}",
             named(&child)
         )));
     }
@@ -457,7 +527,7 @@ async fn launch(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
             "Started a session for the user, {}, on {runs}, in {place}, handed over. It is the \
              user's, not your child: the user follows it in the window and the agent_* tools do not reach \
              it. You hear nothing more of it unless it writes to you; you can write to it with \
-             session_send.",
+             session_send.{leave}",
             named(&child)
         )));
     }
@@ -896,23 +966,24 @@ pub fn session_of(
                  never with session_send"
             )));
         }
-        Some(agent) if agent.project != caller.project => {
-            return Err(refused(format!(
-                "refused: {id} is a session of another project, {}, not of {}: an agent writes \
-                 only to the sessions of its own project",
-                agent.project, caller.project
-            )));
-        }
         Some(agent) => agent,
     };
+    let leave = || {
+        daemon
+            .read(|store| store.has_leave(&caller.id, &session.id))
+            .map_err(failed)
+    };
+    // Across projects, even a session the caller started is written to with the user's leave,
+    // once per pair (`docs/tools.md`, "Sessions that talk to each other").
+    let elsewhere = session.project != caller.project;
     let relation = if session.launched_by.as_deref() == Some(caller.id.as_str()) {
-        Relation::Started
+        match !elsewhere || leave()? {
+            true => Relation::Started,
+            false => Relation::NoLeave,
+        }
     } else if caller.launched_by.as_deref() == Some(session.id.as_str()) {
         Relation::StartedYou
-    } else if daemon
-        .read(|store| store.has_leave(&caller.id, &session.id))
-        .map_err(failed)?
-    {
+    } else if leave()? {
         Relation::Leave
     } else {
         Relation::NoLeave
@@ -954,6 +1025,27 @@ pub fn needs_leave(daemon: &Daemon, grant: &Grant, args: &Value) -> Result<bool,
     }
 }
 
+/// The pair a leave across projects is asked for, as the user reads it on a request: both
+/// sessions, each with its project, and who started the one reached.
+pub fn sessions_across(daemon: &Daemon, caller: &Agent, session: &Agent) -> (String, String) {
+    let starter = match session.launched_by.as_deref() {
+        Some(id) if id == caller.id => "started by this agent".to_owned(),
+        None => "started by you, not by this agent".to_owned(),
+        Some(id) => match daemon.read(|store| store.agent(id)) {
+            Ok(Some(agent)) => format!("started by {}, not by this agent", named(&agent)),
+            _ => format!("started by agent {id}, not by this agent"),
+        },
+    };
+    (
+        format!("{} of project {}", named(caller), caller.project),
+        format!(
+            "the session {} of project {} ({starter})",
+            named(session),
+            session.project
+        ),
+    )
+}
+
 /// A session another agent acts on, as the user reads it on a request: its name, and who started
 /// it, which is never the agent asking.
 pub fn other_session(daemon: &Daemon, session: &Agent) -> String {
@@ -988,10 +1080,14 @@ fn session_send(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
     let asked: SessionSend = arguments("session_send", args)?;
     let (session, relation) = session_of(daemon, caller, &asked)?;
     // A following ties a session to the one that started it; two sessions a leave joins have none.
-    let following = match relation {
-        Relation::Started => Some((caller.id.as_str(), &session)),
-        Relation::StartedYou => Some((session.id.as_str(), caller)),
-        Relation::Leave | Relation::NoLeave => None,
+    // Told by who started whom, not by the relation: across projects the first message of a pair
+    // is performed once the user allowed it, before the leave is kept, as `NoLeave`, and it counts.
+    let following = if session.launched_by.as_deref() == Some(caller.id.as_str()) {
+        Some((caller.id.as_str(), &session))
+    } else if caller.launched_by.as_deref() == Some(session.id.as_str()) {
+        Some((session.id.as_str(), caller))
+    } else {
+        None
     };
     if let Some((starter, followed)) = following
         && crate::subscriptions::paused(daemon, starter, &followed.id)
@@ -1482,7 +1578,8 @@ enum Stopped {
 }
 
 /// What `agent_stop` ends, or the refusal, before anything is asked: the caller itself, a child
-/// of another session, a session of another project, an unknown id or a session that ended.
+/// of another session, an unknown id or a session that ended. A session of another project is
+/// ended as one of the caller's: its own when it leads it, the user's to allow otherwise.
 fn stopped(daemon: &Daemon, caller: &Agent, id: &str) -> Result<Stopped, Outcome> {
     let found = daemon.read(|store| store.agent(id)).map_err(failed)?;
     match found {
@@ -1508,11 +1605,6 @@ fn stopped(daemon: &Daemon, caller: &Agent, id: &str) -> Result<Stopped, Outcome
         Some(agent) if agent.parent.is_some() => Err(refused(format!(
             "refused: {id} is a child of another session: it is stopped by its parent, never by \
              you"
-        ))),
-        Some(agent) if agent.project != caller.project => Err(refused(format!(
-            "refused: {id} is a session of another project, {}, not of {}: an agent ends only \
-             the sessions of its own project",
-            agent.project, caller.project
         ))),
         Some(agent) if agent.state.is_final() => Err(refused(format!(
             "refused: {} has {} already",
@@ -1542,6 +1634,10 @@ pub fn stop_says(daemon: &Daemon, grant: &Grant, args: &Value) -> Result<Vec<Str
     let place = match &session.workspace {
         Some(name) => format!("the workspace {name}"),
         None => "main".to_owned(),
+    };
+    let place = match session.project == caller.project {
+        true => place,
+        false => format!("{place} of project {}", session.project),
     };
     let starter = match session.launched_by.as_deref() {
         Some(id) if id == caller.id && session.led => "this agent, which leads it".to_owned(),
@@ -2399,15 +2495,32 @@ async fn remind_once(daemon: &Arc<Daemon>, session: &Agent) {
             return;
         }
     };
+    // The pilot's workspace tool reaches its own project's workspaces: a session led from another
+    // project is stopped, and its workspace is left to that session and its project (a workspace
+    // of the same name in the pilot's project is none of this one).
+    let across = matches!(
+        daemon.read(|store| store.agent(pilot)),
+        Ok(Some(pilot)) if pilot.project != session.project
+    );
+    let text = match across {
+        true => format!(
+            "{} reported and its branch is in {branch}: stop it. Its workspace {workspace} is in \
+             project {}, which your workspace tool does not reach: it is that session's, or that \
+             project's, to remove, never one of yours",
+            named(session),
+            session.project
+        ),
+        false => format!(
+            "{} reported and its branch is in {branch}: stop it and remove its workspace?",
+            named(session)
+        ),
+    };
     deliveries::deliver(
         daemon,
         pilot,
         LED_INTEGRATED,
         Some(id),
-        &format!(
-            "{} reported and its branch is in {branch}: stop it and remove its workspace?",
-            named(session)
-        ),
+        &text,
         approval::BETWEEN_TURNS,
     );
 }

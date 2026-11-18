@@ -339,7 +339,7 @@ fn a_long_ask_of_a_led_session_stays_inside_its_card(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn a_long_vault_request_stays_inside_its_card(cx: &mut TestAppContext) {
+fn a_long_vault_request_stays_inside_its_line(cx: &mut TestAppContext) {
     let user = user();
     let (shell, page, cx) = page_of(&user, cx);
     show(
@@ -353,7 +353,7 @@ fn a_long_vault_request_stays_inside_its_card(cx: &mut TestAppContext) {
         cx,
     );
     let at = row(&page, |b| matches!(b, Block::VaultAsk(_)), cx);
-    guard::assert_stays_inside(&shell, cx, format!("row-{at}-vault-ask"));
+    guard::assert_stays_inside(&shell, cx, format!("row-{at}-vault-ask-line"));
 }
 
 #[gpui_kit::test]
@@ -496,4 +496,80 @@ fn a_long_toast_stays_inside_its_card(cx: &mut TestAppContext) {
     });
     settle(cx);
     guard::assert_stays_inside(&shell, cx, "toast-1".to_owned());
+}
+
+/// Whether a block of the conversation is a wait for the user. Each kind is decided here, so that
+/// a new kind cannot be added without saying whether its card asks something of the user: what
+/// waits for the user is a card of "Waiting for you" and only there (`docs/design.md`).
+///
+/// - a question of the agent is docked above the composer, its card never in the conversation,
+///   which holds one line;
+/// - a connection's card of "review its new actions" (`Block::ConnectionReview`) still draws its
+///   Review button in the conversation: it is a wait and is not moved yet (it needs a listing the
+///   rail can read), so this test does not feed it;
+/// - a link card, a command's result and a diff are results: they hand the user something, and
+///   nothing waits on them; a led session's question is the pilot's to answer, its card only says
+///   what was asked.
+fn waits_for_the_user(block: &Block) -> bool {
+    match block {
+        Block::VaultAsk(_) | Block::ConnectionReview(_) | Block::Approval { .. } => true,
+        Block::Question { .. } => true,
+        Block::Message { .. }
+        | Block::Relayed { .. }
+        | Block::Thought { .. }
+        | Block::Compacting { .. }
+        | Block::Text { .. }
+        | Block::Steps { .. }
+        | Block::SubAgents
+        | Block::Report { .. }
+        | Block::Notice { .. }
+        | Block::Links { .. }
+        | Block::Diff { .. }
+        | Block::Command(_)
+        | Block::Asked { .. }
+        | Block::Answered { .. } => false,
+    }
+}
+
+#[gpui_kit::test]
+fn no_card_of_the_conversation_carries_an_action_for_the_user(cx: &mut TestAppContext) {
+    let user = user();
+    let (_shell, page, cx) = page_of(&user, cx);
+    show(
+        &page,
+        vec![
+            (
+                "vault.asked",
+                json!({"name": "hippocampe-key", "project": "app", "why": "to read the notes",
+                    "agent": "x"}),
+            ),
+            (
+                "agent.asked",
+                json!({"to": "user", "question": "which one?", "questions": []}),
+            ),
+        ],
+        cx,
+    );
+    // Every block that waits for the user draws one line in the conversation, with no button.
+    let waits: Vec<usize> = blocks(&page, cx)
+        .iter()
+        .enumerate()
+        .filter(|(_, block)| waits_for_the_user(block))
+        .map(|(at, _)| at)
+        .collect();
+    assert!(!waits.is_empty(), "the events made blocks that wait");
+    for at in waits {
+        for part in [
+            "vault-ask-add",
+            "vault-ask-dismiss",
+            "vault-ask-card",
+            "review-open",
+            "review-card",
+        ] {
+            assert!(
+                cx.update(|window, _| window.try_find(format!("row-{at}-{part}")).is_none()),
+                "row {at} draws {part}, an action for the user"
+            );
+        }
+    }
 }
