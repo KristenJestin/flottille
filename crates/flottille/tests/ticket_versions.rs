@@ -372,21 +372,6 @@ fn create_sets_a_work_item_s_fix_version_and_edit_and_removal_are_refused() {
         last["files"][0]["json"]["additionalAttributes"]["fixVersions"],
         json!([{"name": "1.1"}])
     );
-
-    // A work item already made is not moved: acli's edit takes no custom field, so no fix
-    // version, and nothing is asked of the user, nothing run.
-    let before = acli_calls(&user).len();
-    for args in [
-        json!({"action": "edit", "ticket": "ABC-1", "milestone": "1.0"}),
-        json!({"action": "edit", "ticket": "ABC-1", "remove_milestone": true}),
-    ] {
-        let said = refused_at_once(&user, &mcp, args.clone());
-        for word in ["acli", "edit", "fix version", "Jira"] {
-            assert!(said.contains(word), "{args}: {word}: {said}");
-        }
-        assert!(said.contains("nothing was written"), "{said}");
-    }
-    assert_eq!(acli_calls(&user).len(), before, "{:?}", acli_calls(&user));
 }
 
 #[test]

@@ -141,6 +141,33 @@ pub fn unwritable(tracker: &ProjectTracker, args: &Value) -> Option<String> {
     }
 }
 
+/// Whether an `edit` sets something `acli` cannot, which goes through Jira's REST API with the
+/// project's tracker entry: fields, a parent, a fix version.
+pub(super) fn through_api(args: &Value) -> bool {
+    args["fields"].as_object().is_some_and(|f| !f.is_empty())
+        || given(args, "parent").is_some()
+        || given(args, "milestone").is_some()
+        || args["remove_milestone"] == true
+}
+
+/// Why such an edit cannot be done before anyone is asked: a Jira tracker names no entry for it.
+pub(super) fn unwritable_edit(tracker: &ProjectTracker) -> Option<String> {
+    match tracker {
+        ProjectTracker::Jira {
+            worklog_token: None,
+            ..
+        } => Some(edit_no_entry()),
+        _ => None,
+    }
+}
+
+fn edit_no_entry() -> String {
+    no_entry_to(
+        "change a work item's fields, parent or fix version with",
+        "changes work items",
+    )
+}
+
 /// The refusal of a Jira tracker that names no vault entry for its worklogs, and how to set one.
 pub(super) fn no_entry() -> String {
     no_entry_to("log time with", "logs time")
@@ -167,6 +194,14 @@ pub fn says(
     project: &Project,
     args: &Value,
 ) -> Result<Vec<String>, String> {
+    if args["action"] == "edit"
+        && through_api(args)
+        && matches!(project.tracker, Some(ProjectTracker::Jira { .. }))
+    {
+        // An entry the vault does not hold is refused here, before the user is asked.
+        entry_of(daemon, project)?;
+        return Ok(Vec::new());
+    }
     if args["action"] != "log_time" {
         return Ok(Vec::new());
     }
