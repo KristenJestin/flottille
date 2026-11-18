@@ -187,6 +187,9 @@ fn start_daemon(paths: &Paths) -> Result<Child> {
     let mut command = Command::new(program_to_start(std::env::current_exe()?));
     command
         .arg("daemon")
+        // The daemon is this machine's own and drives no other: a shell that exported the
+        // variable must not stop it from starting.
+        .env_remove("FLOTTILLE_MACHINE")
         .current_dir("/")
         .stdin(Stdio::null())
         .stdout(log.try_clone()?)

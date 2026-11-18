@@ -349,6 +349,24 @@ fn main() -> ExitCode {
 }
 
 fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    // What runs here, or is this machine's own process, drives no other: it refuses the flag
+    // and ignores the variable, which a shell may have exported for the commands it aims.
+    let here = match &cli.command {
+        Command::Daemon { action: None } => Some("daemon"),
+        Command::Window => Some("window"),
+        Command::Update { .. } => Some("update"),
+        Command::Mcp => Some("mcp"),
+        Command::Bridge { .. } => Some("bridge"),
+        Command::Remote { .. } => Some("remote"),
+        _ => None,
+    };
+    let flagged = cli.machine.clone().filter(|name| !name.is_empty());
+    if let (Some(command), Some(_)) = (here, &flagged) {
+        return Err(format!(
+            "flottille {command} is this machine's own: it drives no other (leave out --machine)"
+        )
+        .into());
+    }
     // The page's reader runs with no environment: it needs no folder of Flottille's.
     if let Command::ReadPage { kind, url } = &cli.command {
         return Ok(web::read_page(kind, url));
@@ -362,29 +380,13 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         return Ok(extensions::vault_provide(socket));
     }
     let paths = Paths::from_env()?;
-    let machine = cli
-        .machine
-        .clone()
-        .or_else(|| std::env::var("FLOTTILLE_MACHINE").ok())
-        .filter(|name| !name.is_empty());
-    if let Some(machine) = machine {
-        // What runs here, or is this machine's own process, drives no other.
-        let here = match &cli.command {
-            Command::Daemon { action: None } => Some("daemon"),
-            Command::Window => Some("window"),
-            Command::Update { .. } => Some("update"),
-            Command::Mcp => Some("mcp"),
-            Command::Bridge { .. } => Some("bridge"),
-            Command::Remote { .. } => Some("remote"),
-            _ => None,
-        };
-        if let Some(command) = here {
-            return Err(format!(
-                "flottille {command} is this machine's own: it drives no other (leave out \
-                 --machine and FLOTTILLE_MACHINE)"
-            )
-            .into());
-        }
+    if here.is_none()
+        && let Some(machine) = flagged.or_else(|| {
+            std::env::var("FLOTTILLE_MACHINE")
+                .ok()
+                .filter(|name| !name.is_empty())
+        })
+    {
         client::aim(machine);
     }
     match cli.command {
