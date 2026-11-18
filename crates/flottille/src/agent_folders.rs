@@ -87,11 +87,13 @@ thread_local! {
     static CROSS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+#[cfg(test)]
 fn crossed() -> bool {
-    #[cfg(test)]
-    if CROSS.with(std::cell::Cell::get) {
-        return true;
-    }
+    CROSS.with(std::cell::Cell::get)
+}
+
+#[cfg(not(test))]
+fn crossed() -> bool {
     false
 }
 
