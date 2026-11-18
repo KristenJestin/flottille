@@ -191,6 +191,8 @@ pub struct Remote {
     heard: tokio::sync::watch::Sender<Option<tokio::time::Instant>>,
     /// `FIRST_LIST`; shorter in a test.
     first_list: Duration,
+    /// The machines a link of which waits for the hub's list.
+    waiting: Mutex<HashSet<[u8; 32]>>,
     emit: Emit,
 }
 
@@ -272,6 +274,7 @@ impl Remote {
             control: std::sync::OnceLock::new(),
             heard: tokio::sync::watch::Sender::new(Some(tokio::time::Instant::now())),
             first_list: FIRST_LIST,
+            waiting: Mutex::new(HashSet::new()),
             emit,
         }
     }
@@ -714,11 +717,25 @@ async fn accept(remote: Arc<Remote>) {
         .and_then(|text| text.parse().ok())
         .map(Duration::from_millis);
     while let Some(accepting) = remote.endpoint.accept().await {
+        let key = accepting.peer();
+        // A key the list kept does not trust is refused now, whatever comes: a machine the next
+        // list adds dials again. Only one it trusts waits, so that no one piles up waiting links.
+        if remote.trusted(&key).is_none() {
+            remote.say_refused(&key);
+            accepting.refuse(NOT_TRUSTED);
+            continue;
+        }
         let remote = remote.clone();
         tokio::spawn(async move {
-            // Judged by the hub's list, not by the one kept, while one is on its way.
-            remote.hub_heard().await;
-            let key = accepting.peer();
+            // Judged by the hub's list, not by the one kept, while one is on its way: one link of
+            // a key waits at most.
+            if remote.holding() {
+                let Some(_waiting) = Waiting::of(&remote, &key) else {
+                    accepting.refuse(WAITS_ALREADY);
+                    return;
+                };
+                remote.hub_heard().await;
+            }
             let Some(peer) = remote.trusted(&key) else {
                 remote.say_refused(&key);
                 accepting.refuse(NOT_TRUSTED);
@@ -736,6 +753,31 @@ async fn accept(remote: Arc<Remote>) {
                 Err(error) => remote.failed(*key.as_bytes(), &peer.name, &error),
             }
         });
+    }
+}
+
+/// Why a second link of a machine whose first one waits for the hub's list is refused.
+const WAITS_ALREADY: &str = "a link from this machine waits already for the hub's list";
+
+/// A key whose link waits for the hub's list, until the link is judged.
+struct Waiting<'a> {
+    remote: &'a Remote,
+    key: [u8; 32],
+}
+
+impl<'a> Waiting<'a> {
+    /// `None` when a link of `key` waits already.
+    fn of(remote: &'a Remote, key: &PublicKey) -> Option<Waiting<'a>> {
+        let key = *key.as_bytes();
+        let first = remote.waiting.lock().unwrap().insert(key);
+        // Made only for the first: the guard of another would let the first one's key go.
+        first.then(|| Waiting { remote, key })
+    }
+}
+
+impl Drop for Waiting<'_> {
+    fn drop(&mut self) {
+        self.remote.waiting.lock().unwrap().remove(&self.key);
     }
 }
 
