@@ -121,6 +121,10 @@ pub const VERSION: &str = env!("FLOTTILLE_VERSION");
 #[derive(Parser)]
 #[command(name = "flottille", version = VERSION, about = "Runs coding agents on your own machine")]
 struct Cli {
+    /// Drive the user's machine of this name: each request is signed with this device's key and
+    /// carried by this machine's daemon (`FLOTTILLE_MACHINE` too)
+    #[arg(long, global = true, value_name = "NAME")]
+    machine: Option<String>,
     #[command(subcommand)]
     command: Command,
 }
@@ -358,8 +362,42 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         return Ok(extensions::vault_provide(socket));
     }
     let paths = Paths::from_env()?;
+    let machine = cli
+        .machine
+        .clone()
+        .or_else(|| std::env::var("FLOTTILLE_MACHINE").ok())
+        .filter(|name| !name.is_empty());
+    if let Some(machine) = machine {
+        // What runs here, or is this machine's own process, drives no other.
+        let here = match &cli.command {
+            Command::Daemon { action: None } => Some("daemon"),
+            Command::Window => Some("window"),
+            Command::Update { .. } => Some("update"),
+            Command::Mcp => Some("mcp"),
+            Command::Bridge { .. } => Some("bridge"),
+            Command::Remote { .. } => Some("remote"),
+            _ => None,
+        };
+        if let Some(command) = here {
+            return Err(format!(
+                "flottille {command} is this machine's own: it drives no other (leave out \
+                 --machine and FLOTTILLE_MACHINE)"
+            )
+            .into());
+        }
+        client::aim(machine);
+    }
     match cli.command {
         Command::Daemon { action: None } => daemon::run(&paths)?,
+        Command::Daemon {
+            action: Some(DaemonAction::Stop),
+        } if client::aimed().is_some() => {
+            Client::connect_or_start(&paths)?.request("daemon.stop", json!({}))?;
+            println!(
+                "The daemon of {} is stopping.",
+                client::aimed().unwrap_or_default()
+            );
+        }
         Command::Daemon {
             action: Some(DaemonAction::Stop),
         } => match Client::connect(&paths)? {
@@ -501,6 +539,9 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
                 instance,
             );
         }
+        Command::Watch { after, forge } if client::aimed().is_some() => {
+            return watch_another(&paths, after, &forge);
+        }
         Command::Watch { after, forge } => {
             let mut client = Client::connect_or_start(&paths)?;
             client.watch(WatchParams {
@@ -526,6 +567,58 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// `flottille watch` of another machine: its events, carried by this machine's daemon. When the
+/// link drops, or the machine is off, the watch waits and resumes after the last event it printed,
+/// each time with a request signed again.
+fn watch_another(
+    paths: &Paths,
+    after: Option<u64>,
+    forge: &[String],
+) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    let mut after = after;
+    let mut said: Option<String> = None;
+    let mut stdout = std::io::stdout().lock();
+    loop {
+        let mut client = Client::connect_or_start(paths)?;
+        match client.watch(WatchParams {
+            after,
+            client: None,
+        }) {
+            Ok(answer) => {
+                said = None;
+                // Without `after`, the stream starts after the number it answered: a resume
+                // starts there too.
+                after = after.or_else(|| answer["after"].as_u64());
+                if let [project, name] = forge {
+                    client.send(
+                        "workspace.forge",
+                        serde_json::json!({"project": project, "name": name, "watch": true}),
+                    )?;
+                }
+                while let Ok(Some(event)) = client.next_event() {
+                    after = Some(event.seq);
+                    if writeln!(stdout, "{}", serde_json::to_string(&event)?).is_err() {
+                        return Ok(ExitCode::SUCCESS);
+                    }
+                }
+            }
+            Err(error)
+                if error
+                    .downcast_ref::<client::DaemonError>()
+                    .is_some_and(|error| error.code == "unavailable") =>
+            {
+                let error = error.to_string();
+                if said.as_deref() != Some(error.as_str()) {
+                    eprintln!("flottille: {error}; the watch resumes once it is back");
+                    said = Some(error);
+                }
+            }
+            Err(error) => return Err(error),
+        }
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
 }
 
 fn print_status(status: &Value) {

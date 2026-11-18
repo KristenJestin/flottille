@@ -40,13 +40,45 @@ pub struct Client {
     connection: Connection<UnixStream>,
 }
 
+/// The machine this command drives (`--machine`, `FLOTTILLE_MACHINE`), when not this one.
+static AIMED: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Every request of this command goes to the machine `name`, signed with the device key.
+pub fn aim(name: String) {
+    let _ = AIMED.set(name);
+}
+
+/// The machine this command drives, when not this one.
+pub fn aimed() -> Option<&'static str> {
+    AIMED.get().map(String::as_str)
+}
+
 impl Client {
-    /// The running daemon, or `None` when there is none.
+    /// The running daemon, or `None` when there is none. Aimed at another machine, each request
+    /// is signed with this device's key, which the daemon never holds, and carried by it
+    /// (`docs/remote.md`, "Requests from another machine's clients").
     pub fn connect(paths: &Paths) -> Result<Option<Client>> {
         match UnixStream::connect(paths.socket()) {
-            Ok(stream) => Ok(Some(Client {
-                connection: Connection::new(stream),
-            })),
+            Ok(stream) => {
+                let mut connection = Connection::new(stream);
+                if let Some(machine) = aimed() {
+                    let key = crate::remote_command::device_key(paths)?;
+                    let machine = machine.to_owned();
+                    connection = connection.signing(Box::new(move |request| {
+                        let signed = flottille_link::Request::sign(
+                            &key,
+                            &request.id,
+                            &machine,
+                            &request.method,
+                            &request.params,
+                            std::time::SystemTime::now(),
+                        )
+                        .map_err(|error| std::io::Error::other(error.to_string()))?;
+                        serde_json::to_value(signed).map_err(std::io::Error::other)
+                    }));
+                }
+                Ok(Some(Client { connection }))
+            }
             // No socket, or one left by a daemon that died: nobody is listening.
             Err(error)
                 if matches!(

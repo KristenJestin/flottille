@@ -67,6 +67,34 @@ const VAULT_LOAD: Duration = Duration::from_secs(5);
 /// How long a refused client is answered before it is let go.
 const REFUSED_FOR: Duration = Duration::from_secs(10);
 
+tokio::task_local! {
+    /// The member whose device signed the request being served, for a client of another
+    /// machine: the events its serving emits name it (`docs/remote.md`, "Requests from another
+    /// machine's clients").
+    static ASKED_BY: Arc<str>;
+}
+
+/// `future` run as the member `asked_by` asked, when one did.
+async fn as_asked_by<F: std::future::Future>(asked_by: Option<Arc<str>>, future: F) -> F::Output {
+    match asked_by {
+        Some(device) => ASKED_BY.scope(device, future).await,
+        None => future.await,
+    }
+}
+
+/// `data` naming `device` (`device`), unless it names one already.
+fn naming(data: Value, device: &str) -> Value {
+    match data {
+        Value::Object(mut object) => {
+            object
+                .entry("device")
+                .or_insert_with(|| Value::String(device.to_owned()));
+            Value::Object(object)
+        }
+        other => other,
+    }
+}
+
 pub fn run(paths: &Paths) -> Result<()> {
     // What the daemon's descendants leave behind when their parent ends is taken in by the
     // daemon, not by init: a process an agent started stays its descendant, however it detached,
@@ -292,6 +320,10 @@ impl Daemon {
     /// events in the order of their numbers.
     #[track_caller]
     pub fn emit(&self, name: &str, data: Value) -> Result<Event> {
+        let data = match ASKED_BY.try_with(Arc::clone) {
+            Ok(device) => naming(data, &device),
+            Err(_) => data,
+        };
         let events = self.stored();
         let event = events.store.append_event(name, data)?;
         self.developer.event(&event);
@@ -532,7 +564,13 @@ async fn serve(
                 eprintln!("flottille daemon: the event {name} was not stored: {error}");
             }
         });
-        let link = crate::link::start(paths, key, daemon.stopping.subscribe(), emit);
+        let link = crate::link::start(
+            paths,
+            key,
+            daemon.stopping.subscribe(),
+            emit,
+            Arc::downgrade(&daemon),
+        );
         if let Err(why) = &link {
             eprintln!("flottille daemon: the link is not up: {why}");
         }
@@ -690,7 +728,22 @@ async fn refuse(stream: UnixStream) {
     .await;
 }
 
+/// A request of another machine's client, checked, served on `stream` as one of a local
+/// client's: what its serving emits names `device`.
+/// Boxed, its type named: a connection carries requests that end up here.
+pub(crate) fn served_for(
+    daemon: Arc<Daemon>,
+    stream: UnixStream,
+    device: String,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+    Box::pin(ASKED_BY.scope(Arc::from(device), connection(daemon, stream)))
+}
+
 async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
+    let asked_by = ASKED_BY.try_with(Arc::clone).ok();
+    // A watch carried to another machine whose link dropped ends the connection: its client
+    // resumes it after the last event it saw.
+    let (dropped, mut watch_dropped) = mpsc::channel::<()>(1);
     let (read, mut write) = stream.into_split();
     let (out, mut outgoing) = mpsc::channel::<Message>(256);
     let writer = tokio::spawn(async move {
@@ -714,8 +767,25 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
         let line = tokio::select! {
             line = lines.next_line() => line,
             _ = stopping.wait_for(|stopping| *stopping) => break false,
+            _ = watch_dropped.recv() => break true,
         };
         let Ok(Some(line)) = line else { break true };
+        // A request a client signed for a machine it names (`docs/remote.md`, "Requests from
+        // another machine's clients"): carried, never served here as it is. Never on a
+        // connection serving another machine's client, which carries one request of its own.
+        if asked_by.is_none()
+            && line.contains("\"machine\"")
+            && let Ok(Value::Object(request)) = serde_json::from_str::<Value>(&line)
+            && request.contains_key("machine")
+        {
+            let (daemon, out, dropped) = (daemon.clone(), out.clone(), dropped.clone());
+            tokio::spawn(async move {
+                if crate::link::forward(daemon, Value::Object(request), out).await {
+                    let _ = dropped.send(()).await;
+                }
+            });
+            continue;
+        }
         let request = match serde_json::from_str::<Request>(&line) {
             Ok(request) => request,
             Err(error) => {
@@ -787,7 +857,7 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
             || extensions::answers(&request.method)
         {
             let (daemon, out) = (daemon.clone(), out.clone());
-            tokio::spawn(async move {
+            tokio::spawn(as_asked_by(asked_by.clone(), async move {
                 let answer = if request.method.starts_with("agent.") {
                     agents::call(daemon, &request.method, request.params).await
                 } else if request.method.starts_with("approval.") {
@@ -847,7 +917,7 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
                     Err(failure) => failure.answer(Some(request.id)),
                 };
                 let _ = out.send(answer).await;
-            });
+            }));
             continue;
         }
         // Only these count for the watchdog: one answered by a task of its own may wait on work
