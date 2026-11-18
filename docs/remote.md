@@ -279,7 +279,9 @@ link.
 
 `flottille-hub`, a Rust binary of its own, run by the user on any host that is always on (a small
 server, a home server, a VPS), published as a static binary and a container image, with examples for
-docker compose and a systemd unit. One hub serves one user.
+docker compose and a systemd unit (`docs/releases.md`, "The hub": what is published, how to run it;
+`crates/flottille-hub/compose.example.yml`, `crates/flottille-hub/flottille-hub.service`). One hub
+serves one user.
 
 **What it holds:**
 
