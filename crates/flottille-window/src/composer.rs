@@ -74,13 +74,20 @@ fn project_provider<'a>(providers: &'a Providers, project: ProjectDefault<'a>) -
 
 /// The project's model, when a session started on `provider` without a model takes it.
 fn project_model<'a>(
-    providers: &Providers,
+    providers: &'a Providers,
     project: ProjectDefault<'a>,
     provider: &str,
 ) -> Option<&'a str> {
-    project
+    let model = project
         .1
-        .filter(|_| project_provider(providers, project) == Some(provider))
+        .filter(|_| project_provider(providers, project) == Some(provider))?;
+    // A model the list dropped is the one of its family its session starts on.
+    Some(
+        providers
+            .get(provider)
+            .and_then(|p| p.resolved_model(model))
+            .map_or(model, |m| m.id.as_str()),
+    )
 }
 
 /// The provider, the model and the effort a new session starts on, when the user has not picked
@@ -146,6 +153,13 @@ impl Pick {
             return Pick::default();
         };
         let projects = project_model(providers, project, &provider.name);
+        // A model picked that the list dropped is the one of its family a session starts on.
+        if let Some(model) = &self.model
+            && provider.model(model).is_none()
+            && let Some(resolved) = provider.resolved_model(model)
+        {
+            self.model = Some(resolved.id.clone());
+        }
         if let (Some(model), Some(_)) = (&self.model, &provider.models)
             && provider.model(model).is_none()
             && projects != Some(model.as_str())
@@ -1106,16 +1120,15 @@ impl Pickers<'_> {
                 Some(models) => {
                     let default = provider.default_model().map(|m| m.id.as_str());
                     // An alias picked is the model it stands for; the provider's own `default`,
-                    // the model Flottille applies for it.
-                    let picked = self.pick.model.as_deref().map(|picked| match picked {
-                        DEFAULT => default,
-                        _ => Some(
-                            provider
-                                .model(picked)
-                                .and_then(|m| m.stands_for.as_deref())
-                                .unwrap_or(picked),
-                        ),
-                    });
+                    // the model Flottille applies for it; a model the list dropped, the one of
+                    // its family a session starts on.
+                    let picked =
+                        self.pick.model.as_deref().map(|picked| match picked {
+                            DEFAULT => default,
+                            _ => Some(provider.resolved_model(picked).map_or(picked, |m| {
+                                m.stands_for.as_deref().unwrap_or(m.id.as_str())
+                            })),
+                        });
                     // The provider's own `default` is a row only when it runs a model no other
                     // row does.
                     for model in models

@@ -130,6 +130,8 @@ pub trait Events: Send + Sync + 'static {
         options: &Value,
         refused: Vec<String>,
     );
+    /// The effort the session was stored on was refused as it opened: it goes from its choice.
+    fn effort_dropped(&self);
     /// The next prompt, taken from what was delivered, when there is one.
     fn pump(&self) -> Option<Prompt>;
     /// The user asked to reload the agent's tools since this process was given them.
@@ -406,8 +408,25 @@ async fn drive(
     // its name, unless a change waiting names it.
     let waiting = events.pending().unwrap_or_default();
     let mut set_any = false;
+    // A model or an effort the agent does not offer is a setting to fix, never a reason to end
+    // the session: it runs on what replaces it, said in its conversation.
+    let mut model_replaced = false;
+    let mut effort_refused = false;
+    let mut why_replaced = Vec::new();
     for (category, word, value) in chosen {
-        let own = match (category, value) {
+        // The model the session was stored on, and why another runs instead.
+        let mut instead = None;
+        let value = match (category, value) {
+            ("model", Some(asked)) if replaced.is_none() => match runs_instead(&options, asked) {
+                Some((runs, why)) => {
+                    instead = Some((asked, why));
+                    Some(runs)
+                }
+                None => Some(asked.clone()),
+            },
+            _ => value.clone(),
+        };
+        let own = match (category, &value) {
             (_, Some(_)) => None,
             ("model", None) if new && waiting.model.is_none() => own_choice(&options, category),
             // Not only a new session: a process that opens on the agent's own choice again (a
@@ -428,8 +447,35 @@ async fn drive(
                 _ => {}
             }
         }
-        options = match set_option(&cx, &native_id, &options, category, word, value).await {
-            Ok((set, None)) => set,
+        let mut set = set_option(&cx, &native_id, &options, category, word, value).await;
+        // The newest of its family refused too: the default runs, said once.
+        if let (Err(Unset::Refused(_)), Some((asked, _))) = (&set, &instead)
+            && let Some((default, why)) = default_instead(&options, asked)
+            && default != *value
+        {
+            instead = Some((asked, why));
+            set = set_option(&cx, &native_id, &options, category, word, &default).await;
+        }
+        options = match set {
+            Ok((set, None)) => {
+                if let Some((_, why)) = instead {
+                    why_replaced.push(why);
+                    model_replaced = true;
+                }
+                set
+            }
+            // The session goes on with what the agent has; the stored choice follows it.
+            Ok((set, Some(reason))) if category != "mode" => {
+                why_replaced.push(reason);
+                model_replaced |= category == "model";
+                set
+            }
+            Err(Unset::Refused(reason)) if category != "mode" => {
+                why_replaced.push(reason);
+                model_replaced |= category == "model";
+                effort_refused |= category == "thought_level";
+                options
+            }
             Ok((_, Some(reason))) | Err(Unset::Refused(reason) | Unset::Broken(reason)) => {
                 return Err(reason);
             }
@@ -439,6 +485,22 @@ async fn drive(
         // The effort a session keeps once a model is set may be the previous model's: no effort
         // is learned from it.
         events.offered(&options, false, false);
+    }
+    if !why_replaced.is_empty() {
+        // The effort refused goes from the stored choice: said once, not at every start.
+        if effort_refused {
+            events.effort_dropped();
+        }
+        let taken = taken_of(&options);
+        let changed = Choices {
+            model: taken.model.clone().filter(|_| model_replaced),
+            effort: None,
+            mode: None,
+        };
+        events.options_set(Choices::default(), changed, taken, &options, Vec::new());
+        for why in why_replaced {
+            events.conversation("agent.options_replaced", json!({"reason": why}), false);
+        }
     }
     // A change the user made since the process last ran waits for it, and is not a failure.
     if replaced.is_none()
@@ -642,6 +704,35 @@ fn own_choice(options: &Value, category: &str) -> Option<String> {
             .or_else(|| provider::middle_effort(&offered).map(String::as_str)),
     };
     found.map(str::to_owned)
+}
+
+/// What runs instead of the model a session was stored on when the agent does not offer it as it
+/// is: the newest offered of its family (`provider::resolved_model`), else the agent's default;
+/// with why, as the conversation says it. `None` when it is offered, or nothing can replace it.
+fn runs_instead(options: &Value, asked: &str) -> Option<(String, String)> {
+    let option = find_option(options, "model")?;
+    let offered = providers::values(&option);
+    let ids = || offered.iter().map(String::as_str);
+    if provider::listed_model(ids(), asked).is_some() {
+        return None;
+    }
+    if let Some(newest) = provider::resolved_model(ids(), asked) {
+        let why = format!("the model {asked} is no longer offered by the agent: running {newest}");
+        return Some((newest.to_owned(), why));
+    }
+    default_instead(options, asked)
+}
+
+/// The agent's default model, run instead of `asked`; with why, as the conversation says it.
+fn default_instead(options: &Value, asked: &str) -> Option<(String, String)> {
+    let option = find_option(options, "model")?;
+    let offered = providers::values(&option);
+    let default = provider::default_model(
+        offered.iter().map(String::as_str),
+        providers::alias_of(&option),
+    )?;
+    let why = format!("the agent does not offer the model {asked}: running {default}, its default");
+    Some((default.to_owned(), why))
 }
 
 /// Why an option was not set: the agent refused the value, or could not answer (its process or

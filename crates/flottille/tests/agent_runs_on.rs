@@ -486,7 +486,7 @@ fn a_provider_that_offers_no_effort_says_the_model_alone() {
 }
 
 #[test]
-fn a_model_asked_before_the_models_are_known_is_said_as_asked_and_its_refusal_told_once() {
+fn a_model_asked_before_the_models_are_known_and_not_offered_runs_on_the_default() {
     let user = User::with_fake_providers();
     user.write_providers("[opencode]\nenabled = true\n");
     for provider in ["claude", "opencode"] {
@@ -503,19 +503,18 @@ fn a_model_asked_before_the_models_are_known_is_said_as_asked_and_its_refusal_to
 
     assert!(!answer.error, "{}", answer.text);
     says_no_default(&answer.text);
-    // Said as asked, and the session's refusal with it.
+    // Its session runs on the agent's default instead (#1076), which the answer names.
     assert!(
-        answer.text.contains("on OpenCode · fake-huge · "),
+        answer.text.contains("on OpenCode · Fake Small 5.5 · "),
         "{}",
         answer.text
     );
     assert!(
-        answer.text.contains("failed as it opened"),
+        !answer.text.contains("failed as it opened"),
         "{}",
         answer.text
     );
-    assert!(answer.text.contains("fake-huge"), "{}", answer.text);
-    // Said once: by the answer, not again as a note on it nor as a delivery after it.
+    // Not told as a failure: neither by the answer nor as a delivery after it.
     assert!(!answer.text.contains("child-failed"), "{}", answer.text);
     std::thread::sleep(Duration::from_millis(500));
     assert!(delivered(&user, &lead, "child-failed").is_empty());

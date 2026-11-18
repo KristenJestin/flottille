@@ -19,7 +19,9 @@ pub const QUALIFIED_ONLY: [&str; 2] = ["opencode", "codex"];
 
 /// The model a provider lists that `asked` names: the listed id itself, else the one listed id that
 /// is `asked` followed by a date (`-YYYYMMDD`), as a provider's CLI takes `claude-haiku-4-5` for
-/// `claude-haiku-4-5-20251001`. None when no listed model, or more than one, answers to it.
+/// `claude-haiku-4-5-20251001`. None when no listed model, or more than one, answers to it. What
+/// the user asks is matched so, never replaced by another model (`resolved_model` is for a model
+/// a session was stored on).
 pub fn listed_model<'a>(
     offered: impl IntoIterator<Item = &'a str>,
     asked: &str,
@@ -31,10 +33,75 @@ pub fn listed_model<'a>(
     let mut dated = offered.into_iter().filter(|id| {
         id.strip_prefix(asked)
             .and_then(|rest| rest.strip_prefix('-'))
-            .is_some_and(|date| date.len() == 8 && date.bytes().all(|b| b.is_ascii_digit()))
+            .is_some_and(is_date)
     });
     let found = dated.next()?;
     dated.next().is_none().then_some(found)
+}
+
+/// The model a session stored on `asked` runs on: the one listed as it is (`listed_model`), else
+/// the newest offered of its family (`newest_of_family`): an alias or an id the provider's list
+/// dropped runs on what replaced it. None when no model of its family is offered.
+pub fn resolved_model<'a>(
+    offered: impl IntoIterator<Item = &'a str>,
+    asked: &str,
+) -> Option<&'a str> {
+    let offered: Vec<&str> = offered.into_iter().collect();
+    listed_model(offered.iter().copied(), asked).or_else(|| newest_of_family(offered, asked))
+}
+
+fn is_date(part: &str) -> bool {
+    part.len() == 8 && part.bytes().all(|b| b.is_ascii_digit())
+}
+
+fn digits(part: &str, len: usize) -> bool {
+    part.len() == len && part.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// An id cut into its family (its words: `claude-fable` of `claude-fable-5-2`, `fable` of the
+/// alias), its version (`[5, 2]`) and its date (`20250807` of `-20250807` or `-2025-08-07`),
+/// if it has one.
+fn family_of(id: &str) -> (Vec<&str>, Vec<u64>, Option<String>) {
+    let mut words = Vec::new();
+    let mut version = Vec::new();
+    let mut date = None;
+    let parts: Vec<&str> = id.split('-').collect();
+    let mut i = 0;
+    while i < parts.len() {
+        let part = parts[i];
+        if is_date(part) {
+            date = Some(part.to_owned());
+        } else if digits(part, 4)
+            && parts.get(i + 1).is_some_and(|month| digits(month, 2))
+            && parts.get(i + 2).is_some_and(|day| digits(day, 2))
+        {
+            date = Some(parts[i..i + 3].concat());
+            i += 2;
+        } else if !part.is_empty() && part.split('.').all(|n| n.parse::<u64>().is_ok()) {
+            version.extend(part.split('.').filter_map(|n| n.parse::<u64>().ok()));
+        } else {
+            words.push(part);
+        }
+        i += 1;
+    }
+    (words, version, date)
+}
+
+/// The newest offered model of `asked`'s family: one whose words end with `asked`'s (the alias
+/// `fable` is of `claude-fable-*`), the highest version first, then the latest date, then the
+/// id: the order of the list says nothing.
+fn newest_of_family<'a>(offered: Vec<&'a str>, asked: &str) -> Option<&'a str> {
+    let (family, _, _) = family_of(asked);
+    if family.is_empty() || asked == OWN_CHOICE {
+        return None;
+    }
+    offered
+        .into_iter()
+        .filter(|id| *id != OWN_CHOICE)
+        .map(|id| (family_of(id), id))
+        .filter(|((words, _, _), _)| words.ends_with(&family))
+        .max_by(|((_, a, x), i), ((_, b, y), j)| a.cmp(b).then(x.cmp(y)).then(i.cmp(j)))
+        .map(|(_, id)| id)
 }
 
 /// The value a provider gives for "its own choice" of a model or an effort. Flottille never leaves
@@ -293,6 +360,80 @@ mod tests {
         assert_eq!(listed_model(["m-1-20250101", "m-1-20260101"], "m-1"), None);
         // An exact id wins over a dated one.
         assert_eq!(listed_model(["m-1", "m-1-20250101"], "m-1"), Some("m-1"));
+    }
+
+    #[test]
+    fn the_family_order_is_by_version_not_by_list_order() {
+        let listed = [
+            "default",
+            "opus",
+            "claude-fable-5-1",
+            "claude-fable-5-2",
+            "sonnet",
+            "claude-fable-5",
+            "claude-haiku-4-5-20251001",
+            "claude-opus-4-8",
+            "claude-opus-5",
+        ];
+        // An alias that left the list, and an id that left it: the newest of the family.
+        assert_eq!(resolved_model(listed, "fable"), Some("claude-fable-5-2"));
+        assert_eq!(
+            resolved_model(listed, "claude-fable-4-9"),
+            Some("claude-fable-5-2")
+        );
+        // `5` is newer than `4-8`, whichever comes first.
+        assert_eq!(
+            resolved_model(listed, "claude-opus-4-5"),
+            Some("claude-opus-5")
+        );
+        // An id with its date is matched by its version, as today.
+        assert_eq!(
+            resolved_model(listed, "claude-haiku-4"),
+            Some("claude-haiku-4-5-20251001")
+        );
+        assert_eq!(
+            resolved_model(listed, "haiku"),
+            Some("claude-haiku-4-5-20251001")
+        );
+        // Offered as is: itself, never another of its family.
+        assert_eq!(resolved_model(listed, "opus"), Some("opus"));
+        assert_eq!(
+            resolved_model(listed, "claude-fable-5"),
+            Some("claude-fable-5")
+        );
+        // No family offered.
+        assert_eq!(resolved_model(listed, "gpt-5"), None);
+        assert_eq!(resolved_model(listed, "5"), None);
+        // Of two of the same version, the newest date.
+        assert_eq!(
+            resolved_model(["m-1-20250101", "m-1-20260101"], "m"),
+            Some("m-1-20260101")
+        );
+        // What is asked is never another model of its family.
+        assert_eq!(listed_model(listed, "fable"), None);
+        assert_eq!(listed_model(listed, "claude-haiku-4-6"), None);
+    }
+
+    #[test]
+    fn a_dashed_date_is_a_date_not_a_version() {
+        let listed = ["gpt-5-mini-2025-08-07", "gpt-5.1-mini"];
+        assert_eq!(resolved_model(listed, "mini"), Some("gpt-5.1-mini"));
+        assert_eq!(
+            resolved_model(["m-1-2025-08-07", "m-1-2026-01-02"], "m"),
+            Some("m-1-2026-01-02")
+        );
+        // The two ways of writing a date compare as one.
+        assert_eq!(
+            resolved_model(["m-1-20250807", "m-1-2026-01-02"], "m"),
+            Some("m-1-2026-01-02")
+        );
+    }
+
+    #[test]
+    fn two_models_of_one_version_and_date_are_ordered_by_their_id() {
+        for listed in [["a-fable-5", "b-fable-5"], ["b-fable-5", "a-fable-5"]] {
+            assert_eq!(resolved_model(listed, "fable"), Some("b-fable-5"));
+        }
     }
 
     #[test]
