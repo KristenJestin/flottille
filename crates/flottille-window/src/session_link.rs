@@ -879,7 +879,11 @@ impl Link {
                 tree.insert(agent.to_owned());
             }
             // A request for a vault entry asked or answered moves the rail's cards as a request does.
-            let approval = name.starts_with("approval.") || name.starts_with("vault.ask");
+            let approval = name.starts_with("approval.")
+                || matches!(
+                    name,
+                    "vault.asked" | "vault.ask_answered" | "vault.ask_joined"
+                );
             // A subscription opened or ended changes the list, and whether the agent waits.
             let subscription = name.starts_with("subscription.") || following;
             stale.subscriptions |= subscription;
