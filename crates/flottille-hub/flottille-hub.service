@@ -18,15 +18,18 @@ After=network-online.target
 [Service]
 ExecStart=/usr/local/bin/flottille-hub --listen 127.0.0.1:7448 --state /var/lib/flottille-hub
 # Its own user and its own state folder (/var/lib/flottille-hub), the key and the member list.
+# DynamicUser already implies NoNewPrivileges, ProtectSystem=strict and a private /tmp.
 DynamicUser=yes
 StateDirectory=flottille-hub
 StateDirectoryMode=0700
 Restart=on-failure
-NoNewPrivileges=yes
-ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
 PrivateDevices=yes
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallFilter=@system-service
+MemoryDenyWriteExecute=yes
 
 [Install]
 WantedBy=multi-user.target

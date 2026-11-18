@@ -17,6 +17,10 @@ services:
   hub:
     image: ${FLOTTILLE_HUB_IMAGE:?set FLOTTILLE_HUB_IMAGE to the hub image, ghcr.io/owner/repository-hub:version}
     restart: unless-stopped
+    # The hub writes its state volume only, and needs no privilege.
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
     ports:
       - "127.0.0.1:7448:7448"
     volumes:

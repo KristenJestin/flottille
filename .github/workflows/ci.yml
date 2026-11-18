@@ -242,7 +242,7 @@ jobs:
   # partitions (failed, cancelled, never started), so that it never waits on a job skipped.
   # `check` and `test` skipped are a pass only when `changes` said the suite is not needed.
   verify:
-    needs: [verified-on-dev, changes, check, test]
+    needs: [verified-on-dev, changes, check, test, hub]
     # Skipped only when this commit passed it on dev (on main, see `verified-on-dev`).
     if: ${{ always() && needs.verified-on-dev.outputs.verified != 'true' }}
     runs-on: ubuntu-latest
@@ -253,7 +253,14 @@ jobs:
           CHECK: ${{ needs.check.result }}
           TEST: ${{ needs.test.result }}
           RUST: ${{ needs.changes.outputs.rust }}
+          HUB: ${{ needs.hub.result }}
         run: |
+          # `publish` needs `hub`: a red hub check merged would stop every release. Skipped (a pull
+          # request that leaves the hub alone) is fine.
+          if [ "$HUB" = failure ] || [ "$HUB" = cancelled ]; then
+            echo "::error::hub: $HUB."
+            exit 1
+          fi
           if [ "$CHECK" = success ] && [ "$TEST" = success ]; then exit 0; fi
           if [ "$RUST" = false ] && [ "$CHECK" = skipped ] && [ "$TEST" = skipped ]; then
             echo "::notice::The Rust suite was not needed for this change."
@@ -423,10 +430,11 @@ jobs:
             platform: arm64
     env:
       CARGO_INCREMENTAL: 0
-      # `ring`, under the hub's TLS, has C and assembly to build for the target.
+      # `ring`, under the hub's TLS, has C and assembly to build for the target. No linker is set for
+      # x86_64: `musl-gcc` is a wrapper that links dynamically, whatever Rust asks, and the target's
+      # own linking is static.
       CC_x86_64_unknown_linux_musl: musl-gcc
       CC_aarch64_unknown_linux_musl: aarch64-linux-gnu-gcc
-      CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
       CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: aarch64-linux-gnu-gcc
       # A pull request's archives carry no real version: they are only made, to be checked.
       VERSION: ${{ needs.build.outputs.version || '0.0.0-ci' }}
@@ -462,7 +470,7 @@ jobs:
           context="$RUNNER_TEMP/hub-image"
           mkdir -p "$context/state"
           install -m 0755 "$BINARY" "$context/flottille-hub"
-          docker build --platform linux/${{ matrix.platform }} -f crates/flottille-hub/Dockerfile -t flottille-hub:linux-${{ matrix.platform }} "$context"
+          docker build --platform linux/${{ matrix.platform }} --build-arg SOURCE=https://github.com/${{ github.repository }} -f crates/flottille-hub/Dockerfile -t flottille-hub:linux-${{ matrix.platform }} "$context"
       - name: the_image_starts_prints_a_setup_code_and_answers_on_its_port
         if: matrix.arch == 'x86_64'
         run: tools/check-hub-image.sh flottille-hub:linux-amd64

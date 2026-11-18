@@ -22,7 +22,9 @@ cleanup() {
 }
 trap cleanup EXIT
 
-docker run -d --name "$name" -p 127.0.0.1::7448 "$image" >/dev/null
+# As compose.example.yml starts it: nothing writable but the state volume, no capability.
+docker run -d --name "$name" --read-only --cap-drop ALL --security-opt no-new-privileges:true \
+  -p 127.0.0.1::7448 "$image" >/dev/null
 
 seen=
 for _ in $(seq "$tries"); do
