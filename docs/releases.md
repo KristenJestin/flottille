@@ -205,6 +205,8 @@ archive:
   `LICENSE`, `compose.example.yml` and `flottille-hub.service`. They are built for the musl targets
   (`x86_64-unknown-linux-musl`, and `aarch64-unknown-linux-musl` cross-compiled with the other
   architecture's C compiler, nothing emulated), so that they run on any Linux of that architecture.
+  The aarch64 binary is never run in CI (the runners are x86_64 and nothing is emulated): it is
+  built, checked static and packaged, and its image is built, not started.
   Their names do not end `-x86_64-linux.tar.gz`: `install.sh` and `flottille update` take that for
   Flottille's own archive and ignore the hub's.
 - **A container image**, for both architectures under one name, `ghcr.io/<owner>/<repository>-hub`
@@ -212,19 +214,23 @@ archive:
   `latest` when that release is the latest. A job of its own pushes it once the release is
   published; it loads the image the build made and runs nothing of the branch. An alpha has no
   image (they would pile up). The image is `crates/flottille-hub/Dockerfile`: the binary and nothing
-  else (`FROM scratch`), run as an unprivileged user, its state in `/var/lib/flottille-hub`.
+  else (`FROM scratch`), run as an unprivileged user, its state in `/var/lib/flottille-hub`. It
+  carries the label `org.opencontainers.image.source` (the repository's own URL, given to the
+  build), which links the package to the repository. GHCR makes a new package **private**: it is
+  switched to public once, in the package's settings, after the first release that pushes it.
 
 **Running it.** Whichever the way, the hub listens on port **7448** and keeps its key and its member
 list in a state folder (`--state`): that folder is what to back up.
 
 - *docker compose*: `crates/flottille-hub/compose.example.yml`, with `FLOTTILLE_HUB_IMAGE` set to
   the image and its version. It publishes 7448 on the host's loopback and keeps the state in a named
-  volume; the host's reverse proxy, which holds the certificate and passes HTTP upgrades on, is what
+  volume, read-only and with no capability; the host's reverse proxy, which holds the certificate and passes HTTP upgrades on, is what
   to open (443). The first start prints the **setup code** once in the hub's log:
   `docker compose -f compose.example.yml logs hub`.
 - *systemd*: the binary at `/usr/local/bin/flottille-hub` and
   `crates/flottille-hub/flottille-hub.service` in `/etc/systemd/system/`, a service of its own user
-  with `/var/lib/flottille-hub` as its state. The setup code is in `journalctl -u flottille-hub`.
+  with `/var/lib/flottille-hub` as its state, and no capability, a filtered set of system calls,
+  and IP and Unix sockets only. The setup code is in `journalctl -u flottille-hub`.
 - To reach the hub without a proxy, give it a certificate (`--tls-cert`, `--tls-key`) and open its
   port; the image and the unit are plain on the loopback by default.
 
@@ -234,14 +240,17 @@ what the release promises, each as a step named after its scenario:
 - `the_static_binary_runs_with_no_shared_library`: `tools/check-static.sh` (`file` says static,
   `ldd` lists no library), and the x86_64 binary is run;
 - `the_image_starts_prints_a_setup_code_and_answers_on_its_port`: `tools/check-hub-image.sh` starts
-  the image on a loopback port, finds a setup code in its log (never printed back: CI logs are
+  the image as the compose example does (read-only, no capability, no new privilege) on a loopback
+  port, finds a setup code in its log (never printed back: CI logs are
   public) and gets the hub's answer on its port;
 - `the_compose_example_is_valid`: `docker compose config` on the example.
 
 It runs on a pull request **only when the hub or its release changes** (`changes`: the hub, `flottille-link`
 and `flottille-protocol` it is built from, `Cargo.toml`, `Cargo.lock`, `LICENSE`, `ci.yml`,
-`release.yml` and the three tools above), and on every push that publishes. `publish` waits for it
-and puts the archives in the same `gh release create`: a release is whole or is not made.
+`release.yml` and the three tools above), and on every push that publishes. `verify`, the required
+check, fails when `hub` ran and failed (skipped is fine), so that a red hub is not merged and does
+not stop every release afterwards: `publish` waits for it and puts the archives in the same
+`gh release create`: a release is whole or is not made.
 
 `.github/workflows/alpha-cleanup.yml` deletes **every** alpha of a branch, with their tags, when
 the branch is deleted (an immutable release may be deleted), and the rolling `alpha-<branch>`
