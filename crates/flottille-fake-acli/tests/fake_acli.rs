@@ -611,6 +611,37 @@ fn a_creation_from_json_is_recorded_and_needs_its_type() {
 }
 
 #[test]
+fn the_fake_acli_refuses_additional_attributes_on_edit_as_the_real_one_does() {
+    let dir = scripted(json!({}));
+    let file = dir.path().join("edit.json");
+    let edit = |item: Value| {
+        std::fs::write(&file, item.to_string()).unwrap();
+        fake(dir.path())
+            .args(["jira", "workitem", "edit", "--from-json"])
+            .arg(&file)
+            .arg("--yes")
+            .output()
+            .unwrap()
+    };
+
+    // The real command reads a creation's `additionalAttributes` and an edit's JSON does not.
+    let refused = edit(json!({"issues": ["ABC-1"],
+        "additionalAttributes": {"customfield_10100": {"value": "Minor"}}}));
+    // What its JSON does take is read.
+    let taken = edit(json!({"issues": ["ABC-1"], "summary": "A new title"}));
+
+    assert_eq!(refused.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&refused.stderr)
+            .contains("✗ Error: json: unknown field \"additionalAttributes\""),
+        "{}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    assert_eq!(taken.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&taken.stdout).contains("Work item ABC-1 updated"));
+}
+
+#[test]
 fn a_view_asked_the_navigable_fields_gives_them_all() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(

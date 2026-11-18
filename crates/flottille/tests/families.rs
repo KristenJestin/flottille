@@ -2007,53 +2007,6 @@ fn a_missing_required_field_is_named_in_the_refusal() {
 }
 
 #[test]
-fn a_work_item_is_edited_with_its_custom_fields() {
-    let user = user();
-    on_jira(&user);
-    jira_requiring_fields(&user);
-    let (_, mcp) = root_in(&user, None);
-
-    let number = held(&mcp.call(
-        "tickets",
-        json!({"action": "edit", "ticket": "ABC-1", "title": "A new title",
-            "fields": {"customfield_10100": {"value": "Minor"}}}),
-    ));
-    let done = allow(&user, number);
-
-    assert!(done.contains("ABC-1 was changed."), "{done}");
-    let edits: Vec<Value> = user
-        .acli_received()
-        .into_iter()
-        .filter(|call| call["args"][2] == "edit")
-        .collect();
-    // The fields first, so that a refusal of them leaves the rest unwritten.
-    assert_eq!(edits.len(), 2, "{edits:?}");
-    assert_eq!(edits[0]["args"][3], "--from-json");
-    assert_eq!(edits[0]["args"][5], "--yes");
-    assert_eq!(
-        edits[0]["files"][0]["json"],
-        json!({"issues": ["ABC-1"],
-            "additionalAttributes": {"customfield_10100": {"value": "Minor"}}})
-    );
-    assert_eq!(
-        words(vec![edits[1].clone()])[0],
-        "jira workitem edit --key ABC-1 --summary A new title --yes"
-    );
-    // Fields alone are an edit: one call.
-    let alone = held(&mcp.call(
-        "tickets",
-        json!({"action": "edit", "ticket": "ABC-1",
-            "fields": {"customfield_10101": {"value": "Always"}}}),
-    ));
-    allow(&user, alone);
-    let edits = words(user.acli_received())
-        .into_iter()
-        .filter(|call| call.starts_with("jira workitem edit"))
-        .count();
-    assert_eq!(edits, 3);
-}
-
-#[test]
 fn fields_are_refused_where_they_cannot_go_before_anything_is_asked() {
     let user = user();
     on_jira(&user);
@@ -2989,34 +2942,6 @@ fn the_sprints_of_the_project_s_board_are_listed() {
         mcp.call("tickets", json!({"action": "sprints", "project": "ABC"})),
     );
     assert!(none.contains("does not support sprints"), "{none}");
-}
-
-#[test]
-fn changing_the_parent_of_an_existing_item_is_refused_saying_why() {
-    let user = user();
-    on_jira(&user);
-    jira_planned(&user);
-    let (_, mcp) = root_in(&user, None);
-
-    let refused = mcp.call(
-        "tickets",
-        json!({"action": "edit", "ticket": "ABC-1", "parent": "ABC-10"}),
-    );
-
-    assert!(refused.error, "{}", refused.text);
-    assert!(
-        refused.text.contains("acli's workitem edit has no parent"),
-        "{}",
-        refused.text
-    );
-    assert!(refused.text.contains("Jira's REST API"), "{}", refused.text);
-    assert!(
-        refused.text.contains("nothing was written"),
-        "{}",
-        refused.text
-    );
-    assert!(no_request(&user));
-    assert!(user.acli_received().is_empty());
 }
 
 #[test]

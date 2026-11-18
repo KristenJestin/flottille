@@ -27,6 +27,8 @@ use crate::vault;
 const READ_TIME: std::time::Duration = std::time::Duration::from_secs(30);
 /// How much of an answer is read: a page of worklogs with their comments.
 const ANSWER_BYTES: usize = 2 * 1024 * 1024;
+/// How much of an answer to a change is read: Jira's refusal is a few lines.
+const WRITE_ANSWER_BYTES: usize = 64 * 1024;
 /// How many work items one search asks for: the bound of the read, said when reached.
 const SEARCHED: usize = 100;
 /// How many pages of worklogs one work item is read through, of what the site gives at a time.
@@ -104,6 +106,45 @@ impl Site<'_> {
                 .map_err(|_| format!("Jira on {} answered what is not JSON", self.site)),
             Ok(Ok((status, text))) => Err(format!(
                 "Jira on {} answered {status}: {}",
+                self.site,
+                self.clean(&super::worklog::first_words(&text))
+            )),
+        }
+    }
+}
+
+impl Site<'_> {
+    /// `PUT /rest/api/3/<path>` with `body` as JSON: Jira answers a change with `204` and nothing
+    /// to read, or says why it refused. A write: "nothing was written" is said of a status that is no
+    /// success alone; a time-out, or a failure once the request is sent, may follow a change Jira
+    /// applied, so it is said as not confirmed.
+    pub(super) async fn put(&self, path: &str, body: &Value) -> Result<(), String> {
+        let url = rest_url(self.site, path)?;
+        let answer = tokio::time::timeout(
+            READ_TIME,
+            request(
+                http::Method::PUT,
+                &url,
+                &self.authorization,
+                Some(body),
+                WRITE_ANSWER_BYTES,
+            ),
+        )
+        .await;
+        match answer {
+            Err(_) => Err(format!(
+                "the change was not confirmed: {} did not answer in {} s; check the work item \
+                 before changing it again",
+                self.site,
+                READ_TIME.as_secs()
+            )),
+            Ok(Err(why)) => Err(format!(
+                "{}; the change was not confirmed: check the work item before changing it again",
+                self.clean(&why)
+            )),
+            Ok(Ok((status, _))) if status.is_success() => Ok(()),
+            Ok(Ok((status, text))) => Err(format!(
+                "Jira on {} answered {status}: {}; nothing was written",
                 self.site,
                 self.clean(&super::worklog::first_words(&text))
             )),
