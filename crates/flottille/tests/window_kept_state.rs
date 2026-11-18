@@ -160,7 +160,12 @@ struct Silence {
 
 impl Silence {
     fn connect(&self, user: &User) -> Connect {
-        let (inner, silence) = (user.connector(), self.clone());
+        self.around(Arc::new(user.connector()))
+    }
+
+    /// The connections `inner` makes, held by this silence.
+    fn around(&self, inner: Connect) -> Connect {
+        let silence = self.clone();
         Arc::new(move || {
             if silence.down.load(Ordering::SeqCst) {
                 return Err(std::io::Error::new(
@@ -183,6 +188,43 @@ impl Silence {
 
     fn rise(&self) {
         self.down.store(false, Ordering::SeqCst);
+    }
+}
+
+/// The silence falls while a connection is being made: that connection is ended too, or a
+/// window asking the daemon at that very moment is answered by a daemon that "does not answer".
+#[test]
+fn a_connection_being_made_when_the_silence_falls_is_ended_too() {
+    use std::io::Read as _;
+    use std::sync::mpsc::channel;
+
+    let (inside, entered) = channel();
+    let (go, released) = channel::<()>();
+    let (made, _peer) = UnixStream::pair().unwrap();
+    let (made, released) = (Mutex::new(Some(made)), Mutex::new(released));
+    let slow: Connect = Arc::new(move || {
+        inside.send(()).ok();
+        released.lock().unwrap().recv().ok();
+        Ok(made.lock().unwrap().take().expect("connected once"))
+    });
+    let silence = Silence::default();
+    let connect = silence.around(slow);
+    let connecting = std::thread::spawn(move || connect());
+
+    entered.recv().unwrap();
+    silence.fall();
+    go.send(()).unwrap();
+    // Refused, or ended: never a live connection.
+    if let Ok(mut stream) = connecting.join().unwrap() {
+        stream
+            .set_read_timeout(Some(Duration::from_millis(500)))
+            .unwrap();
+        let mut byte = [0u8; 1];
+        assert_eq!(
+            stream.read(&mut byte).ok(),
+            Some(0),
+            "a connection made while the daemon fell is still alive"
+        );
     }
 }
 
