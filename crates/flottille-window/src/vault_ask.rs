@@ -69,24 +69,36 @@ pub fn part(number: u64, part: &str) -> ElementId {
     ElementId::Name(format!("vault-ask-{number}-{part}").into())
 }
 
-/// A labelled line of the card, its visible words said as its label.
-fn labelled(number: u64, name: &str, label: &str, value: &str, p: Palette) -> AnyElement {
+/// A labelled line of the card, its visible words said as its label. The label stands beside
+/// its value, or above it when the value is a sentence the card's narrow width would wrap into
+/// a tall column, which pushes the buttons out of the rail's sight.
+fn labelled(
+    number: u64,
+    name: &str,
+    label: &str,
+    value: &str,
+    stacked: bool,
+    p: Palette,
+) -> AnyElement {
     let said = format!("{label}: {value}");
-    div()
+    let line = div()
         .id(part(number, name))
         .flex()
-        .gap(space::SM)
         .text_size(px(12.))
-        .aria_label(SharedString::from(said))
-        .child(
-            div()
-                .flex_none()
-                .text_color(p.mute)
-                .child(SharedString::from(label.to_owned())),
-        )
-        .child(div().min_w_0().child(SharedString::from(value.to_owned())))
-        .test_support()
-        .into_any_element()
+        .aria_label(SharedString::from(said));
+    match stacked {
+        true => line.flex_col().gap(px(2.)),
+        false => line.gap(space::SM),
+    }
+    .child(
+        div()
+            .flex_none()
+            .text_color(p.mute)
+            .child(SharedString::from(label.to_owned())),
+    )
+    .child(div().min_w_0().child(SharedString::from(value.to_owned())))
+    .test_support()
+    .into_any_element()
 }
 
 /// Whose entry it will be, as the form saves it: an entry a connection's server is given is every
@@ -101,18 +113,19 @@ fn project_said(ask: &VaultAsk) -> String {
 
 /// The lines the compact card shows: the entry, where its secret goes, the project, the reason.
 pub fn lines(number: u64, ask: &VaultAsk, p: Palette) -> Vec<AnyElement> {
-    let mut lines = vec![labelled(number, "name", "Entry", &ask.name, p)];
+    let mut lines = vec![labelled(number, "name", "Entry", &ask.name, false, p)];
     if let Some(host) = ask.host.as_deref() {
-        lines.push(labelled(number, "host", "Goes to", host, p));
+        lines.push(labelled(number, "host", "Goes to", host, false, p));
     }
     lines.push(labelled(
         number,
         "project",
         "Project",
         &project_said(ask),
+        false,
         p,
     ));
-    lines.push(labelled(number, "why", "Why", &ask.why, p));
+    lines.push(labelled(number, "why", "Why", &ask.why, false, p));
     lines
 }
 
@@ -124,10 +137,10 @@ pub fn details(number: u64, ask: &VaultAsk, source: String, p: Palette) -> Vec<A
         .map(|bound| flottille_core::vault::use_said(bound).unwrap_or_else(|| bound.to_owned()));
     let mut lines = Vec::new();
     if let Some(what) = ask.description.as_deref() {
-        lines.push(labelled(number, "what", "What it is for", what, p));
+        lines.push(labelled(number, "what", "What it is for", what, true, p));
     }
     if let Some(used) = used {
-        lines.push(labelled(number, "for", "For", &used, p));
+        lines.push(labelled(number, "for", "For", &used, false, p));
     }
     lines.push(
         div()
