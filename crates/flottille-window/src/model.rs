@@ -473,6 +473,8 @@ pub struct Answers<'a> {
     pub agents: &'a Value,
     /// `approval.list`
     pub approvals: &'a Value,
+    /// `vault.asks`: the requests for a vault entry that wait for the user.
+    pub vault_asks: &'a Value,
     /// The roots whose `needs_user` the daemon says is true (`agent.trees`).
     pub needs_user: &'a HashSet<String>,
     /// Each root's first message, by id.
@@ -662,6 +664,21 @@ impl Snapshot {
                 at: number(request, "created_at"),
             });
         }
+        // An agent's request for a vault entry waits for the user as a held request does: its
+        // session's row says it and the bell rings, the card being in the rail's "Waiting for you".
+        let mut needs_user = answers.needs_user.clone();
+        for ask in list(answers.vault_asks, "asks") {
+            let asker = ask["agent"].as_str().unwrap_or_default();
+            let session = root_of(&parents, asker).to_owned();
+            needs_user.insert(session.clone());
+            bell.push(BellItem {
+                key: format!("vault-{}", number(ask, "ask")),
+                session,
+                label: "Asks you for a vault entry".into(),
+                detail: text(ask, "name"),
+                at: number(ask, "at"),
+            });
+        }
         for root in agents.iter().filter(|agent| asks_the_user(agent)) {
             let id = text(root, "id");
             let open = answers.questions.get(&id).map_or(&[][..], Vec::as_slice);
@@ -805,7 +822,7 @@ impl Snapshot {
                     .flatten();
                 let mark = if ended(agent) {
                     None
-                } else if answers.needs_user.contains(&id) {
+                } else if needs_user.contains(&id) {
                     Some(AgentState::NeedsYou)
                 } else if busy {
                     Some(AgentState::Running)
@@ -840,6 +857,9 @@ impl Snapshot {
                     Some(_) => match bell.iter().find(|item| item.session == id) {
                         Some(item) if item.key.starts_with("request-") => {
                             "Needs you: a permission".to_owned()
+                        }
+                        Some(item) if item.key.starts_with("vault-") => {
+                            "Needs you: a vault entry".to_owned()
                         }
                         Some(_) => "Needs you: a question".to_owned(),
                         None => "Needs you".to_owned(),
@@ -1009,6 +1029,7 @@ mod tests {
             workspaces: &json!({"workspaces": [{"project": "app", "name": "login"}]}),
             agents: &agents,
             approvals: &approvals,
+            vault_asks: &json!({"asks": []}),
             needs_user: &needs_user.iter().map(|id| id.to_string()).collect(),
             questions: &HashMap::new(),
             briefs: &HashMap::from([("r1".into(), "\n  Fix the login\nmore".into())]),
@@ -1320,6 +1341,7 @@ mod tests {
             workspaces: &json!({"workspaces": []}),
             agents: &json!({"agents": [agent("r2", None, "idle", None)]}),
             approvals: &json!({"requests": []}),
+            vault_asks: &json!({"asks": []}),
             needs_user: &HashSet::new(),
             questions: &HashMap::new(),
             briefs: &HashMap::from([("r2".into(), "Hello".into())]),
@@ -1376,6 +1398,7 @@ mod tests {
             workspaces: &json!({"workspaces": []}),
             agents: &json!({"agents": [agent("r1", None, "idle", None), started, child, by_child]}),
             approvals: &json!({"requests": []}),
+            vault_asks: &json!({"asks": []}),
             needs_user: &HashSet::new(),
             questions: &HashMap::new(),
             briefs: &HashMap::from([
@@ -1412,6 +1435,7 @@ mod tests {
             workspaces: &json!({"workspaces": [workspace_json(steps)]}),
             agents: &json!({"agents": []}),
             approvals: &json!({"requests": []}),
+            vault_asks: &json!({"asks": []}),
             needs_user: &HashSet::new(),
             questions: &HashMap::new(),
             briefs: &HashMap::new(),
@@ -1500,6 +1524,7 @@ mod tests {
             workspaces: &json!({"workspaces": [shown]}),
             agents: &json!({"agents": []}),
             approvals: &json!({"requests": []}),
+            vault_asks: &json!({"asks": []}),
             needs_user: &HashSet::new(),
             questions: &HashMap::new(),
             briefs: &HashMap::new(),
@@ -1543,6 +1568,7 @@ mod tests {
             workspaces: &json!({"workspaces": [shown]}),
             agents: &json!({"agents": []}),
             approvals: &json!({"requests": []}),
+            vault_asks: &json!({"asks": []}),
             needs_user: &HashSet::new(),
             questions: &HashMap::new(),
             briefs: &HashMap::new(),
@@ -1589,6 +1615,7 @@ mod tests {
                 workspaces: &json!({"workspaces": []}),
                 agents: &agents,
                 approvals: &json!({"requests": []}),
+                vault_asks: &json!({"asks": []}),
                 needs_user,
                 questions: &HashMap::new(),
                 briefs: &HashMap::new(),
@@ -1636,6 +1663,7 @@ mod tests {
             workspaces: &json!({"workspaces": []}),
             agents: &agents,
             approvals: &approvals,
+            vault_asks: &json!({"asks": []}),
             needs_user: &asking,
             questions: &HashMap::from([(
                 "r2".to_owned(),
@@ -1692,6 +1720,7 @@ mod tests {
             workspaces: &json!({"workspaces": []}),
             agents: &agents,
             approvals: &json!({"requests": []}),
+            vault_asks: &json!({"asks": []}),
             needs_user: &HashSet::new(),
             questions: &HashMap::new(),
             briefs: &HashMap::new(),
@@ -1718,6 +1747,7 @@ mod tests {
             workspaces: &json!({"workspaces": []}),
             agents: &agents,
             approvals: &json!({"requests": []}),
+            vault_asks: &json!({"asks": []}),
             needs_user: &HashSet::new(),
             questions: &HashMap::new(),
             briefs: &HashMap::new(),
@@ -1744,6 +1774,7 @@ mod tests {
             workspaces: &json!({"workspaces": []}),
             agents: &agents,
             approvals: &json!({"requests": []}),
+            vault_asks: &json!({"asks": []}),
             needs_user: &HashSet::new(),
             questions: &HashMap::new(),
             briefs: &HashMap::new(),

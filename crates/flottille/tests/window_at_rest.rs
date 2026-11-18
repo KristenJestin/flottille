@@ -2476,11 +2476,7 @@ fn the_window_draws_no_frame_at_rest_on_a_session_whose_rail_holds_a_vault_ask(
     cx.update(|window, cx| window.click(session_id(&id), cx));
     // The card of "Waiting for you", and the line that records it in the conversation.
     until(&shell, cx, "the card is in the rail", |cx| {
-        cx.update(|window, _| {
-            window
-                .try_find(format!("vault-ask-{number}-add"))
-                .is_some()
-        })
+        cx.update(|window, _| window.try_find(format!("vault-ask-{number}-add")).is_some())
     });
     past_the_pulse(&shell, cx);
     let (frames, asked) = frames_at_rest(&shell, cx);

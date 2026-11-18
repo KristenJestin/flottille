@@ -339,7 +339,7 @@ fn a_long_ask_of_a_led_session_stays_inside_its_card(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn a_long_vault_request_stays_inside_its_card(cx: &mut TestAppContext) {
+fn a_long_vault_request_stays_inside_its_line(cx: &mut TestAppContext) {
     let user = user();
     let (shell, page, cx) = page_of(&user, cx);
     show(
@@ -353,7 +353,7 @@ fn a_long_vault_request_stays_inside_its_card(cx: &mut TestAppContext) {
         cx,
     );
     let at = row(&page, |b| matches!(b, Block::VaultAsk(_)), cx);
-    guard::assert_stays_inside(&shell, cx, format!("row-{at}-vault-ask"));
+    guard::assert_stays_inside(&shell, cx, format!("row-{at}-vault-ask-line"));
 }
 
 #[gpui_kit::test]

@@ -116,9 +116,9 @@ pub enum Block {
         text: String,
         moved: bool,
     },
-    /// The agent asked the user for a vault entry (`vault.asked`): what it, or the feature that
-    /// names the entry, prefilled, and its reason. `open` until the daemon says it was answered
-    /// (`vault.ask_answered`).
+    /// The agent asked the user for a vault entry (`vault.asked`): the conversation records it in
+    /// one line and the card, with its buttons, is in the rail's "Waiting for you". `outcome`
+    /// once the daemon says it was answered (`vault.ask_answered`).
     VaultAsk(VaultAsk),
     /// A connection waits for the user's review of the new actions the agent's accepted request
     /// gave it (`connection.review_waits`), until it is reviewed, removed or turned off
@@ -138,6 +138,8 @@ pub enum Block {
 pub struct VaultAsk {
     /// The number of its `vault.asked` event: the request's number.
     pub seq: u64,
+    /// The agent that asked.
+    pub agent: String,
     pub name: String,
     /// The project of the agent that asked.
     pub project: String,
@@ -154,7 +156,66 @@ pub struct VaultAsk {
     /// The connection it is for: the entry is every project's.
     pub connection: Option<String>,
     pub why: String,
-    pub open: bool,
+    /// How it ended, once answered.
+    pub outcome: Option<VaultOutcome>,
+}
+
+/// How a request for a vault entry was answered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VaultOutcome {
+    /// The user saved the entry.
+    Saved,
+    /// The user dismissed the request.
+    Dismissed,
+}
+
+impl VaultOutcome {
+    fn of(data: &Value) -> Self {
+        match data["outcome"].as_str() {
+            Some("dismissed") => Self::Dismissed,
+            _ => Self::Saved,
+        }
+    }
+}
+
+impl VaultAsk {
+    /// Waiting for the user.
+    pub fn open(&self) -> bool {
+        self.outcome.is_none()
+    }
+
+    /// A request as the daemon lists it (`vault.asks`, or the `vault.asked` event): never a secret.
+    /// `seq` is its number.
+    pub fn of(seq: u64, data: &Value) -> Self {
+        let text = |field: &str| data[field].as_str().unwrap_or_default().to_owned();
+        let option = |field: &str| data[field].as_str().map(str::to_owned);
+        VaultAsk {
+            seq,
+            agent: text("agent"),
+            name: text("name"),
+            project: text("project"),
+            every: data["every"] == true,
+            description: option("description"),
+            url: option("url"),
+            host: option("host"),
+            username: option("username"),
+            bound: option("for"),
+            connection: option("connection"),
+            why: text("why"),
+            outcome: None,
+        }
+    }
+
+    /// The one line the conversation keeps of it, in its own style: no button, the card being in
+    /// the rail while it waits.
+    pub fn said(&self) -> String {
+        let end = match self.outcome {
+            None => "waiting for you",
+            Some(VaultOutcome::Saved) => "saved",
+            Some(VaultOutcome::Dismissed) => "dismissed",
+        };
+        format!("asked for the vault entry {} · {end}", self.name)
+    }
 }
 
 /// A connection waiting for the user's review after an accepted request of the agent, as its
@@ -1051,20 +1112,7 @@ impl Conversation {
             }
             "vault.asked" => {
                 let mut changes = self.close(Some(event.at));
-                changes.extend(self.push(Block::VaultAsk(VaultAsk {
-                    seq: event.seq,
-                    name: text("name"),
-                    project: text("project"),
-                    every: data["every"] == true,
-                    description: data["description"].as_str().map(str::to_owned),
-                    url: data["url"].as_str().map(str::to_owned),
-                    host: data["host"].as_str().map(str::to_owned),
-                    username: data["username"].as_str().map(str::to_owned),
-                    bound: data["for"].as_str().map(str::to_owned),
-                    connection: data["connection"].as_str().map(str::to_owned),
-                    why: text("why"),
-                    open: true,
-                })));
+                changes.extend(self.push(Block::VaultAsk(VaultAsk::of(event.seq, data))));
                 changes
             }
             "vault.ask_answered" => {
@@ -1074,7 +1122,7 @@ impl Conversation {
                 match at {
                     Some(at) => {
                         if let Block::VaultAsk(ask) = &mut self.blocks[at] {
-                            ask.open = false;
+                            ask.outcome = Some(VaultOutcome::of(data));
                         }
                         vec![Change::Changed(at)]
                     }

@@ -316,6 +316,9 @@ pub struct SessionPage {
     /// The command whose output the link reads, when its panel is open.
     watching: Option<String>,
     requests: HashMap<u64, Request>,
+    /// The requests for a vault entry that wait for the user, those an agent of the session
+    /// asked, the oldest first: their cards are in the rail's "Waiting for you".
+    vault_asks: Vec<VaultAsk>,
     decisions: HashMap<u64, String>,
     /// How many pages of the shown agent's conversation are read, from its end.
     pages: usize,
@@ -458,6 +461,7 @@ impl SessionPage {
             run_drawer,
             watching: None,
             requests: HashMap::new(),
+            vault_asks: Vec::new(),
             decisions: HashMap::new(),
             pages: 1,
             read: false,
@@ -681,6 +685,10 @@ impl SessionPage {
     }
 
     /// The rail's "Waiting for you" section.
+    pub(crate) fn shell(&self) -> WeakEntity<Shell> {
+        self.shell.clone()
+    }
+
     pub fn waiting(&self, cx: &gpui_kit::App) -> Entity<Waiting> {
         self.rail.read(cx).waiting.clone()
     }
@@ -1394,6 +1402,10 @@ impl SessionPage {
                 // The rail's cards do not wait for the conversation to be read.
                 self.refresh_conversation(cx);
             }
+            SessionUpdate::VaultAsks(asks) => {
+                self.vault_asks = asks;
+                self.refresh_conversation(cx);
+            }
             SessionUpdate::Decided { number, decision } => {
                 self.decisions.insert(number, decision);
                 self.refresh_conversation(cx);
@@ -1961,8 +1973,16 @@ impl SessionPage {
             .filter_map(|number| self.card(number))
             .filter(|card| card.decision.is_none())
             .collect();
+        let asks: Vec<(VaultAsk, String)> = self
+            .vault_asks
+            .iter()
+            .map(|ask| (ask.clone(), self.said_name(&ask.agent)))
+            .collect();
         let waiting = self.waiting(cx);
-        waiting.update(cx, |waiting, cx| waiting.set(cards, cx));
+        waiting.update(cx, |waiting, cx| {
+            waiting.set(cards, cx);
+            waiting.set_asks(asks, cx);
+        });
     }
 
     /// The children of the shown agent, as its sub-agents list shows them.
@@ -3573,7 +3593,9 @@ impl ConversationView {
             Block::Question { answers, .. } => self.rows[at].read(cx).asking || answers.is_some(),
             // Waiting for the pilot, which the user may answer first.
             Block::Asked { moved, .. } => !moved && self.rows[at].read(cx).asking,
-            Block::VaultAsk(ask) => ask.open,
+            // Its line stays in sight once answered too: it is the conversation's one record of
+            // what the user decided, and a rare one.
+            Block::VaultAsk(_) => true,
             Block::ConnectionReview(review) => review.open,
             _ => false,
         }
@@ -6489,15 +6511,10 @@ impl Row {
         presence(id("asked"), !moved, card).into_any_element()
     }
 
-    /// The agent's request for a vault entry: what was prefilled, where the secret goes, the
-    /// agent's reason, and the way in to the vault's form; it folds away once answered.
+    /// The agent's request for a vault entry, as the conversation records it: one quiet line, the
+    /// card with its buttons being in the rail's "Waiting for you".
     fn render_vault_ask(&mut self, ask: VaultAsk, cx: &mut Context<Self>) -> AnyElement {
-        let Some(shell) = self.page.upgrade().map(|page| page.read(cx).shell.clone()) else {
-            return div().into_any_element();
-        };
-        let when = SharedString::from(self.when.map(clock).unwrap_or_default());
-        let title = gpui_design_system::quoted_title(&self.title(cx));
-        crate::vault_ask::card(self.at, &title, when, &ask, shell, cx)
+        crate::vault_ask::line(self.at, &ask, palette(cx))
     }
 
     /// The connection the agent's accepted request left waiting for the user's review: the card
