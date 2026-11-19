@@ -549,6 +549,23 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
                     None
                 }
             };
+            // What only the user's device may ask (`vault.share`) is signed with its key, read
+            // when it is asked, as the command line reads it.
+            let signing = paths.clone();
+            flottille_window::link::sign_with(std::sync::Arc::new(move |machine, request| {
+                let key = remote_command::device_key(&signing)
+                    .map_err(|error| std::io::Error::other(error.to_string()))?;
+                let signed = flottille_link::Request::sign(
+                    &key,
+                    &request.id,
+                    machine,
+                    &request.method,
+                    &request.params,
+                    std::time::SystemTime::now(),
+                )
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
+                serde_json::to_value(signed).map_err(std::io::Error::other)
+            }));
             let paths = paths.clone();
             flottille_window::run(
                 std::sync::Arc::new(move || {
