@@ -1221,7 +1221,9 @@ with the way to the new list: reload its tools (`flottille agent reload-tools`, 
 
 ### `flottille agent stop <agent>`
 
-Stops a root agent and its whole tree, the deepest first. Their workspaces stay. `--json` prints
+Stops a root agent and its whole tree, the deepest first, and the sessions it leads (in its
+project and in others, and those they lead in turn: `docs/tools.md`, "The pilot ends"). Their
+workspaces stay. It asks nothing: detach a led session first to keep it. `--json` prints
 `{"agent": {...}}`, the root once ended. Refused for a child, and for an agent that is in a final
 state.
 

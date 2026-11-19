@@ -31,6 +31,7 @@ use lyon_tessellation::{LineCap, LineJoin};
 use crate::actions::{Actions, Command, Details, Outcome, Pick, RunFrom};
 use crate::add_project::AddProject;
 use crate::composer::{Choice, Composer, PlaceChoice};
+use crate::end_led::LedEnd;
 use crate::extensions::Registry;
 use crate::extensions::connection_request::ConnectionRequest;
 use crate::extensions::connections::ConnectionsSection;
@@ -876,6 +877,9 @@ impl Shell {
             return;
         };
         let (id, count) = (found.id.clone(), found.live);
+        self.perform(Command::ReadEnding {
+            session: id.clone(),
+        });
         self.sidebar
             .update(cx, |sidebar, cx| sidebar.ask_end(id, count, cx));
     }
@@ -1349,6 +1353,18 @@ impl Shell {
                     && page.read(cx).id() == session
                 {
                     page.update(cx, |page, cx| page.end_answered(refused, cx));
+                }
+            }
+            Outcome::EndingRead { session, read } => {
+                // A read that failed lists nothing: the sentence says what ends.
+                let led = read.map(|read| LedEnd::read(&read)).unwrap_or_default();
+                self.sidebar.update(cx, |sidebar, cx| {
+                    sidebar.led_read(&session, led.clone(), cx)
+                });
+                if let Some(page) = self.session_page.clone()
+                    && page.read(cx).id() == session
+                {
+                    page.update(cx, |page, cx| page.led_read(led, cx));
                 }
             }
             Outcome::Resumed { session, refused } => {

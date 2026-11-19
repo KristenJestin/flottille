@@ -1886,6 +1886,15 @@ secrets; an empty one or one on several lines is refused (`invalid-params`), and
 whose title is its `agent_launch` title. `agent.titled` is emitted with `by` `user`. Answers
 `{"agent", "title", "by": "user"}`.
 
+#### `agent.ending`
+
+`{"agent"}`. Reads, changing nothing, what ending the session of `agent` ends besides it: the
+sessions it leads and theirs in turn, in its project and in others, those that have not ended
+(`docs/tools.md`, "The pilot ends"). Answers `{"agent", "sessions": [{"id", "title", "project",
+"workspace", "state", "losses"}]}`, `workspace` `null` in the project's folder, `state` what its
+workspace holds that is not saved, as `project.removal` says it (`clean`, `uncommitted`,
+`unpushed` or `unknown`), `losses` each as a sentence. The window reads it for its confirmation.
+
 #### `agent.detach`
 
 `{"agent"}`. Takes a session an agent started (`launched_by`, led or handed) away from that agent,
@@ -2314,6 +2323,19 @@ is a view of the stored events.
 `{"ms"}`. Only when the daemon runs with `FLOTTILLE_TEST_CLOCK` set (`docs/agents.md`, "For tests
 and development"); otherwise `unknown-method`. Moves the daemon's clock `ms` milliseconds ahead and
 runs the sweep at once: `{"now"}`, the clock's time.
+
+### `test.travel`, `test.travel_back`
+
+Only in a test build run with `FLOTTILLE_TEST_TRAVEL` set; otherwise `unknown-method`. What
+`agent_launch` will start on another machine (`docs/remote.md`, "What travels"), until it does.
+`test.travel {"machine", "project", "launch", "workspace"?, "corrupt"?, "hold_ms"?}` sends the
+code of a workspace of the project, or of the project's own folder, to the machine for that launch
+(`hold_ms`: how long each bundle stays offered before that machine is told of it):
+`{"workspace", "branch", "folder", "repositories"}`, the workspace made there, and for each
+repository its path, the commits sent and the bundle's prerequisites. `test.travel_back
+{"launch"}` sends back the new commits of the workspace made here for that launch: `{"machine",
+"repositories"}`, each with its path, the commits sent and the ref they landed in. The other
+machine answers either only in such a build too.
 
 ### The approval methods
 

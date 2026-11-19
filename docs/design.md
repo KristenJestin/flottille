@@ -364,8 +364,9 @@ the session ends or fails; a plain turn's end wakes nobody. The delivery names t
 why and holds its last message, masked and cut, after the questions to the pilot that turn asked
 and that still wait, whole. It is a following, a subscription that has no end of its own (§5.6,
 `docs/tools.md`, "Following a session"). Two sessions that write to each other fifty times
-without the user pause it. A pilot that ends leaves its led sessions going on, handed to the
-user.
+without the user pause it. A session led by a pilot is part of its job: **it ends with
+its pilot** (`docs/tools.md`, "The pilot ends"). A led session the user wants to keep is
+detached first and is then theirs.
 
 A led session stays open after its report: once its work is integrated, its pilot stops it and
 removes its workspace. When a led session reported, is idle and its work is integrated, its
@@ -1410,7 +1411,13 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   a base card stands apart by its "Always asks" tag and its still dot, in the attention tone like the others: a request that waits is never drawn as an error, and a denied one is recorded in the error ink;
   an answered card leaves). The
   root's row menu ("⋯") holds End session, the only way the window ends an agent: it ends the root
-  and its tree, after a confirmation that counts the agents that end. An ended session leaves its
+  and its tree, after a confirmation that counts the agents that end. When the session is a pilot,
+  the same confirmation lists the led sessions that end with it, in its project and in others,
+  by title and project, each saying what its workspace holds that is not saved (`uncommitted
+  changes`, `commits not pushed`, `cannot be checked`), and its button counts the sessions
+  (`End 3 sessions`): one confirmation, never one per session. The list is read once the dialog
+  is open (`agent.ending`) and unfolds in it; the ended rows leave the project's level for the
+  "Ended" group with their animation. An ended session leaves its
   place in the sidebar for the "Ended" group, folded, pinned at the bottom of the sidebar
   whatever the tree's length and unfolding upward over it (its rows say their project). Unfolded
   it takes at most eight rows, or 35% of the window's height when that is less, and its rows

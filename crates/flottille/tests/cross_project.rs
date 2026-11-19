@@ -578,6 +578,68 @@ fn agent_stop_ends_the_session_it_leads_in_another_project_and_holds_any_other()
     assert_ne!(shown(&user, &other)["state"], "ended");
 }
 
+#[test]
+fn ending_a_pilot_ends_a_session_it_leads_in_another_project() {
+    let user = user();
+    let (lead, mcp) = lead(&user, "full");
+    let (session, _) = started_in_kit(&user, &mcp, json!({}));
+    idle(&user, &session);
+    assert_eq!(shown(&user, &session)["led_by"], lead.as_str());
+
+    user.call("agent.stop", json!({"agent": lead})).unwrap();
+
+    eventually("the session of kit ended with its pilot", || {
+        shown(&user, &session)["state"] == "ended"
+    });
+}
+
+#[test]
+fn the_card_of_an_agent_s_end_of_a_pilot_lists_the_sessions_that_end_with_it_and_their_unsaved_work()
+ {
+    let user = user();
+    let (lead, mcp) = lead(&user, "full");
+    let workspace = user
+        .call(
+            "workspace.create",
+            json!({"project": "app", "name": "docs", "offline": true}),
+        )
+        .unwrap();
+    let launched = mcp.call(
+        "agent_launch",
+        json!({"kind": "led", "title": "Tidy the docs", "brief": "Tidy.", "workspace": "docs"}),
+    );
+    assert!(!launched.error, "{}", launched.text);
+    let (kit, _) = started_in_kit(&user, &mcp, json!({}));
+    eventually("the led session of app", || {
+        agents(&user).iter().any(|a| a["title"] == "Tidy the docs")
+    });
+    std::fs::write(
+        std::path::Path::new(workspace["folder"].as_str().unwrap()).join("draft.txt"),
+        "draft\n",
+    )
+    .unwrap();
+    let (_, other) = root(&user, "app");
+
+    let number = held(&other.call("agent_stop", json!({"agent_id": lead})));
+
+    let says = requests(&user)
+        .into_iter()
+        .find(|r| r["number"] == number)
+        .unwrap()["says"]
+        .to_string();
+    assert!(
+        says.contains("Tidy the docs") && says.contains("project app"),
+        "{says}"
+    );
+    assert!(
+        says.contains("Make the fonts settable") && says.contains("project kit"),
+        "{says}"
+    );
+    assert!(says.contains("uncommitted changes"), "{says}");
+    // Reading the card ends nothing.
+    assert_ne!(shown(&user, &kit)["state"], "ended");
+}
+
 /// A user whose judge takes a while to allow every call, with the projects `app` and `kit`.
 fn user_with_a_slow_judge() -> User {
     let user = User::with_fake_agent().with_judge(json!([

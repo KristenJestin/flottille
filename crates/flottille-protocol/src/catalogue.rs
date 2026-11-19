@@ -200,6 +200,7 @@ pub const METHODS: &[(&str, Class)] = &[
     ("agent.reload_tools", Drive),
     ("agent.compact", Drive),
     ("agent.rename", Drive),
+    ("agent.ending", Read),
     ("agent.detach", Drive),
     ("agent.mode", Drive),
     ("agent.options", Drive),
@@ -228,6 +229,8 @@ pub const METHODS: &[(&str, Class)] = &[
     ("test.hold", Drive),
     ("test.wait", Drive),
     ("test.advance", Drive),
+    ("test.travel", Drive),
+    ("test.travel_back", Drive),
 ];
 
 /// The class of `method`; none for a method the daemon does not answer.

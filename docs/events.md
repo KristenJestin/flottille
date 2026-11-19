@@ -1032,16 +1032,6 @@ The user detached a session from the agent that started it (`agent.detach`): `la
 | `agent` | The session. |
 | `from` | The agent it was detached from. |
 
-#### `agent.handed`
-
-A led session's pilot ended: the session goes on, handed to the user (`led_by` is `null` from then
-on), and it is told so once by a `handed` delivery.
-
-| Field | |
-|---|---|
-| `agent` | The session. |
-| `from` | Its pilot, which ended. |
-
 #### `agent.answered`
 
 A question of the agent may no longer wait: it took a message of the user (a root) or of its
