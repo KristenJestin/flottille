@@ -105,6 +105,14 @@ impl Machine {
             .collect()
     }
 
+    /// The key this machine's daemon holds, as a test that stands in for it reads it; its
+    /// daemon stopped, so that the other machines take a link of that key again.
+    fn stand_in(&self) -> MachineKey {
+        let stopped = self.user.run(&["daemon", "stop"]);
+        assert!(stopped.status.success(), "{}", self.log());
+        self.machine_key()
+    }
+
     /// The key this machine's daemon holds, as a test that stands in for it reads it.
     fn machine_key(&self) -> MachineKey {
         MachineKey::load_or_make(&self.user.path("state/flottille/remote")).unwrap()
@@ -678,7 +686,7 @@ fn a_machine_the_launch_was_not_sent_to_brings_nothing_back_and_reads_no_bundle(
             assert!(Instant::now() < deadline, "no offer was held\n{}", pc.log());
             std::thread::sleep(Duration::from_millis(50));
         }
-        let key = laptop.machine_key();
+        let key = laptop.stand_in();
         let (pc_key, addresses) = (pc.key(), socket_addresses(&pc));
         let (fetched, back) = runtime().block_on(async {
             let link = dial(&key, &pc, pc_key, &addresses).await;
@@ -735,7 +743,7 @@ fn a_viewer_s_machine_and_a_machine_of_no_member_can_neither_offer_nor_place_cod
     std::fs::write(&file, peers.to_string()).unwrap();
     let workspaces = server.user.call("workspace.list", json!({})).unwrap();
 
-    for (key, name) in [(tablet.machine_key(), "tablet"), (stranger, "stranger")] {
+    for (key, name) in [(tablet.stand_in(), "tablet"), (stranger, "stranger")] {
         // A project the server does not have: what refuses it is who sends it, before the
         // project is looked for.
         let mut offered = offer("l1");
