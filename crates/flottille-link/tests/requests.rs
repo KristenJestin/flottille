@@ -663,7 +663,7 @@ fn a_switch_to_full_is_taken_only_as_a_member_that_may_switch_signed_it() {
     // A key that is no member's, and a signature over other bytes.
     let stranger = signed(&key(9), "agent.mode", full.clone(), 0);
     assert!(refusal(&stranger, "pc", "a1").contains("not signed by a member"));
-    let forged = switch(&pixel, full).replace("\"a1\"", "\"a2\"");
+    let forged = switch(&pixel, full).replace(r#"\"a1\""#, r#"\"a2\""#);
     assert!(refusal(&forged, "pc", "a2").contains("not signed by a member"));
     assert!(refusal("{}", "pc", "a1").contains("not a signed request"));
 }
