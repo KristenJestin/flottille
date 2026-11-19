@@ -42,6 +42,11 @@ struct Jira {
 
 impl Jira {
     fn start(status: &'static str, body: impl Fn(&Received) -> String + Send + 'static) -> Jira {
+        Jira::reply(move |request| (status, body(request)))
+    }
+
+    /// A Jira that answers each request with a status and a body of its own choosing.
+    fn reply(answer: impl Fn(&Received) -> (&'static str, String) + Send + 'static) -> Jira {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         let received = Arc::new(Mutex::new(Vec::new()));
@@ -86,7 +91,7 @@ impl Jira {
                     authorization: header("authorization"),
                     body: serde_json::from_slice(&rest).unwrap_or(Value::Null),
                 };
-                let said = body(&request);
+                let (status, said) = answer(&request);
                 kept.lock().unwrap().push(request);
                 let _ = stream.write_all(
                     format!(
@@ -625,6 +630,11 @@ fn logged(account: &str, name: &str, started: &str, seconds: u64, comment: Optio
         "author": {"accountId": account, "displayName": name},
         "started": started,
         "timeSpentSeconds": seconds,
+        "timeSpent": match (seconds / 3600, seconds % 3600 / 60) {
+            (0, m) => format!("{m}m"),
+            (h, 0) => format!("{h}h"),
+            (h, m) => format!("{h}h {m}m"),
+        },
     });
     if let Some(text) = comment {
         worklog["comment"] = json!({"type": "doc", "version": 1, "content": [
@@ -661,8 +671,43 @@ fn utc_day(started: &str) -> String {
 /// and `maxResults` with at most `page` worklogs at a time, and keeps to `startedAfter` and
 /// `startedBefore` when it is given them.
 fn ledger(items: Vec<(&'static str, &'static str, Vec<Value>)>, cut: bool, page: usize) -> Jira {
-    Jira::start("200 OK", move |request| {
+    ledger_over(Arc::new(Mutex::new(items)), cut, page)
+}
+
+/// The work items of a `ledger` a test may change while the site runs.
+type Items = Arc<Mutex<Vec<(&'static str, &'static str, Vec<Value>)>>>;
+
+/// A `ledger` over items that are read at each request: a test changes them between two.
+fn ledger_over(state: Items, cut: bool, page: usize) -> Jira {
+    Jira::reply(move |request| {
+        let items = state.lock().unwrap().clone();
         let path = request.path.split('?').next().unwrap_or_default();
+        // One worklog (`/issue/<KEY>/worklog/<id>`): read, changed or deleted. As the site does
+        // when the work item exists, it answers any worklog it knows, of that work item or of
+        // another, which says which work item it is on (`issueId`).
+        let on = |key: &str| items.iter().position(|(item, _, _)| *item == key);
+        for (key, _, _) in &items {
+            let Some(id) = path.strip_prefix(&format!("/rest/api/3/issue/{key}/worklog/")) else {
+                continue;
+            };
+            let Some((holder, worklog)) = items.iter().enumerate().find_map(|(at, (_, _, all))| {
+                all.iter()
+                    .find(|worklog| worklog["id"] == id)
+                    .map(|w| (at, w))
+            }) else {
+                return (
+                    "404 Not Found",
+                    json!({"errorMessages": ["Worklog does not exist"]}).to_string(),
+                );
+            };
+            let mut worklog = worklog.clone();
+            worklog["issueId"] = item_id(holder).into();
+            return match request.method.as_str() {
+                "DELETE" => ("204 No Content", String::new()),
+                _ => ("200 OK", worklog.to_string()),
+            };
+        }
+        let said = |body: String| ("200 OK", body);
         let query = request.path.split_once('?').map_or("", |(_, query)| query);
         let number = |name: &str| -> usize {
             query
@@ -672,9 +717,10 @@ fn ledger(items: Vec<(&'static str, &'static str, Vec<Value>)>, cut: bool, page:
                 .unwrap_or(0)
         };
         if path == "/rest/api/3/myself" {
-            return json!({"accountId": MINE, "displayName": "Jane Doe",
-                "emailAddress": ACCOUNT})
-            .to_string();
+            return said(
+                json!({"accountId": MINE, "displayName": "Jane Doe", "emailAddress": ACCOUNT})
+                    .to_string(),
+            );
         }
         if path == "/rest/api/3/search/jql" {
             let jql = unquote(query);
@@ -699,11 +745,15 @@ fn ledger(items: Vec<(&'static str, &'static str, Vec<Value>)>, cut: bool, page:
             if cut {
                 answer["nextPageToken"] = "more".into();
             }
-            return answer.to_string();
+            return said(answer.to_string());
         }
         for (key, title, worklogs) in &items {
             if path == format!("/rest/api/3/issue/{key}") {
-                return json!({"key": key, "fields": {"summary": title}}).to_string();
+                return said(
+                    json!({"id": item_id(on(key).unwrap()), "key": key,
+                        "fields": {"summary": title}})
+                    .to_string(),
+                );
             }
             if path == format!("/rest/api/3/issue/{key}/worklog") {
                 let start = number("startAt");
@@ -724,13 +774,20 @@ fn ledger(items: Vec<(&'static str, &'static str, Vec<Value>)>, cut: bool, page:
                     })
                     .collect();
                 let shown: Vec<&&Value> = kept.iter().skip(start).take(size).collect();
-                return json!({"startAt": start, "maxResults": size,
-                    "total": kept.len(), "worklogs": shown})
-                .to_string();
+                return said(
+                    json!({"startAt": start, "maxResults": size,
+                        "total": kept.len(), "worklogs": shown})
+                    .to_string(),
+                );
             }
         }
-        json!({"errorMessages": ["Issue does not exist"]}).to_string()
+        said(json!({"errorMessages": ["Issue does not exist"]}).to_string())
     })
+}
+
+/// The id Jira gives the work item that comes `at`th in a `ledger`.
+fn item_id(at: usize) -> String {
+    format!("{}", 20_000 + at)
 }
 
 /// A query string as the daemon sent it, decoded: `+` and `%XX` as the text they stand for.
@@ -814,8 +871,8 @@ fn worklogs_of_a_day_are_the_token_owner_s_with_their_durations_and_total() {
     assert!(text.contains("your account (Jane Doe)"), "{text}");
     assert!(text.contains(ZONE), "{text}");
     for line in [
-        "ABC-1 Fix the login redirect — 1h30 (started 09:12) \"Pairing on the redirect\"",
-        "ABC-2 Add the natures — 45m (started 14:00)",
+        "ABC-1 Fix the login redirect — 1h30 (started 09:12, worklog 15400) \"Pairing on the redirect\"",
+        "ABC-2 Add the natures — 45m (started 14:00, worklog 12700)",
         "Day total: 2h15",
         "Range total: 2h15",
     ] {
@@ -920,7 +977,7 @@ fn a_worklog_started_the_day_before_in_the_user_s_zone_is_left_out() {
     let text = worklogs(&mcp, json!({"from": "2026-11-06"}));
 
     assert!(text.contains("Just after midnight"), "{text}");
-    assert!(text.contains("(started 00:30)"), "{text}");
+    assert!(text.contains("(started 00:30, worklog 11800)"), "{text}");
     assert!(!text.contains("Late the day before"), "{text}");
     assert!(!text.contains("Late in New York"), "{text}");
     assert!(text.contains("Range total: 30m"), "{text}");
@@ -1373,4 +1430,533 @@ fn a_refused_worklogs_offers_to_set_up_time_logging() {
             .iter()
             .any(|e| e.name == "agent.tool_served" && e.data["setup"] == "time_logging")
     });
+}
+
+// Correcting a worklog already logged (#1092, `docs/tickets.md`, "Logging time"): `worklogs` gives
+// each worklog's id, `worklog_edit` and `worklog_delete` change or delete one of the token's own
+// account, held for the user like `log_time`.
+
+/// A site with the account's hour on ABC-1 (worklog 13600), somebody else's half hour on it
+/// (11800), and the account's 45 minutes on ABC-2 (12700).
+fn ledger_to_correct() -> Jira {
+    ledger_to_change().0
+}
+
+/// `ledger_to_correct`, with its items for a test to change while the site runs.
+fn ledger_to_change() -> (Jira, Items) {
+    let items: Items = Arc::new(Mutex::new(vec![
+        (
+            "ABC-1",
+            "Fix the login redirect",
+            vec![
+                mine(
+                    "2026-11-06T09:00:00.000+0100",
+                    3_600,
+                    Some("Pairing on the redirect"),
+                ),
+                logged(
+                    OTHER,
+                    "John Roe",
+                    "2026-11-06T10:00:00.000+0100",
+                    1_800,
+                    None,
+                ),
+            ],
+        ),
+        (
+            "ABC-2",
+            "Add the natures",
+            vec![mine("2026-11-06T14:00:00.000+0100", 2_700, None)],
+        ),
+    ]));
+    (ledger_over(items.clone(), false, 100), items)
+}
+
+/// A user over `jira` with the entry set, and the client of the root agent's tools.
+fn ready(jira: &Jira) -> (User, Mcp) {
+    let user = zoned(jira);
+    jira_with(&user, Some("jira-time"));
+    entry(&user);
+    let (mcp, _) = root_in(&user);
+    (user, mcp)
+}
+
+/// A change of a worklog: a new duration for an edit, nothing more for a delete.
+fn changing(action: &str, ticket: &str, worklog: &str) -> Value {
+    let mut args = json!({"action": action, "ticket": ticket, "worklog": worklog});
+    if action == "worklog_edit" {
+        args["duration"] = "1h".into();
+    }
+    args
+}
+
+/// The writes the site received.
+fn written(jira: &Jira) -> Vec<Received> {
+    jira.received()
+        .into_iter()
+        .filter(|request| request.method != "GET")
+        .collect()
+}
+
+/// The card of request `number`, as the user reads it.
+fn card_of(user: &User, number: u64) -> String {
+    requests(user)
+        .iter()
+        .find(|r| r["number"] == number)
+        .unwrap()
+        .to_string()
+}
+
+#[test]
+fn worklogs_gives_each_worklog_s_id() {
+    let jira = ledger_to_correct();
+    let (user, mcp) = ready(&jira);
+
+    let text = worklogs(&mcp, json!({"from": "2026-11-06"}));
+
+    assert!(
+        text.contains(
+            "ABC-1 Fix the login redirect — 1h (started 09:00, worklog 13600) \
+             \"Pairing on the redirect\""
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains("ABC-2 Add the natures — 45m (started 14:00, worklog 12700)"),
+        "{text}"
+    );
+    assert!(requests(&user).is_empty());
+}
+
+#[test]
+fn worklog_edit_changes_the_duration_of_the_account_s_worklog() {
+    let jira = ledger_to_correct();
+    let (user, mcp) = ready(&jira);
+
+    let number = held(&mcp.call(
+        "tickets",
+        json!({"action": "worklog_edit", "ticket": "abc-1", "worklog": "13600",
+            "duration": "2h"}),
+    ));
+    assert!(
+        written(&jira).is_empty(),
+        "written before the user allowed it"
+    );
+
+    let done = allow(&user, number);
+    assert!(done.contains("13600"), "{done}");
+    assert!(!done.contains(SECRET), "{done}");
+    let writes = written(&jira);
+    assert_eq!(writes.len(), 1, "{:?}", jira.received());
+    assert_eq!(writes[0].method, "PUT");
+    assert_eq!(writes[0].path, "/rest/api/3/issue/ABC-1/worklog/13600");
+    assert_eq!(writes[0].authorization, basic());
+    // What changes only: the start and the comment are left as they are.
+    assert_eq!(writes[0].body, json!({"timeSpent": "2h"}));
+}
+
+#[test]
+fn worklog_edit_changes_the_start_and_the_comment() {
+    let jira = ledger_to_correct();
+    let (user, mcp) = ready(&jira);
+
+    let number = held(&mcp.call(
+        "tickets",
+        json!({"action": "worklog_edit", "ticket": "ABC-1", "worklog": "13600",
+            "started": "2026-11-06T11:00:00+02:00", "comment": "Reviewed the fix"}),
+    ));
+    allow(&user, number);
+
+    let writes = written(&jira);
+    assert_eq!(writes.len(), 1, "{:?}", jira.received());
+    assert_eq!(writes[0].method, "PUT");
+    assert_eq!(writes[0].body["started"], "2026-11-06T09:00:00.000+0000");
+    assert_eq!(writes[0].body["comment"]["type"], "doc");
+    assert_eq!(text_of(&writes[0].body["comment"]), "Reviewed the fix");
+    assert!(
+        writes[0].body.get("timeSpent").is_none(),
+        "{}",
+        writes[0].body
+    );
+}
+
+#[test]
+fn worklog_edit_without_a_change_is_refused() {
+    let jira = ledger_to_correct();
+    let (user, mcp) = ready(&jira);
+
+    let said = refused_at_once(
+        &user,
+        &mcp,
+        json!({"action": "worklog_edit", "ticket": "ABC-1", "worklog": "13600"}),
+    );
+    assert!(said.contains("duration, started or comment"), "{said}");
+    // A duration that is not Jira's form is refused the same way.
+    refused_at_once(
+        &user,
+        &mcp,
+        json!({"action": "worklog_edit", "ticket": "ABC-1", "worklog": "13600",
+            "duration": "soon"}),
+    );
+    assert!(written(&jira).is_empty());
+}
+
+#[test]
+fn worklog_delete_removes_the_account_s_worklog() {
+    let jira = ledger_to_correct();
+    let (user, mcp) = ready(&jira);
+
+    let number = held(&mcp.call(
+        "tickets",
+        json!({"action": "worklog_delete", "ticket": "abc-1", "worklog": "13600"}),
+    ));
+    assert!(
+        written(&jira).is_empty(),
+        "deleted before the user allowed it"
+    );
+
+    let done = allow(&user, number);
+    assert!(done.contains("13600"), "{done}");
+    let writes = written(&jira);
+    assert_eq!(writes.len(), 1, "{:?}", jira.received());
+    assert_eq!(writes[0].method, "DELETE");
+    // Jira's default estimate adjustment: nothing is asked of it.
+    assert_eq!(writes[0].path, "/rest/api/3/issue/ABC-1/worklog/13600");
+    assert_eq!(writes[0].authorization, basic());
+}
+
+#[test]
+fn a_worklog_of_another_author_is_refused_before_anything_is_asked() {
+    let jira = ledger_to_correct();
+    let (user, mcp) = ready(&jira);
+
+    for action in ["worklog_edit", "worklog_delete"] {
+        let said = refused_at_once(&user, &mcp, changing(action, "ABC-1", "11800"));
+        assert!(
+            said.contains("worklog 11800 is John Roe's, not your account's"),
+            "{said}"
+        );
+    }
+    assert!(written(&jira).is_empty());
+}
+
+#[test]
+fn a_worklog_not_on_that_work_item_is_refused() {
+    let jira = ledger_to_correct();
+    let (user, mcp) = ready(&jira);
+
+    // 12700 is the account's, on ABC-2; 99999 is nobody's.
+    for worklog in ["12700", "99999"] {
+        for action in ["worklog_edit", "worklog_delete"] {
+            let said = refused_at_once(&user, &mcp, changing(action, "ABC-1", worklog));
+            assert!(
+                said.contains(&format!("ABC-1 has no worklog {worklog}")),
+                "{said}"
+            );
+        }
+    }
+    assert!(written(&jira).is_empty());
+}
+
+#[test]
+fn the_card_shows_the_worklog_as_it_is_and_what_it_becomes() {
+    let jira = ledger_to_correct();
+    let (user, mcp) = ready(&jira);
+
+    let edit = held(&mcp.call(
+        "tickets",
+        json!({"action": "worklog_edit", "ticket": "ABC-1", "worklog": "13600",
+            "duration": "2h", "comment": "Reviewed the fix"}),
+    ));
+    let card = card_of(&user, edit);
+    for said in [
+        "ABC-1",
+        "13600",
+        // As it is.
+        "It is now: 1h, started 2026-11-06T08:00:00Z, \\\"Pairing on the redirect\\\"",
+        // What it becomes: what is not changed stays as it is.
+        "It becomes: 2h, started 2026-11-06T08:00:00Z, \\\"Reviewed the fix\\\"",
+    ] {
+        assert!(card.contains(said), "{said} is not on the card: {card}");
+    }
+
+    let delete = held(&mcp.call(
+        "tickets",
+        json!({"action": "worklog_delete", "ticket": "ABC-2", "worklog": "12700"}),
+    ));
+    let card = card_of(&user, delete);
+    for said in [
+        "ABC-2",
+        "12700",
+        "It deletes the worklog",
+        "45m, started 2026-11-06T13:00:00Z",
+    ] {
+        assert!(card.contains(said), "{said} is not on the card: {card}");
+    }
+    assert!(
+        written(&jira).is_empty(),
+        "written before the user allowed it"
+    );
+}
+
+/// What the user is told when what they allowed is not done: the answer the agent is handed.
+fn not_done(jira: &Jira, user: &User, number: u64) -> String {
+    let told = allow(user, number);
+    assert!(
+        written(jira).is_empty(),
+        "written though the worklog changed: {:?}",
+        written(jira)
+    );
+    told
+}
+
+#[test]
+fn a_worklog_changed_between_the_card_and_the_allow_is_not_written() {
+    for action in ["worklog_edit", "worklog_delete"] {
+        let (jira, items) = ledger_to_change();
+        let (user, mcp) = ready(&jira);
+        let number = held(&mcp.call("tickets", changing(action, "ABC-1", "13600")));
+
+        // Somebody changes its time in Jira after the card was shown.
+        items.lock().unwrap()[0].2[0]["timeSpentSeconds"] = 1_800.into();
+        items.lock().unwrap()[0].2[0]["timeSpent"] = "30m".into();
+
+        let told = not_done(&jira, &user, number);
+        assert!(told.contains("changed since"), "{action}: {told}");
+        assert!(told.contains("30m"), "{action}: {told}");
+    }
+}
+
+#[test]
+fn a_worklog_deleted_between_the_card_and_the_allow_is_not_written() {
+    for action in ["worklog_edit", "worklog_delete"] {
+        let (jira, items) = ledger_to_change();
+        let (user, mcp) = ready(&jira);
+        let number = held(&mcp.call("tickets", changing(action, "ABC-1", "13600")));
+
+        items.lock().unwrap()[0].2.remove(0);
+
+        let told = not_done(&jira, &user, number);
+        assert!(
+            told.contains("ABC-1 has no worklog 13600"),
+            "{action}: {told}"
+        );
+    }
+}
+
+#[test]
+fn a_worklog_whose_author_changed_between_the_card_and_the_allow_is_not_written() {
+    for action in ["worklog_edit", "worklog_delete"] {
+        let (jira, items) = ledger_to_change();
+        let (user, mcp) = ready(&jira);
+        let number = held(&mcp.call("tickets", changing(action, "ABC-1", "13600")));
+
+        items.lock().unwrap()[0].2[0]["author"] =
+            json!({"accountId": OTHER, "displayName": "John Roe"});
+
+        let told = not_done(&jira, &user, number);
+        assert!(
+            told.contains("John Roe's, not your account's"),
+            "{action}: {told}"
+        );
+    }
+}
+
+/// A user whose Auto judge allows everything, over `jira` with the entry set, its agent put in
+/// `mode`.
+fn ready_in(jira: &Jira, mode: &str) -> (User, Mcp) {
+    let user = user(jira).with_allowing_judge().with_env("TZ", ZONE);
+    jira_with(&user, Some("jira-time"));
+    entry(&user);
+    let (mcp, agent) = root_in(&user);
+    user.call("agent.mode", json!({"agent": agent, "mode": mode}))
+        .unwrap();
+    (user, mcp)
+}
+
+/// How many prompts the judge was given.
+fn judged(user: &User) -> usize {
+    user.judge_received()
+        .iter()
+        .filter(|e| e["received"]["method"] == "session/prompt")
+        .count()
+}
+
+#[test]
+fn a_worklog_delete_waits_for_the_user_even_in_full() {
+    let jira = ledger_to_correct();
+    let (user, mcp) = ready_in(&jira, "full");
+
+    let number = held(&mcp.call("tickets", changing("worklog_delete", "ABC-1", "13600")));
+
+    assert_eq!(requests(&user)[0]["class"], "base", "{:?}", requests(&user));
+    assert!(
+        written(&jira).is_empty(),
+        "deleted before the user allowed it"
+    );
+    let done = allow(&user, number);
+    assert!(done.contains("13600"), "{done}");
+    assert_eq!(written(&jira).len(), 1, "{:?}", jira.received());
+    assert_eq!(written(&jira)[0].method, "DELETE");
+}
+
+#[test]
+fn a_worklog_delete_is_never_passed_by_the_judge() {
+    let jira = ledger_to_correct();
+    let (user, mcp) = ready_in(&jira, "auto");
+
+    let number = held(&mcp.call("tickets", changing("worklog_delete", "ABC-1", "13600")));
+
+    assert_eq!(judged(&user), 0, "the judge was asked");
+    assert_eq!(requests(&user)[0]["class"], "base");
+    assert!(written(&jira).is_empty());
+    allow(&user, number);
+}
+
+#[test]
+fn a_worklog_edit_is_allowed_in_full_as_log_time_is() {
+    let jira = ledger_to_correct();
+    let (user, mcp) = ready_in(&jira, "full");
+
+    let done = mcp.call("tickets", changing("worklog_edit", "ABC-1", "13600"));
+
+    assert!(!done.error, "{}", done.text);
+    assert!(requests(&user).is_empty(), "held in Full");
+    assert_eq!(written(&jira).len(), 1, "{:?}", jira.received());
+    assert_eq!(written(&jira)[0].method, "PUT");
+}
+
+#[test]
+fn the_judge_reads_the_card_of_a_worklog_edit() {
+    let jira = ledger_to_correct();
+    let (user, mcp) = ready_in(&jira, "auto");
+
+    let done = mcp.call(
+        "tickets",
+        json!({"action": "worklog_edit", "ticket": "ABC-1", "worklog": "13600",
+            "duration": "2h", "comment": "Reviewed the fix"}),
+    );
+
+    assert!(!done.error, "{}", done.text);
+    let prompts: Vec<String> = user
+        .judge_received()
+        .iter()
+        .filter(|e| e["received"]["method"] == "session/prompt")
+        .map(|e| e["received"]["params"]["prompt"][0]["text"].to_string())
+        .collect();
+    assert_eq!(prompts.len(), 1, "{prompts:?}");
+    for said in [
+        // The worklog as it is, and what it becomes: the lines of the user's card.
+        "It is now: 1h, started 2026-11-06T08:00:00Z",
+        "Pairing on the redirect",
+        "It becomes: 2h, started 2026-11-06T08:00:00Z",
+        "Reviewed the fix",
+    ] {
+        assert!(
+            prompts[0].contains(said),
+            "{said} is not in: {}",
+            prompts[0]
+        );
+    }
+    assert!(!prompts[0].contains(SECRET), "the token is in the prompt");
+}
+
+#[test]
+fn worklog_edit_and_delete_are_refused_on_github() {
+    let jira = Jira::accepting();
+    let user = user(&jira);
+    fixture(&user, json!({"kind": "github", "repository": "."}));
+    let (mcp, _) = root_in(&user);
+
+    for action in ["worklog_edit", "worklog_delete"] {
+        let said = refused_at_once(&user, &mcp, changing(action, "#1", "13600"));
+        assert!(said.contains("GitHub has no worklogs"), "{said}");
+    }
+    assert!(jira.received().is_empty());
+}
+
+#[test]
+fn worklog_edit_and_delete_without_an_entry_say_how_to_add_one() {
+    let jira = ledger_to_correct();
+    let user = zoned(&jira);
+    jira_with(&user, None);
+    let (mcp, _) = root_in(&user);
+
+    for action in ["worklog_edit", "worklog_delete"] {
+        let said = refused_at_once(&user, &mcp, changing(action, "ABC-1", "13600"));
+        assert!(said.contains("worklog_token"), "{said}");
+    }
+    assert!(jira.received().is_empty());
+}
+
+#[test]
+fn a_worklog_edit_and_a_delete_need_their_worklog() {
+    let jira = ledger_to_correct();
+    let (user, mcp) = ready(&jira);
+
+    for args in [
+        json!({"action": "worklog_edit", "ticket": "ABC-1", "duration": "1h"}),
+        json!({"action": "worklog_delete", "ticket": "ABC-1"}),
+        json!({"action": "worklog_delete", "worklog": "13600"}),
+    ] {
+        let said = refused_at_once(&user, &mcp, args);
+        assert!(said.contains("needs"), "{said}");
+    }
+}
+
+#[test]
+fn the_token_never_appears_in_what_is_stored_of_a_worklog_edit() {
+    // A site that reads fine and fails every write, echoing the token and the header back.
+    let jira = Jira::reply(|request| {
+        let path = request.path.split('?').next().unwrap_or_default();
+        match request.method.as_str() {
+            "GET" if path == "/rest/api/3/myself" => (
+                "200 OK",
+                json!({"accountId": MINE, "displayName": "Jane Doe"}).to_string(),
+            ),
+            "GET" if path == "/rest/api/3/issue/ABC-1" => {
+                ("200 OK", json!({"id": "20000", "key": "ABC-1"}).to_string())
+            }
+            "GET" => {
+                let mut worklog = mine("2026-11-06T09:00:00.000+0100", 3_600, None);
+                worklog["issueId"] = "20000".into();
+                ("200 OK", worklog.to_string())
+            }
+            _ => (
+                "401 Unauthorized",
+                json!({"errorMessages": [format!(
+                    "bad credentials {SECRET} ({})", request.authorization
+                )]})
+                .to_string(),
+            ),
+        }
+    });
+    let (user, mcp) = ready(&jira);
+
+    let mut seen = Vec::new();
+    for args in [
+        json!({"action": "worklog_edit", "ticket": "ABC-1", "worklog": "13600",
+            "duration": "2h"}),
+        json!({"action": "worklog_delete", "ticket": "ABC-1", "worklog": "13600"}),
+    ] {
+        let number = held(&mcp.call("tickets", args));
+        seen.push(card_of(&user, number));
+        let failed = allow(&user, number);
+        assert!(failed.contains("401"), "{failed}");
+        seen.push(failed);
+    }
+    seen.push(user.call("vault.list", json!({})).unwrap().to_string());
+    let encoded = basic().strip_prefix("Basic ").unwrap().to_owned();
+    for text in &seen {
+        for forbidden in [SECRET, encoded.as_str()] {
+            assert!(!text.contains(forbidden), "{forbidden} in {text}");
+        }
+    }
+    for forbidden in [SECRET, encoded.as_str()] {
+        assert_eq!(
+            files_holding(&user.path("state"), forbidden),
+            Vec::<PathBuf>::new(),
+            "{forbidden} is stored"
+        );
+    }
 }
