@@ -43,6 +43,9 @@ pub(super) struct Prepared {
 
 static MADE: AtomicU64 = AtomicU64::new(0);
 
+/// Where the refs of a fetch are, in the user's repository, until the place holds the head.
+const REFS: &str = "refs/flottille/review/";
+
 fn not_in(number: u64, from: &str, commits: &[String]) -> Failure {
     Failure::refused(format!(
         "{from} is not a commit of pull request #{number}: it holds {} commit{} after its base",
@@ -87,8 +90,8 @@ pub(super) async fn prepare(
     let place = daemon.paths.reviews().join(&name);
     ensure_private_dir(&daemon.paths.reviews())
         .map_err(|error| Failure::refused(error.to_string()))?;
-    let head_name = format!("refs/flottille/review/{name}-head");
-    let base_name = format!("refs/flottille/review/{name}-base");
+    let head_name = format!("{REFS}{name}-head");
+    let base_name = format!("{REFS}{name}-base");
     let result = fetched(&target, number, from, &place, &head_name, &base_name).await;
     // The refs only carried the fetch: the place holds the head from here on.
     for name in [&head_name, &base_name] {
@@ -297,6 +300,39 @@ pub(super) async fn sweep(daemon: &Daemon, keep: &[String]) {
             Some(repository) => remove(&repository, &place).await,
             None => {
                 let _ = std::fs::remove_dir_all(&place);
+            }
+        }
+    }
+}
+
+/// Deletes the refs of a fetch a daemon that died left in the projects' repositories. They carry a
+/// fetch to its place only, and no review is fetching at the daemon's start: none is held.
+pub(super) async fn sweep_refs(daemon: &Daemon) {
+    for project in crate::projects::all(daemon) {
+        for repository in &project.repositories {
+            let folder = match repository.path.as_str() {
+                "." => project.folder.clone(),
+                path => project.folder.join(path),
+            };
+            if !folder.is_dir() {
+                continue;
+            }
+            let Ok(refs) = git::output(
+                &folder,
+                &["for-each-ref", "--format=%(refname)", REFS],
+                Class::Read,
+            )
+            .await
+            else {
+                continue;
+            };
+            for name in refs.lines().filter(|name| name.starts_with(REFS)) {
+                let _ = git::output(
+                    &folder,
+                    &["update-ref", "-d", "--end-of-options", name],
+                    Class::Read,
+                )
+                .await;
             }
         }
     }

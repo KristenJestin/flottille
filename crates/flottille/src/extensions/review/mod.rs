@@ -1049,7 +1049,7 @@ async fn snapshot(path: &str, folder: &std::path::Path) -> Snapshot {
 
 /// At the daemon's start: the reviews of a pull request whose pilot is gone are failed, and every
 /// place no running review holds is removed, whatever left it (a daemon killed between making a
-/// place and ending its review).
+/// place and ending its review), with the refs of a fetch it left.
 pub async fn close_left_at_start(daemon: &Daemon) {
     let of_pull_requests = || {
         read(daemon, |tables| {
@@ -1064,6 +1064,7 @@ pub async fn close_left_at_start(daemon: &Daemon) {
         .filter_map(|review| review.pull.map(|pull| pull.place))
         .collect();
     pull_request::sweep(daemon, &keep).await;
+    pull_request::sweep_refs(daemon).await;
 }
 
 /// The model an agent of the review runs on: its slot in the project or in Review's tab, else
