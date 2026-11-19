@@ -1490,18 +1490,34 @@ fn reads(pid: u64) -> (u64, u64) {
 }
 
 /// How many times the threads of `pid` gave the processor back or had it taken.
-fn switches(pid: u64) -> u64 {
-    std::fs::read_dir(format!("/proc/{pid}/task"))
+fn switches(pid: u64) -> std::collections::HashMap<String, u64> {
+    let mut threads = std::collections::HashMap::new();
+    for task in std::fs::read_dir(format!("/proc/{pid}/task"))
         .unwrap()
         .flatten()
-        .filter_map(|task| std::fs::read_to_string(task.path().join("status")).ok())
-        .flat_map(|status| {
-            status
-                .lines()
-                .filter(|line| line.contains("ctxt_switches:"))
-                .filter_map(|line| line.split_whitespace().last()?.parse::<u64>().ok())
-                .collect::<Vec<_>>()
-        })
+    {
+        let Ok(status) = std::fs::read_to_string(task.path().join("status")) else {
+            continue;
+        };
+        let count = status
+            .lines()
+            .filter(|line| line.contains("ctxt_switches:"))
+            .filter_map(|line| line.split_whitespace().last()?.parse::<u64>().ok())
+            .sum::<u64>();
+        threads.insert(task.file_name().to_string_lossy().into_owned(), count);
+    }
+    threads
+}
+
+/// The wake-ups between two counts, thread by thread: a thread that ended in between takes its
+/// count with it, so a sum over the whole process could go down.
+fn woken(
+    before: &std::collections::HashMap<String, u64>,
+    after: &std::collections::HashMap<String, u64>,
+) -> u64 {
+    after
+        .iter()
+        .map(|(thread, count)| count.saturating_sub(before.get(thread).copied().unwrap_or(0)))
         .sum()
 }
 
@@ -1519,7 +1535,7 @@ fn at_rest(machine: &Machine) -> (f64, f64, f64) {
     (
         per_second(calls, calls_after),
         per_second(bytes, bytes_after),
-        per_second(woken, woken_after),
+        self::woken(&woken, &woken_after) as f64 / span.as_secs_f64(),
     )
 }
 
