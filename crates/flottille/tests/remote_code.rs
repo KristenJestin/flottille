@@ -72,7 +72,11 @@ impl Machine {
             {
                 return;
             }
-            assert!(Instant::now() < deadline, "{name} is not online\n{}", self.log());
+            assert!(
+                Instant::now() < deadline,
+                "{name} is not online\n{}",
+                self.log()
+            );
             std::thread::sleep(Duration::from_millis(100));
         }
     }
@@ -276,7 +280,10 @@ fn a_repository_with_no_remote_travels_whole_the_first_time() {
     let there = server.folder();
     assert_eq!(server.git(&there, &["remote"]), "");
     assert_eq!(
-        server.git(&there, &["rev-list", "--count", "refs/flottille/incoming/l1^"]),
+        server.git(
+            &there,
+            &["rev-list", "--count", "refs/flottille/incoming/l1^"]
+        ),
         pc.git(&repo, &["rev-list", "--count", "HEAD"])
     );
 }
@@ -308,7 +315,11 @@ fn nothing_is_pushed_and_no_remote_is_contacted() {
     server.travel_back("l1").unwrap();
 
     assert!(!mark.exists(), "a remote was contacted");
-    assert_eq!(pc.git(&bare, &["for-each-ref"]), pushed, "something was pushed");
+    assert_eq!(
+        pc.git(&bare, &["for-each-ref"]),
+        pushed,
+        "something was pushed"
+    );
     assert_eq!(pc.git(&repo, &["for-each-ref", "refs/remotes"]), tracking);
     assert_eq!(server.git(&server.folder(), &["remote"]), "");
 }
@@ -323,7 +334,10 @@ fn the_workspace_on_the_other_machine_has_the_uncommitted_changes_uncommitted() 
 
     let there = folder_of(&sent);
     assert_eq!(sent["branch"], "feat/export");
-    assert_eq!(server.git(&there, &["symbolic-ref", "--short", "HEAD"]), "feat/export");
+    assert_eq!(
+        server.git(&there, &["symbolic-ref", "--short", "HEAD"]),
+        "feat/export"
+    );
     // On the sender's commit, the work on top of it uncommitted and unstaged, the new file
     // untracked.
     assert_eq!(
@@ -376,7 +390,16 @@ fn a_corrupt_bundle_is_refused_and_fetches_nothing() {
         .travel("server", "l2", json!({"corrupt": true}))
         .unwrap_err();
 
-    assert!(refused.contains("the bundle is refused"), "{refused}");
+    // Refused by git, at its verification or its fetch: either way, nothing is fetched.
+    assert!(
+        refused.contains("the bundle is refused") || refused.contains("could not be fetched"),
+        "{refused}"
+    );
+    assert!(
+        !server
+            .git(&there, &["for-each-ref"])
+            .contains("incoming/l2")
+    );
     assert_eq!(server.git(&there, &["for-each-ref"]), refs);
     assert_eq!(
         server.user.call("workspace.list", json!({})).unwrap(),
@@ -434,4 +457,81 @@ fn returned_work_lands_in_the_machines_ref_never_on_the_user_s_branch() {
     assert_eq!(pc.git(&repo, &["for-each-ref", "refs/heads"]), branches);
     assert_eq!(pc.git(&repo, &["rev-parse", "HEAD"]), head);
     assert_eq!(status(&pc, &repo), files);
+}
+
+#[test]
+fn a_machine_the_launch_was_not_sent_to_brings_nothing_back_and_reads_no_bundle() {
+    use flottille_link::{
+        Endpoint, Git, GitFetch, GitOffer, Hello, MachineKey, MachineMessage, Message, PublicKey,
+        Traffic,
+    };
+    let (pc, _server) = pc_and_server();
+    let repo = pc.folder();
+    pc.travel("server", "l1", json!({})).unwrap();
+    let refs = pc.git(&repo, &["for-each-ref"]);
+    // Another machine of the user's, which pc trusts: l1 was sent to the server, not to it.
+    let folder = tempfile::tempdir().unwrap();
+    let key = MachineKey::load_or_make(&folder.path().join("laptop")).unwrap();
+    let file = pc.user.path("state/flottille/remote/peers.json");
+    let mut peers: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    peers["machines"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"name": "laptop", "key": key.public(), "addresses": []}));
+    std::fs::write(&file, peers.to_string()).unwrap();
+    let addresses: Vec<std::net::SocketAddr> = pc
+        .addresses()
+        .iter()
+        .map(|address| address.parse().unwrap())
+        .collect();
+    let pc_key: PublicKey = serde_json::from_value(pc.this()["key"].clone()).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+
+    let (back, fetched) = runtime.block_on(async {
+        let laptop = Endpoint::dialler(&key).unwrap();
+        let deadline = Instant::now() + WAIT;
+        let link = loop {
+            let hello = Hello::ours(env!("CARGO_PKG_VERSION"));
+            match laptop
+                .connect(pc_key, &addresses, Traffic::Machine, &hello, "pc")
+                .await
+            {
+                Ok(link) => break link,
+                Err(error) => assert!(Instant::now() < deadline, "{error}"),
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        };
+        let back = link
+            .send(&Message::Machine(MachineMessage::Git(Git::Offer(
+                GitOffer {
+                    transfer: "l1/back/0".into(),
+                    launch: "l1".into(),
+                    project: "app".into(),
+                    repository: ".".into(),
+                    branch: "feat/export".into(),
+                    size: 1,
+                    sha256: "00".into(),
+                    back: true,
+                },
+            ))))
+            .await;
+        let mut answers = link
+            .ask(&Message::Machine(MachineMessage::Git(Git::Fetch(
+                GitFetch {
+                    transfer: "l1/0".into(),
+                },
+            ))))
+            .await
+            .unwrap();
+        (back, answers.next().await)
+    });
+
+    let refused = back.unwrap_err().to_string();
+    assert!(refused.contains("was not sent to laptop"), "{refused}");
+    let fetched = fetched.unwrap().unwrap_err().to_string();
+    assert!(fetched.contains("no bundle is offered"), "{fetched}");
+    assert_eq!(pc.git(&repo, &["for-each-ref"]), refs);
 }
