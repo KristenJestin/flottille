@@ -214,12 +214,14 @@ pub struct Remote {
     offer_now: tokio::sync::Notify,
     /// Counts the member lists taken: a watch carried for a device looks again whether the
     /// device is still a member.
-    lists: tokio::sync::watch::Sender<u64>,
+    pub(crate) lists: tokio::sync::watch::Sender<u64>,
     /// The bundles offered to another machine, while it reads them (`travel.rs`).
     pub(crate) transfers: crate::travel::Transfers,
     /// The machines this one is reading a bundle from or placing code of, one thing at a time
     /// each (`travel.rs`).
     pub(crate) receiving: crate::travel::Receiving,
+    /// The tunnels this machine carries and serves (`tunnel.rs`).
+    pub(crate) tunnels: crate::tunnel::Tunnels,
 }
 
 /// Starts the link: the endpoint, the loop that accepts and the one that dials. A link that
@@ -324,6 +326,7 @@ impl Remote {
             offered: tokio::sync::watch::Sender::new(None),
             offer_now: tokio::sync::Notify::new(),
             lists: tokio::sync::watch::Sender::new(0),
+            tunnels: crate::tunnel::Tunnels::default(),
             transfers: Default::default(),
             receiving: Default::default(),
         }
@@ -1204,6 +1207,19 @@ async fn serve_clients(remote: Arc<Remote>, link: Link, from: String) {
             link.close(REMOVED);
             break;
         }
+        // A connection of a tunnel opened for this link's machine (`docs/remote.md`, "Tunnels").
+        let received = match received.take_tunnel() {
+            Ok((tunnel, stream)) => {
+                tokio::spawn(crate::tunnel::connection(
+                    remote.clone(),
+                    link.peer(),
+                    tunnel,
+                    stream,
+                ));
+                continue;
+            }
+            Err(received) => received,
+        };
         let Message::Client(request) = received.message().clone() else {
             // Kept apart by the link's protocol name: refused before it gets here.
             received.answer(Err(
@@ -1211,13 +1227,27 @@ async fn serve_clients(remote: Arc<Remote>, link: Link, from: String) {
             ));
             continue;
         };
-        let (remote, from) = (remote.clone(), from.clone());
+        let (remote, from, link) = (remote.clone(), from.clone(), link.clone());
         tokio::spawn(async move {
             let mut answer = received.stream();
             let mut lists = remote.lists.subscribe();
             let gone = answer.gone();
             tokio::pin!(gone);
-            match remote.serve(&request, &from).await {
+            let accepted = match remote.accept(&request) {
+                Ok(accepted) => accepted,
+                Err(refused) => {
+                    let _ = answer.send(&message_bytes(&refused)).await;
+                    answer.end().await;
+                    return;
+                }
+            };
+            // A tunnel is held open by its request, which its own module serves.
+            if accepted.method.starts_with("tunnel.") {
+                crate::tunnel::serve(&remote, &link, accepted, &mut answer, &from).await;
+                answer.end().await;
+                return;
+            }
+            match remote.start(accepted, &from).await {
                 Err(refused) => {
                     let _ = answer.send(&message_bytes(&refused)).await;
                 }
@@ -1321,6 +1351,11 @@ impl Remote {
         self.trusted(key).map(|peer| peer.name)
     }
 
+    /// Emits an event of the daemon's (`docs/events.md`).
+    pub(crate) fn emit(&self, name: &str, data: Value) {
+        (self.emit)(name, data);
+    }
+
     /// The daemon, unless it is stopping.
     pub(crate) fn daemon(&self) -> Option<Arc<Daemon>> {
         self.daemon.get().and_then(std::sync::Weak::upgrade)
@@ -1341,14 +1376,22 @@ impl Remote {
     }
 
     /// `request`, as a link or a client of this machine carried it from the machine `from`:
-    /// checked (`flottille_link::Requests`), then served on a connection of its own as one of a
-    /// local client's, the member that signed it named in the log and in the events its serving
-    /// emits; the refusal, as an answer, otherwise.
+    /// checked (`accept`), then served on a connection of its own (`start`).
     async fn serve(
         &self,
         request: &Value,
         from: &str,
     ) -> Result<Serving, Box<flottille_core::protocol::Message>> {
+        let accepted = self.accept(request)?;
+        self.start(accepted, from).await
+    }
+
+    /// `request` as a link or a client of this machine carried it, checked
+    /// (`flottille_link::Requests`): the refusal, as an answer, otherwise.
+    pub(crate) fn accept(
+        &self,
+        request: &Value,
+    ) -> Result<flottille_link::Accepted, Box<flottille_core::protocol::Message>> {
         use flottille_core::protocol::Message as Answer;
         let id = request["id"].as_str().map(str::to_owned);
         let refused =
@@ -1363,6 +1406,18 @@ impl Remote {
             .unwrap()
             .check(&text, &name, &members, SystemTime::now())
             .map_err(|error| refused(error.to_string()))?;
+        Ok(accepted)
+    }
+
+    /// A request `accept` took, served on a connection of its own as one of a local client's, the
+    /// member that signed it named in the log and in the events its serving emits.
+    async fn start(
+        &self,
+        accepted: flottille_link::Accepted,
+        from: &str,
+    ) -> Result<Serving, Box<flottille_core::protocol::Message>> {
+        use flottille_core::protocol::Message as Answer;
+        let id = Some(accepted.id.clone());
         let daemon = self
             .daemon
             .get()
@@ -1411,7 +1466,7 @@ impl Remote {
 
     /// Whether the device of `key` is a member of the list this machine checked: a list that
     /// cannot be checked says no.
-    async fn still_member(self: &Arc<Self>, key: &PublicKey) -> bool {
+    pub(crate) async fn still_member(self: &Arc<Self>, key: &PublicKey) -> bool {
         let (remote, key) = (self.clone(), *key);
         tokio::task::spawn_blocking(move || {
             remote
@@ -1558,17 +1613,18 @@ pub(crate) async fn forward(
     let message = Message::Client(request.clone());
     // A client link kept may be gone unnoticed: dialled again once.
     let mut tries = 0;
-    let mut answers = loop {
+    let (mut answers, link) = loop {
         tries += 1;
         let asked = match remote.client_link(&peer).await {
             Ok(link) => link
                 .ask(&message)
                 .await
+                .map(|answers| (answers, link))
                 .inspect_err(|_| remote.drop_client(&peer)),
             Err(error) => Err(error),
         };
         match asked {
-            Ok(answers) => break answers,
+            Ok(asked) => break asked,
             Err(_) if tries < 2 => continue,
             Err(why) => {
                 send(error("unavailable", why.to_string())).await;
@@ -1576,6 +1632,11 @@ pub(crate) async fn forward(
             }
         }
     };
+    // A tunnel stays open after its answer, and listens here: its own module carries it.
+    if request["signed"]["method"] == "tunnel.open" {
+        crate::tunnel::carry(&remote, &request, &machine, link, answers, &out).await;
+        return false;
+    }
     let mut answered = false;
     loop {
         match answers.next().await {

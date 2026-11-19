@@ -88,6 +88,8 @@ mod tickets;
 mod titles;
 mod travel;
 mod tree;
+mod tunnel;
+mod tunnel_command;
 mod turn_failures;
 mod update;
 mod vault;
@@ -114,6 +116,7 @@ use crate::remote_command::RemoteAction;
 use crate::runs_command::RunsAction;
 use crate::service_command::ServiceAction;
 use crate::skill_command::SkillAction;
+use crate::tunnel_command::TunnelAction;
 use crate::vault_command::VaultAction;
 use crate::workspace_command::WorkspaceAction;
 
@@ -190,6 +193,12 @@ enum Command {
     Runs {
         #[command(subcommand)]
         action: RunsAction,
+    },
+    /// A run's port on another machine reached on a local port (`--machine`): opened, listed,
+    /// closed
+    Tunnel {
+        #[command(subcommand)]
+        action: TunnelAction,
     },
     /// The services of the machine, shared by every project: listed, written, started, stopped
     Service {
@@ -387,12 +396,17 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         return Ok(extensions::vault_provide(socket));
     }
     let paths = Paths::from_env()?;
+    let machine = flagged.or_else(|| {
+        std::env::var("FLOTTILLE_MACHINE")
+            .ok()
+            .filter(|name| !name.is_empty())
+    });
+    // A tunnel's list and closing are this machine's own: the flag only filters them.
+    let own_tunnels =
+        matches!(&cli.command, Command::Tunnel { action } if tunnel_command::is_local(action));
     if here.is_none()
-        && let Some(machine) = flagged.or_else(|| {
-            std::env::var("FLOTTILLE_MACHINE")
-                .ok()
-                .filter(|name| !name.is_empty())
-        })
+        && !own_tunnels
+        && let Some(machine) = machine.clone()
     {
         client::aim(machine);
     }
@@ -503,6 +517,7 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
             }
         }
         Command::Runs { action } => runs_command::run(&paths, action)?,
+        Command::Tunnel { action } => tunnel_command::run(&paths, action, machine)?,
         Command::Service { action } => service_command::run(&paths, action)?,
         Command::Approvals { json } => approval_command::approvals(&paths, json)?,
         Command::Approve { number, discard } => approval_command::approve(&paths, number, discard)?,

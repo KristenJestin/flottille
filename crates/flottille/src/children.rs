@@ -302,6 +302,15 @@ fn led(pid: u32, scope: Scope, leader: u32) -> bool {
     })
 }
 
+/// The live processes of the session `leader` leads (`in_own_session`), whoever started them
+/// and whatever their group: what a run started, a package manager's script included.
+pub fn session_members(leader: u32) -> Vec<u32> {
+    processes()
+        .into_iter()
+        .filter(|pid| in_session(*pid, leader))
+        .collect()
+}
+
 fn processes() -> Vec<u32> {
     let Ok(entries) = std::fs::read_dir("/proc") else {
         return Vec::new();
