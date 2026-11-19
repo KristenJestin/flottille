@@ -8,7 +8,9 @@
 //! two machines reach each other (a LAN, a VPN, a public address, a tunnel) is the user's.
 
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use quinn::crypto::rustls::{HandshakeData, QuicClientConfig, QuicServerConfig};
@@ -21,6 +23,7 @@ use rustls::pki_types::{
 use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
 use rustls::sign::CertifiedKey;
 use rustls::{DigitallySignedStruct, DistinguishedName, SignatureScheme};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use zeroize::Zeroizing;
 
 /// An Ed25519 public key's SubjectPublicKeyInfo, before its 32 bytes (RFC 8410).
@@ -286,14 +289,59 @@ impl Conn {
     }
 
     /// The next frame the other side sends, with the stream to answer it on; `None` once the
-    /// connection is gone. A stream that fails alone is passed over.
+    /// connection is gone. A stream that fails alone is passed over, and so is a raw one
+    /// (`Conn::next_stream`): this is for a link that carries frames only.
     pub(crate) async fn next(&self, limit: usize) -> Option<(Vec<u8>, Reply)> {
         loop {
-            let (send, mut recv) = self.0.accept_bi().await.ok()?;
-            if let Ok(frame) = recv.read_to_end(limit).await {
-                return Some((frame, Reply(send)));
+            match self.next_stream(limit).await? {
+                Inbound::Frame(frame, reply) => return Some((frame, reply)),
+                Inbound::Raw(raw, _) => raw.refuse(),
             }
         }
+    }
+
+    /// The next stream the other side opens: a frame, read whole, with the stream to answer it
+    /// on, or a raw stream (`Conn::open_raw`) with the line that opened it. `None` once the
+    /// connection is gone. A stream that fails alone is passed over.
+    pub(crate) async fn next_stream(&self, limit: usize) -> Option<Inbound> {
+        loop {
+            let (send, mut recv) = self.0.accept_bi().await.ok()?;
+            let Ok(first) = recv.read_chunk(64 * 1024, true).await else {
+                continue;
+            };
+            let first = first.map(|chunk| chunk.bytes.to_vec()).unwrap_or_default();
+            if first.first() == Some(&RAW) {
+                if let Some(opened) = Raw::opened(send, recv, first).await {
+                    return Some(Inbound::Raw(opened.0, opened.1));
+                }
+                continue;
+            }
+            let Some(room) = limit.checked_sub(first.len()) else {
+                continue;
+            };
+            let Ok(rest) = recv.read_to_end(room).await else {
+                continue;
+            };
+            let mut frame = first;
+            frame.extend_from_slice(&rest);
+            return Some(Inbound::Frame(frame, Reply(send)));
+        }
+    }
+
+    /// Opens a raw, two-way stream, opened by one line (`header`, no newline): what follows it,
+    /// either way, is bytes. A tunnel's connection (`docs/remote.md`, "Tunnels").
+    pub(crate) async fn open_raw(&self, header: &[u8]) -> Result<Raw, Failure> {
+        let (mut send, recv) = self.0.open_bi().await.map_err(failure)?;
+        let mut line = Vec::with_capacity(header.len() + 2);
+        line.push(RAW);
+        line.extend_from_slice(header);
+        line.push(b'\n');
+        send.write_all(&line).await.map_err(write_failure)?;
+        Ok(Raw {
+            send,
+            recv,
+            early: Vec::new(),
+        })
     }
 
     pub(crate) fn close(&self, code: u32, reason: &str) {
@@ -303,6 +351,99 @@ impl Conn {
     /// Waits until the connection is gone; why.
     pub(crate) async fn closed(&self) -> Failure {
         failure(self.0.closed().await)
+    }
+}
+
+/// What opens a raw stream, as the first byte of its opening line: a frame is JSON, and starts
+/// with something else.
+const RAW: u8 = 0;
+/// The longest opening line of a raw stream, newline and marker included.
+const RAW_HEADER: usize = 512;
+
+/// What a stream the other side opened is.
+pub(crate) enum Inbound {
+    /// A frame, read whole, and where to answer it.
+    Frame(Vec<u8>, Reply),
+    /// A raw stream and the line that opened it, marker and newline left out.
+    Raw(Raw, Vec<u8>),
+}
+
+/// A two-way stream of bytes, past its opening line: reads what the other side writes, writes
+/// what it reads. Ending its writing ends what the other side reads.
+pub(crate) struct Raw {
+    send: quinn::SendStream,
+    recv: quinn::RecvStream,
+    /// What came with the opening line, read before the stream is.
+    early: Vec<u8>,
+}
+
+impl Raw {
+    /// The opening line of a stream whose first bytes are `first`, read to its newline; `None`
+    /// when it is too long or the stream failed.
+    async fn opened(
+        send: quinn::SendStream,
+        mut recv: quinn::RecvStream,
+        first: Vec<u8>,
+    ) -> Option<(Raw, Vec<u8>)> {
+        let mut buffer = first;
+        loop {
+            if let Some(at) = buffer.iter().position(|byte| *byte == b'\n') {
+                let early = buffer.split_off(at + 1);
+                buffer.pop();
+                buffer.remove(0);
+                return Some((Raw { send, recv, early }, buffer));
+            }
+            if buffer.len() > RAW_HEADER {
+                return None;
+            }
+            match recv.read_chunk(RAW_HEADER, true).await {
+                Ok(Some(chunk)) => buffer.extend_from_slice(&chunk.bytes),
+                _ => return None,
+            }
+        }
+    }
+
+    /// Ends the stream both ways: the other side's reads and writes fail.
+    pub(crate) fn refuse(mut self) {
+        let _ = self.send.reset(REFUSED.into());
+        let _ = self.recv.stop(REFUSED.into());
+    }
+}
+
+/// The code a raw stream refused is reset with.
+const REFUSED: u32 = 1;
+
+impl AsyncRead for Raw {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        if !self.early.is_empty() {
+            let count = self.early.len().min(buf.remaining());
+            let rest = self.early.split_off(count);
+            buf.put_slice(&std::mem::replace(&mut self.early, rest));
+            return Poll::Ready(Ok(()));
+        }
+        AsyncRead::poll_read(Pin::new(&mut self.recv), cx, buf)
+    }
+}
+
+impl AsyncWrite for Raw {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        AsyncWrite::poll_write(Pin::new(&mut self.send), cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        AsyncWrite::poll_flush(Pin::new(&mut self.send), cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        AsyncWrite::poll_shutdown(Pin::new(&mut self.send), cx)
     }
 }
 

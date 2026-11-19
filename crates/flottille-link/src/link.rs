@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use zeroize::Zeroizing;
 
-use crate::transport::{Conn, Failure, Frames, Reply, Transport};
+use crate::transport::{Conn, Failure, Frames, Inbound, Raw, Reply, Transport};
 use crate::{Hello, MachineKey, NeedsUpdate, PeerState, PublicKey, choose};
 
 /// The longest frame a link takes. Bigger transfers (a git bundle) will have streams of their
@@ -635,7 +635,7 @@ impl Accepting {
 /// A link made: two machines that proved their keys, and a protocol both speak.
 #[derive(Clone)]
 pub struct Link {
-    conn: Conn,
+    pub(crate) conn: Conn,
     peer: PublicKey,
     name: String,
     traffic: Traffic,
@@ -709,10 +709,26 @@ impl Link {
     /// A message of the other kind, or one this side does not know, is refused and passed over.
     pub async fn next(&self) -> Option<Received> {
         loop {
-            let (bytes, reply) = self.conn.next(FRAME_LIMIT).await?;
-            match self.judge(&bytes) {
-                Ok(message) => return Some(Received { message, reply }),
-                Err(reason) => reply.send(&answer(Err(reason))).await,
+            match self.conn.next_stream(FRAME_LIMIT).await? {
+                Inbound::Frame(bytes, reply) => match self.judge(&bytes) {
+                    Ok(message) => {
+                        return Some(Received {
+                            message,
+                            reply: Replying::Frame(reply),
+                        });
+                    }
+                    Err(reason) => reply.send(&answer(Err(reason))).await,
+                },
+                // A tunnel's connection (`docs/remote.md`, "Tunnels"), on a client link only.
+                Inbound::Raw(raw, head) => match (self.traffic, tunnel_of(&head)) {
+                    (Traffic::Client, Some(id)) => {
+                        return Some(Received {
+                            message: Message::Client(serde_json::json!({"tunnel": id})),
+                            reply: Replying::Tunnel(id, raw),
+                        });
+                    }
+                    _ => raw.refuse(),
+                },
             }
         }
     }
@@ -739,7 +755,7 @@ impl Link {
             .map_err(|_| "not a message a machine may send".to_owned())
     }
 
-    fn lost(&self, failure: Failure) -> LinkError {
+    pub(crate) fn lost(&self, failure: Failure) -> LinkError {
         LinkError::Closed(match failure {
             Failure::Closed(reason) => format!("{} closed the link: {reason}", self.name),
             Failure::Lost(why) => format!("the link to {} was lost: {why}", self.name),
@@ -832,7 +848,24 @@ impl Streamed {
 /// A message received, to answer.
 pub struct Received {
     message: Message,
-    reply: Reply,
+    reply: Replying,
+}
+
+/// Where a message is answered: on the stream it came on, or, for a tunnel's connection, that
+/// stream is the connection itself.
+enum Replying {
+    Frame(Reply),
+    Tunnel(String, Raw),
+}
+
+/// The id of the tunnel an opening line names: `{"tunnel": "<id>"}`.
+fn tunnel_of(head: &[u8]) -> Option<String> {
+    match serde_json::from_slice::<Value>(head).ok()? {
+        Value::Object(object) if object.len() == 1 => {
+            object.get("tunnel")?.as_str().map(str::to_owned)
+        }
+        _ => None,
+    }
 }
 
 impl Received {
@@ -840,15 +873,36 @@ impl Received {
         &self.message
     }
 
+    /// The tunnel connection this is, with the id of the tunnel it names, or the message back
+    /// when it is any other.
+    pub fn take_tunnel(self) -> Result<(String, crate::TunnelStream), Received> {
+        match self.reply {
+            Replying::Tunnel(id, raw) => Ok((id, crate::TunnelStream::new(raw))),
+            reply => Err(Received {
+                message: self.message,
+                reply,
+            }),
+        }
+    }
+
     /// Answers it frame by frame: a client's request, whose answer may be followed by events.
     pub fn stream(self) -> Streamed {
-        Streamed(self.reply)
+        match self.reply {
+            Replying::Frame(reply) => Streamed(reply),
+            Replying::Tunnel(..) => unreachable!("a tunnel's connection is taken with take_tunnel"),
+        }
     }
 
     /// Answers it: what it gave, or why it was refused. Within a Tokio runtime.
     pub fn answer(self, answered: Result<Value, String>) {
-        let bytes = answer(answered);
-        tokio::spawn(self.reply.send_owned(bytes));
+        match self.reply {
+            Replying::Frame(reply) => {
+                let bytes = answer(answered);
+                tokio::spawn(reply.send_owned(bytes));
+            }
+            // A connection of a tunnel has no answer to give: it is closed.
+            Replying::Tunnel(_, raw) => raw.refuse(),
+        }
     }
 }
 
