@@ -233,6 +233,25 @@ pub const METHODS: &[(&str, Class)] = &[
     ("test.travel_back", Drive),
 ];
 
+/// The methods that start an agent's process (`docs/remote.md`, "Roles"): a machine whose member
+/// is no runner runs no agent, so it refuses them. Each may start one: `spec.new` when it is
+/// given an idea, `agent.quota_resume` when the reset comes.
+pub const LAUNCHES: &[&str] = &[
+    "agent.start",
+    "agent.run",
+    "agent.resume",
+    "agent.quota_resume",
+    "spec.new",
+    "spec.from_ticket",
+    "spec.develop",
+    "review.start",
+];
+
+/// Whether `method` starts an agent's process.
+pub fn launches(method: &str) -> bool {
+    LAUNCHES.contains(&method)
+}
+
 /// The class of `method`; none for a method the daemon does not answer.
 pub fn class(method: &str) -> Option<Class> {
     METHODS
@@ -277,6 +296,30 @@ mod tests {
             "window.set",
         ] {
             assert_eq!(class(method), Some(Local), "{method}");
+        }
+    }
+
+    #[test]
+    fn every_method_that_starts_an_agent_is_a_launch() {
+        for method in [
+            "agent.start",
+            "agent.run",
+            "agent.resume",
+            "agent.quota_resume",
+            "spec.new",
+            "spec.from_ticket",
+            "spec.develop",
+            "review.start",
+        ] {
+            assert!(launches(method), "{method}");
+        }
+        // A command, a message to a session that runs, a read: no agent starts.
+        for method in ["task.run", "agent.send", "agent.list", "spec.list"] {
+            assert!(!launches(method), "{method}");
+        }
+        // Each launch is a method of the catalogue, and changes something.
+        for method in LAUNCHES {
+            assert_eq!(class(method), Some(Drive), "{method}");
         }
     }
 
