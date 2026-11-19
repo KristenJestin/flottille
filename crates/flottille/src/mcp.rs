@@ -413,11 +413,9 @@ const SERVED: [Definition; 33] = [
             worklogs (Jira: a day's or range's time). \
             Writes, judged, answered at once, the result maybe later: create, comment, reply, edit, close, \
             reopen, status, link, unlink, comment_edit, \
-            comment_delete (both yours only); log_time (Jira), \
-            worklog_edit, worklog_delete (Jira: a worklog of the user's own account, id from worklogs), \
+            comment_delete; log_time, worklog_edit, worklog_delete (Jira), \
             time_spent (this session's, to propose). \
-            Assign only if asked (assignee \"me\": the user; \
-            GitHub: assignees). Jira create: parent, sprint (see sprints), fields. \
+            Assign only if asked. Jira create: parent, sprint (see sprints), fields. \
             Milestones (Jira: versions): milestones, progress; GitHub: milestone_create/_edit. \
             subscribe: a ticket's events wake you until it closes (maybe already); unsubscribe.",
         read_only: false,
