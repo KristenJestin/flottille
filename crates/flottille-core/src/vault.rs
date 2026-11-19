@@ -23,6 +23,10 @@ pub struct Entry {
     /// names it when `None`.
     #[serde(default, rename = "for", skip_serializing_if = "Option::is_none")]
     pub bound: Option<String>,
+    /// The machine of the user's it was shared from: a copy of that machine's entry, not kept in
+    /// sync (`docs/remote.md`, "Vault entries"); `None` for this machine's own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shared_from: Option<String>,
 }
 
 /// The use of the worklog of `project`: the token its tracker logs time with.
@@ -108,7 +112,8 @@ impl Entry {
     /// As every client and tool shows it: its metadata, each field present.
     pub fn to_json(&self) -> Value {
         json!({"name": self.name, "description": self.description, "url": self.url,
-            "username": self.username, "project": self.project, "for": self.bound})
+            "username": self.username, "project": self.project, "for": self.bound,
+            "shared_from": self.shared_from})
     }
 }
 

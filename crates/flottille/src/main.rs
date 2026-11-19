@@ -367,6 +367,17 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         _ => None,
     };
     let flagged = cli.machine.clone().filter(|name| !name.is_empty());
+    // `vault share` is this machine's request: its --machine names where the entry goes.
+    let mut cli = cli;
+    let sharing = if let Command::Vault {
+        action: VaultAction::Share { machine, .. },
+    } = &mut cli.command
+    {
+        *machine = flagged.clone();
+        true
+    } else {
+        false
+    };
     if let (Some(command), Some(_)) = (here, &flagged) {
         return Err(format!(
             "flottille {command} is this machine's own: it drives no other (leave out --machine)"
@@ -387,6 +398,7 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
     }
     let paths = Paths::from_env()?;
     if here.is_none()
+        && !sharing
         && let Some(machine) = flagged.or_else(|| {
             std::env::var("FLOTTILLE_MACHINE")
                 .ok()

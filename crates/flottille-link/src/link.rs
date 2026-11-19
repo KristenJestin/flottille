@@ -87,6 +87,43 @@ pub enum MachineMessage {
     /// Every address the sender may be reached at now, so that the two can link again without
     /// the hub.
     Addresses(Vec<String>),
+    /// A vault entry the user shared with the receiver (`docs/remote.md`, "Vault entries").
+    Share(Share),
+}
+
+/// A vault entry the user shared: their device's signed `vault.share`, which the receiver checks
+/// itself (a machine alone shares nothing), the entry's metadata, and its secret.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Share {
+    /// The user's request, as their device signed it for the machine that holds the entry.
+    pub request: Value,
+    /// The entry's metadata, as the holder's vault lists it.
+    pub entry: Value,
+    pub secret: Secret,
+}
+
+/// A secret on its way to another machine's keyring: zeroized when dropped, and never in its
+/// `Debug`.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Secret(pub Zeroizing<String>);
+
+impl fmt::Debug for Secret {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Secret([masked])")
+    }
+}
+
+impl Serialize for Secret {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for Secret {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Secret, D::Error> {
+        Ok(Secret(Zeroizing::new(String::deserialize(deserializer)?)))
+    }
 }
 
 /// The answer to one message.

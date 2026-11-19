@@ -219,8 +219,16 @@ async fn os() -> Result<oo7::Keyring, String> {
     oo7::Keyring::new().await.map_err(said)
 }
 
+/// What a machine with no keyring says: the vault keeps no secret anywhere else.
+pub const NO_KEYRING: &str = "this machine has no keyring: no Secret Service runs in its \
+                              session (a headless server), and a vault entry is kept in a \
+                              keyring alone, never in a file";
+
 /// A keyring's error, which names what failed and never a secret.
 fn said(error: oo7::Error) -> String {
+    if crate::remote_command::no_service(&error) {
+        return NO_KEYRING.to_owned();
+    }
     format!("the keyring: {error}")
 }
 
@@ -252,6 +260,17 @@ struct Set {
 struct AskDismiss {
     ask: u64,
 }
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ShareWith {
+    name: String,
+    /// The user's machine it goes to.
+    machine: String,
+}
+
+/// What a client that does not sign is answered for `vault.share`.
+pub const NOT_SIGNED: &str = "sharing a vault entry is signed by the user's device: ask it with                               flottille vault share, or from the window's Settings, Vault";
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -293,6 +312,10 @@ pub async fn call(
                 message: masked_of(&failure.message, &given),
                 ..failure
             })
+        }
+        "vault.share" => {
+            let ShareWith { name, machine } = serde_json::from_value(params)?;
+            share(&daemon, &name, &machine).await
         }
         "vault.asks" => {
             let open = daemon.read(asks)?.open;
@@ -403,6 +426,12 @@ async fn set(daemon: &std::sync::Arc<Daemon>, params: Value) -> Result<Value, Fa
     // Which username was masked with the secret: an edit without a secret that changes it must
     // mask the new Basic form too.
     let username_was = existing.as_ref().and_then(|entry| entry.username.clone());
+    // A copy of another machine's entry stays one while its secret is: a new secret makes it this
+    // machine's own.
+    let shared_from = existing
+        .as_ref()
+        .filter(|_| asked.secret.is_none())
+        .and_then(|entry| entry.shared_from.clone());
     let had = existing.and_then(|entry| entry.bound);
     let bound = match (given(asked.bound), had) {
         (Some(new), Some(own)) if new != own => {
@@ -452,6 +481,7 @@ async fn set(daemon: &std::sync::Arc<Daemon>, params: Value) -> Result<Value, Fa
         project,
         updated_at: now_ms(),
         bound,
+        shared_from,
     };
     if let Some(secret) = &asked.secret {
         // Masked before it is kept anywhere, so that nothing written after can hold it.
@@ -479,6 +509,126 @@ async fn set(daemon: &std::sync::Arc<Daemon>, params: Value) -> Result<Value, Fa
         answered(daemon, request, Some(&entry));
     }
     Ok(entry.to_json())
+}
+
+/// The entry `name` sent to the user's machine `machine` (`docs/remote.md`, "Vault entries"): only
+/// as the request the user's device signed, which goes with it for that machine to check; its
+/// secret read from the keyring here and sent with its metadata, in nothing else.
+async fn share(daemon: &Daemon, name: &str, machine: &str) -> Result<Value, Failure> {
+    let asked = crate::daemon::asked()
+        .filter(|asked| {
+            serde_json::from_str::<Value>(&asked.signed)
+                .is_ok_and(|request| request["signed"]["method"] == "vault.share")
+        })
+        .ok_or_else(|| Failure::refused(NOT_SIGNED))?;
+    let Some(entry) = daemon
+        .read(|store| store.vault_entries())?
+        .into_iter()
+        .find(|entry| entry.name == name)
+    else {
+        return Err(Failure::new(
+            "not-found",
+            format!("the vault has no entry {name}"),
+        ));
+    };
+    let secret = daemon
+        .vault
+        .read(name)
+        .await
+        .map_err(unavailable)?
+        .ok_or_else(|| {
+            Failure::refused(format!(
+                "the keyring holds no secret for the vault entry {name}: set it again"
+            ))
+        })?;
+    let secret = zeroize::Zeroizing::new(secret);
+    let mut metadata = entry.to_json();
+    // Where it came from is the receiver's to say: the sender's own name for it.
+    if let Some(object) = metadata.as_object_mut() {
+        object.remove("shared_from");
+    }
+    let message = flottille_link::Share {
+        request: serde_json::from_str(&asked.signed)?,
+        entry: metadata,
+        secret: flottille_link::Secret(secret.clone()),
+    };
+    crate::link::share(daemon, machine, message)
+        .await
+        .map_err(|why| Failure::refused(masked_of(&why, &secret)))?;
+    eprintln!(
+        "flottille daemon: the vault entry {name} was shared with {machine}, asked by {}",
+        asked.device
+    );
+    Ok(json!({"name": name, "machine": machine}))
+}
+
+/// The entry `entry` another machine of the user's, `from`, shared with this one, its user's
+/// request checked already (`link::Remote::shared`): its secret into this machine's keyring, its
+/// metadata into the store, marked as shared from `from`, in place of one of its name. What is
+/// refused is said in a sentence that holds no secret.
+pub async fn receive(
+    daemon: &Daemon,
+    entry: &Value,
+    secret: &str,
+    from: &str,
+) -> Result<(), String> {
+    #[derive(Deserialize)]
+    struct Shared {
+        name: String,
+        description: Option<String>,
+        url: Option<String>,
+        username: Option<String>,
+        project: Option<String>,
+        #[serde(rename = "for")]
+        bound: Option<String>,
+    }
+    let shared: Shared = serde_json::from_value(entry.clone())
+        .map_err(|_| "refused: this is not a vault entry's metadata".to_owned())?;
+    let name = shared.name;
+    if !valid_name(&name) {
+        return Err("refused: this is not a vault entry's name".to_owned());
+    }
+    if secret.chars().count() < VAULT_SHORTEST {
+        return Err(format!(
+            "refused: a secret is {VAULT_SHORTEST} characters at least"
+        ));
+    }
+    // A worklog's entry is its project's: the project must be here for it to log time.
+    if let Some(project) = shared
+        .bound
+        .as_deref()
+        .and_then(|bound| bound.strip_prefix("worklog:"))
+        && crate::projects::load_project(daemon, project).is_err()
+    {
+        return Err(format!(
+            "the vault entry {name} is bound to {}, which is not on this machine: add the \
+             project here first",
+            use_said(shared.bound.as_deref().unwrap_or_default()).unwrap_or_default()
+        ));
+    }
+    // Masked before it is kept anywhere, so that nothing written after can hold it.
+    secrets::add_vault_login(shared.username.as_deref(), secret);
+    daemon
+        .vault
+        .store(&name, secret)
+        .await
+        .map_err(|why| masked_of(&why, secret))?;
+    let entry = Entry {
+        name: name.clone(),
+        description: shared.description,
+        url: shared.url,
+        username: shared.username,
+        project: shared.project,
+        updated_at: now_ms(),
+        bound: shared.bound,
+        shared_from: Some(from.to_owned()),
+    };
+    daemon
+        .write(|store| store.put_vault_entry(&entry))
+        .map_err(|error| error.to_string())?;
+    retool(daemon);
+    eprintln!("flottille daemon: the vault entry {name} was shared from {from}");
+    Ok(())
 }
 
 /// The user's Share of the entry `name` from an agent's connection request: every project's from
@@ -1223,6 +1373,7 @@ mod tests {
             project: project.map(str::to_owned),
             updated_at: 0,
             bound: None,
+            shared_from: None,
         }
     }
 

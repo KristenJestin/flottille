@@ -21,7 +21,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use flottille_core::paths::Paths;
 use flottille_link::{
     Address, Endpoint, Hello, Link, LinkError, MachineKey, MachineMessage, Message, PeerState,
-    PublicKey, Traffic,
+    PublicKey, Share, Traffic,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -728,6 +728,9 @@ impl Remote {
     fn machines(&self) -> Value {
         let key = self.endpoint.key();
         let this = json!({
+            // Its member's name, once it is one: what a client signs a request of this machine's
+            // for (`vault.share`).
+            "name": self.listed().ok().map(|(_, name)| name),
             "key": key,
             "fingerprint": key.fingerprint(),
             "listening": self.endpoint.listening().map(|local| local.to_string()),
@@ -849,6 +852,13 @@ async fn serve(remote: Arc<Remote>, link: Link, name: String, generation: u64) {
             Message::Machine(MachineMessage::Addresses(addresses)) => {
                 remote.told_by(link.peer(), addresses.clone());
                 received.answer(Ok(json!({})));
+            }
+            Message::Machine(MachineMessage::Share(share)) => {
+                let (remote, share, peer) = (remote.clone(), share.clone(), link.peer());
+                tokio::spawn(async move {
+                    let answered = remote.shared(&peer, share).await;
+                    received.answer(answered);
+                });
             }
             // Kept apart by the link's protocol name: a client's request on a machine link is
             // refused before it gets here (`Link::next`).
@@ -1005,7 +1015,10 @@ impl Remote {
         tokio::spawn(crate::daemon::served_for(
             daemon,
             theirs,
-            accepted.device.name.clone(),
+            crate::daemon::Asked {
+                device: accepted.device.name.clone(),
+                signed: text,
+            },
         ));
         let (read, mut write) = ours.into_split();
         let once = accepted.method != "events.watch";
@@ -1061,6 +1074,126 @@ impl Remote {
             link.close("it failed");
         }
     }
+}
+
+impl Remote {
+    /// Why the machine `peer` cannot be sent anything now, when it cannot: what the user sends to
+    /// a machine that is off is refused, never kept.
+    fn offline(&self, peer: &Peer) -> Option<String> {
+        let machine = &peer.name;
+        let seen = self.seen.lock().unwrap();
+        match seen.get(peer.key.as_bytes()) {
+            Some(seen) if seen.link.is_some() => None,
+            Some(seen) if seen.state == PeerState::NeedsUpdate => Some(format!(
+                "{machine} needs an update: {}",
+                seen.reason.clone().unwrap_or_default()
+            )),
+            Some(seen) => Some(format!(
+                "{machine} is offline since {}",
+                time_of_day(seen.since)
+            )),
+            None => Some(format!("{machine} is offline")),
+        }
+    }
+
+    /// A vault entry the user shared, as the machine `peer` sent it: taken only with the user's
+    /// own request, which this machine checks itself as it checks any request of a device (a
+    /// machine alone shares nothing): `vault.share` of that very entry with this machine, signed
+    /// for the machine that sent it, within its time, and never twice.
+    async fn shared(&self, peer: &PublicKey, share: Share) -> Result<Value, String> {
+        let (members, name) = self.listed().map_err(|why| format!("refused: {why}"))?;
+        let from = members
+            .by_machine(peer)
+            .map(|member| member.name.clone())
+            .ok_or_else(|| "refused: this machine is no member's".to_owned())?;
+        let accepted = self
+            .requests
+            .lock()
+            .unwrap()
+            .check(
+                &share.request.to_string(),
+                &from,
+                &members,
+                SystemTime::now(),
+            )
+            .map_err(|error| error.to_string())?;
+        if accepted.method != "vault.share" {
+            return Err(format!(
+                "refused: {} is not the user's share of a vault entry",
+                accepted.method
+            ));
+        }
+        let shown = |value: &Value| {
+            value
+                .as_str()
+                .unwrap_or_default()
+                .chars()
+                .take(64)
+                .collect::<String>()
+                .escape_debug()
+                .to_string()
+        };
+        if accepted.params["machine"].as_str() != Some(name.as_str()) {
+            return Err(format!(
+                "refused: the user shared it with {}, not with {name}",
+                shown(&accepted.params["machine"])
+            ));
+        }
+        if accepted.params["name"] != share.entry["name"] || !share.entry["name"].is_string() {
+            return Err(format!(
+                "refused: the user shared {}, not {}",
+                shown(&accepted.params["name"]),
+                shown(&share.entry["name"])
+            ));
+        }
+        let daemon = self
+            .daemon
+            .get()
+            .and_then(std::sync::Weak::upgrade)
+            .ok_or_else(|| "the daemon is stopping".to_owned())?;
+        crate::vault::receive(&daemon, &share.entry, &share.secret.0, &from).await?;
+        Ok(json!({"name": share.entry["name"]}))
+    }
+}
+
+/// Sends the vault entry the user shared, `share`, to their machine `machine`, a runner, which
+/// checks the user's signature it carries and keeps it: what it answered, or why it is refused.
+pub(crate) async fn share(daemon: &Daemon, machine: &str, share: Share) -> Result<(), String> {
+    let remote = remote_of(daemon).map_err(|failure| failure.message)?;
+    let (members, _) = remote.listed()?;
+    let Some(peer) = remote
+        .peers()
+        .machines
+        .into_iter()
+        .find(|peer| peer.name == machine)
+    else {
+        return Err(format!(
+            "no machine of the user's is named {}",
+            machine.chars().take(64).collect::<String>().escape_debug()
+        ));
+    };
+    if members
+        .by_machine(&peer.key)
+        .is_none_or(|member| member.role != flottille_link::Role::Runner)
+    {
+        return Err(format!(
+            "{machine} runs no agent: a vault entry is shared with a runner"
+        ));
+    }
+    if let Some(offline) = remote.offline(&peer) {
+        return Err(offline);
+    }
+    let link = remote
+        .seen
+        .lock()
+        .unwrap()
+        .get(peer.key.as_bytes())
+        .and_then(|seen| seen.link.as_ref().map(|(_, link, _)| link.clone()))
+        .ok_or_else(|| format!("{machine} is offline"))?;
+    link.send(&Message::Machine(MachineMessage::Share(share)))
+        .await
+        .map(|_| ())
+        .map_err(|error| error.to_string())
 }
 
 /// `since`, milliseconds since the Unix epoch, as the time of day it was here (`22:14`).
@@ -1144,22 +1277,7 @@ pub(crate) async fn forward(
         .await;
         return false;
     };
-    let offline = {
-        let seen = remote.seen.lock().unwrap();
-        match seen.get(peer.key.as_bytes()) {
-            Some(seen) if seen.link.is_some() => None,
-            Some(seen) if seen.state == PeerState::NeedsUpdate => Some(format!(
-                "{machine} needs an update: {}",
-                seen.reason.clone().unwrap_or_default()
-            )),
-            Some(seen) => Some(format!(
-                "{machine} is offline since {}",
-                time_of_day(seen.since)
-            )),
-            None => Some(format!("{machine} is offline")),
-        }
-    };
-    if let Some(offline) = offline {
+    if let Some(offline) = remote.offline(&peer) {
         send(error("unavailable", offline)).await;
         return false;
     }
