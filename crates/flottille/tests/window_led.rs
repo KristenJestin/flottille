@@ -1083,7 +1083,7 @@ fn the_end_confirmation_lists_the_led_sessions_and_their_unsaved_work(cx: &mut T
     settle(cx);
     assert_eq!(
         label(cx, ("sidebar-end-led-".to_owned() + &led).into()).as_deref(),
-        Some("Docs in atlas, uncommitted changes")
+        Some("Session Docs in atlas, uncommitted changes")
     );
     assert_eq!(
         label(cx, "sidebar-end-confirm".into()).as_deref(),
@@ -1142,4 +1142,38 @@ fn a_session_with_no_led_session_lists_none_in_its_end_confirmation(cx: &mut Tes
         label(cx, "sidebar-end-confirm".into()).as_deref(),
         Some("End session")
     );
+}
+
+#[gpui_kit::test]
+fn the_session_page_s_end_confirmation_lists_the_led_sessions_too(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, led) = lead_and_led_with_unsaved_work(&user);
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the led session's row", |cx| {
+        label(cx, session_id(&led)).is_some()
+    });
+    settle(cx);
+    cx.update(|window, cx| window.click(session_id(&lead), cx));
+    until(&shell, cx, "the pilot's page", |cx| {
+        label(cx, "rail-agent-menu".into()).is_some()
+    });
+    settle(cx);
+
+    cx.update(|window, cx| window.click("rail-agent-menu", cx));
+    settle(cx);
+    cx.update(|window, cx| window.click("rail-agent-end", cx));
+    until(&shell, cx, "the led session is listed", |cx| {
+        label(cx, ("session-end-led-".to_owned() + &led).into()).is_some()
+    });
+    assert_eq!(
+        label(cx, ("session-end-led-".to_owned() + &led).into()).as_deref(),
+        Some("Session Docs in atlas, uncommitted changes")
+    );
+
+    cx.update(|window, cx| window.click("session-end-confirm", cx));
+    until(&shell, cx, "both ended", |_| {
+        [&lead, &led].iter().all(|id| {
+            user.call("agent.show", json!({"agent": id})).unwrap()["agent"]["state"] == "ended"
+        })
+    });
 }

@@ -22,6 +22,7 @@ use gpui_kit::{
 };
 
 use crate::actions::Command;
+use crate::end_led::{self, LedEnd};
 use crate::model::{Place, ago};
 use crate::session::end_sentence;
 use crate::session_link::PullRequest;
@@ -262,6 +263,9 @@ pub struct Sidebar {
     ending: Option<(String, usize)>,
     /// The count the confirmation said last, which it still shows while it fades out.
     said: usize,
+    /// The led sessions that end with the session asked, as the daemon read them; they stay while
+    /// the confirmation fades out.
+    led: Vec<LedEnd>,
     /// The sessions asked of the daemon from here: an answer that refuses is said here only for
     /// them (the session's page says its own).
     asked: HashSet<String>,
@@ -278,6 +282,7 @@ impl Sidebar {
             ended: None,
             ending: None,
             said: 0,
+            led: Vec::new(),
             asked: HashSet::new(),
             refused: None,
         }
@@ -310,8 +315,18 @@ impl Sidebar {
     pub fn ask_end(&mut self, session: String, count: usize, cx: &mut Context<Self>) {
         self.ending = Some((session, count));
         self.said = count;
+        self.led.clear();
         self.refused = None;
         cx.notify();
+    }
+
+    /// The daemon read the led sessions ending `session` would end: the confirmation lists them
+    /// if it is still asked for that session.
+    pub fn led_read(&mut self, session: &str, led: Vec<LedEnd>, cx: &mut Context<Self>) {
+        if self.ending() == Some(session) && self.led != led {
+            self.led = led;
+            cx.notify();
+        }
     }
 
     /// The session whose ending is asked.
@@ -438,15 +453,10 @@ impl Render for Sidebar {
                     .child(SharedString::from(end_sentence(count)))
                     .test_support(),
             )
+            .child(end_led::block("sidebar-end", &self.led, cx))
             .action(
-                Button::danger(
-                    "sidebar-end-confirm",
-                    match count {
-                        0 | 1 => "End session".to_owned(),
-                        n => format!("End {n} agents"),
-                    },
-                )
-                .on_click(cx.listener(|this, _, _, cx| this.confirm_end(cx))),
+                Button::danger("sidebar-end-confirm", end_led::end_label(count, &self.led))
+                    .on_click(cx.listener(|this, _, _, cx| this.confirm_end(cx))),
             );
         div()
             .id("sidebar")
