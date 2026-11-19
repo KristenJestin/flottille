@@ -365,6 +365,11 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
             refuse_child(daemon, &agent, "names it, with agent_launch")?;
             crate::titles::rename(daemon, &agent, &asked.title)
         }
+        "agent.ending" => {
+            let asked: AgentName = serde_json::from_value(params)?;
+            let agent = find(daemon, &asked.agent)?;
+            tree::ending(daemon, &agent.id).await
+        }
         "agent.detach" => {
             let asked: AgentName = serde_json::from_value(params)?;
             let mut agent = tree::detach(daemon, &asked.agent)?;

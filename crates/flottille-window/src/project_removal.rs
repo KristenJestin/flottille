@@ -47,7 +47,7 @@ impl WorkspaceLoss {
         self.state != "clean"
     }
 
-    fn state_said(&self) -> &'static str {
+    pub(crate) fn state_said(&self) -> &'static str {
         match self.state.as_str() {
             "clean" => "clean",
             "uncommitted" => "uncommitted changes",

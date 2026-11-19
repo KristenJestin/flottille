@@ -321,6 +321,10 @@ pub enum Command {
     },
     /// Detects the project's repositories again, against its file.
     CheckProject(String),
+    /// The led sessions the end of `session` would end (`agent.ending`), for its confirmation.
+    ReadEnding {
+        session: String,
+    },
     /// What removing the project would do (`project.removal`): read `serial` of its dialog.
     ReadRemoval {
         project: String,
@@ -919,6 +923,11 @@ pub enum Outcome {
     /// The project's repositories detected again (`project.check`), or why not.
     ProjectChecked {
         project: String,
+        read: Result<Value, String>,
+    },
+    /// The led sessions ending `session` would end, or why they cannot be read.
+    EndingRead {
+        session: String,
         read: Result<Value, String>,
     },
     /// What removing the project would do, or why it cannot be read.
@@ -2070,6 +2079,15 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
                 bounds.quick,
             )),
             project,
+        },
+        Command::ReadEnding { session } => Outcome::EndingRead {
+            read: answer(ask_alone(
+                connect,
+                "agent.ending",
+                json!({"agent": session}),
+                bounds.quick,
+            )),
+            session,
         },
         Command::ReadRemoval { project, serial } => Outcome::RemovalRead {
             read: answer(ask_alone(
