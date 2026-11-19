@@ -1320,6 +1320,19 @@ fn run(call: &Call) -> Verdict {
             }
         }
     }
+    // The copy of a pull request a review reads is someone else's code: a line that does more
+    // than read there runs it, which only the user lets a review do, in every mode.
+    if (!reads || files)
+        && let Some(number) = call
+            .paths
+            .first()
+            .and_then(|folder| pull_request_copy(call.own, folder))
+    {
+        found.base(format!(
+            "it runs the code of pull request #{number}, in the copy its review reads: only the \
+             user lets a review run it"
+        ));
+    }
     if let Some((name, command)) = call.command {
         // A service runs in its own folder, never the project's.
         let service = call.tool == "services";
@@ -1406,6 +1419,29 @@ fn run(call: &Call) -> Verdict {
         }
     }
     found.verdict(Kind::Call)
+}
+
+/// The pull request whose copy `folder` is in: a place of Review's in Flottille's data folder,
+/// named after the pull request it holds (`reviews/pr<number>-…`).
+fn pull_request_copy(own: &[PathBuf], folder: &Resolved) -> Option<u64> {
+    let reviews = own.first()?.join("reviews");
+    let real = place::real_path(&reviews).ok();
+    [&folder.path, &folder.written]
+        .into_iter()
+        .find_map(|path| {
+            let rest = path
+                .strip_prefix(&reviews)
+                .ok()
+                .or_else(|| path.strip_prefix(real.as_ref()?).ok())?;
+            rest.iter()
+                .next()?
+                .to_str()?
+                .strip_prefix("pr")?
+                .split('-')
+                .next()?
+                .parse()
+                .ok()
+        })
 }
 
 /// A layer that deletes untracked files: where, the folders its `-C`s go to from the run's, and

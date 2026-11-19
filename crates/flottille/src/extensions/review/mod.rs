@@ -1233,6 +1233,10 @@ fn pull_brief(prepared: &pull_request::Prepared, passes: &[String]) -> String {
          the forge: your findings are delivered to the session that asked for the review, which \
          posts what it chooses.",
     );
+    text.push_str(
+        "\n\nRun none of the pull request's code: no test, no build, no script of it. Read it, \
+         with git in its copy; a command run there waits for the user, in every mode.",
+    );
     text.push_str(&format!(
         "\n\nThe passes you may run, each once: {}; then {VERIFIER} on the candidates.",
         passes.join(", ")
