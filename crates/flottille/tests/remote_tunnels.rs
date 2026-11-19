@@ -1003,7 +1003,7 @@ fn a_v6_listener_beside_a_foreign_v4_one_is_refused() {
     for extra in [&[][..], &["--port", &port.to_string()][..]] {
         let said = refused(pc.on("server", &[&["tunnel", "open", &run], extra].concat()));
         assert!(said.contains("refused:"), "{said}");
-        assert!(said.contains("another process listens"), "{said}");
+        assert!(said.contains("another process"), "{said}");
     }
     assert!(
         foreign.accept().is_err(),

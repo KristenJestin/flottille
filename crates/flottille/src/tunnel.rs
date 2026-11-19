@@ -9,12 +9,14 @@
 //! first frame of the request's stream, and the stream ends when the tunnel does.
 //!
 //! What a tunnel may reach is decided by the machine of the run, never by the one that asks: a run
-//! Flottille started, and a port that run reports as its address or its processes listen on, read
-//! from the system. The check is made again for each connection. No agent's tool opens one, and
+//! Flottille started, and a port its processes listen on, read from the system, that no other
+//! process listens on too; the address the run reports only chooses the port taken when none is
+//! asked for. The check is made again for each connection, and the connection goes to the very
+//! address the run listens on. No agent's tool opens one, and
 //! no machine message carries one: it is a user's request only.
 
-use std::collections::{HashMap, HashSet};
-use std::net::{Ipv4Addr, SocketAddr};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -490,7 +492,7 @@ fn open(
     };
     let reached = reached(reach.pid, reach.url.as_deref());
     let port = match port {
-        Some(port) if reached.allows(port) => port,
+        Some(port) if reached.target(port).is_some() => port,
         Some(port) => {
             return Err(format!(
                 "refused: port {port} is none of run {run}'s: {}",
@@ -572,7 +574,7 @@ fn bytes(message: &impl serde::Serialize) -> Vec<u8> {
 }
 
 /// A connection of a tunnel, opened by the machine `carrier` on its client link: connected to the
-/// port of the run, on `127.0.0.1` and nowhere else, and copied both ways. A connection for a
+/// port of the run, on the loopback address it listens on and nowhere else, and copied both ways. A connection for a
 /// tunnel this machine did not open for that machine is closed with no word, and said in the log.
 pub(crate) async fn connection(
     remote: Arc<Remote>,
@@ -594,21 +596,24 @@ pub(crate) async fn connection(
         return;
     };
     // The port is checked again: the run's own listener may have closed, and another process
-    // taken its port since.
+    // taken its port since. It is connected to the address the run listens on, which is what was
+    // checked, and no other. What is left is the instant between this check and the connection
+    // (`docs/remote.md`, "Tunnels").
     let (pid, url, port) = (served.pid, served.url.clone(), served.port);
-    let allowed = tokio::task::spawn_blocking(move || reached(pid, url.as_deref()).allows(port))
+    let target = tokio::task::spawn_blocking(move || reached(pid, url.as_deref()).target(port))
         .await
-        .unwrap_or(false);
-    if !allowed {
+        .ok()
+        .flatten();
+    let Some(target) = target else {
         eprintln!(
             "flottille daemon: port {port} is no longer one of run {}'s: a connection of tunnel {tunnel} is closed",
             served.run
         );
         return;
-    }
+    };
     let connected = tokio::time::timeout(
         CONNECT_WITHIN,
-        TcpStream::connect(SocketAddr::from((Ipv4Addr::LOCALHOST, port))),
+        TcpStream::connect(SocketAddr::new(target, port)),
     )
     .await;
     let Ok(Ok(mut tcp)) = connected else {
@@ -626,71 +631,133 @@ pub(crate) async fn connection(
 
 /// The ports of a run a tunnel may reach.
 struct Reached {
-    /// The port of the address the run reports, when it has one on this machine.
+    /// The port of the address the run reports, when it is one of this machine: it only chooses
+    /// the default port, and is reachable only if a process of the run listens on it.
     address: Option<u16>,
-    /// The ports its processes listen on, on `127.0.0.1` or on every address.
-    listening: Vec<u16>,
+    /// The ports a process of the run's session listens on, on the loopback or on every address,
+    /// and that no other process listens on: with the address to connect to.
+    listening: BTreeMap<u16, Via>,
+    /// The ports a process of the run listens on that another process listens on too, whatever
+    /// the address: Linux lets `[::1]:22` sit beside `0.0.0.0:22`, so such a port may lead to
+    /// the other one.
+    shared: BTreeSet<u16>,
+}
+
+/// The loopback address a listener is reached on: the family it listens in.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Via {
+    V4,
+    V6,
+}
+
+impl Via {
+    fn address(self) -> IpAddr {
+        match self {
+            Via::V4 => Ipv4Addr::LOCALHOST.into(),
+            Via::V6 => Ipv6Addr::LOCALHOST.into(),
+        }
+    }
+}
+
+/// A socket of `/proc/net/tcp*` that listens.
+#[derive(Debug, PartialEq)]
+struct Listener {
+    port: u16,
+    inode: u64,
+    /// The loopback address that reaches it, when it listens on the loopback or on every
+    /// address; none when it listens on another one, which a connection of ours never reaches.
+    via: Option<Via>,
 }
 
 /// What the run whose session `pid` leads, and that reports `url`, reaches. Reads `/proc`.
 fn reached(pid: u32, url: Option<&str>) -> Reached {
     let inodes = sockets_of(&crate::children::session_members(pid));
-    let mut listening = Vec::new();
+    let mut all = Vec::new();
     for (table, v6) in [("/proc/net/tcp", false), ("/proc/net/tcp6", true)] {
         if let Ok(text) = std::fs::read_to_string(table) {
-            listening.extend(listeners(&text, &inodes, v6));
+            all.extend(listeners(&text, v6));
         }
     }
-    listening.sort_unstable();
-    listening.dedup();
+    reach(url, &inodes, &all)
+}
+
+/// The ports of the run (the sockets `inodes`) among every `listeners` of the machine.
+fn reach(url: Option<&str>, inodes: &HashSet<u64>, listeners: &[Listener]) -> Reached {
+    let mut listening: BTreeMap<u16, Via> = BTreeMap::new();
+    let mut shared = BTreeSet::new();
+    let mut ours = BTreeSet::new();
+    for listener in listeners {
+        if !inodes.contains(&listener.inode) {
+            shared.insert(listener.port);
+            continue;
+        }
+        ours.insert(listener.port);
+        if let Some(via) = listener.via {
+            // Both families: the older, IPv4, is the one to connect to.
+            let kept = listening.entry(listener.port).or_insert(via);
+            if via == Via::V4 {
+                *kept = via;
+            }
+        }
+    }
+    // Only ports the run has a socket on matter in `shared`.
+    shared.retain(|port| ours.contains(port));
+    listening.retain(|port, _| !shared.contains(port));
     Reached {
         address: url.and_then(address_port),
         listening,
+        shared,
     }
 }
 
 impl Reached {
-    fn allows(&self, port: u16) -> bool {
-        self.address == Some(port) || self.listening.contains(&port)
+    /// The address to connect to for `port`, when the run may be reached there: a process of its
+    /// session listens on it and no other process does.
+    fn target(&self, port: u16) -> Option<IpAddr> {
+        self.listening.get(&port).map(|via| via.address())
     }
 
-    /// The port to take when none was asked for: the address's, or the only one listened on.
+    /// The port to take when none was asked for: the address's when the run listens on it, the
+    /// only one it listens on otherwise.
     fn only(&self) -> Result<u16, String> {
-        if let Some(port) = self.address {
+        if let Some(port) = self.address
+            && self.listening.contains_key(&port)
+        {
             return Ok(port);
         }
-        match self.listening.as_slice() {
-            [port] => Ok(*port),
-            [] => Err("it reports no address and listens on no port yet".to_owned()),
-            several => Err(format!(
+        let mut ports = self.listening.keys();
+        match (ports.next(), ports.next()) {
+            (Some(port), None) => Ok(*port),
+            (None, _) if !self.shared.is_empty() => Err(format!(
+                "its ports are shared with another process ({})",
+                list(self.shared.iter())
+            )),
+            (None, _) => Err("it listens on no port yet".to_owned()),
+            _ => Err(format!(
                 "it listens on several ports ({}): say which with --port",
-                several
-                    .iter()
-                    .map(u16::to_string)
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                list(self.listening.keys())
             )),
         }
     }
 
     /// What is reachable, for a refusal.
     fn said(&self, run: &str) -> String {
-        let mut ports: Vec<u16> = self.listening.clone();
-        ports.extend(self.address);
-        ports.sort_unstable();
-        ports.dedup();
-        match ports.as_slice() {
-            [] => "it reports no address and listens on no port".to_owned(),
-            ports => format!(
-                "run {run} reaches {}",
-                ports
-                    .iter()
-                    .map(u16::to_string)
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
+        let mut said = match self.listening.len() {
+            0 => format!("run {run} listens on no port"),
+            _ => format!("run {run} reaches {}", list(self.listening.keys())),
+        };
+        if !self.shared.is_empty() {
+            said.push_str(&format!(
+                "; another process listens on {} too, which is refused",
+                list(self.shared.iter())
+            ));
         }
+        said
     }
+}
+
+fn list<'a>(ports: impl Iterator<Item = &'a u16>) -> String {
+    ports.map(u16::to_string).collect::<Vec<_>>().join(", ")
 }
 
 /// The port of an address a run reports (`http://localhost:3000/`) when it is one of this machine:
@@ -736,18 +803,21 @@ fn sockets_of(pids: &[u32]) -> HashSet<u64> {
     inodes
 }
 
-/// The ports a table of `/proc/net/tcp` (`v6`: `tcp6`) lists as listening, on `127.0.0.1` or on
-/// every address, whose socket is one of `inodes`.
-fn listeners(table: &str, inodes: &HashSet<u64>, v6: bool) -> Vec<u16> {
-    // Little-endian words, as the kernel prints them: 127.0.0.1, ::1, ::, and 127.0.0.1 mapped.
+/// Every socket a table of `/proc/net/tcp` (`v6`: `tcp6`) lists as listening, on whatever
+/// address.
+fn listeners(table: &str, v6: bool) -> Vec<Listener> {
+    // Little-endian words, as the kernel prints them. IPv4: 127.0.0.1 and 0.0.0.0. IPv6: ::1 and
+    // `::` reach through [::1]; 127.0.0.1 and 0.0.0.0 mapped through 127.0.0.1.
     const HERE: [&str; 2] = ["0100007F", "00000000"];
-    const HERE6: [&str; 4] = [
+    const HERE6: [&str; 2] = [
         "00000000000000000000000001000000",
         "00000000000000000000000000000000",
+    ];
+    const MAPPED: [&str; 2] = [
         "0000000000000000FFFF00000100007F",
         "0000000000000000FFFF000000000000",
     ];
-    let mut ports = Vec::new();
+    let mut found = Vec::new();
     for line in table.lines().skip(1) {
         let fields: Vec<&str> = line.split_whitespace().collect();
         // `local_address`, `st` (0A listens) and `inode`.
@@ -758,19 +828,22 @@ fn listeners(table: &str, inodes: &HashSet<u64>, v6: bool) -> Vec<u16> {
         let Some((host, port)) = local.split_once(':') else {
             continue;
         };
-        let here = if v6 {
-            HERE6.contains(&host)
-        } else {
-            HERE.contains(&host)
-        };
         let (Ok(port), Ok(inode)) = (u16::from_str_radix(port, 16), inode.parse::<u64>()) else {
             continue;
         };
-        if *state == "0A" && here && inodes.contains(&inode) {
-            ports.push(port);
+        if *state != "0A" {
+            continue;
         }
+        let via = if !v6 && HERE.contains(&host) || v6 && MAPPED.contains(&host) {
+            Some(Via::V4)
+        } else if v6 && HERE6.contains(&host) {
+            Some(Via::V6)
+        } else {
+            None
+        };
+        found.push(Listener { port, inode, via });
     }
-    ports
+    found
 }
 
 #[cfg(test)]
@@ -819,30 +892,88 @@ mod tests {
 
     #[test]
     fn only_the_listening_sockets_of_the_run_s_processes_on_the_loopback_count() {
-        let ours: HashSet<u64> = [111, 222].into();
-        // 0BB8 = 3000 and 1F90 = 8080; 22 is another process's, 6000 is connected, not
-        // listening, and 9000 listens on a LAN address.
-        assert_eq!(listeners(TABLE, &ours, false), vec![3000, 8080]);
-        assert!(listeners(TABLE, &HashSet::new(), false).is_empty());
+        let all = listeners(TABLE, false);
+        // Listening sockets only: 3000, 8080, 22 and 9000 (a LAN address); 6000 is connected.
+        let ports: Vec<u16> = all.iter().map(|listener| listener.port).collect();
+        assert_eq!(ports, vec![3000, 8080, 22, 9000]);
+        let reach = reach_of(None, &[111, 222], &all);
+        // 22 is another process's, and 9000 listens on a LAN address: no address of ours
+        // reaches it.
+        assert_eq!(
+            reach.listening.keys().copied().collect::<Vec<_>>(),
+            [3000, 8080]
+        );
+        assert_eq!(reach.target(3000), Some(Ipv4Addr::LOCALHOST.into()));
+        assert_eq!(reach.target(22), None);
+        assert_eq!(reach.target(9000), None);
         let v6 = "  sl  local_address rem_address st tx rx tr tm retr uid timeout inode\n\
             0: 00000000000000000000000001000000:2328 00000000000000000000000000000000:0000 0A 0:0 0:0 0 1000 0 444 1\n\
-            1: 0000000000000000FFFF0000C0A80001:2329 00000000000000000000000000000000:0000 0A 0:0 0:0 0 1000 0 444 1\n";
-        assert_eq!(listeners(v6, &[444].into(), true), vec![9000]);
+            1: 0000000000000000FFFF0000C0A80001:2329 00000000000000000000000000000000:0000 0A 0:0 0:0 0 1000 0 444 1\n\
+            2: 0000000000000000FFFF00000100007F:232A 00000000000000000000000000000000:0000 0A 0:0 0:0 0 1000 0 444 1\n";
+        let reach = reach_of(None, &[444], &listeners(v6, true));
+        // ::1 is reached on [::1], a mapped 127.0.0.1 on 127.0.0.1, a mapped LAN address not.
+        assert_eq!(reach.target(9000), Some(Ipv6Addr::LOCALHOST.into()));
+        assert_eq!(reach.target(9002), Some(Ipv4Addr::LOCALHOST.into()));
+        assert_eq!(reach.target(9001), None);
+    }
+
+    fn reach_of(url: Option<&str>, inodes: &[u64], all: &[Listener]) -> Reached {
+        reach(url, &inodes.iter().copied().collect(), all)
+    }
+
+    fn on(port: u16, inode: u64, via: Option<Via>) -> Listener {
+        Listener { port, inode, via }
     }
 
     #[test]
-    fn a_port_is_reached_by_the_address_or_by_a_listener_and_none_is_chosen_for_many() {
-        let reach = |address, listening: &[u16]| Reached {
-            address,
-            listening: listening.to_vec(),
-        };
-        assert!(reach(Some(3000), &[]).allows(3000));
-        assert!(reach(None, &[8080]).allows(8080));
-        assert!(!reach(Some(3000), &[8080]).allows(22));
-        assert_eq!(reach(Some(3000), &[8080]).only(), Ok(3000));
-        assert_eq!(reach(None, &[8080]).only(), Ok(8080));
-        assert!(reach(None, &[1, 2]).only().unwrap_err().contains("--port"));
-        assert!(reach(None, &[]).only().is_err());
+    fn a_port_a_foreign_process_listens_on_too_is_refused_whatever_the_address() {
+        // The run's [::1]:3000 (inode 1), and another process's 127.0.0.1:3000 (inode 2): a
+        // connection to either address of the port may reach the other.
+        let all = [
+            on(3000, 1, Some(Via::V6)),
+            on(3000, 2, Some(Via::V4)),
+            on(4000, 1, Some(Via::V6)),
+            on(5000, 3, None),
+        ];
+        let reach = reach_of(Some("http://[::1]:3000"), &[1], &all);
+        assert_eq!(reach.target(3000), None);
+        // Its other port is its own, on [::1]; a port of another process alone is none of its.
+        assert_eq!(reach.target(4000), Some(Ipv6Addr::LOCALHOST.into()));
+        assert_eq!(reach.target(5000), None);
+        assert!(
+            reach
+                .said("r1")
+                .contains("another process listens on 3000 too")
+        );
+        // The address's port is no default while it is shared.
+        assert_eq!(reach.only(), Ok(4000));
+        let alone = reach_of(Some("http://[::1]:3000"), &[1], &all[..1]);
+        assert_eq!(alone.only(), Ok(3000));
+        assert_eq!(alone.target(3000), Some(Ipv6Addr::LOCALHOST.into()));
+    }
+
+    #[test]
+    fn a_run_s_address_chooses_a_port_but_is_reached_only_where_the_run_listens() {
+        // The address says 22, the run listens on nothing there: it is no port of the run.
+        let listening = [on(8080, 1, Some(Via::V4))];
+        let reach = reach_of(Some("http://127.0.0.1:22"), &[1], &listening);
+        assert_eq!(reach.target(22), None);
+        assert_eq!(reach.only(), Ok(8080));
+        let nothing = reach_of(Some("http://127.0.0.1:22"), &[1], &[]);
+        assert_eq!(nothing.target(22), None);
+        assert!(nothing.only().is_err());
+        // With several, the address's wins; with none by the address, none is chosen.
+        let two = [on(1, 1, Some(Via::V4)), on(2, 1, Some(Via::V4))];
+        assert_eq!(
+            reach_of(Some("http://localhost:2"), &[1], &two).only(),
+            Ok(2)
+        );
+        assert!(
+            reach_of(None, &[1], &two)
+                .only()
+                .unwrap_err()
+                .contains("--port")
+        );
     }
 
     #[test]
