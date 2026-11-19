@@ -2569,10 +2569,6 @@ fn a_pull_request_is_checked_out_without_the_user_s_filters() {
             &app,
             &["config", &format!("filter.{driver}.smudge"), &smudge],
         );
-        user.git(
-            &app,
-            &["config", &format!("filter.{driver}.required"), "true"],
-        );
     }
     let _ = std::fs::remove_file(&marker);
     let (lead, mcp) = lead(&user);
