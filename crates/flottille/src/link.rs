@@ -1478,10 +1478,17 @@ impl Remote {
     /// for the machine that sent it, within its time, and never twice.
     async fn shared(&self, peer: &PublicKey, share: Share) -> Result<Value, String> {
         let (members, name) = self.listed().map_err(|why| format!("refused: {why}"))?;
-        let from = members
+        let sender = members
             .by_machine(peer)
-            .map(|member| member.name.clone())
             .ok_or_else(|| "refused: this machine is no member's".to_owned())?;
+        let from = sender.name.clone();
+        // As code (`travel`): a viewer's machine sends nothing the user decided, whoever signed.
+        if sender.role == Role::Viewer {
+            return Err(format!(
+                "refused: {from} is a viewer's machine: only a runner's or a controller's \
+                 machine shares a vault entry"
+            ));
+        }
         let accepted = self
             .requests
             .lock()
