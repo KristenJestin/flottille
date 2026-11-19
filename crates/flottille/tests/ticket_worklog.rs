@@ -671,7 +671,16 @@ fn utc_day(started: &str) -> String {
 /// and `maxResults` with at most `page` worklogs at a time, and keeps to `startedAfter` and
 /// `startedBefore` when it is given them.
 fn ledger(items: Vec<(&'static str, &'static str, Vec<Value>)>, cut: bool, page: usize) -> Jira {
+    ledger_over(Arc::new(Mutex::new(items)), cut, page)
+}
+
+/// The work items of a `ledger` a test may change while the site runs.
+type Items = Arc<Mutex<Vec<(&'static str, &'static str, Vec<Value>)>>>;
+
+/// A `ledger` over items that are read at each request: a test changes them between two.
+fn ledger_over(state: Items, cut: bool, page: usize) -> Jira {
     Jira::reply(move |request| {
+        let items = state.lock().unwrap().clone();
         let path = request.path.split('?').next().unwrap_or_default();
         // One worklog of an item (`/issue/<KEY>/worklog/<id>`): read, changed or deleted. A
         // worklog that is not on that item is a 404, as it is on the site.
@@ -1413,35 +1422,37 @@ fn a_refused_worklogs_offers_to_set_up_time_logging() {
 /// A site with the account's hour on ABC-1 (worklog 13600), somebody else's half hour on it
 /// (11800), and the account's 45 minutes on ABC-2 (12700).
 fn ledger_to_correct() -> Jira {
-    ledger(
-        vec![
-            (
-                "ABC-1",
-                "Fix the login redirect",
-                vec![
-                    mine(
-                        "2026-11-06T09:00:00.000+0100",
-                        3_600,
-                        Some("Pairing on the redirect"),
-                    ),
-                    logged(
-                        OTHER,
-                        "John Roe",
-                        "2026-11-06T10:00:00.000+0100",
-                        1_800,
-                        None,
-                    ),
-                ],
-            ),
-            (
-                "ABC-2",
-                "Add the natures",
-                vec![mine("2026-11-06T14:00:00.000+0100", 2_700, None)],
-            ),
-        ],
-        false,
-        100,
-    )
+    ledger_to_change().0
+}
+
+/// `ledger_to_correct`, with its items for a test to change while the site runs.
+fn ledger_to_change() -> (Jira, Items) {
+    let items: Items = Arc::new(Mutex::new(vec![
+        (
+            "ABC-1",
+            "Fix the login redirect",
+            vec![
+                mine(
+                    "2026-11-06T09:00:00.000+0100",
+                    3_600,
+                    Some("Pairing on the redirect"),
+                ),
+                logged(
+                    OTHER,
+                    "John Roe",
+                    "2026-11-06T10:00:00.000+0100",
+                    1_800,
+                    None,
+                ),
+            ],
+        ),
+        (
+            "ABC-2",
+            "Add the natures",
+            vec![mine("2026-11-06T14:00:00.000+0100", 2_700, None)],
+        ),
+    ]));
+    (ledger_over(items.clone(), false, 100), items)
 }
 
 /// A user over `jira` with the entry set, and the client of the root agent's tools.
@@ -1669,6 +1680,69 @@ fn the_card_shows_the_worklog_as_it_is_and_what_it_becomes() {
         written(&jira).is_empty(),
         "written before the user allowed it"
     );
+}
+
+/// What the user is told when what they allowed is not done: the answer the agent is handed.
+fn not_done(jira: &Jira, user: &User, number: u64) -> String {
+    let told = allow(user, number);
+    assert!(
+        written(jira).is_empty(),
+        "written though the worklog changed: {:?}",
+        written(jira)
+    );
+    told
+}
+
+#[test]
+fn a_worklog_changed_between_the_card_and_the_allow_is_not_written() {
+    for action in ["worklog_edit", "worklog_delete"] {
+        let (jira, items) = ledger_to_change();
+        let (user, mcp) = ready(&jira);
+        let number = held(&mcp.call("tickets", changing(action, "ABC-1", "13600")));
+
+        // Somebody changes its time in Jira after the card was shown.
+        items.lock().unwrap()[0].2[0]["timeSpentSeconds"] = 1_800.into();
+        items.lock().unwrap()[0].2[0]["timeSpent"] = "30m".into();
+
+        let told = not_done(&jira, &user, number);
+        assert!(told.contains("changed since"), "{action}: {told}");
+        assert!(told.contains("30m"), "{action}: {told}");
+    }
+}
+
+#[test]
+fn a_worklog_deleted_between_the_card_and_the_allow_is_not_written() {
+    for action in ["worklog_edit", "worklog_delete"] {
+        let (jira, items) = ledger_to_change();
+        let (user, mcp) = ready(&jira);
+        let number = held(&mcp.call("tickets", changing(action, "ABC-1", "13600")));
+
+        items.lock().unwrap()[0].2.remove(0);
+
+        let told = not_done(&jira, &user, number);
+        assert!(
+            told.contains("ABC-1 has no worklog 13600"),
+            "{action}: {told}"
+        );
+    }
+}
+
+#[test]
+fn a_worklog_whose_author_changed_between_the_card_and_the_allow_is_not_written() {
+    for action in ["worklog_edit", "worklog_delete"] {
+        let (jira, items) = ledger_to_change();
+        let (user, mcp) = ready(&jira);
+        let number = held(&mcp.call("tickets", changing(action, "ABC-1", "13600")));
+
+        items.lock().unwrap()[0].2[0]["author"] =
+            json!({"accountId": OTHER, "displayName": "John Roe"});
+
+        let told = not_done(&jira, &user, number);
+        assert!(
+            told.contains("John Roe's, not your account's"),
+            "{action}: {told}"
+        );
+    }
 }
 
 #[test]
