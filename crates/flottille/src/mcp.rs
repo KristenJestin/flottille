@@ -2437,6 +2437,7 @@ async fn played_in(
                                             tool,
                                             &args,
                                             &ask.reasons,
+                                            &says,
                                         )
                                         .await;
                                         let judgement = judged.judgement.clone();
