@@ -14,10 +14,12 @@ use std::time::{Duration, SystemTime};
 
 use common::User;
 use common::mcp::{Mcp, server_of};
-use flottille_link::{DeviceKey, Endpoint, Hello, MachineKey, Message, PublicKey, Request, Traffic};
+use flottille_link::{
+    DeviceKey, Endpoint, Hello, MachineKey, Message, PublicKey, Request, Traffic,
+};
 use remote::{
-    Machine, NoKeyring, WAIT, error_of, eventually, json_of, pair, pc_and_server,
-    pc_and_server_on, signed,
+    Machine, NoKeyring, WAIT, error_of, eventually, json_of, pair, pc_and_server, pc_and_server_on,
+    signed,
 };
 use serde_json::{Value, json};
 
