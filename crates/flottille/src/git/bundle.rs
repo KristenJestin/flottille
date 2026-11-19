@@ -632,7 +632,7 @@ mod tests {
         let file = receiver.with_extension("bundle");
         let bundled = outgoing(sender, launch, &[], &file).await.unwrap();
         assert_eq!(bundled, Bundled::Written);
-        let received = clone(receiver, &file, launch).await.unwrap();
+        let received = clone(receiver, &file, "pc", launch).await.unwrap();
         assert_eq!(received.snapshot, snapshot.commit);
         assert_eq!(received.tip, snapshot.head);
         make_workspace(receiver, &snapshot.branch, &received, worktree).await;
@@ -767,7 +767,7 @@ mod tests {
         // The receiver had the first commit: the bundle starts past it, the unknown id left out.
         assert_eq!(prerequisites(&file), std::slice::from_ref(&first));
         let before = objects(&receiver);
-        let received = receive(&receiver, &file, "l2").await.unwrap();
+        let received = receive(&receiver, &file, "pc", "l2").await.unwrap();
         assert_ne!(objects(&receiver), before);
         assert_eq!(
             git(
@@ -800,11 +800,81 @@ mod tests {
 
         assert!(prerequisites(&file).is_empty());
         let receiver = dir.path().join("receiver");
-        let received = clone(&receiver, &file, "l1").await.unwrap();
+        let received = clone(&receiver, &file, "pc", "l1").await.unwrap();
         assert_eq!(git(&receiver, &["rev-list", "--count", &received.tip]), "3");
         assert_eq!(received.tip, git(&sender, &["rev-parse", "HEAD"]));
         // Made from the bundle alone: it names no remote.
         assert_eq!(git(&receiver, &["remote"]), "");
+    }
+
+    #[tokio::test]
+    async fn a_launch_of_one_machine_never_lands_on_the_same_launch_of_another() {
+        let dir = tempfile::tempdir().unwrap();
+        let sender = repository(dir.path());
+        snapshot(&sender, "l1").await.unwrap();
+        let first = dir.path().join("first.bundle");
+        outgoing(&sender, "l1", &[], &first).await.unwrap();
+        let receiver = dir.path().join("receiver");
+        let from_pc = clone(&receiver, &first, "pc", "l1").await.unwrap();
+        // Another machine's launch of the same name, of other work.
+        let other = dir.path().join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        git(&other, &["clone", "--quiet", sender.to_str().unwrap(), "."]);
+        commit(&other, "c.txt", "c\n");
+        snapshot(&other, "l1").await.unwrap();
+        let second = dir.path().join("second.bundle");
+        outgoing(&other, "l1", &[], &second).await.unwrap();
+
+        let from_laptop = receive(&receiver, &second, "laptop", "l1").await.unwrap();
+
+        assert_ne!(from_pc.snapshot, from_laptop.snapshot);
+        assert_eq!(
+            git(&receiver, &["rev-parse", &incoming_ref("pc", "l1")]),
+            from_pc.snapshot
+        );
+        assert_eq!(
+            git(&receiver, &["rev-parse", &incoming_ref("laptop", "l1")]),
+            from_laptop.snapshot
+        );
+        assert_eq!(incoming_ref("pc", "l1"), "refs/flottille/incoming/pc/l1");
+    }
+
+    #[tokio::test]
+    async fn an_object_git_finds_malformed_is_refused_and_fetches_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let sender = repository(dir.path());
+        // A commit whose author has no email in angle brackets: git reads it, fsck refuses it.
+        let tree = git(&sender, &["rev-parse", "HEAD^{tree}"]);
+        let parent = git(&sender, &["rev-parse", "HEAD"]);
+        let text = format!(
+            "tree {tree}\nparent {parent}\nauthor Ada ada.example.invalid 0 +0000\n\
+             committer Ada <ada@example.invalid> 0 +0000\n\nmalformed\n"
+        );
+        let object = sender.join("malformed");
+        std::fs::write(&object, text).unwrap();
+        let malformed = git(
+            &sender,
+            &[
+                "hash-object",
+                "--literally",
+                "-t",
+                "commit",
+                "-w",
+                "malformed",
+            ],
+        );
+        std::fs::remove_file(&object).unwrap();
+        git(&sender, &["update-ref", &outgoing_ref("l1"), &malformed]);
+        let file = dir.path().join("l1.bundle");
+        outgoing(&sender, "l1", &[], &file).await.unwrap();
+        let receiver = dir.path().join("receiver");
+        std::fs::create_dir_all(&receiver).unwrap();
+        git(&receiver, &["init", "--quiet"]);
+
+        let refused = receive(&receiver, &file, "pc", "l1").await;
+
+        assert!(refused.is_err(), "{refused:?}");
+        assert_eq!(refs(&receiver), "");
     }
 
     #[tokio::test]
@@ -832,7 +902,7 @@ mod tests {
         returning(&receiver, &snapshot.branch, &[snapshot.commit], &back)
             .await
             .unwrap();
-        fetch_returned(&sender, &back, "server", &snapshot.branch)
+        fetch_returned(&sender, &back, "server", "l1", &snapshot.branch)
             .await
             .unwrap();
 
@@ -898,7 +968,7 @@ mod tests {
         snapshot(&sender, "l2").await.unwrap();
         let file = dir.path().join("l2.bundle");
         outgoing(&sender, "l2", &[], &file).await.unwrap();
-        let received = receive(&receiver, &file, "l2").await.unwrap();
+        let received = receive(&receiver, &file, "pc", "l2").await.unwrap();
         let w2 = dir.path().join("w2");
         let second = make_workspace(&receiver, "feature", &received, &w2).await;
 
@@ -919,7 +989,7 @@ mod tests {
         travel(&sender, "l1", &receiver, &dir.path().join("w1")).await;
         commit(&sender, "c2.txt", "2\n".repeat(4096).as_str());
         snapshot(&sender, "l2").await.unwrap();
-        let tip = git(&receiver, &["rev-parse", &incoming_ref("l1")]);
+        let tip = git(&receiver, &["rev-parse", &incoming_ref("pc", "l1")]);
         let whole = dir.path().join("whole.bundle");
         outgoing(&sender, "l2", &[], &whole).await.unwrap();
         let past = dir.path().join("past.bundle");
@@ -947,14 +1017,14 @@ mod tests {
         ] {
             let (refs_before, objects_before) = (refs(repo), objects(repo));
 
-            let refused = receive(repo, file, "l2").await;
+            let refused = receive(repo, file, "pc", "l2").await;
 
             assert!(refused.is_err(), "{} was taken", file.display());
             assert_eq!(refs(repo), refs_before, "{}", file.display());
             assert_eq!(objects(repo), objects_before, "{}", file.display());
         }
         let new = dir.path().join("new");
-        assert!(clone(&new, &past, "l2").await.is_err());
+        assert!(clone(&new, &past, "pc", "l2").await.is_err());
         assert!(!new.exists(), "a refused clone leaves no folder");
         assert!(verify(&stranger, &past).await.is_err());
     }
@@ -989,7 +1059,7 @@ mod tests {
 
         assert_eq!(bundled, Bundled::Written);
         assert_eq!(prerequisites(&back), std::slice::from_ref(&snapshot.head));
-        let landed = fetch_returned(&sender, &back, "server", "feature")
+        let landed = fetch_returned(&sender, &back, "server", "l1", "feature")
             .await
             .unwrap();
         assert_eq!(git(&sender, &["rev-parse", &landed]), tip);
@@ -1031,7 +1101,7 @@ mod tests {
             ("server", "a..b"),
             ("server", "a:b"),
         ] {
-            let refused = fetch_returned(&sender, &back, machine, branch).await;
+            let refused = fetch_returned(&sender, &back, machine, "l1", branch).await;
             assert!(refused.is_err(), "{machine} {branch} was taken");
         }
         assert_eq!(
@@ -1039,11 +1109,11 @@ mod tests {
             ""
         );
 
-        let landed = fetch_returned(&sender, &back, "server", "feature")
+        let landed = fetch_returned(&sender, &back, "server", "l1", "feature")
             .await
             .unwrap();
 
-        assert_eq!(landed, "refs/flottille/machines/server/feature");
+        assert_eq!(landed, "refs/flottille/machines/server/l1/feature");
         assert_eq!(git(&sender, &["rev-parse", &landed]), tip);
         assert_eq!(git(&sender, &["for-each-ref", "refs/heads"]), heads);
         assert_eq!(user_state(&sender), before);
@@ -1104,7 +1174,7 @@ mod tests {
         let file = dir.path().join("l1.bundle");
         outgoing(&sender, "l1", &[], &file).await.unwrap();
         let receiver = dir.path().join("receiver");
-        let received = clone(&receiver, &file, "l1").await.unwrap();
+        let received = clone(&receiver, &file, "pc", "l1").await.unwrap();
         // git-lfs as the user's configuration installs it: its smudge downloads the object
         // unless it is told to skip.
         let mark = dir.path().join("downloaded");
@@ -1145,7 +1215,7 @@ mod tests {
         let file = dir.path().join("l1.bundle");
         outgoing(&sender, "l1", &[], &file).await.unwrap();
         let receiver = dir.path().join("receiver");
-        let received = clone(&receiver, &file, "l1").await.unwrap();
+        let received = clone(&receiver, &file, "pc", "l1").await.unwrap();
         let worktree = dir.path().join("workspace");
         let target = worktree.to_str().unwrap();
         git(

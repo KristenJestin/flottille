@@ -696,4 +696,65 @@ mod tests {
         // Once its offer is answered, no one reads it.
         assert_eq!(transfers.file_for("l1/0", &ours), None);
     }
+
+    #[test]
+    fn a_bundle_past_the_ceiling_is_refused_before_it_is_read() {
+        assert!(fits(MOST_BYTES).is_ok());
+        let refused = fits(MOST_BYTES + 1).unwrap_err();
+        assert!(refused.contains("more than 2 GiB"), "{refused}");
+        assert_eq!(MOST_BYTES, 2 << 30);
+    }
+
+    #[test]
+    fn a_machine_sends_one_bundle_at_a_time() {
+        let receiving = Receiving::default();
+        let keys = tempfile::tempdir().unwrap();
+        let key = |name: &str| {
+            flottille_link::MachineKey::load_or_make(&keys.path().join(name))
+                .unwrap()
+                .public()
+        };
+        let (pc, laptop) = (key("pc"), key("laptop"));
+        {
+            let _held = receiving.hold(&pc, "pc").unwrap();
+            let refused = receiving.hold(&pc, "pc").err().unwrap();
+            assert!(
+                refused.contains("pc is sending something already"),
+                "{refused}"
+            );
+            // Another machine is not kept waiting by it.
+            assert!(receiving.hold(&laptop, "laptop").is_ok());
+        }
+        assert!(receiving.hold(&pc, "pc").is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_bundle_s_prerequisites_are_read_from_its_header_alone() {
+        let folder = tempfile::tempdir().unwrap();
+        let file = folder.path().join("bundle");
+        let header = format!(
+            "# v2 git bundle\n-{} first\n{} refs/x\n\n",
+            "a".repeat(40),
+            "b".repeat(40)
+        );
+        let mut bytes = header.into_bytes();
+        // A pack that happens to hold a line like one of the header's.
+        bytes.extend(format!("PACK\n-{} not one\n", "c".repeat(40)).as_bytes());
+        std::fs::write(&file, bytes).unwrap();
+
+        assert_eq!(prerequisites(&file).await.unwrap(), vec!["a".repeat(40)]);
+    }
+
+    #[tokio::test]
+    async fn a_bundle_is_measured_in_chunks() {
+        let folder = tempfile::tempdir().unwrap();
+        let file = folder.path().join("bundle");
+        let bytes: Vec<u8> = (0..CHUNK * 2 + 7).map(|n| n as u8).collect();
+        std::fs::write(&file, &bytes).unwrap();
+
+        let (size, sha256) = measured(&file).await.unwrap();
+
+        assert_eq!(size, bytes.len() as u64);
+        assert_eq!(sha256, hex(&Sha256::digest(&bytes)));
+    }
 }
