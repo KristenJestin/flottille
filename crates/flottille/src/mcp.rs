@@ -1575,6 +1575,12 @@ pub fn grant_of(daemon: &Daemon, agent: &Agent) -> Result<Grant, String> {
                 .ok_or_else(|| format!("project {} has no workspace named {name}", project.name))?;
             Place::of_workspace(&workspace, agent.folder.clone())
         }
+        // A review's copy of a pull request is one repository, at its top: never the project's
+        // repositories, which are the user's own checkouts (`agents::made`).
+        None if agent.folder.starts_with(daemon.paths.reviews()) => Place {
+            repositories: vec![(".".to_owned(), agent.folder.clone())],
+            ..Place::main(&project, agent.folder.clone())
+        },
         None => Place::main(&project, agent.folder.clone()),
     };
     Ok(Grant {

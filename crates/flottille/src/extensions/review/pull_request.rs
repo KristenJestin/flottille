@@ -36,7 +36,7 @@ pub(super) struct PullRequest {
 pub(super) struct Prepared {
     pub pull: PullRequest,
     pub diff: Diff,
-    /// The files the review reads, from the project's top.
+    /// The files the review reads, from the top of the place.
     pub files: Vec<String>,
     pub before: Snapshot,
 }
@@ -192,13 +192,9 @@ async fn fetched(
             commit
         }
     };
-    let mut files = Vec::new();
-    for file in git_lines(place, &["diff", "--name-only", &start]).await {
-        files.push(match target.path.as_str() {
-            "." => file,
-            path => format!("{path}/{file}"),
-        });
-    }
+    // The place is the repository's copy, whatever its path in the project: its files are said
+    // from its top, which is where the review's agents work.
+    let files = git_lines(place, &["diff", "--name-only", &start]).await;
     if files.is_empty() {
         return Err(Failure::refused(match from {
             Some(from) => {
@@ -210,7 +206,7 @@ async fn fetched(
             ),
         }));
     }
-    let before = snapshot(&target.path, place).await;
+    let before = snapshot(".", place).await;
     Ok(Prepared {
         pull: PullRequest {
             repository: target.path.clone(),
@@ -221,7 +217,7 @@ async fn fetched(
             place: place_text,
         },
         diff: Diff {
-            path: target.path.clone(),
+            path: ".".to_owned(),
             folder: place.display().to_string(),
             base: target.base.clone(),
             from: start,
