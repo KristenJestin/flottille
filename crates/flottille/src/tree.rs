@@ -1633,7 +1633,11 @@ fn caller_of(daemon: &Daemon, grant: &Grant) -> Result<Agent, Outcome> {
 /// What `agent_stop` does, in words, for a session the user is asked to end: the session, where
 /// it works, who started it, and what ending does; nothing for a child, stopped as ever. A call
 /// that names nothing it may end is the refusal, before anything is asked.
-pub fn stop_says(daemon: &Daemon, grant: &Grant, args: &Value) -> Result<Vec<String>, Outcome> {
+pub async fn stop_says(
+    daemon: &Arc<Daemon>,
+    grant: &Grant,
+    args: &Value,
+) -> Result<Vec<String>, Outcome> {
     let asked: StopChild = arguments("agent_stop", args.clone())?;
     let caller = caller_of(daemon, grant)?;
     let Stopped::Session(session) = stopped(daemon, &caller, &asked.agent_id)? else {
@@ -1656,11 +1660,36 @@ pub fn stop_says(daemon: &Daemon, grant: &Grant, args: &Value) -> Result<Vec<Str
             _ => format!("agent {id}, not by this agent"),
         },
     };
-    Ok(vec![format!(
+    let mut says = vec![format!(
         "End the session {}, in {place}, started by {starter}: its tree, its runs and what was \
          queued for it are stopped; its workspace stays",
         named(&session)
-    )])
+    )];
+    // The sessions it leads end with it: the user reads them here, as the window's confirmation
+    // lists them (`agent.ending`), before the end is allowed.
+    let ending = ending(daemon, &session.id)
+        .await
+        .map_err(|failure| failed(failure.message))?;
+    for led in ending["sessions"].as_array().into_iter().flatten() {
+        let title = match led["title"].as_str() {
+            Some(title) => format!(
+                "\"{title}\" (agent {})",
+                led["id"].as_str().unwrap_or_default()
+            ),
+            None => format!("agent {}", led["id"].as_str().unwrap_or_default()),
+        };
+        let unsaved = match led["state"].as_str() {
+            Some("clean") | None => String::new(),
+            Some("uncommitted") => ", which holds uncommitted changes".to_owned(),
+            Some("unpushed") => ", which holds commits not pushed".to_owned(),
+            Some(_) => ", whose work cannot be checked".to_owned(),
+        };
+        says.push(format!(
+            "It ends with it the session {title}, in project {}{unsaved}",
+            led["project"].as_str().unwrap_or_default()
+        ));
+    }
+    Ok(says)
 }
 
 /// Whether an `agent_stop` ends a session that is neither one of the caller's children nor one
