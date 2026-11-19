@@ -50,6 +50,7 @@ pub use events::{EVENTS, offer, reference_of, target_named};
 pub use links::checked as checked_links;
 pub use milestones::says as milestone_says;
 pub use replies::says as reply_says;
+pub use worklog::change_says as worklog_change_says;
 pub use worklog::says as worklog_says;
 pub use worklog::unset as worklog_unset;
 
@@ -990,6 +991,9 @@ struct TicketsCall {
     /// its offset; the duration before now when left out).
     duration: Option<String>,
     started: Option<String>,
+    /// `worklog_edit`, `worklog_delete`: the id of a worklog of the token's own account, as
+    /// `worklogs` gives it. `worklog_edit` takes `duration`, `started` and the new text, `comment`.
+    worklog: Option<String>,
     /// `worklogs`: the last day of the range (`from` is its first), and whose worklogs: an account
     /// id, or a name found among the people; the token's own account when left out.
     to: Option<String>,
@@ -1089,8 +1093,10 @@ fn assignable(who: &str) -> bool {
 }
 
 /// The writes of `tickets`.
-const WRITES: [&str; 14] = [
+const WRITES: [&str; 16] = [
     "log_time",
+    "worklog_edit",
+    "worklog_delete",
     "create",
     "comment",
     "reply",
@@ -1182,6 +1188,9 @@ pub fn unwritable(project: &Project, args: &Value) -> Option<String> {
     }
     if action == "log_time" {
         return worklog::unwritable(tracker, args);
+    }
+    if matches!(action, "worklog_edit" | "worklog_delete") {
+        return worklog::unwritable_change(tracker, action, args);
     }
     if action == "edit"
         && worklog::through_api(args)
@@ -1529,7 +1538,7 @@ pub async fn tickets(daemon: &Arc<Daemon>, agent: &str, place: &Place, args: Val
             created
         }
         "comment" | "reply" | "edit" | "close" | "reopen" | "status" | "link" | "unlink"
-        | "comment_edit" | "comment_delete" | "log_time" => {
+        | "comment_edit" | "comment_delete" | "log_time" | "worklog_edit" | "worklog_delete" => {
             let key = match key_of(daemon, place, &project, &asked) {
                 Ok(key) => key,
                 Err(refusal) => return refusal,
@@ -1537,6 +1546,9 @@ pub async fn tickets(daemon: &Arc<Daemon>, agent: &str, place: &Place, args: Val
             let written = match asked.action.as_str() {
                 "status" => status(daemon, &project, &asked, &key).await,
                 "log_time" => worklog::log_time(daemon, &project, &asked, &key).await,
+                "worklog_edit" | "worklog_delete" => {
+                    worklog::change(daemon, &project, &asked, &key).await
+                }
                 "link" | "unlink" => links::link(&project, &asked, &key).await,
                 "comment_edit" | "comment_delete" => {
                     links::comment(daemon, &project, &asked, &key).await

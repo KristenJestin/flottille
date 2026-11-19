@@ -414,6 +414,7 @@ const SERVED: [Definition; 33] = [
             Writes, judged, answered at once, the result maybe later: create, comment, reply, edit, close, \
             reopen, status, link, unlink, comment_edit, \
             comment_delete (both yours only); log_time (Jira), \
+            worklog_edit, worklog_delete (Jira: a worklog of the user's own account, id from worklogs), \
             time_spent (this session's, to propose). \
             Assign only if asked (assignee \"me\": the user; \
             GitHub: assignees). Jira create: parent, sprint (see sprints), fields. \
@@ -424,10 +425,11 @@ const SERVED: [Definition; 33] = [
         destructive: false,
         schema: || {
             json!({"type": "object", "properties": {
-                "action": {"type": "string", "enum": ["list", "search", "show", "people", "types", "fields", "link_types", "sprints", "milestones", "progress", "subscribe", "unsubscribe", "create", "comment", "reply", "edit", "close", "reopen", "status", "link", "unlink", "comment_edit", "comment_delete", "milestone_create", "milestone_edit", "log_time", "time_spent", "worklogs"]},
+                "action": {"type": "string", "enum": ["list", "search", "show", "people", "types", "fields", "link_types", "sprints", "milestones", "progress", "subscribe", "unsubscribe", "create", "comment", "reply", "edit", "close", "reopen", "status", "link", "unlink", "comment_edit", "comment_delete", "milestone_create", "milestone_edit", "log_time", "worklog_edit", "worklog_delete", "time_spent", "worklogs"]},
                 "ticket": {"type": "string", "description": "#123 or ABC-123; the workspace's when left out."},
-                "duration": {"type": "string", "description": "log_time (Jira): the time spent, in Jira's form: 2h 30m, 1d, 45m (weeks, days, hours, minutes)."},
-                "started": {"type": "string", "description": "log_time: when the work started, RFC 3339 with its offset (2026-11-06T09:00:00+01:00); the duration before now when left out."},
+                "duration": {"type": "string", "description": "log_time (Jira): the time spent, in Jira's form: 2h 30m, 1d, 45m (weeks, days, hours, minutes). worklog_edit: the new time spent."},
+                "started": {"type": "string", "description": "log_time: when the work started, RFC 3339 with its offset (2026-11-06T09:00:00+01:00); the duration before now when left out. worklog_edit: the new start."},
+                "worklog": {"type": "string", "description": "worklog_edit, worklog_delete (Jira): the id of a worklog of the user's own account on that ticket, as worklogs gives it (worklog 10234); another author's is refused. worklog_edit needs one of duration, started, comment."},
                 "workspace": {"type": "string"},
                 "query": {"type": "string", "description": "search: words. people: lists who can be assigned (assignee takes their name); these words narrow it."},
                 "updated_within": {"type": "integer", "minimum": 1, "maximum": 365, "description": "list, search: updated in the last that many days."},
@@ -448,7 +450,7 @@ const SERVED: [Definition; 33] = [
                 "status": {"type": "string", "description": "status: its name."},
                 "other": {"type": "string", "description": "link, unlink: the other ticket. The link reads ticket, kind, other: ABC-2 blocks ABC-1 is ticket ABC-2, kind blocks, other ABC-1."},
                 "kind": {"type": "string", "description": "link, unlink: a kind link_types lists (blocks, is blocked by, relates to; GitHub: parent of, sub-task of). fields (Jira): the work item type, one types lists; every type's when left out."},
-                "comment": {"type": "string", "description": "reply: the id show (detail full) gives any comment. comment_edit, comment_delete: one an agent posted, no one else's."},
+                "comment": {"type": "string", "description": "reply: the id show (detail full) gives any comment. comment_edit, comment_delete: one an agent posted, no one else's. worklog_edit: the worklog's new comment (Markdown, converted for Jira)."},
                 "sprint": {"type": "string", "description": "create on Jira (with type): an open sprint, by the name or id sprints gives. An existing item's sprint cannot be changed (acli)."},
                 "fields": {"type": "object", "description": "create, edit on Jira: any field of the work item, as Jira takes it (create: through acli; edit: through Jira's API with the project's tracker entry). Keys: the field's id (customfield_10042; the action fields lists a type's) or system key (priority, components). A select: {\"value\": \"Major\"}; a user: {\"accountId\": ...}. fixVersions: [{\"name\": ...}] replaces every fix version the work item has. A creation refused for a missing required field names it: give it here. create needs type.", "additionalProperties": true},
                 "parent": {"type": "string", "description": "create, edit on Jira: the work item it goes under (an epic, or a sub-task's parent); edit moves an existing item under it, through Jira's API with the project's tracker entry."},
@@ -3281,7 +3283,10 @@ fn record(
     // A time that cannot be logged for want of the project's vault entry: the window offers its
     // Settings, where the user chooses one.
     if tool == "tickets"
-        && matches!(recorded["action"].as_str(), Some("log_time" | "worklogs"))
+        && matches!(
+            recorded["action"].as_str(),
+            Some("log_time" | "worklogs" | "worklog_edit" | "worklog_delete")
+        )
         && matches!(outcome, Outcome::Refused(_))
         && crate::projects::load_project(daemon, &grant.place.project)
             .is_ok_and(|project| crate::tickets::worklog_unset(daemon, &project))

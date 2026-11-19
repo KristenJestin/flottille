@@ -358,6 +358,13 @@ pub async fn prepared(
             crate::tickets::worklog_says(daemon, &grant.place, &project, args)
                 .map_err(Outcome::Refused)?,
         );
+        // The worklog an edit or a delete is about, as it is and what it becomes; one that is not
+        // the account's own is refused here, before the user is asked.
+        says.extend(
+            crate::tickets::worklog_change_says(daemon, &project, args)
+                .await
+                .map_err(Outcome::Refused)?,
+        );
         // The labels, which the user reads whole; the sprint as the site names it.
         for (key, said) in [
             ("labels", "It adds the labels"),

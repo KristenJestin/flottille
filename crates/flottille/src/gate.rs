@@ -721,6 +721,9 @@ fn untexted(tool: &str, action: &str, args: &Value, keys: &[&str]) -> Result<(),
                 ("title", _) => "edit and create",
                 ("comment", _) => "close and reopen",
                 ("message", _) => "a merge by squash",
+                ("body", "tickets") if action.starts_with("worklog_") => {
+                    "create, comment and log_time (a worklog's new text is comment)"
+                }
                 (_, "forge") => "create, comment, edit, reply and review",
                 _ => "create, comment and edit",
             };
@@ -894,19 +897,21 @@ pub const FORGE_ACTIONS: &str = "list, show, people, subscribe, unsubscribe, cre
 /// The actions of `tickets`, as a refusal names them.
 pub const TICKET_ACTIONS: &str = "list, search, show, people, types, fields, link_types, sprints, milestones, subscribe, unsubscribe, \
      create, comment, reply, edit, close, reopen, status, link, unlink, comment_edit, \
-     comment_delete, milestone_create, milestone_edit, log_time, time_spent and worklogs";
+     comment_delete, milestone_create, milestone_edit, log_time, worklog_edit, worklog_delete, \
+     time_spent and worklogs";
 /// What `tickets close` closes for, as `gh issue close --reason` names it.
 pub const CLOSE_REASONS: [&str; 2] = ["completed", "not planned"];
 /// The arguments of `tickets` that belong to `edit` or `close` alone.
-const TICKET_ONLY: [(&str, &str); 8] = [
-    ("duration", "log_time"),
-    ("started", "log_time"),
-    ("to", "worklogs"),
-    ("author", "worklogs"),
-    ("reason", "close"),
-    ("remove_labels", "edit"),
-    ("assignees", "edit"),
-    ("remove_assignees", "edit"),
+const TICKET_ONLY: [(&str, &[&str]); 9] = [
+    ("duration", &["log_time", "worklog_edit"]),
+    ("started", &["log_time", "worklog_edit"]),
+    ("worklog", &["worklog_edit", "worklog_delete"]),
+    ("to", &["worklogs"]),
+    ("author", &["worklogs"]),
+    ("reason", &["close"]),
+    ("remove_labels", &["edit"]),
+    ("assignees", &["edit"]),
+    ("remove_assignees", &["edit"]),
 ];
 
 /// `tickets`: its reads are harmless, and so is waiting for what happens to a ticket; its writes
@@ -929,6 +934,16 @@ fn tickets(call: &Call) -> Verdict {
                 || "that long before it is logged".to_owned(),
                 |_| shown("started")
             )
+        ),
+        "worklog_edit" => format!(
+            "it changes the worklog {} of {} on the tracker",
+            shown("worklog"),
+            shown("ticket")
+        ),
+        "worklog_delete" => format!(
+            "it deletes the worklog {} of {} on the tracker",
+            shown("worklog"),
+            shown("ticket")
         ),
         // The link as the ticket named reads it, so that the card says its direction.
         "link" => format!(
@@ -985,7 +1000,8 @@ fn tickets(call: &Call) -> Verdict {
     };
     let none: &[&str] = match action {
         "comment" | "reply" | "comment_edit" | "log_time" => &["title"],
-        "close" | "reopen" | "status" | "link" | "unlink" | "comment_delete" => &["title", "body"],
+        "close" | "reopen" | "status" | "link" | "unlink" | "comment_delete" | "worklog_edit"
+        | "worklog_delete" => &["title", "body"],
         // A milestone's text is its description.
         "milestone_create" | "milestone_edit" => &["body"],
         _ => &[],
@@ -994,9 +1010,10 @@ fn tickets(call: &Call) -> Verdict {
         return refused;
     }
     for (key, takers) in TICKET_ONLY {
-        if takers != action && call.args.get(key).is_some_and(|value| !value.is_null()) {
+        if !takers.contains(&action) && call.args.get(key).is_some_and(|value| !value.is_null()) {
             return Verdict::Deny(format!(
-                "refused: tickets {action} takes no {key}: {key} is for {takers}"
+                "refused: tickets {action} takes no {key}: {key} is for {}",
+                takers.join(" and ")
             ));
         }
     }
@@ -1021,7 +1038,12 @@ fn tickets(call: &Call) -> Verdict {
     if let Err(refused) = texts(
         call.grant,
         call.args,
-        &["title", "body", "description", "status", "kind"],
+        // A worklog's new text is its `comment`: read like a body, as `log_time`'s is.
+        if action == "worklog_edit" {
+            &["title", "body", "description", "status", "kind", "comment"]
+        } else {
+            &["title", "body", "description", "status", "kind"]
+        },
         &mut found,
     ) {
         return refused;
