@@ -18,6 +18,10 @@ emits it.
 | `name` | `<subject>.<what happened>`. |
 | `data` | An object, its fields given per event below. A client ignores fields it does not know. |
 
+An event emitted while the daemon serves a request of another machine's client has one more
+field in `data`, `device`: the name of the member whose device signed the request
+(`docs/remote.md`, "Requests from another machine's clients").
+
 ## The events
 
 ### `daemon.started`

@@ -53,8 +53,6 @@ const MOST_SAID: usize = 16;
 const LEARN_EVERY: Duration = Duration::from_secs(2);
 /// How long the links wait at start for the hub's list, before they go on with the one kept.
 const FIRST_LIST: Duration = Duration::from_secs(10);
-/// What a client's request over a link is answered, until they are served (#813).
-const NOT_SERVED: &str = "requests from another machine's clients are not served yet";
 
 /// What `remote/peers.json` holds.
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -131,6 +129,8 @@ struct Seen {
     reason: Option<String>,
     /// The link, its generation, and whether this machine dialled it.
     link: Option<(u64, Link, bool)>,
+    /// The client link this machine dialled to carry its clients' requests to it.
+    client: Option<Link>,
     dialling: bool,
     next_try: Instant,
     wait: Duration,
@@ -143,6 +143,7 @@ impl Seen {
             since: now(),
             reason: None,
             link: None,
+            client: None,
             dialling: false,
             next_try: Instant::now(),
             wait: ROUND,
@@ -197,6 +198,12 @@ pub struct Remote {
     /// told at once, before the session's next round sees it and ends.
     awake: Mutex<crate::hub_session::Awake>,
     emit: Emit,
+    /// The requests of the user's clients this machine took, for every link: kept in memory, so
+    /// that a restart refuses what was signed before it (`flottille_link::Requests`).
+    requests: Mutex<flottille_link::Requests>,
+    /// The daemon, which serves those requests as its own clients'; held weakly, the daemon
+    /// holding the link.
+    daemon: std::sync::OnceLock<std::sync::Weak<Daemon>>,
 }
 
 /// Starts the link: the endpoint, the loop that accepts and the one that dials. A link that
@@ -206,6 +213,7 @@ pub fn start(
     key: MachineKey,
     stopping: tokio::sync::watch::Receiver<bool>,
     emit: Emit,
+    daemon: std::sync::Weak<Daemon>,
 ) -> Result<Arc<Remote>, String> {
     let endpoint = match crate::remote::listen(paths)? {
         Some(listen) => Endpoint::bind(&key, listen),
@@ -223,6 +231,7 @@ pub fn start(
         crate::remote::folder(paths),
         emit.clone(),
     ));
+    let _ = remote.daemon.set(daemon);
     // Read before the first link comes in, which is judged by the file as last read.
     remote.peers();
     let control = Arc::new(crate::hub_session::Control::new(
@@ -293,6 +302,8 @@ impl Remote {
             waiting: Mutex::new(HashSet::new()),
             awake: Mutex::new(crate::hub_session::Awake::now()),
             emit,
+            requests: Mutex::new(flottille_link::Requests::new(SystemTime::now())),
+            daemon: std::sync::OnceLock::new(),
         }
     }
 
@@ -342,10 +353,15 @@ impl Remote {
         self.peers();
         // A machine removed from the list: its link is cut now, not when it next says something.
         for (key, seen) in self.seen.lock().unwrap().iter() {
-            if !trusted.contains(key)
-                && let Some((_, link, _)) = &seen.link
-            {
-                link.close(REMOVED);
+            if !trusted.contains(key) {
+                for link in seen
+                    .link
+                    .iter()
+                    .map(|(_, link, _)| link)
+                    .chain(seen.client.as_ref())
+                {
+                    link.close(REMOVED);
+                }
             }
         }
     }
@@ -794,7 +810,7 @@ async fn accept(remote: Arc<Remote>) {
                     }
                     remote.linked(link, peer.name, false)
                 }
-                Ok(link) => serve_clients(link).await,
+                Ok(link) => serve_clients(remote, link, peer.name).await,
                 Err(error) => remote.failed(*key.as_bytes(), &peer.name, &error),
             }
         });
@@ -834,7 +850,11 @@ async fn serve(remote: Arc<Remote>, link: Link, name: String, generation: u64) {
                 remote.told_by(link.peer(), addresses.clone());
                 received.answer(Ok(json!({})));
             }
-            Message::Client(_) => received.answer(Err(NOT_SERVED.to_owned())),
+            // Kept apart by the link's protocol name: a client's request on a machine link is
+            // refused before it gets here (`Link::next`).
+            Message::Client(_) => received.answer(Err(
+                "a client's request is not taken on a machine link".into(),
+            )),
         }
     }
     let why = link.closed().await;
@@ -851,15 +871,358 @@ async fn serve(remote: Arc<Remote>, link: Link, name: String, generation: u64) {
             json!({"name": name, "fingerprint": link.peer().fingerprint(), "reason": why}),
         );
         seen.link = None;
+        if let Some(client) = seen.client.take() {
+            client.close(&why);
+        }
         seen.set(PeerState::Offline, Some(why));
         seen.next_try = Instant::now();
     }
 }
 
-/// A client link: its requests are refused until they are served (#813).
-async fn serve_clients(link: Link) {
+/// A client link: each request of the user's another machine carried, checked and served as one
+/// of a local client's, its answer, then the events of a subscription, sent back on its stream.
+async fn serve_clients(remote: Arc<Remote>, link: Link, from: String) {
     while let Some(received) = link.next().await {
-        received.answer(Err(NOT_SERVED.to_owned()));
+        // A machine removed from the list since its link came in carries nothing more.
+        if remote.trusted(&link.peer()).is_none() {
+            received.answer(Err(REMOVED.to_owned()));
+            link.close(REMOVED);
+            break;
+        }
+        let Message::Client(request) = received.message().clone() else {
+            // Kept apart by the link's protocol name: refused before it gets here.
+            received.answer(Err(
+                "a machine's message is not taken on a client link".into()
+            ));
+            continue;
+        };
+        let (remote, from) = (remote.clone(), from.clone());
+        tokio::spawn(async move {
+            let mut answer = received.stream();
+            let gone = answer.gone();
+            tokio::pin!(gone);
+            match remote.serve(&request, &from).await {
+                Err(refused) => {
+                    let _ = answer.send(&message_bytes(&refused)).await;
+                }
+                Ok(mut serving) => loop {
+                    let line = tokio::select! {
+                        line = serving.lines.next_line() => line,
+                        _ = &mut gone => break,
+                    };
+                    let Ok(Some(line)) = line else { break };
+                    if !answer.send(line.as_bytes()).await || serving.once {
+                        break;
+                    }
+                },
+            }
+            answer.end().await;
+        });
+    }
+}
+
+/// A request served for another machine's client: what its connection writes, line by line.
+struct Serving {
+    lines: tokio::io::Lines<tokio::io::BufReader<tokio::net::unix::OwnedReadHalf>>,
+    /// Held while it is served: the connection ends when it is let go.
+    _write: tokio::net::unix::OwnedWriteHalf,
+    /// Its answer is the only line: anything but a watch that was answered.
+    once: bool,
+    /// The device a watch is served for: the log says when it ends, which is how a watch that
+    /// outlived its client is seen.
+    watch_of: Option<String>,
+}
+
+impl Drop for Serving {
+    fn drop(&mut self) {
+        if let Some(device) = &self.watch_of {
+            eprintln!("flottille daemon: the watch asked by {device} ended");
+        }
+    }
+}
+
+fn message_bytes(message: &flottille_core::protocol::Message) -> Vec<u8> {
+    serde_json::to_vec(message).expect("a message is JSON")
+}
+
+impl Remote {
+    /// The checked member list this machine keeps, and its own member's name.
+    fn listed(&self) -> Result<(flottille_link::Members, String), String> {
+        let control = self
+            .control
+            .get()
+            .ok_or_else(|| "the link is not up".to_owned())?;
+        let (_, members) = control.checked()?;
+        let name = members
+            .by_machine(&self.endpoint.key())
+            .map(|member| member.name.clone())
+            .ok_or_else(|| "this machine is no member's".to_owned())?;
+        Ok((members, name))
+    }
+
+    /// `request`, as a link or a client of this machine carried it from the machine `from`:
+    /// checked (`flottille_link::Requests`), then served on a connection of its own as one of a
+    /// local client's, the member that signed it named in the log and in the events its serving
+    /// emits; the refusal, as an answer, otherwise.
+    async fn serve(
+        &self,
+        request: &Value,
+        from: &str,
+    ) -> Result<Serving, Box<flottille_core::protocol::Message>> {
+        use flottille_core::protocol::Message as Answer;
+        let id = request["id"].as_str().map(str::to_owned);
+        let refused =
+            |why: String| Answer::error(id.clone(), flottille_protocol::code::REFUSED, why);
+        let (members, name) = self
+            .listed()
+            .map_err(|why| refused(format!("refused: {why}")))?;
+        let text = request.to_string();
+        let accepted = self
+            .requests
+            .lock()
+            .unwrap()
+            .check(&text, &name, &members, SystemTime::now())
+            .map_err(|error| refused(error.to_string()))?;
+        let daemon = self
+            .daemon
+            .get()
+            .and_then(std::sync::Weak::upgrade)
+            .ok_or_else(|| {
+                Box::new(Answer::error(
+                    id.clone(),
+                    "unavailable",
+                    "the daemon is stopping",
+                ))
+            })?;
+        let unavailable = |error: std::io::Error| {
+            Box::new(Answer::error(id.clone(), "unavailable", error.to_string()))
+        };
+        let (ours, theirs) = tokio::net::UnixStream::pair().map_err(unavailable)?;
+        eprintln!(
+            "flottille daemon: {} asked by {} from {from}",
+            accepted.method, accepted.device.name
+        );
+        tokio::spawn(crate::daemon::served_for(
+            daemon,
+            theirs,
+            accepted.device.name.clone(),
+        ));
+        let (read, mut write) = ours.into_split();
+        let once = accepted.method != "events.watch";
+        let mut line = serde_json::to_vec(&flottille_core::protocol::Request {
+            id: accepted.id,
+            method: accepted.method,
+            params: accepted.params,
+        })
+        .expect("a request is JSON");
+        line.push(b'\n');
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+        write.write_all(&line).await.map_err(unavailable)?;
+        Ok(Serving {
+            lines: tokio::io::BufReader::new(read).lines(),
+            _write: write,
+            once,
+            watch_of: (!once).then(|| accepted.device.name.clone()),
+        })
+    }
+
+    /// The client link to `peer`, dialled when there is none.
+    async fn client_link(&self, peer: &Peer) -> Result<Link, LinkError> {
+        let kept = self
+            .seen
+            .lock()
+            .unwrap()
+            .get(peer.key.as_bytes())
+            .and_then(|seen| seen.client.clone());
+        if let Some(link) = kept {
+            return Ok(link);
+        }
+        let link = self
+            .endpoint
+            .connect(
+                peer.key,
+                &sockets_of(peer).await,
+                Traffic::Client,
+                &self.hello,
+                &peer.name,
+            )
+            .await?;
+        if let Some(seen) = self.seen.lock().unwrap().get_mut(peer.key.as_bytes()) {
+            seen.client = Some(link.clone());
+        }
+        Ok(link)
+    }
+
+    /// Forgets the client link to `peer`, one that failed: the next request dials again.
+    fn drop_client(&self, peer: &Peer) {
+        if let Some(seen) = self.seen.lock().unwrap().get_mut(peer.key.as_bytes())
+            && let Some(link) = seen.client.take()
+        {
+            link.close("it failed");
+        }
+    }
+}
+
+/// `since`, milliseconds since the Unix epoch, as the time of day it was here (`22:14`).
+fn time_of_day(since: u64) -> String {
+    jiff::Timestamp::from_millisecond(since as i64)
+        .map(|at| {
+            at.to_zoned(jiff::tz::TimeZone::system())
+                .strftime("%H:%M")
+                .to_string()
+        })
+        .unwrap_or_default()
+}
+
+/// A request a client of this machine signed for the machine it names (`docs/remote.md`,
+/// "Requests from another machine's clients"), written on `out` as its answer then, for a watch,
+/// the events that came back. Carried as it is: this daemon holds no device key, and the
+/// machine it is for checks it. One for this machine is checked and served here the same way.
+/// What the user sends to a machine that is off is refused, never kept. `true` when a watch the
+/// other machine answered ended with its link: the connection is to end, so that its client
+/// resumes it after the last event it saw.
+pub(crate) async fn forward(
+    daemon: Arc<Daemon>,
+    request: Value,
+    out: tokio::sync::mpsc::Sender<flottille_core::protocol::Message>,
+) -> bool {
+    use flottille_core::protocol::Message as Answer;
+    let id = request["id"].as_str().map(str::to_owned);
+    let error = |code: &str, why: String| Answer::error(id.clone(), code, why);
+    let send = |answer: Answer| {
+        let out = out.clone();
+        async move { out.send(answer).await.is_ok() }
+    };
+    let Some(machine) = request["machine"].as_str().map(str::to_owned) else {
+        send(error(
+            flottille_protocol::code::INVALID_REQUEST,
+            "`machine` is the name of one of the user's machines".to_owned(),
+        ))
+        .await;
+        return false;
+    };
+    let watch = request["signed"]["method"] == "events.watch";
+    let remote = match remote_of(&daemon) {
+        Ok(remote) => remote,
+        Err(failure) => {
+            send(failure.answer(id.clone())).await;
+            return false;
+        }
+    };
+    if remote.listed().is_ok_and(|(_, name)| name == machine) {
+        // This machine, by its name: checked as another machine would check it.
+        let mut serving = match remote.serve(&request, &machine).await {
+            Ok(serving) => serving,
+            Err(refused) => {
+                send(*refused).await;
+                return false;
+            }
+        };
+        while let Ok(Some(line)) = serving.lines.next_line().await {
+            let Ok(message) = serde_json::from_str::<Answer>(&line) else {
+                continue;
+            };
+            if !send(message).await || serving.once {
+                break;
+            }
+        }
+        return false;
+    }
+    let Some(peer) = remote
+        .peers()
+        .machines
+        .into_iter()
+        .find(|peer| peer.name == machine)
+    else {
+        send(error(
+            flottille_protocol::code::NOT_FOUND,
+            format!(
+                "no machine of the user's is named {}",
+                machine.chars().take(64).collect::<String>().escape_debug()
+            ),
+        ))
+        .await;
+        return false;
+    };
+    let offline = {
+        let seen = remote.seen.lock().unwrap();
+        match seen.get(peer.key.as_bytes()) {
+            Some(seen) if seen.link.is_some() => None,
+            Some(seen) if seen.state == PeerState::NeedsUpdate => Some(format!(
+                "{machine} needs an update: {}",
+                seen.reason.clone().unwrap_or_default()
+            )),
+            Some(seen) => Some(format!(
+                "{machine} is offline since {}",
+                time_of_day(seen.since)
+            )),
+            None => Some(format!("{machine} is offline")),
+        }
+    };
+    if let Some(offline) = offline {
+        send(error("unavailable", offline)).await;
+        return false;
+    }
+    let message = Message::Client(request.clone());
+    // A client link kept may be gone unnoticed: dialled again once.
+    let mut tries = 0;
+    let mut answers = loop {
+        tries += 1;
+        let asked = match remote.client_link(&peer).await {
+            Ok(link) => link
+                .ask(&message)
+                .await
+                .inspect_err(|_| remote.drop_client(&peer)),
+            Err(error) => Err(error),
+        };
+        match asked {
+            Ok(answers) => break answers,
+            Err(_) if tries < 2 => continue,
+            Err(why) => {
+                send(error("unavailable", why.to_string())).await;
+                return false;
+            }
+        }
+    };
+    let mut answered = false;
+    loop {
+        match answers.next().await {
+            Some(Ok(value)) => {
+                let Ok(message) = serde_json::from_value::<Answer>(value) else {
+                    continue;
+                };
+                // Only this request's answer, or a watch's events: nothing under another id.
+                let ours = match &message.id {
+                    Some(given) => Some(given) == id.as_ref() && !answered,
+                    None => answered && watch && message.event.is_some(),
+                };
+                if !ours {
+                    continue;
+                }
+                let failed = message.error.is_some();
+                answered = true;
+                if !send(message).await || failed || !watch {
+                    return false;
+                }
+            }
+            Some(Err(LinkError::Declined { reason, .. })) => {
+                send(error(flottille_protocol::code::REFUSED, reason)).await;
+                return false;
+            }
+            Some(Err(why)) if !answered => {
+                send(error("unavailable", why.to_string())).await;
+                return false;
+            }
+            Some(Err(_)) | None if answered => return true,
+            Some(Err(_)) | None => {
+                send(error(
+                    "unavailable",
+                    format!("the link to {machine} ended before it answered"),
+                ))
+                .await;
+                return false;
+            }
+        }
     }
 }
 
@@ -905,7 +1268,8 @@ async fn dial(remote: Arc<Remote>, mut stopping: tokio::sync::watch::Receiver<bo
     }
 }
 
-async fn dial_one(remote: Arc<Remote>, peer: Peer) {
+/// The sockets of every address known for `peer`.
+async fn sockets_of(peer: &Peer) -> Vec<SocketAddr> {
     let mut sockets: Vec<SocketAddr> = Vec::new();
     for text in &peer.known() {
         if let Ok(address) = Address::parse(text) {
@@ -917,6 +1281,11 @@ async fn dial_one(remote: Arc<Remote>, peer: Peer) {
             }
         }
     }
+    sockets
+}
+
+async fn dial_one(remote: Arc<Remote>, peer: Peer) {
+    let sockets = sockets_of(&peer).await;
     let key = *peer.key.as_bytes();
     let made = remote
         .endpoint

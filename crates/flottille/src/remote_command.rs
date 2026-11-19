@@ -488,7 +488,7 @@ fn read_code(prompt: &str, none: &str) -> Result<zeroize::Zeroizing<String>> {
 
 /// The device key of this user session's clients, a member's: in the session's keyring, or, with
 /// none, `remote/device.key`. Only a setup or a join that succeeded keeps one.
-fn device_key(paths: &Paths) -> Result<flottille_link::DeviceKey> {
+pub(crate) fn device_key(paths: &Paths) -> Result<flottille_link::DeviceKey> {
     kept_device_key(paths)?.ok_or_else(|| {
         "this device holds no key of a member: flottille remote setup, or flottille remote join"
             .into()
