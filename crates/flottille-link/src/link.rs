@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use zeroize::Zeroizing;
 
-use crate::transport::{Conn, Failure, Reply, Transport};
+use crate::transport::{Conn, Failure, Frames, Reply, Transport};
 use crate::{Hello, MachineKey, NeedsUpdate, PeerState, PublicKey, choose};
 
 /// The longest frame a link takes. Bigger transfers (a git bundle) will have streams of their
@@ -620,6 +620,22 @@ impl Link {
         }
     }
 
+    /// Sends a client's request, and gives what comes back on its stream: its answer, then, for a
+    /// subscription, its events, until either side ends it (`docs/remote.md`, "Requests from
+    /// another machine's clients").
+    pub async fn ask(&self, message: &Message) -> Result<Answers, LinkError> {
+        let frame = serde_json::to_vec(message).expect("a message is JSON");
+        let frames = self
+            .conn
+            .open(&frame)
+            .await
+            .map_err(|failure| self.lost(failure))?;
+        Ok(Answers {
+            frames,
+            name: self.name.clone(),
+        })
+    }
+
     /// The next message the other side sends, of this link's kind; `None` once the link is gone.
     /// A message of the other kind, or one this side does not know, is refused and passed over.
     pub async fn next(&self) -> Option<Received> {
@@ -683,6 +699,67 @@ impl fmt::Debug for Link {
     }
 }
 
+/// What comes back for a client's request (`Link::ask`), one frame after another.
+pub struct Answers {
+    frames: Frames,
+    name: String,
+}
+
+impl Answers {
+    /// The next frame that came back, as JSON; `None` once the other side ended the stream. A
+    /// request the other side refused before reading it (one of the other kind) is its refusal.
+    pub async fn next(&mut self) -> Option<Result<Value, LinkError>> {
+        let frame = match self.frames.next(FRAME_LIMIT).await? {
+            Ok(frame) => frame,
+            Err(Failure::Closed(reason)) => {
+                return Some(Err(LinkError::Closed(format!(
+                    "{} closed the link: {reason}",
+                    self.name
+                ))));
+            }
+            Err(Failure::Lost(why)) => {
+                return Some(Err(LinkError::Closed(format!(
+                    "the link to {} was lost: {why}",
+                    self.name
+                ))));
+            }
+        };
+        Some(match serde_json::from_slice::<Value>(&frame) {
+            Ok(Value::Object(object)) if object.len() == 1 && object.contains_key("refused") => {
+                Err(LinkError::Declined {
+                    peer: self.name.clone(),
+                    reason: object["refused"].as_str().unwrap_or_default().to_owned(),
+                })
+            }
+            Ok(value) => Ok(value),
+            Err(_) => Err(LinkError::Closed(format!(
+                "{} answered what is not an answer",
+                self.name
+            ))),
+        })
+    }
+}
+
+/// An answer given frame by frame (`Received::stream`).
+pub struct Streamed(Reply);
+
+impl Streamed {
+    /// Sends one frame, a JSON text with no newline; `false` once the other side stopped reading.
+    pub async fn send(&mut self, frame: &[u8]) -> bool {
+        self.0.line(frame).await
+    }
+
+    /// Ends the answer.
+    pub async fn end(self) {
+        self.0.end().await
+    }
+
+    /// Until the other side stops reading, or the link is gone.
+    pub fn gone(&self) -> impl Future<Output = ()> + Send + 'static {
+        self.0.gone()
+    }
+}
+
 /// A message received, to answer.
 pub struct Received {
     message: Message,
@@ -692,6 +769,11 @@ pub struct Received {
 impl Received {
     pub fn message(&self) -> &Message {
         &self.message
+    }
+
+    /// Answers it frame by frame: a client's request, whose answer may be followed by events.
+    pub fn stream(self) -> Streamed {
+        Streamed(self.reply)
     }
 
     /// Answers it: what it gave, or why it was refused. Within a Tokio runtime.

@@ -37,6 +37,15 @@ it (`docs/design.md` §3, §11).
   the socket, then talks to it. The daemon started this way writes its output to
   `$XDG_STATE_HOME/flottille/daemon.log`.
 
+- **A request for another machine** of the user's is a line `{"id", "machine", "signed":
+  {"device", "nonce", "at", "method", "params"}, "sig"}`, signed by the client with the device
+  key (`docs/remote.md`, "Requests from another machine's clients"): the daemon carries it to
+  that machine and writes back its answer, under its `id`, then, for `events.watch`, that
+  machine's events. A machine that is off is answered `unavailable` (`server is offline since
+  22:14`); a request the other machine refuses, `refused`. A client an agent started is refused
+  before any of it. The carried request lasts as long as its client's connection: a watch the
+  client leaves ends on the other machine too, with no event needed to tell it.
+
 The protocol is written to travel later over an authenticated network transport (design §12):
 every request is self-contained, identifiers are opaque strings, and nothing assumes the client
 shares the daemon's file system except paths the user typed.
@@ -132,6 +141,7 @@ Subscribes the connection to the event stream.
 |---|---|
 | `after` | Optional event number. With it, the stored events numbered after it are sent first, oldest first, then the new ones. Without it, only the events emitted after the subscription. |
 | `client` | Optional: what the client is. `window` makes the daemon read the items at the window's rhythm for as long as this connection is open ([`items.md`](items.md), "Rhythm"). |
+| `forge` | Optional: `[project, workspace]`, watched for its forge as `workspace.forge {watch: true}` does, for as long as the subscription lasts. It is how a watch of another machine keeps a forge read: that machine serves each request of its own on a connection that ends with its answer, and a subscription's connection is the one that lasts. |
 
 The result is `{"after": <n>}`, the number the stream starts after. It is written before the
 first event. Then every event follows, in the order of its number, none missing and none twice,

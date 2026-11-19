@@ -415,6 +415,13 @@ only when the agent says its session is gone (lost or unreadable: any other fail
 keeps the session and fails the agent, to be resumed) or the agent is stuck, and then from its first message, a summary of its conversation when a compactor is set (§5.8)
 and its latest messages word for word (`docs/agents.md`, "A death", "Replacement").
 
+A restart resumes the sessions as they were: one at rest gets no prompt, and nothing already
+delivered is delivered again, a first message given again to a compaction's new session
+included. A delivery is marked taken before its prompt is sent: one a turn that ran had taken is
+in the session's history, taken as sent, and its agent is told its turn was cut; one taken by a
+prompt that never started goes back to the queue, and, as every message still queued, is
+delivered once.
+
 ### 5.6 Subscriptions: waking on what happens outside
 
 An agent that waits for something outside Flottille (the end of a pull request's checks, a
