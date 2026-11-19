@@ -191,8 +191,9 @@ impl Requests {
     /// checked member list is `members`, at `now`, in this order: it is a request for this
     /// machine; its device is a member, and the signature is the device's; the time is within the
     /// window of `now`, and not before this machine started; the nonce was not seen in the window;
-    /// the device's role allows the method's class. Until the signature passes, a refusal names
-    /// nothing of the list. An accepted request's nonce is remembered.
+    /// the device's role allows the method's class, and a launch is for a runner (`runs_agents`).
+    /// Until the signature passes, a refusal names nothing of the list. An accepted request's
+    /// nonce is remembered.
     pub fn check(
         &mut self,
         text: &str,
@@ -256,10 +257,12 @@ impl Requests {
         }
         if member.role == Role::Viewer && class == Class::Drive {
             return refused(format!(
-                "{} may only view: a controller or a runner may call {}",
-                member.name, signed.method
+                "{} may only view: a controller or a runner may {}",
+                member.name,
+                deed(&signed.method)
             ));
         }
+        runs_agents(members, machine, &signed.method)?;
         if seen.len() >= NONCES_PER_DEVICE {
             return refused(format!(
                 "{} sent more than {NONCES_PER_DEVICE} requests in five minutes",
@@ -292,6 +295,49 @@ impl Requests {
             !seen.is_empty()
         });
     }
+}
+
+/// The methods that start a session: a machine whose member is no runner runs no agent.
+const LAUNCHES: &[&str] = &["agent.start", "agent.run"];
+
+/// Refused when `method` starts a session and `machine` is the machine of a member that is no
+/// runner (`docs/remote.md`, "Roles"): the one check of it, made by the machine that would
+/// carry the request and by the one it is for. A name that is no member's passes: the carrier
+/// says it is no machine of the user's.
+pub fn runs_agents(members: &Members, machine: &str, method: &str) -> Result<(), RequestError> {
+    if !LAUNCHES.contains(&method) {
+        return Ok(());
+    }
+    match members
+        .members()
+        .iter()
+        .find(|member| member.name == machine)
+    {
+        Some(member) if member.role != Role::Runner => Err(RequestError(format!(
+            "{machine} is a {}: it runs no agent, a runner does",
+            member.role.word()
+        ))),
+        _ => Ok(()),
+    }
+}
+
+/// What `method` does, as a refusal names it: the user's words for what they do most, the
+/// method's name otherwise.
+fn deed(method: &str) -> String {
+    let words = match method {
+        "approval.approve" | "approval.deny" => "answer a request",
+        "agent.answer" => "answer a question",
+        "agent.send" | "agent.send_now" => "send a message",
+        "agent.start" | "agent.run" => "start a session",
+        "agent.stop" => "stop a session",
+        "agent.cancel" => "stop a turn",
+        "agent.mode" => "switch the mode",
+        "remote.invite" => "invite a device",
+        "remote.refuse" => "refuse a device",
+        "remote.change" => "add, remove or rename a device",
+        _ => return format!("call {method}"),
+    };
+    words.to_owned()
 }
 
 /// `time` in milliseconds since the Unix epoch; zero before it.

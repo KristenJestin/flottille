@@ -87,6 +87,9 @@ pub enum MachineMessage {
     /// Every address the sender may be reached at now, so that the two can link again without
     /// the hub.
     Addresses(Vec<String>),
+    /// What a runner offers: its projects with their free slots, the agents signed in on it
+    /// (`docs/remote.md`, "Roles"). Sent when a link is made, and again when it changes.
+    Capabilities(crate::Capabilities),
 }
 
 /// The answer to one message.
