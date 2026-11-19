@@ -650,6 +650,111 @@ fn a_led_session_goes_on_when_its_pilot_ends_and_is_handed() {
     });
 }
 
+// A led session ends with its pilot (#1089, `docs/tools.md`, "The pilot ends").
+
+/// A session the lead leads, titled `title`: its id and MCP session.
+fn led_titled(user: &User, mcp: &Mcp, title: &str) -> (String, Mcp) {
+    let (answer, session) = launch(
+        user,
+        mcp,
+        json!({"kind": "led", "title": title, "brief": "Do it."}),
+    );
+    assert!(!answer.error, "{}", answer.text);
+    session.unwrap()
+}
+
+fn has_ended(user: &User, id: &str) -> bool {
+    shown(user, id)["state"] == "ended"
+}
+
+#[test]
+fn ending_a_pilot_ends_the_sessions_it_leads() {
+    let user = User::with_fake_agent();
+    let (lead, mcp) = lead(&user);
+    let (login, _) = led_titled(&user, &mcp, "Login");
+    let (docs, _) = led_titled(&user, &mcp, "Docs");
+    eventually("their first turns", || {
+        turns(&user, &login) == 1 && turns(&user, &docs) == 1
+    });
+
+    user.call("agent.stop", json!({"agent": lead})).unwrap();
+
+    eventually("the led sessions ended", || {
+        has_ended(&user, &login) && has_ended(&user, &docs)
+    });
+    let reason = &store(&user)
+        .last_agent_events(&login, "agent.ended", 1)
+        .unwrap()[0]
+        .data["reason"];
+    assert!(reason.as_str().unwrap().contains("pilot"), "{reason}");
+}
+
+#[test]
+fn ending_a_pilot_ends_the_sessions_its_led_sessions_lead() {
+    let user = User::with_fake_agent();
+    let (lead, mcp) = lead(&user);
+    let (login, login_mcp) = led_titled(&user, &mcp, "Login");
+    eventually("its first turn", || turns(&user, &login) == 1);
+    let opened = user.received_requests("session/new").len();
+    let answer = login_mcp.call(
+        "agent_launch",
+        json!({"kind": "led", "title": "Tests", "brief": "Write the tests."}),
+    );
+    let (tests, _) = allowed_launch(&user, answer, "Tests", opened);
+    assert_eq!(shown(&user, &tests)["led_by"], login.as_str());
+
+    user.call("agent.stop", json!({"agent": lead})).unwrap();
+
+    eventually("the whole chain ended", || {
+        has_ended(&user, &login) && has_ended(&user, &tests)
+    });
+}
+
+#[test]
+fn a_detached_session_does_not_end_with_its_former_pilot() {
+    let user = User::with_fake_agent();
+    let (lead, mcp) = lead(&user);
+    let (kept, _) = led_titled(&user, &mcp, "Login");
+    let (led, _) = led_titled(&user, &mcp, "Docs");
+    eventually("their first turns", || {
+        turns(&user, &kept) == 1 && turns(&user, &led) == 1
+    });
+    detach(&user, &kept);
+
+    user.call("agent.stop", json!({"agent": lead})).unwrap();
+
+    eventually("the led session ended", || has_ended(&user, &led));
+    let kept = shown(&user, &kept);
+    assert!(
+        !["ended", "failed"].contains(&kept["state"].as_str().unwrap()),
+        "{kept}"
+    );
+    assert!(kept["launched_by"].is_null(), "{kept}");
+}
+
+#[test]
+fn a_pilot_s_turn_that_ends_ends_no_led_session() {
+    let user = User::with_fake_agent();
+    let (lead, mcp) = lead(&user);
+    let (session, _) = led_titled(&user, &mcp, "Login");
+    eventually("its first turn", || turns(&user, &session) == 1);
+
+    user.call(
+        "agent.send",
+        json!({"agent": lead, "message": "Another turn."}),
+    )
+    .unwrap();
+    eventually("the pilot's second turn", || turns(&user, &lead) == 2);
+    settle();
+
+    let session = shown(&user, &session);
+    assert!(
+        !["ended", "failed"].contains(&session["state"].as_str().unwrap()),
+        "{session}"
+    );
+    assert_eq!(session["led_by"], lead.as_str(), "{session}");
+}
+
 // Detach.
 
 fn subscriptions_of(user: &User, agent: &str) -> Vec<Value> {

@@ -578,6 +578,21 @@ fn agent_stop_ends_the_session_it_leads_in_another_project_and_holds_any_other()
     assert_ne!(shown(&user, &other)["state"], "ended");
 }
 
+#[test]
+fn ending_a_pilot_ends_a_session_it_leads_in_another_project() {
+    let user = user();
+    let (lead, mcp) = lead(&user, "full");
+    let (session, _) = started_in_kit(&user, &mcp, json!({}));
+    idle(&user, &session);
+    assert_eq!(shown(&user, &session)["led_by"], lead.as_str());
+
+    user.call("agent.stop", json!({"agent": lead})).unwrap();
+
+    eventually("the session of kit ended with its pilot", || {
+        shown(&user, &session)["state"] == "ended"
+    });
+}
+
 /// A user whose judge takes a while to allow every call, with the projects `app` and `kit`.
 fn user_with_a_slow_judge() -> User {
     let user = User::with_fake_agent().with_judge(json!([
