@@ -1589,7 +1589,7 @@ passes' instructions, and the pilot's first message, say to run none of it (no t
 script). The gate holds for the user, in every mode, Full and Auto included, a `run` (or a task)
 whose folder is in the copy of a pull request and that does more than read: base, its card saying
 `it runs the code of pull request #7, in the copy its review reads: only the user lets a review
-run it`, as `worklog_delete` is held whatever the mode. A line the rules know to only read (`git
+run it, in every mode, Full included`, as `worklog_delete` is held whatever the mode. A line the rules know to only read (`git
 diff`, `git log`, `git show`, `cat`) passes as it does elsewhere: the review reads the pull
 request with them. The copy itself is checked out with none of the user's filters (Large File
 Storage included, whose `.lfsconfig` the pull request would choose): its files are written as its
