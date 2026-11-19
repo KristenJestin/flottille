@@ -790,16 +790,32 @@ and removes its workspace as today, through `call`.
 - **The machine of the run decides, never the one that asks.** The request is checked as every
   request of another machine's client ("Requests from another machine's clients": member,
   signature, time, nonce, and the role: `tunnel.open` is a `drive` method, a `viewer` is
-  refused). Then the run must be one the daemon started and that still runs, and the port the one
-  its address reports (`localhost`, `127.0.0.1`, `[::1]`, `0.0.0.0` or a name under `.localhost`,
-  with a port written) or one its processes listen on: the sockets of the processes of the run's
-  session, read from `/proc` (Linux), matched to `/proc/net/tcp` and `tcp6`, listening on
-  `127.0.0.1` or on every address. Any other port of the machine, and a port of a process that is
-  not the run's, is refused (`refused: port 22 is none of run r1's`). It is checked again at
-  each connection, so that a port the run gave up and another process took is not reached. The
-  machine connects to `127.0.0.1` only, and no agent has a tool to open a tunnel: the request is
-  signed by the user's device key, which no agent reads, and the user's command line refuses to
-  run under an agent.
+  refused). Then the run must be one the daemon started and that still runs, and the port one a
+  process of the run's session listens on: the sockets of those processes, read from `/proc`
+  (Linux), matched to `/proc/net/tcp` and `tcp6`, listening on the loopback or on every address.
+  The address the run reports (`localhost`, `127.0.0.1`, `[::1]`, `0.0.0.0` or a name under
+  `.localhost`, with a port written) only chooses the port taken when none is asked for: an
+  address is a line the run printed, which a script of the workspace may write, so it reaches
+  nothing by itself, and a port no process of the run listens on is refused, whatever the run
+  reports. A port is also refused when **any other** socket listens on it, on any address and in
+  either table: Linux lets `[::1]:22` sit beside `0.0.0.0:22`, so a port the run shares with
+  another process may lead to the other one (`refused: port 22 is none of run r1's: ...another
+  process listens on 22 too`). Any other port of the machine is refused (`refused: port 22 is
+  none of run r1's`). Everything is checked again at each connection, so that a port the run
+  gave up and another process took is not reached.
+- **The machine connects to the address the run listens on**: `127.0.0.1` for a listener on
+  `127.0.0.1`, on `0.0.0.0` or an IPv4-mapped address, `[::1]` for a listener on `::1` or `::`,
+  and never another address. A connection is checked, then made: what remains is the instant
+  between the two, in which a process that is none of the run's could take the port the run just
+  gave up; it needs to bind the very port, on the loopback, in that instant, and the next
+  connection is refused. No agent has a tool to open a tunnel: the request is signed by the
+  user's device key, which no agent reads, and the user's command line refuses to run under an
+  agent.
+- **The local listener is open to every process of the carrying machine**, its agents' processes
+  included, as the listener of `ssh -L` is: it is on `127.0.0.1` for this reason and no other
+  address, but a program of the same machine that connects to it reaches the run's port. A
+  tunnel is a door to a port of the run for as long as it is open: close it when it is not in use
+  (`tunnel close`, or the command ending). The machine's own user is the one it opens for.
 - **A connection is a raw stream.** Each TCP connection is one stream of the `client` link, opened
   by a line (`{"tunnel": "<id>"}`) and raw bytes either way after it; the end of each direction
   ends the other side's reads. A tunnel's connections are not framed like a bundle's chunks
@@ -989,6 +1005,9 @@ on a real phone, by hand, and reported.
 - A tunnel carries at most 64 connections at once and a device has at most 8 tunnels open on a
   machine: a small cap for one person's pages and APIs, said in the refusal; raising it is one
   constant.
+- A raw stream of a link has 5 seconds to end its opening line (and 512 bytes): a member machine
+  that opens one and does not is given up on, and every other stream of the link is taken
+  meanwhile.
 - `tunnel.list` and `tunnel.close` are of the machine that carries the tunnel (the listener is
   there), class `local`, never over a link; `--machine` filters them. `tunnel.open` is `drive`.
 - The local port is the run's own when it is free, so that a page that hard-codes its port still
