@@ -67,6 +67,34 @@ const VAULT_LOAD: Duration = Duration::from_secs(5);
 /// How long a refused client is answered before it is let go.
 const REFUSED_FOR: Duration = Duration::from_secs(10);
 
+tokio::task_local! {
+    /// The member whose device signed the request being served, for a client of another
+    /// machine: the events its serving emits name it (`docs/remote.md`, "Requests from another
+    /// machine's clients").
+    static ASKED_BY: Arc<str>;
+}
+
+/// `future` run as the member `asked_by` asked, when one did.
+async fn as_asked_by<F: std::future::Future>(asked_by: Option<Arc<str>>, future: F) -> F::Output {
+    match asked_by {
+        Some(device) => ASKED_BY.scope(device, future).await,
+        None => future.await,
+    }
+}
+
+/// `data` naming `device` (`device`), unless it names one already.
+fn naming(data: Value, device: &str) -> Value {
+    match data {
+        Value::Object(mut object) => {
+            object
+                .entry("device")
+                .or_insert_with(|| Value::String(device.to_owned()));
+            Value::Object(object)
+        }
+        other => other,
+    }
+}
+
 pub fn run(paths: &Paths) -> Result<()> {
     // What the daemon's descendants leave behind when their parent ends is taken in by the
     // daemon, not by init: a process an agent started stays its descendant, however it detached,
@@ -292,6 +320,10 @@ impl Daemon {
     /// events in the order of their numbers.
     #[track_caller]
     pub fn emit(&self, name: &str, data: Value) -> Result<Event> {
+        let data = match ASKED_BY.try_with(Arc::clone) {
+            Ok(device) => naming(data, &device),
+            Err(_) => data,
+        };
         let events = self.stored();
         let event = events.store.append_event(name, data)?;
         self.developer.event(&event);
@@ -532,7 +564,13 @@ async fn serve(
                 eprintln!("flottille daemon: the event {name} was not stored: {error}");
             }
         });
-        let link = crate::link::start(paths, key, daemon.stopping.subscribe(), emit);
+        let link = crate::link::start(
+            paths,
+            key,
+            daemon.stopping.subscribe(),
+            emit,
+            Arc::downgrade(&daemon),
+        );
         if let Err(why) = &link {
             eprintln!("flottille daemon: the link is not up: {why}");
         }
@@ -592,7 +630,7 @@ async fn serve(
     let reason = loop {
         tokio::select! {
             accepted = listener.accept() => match accepted {
-                Ok((stream, _)) => match started_by_an_agent(&stream) {
+                Ok((stream, _)) => match started_by_an_agent(&stream, std::process::id()) {
                     Some(pid) => {
                         eprintln!(
                             "flottille daemon: refused a client started by an agent (pid {pid})"
@@ -655,18 +693,18 @@ async fn wind_down(
     Ok(())
 }
 
-/// The pid of a client that descends from the daemon. Everything the daemon starts is an agent,
+/// The pid of a client that descends from the daemon, `daemon_pid`. Everything the daemon starts is an agent,
 /// a command of one, or a program of the daemon's own (git, a forge's command line, a provider's
 /// `--version`), and none of them is a client of the daemon: such a client was started by an
 /// agent. A client whose ancestry cannot be read is refused too.
-fn started_by_an_agent(stream: &UnixStream) -> Option<u32> {
+fn started_by_an_agent(stream: &UnixStream, daemon_pid: u32) -> Option<u32> {
     let pid = stream
         .peer_cred()
         .ok()
         .and_then(|credentials| credentials.pid())
         .and_then(|pid| u32::try_from(pid).ok())
         .unwrap_or(0);
-    children::descends_from(pid, std::process::id()).then_some(pid)
+    children::descends_from(pid, daemon_pid).then_some(pid)
 }
 
 /// Answers each request of a refused client with the refusal, until it leaves or `REFUSED_FOR`
@@ -690,7 +728,22 @@ async fn refuse(stream: UnixStream) {
     .await;
 }
 
+/// A request of another machine's client, checked, served on `stream` as one of a local
+/// client's: what its serving emits names `device`.
+/// Boxed, its type named: a connection carries requests that end up here.
+pub(crate) fn served_for(
+    daemon: Arc<Daemon>,
+    stream: UnixStream,
+    device: String,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+    Box::pin(ASKED_BY.scope(Arc::from(device), connection(daemon, stream)))
+}
+
 async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
+    let asked_by = ASKED_BY.try_with(Arc::clone).ok();
+    // A watch carried to another machine whose link dropped ends the connection: its client
+    // resumes it after the last event it saw.
+    let (dropped, mut watch_dropped) = mpsc::channel::<()>(1);
     let (read, mut write) = stream.into_split();
     let (out, mut outgoing) = mpsc::channel::<Message>(256);
     let writer = tokio::spawn(async move {
@@ -706,6 +759,10 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
     let mut lines = BufReader::new(read).lines();
     let mut stopping = daemon.stopping.subscribe();
     let mut subscriptions = JoinSet::new();
+    // The requests carried to a machine: ended with the connection, so that a watch carried does
+    // not outlive its client (its stream to the other machine closes, and that machine ends its
+    // subscription).
+    let mut carried = JoinSet::new();
     // The workspaces this connection watches: their forges are read again while it stays open.
     let mut watched: HashMap<(String, String), forge::Watch> = HashMap::new();
     // Held while this connection is a window's.
@@ -714,8 +771,27 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
         let line = tokio::select! {
             line = lines.next_line() => line,
             _ = stopping.wait_for(|stopping| *stopping) => break false,
+            _ = watch_dropped.recv() => break true,
+            Some(_) = carried.join_next(), if !carried.is_empty() => continue,
         };
         let Ok(Some(line)) = line else { break true };
+        // A request a client signed for a machine it names (`docs/remote.md`, "Requests from
+        // another machine's clients"): carried, never served here as it is. Never on a
+        // connection serving another machine's client, which carries one request of its own.
+        if asked_by.is_none()
+            && line.contains("\"machine\"")
+            && let Ok(Value::Object(request)) = serde_json::from_str::<Value>(&line)
+            && request.contains_key("machine")
+        {
+            let (daemon, out, dropped) = (daemon.clone(), out.clone(), dropped.clone());
+            carried.spawn(async move {
+                if crate::link::forward(daemon, Value::Object(request), out).await {
+                    // Full: it is said already.
+                    let _ = dropped.try_send(());
+                }
+            });
+            continue;
+        }
         let request = match serde_json::from_str::<Request>(&line) {
             Ok(request) => request,
             Err(error) => {
@@ -742,6 +818,17 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
         {
             let watch = forge::watch(&daemon, &workspace);
             watched.insert((asked.project, asked.name), watch);
+        }
+        if request.method == "events.watch"
+            && let Ok(WatchParams {
+                forge: Some([project, name]),
+                ..
+            }) = serde_json::from_value::<WatchParams>(request.params.clone())
+            && !watched.contains_key(&(project.clone(), name.clone()))
+            && let Ok(Some(workspace)) = daemon.read(|store| store.workspace(&project, &name))
+        {
+            let watch = forge::watch(&daemon, &workspace);
+            watched.insert((project, name), watch);
         }
         if request.method == "events.watch"
             && window.is_none()
@@ -787,7 +874,7 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
             || extensions::answers(&request.method)
         {
             let (daemon, out) = (daemon.clone(), out.clone());
-            tokio::spawn(async move {
+            tokio::spawn(as_asked_by(asked_by.clone(), async move {
                 let answer = if request.method.starts_with("agent.") {
                     agents::call(daemon, &request.method, request.params).await
                 } else if request.method.starts_with("approval.") {
@@ -847,7 +934,7 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
                     Err(failure) => failure.answer(Some(request.id)),
                 };
                 let _ = out.send(answer).await;
-            });
+            }));
             continue;
         }
         // Only these count for the watchdog: one answered by a task of its own may wait on work
@@ -865,6 +952,7 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
         }
     };
 
+    carried.abort_all();
     // A client that left reads nothing more; a stopping daemon lets subscribers send the rest.
     if client_left {
         subscriptions.abort_all();
@@ -1116,6 +1204,58 @@ mod tests {
     use super::*;
 
     const OURS: (u64, u64) = (1, 2);
+
+    /// A client whose credentials the kernel gives as this process's: the two ends of a pair are
+    /// made here. The refusal of a client started by an agent is reached without any run of one,
+    /// which Landlock may keep from the socket where the kernel has it.
+    #[tokio::test]
+    async fn a_client_that_descends_from_the_daemon_is_refused_and_told_why() {
+        let (client, served) = UnixStream::pair().unwrap();
+        // The daemon is this process's parent: this process, the client, descends from it.
+        let daemon = std::os::unix::process::parent_id();
+        assert_eq!(
+            started_by_an_agent(&served, daemon),
+            Some(std::process::id())
+        );
+        // Its own descendant too: a client is no stranger to itself.
+        assert_eq!(
+            started_by_an_agent(&served, std::process::id()),
+            Some(std::process::id())
+        );
+
+        let refusing = tokio::spawn(refuse(served));
+        let (read, mut write) = client.into_split();
+        write
+            .write_all(b"{\"id\":\"1\",\"method\":\"project.list\"}\n")
+            .await
+            .unwrap();
+        let line = BufReader::new(read)
+            .lines()
+            .next_line()
+            .await
+            .unwrap()
+            .unwrap();
+        let answer: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(answer["id"], "1");
+        assert_eq!(answer["error"]["code"], "refused");
+        assert_eq!(answer["error"]["message"], REFUSED_CLIENT);
+        drop(write);
+        refusing.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_client_that_does_not_descend_from_the_daemon_is_served() {
+        let (_client, served) = UnixStream::pair().unwrap();
+        // A process of its own is the daemon here: this one is not its descendant.
+        let mut daemon = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let stranger = started_by_an_agent(&served, daemon.id());
+        let _ = daemon.kill();
+        let _ = daemon.wait();
+        assert_eq!(stranger, None);
+    }
 
     #[test]
     fn only_a_socket_path_that_is_not_found_or_leads_elsewhere_is_gone() {

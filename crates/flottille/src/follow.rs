@@ -43,6 +43,7 @@ pub fn follow(
     events.watch(WatchParams {
         after,
         client: None,
+        forge: None,
     })?;
     let mut shown_requests = HashSet::new();
     let (awaited, mut playing) = match turn {

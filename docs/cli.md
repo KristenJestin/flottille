@@ -11,6 +11,15 @@ and an agent running outside Flottille drives it through [`flottille mcp`](#the-
 - **Exit code**: 0 when the command did what it was asked, 1 when it did not. The reason is one
   sentence on the standard error, `flottille: <sentence>`: the sentence of the daemon's refusal
   when it refused. Nothing was done then.
+- **`--machine <name>`** (or `FLOTTILLE_MACHINE`), on every command: drive the user's machine of
+  that name (`docs/remote.md`, "Requests from another machine's clients"). Each request is signed
+  with this device's key and carried by this machine's daemon; the answers and the events come
+  back as if that machine's daemon were here. A path typed is that machine's
+  (`flottille --machine server project add ~/code/app`). A machine that is off is refused at once,
+  `flottille: server is offline since 22:14`; nothing is kept for it. `flottille daemon`,
+  `window`, `update`, `mcp`, `bridge`, `remote`, `doctor`, `vault provide` and `read-page` are this
+  machine's own and refuse the flag; they ignore the variable, which a shell may have exported for
+  the commands it aims, and the daemon a command starts never reads it.
 - **Agents are named by their id**, twelve hexadecimal digits, as `agent list` shows them.
 - **The program answers to `flottille` and to `flot`** (see [The `flot` name](#the-flot-name)).
   The examples below write `flottille`.
@@ -75,7 +84,10 @@ Prints the daemon's events (`docs/events.md`), one JSON object per line, until i
 `--after <n>` prints the stored events numbered after `n` first: a client that lost its connection
 resumes with the number of the last event it saw. `--forge <project> <workspace>` watches that
 workspace too: while it runs, the daemon reads its pull requests again about once a minute, and
-`workspace.forge` says when they changed ([`forges.md`](forges.md)).
+`workspace.forge` says when they changed ([`forges.md`](forges.md)). With `--machine`, a link
+that drops or a machine that goes off does not end it: it says so once, and resumes after the
+last event it printed when the machine is back, and `--forge` goes with the watch's own stream,
+which that machine ends when the watch ends: a watch interrupted ends there too, at once.
 
 ```
 $ flottille watch --after 0

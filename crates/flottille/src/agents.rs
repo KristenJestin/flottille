@@ -2692,7 +2692,8 @@ fn kill_left(store: &Store, pid: u32, started: u64) {
 /// session is kept (the next process resumes it, which keeps what it knew), and every agent with
 /// something queued is rung. A working agent's prompt was sent (it is working once its prompt is
 /// asked): it is in the session's history, so it is taken as sent, never sent again, and the
-/// agent is told its turn was cut. A starting agent's was not sent yet: it is given back.
+/// agent is told its turn was cut. Any other agent's was not sent yet (a starting one's, or one
+/// taken by a daemon killed before its process started): it is given back.
 pub fn settle_at_start(daemon: &Arc<Daemon>) {
     let agents = match daemon.read(Store::agents) {
         Ok(agents) => agents,
@@ -2710,9 +2711,7 @@ pub fn settle_at_start(daemon: &Arc<Daemon>) {
                 None,
                 Some(("agent.released", json!({"reason": "restart"}))),
             );
-            if agent.state == AgentState::Starting {
-                let _ = daemon.write(|store| Ok(((), store.give_back(&agent.id)?)));
-            } else {
+            if agent.state == AgentState::Working {
                 let _ = daemon.read(|store| store.deliveries_taken(&agent.id));
                 deliveries::deliver(
                     daemon,
@@ -2724,6 +2723,9 @@ pub fn settle_at_start(daemon: &Arc<Daemon>) {
                     approval::BETWEEN_TURNS,
                 );
             }
+        }
+        if !agent.state.is_final() && agent.state != AgentState::Working {
+            let _ = daemon.write(|store| Ok(((), store.give_back(&agent.id)?)));
         }
         if !agent.state.is_final()
             && daemon

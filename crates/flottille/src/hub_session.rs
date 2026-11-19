@@ -231,7 +231,7 @@ impl Control {
     }
 
     /// The hub this machine pinned, and the members of the list it last checked.
-    fn checked(&self) -> Result<(Device, Members), String> {
+    pub(crate) fn checked(&self) -> Result<(Device, Members), String> {
         let device = match self.pinned() {
             None => return Err(NOT_SET_UP.to_owned()),
             Some(pinned) => pinned?,
