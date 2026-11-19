@@ -35,9 +35,44 @@ fn needs_a_live_session(tool: &str) -> bool {
     matches!(tool, "session_send" | "agent_stop")
 }
 
+/// The other project a `session_send` or `session_read` names (`project`), when it is not the
+/// caller's: a title is then matched among that project's root sessions. A project that is not
+/// registered is refused, naming the registered ones.
+fn named_project(
+    daemon: &Daemon,
+    tool: &str,
+    args: &Value,
+    caller_project: &str,
+) -> Result<Option<String>, Outcome> {
+    if !matches!(tool, "session_send" | "session_read") {
+        return Ok(None);
+    }
+    let Some(project) = args["project"]
+        .as_str()
+        .map(str::trim)
+        .filter(|project| !project.is_empty())
+    else {
+        return Ok(None);
+    };
+    if !crate::projects::exists(daemon, project) {
+        let mut names: Vec<String> = crate::projects::all(daemon)
+            .into_iter()
+            .map(|project| project.name)
+            .collect();
+        names.sort();
+        return Err(Outcome::Refused(format!(
+            "refused: project {} is not registered: the registered projects are {}",
+            label(project),
+            names.join(", ")
+        )));
+    }
+    Ok((project != caller_project).then(|| project.to_owned()))
+}
+
 /// The arguments of the call with the session it names given by its id, or the refusal when a
 /// title picks none or several. An id that names an agent is left to the tool, which refuses a
-/// session of another project or a child as it always did.
+/// session of another project or a child as it always did. With `project`, a title is matched
+/// among that project's root sessions, as it is among the caller's own.
 pub fn resolve(
     daemon: &Daemon,
     grant: &Grant,
@@ -52,6 +87,11 @@ pub fn resolve(
     };
     let name = given.trim().to_owned();
     let failed = |error: String| Outcome::Failed(error);
+    let caller = daemon
+        .read(|store| store.agent(&grant.agent))
+        .map_err(|error| failed(error.to_string()))?
+        .ok_or_else(|| failed(format!("there is no agent {}", grant.agent)))?;
+    let elsewhere = named_project(daemon, tool, &args, &caller.project)?;
     let found = daemon
         .read(|store| store.agent(&name))
         .map_err(|error| failed(error.to_string()))?;
@@ -59,15 +99,12 @@ pub fn resolve(
         args[field] = Value::String(name);
         return Ok(args);
     }
-    let caller = daemon
-        .read(|store| store.agent(&grant.agent))
-        .map_err(|error| failed(error.to_string()))?
-        .ok_or_else(|| failed(format!("there is no agent {}", grant.agent)))?;
+    let among = elsewhere.as_deref().unwrap_or(&caller.project);
     let mut roots: Vec<Agent> = daemon
         .read(|store| store.agents())
         .map_err(|error| failed(error.to_string()))?
         .into_iter()
-        .filter(|agent| agent.parent.is_none() && agent.project == caller.project)
+        .filter(|agent| agent.parent.is_none() && agent.project == among)
         .collect();
     roots.sort_by_key(|agent| std::cmp::Reverse((last_sign(agent), agent.created_at)));
     let wanted = name.to_lowercase();
@@ -85,6 +122,10 @@ pub fn resolve(
     if needs_a_live_session(tool) && same.iter().any(|agent| !agent.state.is_final()) {
         same.retain(|agent| !agent.state.is_final());
     }
+    let whose = match &elsewhere {
+        Some(project) => format!("project {}", label(project)),
+        None => "your project".to_owned(),
+    };
     let (header, listed) = match same.as_slice() {
         [one] => {
             args[field] = Value::String(one.id.clone());
@@ -92,7 +133,7 @@ pub fn resolve(
         }
         [] => (
             format!(
-                "refused: no session of your project has the id or the title \"{}\": {what} \
+                "refused: no session of {whose} has the id or the title \"{}\": {what} \
                  names a session by its agent id or by its title. The sessions of this project, \
                  the most recently active first:",
                 label(&name)
@@ -101,7 +142,7 @@ pub fn resolve(
         ),
         several => (
             format!(
-                "refused: {} sessions of your project are titled \"{}\": name the one you mean \
+                "refused: {} sessions of {whose} are titled \"{}\": name the one you mean \
                  by its agent id:",
                 several.len(),
                 label(&name)
