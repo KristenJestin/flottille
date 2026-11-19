@@ -281,6 +281,7 @@ no device calls a `local` one over a link (`docs/remote.md`, "Roles").
 | `agent.reload_tools` | drive |
 | `agent.compact` | drive |
 | `agent.rename` | drive |
+| `agent.ending` | read |
 | `agent.detach` | drive |
 | `agent.mode` | drive |
 | `agent.options` | drive |
