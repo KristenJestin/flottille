@@ -2258,6 +2258,8 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
                         .into_iter()
                         .flatten()
                         .filter(|machine| machine["state"] == "online")
+                        // A share is for a runner: a controller's machine would refuse it.
+                        .filter(|machine| machine["role"] == "runner")
                         .filter_map(|machine| machine["name"].as_str().map(str::to_owned))
                         .collect()
                 });
