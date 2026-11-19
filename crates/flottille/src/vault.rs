@@ -690,7 +690,8 @@ pub fn needs(daemon: &Daemon, project: &Project) -> Vec<Need> {
             name: name.clone(),
             description: format!(
                 "The Jira API token tickets uses on {site} to log time, to read worklogs and \
-                 fields, and to edit work items (their fields, parent and fix version); its \
+                 fields, to edit work items (their fields, parent and fix version) and to \
+                 post a reply under a comment or a comment that mentions someone; its \
                  username is the Jira account's e-mail"
             ),
             bound: uses::worklog(&project.name),

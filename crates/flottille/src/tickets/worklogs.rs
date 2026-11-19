@@ -119,11 +119,33 @@ impl Site<'_> {
     /// success alone; a time-out, or a failure once the request is sent, may follow a change Jira
     /// applied, so it is said as not confirmed.
     pub(super) async fn put(&self, path: &str, body: &Value) -> Result<(), String> {
+        self.write(http::Method::PUT, path, body).await.map(drop)
+    }
+
+    /// `POST /rest/api/3/<path>` with `body` as JSON: what Jira created, as JSON, said as `put`
+    /// says a refusal and a doubt.
+    pub(super) async fn post(&self, path: &str, body: &Value) -> Result<Value, String> {
+        let text = self.write(http::Method::POST, path, body).await?;
+        serde_json::from_str(&text).map_err(|_| {
+            format!(
+                "the change was not confirmed: Jira on {} answered what is not JSON; check the \
+                 work item before changing it again",
+                self.site
+            )
+        })
+    }
+
+    async fn write(
+        &self,
+        method: http::Method,
+        path: &str,
+        body: &Value,
+    ) -> Result<String, String> {
         let url = rest_url(self.site, path)?;
         let answer = tokio::time::timeout(
             READ_TIME,
             request(
-                http::Method::PUT,
+                method,
                 &url,
                 &self.authorization,
                 Some(body),
@@ -142,7 +164,7 @@ impl Site<'_> {
                 "{}; the change was not confirmed: check the work item before changing it again",
                 self.clean(&why)
             )),
-            Ok(Ok((status, _))) if status.is_success() => Ok(()),
+            Ok(Ok((status, text))) if status.is_success() => Ok(text),
             Ok(Ok((status, text))) => Err(format!(
                 "Jira on {} answered {status}: {}; nothing was written",
                 self.site,

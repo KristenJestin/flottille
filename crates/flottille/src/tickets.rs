@@ -136,9 +136,36 @@ pub struct Comment {
     /// Why a reply would quote the comment to people it is not for (restricted, an internal note,
     /// hidden), when it would.
     pub restricted: Option<String>,
+    /// Jira: the id of the comment it answers (`parentId`), when it is a reply in a thread; read
+    /// by `show` with `detail full` from Jira's REST API, which `acli`'s view is not known to give.
+    pub parent: Option<String>,
 }
 
 impl Comment {
+    /// Its line in `show`: `indent` for a reply under its comment, `answers` the id of the comment
+    /// it answers when that one is not shown above it.
+    fn line(&self, indent: &str, answers: Option<&str>) -> String {
+        if !self.agent {
+            crate::web::shown(&self.body, crate::web::Source::Link);
+        }
+        let at = self
+            .at
+            .as_deref()
+            .map_or(String::new(), |at| format!(", {at}"));
+        // The id of every comment: what `reply` takes, and `comment_edit` and `comment_delete`
+        // for one an agent posted.
+        let id = match (&self.id, answers) {
+            (Some(id), Some(parent)) => format!(" [comment {id}, a reply to {parent}]"),
+            (Some(id), None) => format!(" [comment {id}]"),
+            (None, _) => String::new(),
+        };
+        format!(
+            "{indent}- {}{id}{at}: {}\n",
+            self.by(),
+            self.body.replace('\n', &format!("\n{indent}    "))
+        )
+    }
+
     /// Its author, and that an agent posted it when one did.
     fn by(&self) -> String {
         match self.agent {
@@ -160,6 +187,7 @@ fn comment_of(author: String, at: Option<&str>, id: Option<String>, text: &str) 
         own: false,
         account: None,
         restricted: None,
+        parent: None,
     }
 }
 
@@ -265,25 +293,27 @@ impl Ticket {
             if self.older > 0 {
                 text.push_str(&format!("  ({} older ones are not shown)\n", self.older));
             }
+            // Each reply under its parent, indented (Jira's threads are one level deep); a reply
+            // whose parent is not among the comments read stands where it is and says whom it
+            // answers.
+            let parent_of = |comment: &Comment| {
+                let parent = comment.parent.as_ref()?;
+                let found = self
+                    .comments
+                    .iter()
+                    .find(|c| c.id.as_ref() == Some(parent))?;
+                found.parent.is_none().then_some(found)
+            };
             for comment in &self.comments {
-                if !comment.agent {
-                    crate::web::shown(&comment.body, crate::web::Source::Link);
+                if parent_of(comment).is_some() {
+                    continue;
                 }
-                let at = comment
-                    .at
-                    .as_deref()
-                    .map_or(String::new(), |at| format!(", {at}"));
-                // The id of every comment: what `reply` takes, and `comment_edit` and
-                // `comment_delete` for one an agent posted.
-                let id = comment
-                    .id
-                    .as_ref()
-                    .map_or(String::new(), |id| format!(" [comment {id}]"));
-                text.push_str(&format!(
-                    "- {}{id}{at}: {}\n",
-                    comment.by(),
-                    comment.body.replace('\n', "\n    ")
-                ));
+                text.push_str(&comment.line("", comment.parent.as_deref()));
+                for reply in self.comments.iter().filter(|reply| {
+                    parent_of(reply).is_some_and(|parent| std::ptr::eq(parent, comment))
+                }) {
+                    text.push_str(&reply.line("    ", None));
+                }
             }
         }
         if !self.links.is_empty() {
@@ -1145,6 +1175,9 @@ pub fn unwritable(project: &Project, args: &Value) -> Option<String> {
         return Some(format!("refused: {why}"));
     }
     if let Some(why) = unplannable(project, tracker, action, args) {
+        return Some(why);
+    }
+    if let Some(why) = replies::unwritable(tracker, action, args) {
         return Some(why);
     }
     if action == "log_time" {
@@ -2288,11 +2321,23 @@ async fn show(
     // `detail: full` and `fresh` read again, and keep what they read for the next show.
     let (read, age) = read_or_kept(daemon, project, &key, full || asked.fresh).await;
     match read {
-        Ok(ticket) => {
+        Ok(mut ticket) => {
             if held.is_some() && age.is_none() {
                 events::remember(daemon, project, &key, &ticket);
             }
-            Outcome::Done(ticket.text(full, asked.ticket.as_deref(), age))
+            // The threads are Jira's REST read (its `parentId`): drawn when the project has its
+            // entry, and said when they could not be read.
+            let unthreaded = match full {
+                true => replies::threaded(daemon, project, &key, &mut ticket).await,
+                false => None,
+            };
+            let text = ticket.text(full, asked.ticket.as_deref(), age);
+            Outcome::Done(match unthreaded {
+                Some(why) => {
+                    format!("{text}\n(The replies are not told from the comments: {why})\n")
+                }
+                None => text,
+            })
         }
         Err(problem) => Outcome::Failed(format!(
             "the ticket {} could not be read: {problem}",
@@ -2983,6 +3028,21 @@ async fn write_work_item(
             || labels.iter().any(|(_, names)| !names.is_empty());
         if !more {
             return Outcome::Done(format!("{key} was changed."));
+        }
+    }
+    // A comment that mentions someone goes through Jira's REST API with the project's entry:
+    // that `acli`'s comment create keeps a mention node is not confirmed.
+    if let ("comment", Some(body)) = (action, body) {
+        let document = crate::adf::from_markdown(body);
+        if !crate::adf::mentions(&document).is_empty() {
+            return replies::comment_with_mentions(
+                daemon,
+                project,
+                on,
+                site,
+                (&document, asked.by_id_only),
+            )
+            .await;
         }
     }
     let file = match body.map(|body| AdfFile::of(daemon, body)).transpose() {

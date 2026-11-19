@@ -489,7 +489,7 @@ fn a_jira_reply_without_a_tracker_entry_is_refused_before_anything_runs() {
     let mcp = root_in(&named);
     let said = refused_at_once(&named, &mcp, ask);
     assert!(said.contains("jira-time"), "{said}");
-    assert!(said.contains("\"action\": \"ask\""), "{said}");
+    assert!(said.contains("action: \"ask\""), "{said}");
 
     // Never a separate comment in its place, and no call to the site.
     for user in [&user, &named] {
@@ -702,9 +702,7 @@ fn the_card_says_who_a_mention_notifies() {
         "{card}"
     );
     assert!(
-        card.contains(&format!(
-            "through Jira's API with the vault entry jira-time"
-        )),
+        card.contains("through Jira's API with the vault entry jira-time"),
         "{card}"
     );
 
