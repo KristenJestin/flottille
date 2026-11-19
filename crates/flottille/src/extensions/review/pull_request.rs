@@ -258,10 +258,21 @@ async fn filters_off(folder: &Path) -> Vec<(String, String)> {
         .collect();
     drivers.sort_unstable();
     drivers.dedup();
+    filter_env(&drivers, 0)
+}
+
+/// The environment `filters_off` gives git for `drivers`: `inherited` is the number of
+/// `GIT_CONFIG_KEY_n` the daemon's own environment already holds, which a count of ours would drop.
+fn filter_env(drivers: &[&str], _inherited: usize) -> Vec<(String, String)> {
     let mut env = vec![("GIT_LFS_SKIP_SMUDGE".to_owned(), "1".to_owned())];
     let mut count = 0;
     for driver in drivers {
-        for (key, value) in [("smudge", ""), ("process", ""), ("required", "false")] {
+        for (key, value) in [
+            ("smudge", ""),
+            ("process", ""),
+            ("required", "false"),
+            ("clean", ""),
+        ] {
             env.push((
                 format!("GIT_CONFIG_KEY_{count}"),
                 format!("filter.{driver}.{key}"),
@@ -378,5 +389,36 @@ pub(super) async fn sweep_refs(daemon: &Daemon) {
                 .await;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn value<'a>(env: &'a [(String, String)], name: &str) -> Option<&'a str> {
+        env.iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.as_str())
+    }
+
+    #[test]
+    fn the_filters_off_numbering_starts_after_the_configuration_the_daemon_inherited() {
+        let env = filter_env(&["lfs", "mark"], 2);
+
+        // The daemon's own KEY_0 and KEY_1 stay: ours begin at 2, and the count covers both.
+        assert_eq!(value(&env, "GIT_CONFIG_KEY_0"), None);
+        assert_eq!(value(&env, "GIT_CONFIG_KEY_1"), None);
+        assert_eq!(value(&env, "GIT_CONFIG_KEY_2"), Some("filter.lfs.smudge"));
+        assert_eq!(value(&env, "GIT_CONFIG_COUNT"), Some("10"));
+        assert_eq!(value(&env, "GIT_CONFIG_KEY_9"), Some("filter.mark.clean"));
+    }
+
+    #[test]
+    fn the_filters_off_numbering_starts_at_zero_with_nothing_inherited() {
+        let env = filter_env(&["lfs"], 0);
+
+        assert_eq!(value(&env, "GIT_CONFIG_KEY_0"), Some("filter.lfs.smudge"));
+        assert_eq!(value(&env, "GIT_CONFIG_COUNT"), Some("4"));
     }
 }
