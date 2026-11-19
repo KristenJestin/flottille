@@ -267,6 +267,8 @@ pub struct Sidebar {
     asked: HashSet<String>,
     /// What the daemon refused of what was asked from a row.
     refused: Option<SharedString>,
+    /// Whether the daemon has not told yet what the tree shows: its rows are skeletons until then.
+    loading: bool,
 }
 
 impl Sidebar {
@@ -280,6 +282,7 @@ impl Sidebar {
             said: 0,
             asked: HashSet::new(),
             refused: None,
+            loading: true,
         }
     }
 
@@ -354,6 +357,14 @@ impl Sidebar {
     /// What the daemon refused of what was asked from a row.
     pub fn refused(&self) -> Option<&str> {
         self.refused.as_deref()
+    }
+
+    /// The daemon answered (or cannot be reached): the tree is not waiting for it any more.
+    pub fn set_loading(&mut self, loading: bool, cx: &mut Context<Self>) {
+        if self.loading != loading {
+            self.loading = loading;
+            cx.notify();
+        }
     }
 }
 
@@ -498,6 +509,11 @@ impl Render for Sidebar {
                                 ),
                             ),
                     )
+                    .child(presence(
+                        "sidebar-loading",
+                        self.loading,
+                        crate::loading::sidebar(),
+                    ))
                     .children(projects),
             )
             .children(ended)

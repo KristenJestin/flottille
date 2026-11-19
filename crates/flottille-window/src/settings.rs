@@ -1605,6 +1605,7 @@ impl SettingsPage {
         }
         self.appearance = Some(appearance.clone());
         appearance::appear(appearance.clone(), cx);
+        crate::look::remember(&appearance, cx);
         self.shell
             .update(cx, |shell, _| shell.ask_appearance(Some(appearance)))
             .ok();

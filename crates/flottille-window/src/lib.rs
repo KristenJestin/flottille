@@ -22,6 +22,7 @@ pub mod kept;
 pub mod leaves;
 pub mod link;
 pub mod links_card;
+pub mod loading;
 pub mod look;
 pub mod message_checks;
 pub mod modals;
@@ -100,8 +101,10 @@ pub fn start(
     memory: Option<look::Memory>,
     cx: &mut gpui_kit::App,
 ) {
-    let _ = memory;
     init_with(env, cx);
+    if let Some(memory) = memory {
+        look::begin(memory, cx);
+    }
 }
 
 pub use instance::Instance;
@@ -115,7 +118,16 @@ pub fn run(connect: Connect, instance: Option<Instance>) {
     gpui_kit::application()
         .with_assets(glyphs::Assets)
         .run(move |cx| {
-            init(cx);
+            // The copy of the user's theme, which the first frame is drawn in: the daemon, which
+            // keeps the choice, has not answered yet.
+            let memory = flottille_core::paths::Paths::from_env()
+                .ok()
+                .map(|paths| look::Memory::in_folder(&paths.state));
+            start(
+                gpui_design_system::omarchy::Environment::from_system(),
+                memory,
+                cx,
+            );
             let bounds = Bounds::centered(None, size(px(1280.), px(800.)), cx);
             let options = WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),

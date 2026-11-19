@@ -75,6 +75,8 @@ pub struct MainArea {
     restarted: bool,
     /// Whether Flottille was read once: until then, an empty page says nothing of the projects.
     read: bool,
+    /// Whether Flottille can be reached: when it cannot, the page does not wait for it.
+    reachable: bool,
 }
 
 impl MainArea {
@@ -98,6 +100,7 @@ impl MainArea {
             restarting: false,
             restarted: false,
             read: false,
+            reachable: true,
         }
     }
 
@@ -107,6 +110,15 @@ impl MainArea {
                 self.restarted = false;
             }
             self.not_answering = since;
+            cx.notify();
+        }
+    }
+
+    /// Whether the link reaches Flottille: until it has been read, the page shows a skeleton
+    /// while it does, and the "reconnecting" of the top bar speaks for it when it does not.
+    pub fn set_reachable(&mut self, reachable: bool, cx: &mut Context<Self>) {
+        if self.reachable != reachable {
+            self.reachable = reachable;
             cx.notify();
         }
     }
@@ -261,8 +273,10 @@ impl MainArea {
 }
 
 impl Render for MainArea {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
+        let waiting = !self.read && self.reachable && self.not_answering.is_none();
+        let veil = crate::loading::veil(waiting, &p, window, cx);
         let root = div()
             .id("main")
             .size_full()
@@ -303,6 +317,7 @@ impl Render for MainArea {
             Page::ProjectSettings { .. } => page.children(self.project_settings.clone()),
             Page::Spec { .. } => page.children(self.spec.clone()),
         };
+        let page = page.children(veil);
         root.flex()
             .flex_col()
             .child(self.not_answering_banner(cx))
