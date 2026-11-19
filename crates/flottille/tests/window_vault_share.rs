@@ -20,6 +20,8 @@ use remote::{Machine, NoKeyring, pc_and_server};
 use serde_json::json;
 
 const SECRET: &str = "w1ndow-sh4re-secret";
+/// The secret the server sets by hand over its copy.
+const SECOND: &str = "s3rver-0wn-secret";
 
 fn window<'a>(
     machine: &Machine,
@@ -194,15 +196,25 @@ fn share_with_lists_the_online_machines_and_says_the_result(cx: &mut TestAppCont
 #[gpui_kit::test]
 fn the_row_of_a_shared_entry_says_where_it_came_from(cx: &mut TestAppContext) {
     let (_hub, pc, server) = pc_and_server(common::User::new());
-    // The server's own entry first: sharing pc's over it makes it a copy.
-    for user in [&server.user, &pc.user] {
-        user.call("vault.set", json!({"name": "tracker", "secret": SECRET}))
-            .unwrap();
-    }
+    // The server's own entry says nothing; pc's, shared, comes as a copy.
+    server
+        .user
+        .call("vault.set", json!({"name": "notes", "secret": SECRET}))
+        .unwrap();
+    pc.user
+        .call("vault.set", json!({"name": "tracker", "secret": SECRET}))
+        .unwrap();
     let (shell, cx) = window(&server, cx);
     let section = open_vault(&shell, cx);
+    until(&shell, cx, "the server's own entry is read", |cx| {
+        section.read_with(cx, |s, _| {
+            s.entries()
+                .is_some_and(|e| e.iter().any(|e| e.name == "notes"))
+        })
+    });
+    settle(cx);
     assert!(
-        !shown("vault-shared-tracker", cx),
+        !shown("vault-shared-notes", cx),
         "its own entry says nothing"
     );
 
@@ -220,28 +232,7 @@ fn the_row_of_a_shared_entry_says_where_it_came_from(cx: &mut TestAppContext) {
                 .is_some_and(|e| e.iter().any(|e| e.shared_from.as_deref() == Some("pc")))
         })
     });
-    // The row's new line unfolds under it.
-    cx.executor().advance_clock(Duration::from_millis(60));
-    cx.update(|window, cx| window.simulate_next_frame(cx));
-    let partway = cx.update(|window, _| {
-        window
-            .find("vault-shared-block-tracker")
-            .bounds()
-            .size
-            .height
-    });
     settle(cx);
-    let whole = cx.update(|window, _| {
-        window
-            .find("vault-shared-block-tracker")
-            .bounds()
-            .size
-            .height
-    });
-    assert!(
-        partway < whole,
-        "the line unfolds: {partway:?} then {whole:?}"
-    );
     let said = cx.update(|window, _| {
         window
             .find("vault-shared-tracker")
@@ -249,4 +240,40 @@ fn the_row_of_a_shared_entry_says_where_it_came_from(cx: &mut TestAppContext) {
             .map(str::to_owned)
     });
     assert_eq!(said.as_deref(), Some("Shared from pc"));
+    let height = |cx: &mut VisualTestContext| {
+        cx.update(|window, _| {
+            window
+                .find("vault-shared-block-tracker")
+                .bounds()
+                .size
+                .height
+        })
+    };
+    let whole = height(cx);
+
+    // A secret set here by hand makes it the server's own: the line folds away.
+    server
+        .user
+        .call("vault.set", json!({"name": "tracker", "secret": SECOND}))
+        .unwrap();
+    until(&shell, cx, "the entry is read as the server's own", |cx| {
+        section.read_with(cx, |s, _| {
+            s.entries().is_some_and(|e| {
+                e.iter()
+                    .any(|e| e.name == "tracker" && e.shared_from.is_none())
+            })
+        })
+    });
+    cx.executor().advance_clock(Duration::from_millis(60));
+    cx.update(|window, cx| window.simulate_next_frame(cx));
+    let partway = height(cx);
+    assert!(
+        partway < whole,
+        "the line folds away: {whole:?} then {partway:?}"
+    );
+    settle(cx);
+    assert!(
+        !shown("vault-shared-tracker", cx),
+        "its own entry says nothing"
+    );
 }
