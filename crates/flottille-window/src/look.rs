@@ -88,3 +88,51 @@ pub fn remember(chosen: &Appearance, cx: &mut App) {
     }
     cx.global_mut::<Memory>().held = Some(chosen.clone());
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui_design_system::Source;
+    use gpui_design_system::theme::Shade;
+
+    /// A new empty folder of the machine's temporary one, never the user's.
+    fn scratch(name: &str) -> PathBuf {
+        let folder =
+            std::env::temp_dir().join(format!("flottille-look-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&folder);
+        std::fs::create_dir_all(&folder).unwrap();
+        folder
+    }
+
+    fn light() -> Appearance {
+        Appearance {
+            source: Source::Theme(crate::OWN_THEME.into()),
+            shade: Shade::Light,
+        }
+    }
+
+    #[test]
+    fn what_is_written_is_read_back_and_a_folder_that_is_missing_is_made() {
+        let folder = scratch("round-trip");
+        let memory = Memory::in_folder(&folder.join("state/flottille"));
+        assert_eq!(memory.read(), None, "nothing yet");
+        memory.write(&light()).unwrap();
+        assert_eq!(memory.read(), Some(light()));
+        std::fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[test]
+    fn a_copy_that_cannot_be_read_is_no_copy() {
+        let folder = scratch("unreadable");
+        let memory = Memory::in_folder(&folder);
+        std::fs::write(memory.path(), "{\"theme\": ").unwrap();
+        assert_eq!(memory.read(), None);
+        std::fs::write(
+            memory.path(),
+            "{\"theme\": \"nowhere\", \"shade\": \"dark\"}",
+        )
+        .unwrap();
+        assert_eq!(memory.read(), None);
+        std::fs::remove_dir_all(folder).unwrap();
+    }
+}
