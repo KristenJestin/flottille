@@ -41,6 +41,35 @@ pub struct Travel {
     pub at: u64,
 }
 
+/// A session or a child started on another machine by an agent (`launches`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Launch {
+    /// `out` on the caller's machine, `in` on the machine it runs on.
+    pub way: String,
+    /// The other machine's key.
+    pub machine: String,
+    pub launch: String,
+    pub caller: String,
+    pub kind: String,
+    pub project: String,
+    /// `held`, `accepted`, `started` or `refused`.
+    pub state: String,
+    pub request: Option<u64>,
+    pub agent: Option<String>,
+    pub workspace: Option<String>,
+    pub asked: Value,
+    pub at: u64,
+}
+
+/// Which launches `Store::launches` gives.
+#[derive(Debug, Clone, Copy)]
+pub enum LaunchFilter<'a> {
+    All,
+    Named(&'a str),
+    Agent(&'a str),
+    Request(u64),
+}
+
 /// A run's process recorded while it runs (`run_processes`), what a daemon started after a crash
 /// ends.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -834,6 +863,33 @@ const MIGRATIONS: &[&str] = &[
         at         INTEGER NOT NULL,
         PRIMARY KEY (way, machine, launch, repository)
     ) STRICT;
+",
+    "
+    -- A session or a child started on another machine by an agent (`docs/remote.md`, \"Starting
+    -- a session on another machine\"): `out` on the caller's machine, `in` on the machine it runs
+    -- on. `machine` is the other machine's key; `caller` the agent that launched it (of this
+    -- machine for `out`, of the other for `in`); `state` `held` (for the user there), `accepted`
+    -- (by the gate there), `started`, or `refused`; `request` the user's request there while it is
+    -- held; `agent` the agent it started (there for `out`); `asked` the launch as it was asked.
+    CREATE TABLE launches (
+        way       TEXT NOT NULL CHECK (way IN ('out', 'in')),
+        machine   TEXT NOT NULL,
+        launch    TEXT NOT NULL,
+        caller    TEXT NOT NULL,
+        kind      TEXT NOT NULL,
+        project   TEXT NOT NULL,
+        state     TEXT NOT NULL,
+        request   INTEGER,
+        agent     TEXT,
+        workspace TEXT,
+        asked     TEXT NOT NULL,
+        at        INTEGER NOT NULL,
+        PRIMARY KEY (way, machine, launch)
+    ) STRICT;
+    CREATE INDEX launches_by_agent ON launches (agent);
+    -- The user's switch of a tree to Full, as the device that made it signed it: what a launch on
+    -- another machine needs to start in Full there.
+    ALTER TABLE agents ADD COLUMN full_switch TEXT;
 ",
 ];
 
@@ -2349,6 +2405,30 @@ impl Store {
         Ok(Some(event))
     }
 
+    /// Settles a request whose answer is for no agent: the launch of another machine's agent,
+    /// which the user allowed or refused here. Its answer is kept as sent, never delivered.
+    pub fn settle_unsent(&mut self, request: &Request, outcome: &str) -> Result<Option<Event>> {
+        let transaction = self.connection.transaction()?;
+        let id = format!("approval-{}", request.number);
+        let stored = transaction.execute(
+            "INSERT OR IGNORE INTO deliveries (id, agent, kind, body, urgency, state, created_at, \
+             images) VALUES (?1, ?2, 'approval', ?3, 'urgent', 'superseded', ?4, '[]')",
+            params![id, request.agent, outcome, now_ms()],
+        )?;
+        if stored == 0 {
+            return Ok(None);
+        }
+        let event = append_agent_event(
+            &transaction,
+            &request.agent,
+            "approval.settled",
+            json!({"number": request.number, "agent": request.agent, "outcome": outcome,
+                "delivery": id}),
+        )?;
+        transaction.commit()?;
+        Ok(Some(event))
+    }
+
     /// The requests allowed whose answer was never stored: a daemon stopped while it performed
     /// them.
     pub fn unsettled_requests(&self) -> Result<Vec<Request>> {
@@ -2980,6 +3060,109 @@ impl Store {
         Ok(())
     }
 
+    /// Records a launch, in place of the one of the same name with the same machine.
+    pub fn record_launch(&mut self, launch: &Launch) -> Result<()> {
+        self.connection.execute(
+            "INSERT OR REPLACE INTO launches (way, machine, launch, caller, kind, project, state, \
+             request, agent, workspace, asked, at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![
+                launch.way,
+                launch.machine,
+                launch.launch,
+                launch.caller,
+                launch.kind,
+                launch.project,
+                launch.state,
+                launch.request.map(|n| n as i64),
+                launch.agent,
+                launch.workspace,
+                serde_json::to_string(&launch.asked)?,
+                launch.at as i64,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// The launches `way` with `machine` (any, when `None`) that match `filter`: `launch` the
+    /// launch's name, `agent` the agent it started, `request` the user's request.
+    pub fn launches(
+        &self,
+        way: &str,
+        machine: Option<&str>,
+        filter: LaunchFilter<'_>,
+    ) -> Result<Vec<Launch>> {
+        let (launch, agent, request) = match filter {
+            LaunchFilter::All => (None, None, None),
+            LaunchFilter::Named(launch) => (Some(launch), None, None),
+            LaunchFilter::Agent(agent) => (None, Some(agent), None),
+            LaunchFilter::Request(request) => (None, None, Some(request as i64)),
+        };
+        let mut statement = self.connection.prepare_cached(
+            "SELECT way, machine, launch, caller, kind, project, state, request, agent, \
+             workspace, asked, at FROM launches \
+             WHERE way = ?1 AND (?2 IS NULL OR machine = ?2) AND (?3 IS NULL OR launch = ?3) \
+             AND (?4 IS NULL OR agent = ?4) AND (?5 IS NULL OR request = ?5) ORDER BY at, launch",
+        )?;
+        let rows = statement.query_map(params![way, machine, launch, agent, request], |row| {
+            Ok((
+                Launch {
+                    way: row.get(0)?,
+                    machine: row.get(1)?,
+                    launch: row.get(2)?,
+                    caller: row.get(3)?,
+                    kind: row.get(4)?,
+                    project: row.get(5)?,
+                    state: row.get(6)?,
+                    request: row.get::<_, Option<i64>>(7)?.map(|n| n as u64),
+                    agent: row.get(8)?,
+                    workspace: row.get(9)?,
+                    asked: Value::Null,
+                    at: row.get::<_, i64>(11)? as u64,
+                },
+                row.get::<_, String>(10)?,
+            ))
+        })?;
+        rows.map(|row| {
+            let (mut launch, asked) = row?;
+            launch.asked = serde_json::from_str(&asked)?;
+            Ok(launch)
+        })
+        .collect()
+    }
+
+    /// Forgets a launch.
+    pub fn forget_launch(&mut self, way: &str, machine: &str, launch: &str) -> Result<()> {
+        self.connection.execute(
+            "DELETE FROM launches WHERE way = ?1 AND machine = ?2 AND launch = ?3",
+            params![way, machine, launch],
+        )?;
+        Ok(())
+    }
+
+    /// Keeps the user's switch of the tree of `agent` to Full as the device signed it, or forgets
+    /// it (`None`).
+    pub fn set_full_switch(&mut self, agent: &str, signed: Option<&str>) -> Result<()> {
+        self.connection.execute(
+            "UPDATE agents SET full_switch = ?2 WHERE id = ?1",
+            params![agent, signed],
+        )?;
+        Ok(())
+    }
+
+    /// The user's switch of the tree of `agent` to Full, as the device signed it, when kept.
+    pub fn full_switch(&self, agent: &str) -> Result<Option<String>> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT full_switch FROM agents WHERE id = ?1",
+                params![agent],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten())
+    }
+
     /// The keys of the drafts the composers hold.
     pub fn draft_keys(&self) -> Result<Vec<String>> {
         let mut statement = self
@@ -3590,9 +3773,19 @@ impl Store {
 
     /// The children of the project that have not ended: what its children cap counts.
     pub fn live_children(&self, project: &str) -> Result<usize> {
+        // A child another machine launched here has no parent here (one whose code is on its way
+        // counts already), and one an agent of this machine launched on another counts while its
+        // parent lives (`docs/remote.md`, "Starting
+        // a session on another machine").
         let count: u64 = self.connection.query_row(
-            "SELECT count(*) FROM agents WHERE project = ?1 AND parent IS NOT NULL \
-             AND state NOT IN ('ended', 'failed')",
+            "SELECT (SELECT count(*) FROM agents WHERE project = ?1 \
+             AND state NOT IN ('ended', 'failed') AND (parent IS NOT NULL OR id IN \
+             (SELECT agent FROM launches WHERE way = 'in' AND kind = 'child' AND agent IS NOT NULL))) \
+             + (SELECT count(*) FROM launches WHERE way = 'in' AND kind = 'child' \
+             AND project = ?1 AND agent IS NULL AND state IN ('held', 'accepted')) \
+             + (SELECT count(*) FROM launches JOIN agents ON agents.id = launches.caller \
+             WHERE launches.way = 'out' AND launches.kind = 'child' AND launches.project = ?1 \
+             AND launches.state != 'refused' AND agents.state NOT IN ('ended', 'failed'))",
             params![project],
             |row| row.get(0),
         )?;
