@@ -410,9 +410,6 @@ async fn set(daemon: &std::sync::Arc<Daemon>, params: Value) -> Result<Value, Fa
     };
     // Trimmed first: an empty project is every project's, which no project has to load.
     let project = given(asked.project);
-    if let Some(project) = &project {
-        crate::projects::load_project(daemon, project)?;
-    }
     let existing = daemon
         .read(|store| store.vault_entries())?
         .into_iter()
@@ -445,17 +442,13 @@ async fn set(daemon: &std::sync::Arc<Daemon>, params: Value) -> Result<Value, Fa
         (None, had) => had,
     };
     let url = given(asked.url);
-    // A worklog's entry is its project's alone: no other project's agent learns it exists.
-    let project = match &bound {
-        Some(bound) => bound_checked(
-            daemon,
-            &asked.name,
-            bound,
-            project.as_deref(),
-            url.as_deref(),
-        )?,
-        None => project,
-    };
+    let project = checked(
+        daemon,
+        &asked.name,
+        project,
+        bound.as_deref(),
+        url.as_deref(),
+    )?;
     let username = given(asked.username);
     let open = daemon
         .read(asks)
@@ -563,11 +556,13 @@ async fn share(daemon: &Daemon, name: &str, machine: &str) -> Result<Value, Fail
 }
 
 /// The entry `entry` another machine of the user's, `from`, shared with this one, its user's
-/// request checked already (`link::Remote::shared`): its secret into this machine's keyring, its
-/// metadata into the store, marked as shared from `from`, in place of one of its name. What is
-/// refused is said in a sentence that holds no secret.
+/// request checked already (`link::Remote::shared`): its metadata checked here as Save checks it
+/// (`checked`), never taken on the sender's word; its secret into this machine's keyring, its
+/// metadata into the store, marked as shared from `from`. It replaces a copy `from` shared
+/// before, never an entry of this machine's own nor another machine's copy. What is refused is
+/// said in a sentence that holds no secret, and leaves nothing behind.
 pub async fn receive(
-    daemon: &Daemon,
+    daemon: &std::sync::Arc<Daemon>,
     entry: &Value,
     secret: &str,
     from: &str,
@@ -593,12 +588,31 @@ pub async fn receive(
             "refused: a secret is {VAULT_SHORTEST} characters at least"
         ));
     }
-    // A worklog's entry is its project's: the project must be here for it to log time.
+    let existing = daemon
+        .read(|store| store.vault_entries())
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .find(|entry| entry.name == name);
+    match existing.as_ref().map(|entry| entry.shared_from.as_deref()) {
+        Some(None) => {
+            return Err(format!(
+                "this machine has its own vault entry {name}: remove or rename it here first"
+            ));
+        }
+        Some(Some(other)) if other != from => {
+            return Err(format!(
+                "the vault entry {name} here was shared from {other}: remove it here first"
+            ));
+        }
+        _ => {}
+    }
+    // What this machine lacks is said as such: the project the entry is for must be here.
+    let here = |project: &str| crate::projects::load_project(daemon, project).is_ok();
     if let Some(project) = shared
         .bound
         .as_deref()
         .and_then(|bound| bound.strip_prefix("worklog:"))
-        && crate::projects::load_project(daemon, project).is_err()
+        && !here(project)
     {
         return Err(format!(
             "the vault entry {name} is bound to {}, which is not on this machine: add the \
@@ -606,28 +620,73 @@ pub async fn receive(
             use_said(shared.bound.as_deref().unwrap_or_default()).unwrap_or_default()
         ));
     }
-    // Masked before it is kept anywhere, so that nothing written after can hold it.
-    secrets::add_vault_login(shared.username.as_deref(), secret);
-    daemon
-        .vault
-        .store(&name, secret)
-        .await
-        .map_err(|why| masked_of(&why, secret))?;
+    if let Some(project) = &shared.project
+        && !here(project)
+    {
+        return Err(format!(
+            "the vault entry {name} is the project {project}'s, which is not on this machine: \
+             add the project here first"
+        ));
+    }
+    let project = checked(
+        daemon,
+        &name,
+        shared.project,
+        shared.bound.as_deref(),
+        shared.url.as_deref(),
+    )
+    .map_err(|failure| failure.message)?;
     let entry = Entry {
         name: name.clone(),
         description: shared.description,
         url: shared.url,
         username: shared.username,
-        project: shared.project,
+        project,
         updated_at: now_ms(),
         bound: shared.bound,
         shared_from: Some(from.to_owned()),
     };
+    // The copy it replaces, to put back if the store refuses the new one.
+    let before = match &existing {
+        Some(_) => daemon
+            .vault
+            .read(&name)
+            .await
+            .map_err(|why| masked_of(&why, secret))?
+            .map(zeroize::Zeroizing::new),
+        None => None,
+    };
+    // Masked before it is kept anywhere, so that nothing written after can hold it.
+    secrets::add_vault_login(entry.username.as_deref(), secret);
     daemon
-        .write(|store| store.put_vault_entry(&entry))
-        .map_err(|error| error.to_string())?;
+        .vault
+        .store(&name, secret)
+        .await
+        .map_err(|why| masked_of(&why, secret))?;
+    if let Err(error) = daemon.write(|store| store.put_vault_entry(&entry)) {
+        // No secret is left in the keyring that no entry of the store names.
+        let undone = match &before {
+            Some(before) => daemon.vault.store(&name, before).await,
+            None => daemon.vault.delete(&name).await,
+        };
+        if let Err(why) = undone {
+            eprintln!(
+                "flottille daemon: the vault entry {name} shared from {from}: {}",
+                masked_of(&why, secret)
+            );
+        }
+        return Err(masked_of(&error.to_string(), secret));
+    }
     retool(daemon);
     eprintln!("flottille daemon: the vault entry {name} was shared from {from}");
+    // An agent that asked for it is told, as when the user sets it here.
+    let open = daemon
+        .read(asks)
+        .map(|state| state.open)
+        .unwrap_or_default();
+    for request in open.iter().filter(|r| entry.name == r.name) {
+        answered(daemon, request, Some(&entry));
+    }
     Ok(())
 }
 
@@ -673,6 +732,26 @@ fn rewritten(
     daemon.write(|store| store.put_vault_entry(&entry))?;
     retool(daemon);
     Ok(entry.to_json())
+}
+
+/// The project of the entry `name` whose metadata is `project`, `bound` and `url`, as Save and a
+/// share from another machine check it: the project is one of this machine's, and the use is one
+/// it fits (`bound_checked`).
+fn checked(
+    daemon: &Daemon,
+    name: &str,
+    project: Option<String>,
+    bound: Option<&str>,
+    url: Option<&str>,
+) -> Result<Option<String>, Failure> {
+    if let Some(project) = &project {
+        crate::projects::load_project(daemon, project)?;
+    }
+    // A worklog's entry is its project's alone: no other project's agent learns it exists.
+    match bound {
+        Some(bound) => bound_checked(daemon, name, bound, project.as_deref(), url),
+        None => Ok(project),
+    }
 }
 
 /// The project an entry bound to `bound` has, if Flottille knows the use and it fits the entry's

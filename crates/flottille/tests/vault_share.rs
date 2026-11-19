@@ -169,6 +169,8 @@ fn a_shared_entry_is_in_the_other_machine_s_keyring_with_its_metadata() {
             .unwrap();
     };
     set(SECRET);
+    // The entry is the project app's: the server takes it only with that project.
+    project(&server.user, "app");
 
     let shared = json_of(share(&pc, "tracker", "server"));
 
@@ -183,7 +185,6 @@ fn a_shared_entry_is_in_the_other_machine_s_keyring_with_its_metadata() {
     assert!(entry(&pc, "tracker").unwrap()["shared_from"].is_null());
 
     // The server's keyring holds the secret: its tools sign in with it.
-    project(&server.user, "app");
     let fields = site.url("/rest/api/3/field");
     let mcp = session(&server.user, &fields);
     let read = |mcp: &Mcp| {
