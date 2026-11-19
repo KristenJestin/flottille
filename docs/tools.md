@@ -1582,6 +1582,21 @@ what the user asked for when they asked for a review, within the children cap.
 | `review {action: run_pass, pass, brief?}` (the pilot) | Runs one pass of its review as the pilot's own child (depth 2): `spec` (only for a session that develops a spec), `bugs`, `standards`, `security`, among those Review's settings enable for the project, or the `verifier`; each once. Its instructions are Review's fixed text for that pass and the user's guidance; the standards pass's add the project's `CLAUDE.md` else `AGENTS.md` read from the base branch, never from the workspace. Its first message is the diff (each repository's `git diff <from>` and the files it changes), the spec's `C` and `D` when there is one, and `brief`. Its report comes to the pilot as `[flottille:child-report]`. Refused above the project's children cap (`the project app runs its cap of 2 children: wait for one of them to end`), never queued. |
 | `review {action: report, summary?, findings, previous?}` (the pilot) | The findings, once: each `{severity, confidence, file?, lines?, concerns, quote?, text, case?}`, `severity` `high`, `medium`, `low` or `info`, `confidence` the verifier's (`confirmed`, `plausible`, or `rejected`, which is left out), `concerns` `code` or a `C` or `D` of the spec, `file` a file of the diff. A `high` or `medium` finding without its place (`file`, `lines`) and its failing case (`case`) is refused, and so is one naming a `C` or `D` the spec does not have, or a file the diff does not change: nothing is kept then. In a second round, `previous` gives each open finding of the first by its identifier, `fixed` or `open`. Kept, each finding takes the session's next identifier (`F1`, `F2`…); the confirmed and plausible ones, `info` left out, are delivered to the session, with what changed in the workspace during the review when something did; the pilot's session ends with its turn, its passes still running stop. |
 
+**A review of a pull request runs none of its code without the user** (#1091; a decision of the
+lead, reversible, to be confirmed by the maintainer). A pull request is someone else's code, often
+a stranger's: its review reads it, it does not run it on the user's machine. The pilot's and the
+passes' instructions, and the pilot's first message, say to run none of it (no test, no build, no
+script). The gate holds for the user, in every mode, Full and Auto included, a `run` (or a task)
+whose folder is in the copy of a pull request and that does more than read: base, its card saying
+`it runs the code of pull request #7, in the copy its review reads: only the user lets a review
+run it`, as `worklog_delete` is held whatever the mode. A line the rules know to only read (`git
+diff`, `git log`, `git show`, `cat`) passes as it does elsewhere: the review reads the pull
+request with them. The copy itself is checked out with none of the user's filters (Large File
+Storage included, whose `.lfsconfig` the pull request would choose): its files are written as its
+commits hold them. The agents of the review see the copy as their place's one repository, `.`, at
+its top: the files it changes are said from there, and naming a repository of the project's
+reaches nothing of the user's checkout.
+
 ## The tree's tools
 
 The tools through which agents launch other agents and answer for them (`docs/design.md` §4.3,
