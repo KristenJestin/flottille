@@ -103,7 +103,9 @@ fn entries(machine: &Machine) -> Vec<Value> {
 }
 
 fn entry(machine: &Machine, name: &str) -> Option<Value> {
-    entries(machine).into_iter().find(|entry| entry["name"] == name)
+    entries(machine)
+        .into_iter()
+        .find(|entry| entry["name"] == name)
 }
 
 /// The project `name` on `user`'s machine, a throwaway repository.
@@ -218,13 +220,7 @@ fn sharing_needs_the_device_s_signature() {
     );
     // Signed by a key that is no member's.
     let stranger = DeviceKey::make().unwrap();
-    let answer = pc.raw(&signed(
-        &stranger,
-        "1",
-        "pc",
-        "vault.share",
-        params.clone(),
-    ));
+    let answer = pc.raw(&signed(&stranger, "1", "pc", "vault.share", params.clone()));
     assert_eq!(
         error_of(&answer),
         "refused: this request is not signed by a member"
@@ -451,7 +447,9 @@ fn the_secret_is_in_no_event_log_or_store_on_either_side() {
     }
     // The server says what came, and from where, never the value.
     assert!(
-        server.log().contains("the vault entry tracker was shared from pc"),
+        server
+            .log()
+            .contains("the vault entry tracker was shared from pc"),
         "{}",
         server.log()
     );
@@ -488,13 +486,11 @@ fn a_worklog_entry_needs_its_project_on_the_other_machine() {
 
 #[test]
 fn a_machine_with_no_keyring_refuses_saying_so() {
-    let (_hub, pc, server) = pc_and_server(User::new());
-    // The server started again as a headless one: no memory keyring chosen, and no Secret Service
-    // on its session bus (the test's own, where nothing listens).
-    std::fs::remove_file(server.user.path("config/flottille/keyring.toml")).unwrap();
-    assert!(server.user.run(&["daemon", "stop"]).status.success());
-    server.user.status();
-    pc.wait_for("server", "online");
+    // A headless server: no memory keyring chosen, and no Secret Service on its session bus (the
+    // test's own, where nothing listens). Its device key is a file, as on such a machine.
+    let server_user = User::new();
+    std::fs::remove_file(server_user.path("config/flottille/keyring.toml")).unwrap();
+    let (_hub, pc, server) = pc_and_server(server_user);
     pc.user
         .call("vault.set", json!({"name": "tracker", "secret": SECRET}))
         .unwrap();

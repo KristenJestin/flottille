@@ -693,7 +693,7 @@ impl SessionKeyring {
 /// Whether `error` says there is no Secret Service to reach: no session bus, or none that has it.
 /// Any other failure is said, and the device key is not made in a file instead: a second identity
 /// for a passing failure would be worse than a refusal.
-fn no_service(error: &oo7::Error) -> bool {
+pub(crate) fn no_service(error: &oo7::Error) -> bool {
     use oo7::zbus;
     let oo7::Error::DBus(oo7::dbus::Error::ZBus(error)) = error else {
         return false;
@@ -707,7 +707,8 @@ fn no_service(error: &oo7::Error) -> bool {
     };
     match error {
         zbus::Error::Address(_) => true,
-        zbus::Error::InputOutput(error) => matches!(
+        // No bus at its address: what a session with none, a headless server's, gives.
+        zbus::Error::InputOutput(error) | zbus::Error::Connection(error, _) => matches!(
             error.kind(),
             std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
         ),
