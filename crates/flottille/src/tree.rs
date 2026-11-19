@@ -749,10 +749,14 @@ pub fn brief_at_start(daemon: &Arc<Daemon>) {
             continue;
         }
         let key = format!("brief-{}-{}", agent.id, agent.epoch);
-        if daemon
-            .read(|store| store.delivery(&key))
-            .is_ok_and(|d| d.is_some())
-        {
+        // A compaction's new session was given its brief again under the replay's id: given all
+        // the same, it is never given a third time as news.
+        let replay = flottille_core::prompt::replay_id(&key);
+        if [&key, &replay].into_iter().any(|id| {
+            daemon
+                .read(|store| store.delivery(id))
+                .is_ok_and(|d| d.is_some())
+        }) {
             continue;
         }
         match agent.workspace {
