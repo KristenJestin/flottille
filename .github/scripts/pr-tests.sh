@@ -11,13 +11,14 @@
 #   cost this avoids).
 #
 # Run in a checkout of the pull request. Reads BASE and HEAD (commits) and BODY (the description).
-# A name reaches a command line: only letters, digits, dashes and underscores are kept.
+# A name reaches a command line: only letters, digits, dashes and underscores are kept, and it
+# does not start with a dash (that would be an option).
 set -euo pipefail
 
 : "${BASE:?the commit the pull request starts from}" "${HEAD:?the last commit of the pull request}"
 body=${BODY:-}
 big=" flottille flottille-window "
-valid='^[A-Za-z0-9_-]+$'
+valid='^[A-Za-z0-9_][A-Za-z0-9_-]*$'
 
 binaries=()
 crates=()
