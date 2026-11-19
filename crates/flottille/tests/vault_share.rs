@@ -630,6 +630,29 @@ fn a_viewer_s_share_is_refused_by_both_machines() {
 }
 
 #[test]
+fn a_share_carried_by_a_viewer_s_machine_is_refused() {
+    let (_hub, pc, server, phone) = with_a_viewer();
+    // pc's device signs a share for the phone, a viewer's machine; the phone's machine key, as an
+    // agent there that read it, carries it to the server.
+    let request = share_request(&pc.device(), "phone", "vault.share", "tracker", "server");
+    assert!(phone.user.run(&["daemon", "stop"]).status.success());
+    server.wait_for("phone", "offline");
+
+    let answers = sent_as(
+        &MachineKey::load_or_make(&phone.folder()).unwrap(),
+        &server,
+        &[share_message(request, "tracker")],
+    );
+
+    assert_eq!(
+        answers[0].clone().unwrap_err(),
+        "server refused: refused: phone is a viewer's machine: only a runner's or a \
+         controller's machine shares a vault entry"
+    );
+    assert!(entry(&server, "tracker").is_none());
+}
+
+#[test]
 fn a_share_with_a_machine_that_is_not_a_runner_is_refused() {
     let (_hub, pc, _server, phone) = with_a_viewer();
 

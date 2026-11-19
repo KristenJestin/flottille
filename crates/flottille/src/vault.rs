@@ -103,6 +103,9 @@ impl Keyring {
     async fn store(&self, name: &str, secret: &str) -> Result<(), String> {
         match self {
             Keyring::Memory { kept, file } => {
+                // An await, as the system's keyring's call over D-Bus is: two writes that
+                // overlap there overlap here too.
+                tokio::task::yield_now().await;
                 if refuses_a_store(file) {
                     return Err("the keyring refused to store it".to_owned());
                 }
@@ -1881,6 +1884,40 @@ mod tests {
 
         assert!(refused.contains("the disk is full"), "{refused}");
         assert_eq!(daemon.vault.read("tracker").await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn a_share_at_the_moment_of_a_save_keeps_the_user_s_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = a_daemon(dir.path());
+        let mut set = std::pin::pin!(call(
+            daemon.clone(),
+            "vault.set",
+            json!({"name": "tracker", "secret": "own-t0ken-Zr81", "url": "https://own.example.com"}),
+        ));
+        let mut share = std::pin::pin!(receive(
+            &daemon,
+            &json!({"name": "tracker", "url": "https://theirs.example.com"}),
+            SHARED,
+            "pc",
+        ));
+        // The user's Save waits on the keyring when the share comes, which waits on it too.
+        assert!(futures::poll!(set.as_mut()).is_pending());
+        assert!(futures::poll!(share.as_mut()).is_pending());
+        ok(set.await);
+        let shared = share.await;
+
+        assert!(
+            shared.is_err_and(|refused| refused.contains("this machine has its own vault entry")),
+            "the share is refused"
+        );
+        let entries = listed(&daemon).await;
+        assert_eq!(entries[0].url.as_deref(), Some("https://own.example.com"));
+        assert_eq!(entries[0].shared_from, None);
+        assert_eq!(
+            daemon.vault.read("tracker").await.unwrap().as_deref(),
+            Some("own-t0ken-Zr81")
+        );
     }
 
     #[tokio::test]

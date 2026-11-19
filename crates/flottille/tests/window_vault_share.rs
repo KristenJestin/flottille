@@ -16,7 +16,7 @@ use flottille_window::link::{Connect, Sign};
 use flottille_window::vault::{NO_MACHINE, VaultSection};
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{Entity, TestAppContext, VisualTestContext, px, size};
-use remote::{Machine, NoKeyring, pc_and_server};
+use remote::{Machine, NoKeyring, pair, pc_and_server};
 use serde_json::json;
 
 const SECRET: &str = "w1ndow-sh4re-secret";
@@ -191,6 +191,36 @@ fn share_with_lists_the_online_machines_and_says_the_result(cx: &mut TestAppCont
     });
     settle(cx);
     assert!(!section.read_with(cx, |s, _| s.is_sharing()));
+}
+
+#[gpui_kit::test]
+fn share_with_lists_only_the_runners(cx: &mut TestAppContext) {
+    let (_hub, pc, server) = pc_and_server(common::User::new());
+    // A laptop that drives without running agents, online too: a share there would be refused.
+    let laptop = Machine::new();
+    pair(&pc, &laptop, "laptop", "controller");
+    server.wait_for_member("laptop", true);
+    pc.wait_for("laptop", "online");
+    pc.user
+        .call("vault.set", json!({"name": "tracker", "secret": SECRET}))
+        .unwrap();
+    let (shell, cx) = window(&pc, cx);
+    let section = open_vault(&shell, cx);
+
+    click("vault-more-tracker", cx);
+    settle(cx);
+    click("share-vault-tracker", cx);
+    until(&shell, cx, "the machines are listed", |cx| {
+        section.read_with(cx, |s, _| s.machines().is_some())
+    });
+    settle(cx);
+
+    assert_eq!(
+        section.read_with(cx, |s, _| s.machines().cloned()),
+        Some(Ok(vec!["server".to_owned()]))
+    );
+    assert!(shown("share-to-server", cx));
+    assert!(!shown("share-to-laptop", cx));
 }
 
 #[gpui_kit::test]
