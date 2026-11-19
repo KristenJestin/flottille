@@ -616,6 +616,16 @@ pub fn replies_to_a_comment(tool: &str, args: &Value) -> bool {
     tool == "tickets" && args["action"] == "reply"
 }
 
+/// Whether a call of `tickets` changes or deletes a worklog: its card says the worklog as it
+/// stood, and one changed in Jira before the user allows it is not written over unseen.
+pub fn changes_a_worklog(tool: &str, args: &Value) -> bool {
+    tool == "tickets"
+        && matches!(
+            args["action"].as_str(),
+            Some("worklog_edit" | "worklog_delete")
+        )
+}
+
 /// Whether a call of `forge` approves a pull request or requests changes on it.
 pub fn decides_a_review(tool: &str, args: &Value) -> bool {
     tool == "forge"
