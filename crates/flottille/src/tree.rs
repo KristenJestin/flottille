@@ -1638,7 +1638,11 @@ fn caller_of(daemon: &Daemon, grant: &Grant) -> Result<Agent, Outcome> {
 /// What `agent_stop` does, in words, for a session the user is asked to end: the session, where
 /// it works, who started it, and what ending does; nothing for a child, stopped as ever. A call
 /// that names nothing it may end is the refusal, before anything is asked.
-pub fn stop_says(daemon: &Daemon, grant: &Grant, args: &Value) -> Result<Vec<String>, Outcome> {
+pub async fn stop_says(
+    daemon: &Arc<Daemon>,
+    grant: &Grant,
+    args: &Value,
+) -> Result<Vec<String>, Outcome> {
     let asked: StopChild = arguments("agent_stop", args.clone())?;
     let caller = caller_of(daemon, grant)?;
     let Stopped::Session(session) = stopped(daemon, &caller, &asked.agent_id)? else {
@@ -1661,11 +1665,36 @@ pub fn stop_says(daemon: &Daemon, grant: &Grant, args: &Value) -> Result<Vec<Str
             _ => format!("agent {id}, not by this agent"),
         },
     };
-    Ok(vec![format!(
+    let mut says = vec![format!(
         "End the session {}, in {place}, started by {starter}: its tree, its runs and what was \
          queued for it are stopped; its workspace stays",
         named(&session)
-    )])
+    )];
+    // The sessions it leads end with it: the user reads them here, as the window's confirmation
+    // lists them (`agent.ending`), before the end is allowed.
+    let ending = ending(daemon, &session.id)
+        .await
+        .map_err(|failure| failed(failure.message))?;
+    for led in ending["sessions"].as_array().into_iter().flatten() {
+        let title = match led["title"].as_str() {
+            Some(title) => format!(
+                "\"{title}\" (agent {})",
+                led["id"].as_str().unwrap_or_default()
+            ),
+            None => format!("agent {}", led["id"].as_str().unwrap_or_default()),
+        };
+        let unsaved = match led["state"].as_str() {
+            Some("clean") | None => String::new(),
+            Some("uncommitted") => ", which holds uncommitted changes".to_owned(),
+            Some("unpushed") => ", which holds commits not pushed".to_owned(),
+            Some(_) => ", whose work cannot be checked".to_owned(),
+        };
+        says.push(format!(
+            "It ends with it the session {title}, in project {}{unsaved}",
+            led["project"].as_str().unwrap_or_default()
+        ));
+    }
+    Ok(says)
 }
 
 /// Whether an `agent_stop` ends a session that is neither one of the caller's children nor one
@@ -2090,48 +2119,69 @@ pub fn unfollowed(daemon: &Arc<Daemon>, following: &Subscription) {
     );
 }
 
-/// The pilot ended: the sessions it led go on, handed to the user, each told once.
-fn hand_over(daemon: &Arc<Daemon>, pilot: &Agent) {
-    let Ok(agents) = daemon.read(|store| store.agents()) else {
-        return;
-    };
-    for session in agents
-        .into_iter()
-        .filter(|agent| agent.led && agent.launched_by.as_deref() == Some(pilot.id.as_str()))
-    {
-        let _ = daemon.write(|store| {
-            let (_, event) = store.change_agent(
-                &session.id,
-                AgentChange {
-                    led: Some(false),
-                    ..AgentChange::default()
-                },
-                Some((
-                    "agent.handed",
-                    json!({"agent": session.id, "from": pilot.id}),
-                )),
-            )?;
-            Ok(((), event))
-        });
-        if session.state.is_final() {
-            continue;
-        }
-        let moved = questions_to_user(daemon, &session, &pilot.id);
-        deliveries::deliver(
-            daemon,
-            &session.id,
-            "handed",
-            Some(format!("handed-{}-{}", session.id, pilot.id)),
-            &format!(
-                "{}, which led this session, ended. The session goes on, handed to the user: what \
-                 you need answered now goes through ask to the user, and that agent no longer \
-                 reads you.{}",
-                named(pilot),
-                moved_said(moved)
-            ),
-            approval::BETWEEN_TURNS,
-        );
+/// The pilot ended for good: the sessions it leads end with it, in its project and in others,
+/// and each one's own led sessions in turn, since it ends as any session does. A led session the
+/// user kept was detached before and is no one's to end. A pilot that failed ends nothing: it can
+/// be resumed, and its sessions go on led by it.
+fn end_led(daemon: &Arc<Daemon>, pilot: &Agent) {
+    for session in led_by_pilot(daemon, &pilot.id) {
+        stop_tree(daemon, &session.id, "its pilot ended");
     }
+}
+
+/// The sessions that end with `pilot`'s end, its led sessions and theirs in turn, the oldest
+/// first: what the user is told before they confirm.
+fn led_by_pilot(daemon: &Daemon, pilot: &str) -> Vec<Agent> {
+    let agents = daemon.read(|store| store.agents()).unwrap_or_default();
+    let mut found: Vec<Agent> = Vec::new();
+    let mut pilots = vec![pilot.to_owned()];
+    while let Some(pilot) = pilots.pop() {
+        let sessions: Vec<&Agent> = agents
+            .iter()
+            .filter(|agent| {
+                agent.led
+                    && agent.launched_by.as_deref() == Some(pilot.as_str())
+                    && !agent.state.is_final()
+            })
+            .collect();
+        for session in sessions {
+            pilots.push(session.id.clone());
+            found.push(session.clone());
+        }
+    }
+    found
+}
+
+/// `agent.ending`: the led sessions the end of `id` would end, by title and project, each with
+/// what its workspace holds that is not saved (`clean`, `uncommitted`, `unpushed` or `unknown`,
+/// as `project.removal` says it). Nothing is changed.
+pub async fn ending(daemon: &Arc<Daemon>, id: &str) -> Result<Value, Failure> {
+    let mut sessions = Vec::new();
+    for session in led_by_pilot(daemon, id) {
+        let workspace = match &session.workspace {
+            Some(name) => daemon
+                .read(|store| store.workspace(&session.project, name))
+                .ok()
+                .flatten(),
+            None => None,
+        };
+        let (state, losses) = match workspace {
+            Some(workspace) => match workspaces::loss_state(daemon, &workspace).await {
+                Ok(found) => found,
+                Err(failure) => ("unknown", vec![failure.message]),
+            },
+            None => ("clean", Vec::new()),
+        };
+        sessions.push(json!({
+            "id": session.id,
+            "title": session.title,
+            "project": session.project,
+            "workspace": session.workspace,
+            "state": state,
+            "losses": losses,
+        }));
+    }
+    Ok(json!({"agent": id, "sessions": sessions}))
 }
 
 // Requests.
@@ -2402,7 +2452,9 @@ fn end(daemon: &Arc<Daemon>, id: &str, state: AgentState, reason: &str) -> bool 
         _ => format!("ended: {reason}"),
     };
     crate::subscriptions::followed_ended(daemon, &agent, &why);
-    hand_over(daemon, &agent);
+    if state == AgentState::Ended {
+        end_led(daemon, &agent);
+    }
     agents::tell(daemon, id, Order::Stop);
     let (daemon, id) = (daemon.clone(), id.to_owned());
     tokio::spawn(async move { crate::runs::stop_runs_of(&daemon, &id).await });
