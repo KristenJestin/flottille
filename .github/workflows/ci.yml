@@ -284,7 +284,9 @@ jobs:
           tool: cargo-nextest@0.9.152
       # The profile `ci` (`.config/nextest.toml`) retries a failed test twice: a test that passes
       # on a retry is flaky, and listed below.
-      - run: cargo nextest run --archive-file "$RUNNER_TEMP/archive/tests.tar.zst" --extract-to "$RUNNER_TEMP/extract" --workspace-remap . --profile ci --partition count:${{ matrix.partition }}/12
+      - run: |
+          mkdir -p "$RUNNER_TEMP/extract"
+          cargo nextest run --archive-file "$RUNNER_TEMP/archive/tests.tar.zst" --extract-to "$RUNNER_TEMP/extract" --workspace-remap . --profile ci --partition count:${{ matrix.partition }}/12
       # Whatever the tests said: the flaky ones are seen (job summary `Flaky tests`), and kept for
       # `verify`, which lists those of every partition.
       - name: Flaky tests
