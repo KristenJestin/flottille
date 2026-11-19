@@ -21,7 +21,7 @@ fn server() -> Capabilities {
 }
 
 #[test]
-fn a_runner_with_the_project_the_agent_and_a_free_slot_takes_a_session() {
+fn a_runner_with_the_project_and_the_agent_takes_a_session() {
     let server = server();
     assert_eq!(server.refusal("server", "app", Some("claude")), None);
     // No agent named: any agent signed in.
@@ -34,10 +34,6 @@ fn a_runner_with_the_project_the_agent_and_a_free_slot_takes_a_session() {
         server.refusal("server", "app", Some("codex")).unwrap(),
         "codex is not signed in on server"
     );
-    assert_eq!(
-        server.refusal("server", "site", Some("claude")).unwrap(),
-        "server has no slot free for project site"
-    );
     let none = Capabilities {
         agents: Vec::new(),
         ..server.clone()
@@ -46,6 +42,15 @@ fn a_runner_with_the_project_the_agent_and_a_free_slot_takes_a_session() {
         none.refusal("server", "app", None).unwrap(),
         "no agent is signed in on server"
     );
+}
+
+#[test]
+fn a_session_for_the_user_is_taken_with_no_slot_free() {
+    // The slots bound the children launched from another machine (#816): a session for the
+    // user counts in no children cap.
+    let server = server();
+    assert_eq!(server.refusal("server", "site", Some("claude")), None);
+    assert_eq!(server.refusal("server", "site", None), None);
 }
 
 #[test]
