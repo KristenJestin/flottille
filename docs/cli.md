@@ -341,7 +341,7 @@ The runners instead, this machine first when it is one, with what each offers ov
 projects and their free slots (the project's children cap minus the children that run), and the
 agents signed in there (`docs/remote.md`, "Roles"). With `--project`, only the runners linked that
 would take a session of that project (on `--agent`, or any agent signed in): the project there,
-the agent signed in, a slot free. `remote.machines`.
+the agent signed in (a session for the user counts in no children cap). `remote.machines`.
 
 ```
 $ flottille remote members --runners --project app --agent claude

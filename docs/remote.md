@@ -526,8 +526,9 @@ cannot change it.
   and signed in (their login files checked for presence only, never read: `AGENTS.md`), and its
   free slots (the project caps minus what runs). It sends it again when it changes.
 - **Starting a session on a machine** (from a client, or by an agent: "A tree across machines")
-  offers only the runners that have that project, that agent signed in, and a free slot. A
-  `controller` or a `viewer` runs no agent: a launch aimed at one is refused, naming it.
+  offers only the runners that have that project and that agent signed in; a child launched there
+  needs a free slot too (a session for the user counts in no children cap). A `controller` or a
+  `viewer` runs no agent: a launch aimed at one is refused, naming it.
 - **Every method is `read` or `drive`**: a `controller` may call every `drive` method on a runner,
   a `viewer` only `read`.
 - **`workspace.show`, `workspace.forge` and `spec.list` are `read`, though they write**: the branch a
@@ -1084,21 +1085,31 @@ on a real phone, by hand, and reported.
   request`, `send a message`, `start a session`, `invite a device`, `add, remove or rename a
   device`, …), the method otherwise (`may call project.add`). Each method's class is said beside
   it in the table of `protocol.md`, "The classes", which a test holds to the catalogue.
-- A launch is `agent.start` (and its old name `agent.run`): aimed at a machine whose member is a
-  `controller` or a `viewer`, it is refused by the machine that would carry it and by that machine
-  itself (`refused: tablet is a controller: it runs no agent, a runner does`), in one check of
-  `flottille-link` (`runs_agents`) that a launch by an agent (`agent_launch {machine}`) takes too.
-  The other methods that start agents (`spec.develop`, `review.start`, `task.run`) are not refused
-  on a controller's machine: they are the user's, on a machine of theirs.
-- What a runner offers (`capabilities`, `crates/flottille-link/src/offers.rs`) is looked at every
-  second and sent on each link when it changed, in order, and when a link is made: its projects,
-  each with its children cap minus the children that run or are being launched (the cap a
+- A launch is a method that may start an agent's process, marked in the catalogue
+  (`flottille_protocol::LAUNCHES`): `agent.start` (and its old name `agent.run`), `agent.resume`,
+  `agent.quota_resume`, `spec.new` (which starts a writer when given an idea), `spec.from_ticket`,
+  `spec.develop` and `review.start`. Aimed at a machine whose member is a `controller` or a
+  `viewer`, it is refused by the machine that would carry it and by that machine itself
+  (`refused: tablet is a controller: it runs no agent, a runner does`), in one check of
+  `flottille-link` (`runs_agents`). A launch by an agent on another machine (`agent_launch
+  {machine}`) is #816's, and is to take the same check. `task.run` is no launch: it runs a
+  command of the project, not an agent.
+- What a runner offers (`capabilities`, `crates/flottille-link/src/offers.rs`) is looked at only
+  while a machine is linked to this one: when a link is made, after an event that may change it (a
+  project added, edited or removed, a provider changed, a session that starts or ends), and every
+  30 s for what no event says (a login file); `remote.machines` looks at this machine's at once. It
+  is sent on each link when it changed, in order, and again, waiting longer each time (1 s doubled
+  up to a minute), when the other machine did not take it: its projects, each with its children cap minus the children that run or are being launched (the cap a
   `child` from another machine counts in), and each provider enabled, installed (on `PATH`, or a
   test's override) and signed in where Flottille can see it, as `doctor` says it (its login file
   present by its metadata, never opened, or its sign-in variable set, never read). It names 1024
   projects and 64 agents at most, each name 1 to 64 characters with no control or invisible one.
-  It is taken only from a runner's machine, and forgotten when its link ends: an offline runner
-  offers nothing. No event says it changed yet: a client reads `remote.machines` again.
+  It is taken only from a runner's machine, and only from the link kept for it (one replaced says
+  nothing any more), and forgotten when its link ends: an offline runner offers nothing. The slots
+  bound the children launched from another machine (#816), not a session for the user. No event
+  says it changed yet: a client reads `remote.machines` again.
+- A watch (`events.watch`) carried for a device ends when the device leaves the member list: each
+  list taken, the machine that serves it looks again whether the device is still a member.
 - The git work of "What travels" is `crates/flottille/src/git/bundle.rs`. The snapshot is made
   from a copy of the repository's index (a linked worktree's own), under Flottille's name
   (`Flottille <flottille@localhost>`), never signed: it is never kept as a commit. The bundle
