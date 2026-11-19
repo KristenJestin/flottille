@@ -284,20 +284,17 @@ jobs:
           tool: cargo-nextest@0.9.152
       # The profile `ci` (`.config/nextest.toml`) retries a failed test twice: a test that passes
       # on a retry is flaky, and listed below.
-      - run: |
-          mkdir -p "$RUNNER_TEMP/extract"
-          cargo nextest run --archive-file "$RUNNER_TEMP/archive/tests.tar.zst" --extract-to "$RUNNER_TEMP/extract" --workspace-remap . --profile ci --partition count:${{ matrix.partition }}/12
+      # Extracted into the checkout: the test binaries hold the paths of the build (`target/debug/…`,
+      # where `env!("CARGO_BIN_EXE_…")` and the fakes beside it are looked for), which are these.
+      - run: cargo nextest run --archive-file "$RUNNER_TEMP/archive/tests.tar.zst" --extract-to "$GITHUB_WORKSPACE" --extract-overwrite --workspace-remap . --profile ci --partition count:${{ matrix.partition }}/12
       # Whatever the tests said: the flaky ones are seen (job summary `Flaky tests`), and kept for
       # `verify`, which lists those of every partition.
       - name: Flaky tests
         if: ${{ !cancelled() }}
         run: |
           mkdir -p "$RUNNER_TEMP/junit"
-          report="$RUNNER_TEMP/extract/target/nextest/ci/junit.xml"
+          report="$GITHUB_WORKSPACE/target/nextest/ci/junit.xml"
           if [ ! -f "$report" ]; then
-            report=$(find "$RUNNER_TEMP" "$GITHUB_WORKSPACE" -maxdepth 6 -path '*nextest/ci/junit.xml' -print -quit)
-          fi
-          if [ -z "$report" ]; then
             echo "::warning::No JUnit report: the flaky tests of this partition are not known."
             exit 0
           fi
