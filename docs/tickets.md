@@ -451,42 +451,66 @@ ticket itself.
   delete --key <K> --id <id>`; on GitHub, `gh api repos/<owner>/<name>/issues/comments/<id>
   --method PATCH -f body=<text>` and `--method DELETE`. An edit replaces the record of the id with the
   new words, so that the comment stays the agent's and has one record; a delete drops it.
-- **Replies** (#934): `reply {ticket, comment, body}` answers any comment of a ticket, an agent's
-  or a person's, found by the id that `show` with `detail full` prints after the author of
+- **Replies** (#934, #1068): `reply {ticket, comment, body}` answers any comment of a ticket, an
+  agent's or a person's, found by the id that `show` with `detail full` prints after the author of
   **every** comment (`[comment 20000]`, GitHub's `issuecomment-500`); `comment_edit` and
-  `comment_delete` still take an agent's own alone. Neither tracker has threads on a ticket, so a
-  reply is a new comment that says whom it answers and quotes it (the first 500 characters),
-  recorded as an agent's comment like `comment` (one record of its id, read right after the post
-  on Jira). The gate judges it as a comment (one card: the ticket, the comment id and the words),
-  and a comment that is not there is refused before the user is asked, checked again right before
-  the write.
-  - GitHub: `gh issue comment <n> --body` of `> @alice wrote:`, the quoted lines, a blank line and
-    the reply.
-  - Jira: `acli jira workitem comment create --key <K> --body-file <file>` of an ADF document: a
-    paragraph with a **mention** of the author (`{"type": "mention", "attrs": {"id": <account id
-    of the comment's author>, "text": "@Name"}}`, plain text when the read gave no account id)
-    and ` wrote:`, a blockquote of the comment, then the reply, as Jira's own Reply does. The
-    quote is the comment's first 500 characters written as a Markdown quote and converted like any
-    text, so a quote, a heading, a rule or a table in the comment (a reply to a reply) is written
-    as paragraphs there, which Jira takes in a quote and refuses otherwise.
-  - **The card shows what is posted**: the comment quoted first and the reply, as they go out
-    (on GitHub the Markdown, on Jira the document as Markdown), and "it mentions <name>, who is
-    notified" when the author is mentioned: on Jira when the read gave their account id, on
-    GitHub (`> @alice wrote:`) when it gave their login (a deleted user has none: `> A deleted
-    user wrote:`, no mention). The card is rebuilt when the user allows the call, and a comment
-    edited since is not posted: it is refused as what the call does having changed. A comment
+  `comment_delete` still take an agent's own alone. It is recorded as an agent's comment like
+  `comment` (one record of its id), judged by the gate as a comment, and a comment that is not
+  there is refused before the user is asked, checked again right before the write.
+  - **GitHub** has no threads on an issue: a reply is a new comment that says whom it answers and
+    quotes it (the first 500 characters): `gh issue comment <n> --body` of `> @alice wrote:`, the
+    quoted lines, a blank line and the reply. The `@alice` notifies its author (a deleted user has
+    no login: `> A deleted user wrote:`, no mention).
+  - **Jira Cloud** has threaded replies, one level deep, as the user's own Reply makes: the reply
+    goes **under** the comment, in its thread. It is `POST /rest/api/3/issue/<key>/comment` with
+    `{"body": <ADF>, "parentId": <number>}`, **no quote and no "wrote:"**, by the daemon with the
+    project's tracker entry (the one `log_time`, `worklogs` and `edit` with `fields` use; the
+    secret goes to the tracker's site alone and is in no argument, log, error, event or card).
+    `parentId` is the comment answered, or, when that comment is itself a reply, **the first comment
+    of its thread** (Jira refuses a reply to a reply with `Parent comment not found`): it is read
+    from `GET /rest/api/3/issue/<key>/comment`, whose comments each carry a reply's `parentId`
+    (a number, beside `id`, `author`, `body` and `created`; the field is not in the published v3
+    schema, the maintainer read it on a real site from a reply made in Jira's UI). The answer is
+    the reply's Markdown as an ADF document, and Jira answers the new comment's `id`, recorded
+    as the agent's. `acli jira workitem comment create` has no way to name a parent, so `acli`
+    posts no reply.
+  - **Without the entry** (the tracker names none, or the vault does not hold it) a Jira `reply` is
+    **refused before anything is asked or run**, saying it needs the entry and how to set one (or
+    to ask the user for it, `vault ask`); it never falls back to a separate comment.
+  - **The card** says the comment answered (its id, its author and its first 500 characters), the
+    answer, that it goes through Jira's API with the vault entry's name, and who is notified when
+    the answer mentions someone. The card is rebuilt when the user allows the call, and a comment
+    edited since is not answered: it is refused as what the call does having changed. A comment
     that cannot be read when the card is built gets no card, it is refused.
-  - **A comment not for everyone is not quoted**: acli's reference gives `--visibility-role` and
-    `--visibility-group` to `comment update` only; `comment create` uses *the project's default
-    visibility*, so a reply cannot be posted in the visibility of the comment it answers. A Jira
-    comment whose `visibility` (a role or a group, as Jira's REST gives it) is set, or whose
-    `jsdPublic` is `false` (a Service Management internal note), is refused, saying so, with nothing
-    written. On GitHub a hidden comment (`isMinimized`) is refused too: quoting it would show it
-    again. Refused before the user is asked, and again right before the write.
-  - Not confirmed against a real site (the fake follows acli's published reference): that
-    `view --json` gives each comment's `author.accountId`, and `visibility` and `jsdPublic`
-    (**if it leaves them out, a restricted comment is not seen as one and is quoted to everyone**),
-    and that `comment create` takes a document with a mention node in `--body-file`.
+  - **`show` with `detail full` draws the threads** of a Jira work item: each reply under its
+    comment, indented, with its id (`[comment 20001]`); a reply whose parent is not among the
+    comments read stands in the list and says whom it answers (`a reply to 20000`). The threads
+    come from the REST read above, so they are drawn when the project has the entry; without it
+    the comments are listed flat, as `acli`'s view gives them (its comments are not known to carry
+    `parentId`). A read that fails is said under the comments, not hidden.
+  - **A comment not for everyone is not answered**: a Jira comment whose `visibility` (a role or a
+    group, as Jira's REST gives it) is set, or whose `jsdPublic` is `false` (a Service Management
+    internal note), is refused, saying so, with nothing written: the reply would stand in the open
+    under it, and the call carries no visibility. On GitHub a hidden comment (`isMinimized`) is
+    refused too: quoting it would show it again. Refused before the user is asked, and again right
+    before the write.
+- **Mentions** (#1068): on Jira an `@Name` written in an ADF text stays text and notifies no one;
+  only a `mention` node with the account id does. In a Jira `comment`, `reply`, `create` and `edit`
+  description, `[@Display Name](mention:<accountId>)` becomes `{"type": "mention", "attrs": {"id":
+  "<accountId>", "text": "@Display Name"}}` (`people` gives the account ids; the conversion is the
+  same as the rest of Jira's text, `adf::from_markdown`). A `mention:` whose id is not an account id
+  (24 hexadecimal digits, or `<number>:<uuid>`) is refused before the user is asked. **The card
+  says who is notified**, by display name (`It mentions Ana Example, Ben Sample, who are
+  notified`). A `comment` or a `reply` that mentions someone is posted through the REST API with
+  the project's entry, as a `reply` is (`acli`'s comment create is not known to keep a mention
+  node): without the entry a comment with a mention is **refused before it is asked**, saying it
+  needs the entry (and `vault ask`), never posted without its mention. A `create` and an `edit`
+  keep going through `acli` (a description, with the document in the file `acli` reads). A mention
+  reads back as `@Display Name`; to keep a mention while editing a text, the agent writes it
+  again. GitHub is unchanged: an `@login` notifies, and a `mention:` link is left as a link.
+  - Not confirmed against a real site (the fake follows the shapes above): that a `mention` node
+    in the body of `POST …/comment` notifies the person, and that `acli` takes one in a
+    description's file.
 **Measured on a real Jira Cloud site**: the shapes of `link type --json`, `link list --json` and
 `view --fields issuelinks` above, `link delete --id <link id> --yes`, and `comment list --key <K>
 --json`, whose comments each carry their `id` (their `body` plain text). The view's comments are

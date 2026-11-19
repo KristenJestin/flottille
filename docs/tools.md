@@ -1143,10 +1143,16 @@ Jira: their account id, else their e-mail). The card shows the names as given.
   in acme/app: the members of the workspace acme, its default reviewers and the people on its pull
   requests`), and nothing is written.
 - **A mention is no field.** No field of Flottille's tools names a person for a mention: one is
-  free text in a comment's or a description's `body`, which Flottille does not read, resolve or
-  rewrite (a Jira mention Jira rewrites on its own). An agent finds the identifier with `people`
-  and writes the mention as the forge or the tracker wants it. If a tool gets such a field, it is
-  resolved here like the others.
+  free text in a comment's or a description's `body`. An agent finds the identifier with `people`
+  and writes the mention as the forge or the tracker wants it. On GitHub an `@login` in the text
+  notifies, and is left as written. **On Jira an `@Name` in the text stays text and notifies no
+  one** (Jira rewrites nothing): only a mention node with the account id does, so in a Jira
+  `comment`, `reply`, `create` or `edit` description the agent writes `[@Display Name]
+  (mention:<accountId>)` (`people` gives the account ids), which becomes the node. The card says
+  who is notified, by display name; a `mention:` that holds no account id is refused before the
+  user is asked, and a comment that mentions someone is posted through Jira's API with the
+  project's tracker entry, so it is refused without one (`docs/tickets.md`, "Replies"). If a
+  tool gets such a field, it is resolved here like the others.
 - **The answer says who was added**, by display name and identifier (`Reviewers: added Jane Doe
   (jdoe); removed Bob Roe (broe).`, `Assigned to Anne Example (anne@example.org).`), so a wrong
   guess shows at once.
@@ -1293,9 +1299,10 @@ Jira: their account id, else their e-mail). The card shows the names as given.
   `link {ticket, kind, other}` and `unlink {ticket, kind, other}` make and remove a link;
   `comment_edit {ticket, comment, body}` and `comment_delete {ticket, comment}` change or delete a
   comment, **only one Flottille recorded as posted by an agent** (`show` with `detail full` gives
-  the id of those, `[comment 10100]`); `show` gives the id of every comment, and `reply {ticket,
-  comment, body}` answers any of them, quoting it, judged like `comment` ([`tickets.md`](tickets.md),
-  "Replies"). A
+  the id of those, `[comment 10100]`); `show` gives the id of every comment (with `detail full` on
+  Jira, each reply drawn under its comment), and `reply {ticket, comment, body}` answers any of
+  them, judged like `comment`: on Jira a real reply, under the comment in its thread, on GitHub a
+  comment that quotes it ([`tickets.md`](tickets.md), "Replies"). A
   link reads `ticket kind other`, so the card the user is shown says its direction in words (`ABC-2
   blocks ABC-1`). `ticket` is required, never the workspace's. On Jira, the kinds are the site's
   own link types, in the outward or the inward wording; on GitHub, `parent of`, `sub-task of`,
