@@ -600,8 +600,7 @@ impl Accepting {
     /// they speak no protocol in common. `name` is the other machine's, for the sentence.
     pub async fn handshake(self, ours: &Hello, name: &str) -> Result<Link, LinkError> {
         let conn = self.conn;
-        let Ok(Some((bytes, reply))) = tokio::time::timeout(WAIT, conn.next(FRAME_LIMIT)).await
-        else {
+        let Ok(Some((bytes, reply))) = tokio::time::timeout(WAIT, conn.next()).await else {
             conn.close(CLOSE_DONE, "no hello");
             return Err(LinkError::Closed(format!("{name} said no hello")));
         };
@@ -709,7 +708,7 @@ impl Link {
     /// A message of the other kind, or one this side does not know, is refused and passed over.
     pub async fn next(&self) -> Option<Received> {
         loop {
-            match self.conn.next_stream(FRAME_LIMIT).await? {
+            match self.conn.next_stream().await? {
                 Inbound::Frame(bytes, reply) => match self.judge(&bytes) {
                     Ok(message) => {
                         return Some(Received {
