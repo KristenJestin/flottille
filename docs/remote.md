@@ -784,12 +784,14 @@ and removes its workspace as today, through `call`.
 
 - **Entry by entry, with consent**: Settings, Vault, an entry's **Share with…** (or `flottille vault
   share <name> --machine <m>`), a signed user request on the machine that holds it. That daemon reads
-  the secret from its keyring and sends it, with the entry's metadata, in a `share` message signed
-  by the device, end to end, to the other runner, which writes it into its own keyring. Never a
+  the secret from its keyring and sends it, with the entry's metadata and the device's signed
+  request, in a `share` message, end to end, to the other runner, which checks that request and
+  the metadata itself and writes it into its own keyring. Never a
   file, never an agent, never the store, never an event, never the hub: as `vault.md` says of every
   secret.
 - The copy is marked `shared from pc` on that machine; it is a copy, not kept in sync: sharing again
-  replaces it. A machine with no keyring refuses it, saying so.
+  from the same machine replaces it, never an entry that machine set up itself. A machine with no
+  keyring refuses it, saying so.
 - An entry bound to a use (`for`) keeps it; a `worklog:<project>` entry needs that project on the
   other machine.
 - **Built (#832)**: `vault.share {name, machine}` (`protocol.md`), `flottille vault share <name>

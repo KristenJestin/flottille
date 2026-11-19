@@ -261,16 +261,27 @@ row's **Share with…** (a dialog that lists the machines online), or `flottille
   in a `share` message over the link, encrypted end to end between the two machines. The other
   machine checks that request itself as it checks any user's request: signed by a member's
   device, for the machine that sent it, within five minutes, never seen before, of a role that may
-  drive, `vault.share` of that very entry with this machine. A machine's message alone shares
-  nothing: a machine key read by an agent's code cannot put a secret of its choosing into another
-  machine's keyring, nor play a share again.
-- **Kept as any secret there.** The other machine masks the secret first, then writes it into its
-  own keyring under the entry's name, and the metadata into its store, marked as shared from the
-  machine it came from (`shared_from`, the row's `Shared from pc`). It is a copy, not kept in
-  sync: sharing again replaces it, and a secret set there by hand makes it that machine's own. A
-  use (`for`) goes with it; a `worklog:<project>` entry is refused there until that project is
-  (`the vault entry jira is bound to the worklog of the project app, which is not on this machine:
-  add the project here first`).
+  drive, `vault.share` of that very entry with this machine.
+- **What the signature covers, and what it does not.** The device signs the entry's name and the
+  machine it goes to, nothing more: not the secret, nor the metadata, which are the holding
+  machine's word. So a machine's message alone shares nothing the user did not: a machine key read
+  by an agent's code can carry only an entry the user just shared, by that name, to that machine,
+  within the request's five minutes, and once; it cannot share another entry, send it elsewhere,
+  or play the share again. The receiving machine therefore takes nothing else on trust: it checks
+  the metadata as Save checks it, and never replaces an entry of its own (below).
+- **Kept as any secret there.** The other machine checks the metadata first as its own Save
+  would: the project is one of its own, the use (`for`) is one it knows and fits the entry, a
+  `connection:` entry's `url` is no plain `http` to another machine. A `worklog:<project>` entry
+  is refused until that project is there (`the vault entry jira is bound to the worklog of the
+  project app, which is not on this machine: add the project here first`), as is an entry of a
+  project it lacks. Then it masks the secret, writes it into its own keyring under the entry's
+  name, and the metadata into its store, marked as shared from the machine it came from
+  (`shared_from`, the row's `Shared from pc`); an agent there whose request for that entry was
+  open is told, as when the user sets it. A store that refuses the write takes the secret back
+  out of the keyring: nothing is left half kept. It is a copy, not kept in sync: sharing again from
+  the same machine replaces it, and a secret set there by hand makes it that machine's own. It
+  never replaces an entry that machine set up itself, nor a copy from a third machine: that is
+  refused (`this machine has its own vault entry tracker: remove or rename it here first`).
 - **A machine with no keyring refuses**, saying so (`this machine has no keyring: no Secret Service
   runs in its session …`): the vault keeps no secret in a file, there either.
 - **Nowhere else.** Neither side writes the secret to a file, the store, an event, a log or an
