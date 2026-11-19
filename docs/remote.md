@@ -791,7 +791,8 @@ and removes its workspace as today, through `call`.
   share <name> --machine <m>`), a signed user request on the machine that holds it. That daemon reads
   the secret from its keyring and sends it, with the entry's metadata and the device's signed
   request, in a `share` message, end to end, to the other runner, which checks that request and
-  the metadata itself and writes it into its own keyring. Never a
+  the metadata itself, and that a runner's or a controller's machine sent it (never a viewer's),
+  and writes it into its own keyring. **Share with…** lists the runners online. Never a
   file, never an agent, never the store, never an event, never the hub: as `vault.md` says of every
   secret.
 - The copy is marked `shared from pc` on that machine; it is a copy, not kept in sync: sharing again

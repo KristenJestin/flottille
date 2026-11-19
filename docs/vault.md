@@ -249,7 +249,7 @@ another.
 
 The one way a secret leaves its machine (`docs/remote.md`, "Vault entries"): the user shares an
 entry, one at a time, with another of their machines that runs agents, from Settings, Vault, the
-row's **Share with…** (a dialog that lists the machines online), or `flottille vault share <name>
+row's **Share with…** (a dialog that lists the runners online), or `flottille vault share <name>
 --machine <machine>`.
 
 - **Only the user's device asks it.** `vault.share {name, machine}` is a request the client signs
@@ -261,7 +261,10 @@ row's **Share with…** (a dialog that lists the machines online), or `flottille
   in a `share` message over the link, encrypted end to end between the two machines. The other
   machine checks that request itself as it checks any user's request: signed by a member's
   device, for the machine that sent it, within five minutes, never seen before, of a role that may
-  drive, `vault.share` of that very entry with this machine.
+  drive, `vault.share` of that very entry with this machine. The machine that sent it must be a
+  runner's or a controller's, as for code (`docs/remote.md`, "What travels"): a viewer's machine
+  shares nothing, whoever signed (`refused: phone is a viewer's machine: only a runner's or a
+  controller's machine shares a vault entry`).
 - **What the signature covers, and what it does not.** The device signs the entry's name and the
   machine it goes to, nothing more: not the secret, nor the metadata, which are the holding
   machine's word. So a machine's message alone shares nothing the user did not: a machine key read
@@ -269,6 +272,9 @@ row's **Share with…** (a dialog that lists the machines online), or `flottille
   within the request's five minutes, and once; it cannot share another entry, send it elsewhere,
   or play the share again. The receiving machine therefore takes nothing else on trust: it checks
   the metadata as Save checks it, and never replaces an entry of its own (below).
+- **One write of an entry at a time.** A Save, a removal and a share of the same name are served
+  one after the other: a share that arrives while the user saves that entry waits, then finds it,
+  and is refused; it never overwrites it.
 - **Kept as any secret there.** The other machine checks the metadata first as its own Save
   would: the project is one of its own, the use (`for`) is one it knows and fits the entry, a
   `connection:` entry's `url` is no plain `http` to another machine. A `worklog:<project>` entry
