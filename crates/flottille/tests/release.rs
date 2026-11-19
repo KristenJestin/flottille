@@ -4969,6 +4969,20 @@ fn a_pull_request_runs_the_selected_tests_alone_and_a_push_the_whole_suite() {
 }
 
 #[test]
+fn a_partition_makes_the_scratch_folder_cargo_makes_before_it_runs_the_tests() {
+    // The tests keep scratch files in `CARGO_TARGET_TMPDIR` (`target/tmp`), which cargo makes when
+    // it runs a test and an archive does not hold: run 44623882394 failed on it, 27 tests.
+    let test = ci_job("test");
+    let make = test
+        .find("mkdir -p \"$GITHUB_WORKSPACE/target/tmp\"")
+        .expect("the folder is made");
+    let run = test
+        .find("cargo nextest run --archive-file")
+        .expect("the run");
+    assert!(make < run, "{test}");
+}
+
+#[test]
 fn every_job_that_compiles_links_with_mold() {
     for name in [
         "check",
