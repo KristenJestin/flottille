@@ -1680,10 +1680,17 @@ Both are the same kind of session otherwise:
   `led_by` (its pilot's id, `null` for a handed session).
 - **The user talks to a led session directly**: what they write reaches it as from the window to
   any session, and its pilot is neither asked nor woken by it.
-- **The pilot ends**: a led session goes on. It becomes a handed session (`led_by` `null`,
-  `agent.handed`), its questions go to the user from then on, and it is told so once by a
-  delivery (`handed`): `<pilot>, which led this session, ended. The session goes on, handed to the
-  user: …`.
+- **The pilot ends**: a led session is part of its pilot's job, so **it ends with it**. Ending a
+  session for good (the window's End session, `agent.stop`, `flottille agent stop`, `agent_stop`)
+  also ends the sessions it leads, in its project and in other projects, and those they lead in
+  turn, each as any session ends (its tree, its runs and what was queued for it stop; its
+  workspace stays; `agent.ended`, its reason `its pilot ended`). A led session the user wants to
+  keep is detached first ("Detach", below): it is then the user's alone and does not end. Only a
+  real end does it: the end of a pilot's turn, a crash (its process starts again, or the pilot
+  fails and may be resumed, its sessions staying led by it), a compaction and a restart of the
+  daemon end nothing. The window's confirmation lists the sessions that end with it, by title and
+  project, each with the work its workspace holds that is not saved, read by `agent.ending`
+  (`docs/protocol.md`): one confirmation for the whole end.
 
 A session launched before `kind` keeps its relation: one whose starter still followed it is led,
 the others are handed (a migration of the store sets it, and turns the following into the
@@ -1843,6 +1850,7 @@ why. What it does, at once:
 - the session leaves its pilot's rows and goes back under its workspace;
 - `ask` now reaches the user;
 - the two need the user's leave to write to each other, as any two sessions do;
+- the session no longer ends with its former pilot ("The pilot ends", above);
 - the session becomes a plain session of the user: it may start sessions as its mode allows, and
   "No chain without the user" no longer applies, since the user took it;
 - its first message stays in the conversation, still marked as the agent's words (and the judge
