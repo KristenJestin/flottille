@@ -1212,7 +1212,7 @@ async fn forward(daemon: Arc<Daemon>, mut subscription: Subscription, out: mpsc:
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use flottille_core::agent::{Agent, AgentState, Choices, GateMode};
 
     use super::*;
@@ -1286,7 +1286,7 @@ mod tests {
         assert_eq!(judge(error(ErrorKind::Interrupted), OURS), Socket::Unknown);
     }
 
-    fn an_agent(id: &str) -> Agent {
+    pub(crate) fn an_agent(id: &str) -> Agent {
         Agent {
             id: id.into(),
             provider: "claude".into(),

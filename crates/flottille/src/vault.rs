@@ -1810,6 +1810,10 @@ mod tests {
         let daemon = a_daemon(dir.path());
         daemon
             .write(|store| {
+                store.create_agent(
+                    &crate::daemon::tests::an_agent("a1"),
+                    ("agent.created", json!({})),
+                )?;
                 let event = store.append_event(
                     "vault.asked",
                     json!({"agent": "a1", "project": "app", "name": "tracker",
