@@ -2963,9 +2963,10 @@ dependencies = [
 [[package]]
 name = "gpui-design-system"
 version = "0.1.0"
-source = "git+https://github.com/KristenJestin/gpui-design-system?tag=v0.2.0-beta.18#198d6402308490085579e68a666f57c4f0b629b5"
+source = "git+https://github.com/KristenJestin/gpui-design-system?tag=v0.3.0-beta.1#d3e7dbebeb7aabab30808e308ac13bfa9e353847"
 dependencies = [
  "gpui-kit",
+ "qrcodegen",
  "toml 1.1.8+spec-1.1.0",
  "unicode-normalization",
 ]
@@ -6429,6 +6430,12 @@ checksum = "7f6d64c71eb498fe9eae14ce4ec935c555749aef511cca85b5568910d6e48001"
 dependencies = [
  "bytemuck",
 ]
+
+[[package]]
+name = "qrcodegen"
+version = "1.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4339fc7a1021c9c1621d87f5e3505f2805c8c105420ba2f2a4df86814590c142"
 
 [[package]]
 name = "quick-error"
