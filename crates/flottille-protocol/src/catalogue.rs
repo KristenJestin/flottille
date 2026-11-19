@@ -230,6 +230,25 @@ pub const METHODS: &[(&str, Class)] = &[
     ("test.advance", Drive),
 ];
 
+/// The methods that start an agent's process (`docs/remote.md`, "Roles"): a machine whose member
+/// is no runner runs no agent, so it refuses them. Each may start one: `spec.new` when it is
+/// given an idea, `agent.quota_resume` when the reset comes.
+pub const LAUNCHES: &[&str] = &[
+    "agent.start",
+    "agent.run",
+    "agent.resume",
+    "agent.quota_resume",
+    "spec.new",
+    "spec.from_ticket",
+    "spec.develop",
+    "review.start",
+];
+
+/// Whether `method` starts an agent's process.
+pub fn launches(method: &str) -> bool {
+    LAUNCHES.contains(&method)
+}
+
 /// The class of `method`; none for a method the daemon does not answer.
 pub fn class(method: &str) -> Option<Class> {
     METHODS

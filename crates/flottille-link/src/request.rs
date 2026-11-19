@@ -297,15 +297,12 @@ impl Requests {
     }
 }
 
-/// The methods that start a session: a machine whose member is no runner runs no agent.
-const LAUNCHES: &[&str] = &["agent.start", "agent.run"];
-
-/// Refused when `method` starts a session and `machine` is the machine of a member that is no
-/// runner (`docs/remote.md`, "Roles"): the one check of it, made by the machine that would
-/// carry the request and by the one it is for. A name that is no member's passes: the carrier
+/// Refused when `method` starts an agent (`flottille_protocol::LAUNCHES`) and `machine` is the
+/// machine of a member that is no runner (`docs/remote.md`, "Roles"): the one check of it, made
+/// by the machine that would carry the request and by the one it is for. A name that is no member's passes: the carrier
 /// says it is no machine of the user's.
 pub fn runs_agents(members: &Members, machine: &str, method: &str) -> Result<(), RequestError> {
-    if !LAUNCHES.contains(&method) {
+    if !flottille_protocol::launches(method) {
         return Ok(());
     }
     match members

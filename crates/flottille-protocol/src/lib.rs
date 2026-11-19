@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-pub use catalogue::{Class, METHODS, class};
+pub use catalogue::{Class, LAUNCHES, METHODS, class, launches};
 
 /// The protocol's version, `protocol` in `daemon.status`. Raised by any change of a method, an
 /// answer or an event that an older client would misread (`docs/remote.md`, "The version"); one
