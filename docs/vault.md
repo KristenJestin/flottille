@@ -53,7 +53,7 @@ An entry made for one precise feature is that feature's alone. `for` names it:
 
 | `for` | The use |
 |---|---|
-| `worklog:<project>` | The token the project's tracker logs time with (`docs/tickets.md`, "Logging time"), and reads worklogs and fields with, edits work items with (their fields, parent and fix version, `docs/tools.md`), and posts a reply under a comment or a comment that mentions someone with (`docs/tickets.md`, "Replies"). |
+| `worklog:<project>` | The token the project's tracker logs time with (`docs/tickets.md`, "Logging time"), and reads worklogs and fields with, edits work items with (their fields, parent and fix version, `docs/tools.md`), posts a reply under a comment, and posts or changes a text that mentions someone, and looks the mentioned accounts up, with (`docs/tickets.md`, "Replies"). |
 | `connection:<name>` | What the server of a connection is given (`docs/extensions.md`, "Connections"), and the logins its adapter signs in with (agent-browser's `login`, "Adapters"). |
 
 - **Only its use reads it.** A feature reads an entry bound to it or an unbound one it names. An

@@ -1147,12 +1147,14 @@ Jira: their account id, else their e-mail). The card shows the names as given.
   and writes the mention as the forge or the tracker wants it. On GitHub an `@login` in the text
   notifies, and is left as written. **On Jira an `@Name` in the text stays text and notifies no
   one** (Jira rewrites nothing): only a mention node with the account id does, so in a Jira
-  `comment`, `reply`, `create` or `edit` description the agent writes `[@Display Name]
-  (mention:<accountId>)` (`people` gives the account ids), which becomes the node. The card says
-  who is notified, by display name; a `mention:` that holds no account id is refused before the
-  user is asked, and a comment that mentions someone is posted through Jira's API with the
-  project's tracker entry, so it is refused without one (`docs/tickets.md`, "Replies"). If a
-  tool gets such a field, it is resolved here like the others.
+  `comment`, `comment_edit`, `reply`, `log_time` comment, `create` or `edit` description the agent
+  writes `[@Display Name](mention:<accountId>)` (`people` gives the account ids), which becomes the
+  node. Each account is looked up on the site with the project's tracker entry: an id the site
+  does not know, or one that holds no account id, is refused before the user is asked, and the
+  card says who is notified by the name Jira returns and the id, whatever the text says. Every
+  such text goes through Jira's API with the entry (never `acli`), so it is refused without one
+  (`docs/tickets.md`, "Replies"). If a tool gets such a
+  field, it is resolved here like the others.
 - **The answer says who was added**, by display name and identifier (`Reviewers: added Jane Doe
   (jdoe); removed Bob Roe (broe).`, `Assigned to Anne Example (anne@example.org).`), so a wrong
   guess shows at once.

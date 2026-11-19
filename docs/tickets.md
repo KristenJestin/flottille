@@ -164,8 +164,10 @@ take for markup (`*`, `` ` ``, `[`, `<`, `~`, `_` at a word's edge, a line start
 **What an agent posts is found again by its words.** The record of a Jira comment is a hash of its
 text (`forges.md`, "What Flottille posts is recorded"). What is recorded is the text after the
 round trip (Markdown, ADF, Markdown), the text a read gives, so the match does not rely on Jira
-keeping anything but the tree. What Jira rewrites on its own (a mention, a smart link) still
-breaks the match: that comment is then shown as a person's and `from: people` delivers it. The
+keeping anything but the tree. What Jira rewrites on its own (a smart link) still breaks the match:
+that comment is then shown as a person's and `from: people` delivers it. A comment posted through
+the REST API (a mention, a reply) and an edited one are recorded by the id Jira answers, so they
+do not depend on the words. The
 maintainer checks one real Jira comment, as for the shapes below.
 
 ### What `acli` prints is assumed, and the maintainer checks it
@@ -479,7 +481,8 @@ ticket itself.
     to ask the user for it, `vault ask`); it never falls back to a separate comment.
   - **The card** says the comment answered (its id, its author and its first 500 characters), the
     answer, that it goes through Jira's API with the vault entry's name, and who is notified when
-    the answer mentions someone. The card is rebuilt when the user allows the call, and a comment
+    the answer mentions someone. The comment named is the one the answer goes under: for a reply
+    to a reply, the first comment of the thread, read as the post reads it. The card is rebuilt when the user allows the call, and a comment
     edited since is not answered: it is refused as what the call does having changed. A comment
     that cannot be read when the card is built gets no card, it is refused.
   - **`show` with `detail full` draws the threads** of a Jira work item: each reply under its
@@ -495,22 +498,43 @@ ticket itself.
     refused too: quoting it would show it again. Refused before the user is asked, and again right
     before the write.
 - **Mentions** (#1068): on Jira an `@Name` written in an ADF text stays text and notifies no one;
-  only a `mention` node with the account id does. In a Jira `comment`, `reply`, `create` and `edit`
-  description, `[@Display Name](mention:<accountId>)` becomes `{"type": "mention", "attrs": {"id":
-  "<accountId>", "text": "@Display Name"}}` (`people` gives the account ids; the conversion is the
-  same as the rest of Jira's text, `adf::from_markdown`). A `mention:` whose id is not an account id
-  (24 hexadecimal digits, or `<number>:<uuid>`) is refused before the user is asked. **The card
-  says who is notified**, by display name (`It mentions Ana Example, Ben Sample, who are
-  notified`). A `comment` or a `reply` that mentions someone is posted through the REST API with
-  the project's entry, as a `reply` is (`acli`'s comment create is not known to keep a mention
-  node): without the entry a comment with a mention is **refused before it is asked**, saying it
-  needs the entry (and `vault ask`), never posted without its mention. A `create` and an `edit`
-  keep going through `acli` (a description, with the document in the file `acli` reads). A mention
-  reads back as `@Display Name`; to keep a mention while editing a text, the agent writes it
-  again. GitHub is unchanged: an `@login` notifies, and a `mention:` link is left as a link.
+  only a `mention` node with the account id does. In a Jira `comment`, `comment_edit`, `reply`,
+  `log_time` comment, and `create` and `edit` description, `[@Display Name](mention:<accountId>)`
+  (or its reference form, `[@Display Name][x]` with `[x]: mention:<accountId>`) becomes
+  `{"type": "mention", "attrs": {"id": "<accountId>", "text": "@Display Name"}}` (`people` gives
+  the account ids; the conversion is the same as the rest of Jira's text, `adf::from_markdown`).
+  A `mention:` whose id is not an account id (24 hexadecimal digits, or `<number>:<uuid>`) is
+  refused before the user is asked.
+  - **Each account is looked up on the site** with the project's entry (`GET
+    /rest/api/3/user?accountId=`, signed as the rest of the REST calls): an id the site does not
+    know is **refused before the card**, `nothing was written`, and the name Jira returns is the
+    one the node carries (the text the agent wrote is its own, Jira's notifies). **The card says
+    who is notified**, by the name Jira returns and the id (`It mentions Ana Example (5b10…), Ben
+    Sample (7120…), who are notified`), whatever the text says.
+  - **Every path with a mention goes through the REST API with the entry, never `acli`** (that
+    `acli` keeps a mention node is not confirmed): a `comment` (`POST …/comment`), a `reply`, a
+    `comment_edit` (`PUT /rest/api/3/issue/<key>/comment/<id>`), a `log_time` comment (its
+    worklog), an `edit` description (`PUT /rest/api/3/issue/<key>` with `fields.description`;
+    the title, assignee and labels of the same call still go through `acli`, and an edit with
+    only the description does not call `acli` at all) and a `create` (`acli` creates the work
+    item **without** a description, then the description is set with the same `PUT` in the same
+    action; if that `PUT` fails the answer says the work item exists with no description). Without
+    the entry, any of them is **refused before it is asked**, saying it needs the entry (and
+    `vault ask`), never posted without its mention. A text with no mention goes as it did.
+    These paths need no signed-in `acli` of their own: a comment with a mention is posted with
+    `acli` signed out (a `reply` and a `comment_edit` still read the work item through `acli`
+    first).
+  - **What the agent posted is recorded by the id Jira answers** (a comment, a reply, an edited
+    comment), so it is still the agent's when read back, whatever Jira shows for the mention. A
+    description is recorded by its words, the names being Jira's own, as a read gives them.
+  - A mention reads back as `@Display Name`; to keep a mention while editing a text, the agent
+    writes it again. GitHub is unchanged: an `@login` notifies, and a `mention:` link is left as
+    a link. A raw ADF given in `fields` is the agent's own document: its mention nodes are not
+    looked up, except those of `fields.description`.
   - Not confirmed against a real site (the fake follows the shapes above): that a `mention` node
-    in the body of `POST …/comment` notifies the person, and that `acli` takes one in a
-    description's file.
+    in the body of `POST …/comment`, of the comment's `PUT`, of a description's `PUT` and of a
+    worklog notifies the person, and what `GET /rest/api/3/user?accountId=` answers for an
+    account of another site or a deactivated one (a `404` is taken as unknown).
 **Measured on a real Jira Cloud site**: the shapes of `link type --json`, `link list --json` and
 `view --fields issuelinks` above, `link delete --id <link id> --yes`, and `comment list --key <K>
 --json`, whose comments each carry their `id` (their `body` plain text). The view's comments are
