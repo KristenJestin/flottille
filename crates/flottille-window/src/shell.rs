@@ -1109,6 +1109,7 @@ impl Shell {
         match update {
             Update::Disconnected(_) => {
                 self.set_online(false, cx);
+                self.waiting_for_the_daemon(false, cx);
                 self.texts_due = true;
             }
             Update::NotAnswering(since) => self
@@ -1118,6 +1119,7 @@ impl Shell {
             // what the pages read, not in the events, so they read it again.
             Update::Snapshot(snapshot) => {
                 self.set_online(true, cx);
+                self.waiting_for_the_daemon(false, cx);
                 self.main.update(cx, |main, cx| main.set_read(cx));
                 self.show(snapshot, window, cx);
                 if std::mem::take(&mut self.texts_due) {
@@ -1821,7 +1823,9 @@ impl Shell {
             Outcome::Appearance { written, shown, .. } => {
                 match &shown {
                     Ok(appearance) => {
-                        gpui_design_system::appearance::appear(appearance.clone(), cx)
+                        gpui_design_system::appearance::appear(appearance.clone(), cx);
+                        // What the daemon keeps is the copy the next first frame is drawn in.
+                        crate::look::remember(appearance, cx);
                     }
                     // A choice not kept: the window goes back to what the daemon keeps.
                     Err(_) if written => self.ask_appearance(None),
@@ -2483,6 +2487,15 @@ impl Shell {
             });
         })
         .detach();
+    }
+
+    /// Whether the parts that show what the daemon says are waiting for it: they show skeletons
+    /// until it answered, and stop when it cannot be reached (the top bar says it reconnects).
+    fn waiting_for_the_daemon(&mut self, waiting: bool, cx: &mut Context<Self>) {
+        self.sidebar
+            .update(cx, |sidebar, cx| sidebar.set_loading(waiting, cx));
+        self.main
+            .update(cx, |main, cx| main.set_reachable(waiting, cx));
     }
 
     fn set_online(&mut self, online: bool, cx: &mut Context<Self>) {

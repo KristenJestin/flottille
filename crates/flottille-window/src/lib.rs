@@ -23,6 +23,8 @@ pub mod kept;
 pub mod leaves;
 pub mod link;
 pub mod links_card;
+pub mod loading;
+pub mod look;
 pub mod message_checks;
 pub mod modals;
 pub mod mode;
@@ -94,6 +96,18 @@ pub fn init_with(env: gpui_design_system::omarchy::Environment, cx: &mut gpui_ki
     gpui_design_system::init(identity(env), cx);
 }
 
+/// [`init_with`] for a window that draws its first frame in the theme `memory` holds.
+pub fn start(
+    env: gpui_design_system::omarchy::Environment,
+    memory: Option<look::Memory>,
+    cx: &mut gpui_kit::App,
+) {
+    init_with(env, cx);
+    if let Some(memory) = memory {
+        look::begin(memory, cx);
+    }
+}
+
 pub use instance::Instance;
 pub use link::Connect;
 pub use shell::Shell;
@@ -105,7 +119,16 @@ pub fn run(connect: Connect, instance: Option<Instance>) {
     gpui_kit::application()
         .with_assets(glyphs::Assets)
         .run(move |cx| {
-            init(cx);
+            // The copy of the user's theme, which the first frame is drawn in: the daemon, which
+            // keeps the choice, has not answered yet.
+            let memory = flottille_core::paths::Paths::from_env()
+                .ok()
+                .map(|paths| look::Memory::in_folder(&paths.state));
+            start(
+                gpui_design_system::omarchy::Environment::from_system(),
+                memory,
+                cx,
+            );
             let bounds = Bounds::centered(None, size(px(1280.), px(800.)), cx);
             let options = WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),

@@ -136,9 +136,36 @@ pub struct Comment {
     /// Why a reply would quote the comment to people it is not for (restricted, an internal note,
     /// hidden), when it would.
     pub restricted: Option<String>,
+    /// Jira: the id of the comment it answers (`parentId`), when it is a reply in a thread; read
+    /// by `show` with `detail full` from Jira's REST API, which `acli`'s view is not known to give.
+    pub parent: Option<String>,
 }
 
 impl Comment {
+    /// Its line in `show`: `indent` for a reply under its comment, `answers` the id of the comment
+    /// it answers when that one is not shown above it.
+    fn line(&self, indent: &str, answers: Option<&str>) -> String {
+        if !self.agent {
+            crate::web::shown(&self.body, crate::web::Source::Link);
+        }
+        let at = self
+            .at
+            .as_deref()
+            .map_or(String::new(), |at| format!(", {at}"));
+        // The id of every comment: what `reply` takes, and `comment_edit` and `comment_delete`
+        // for one an agent posted.
+        let id = match (&self.id, answers) {
+            (Some(id), Some(parent)) => format!(" [comment {id}, a reply to {parent}]"),
+            (Some(id), None) => format!(" [comment {id}]"),
+            (None, _) => String::new(),
+        };
+        format!(
+            "{indent}- {}{id}{at}: {}\n",
+            self.by(),
+            self.body.replace('\n', &format!("\n{indent}    "))
+        )
+    }
+
     /// Its author, and that an agent posted it when one did.
     fn by(&self) -> String {
         match self.agent {
@@ -160,6 +187,7 @@ fn comment_of(author: String, at: Option<&str>, id: Option<String>, text: &str) 
         own: false,
         account: None,
         restricted: None,
+        parent: None,
     }
 }
 
@@ -265,25 +293,27 @@ impl Ticket {
             if self.older > 0 {
                 text.push_str(&format!("  ({} older ones are not shown)\n", self.older));
             }
+            // Each reply under its parent, indented (Jira's threads are one level deep); a reply
+            // whose parent is not among the comments read stands where it is and says whom it
+            // answers.
+            let parent_of = |comment: &Comment| {
+                let parent = comment.parent.as_ref()?;
+                let found = self
+                    .comments
+                    .iter()
+                    .find(|c| c.id.as_ref() == Some(parent))?;
+                found.parent.is_none().then_some(found)
+            };
             for comment in &self.comments {
-                if !comment.agent {
-                    crate::web::shown(&comment.body, crate::web::Source::Link);
+                if parent_of(comment).is_some() {
+                    continue;
                 }
-                let at = comment
-                    .at
-                    .as_deref()
-                    .map_or(String::new(), |at| format!(", {at}"));
-                // The id of every comment: what `reply` takes, and `comment_edit` and
-                // `comment_delete` for one an agent posted.
-                let id = comment
-                    .id
-                    .as_ref()
-                    .map_or(String::new(), |id| format!(" [comment {id}]"));
-                text.push_str(&format!(
-                    "- {}{id}{at}: {}\n",
-                    comment.by(),
-                    comment.body.replace('\n', "\n    ")
-                ));
+                text.push_str(&comment.line("", comment.parent.as_deref()));
+                for reply in self.comments.iter().filter(|reply| {
+                    parent_of(reply).is_some_and(|parent| std::ptr::eq(parent, comment))
+                }) {
+                    text.push_str(&reply.line("    ", None));
+                }
             }
         }
         if !self.links.is_empty() {
@@ -1145,6 +1175,9 @@ pub fn unwritable(project: &Project, args: &Value) -> Option<String> {
         return Some(format!("refused: {why}"));
     }
     if let Some(why) = unplannable(project, tracker, action, args) {
+        return Some(why);
+    }
+    if let Some(why) = replies::unwritable(tracker, action, args) {
         return Some(why);
     }
     if action == "log_time" {
@@ -2288,11 +2321,23 @@ async fn show(
     // `detail: full` and `fresh` read again, and keep what they read for the next show.
     let (read, age) = read_or_kept(daemon, project, &key, full || asked.fresh).await;
     match read {
-        Ok(ticket) => {
+        Ok(mut ticket) => {
             if held.is_some() && age.is_none() {
                 events::remember(daemon, project, &key, &ticket);
             }
-            Outcome::Done(ticket.text(full, asked.ticket.as_deref(), age))
+            // The threads are Jira's REST read (its `parentId`): drawn when the project has its
+            // entry, and said when they could not be read.
+            let unthreaded = match full {
+                true => replies::threaded(daemon, project, &key, &mut ticket).await,
+                false => None,
+            };
+            let text = ticket.text(full, asked.ticket.as_deref(), age);
+            Outcome::Done(match unthreaded {
+                Some(why) => {
+                    format!("{text}\n(The replies are not told from the comments: {why})\n")
+                }
+                None => text,
+            })
         }
         Err(problem) => Outcome::Failed(format!(
             "the ticket {} could not be read: {problem}",
@@ -2691,6 +2736,31 @@ async fn create_work_item(
     }
     let labels = named(&asked.labels);
     let body = asked.body.as_deref().filter(|b| !b.trim().is_empty());
+    // A description that mentions someone is set through Jira's REST API once `acli` has created
+    // the work item without it: that `acli` keeps a mention node is not confirmed. Its people are
+    // asked of the site now, before anything is created.
+    let mut mentioning = None;
+    if let Some(text) = body {
+        let mut document = crate::adf::from_markdown(text);
+        if !crate::adf::mentions(&document).is_empty() {
+            let jira = match replies::signed_in(
+                daemon,
+                project_of,
+                site,
+                replies::mention_use("create").unwrap_or_default(),
+            )
+            .await
+            {
+                Ok(jira) => jira,
+                Err(refused) => return refused,
+            };
+            if let Err(outcome) = replies::verified(&jira, &mut document).await {
+                return outcome;
+            }
+            mentioning = Some((jira, document));
+        }
+    }
+    let body = body.filter(|_| mentioning.is_none());
     let kind = asked.kind.as_deref().filter(|k| !k.trim().is_empty());
     let parent = asked
         .parent
@@ -2864,6 +2934,20 @@ async fn create_work_item(
         let posted = crate::adf::round_trip(body);
         crate::posts::record_body(daemon, (name, "jira", "", key.as_str()), &posted);
     }
+    // The description with its mentions, set now that the work item exists.
+    let mut described = Ok(());
+    if let Some((jira, document)) = &mentioning {
+        described = jira
+            .put(
+                &format!("issue/{key}"),
+                &json!({"fields": {"description": document}}),
+            )
+            .await;
+        if described.is_ok() {
+            let posted = crate::adf::to_markdown(document);
+            crate::posts::record_body(daemon, (name, "jira", "", key.as_str()), &posted);
+        }
+    }
     let mut placed = String::new();
     let mut version_said = String::new();
     let mut unset = String::new();
@@ -2931,9 +3015,15 @@ async fn create_work_item(
         (None, _) => {}
     }
     placed.push_str(&version_said);
-    Outcome::Done(format!(
+    let opened = format!(
         "The ticket {key} was opened in {project}{placed}: https://{site}/browse/{key}{unset}{after}"
-    ))
+    );
+    match described {
+        Ok(()) => Outcome::Done(opened),
+        Err(why) => Outcome::Failed(format!(
+            "{opened}; but its description, with the mentions, was not set: {why}: set it with edit"
+        )),
+    }
 }
 
 /// `tickets comment`, `edit`, `close`, `reopen` and `status` of a Jira work item, once `acli` is
@@ -2948,10 +3038,37 @@ async fn write_work_item(
     labels: &[(&str, String)],
 ) -> Outcome {
     let key = on.3;
-    if let Err(problem) = jira_site(site, "written").await {
+    let action = asked.action.as_str();
+    // Words that mention someone go through Jira's REST API with the project's entry: that `acli`
+    // keeps a mention node is not confirmed. A comment is posted so, with no call to `acli`; an
+    // edit sets the description so, and `acli` does the rest if there is any.
+    let mentioning = body
+        .map(crate::adf::from_markdown)
+        .filter(|document| !crate::adf::mentions(document).is_empty());
+    let mut description = None;
+    match (action, mentioning) {
+        ("comment", Some(document)) => {
+            return replies::comment_with_mentions(
+                daemon,
+                project,
+                on,
+                site,
+                (document, asked.by_id_only),
+            )
+            .await;
+        }
+        ("edit", Some(document)) => description = Some(document),
+        _ => {}
+    }
+    let acli_has_work = action != "edit"
+        || title.is_some()
+        || asked.assignment().is_some()
+        || labels.iter().any(|(_, names)| !names.is_empty())
+        || (body.is_some() && description.is_none());
+    if acli_has_work && let Err(problem) = jira_site(site, "written").await {
         return Outcome::Failed(problem);
     }
-    let action = asked.action.as_str();
+    let described = description.is_some();
     let mut args = vec!["jira", "workitem"];
     match action {
         "comment" => args.extend(["comment", "create", "--key", key]),
@@ -2963,29 +3080,39 @@ async fn write_work_item(
     let mut fielded = false;
     let mut set = String::new();
     if action == "edit" {
-        let through_api = match api_edit(project, asked, key).await {
+        let mut through_api = match api_edit(project, asked, key).await {
             Ok(through_api) => through_api,
             Err(outcome) => return outcome,
         };
+        if let Some(document) = description {
+            through_api
+                .get_or_insert_with(serde_json::Map::new)
+                .insert("description".into(), document);
+        }
         if let Some(through_api) = through_api {
             set = set_said(&through_api);
-            if let Err(refusal) = edited_through_api(daemon, project, site, key, through_api).await
-            {
-                return Outcome::Failed(refusal);
+            match edited_through_api(daemon, project, site, key, through_api).await {
+                Ok(Some(text)) => crate::posts::record_body(daemon, on, &text),
+                Ok(None) => {}
+                Err(refusal) => return Outcome::Failed(refusal),
             }
             fielded = true;
         }
     }
     if fielded {
         let more = title.is_some()
-            || body.is_some()
+            || (body.is_some() && !described)
             || asked.assignment().is_some()
             || labels.iter().any(|(_, names)| !names.is_empty());
         if !more {
             return Outcome::Done(format!("{key} was changed."));
         }
     }
-    let file = match body.map(|body| AdfFile::of(daemon, body)).transpose() {
+    let file = match body
+        .filter(|_| !described)
+        .map(|body| AdfFile::of(daemon, body))
+        .transpose()
+    {
         Ok(file) => file,
         Err(why) => return Outcome::Failed(why),
     };
@@ -3034,7 +3161,7 @@ async fn write_work_item(
             ))
         }
         Ok(_) => {
-            if let (Some(body), "edit") = (body, action) {
+            if let (Some(body), "edit", false) = (body, action, described) {
                 crate::posts::record_body(daemon, on, &crate::adf::round_trip(body));
             }
             Outcome::Done(format!("{key} was changed."))
@@ -3056,9 +3183,12 @@ fn set_said(fields: &serde_json::Map<String, Value>) -> String {
     let mut named = Vec::new();
     if fields
         .keys()
-        .any(|key| key != "parent" && key != "fixVersions")
+        .any(|key| !["parent", "fixVersions", "description"].contains(&key.as_str()))
     {
         named.push("its fields");
+    }
+    if fields.contains_key("description") {
+        named.push("its description");
     }
     if fields.contains_key("parent") {
         named.push("its parent");
@@ -3116,13 +3246,15 @@ async fn api_edit(
 /// `PUT /rest/api/3/issue/<key>` with the project's tracker entry: the fields of a work item set
 /// as given, or why Jira did not set them. The daemon puts the secret; it goes to the tracker's
 /// site alone and is in no answer.
+/// A description among them is asked of the site first, as to its mentions: what it holds as
+/// words is given back, for the record of what an agent posted.
 async fn edited_through_api(
     daemon: &Daemon,
     project: &Project,
     site: &str,
     key: &str,
-    fields: serde_json::Map<String, Value>,
-) -> Result<(), String> {
+    mut fields: serde_json::Map<String, Value>,
+) -> Result<Option<String>, String> {
     let (jira, _, _) = worklogs::signed_in(
         daemon,
         project,
@@ -3135,8 +3267,16 @@ async fn edited_through_api(
     .await
     // Nothing was sent: a refusal before the request says it, and `put` says what it knows.
     .map_err(|why| format!("{why}; nothing was written"))?;
+    let mut text = None;
+    if let Some(document) = fields.get_mut("description") {
+        replies::verified(&jira, document)
+            .await
+            .map_err(replies::text_of)?;
+        text = Some(crate::adf::to_markdown(document));
+    }
     jira.put(&format!("issue/{key}"), &json!({"fields": fields}))
-        .await
+        .await?;
+    Ok(text)
 }
 
 /// The id of the comment just posted with `text` on the work item `on`, from a read right after

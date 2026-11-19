@@ -111,6 +111,7 @@ The kit has one helper for each thing that moves; a screen uses them and invents
 | the sessions a session leads, under its row | the sidebar's `Level` draws them as `Item`s that unfold from nothing and fold away (`framed` leaves `.rising()` to the rows that arrive at full size); each is tied to the row above by `tree_tie(row, &Tie, first_line, shown, cx)`, a thin line in `p.line` that comes down and turns right into the row (├ with a line going on below, └ for the last one, a line past it for each ancestor with a sibling below), drawn inside the row so it folds and fades with it; `<row>-tie` says `Branch` or `Last branch` |
 | a level that folds | `Fold` (a view) or `fold_frame` |
 | a part that waits for a slow read, then shows it | `awaiting(id, pending, Skeleton, content)`: the skeleton fades out and the content in at the same place, the height easing from one to the other (to nothing when nothing came); build it on every frame |
+| the sidebar's rows and the page, until the daemon first answered | `loading::sidebar()` in a `presence` (it folds away when the projects arrive, which rise in) and `loading::veil(..)` over the page (`fade`: the page under it is drawn at once, the skeleton fades out over `PANEL`); both stop when the link cannot reach the daemon, the top bar then says it reconnects |
 | a panel over the page (a menu, a drawer, a modal, the bell's list) | rises a little and fades in, fades out, and stays drawn until it has |
 
 Never in a screen: `.hover(..)` or `.group_hover(..)` (they switch at once; `tests/the_rule.rs`
@@ -335,6 +336,14 @@ The components that hold them:
 `--drawer`, `--menu` open one of them), for a capture in a headless compositor.
 
 ## Pitfalls
+
+- **The first frame is drawn before the daemon answers**, so what the daemon owns and the window
+  needs at once is copied into a file of the window's (`look.rs`: the theme, `window-appearance.json`
+  in the state folder). It is applied before the window opens with reduced motion on for that one
+  call (`App::set_reduce_motion`), because the kit's `appear` cross-fades from its default palette
+  over `COVER`; the daemon's answer then finds the choice already made and changes nothing. A test
+  that starts the window with `flottille_window::start(env, Some(memory), cx)` draws as the program
+  does; `init_with` alone starts from the kit's default.
 
 - `use gpui_kit::prelude::*` brings `ParentElement`, `StatefulInteractiveElement`, `AppContext`,
   `FluentBuilder`; `h_flex`/`v_flex` are in `gpui_kit::base`. `.on_click` needs an `.id(..)`.
