@@ -1762,6 +1762,70 @@ fn a_worklog_whose_author_changed_between_the_card_and_the_allow_is_not_written(
     }
 }
 
+/// A user whose Auto judge allows everything, over `jira` with the entry set, its agent put in
+/// `mode`.
+fn ready_in(jira: &Jira, mode: &str) -> (User, Mcp) {
+    let user = user(jira).with_allowing_judge().with_env("TZ", ZONE);
+    jira_with(&user, Some("jira-time"));
+    entry(&user);
+    let (mcp, agent) = root_in(&user);
+    user.call("agent.mode", json!({"agent": agent, "mode": mode}))
+        .unwrap();
+    (user, mcp)
+}
+
+/// How many prompts the judge was given.
+fn judged(user: &User) -> usize {
+    user.judge_received()
+        .iter()
+        .filter(|e| e["received"]["method"] == "session/prompt")
+        .count()
+}
+
+#[test]
+fn a_worklog_delete_waits_for_the_user_even_in_full() {
+    let jira = ledger_to_correct();
+    let (user, mcp) = ready_in(&jira, "full");
+
+    let number = held(&mcp.call("tickets", changing("worklog_delete", "ABC-1", "13600")));
+
+    assert_eq!(requests(&user)[0]["class"], "base", "{:?}", requests(&user));
+    assert!(
+        written(&jira).is_empty(),
+        "deleted before the user allowed it"
+    );
+    let done = allow(&user, number);
+    assert!(done.contains("13600"), "{done}");
+    assert_eq!(written(&jira).len(), 1, "{:?}", jira.received());
+    assert_eq!(written(&jira)[0].method, "DELETE");
+}
+
+#[test]
+fn a_worklog_delete_is_never_passed_by_the_judge() {
+    let jira = ledger_to_correct();
+    let (user, mcp) = ready_in(&jira, "auto");
+
+    let number = held(&mcp.call("tickets", changing("worklog_delete", "ABC-1", "13600")));
+
+    assert_eq!(judged(&user), 0, "the judge was asked");
+    assert_eq!(requests(&user)[0]["class"], "base");
+    assert!(written(&jira).is_empty());
+    allow(&user, number);
+}
+
+#[test]
+fn a_worklog_edit_is_allowed_in_full_as_log_time_is() {
+    let jira = ledger_to_correct();
+    let (user, mcp) = ready_in(&jira, "full");
+
+    let done = mcp.call("tickets", changing("worklog_edit", "ABC-1", "13600"));
+
+    assert!(!done.error, "{}", done.text);
+    assert!(requests(&user).is_empty(), "held in Full");
+    assert_eq!(written(&jira).len(), 1, "{:?}", jira.received());
+    assert_eq!(written(&jira)[0].method, "PUT");
+}
+
 #[test]
 fn worklog_edit_and_delete_are_refused_on_github() {
     let jira = Jira::accepting();
