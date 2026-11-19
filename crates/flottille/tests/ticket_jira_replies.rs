@@ -28,6 +28,18 @@ const BASE: &str = "FLOTTILLE_TEST_JIRA_BASE";
 /// The account ids of the people of the fake site.
 const ANA: &str = "5b10ac8d82e05b22cc7d4ef5";
 const BEN: &str = "712020:9f8e7d6c-1111-4222-8333-444455556666";
+/// A well-formed account id that the fake site has never heard of.
+const NOBODY: &str = "5b10ac8d82e05b22cc7d4ef6";
+
+/// The display name the fake site gives an account (`GET /rest/api/3/user?accountId=`), none for
+/// an id it does not know.
+fn name_of(account: &str) -> Option<&'static str> {
+    match account {
+        ANA => Some("Ana Example"),
+        BEN => Some("Ben Sample"),
+        _ => None,
+    }
+}
 
 /// What the fake Jira received of one request.
 #[derive(Clone, Debug)]
@@ -94,6 +106,26 @@ impl Jira {
                     body: serde_json::from_slice(&rest).unwrap_or(Value::Null),
                 });
                 let (status, said) = match method.as_str() {
+                    "GET" if path.starts_with("/rest/api/3/user?") => {
+                        let account = path.split("accountId=").nth(1).unwrap_or_default();
+                        let account = account.split('&').next().unwrap_or_default();
+                        let account = account.replace("%3A", ":");
+                        match name_of(&account) {
+                            Some(name) => (
+                                "200 OK",
+                                json!({"accountId": account, "displayName": name,
+                                    "active": true})
+                                .to_string(),
+                            ),
+                            None => (
+                                "404 Not Found",
+                                json!({"errorMessages": [format!(
+                                    "The user with the accountId '{account}' does not exist")],
+                                    "errors": {}})
+                                .to_string(),
+                            ),
+                        }
+                    }
                     "GET" => (
                         "200 OK",
                         json!({"startAt": 0, "maxResults": 5000, "total": comments
@@ -413,10 +445,17 @@ fn a_reply_to_a_reply_goes_under_the_first_comment_of_the_thread() {
         ]),
     );
 
-    written(
-        &user,
-        &mcp,
+    // The card names the comment the answer goes under, not the reply it was asked of.
+    held(&mcp.call(
+        "tickets",
         json!({"action": "reply", "ticket": "ABC-1", "comment": "20001", "body": "Agreed"}),
+    ));
+    let card = card_of_the_last(&user);
+    assert!(card.contains("under the comment 20000 by Ana"), "{card}");
+    assert!(!card.contains("20001"), "{card}");
+    allow(
+        &user,
+        requests(&user).last().unwrap()["number"].as_u64().unwrap(),
     );
 
     let posted = jira.posted();
@@ -640,47 +679,350 @@ fn a_mention_in_a_jira_comment_without_a_tracker_entry_is_refused() {
     assert!(jira.received().is_empty(), "{:?}", jira.received());
 }
 
+/// The requests of the fake site that were `method`, on a path that ends with `end`.
+fn sent(jira: &Jira, method: &str, end: &str) -> Vec<Received> {
+    jira.received()
+        .into_iter()
+        .filter(|request| request.method == method && request.path.ends_with(end))
+        .collect()
+}
+
+/// The line of the card that says who is notified.
+fn notified_line(user: &User) -> String {
+    let card = card_of_the_last(user);
+    card.lines()
+        .find(|line| line.starts_with("It mentions"))
+        .unwrap_or_else(|| panic!("no line of who is notified: {card}"))
+        .to_owned()
+}
+
 #[test]
-fn a_mention_in_a_jira_description_becomes_a_mention_node() {
+fn a_description_with_a_mention_goes_through_jiras_api() {
     let jira = Jira::with_comments(json!([]));
     let (user, mcp) = signed_in(&jira, json!([]));
 
-    written(
+    let done = written(
         &user,
         &mcp,
         json!({"action": "edit", "ticket": "ABC-1",
             "body": format!("Owned by [@Ana Example](mention:{ANA})")}),
     );
+
+    assert!(done.contains("ABC-1 was changed"), "{done}");
+    let puts = sent(&jira, "PUT", "/rest/api/3/issue/ABC-1");
+    assert_eq!(puts.len(), 1, "{:?}", jira.received());
+    assert_eq!(puts[0].authorization, basic());
+    assert_eq!(
+        mentions(&puts[0].body["fields"]["description"]),
+        [(ANA.to_owned(), "@Ana Example".to_owned())],
+        "{}",
+        puts[0].body
+    );
+    // Not through `acli`, whose keeping a mention node is not confirmed.
+    assert!(
+        acli_calls(&user)
+            .iter()
+            .all(|call| !call.starts_with("jira workitem edit")),
+        "{:?}",
+        acli_calls(&user)
+    );
+
+    // The summary still goes through `acli`, with no description beside it.
     written(
+        &user,
+        &mcp,
+        json!({"action": "edit", "ticket": "ABC-1", "title": "Renamed",
+            "body": format!("Owned by [@Ben Sample](mention:{BEN})")}),
+    );
+    let calls = acli_calls(&user);
+    let edit = calls
+        .iter()
+        .find(|call| call.starts_with("jira workitem edit"))
+        .unwrap_or_else(|| panic!("{calls:?}"));
+    assert!(edit.contains("--summary Renamed"), "{edit}");
+    assert!(!edit.contains("--description-file"), "{edit}");
+    assert_eq!(sent(&jira, "PUT", "/rest/api/3/issue/ABC-1").len(), 2);
+
+    // Words with no mention are as they were: `acli`, no call to the site.
+    let before = jira.received().len();
+    written(
+        &user,
+        &mcp,
+        json!({"action": "edit", "ticket": "ABC-1", "body": "plain words"}),
+    );
+    assert_eq!(jira.received().len(), before);
+    assert!(
+        acli_calls(&user)
+            .iter()
+            .any(|call| call.contains("--description-file")),
+        "{:?}",
+        acli_calls(&user)
+    );
+}
+
+#[test]
+fn a_created_description_with_a_mention_is_set_through_jiras_api() {
+    let jira = Jira::with_comments(json!([]));
+    let (user, mcp) = signed_in(&jira, json!([]));
+
+    let done = written(
         &user,
         &mcp,
         json!({"action": "create", "title": "A new one", "project": "ABC",
             "body": format!("Ask [@Ben Sample](mention:{BEN})")}),
     );
 
-    let files: Vec<Value> = user
-        .acli_received()
+    assert!(done.contains("ABC-1"), "{done}");
+    // `acli` creates the work item, with no description (it could drop the mention node)...
+    let calls = acli_calls(&user);
+    let created = calls
         .iter()
-        .flat_map(|call| call["files"].as_array().cloned().unwrap_or_default())
-        .collect();
-    let described = |name: &str| {
-        files
+        .find(|call| call.starts_with("jira workitem create"))
+        .unwrap_or_else(|| panic!("{calls:?}"));
+    assert!(!created.contains("--description-file"), "{created}");
+    // ...and the description is set right after, by the REST API, in the same action.
+    let puts = sent(&jira, "PUT", "/rest/api/3/issue/ABC-1");
+    assert_eq!(puts.len(), 1, "{:?}", jira.received());
+    assert_eq!(
+        mentions(&puts[0].body["fields"]["description"]),
+        [(BEN.to_owned(), "@Ben Sample".to_owned())],
+        "{}",
+        puts[0].body
+    );
+}
+
+#[test]
+fn a_description_with_a_mention_without_a_tracker_entry_is_refused() {
+    let jira = Jira::with_comments(json!([]));
+    let user = user(&jira);
+    jira_with(&user, None);
+    script(&user, json!([]));
+    let mcp = root_in(&user);
+    let body = format!("Ask [@Ben Sample](mention:{BEN})");
+
+    for ask in [
+        json!({"action": "edit", "ticket": "ABC-1", "body": body}),
+        json!({"action": "create", "title": "A new one", "project": "ABC", "body": body}),
+    ] {
+        let said = refused_at_once(&user, &mcp, ask);
+        assert!(said.contains("no vault entry to mention"), "{said}");
+    }
+    // Neither `acli` nor the site was called.
+    assert!(
+        acli_calls(&user)
             .iter()
-            .filter_map(|file| {
-                file["adf"]
-                    .as_object()
-                    .map(|_| file["adf"].clone())
-                    .or_else(|| {
-                        file["json"]["description"]
-                            .as_object()
-                            .map(|_| file["json"]["description"].clone())
-                    })
-            })
-            .flat_map(|document| mentions(&document))
-            .any(|(_, text)| text == name)
-    };
-    assert!(described("@Ana Example"), "{files:?}");
-    assert!(described("@Ben Sample"), "{files:?}");
+            .all(|call| !call.starts_with("jira workitem")),
+        "{:?}",
+        acli_calls(&user)
+    );
+    assert!(jira.received().is_empty(), "{:?}", jira.received());
+}
+
+#[test]
+fn the_card_names_whoever_jira_notifies_not_whoever_the_agent_writes() {
+    let jira = Jira::with_comments(json!([rest_comment("20000", ANA, None)]));
+    let (user, mcp) = signed_in(
+        &jira,
+        json!([viewed("20000", "Ana", ANA, "I can reproduce")]),
+    );
+    // The text says Ana; the account id is Ben's.
+    let lie = format!("[@Ana Example](mention:{BEN}) look");
+
+    held(&mcp.call(
+        "tickets",
+        json!({"action": "comment", "ticket": "ABC-1", "body": lie}),
+    ));
+    let line = notified_line(&user);
+    assert!(line.contains("Ben Sample") && line.contains(BEN), "{line}");
+    assert!(!line.contains("Ana Example"), "{line}");
+    let number = requests(&user).last().unwrap()["number"].as_u64().unwrap();
+    allow(&user, number);
+    // What is posted reads as who is notified too.
+    assert_eq!(
+        mentions(&jira.posted()[0].body["body"]),
+        [(BEN.to_owned(), "@Ben Sample".to_owned())]
+    );
+
+    // A reply, a description and a worklog's comment say it the same way.
+    for ask in [
+        json!({"action": "reply", "ticket": "ABC-1", "comment": "20000", "body": lie}),
+        json!({"action": "edit", "ticket": "ABC-1", "body": lie}),
+        json!({"action": "log_time", "ticket": "ABC-1", "duration": "1h",
+            "started": "2026-11-06T09:00:00Z", "body": lie}),
+    ] {
+        held(&mcp.call("tickets", ask.clone()));
+        let line = notified_line(&user);
+        assert!(
+            line.contains("Ben Sample") && line.contains(BEN),
+            "{ask}: {line}"
+        );
+        assert!(!line.contains("Ana Example"), "{ask}: {line}");
+    }
+}
+
+#[test]
+fn an_account_id_the_site_does_not_know_is_refused_before_the_card() {
+    let jira = Jira::with_comments(json!([rest_comment("20000", ANA, None)]));
+    let (user, mcp) = signed_in(
+        &jira,
+        json!([viewed("20000", "Ana", ANA, "I can reproduce")]),
+    );
+    let ghost = format!("[@Nobody](mention:{NOBODY}) look");
+
+    for ask in [
+        json!({"action": "comment", "ticket": "ABC-1", "body": ghost}),
+        json!({"action": "reply", "ticket": "ABC-1", "comment": "20000", "body": ghost}),
+        json!({"action": "edit", "ticket": "ABC-1", "body": ghost}),
+        json!({"action": "create", "title": "A new one", "project": "ABC", "body": ghost}),
+        json!({"action": "log_time", "ticket": "ABC-1", "duration": "1h",
+            "started": "2026-11-06T09:00:00Z", "body": ghost}),
+    ] {
+        let said = refused_at_once(&user, &mcp, ask.clone());
+        assert!(said.contains(NOBODY), "{ask}: {said}");
+        assert!(said.contains("nothing was written"), "{ask}: {said}");
+    }
+    // Nothing was written, to the site or through `acli`.
+    assert!(
+        jira.received()
+            .iter()
+            .all(|request| request.method == "GET"),
+        "{:?}",
+        jira.received()
+    );
+    assert!(
+        acli_calls(&user)
+            .iter()
+            .all(|call| !call.starts_with("jira workitem create")
+                && !call.starts_with("jira workitem edit")),
+        "{:?}",
+        acli_calls(&user)
+    );
+}
+
+#[test]
+fn a_mention_in_an_edited_jira_comment_goes_through_jiras_api() {
+    let jira = Jira::with_comments(json!([]));
+    let (user, mcp) = signed_in(&jira, json!([viewed("20100", "Dev", "me", "first")]));
+    // The agent's own comment, recorded under the id Jira answered.
+    written(
+        &user,
+        &mcp,
+        json!({"action": "comment", "ticket": "ABC-1",
+            "body": format!("[@Ana Example](mention:{ANA}) first")}),
+    );
+
+    let edit = json!({"action": "comment_edit", "ticket": "ABC-1", "comment": "20100",
+        "body": format!("[@Ana Example](mention:{BEN}) second")});
+    held(&mcp.call("tickets", edit.clone()));
+    let line = notified_line(&user);
+    assert!(line.contains("Ben Sample") && line.contains(BEN), "{line}");
+    assert!(
+        card_of_the_last(&user).contains("through Jira's API with the vault entry jira-time"),
+        "{}",
+        card_of_the_last(&user)
+    );
+    let number = requests(&user).last().unwrap()["number"].as_u64().unwrap();
+    let done = allow(&user, number);
+
+    assert!(
+        done.contains("The comment 20100 of ABC-1 was changed"),
+        "{done}"
+    );
+    let puts = sent(&jira, "PUT", "/rest/api/3/issue/ABC-1/comment/20100");
+    assert_eq!(puts.len(), 1, "{:?}", jira.received());
+    assert_eq!(puts[0].authorization, basic());
+    assert_eq!(
+        mentions(&puts[0].body["body"]),
+        [(BEN.to_owned(), "@Ben Sample".to_owned())],
+        "{}",
+        puts[0].body
+    );
+    assert!(
+        acli_calls(&user)
+            .iter()
+            .all(|call| !call.starts_with("jira workitem comment update")),
+        "{:?}",
+        acli_calls(&user)
+    );
+    // Still the agent's comment, recorded once, by its id.
+    let records: Vec<_> = store(&user)
+        .posts("app", "jira", "", "ABC-1")
+        .unwrap()
+        .into_iter()
+        .filter(|post| post.kind == "comment")
+        .map(|post| post.comment_id)
+        .collect();
+    assert_eq!(records, [Some("20100".to_owned())]);
+
+    // An id the site does not know is refused before the card.
+    let said = refused_at_once(
+        &user,
+        &mcp,
+        json!({"action": "comment_edit", "ticket": "ABC-1", "comment": "20100",
+            "body": format!("[@Nobody](mention:{NOBODY}) second")}),
+    );
+    assert!(said.contains(NOBODY), "{said}");
+}
+
+#[test]
+fn a_mention_in_an_edited_jira_comment_without_a_tracker_entry_is_refused() {
+    let jira = Jira::with_comments(json!([]));
+    let user = user(&jira);
+    jira_with(&user, None);
+    script(&user, json!([viewed("20100", "Dev", "me", "first")]));
+    let mcp = root_in(&user);
+
+    let said = refused_at_once(
+        &user,
+        &mcp,
+        json!({"action": "comment_edit", "ticket": "ABC-1", "comment": "20100",
+            "body": format!("[@Ana Example](mention:{ANA}) second")}),
+    );
+
+    assert!(said.contains("no vault entry to mention"), "{said}");
+    assert!(jira.received().is_empty(), "{:?}", jira.received());
+}
+
+#[test]
+fn a_mention_in_a_worklog_comment_is_checked_and_said() {
+    let jira = Jira::with_comments(json!([]));
+    let (user, mcp) = signed_in(&jira, json!([]));
+
+    let done = written(
+        &user,
+        &mcp,
+        json!({"action": "log_time", "ticket": "ABC-1", "duration": "1h",
+            "started": "2026-11-06T09:00:00Z",
+            "body": format!("[@Ana Example](mention:{BEN}) paired")}),
+    );
+
+    assert!(done.contains("logged 1h on ABC-1"), "{done}");
+    let worklogs = sent(&jira, "POST", "/worklog");
+    assert_eq!(worklogs.len(), 1, "{:?}", jira.received());
+    assert_eq!(
+        mentions(&worklogs[0].body["comment"]),
+        [(BEN.to_owned(), "@Ben Sample".to_owned())],
+        "{}",
+        worklogs[0].body
+    );
+}
+
+#[test]
+fn a_mention_comment_does_not_need_acli_signed_in() {
+    let jira = Jira::with_comments(json!([]));
+    let (user, mcp) = signed_in(&jira, json!([]));
+    // The comment goes through the REST API alone: a signed-out `acli` is no reason to fail it.
+    user.acli_script(json!({"signed_in": false, "items": {}}));
+
+    let done = written(
+        &user,
+        &mcp,
+        json!({"action": "comment", "ticket": "ABC-1",
+            "body": format!("[@Ana Example](mention:{ANA}) fixed")}),
+    );
+
+    assert!(done.contains("The comment was posted on ABC-1"), "{done}");
+    assert_eq!(jira.posted().len(), 1, "{:?}", jira.received());
 }
 
 #[test]

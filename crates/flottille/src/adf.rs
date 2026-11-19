@@ -811,6 +811,22 @@ mod tests {
     }
 
     #[test]
+    fn a_reference_style_mention_link_is_a_mention_node_too() {
+        // `[@Ana][x]` with `[x]: mention:<id>` is the same link as the inline form: it must not
+        // end as a link mark whose href is a `mention:` URL, which notifies no one.
+        let adf =
+            from_markdown("Hi [@Ana Example][ana]\n\n[ana]: mention:5b10ac8d82e05b22cc7d4ef5");
+        assert_eq!(
+            mentions(&adf),
+            [(
+                "5b10ac8d82e05b22cc7d4ef5".to_owned(),
+                "@Ana Example".to_owned()
+            )]
+        );
+        assert!(!adf.to_string().contains("\"href\":\"mention:"), "{adf}");
+    }
+
+    #[test]
     fn what_cannot_be_converted_is_kept_as_text() {
         let adf = from_markdown(
             "<div class=\"x\">raw</div>\n\nSee ![a logo](https://example.com/l.png) here",
