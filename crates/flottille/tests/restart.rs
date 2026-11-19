@@ -334,7 +334,13 @@ fn a_message_taken_but_not_yet_sent_is_delivered_once_after_a_restart() {
     };
     store.deliver(&message).unwrap();
     store
-        .move_deliveries(&agent, &[message.id.clone()], "queued", "sending", "prompt")
+        .move_deliveries(
+            &agent,
+            std::slice::from_ref(&message.id),
+            "queued",
+            "sending",
+            "prompt",
+        )
         .unwrap();
     drop(store);
     let before = prompts(&user).len();
