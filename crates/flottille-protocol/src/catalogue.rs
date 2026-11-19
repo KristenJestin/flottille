@@ -229,6 +229,8 @@ pub const METHODS: &[(&str, Class)] = &[
     ("test.hold", Drive),
     ("test.wait", Drive),
     ("test.advance", Drive),
+    ("test.travel", Drive),
+    ("test.travel_back", Drive),
 ];
 
 /// The class of `method`; none for a method the daemon does not answer.
