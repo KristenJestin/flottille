@@ -151,7 +151,12 @@ async fn fetched(
         )));
     };
     let place_text = place.to_string_lossy().into_owned();
-    git::output(
+    let filters_off = filters_off(&target.folder).await;
+    let env: Vec<(&str, &std::ffi::OsStr)> = filters_off
+        .iter()
+        .map(|(name, value)| (name.as_str(), std::ffi::OsStr::new(value)))
+        .collect();
+    git::output_with(
         &target.folder,
         &[
             "worktree",
@@ -163,6 +168,7 @@ async fn fetched(
             &head,
         ],
         Class::Work,
+        &env,
     )
     .await
     .map_err(|reason| {
@@ -229,6 +235,43 @@ async fn fetched(
         files,
         before,
     })
+}
+
+/// The environment of a checkout of a pull request that runs none of the user's filters on its
+/// files: the content is a stranger's, and Large File Storage would download from the server the
+/// pull request's own `.lfsconfig` names. Every driver the repository's configuration names, and
+/// Large File Storage's, is given no program and is not required: its files are written as the
+/// commit holds them.
+async fn filters_off(folder: &Path) -> Vec<(String, String)> {
+    let named = git::output(
+        folder,
+        &["config", "--name-only", "--get-regexp", r"^filter\."],
+        Class::Read,
+    )
+    .await
+    .unwrap_or_default();
+    let mut drivers: Vec<&str> = named
+        .lines()
+        .filter_map(|key| key.strip_prefix("filter.")?.rsplit_once('.'))
+        .map(|(driver, _)| driver)
+        .chain(["lfs"])
+        .collect();
+    drivers.sort_unstable();
+    drivers.dedup();
+    let mut env = vec![("GIT_LFS_SKIP_SMUDGE".to_owned(), "1".to_owned())];
+    let mut count = 0;
+    for driver in drivers {
+        for (key, value) in [("smudge", ""), ("process", ""), ("required", "false")] {
+            env.push((
+                format!("GIT_CONFIG_KEY_{count}"),
+                format!("filter.{driver}.{key}"),
+            ));
+            env.push((format!("GIT_CONFIG_VALUE_{count}"), value.to_owned()));
+            count += 1;
+        }
+    }
+    env.push(("GIT_CONFIG_COUNT".to_owned(), count.to_string()));
+    env
 }
 
 /// Removes a place, and what the repository holds of it: the worktree, then the folder if it is
