@@ -1667,6 +1667,169 @@ mod tests {
         );
     }
 
+    /// A secret another machine shares, invented.
+    const SHARED: &str = "sh4red-t0ken-9Qx2";
+
+    #[tokio::test]
+    async fn a_share_does_not_replace_this_machine_s_own_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = a_daemon(dir.path());
+        ok(call(
+            daemon.clone(),
+            "vault.set",
+            json!({"name": "tracker", "secret": "own-t0ken-Zr81", "url": "https://own.example.com"}),
+        )
+        .await);
+
+        let refused = receive(
+            &daemon,
+            &json!({"name": "tracker", "url": "https://theirs.example.com"}),
+            SHARED,
+            "pc",
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            refused.contains(
+                "this machine has its own vault entry tracker: remove or rename it here first"
+            ),
+            "{refused}"
+        );
+        let entries = listed(&daemon).await;
+        assert_eq!(entries[0].url.as_deref(), Some("https://own.example.com"));
+        assert_eq!(entries[0].shared_from, None);
+        assert_eq!(
+            daemon.vault.read("tracker").await.unwrap().as_deref(),
+            Some("own-t0ken-Zr81")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_share_replaces_a_copy_from_the_same_machine_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = a_daemon(dir.path());
+        receive(&daemon, &json!({"name": "tracker"}), SHARED, "pc")
+            .await
+            .unwrap();
+
+        // Shared again from pc: the copy is replaced.
+        receive(
+            &daemon,
+            &json!({"name": "tracker", "description": "Again"}),
+            "s3cond-t0ken-Lm4P",
+            "pc",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            listed(&daemon).await[0].description.as_deref(),
+            Some("Again")
+        );
+        // From laptop: pc's copy is not laptop's to replace.
+        let refused = receive(&daemon, &json!({"name": "tracker"}), SHARED, "laptop")
+            .await
+            .unwrap_err();
+        assert!(
+            refused.contains("the vault entry tracker here was shared from pc"),
+            "{refused}"
+        );
+        assert_eq!(listed(&daemon).await[0].shared_from.as_deref(), Some("pc"));
+        assert_eq!(
+            daemon.vault.read("tracker").await.unwrap().as_deref(),
+            Some("s3cond-t0ken-Lm4P")
+        );
+    }
+
+    /// What this machine refuses of the metadata another machine sent: what Save would refuse.
+    #[tokio::test]
+    async fn a_share_s_metadata_is_checked_as_save_checks_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = a_daemon(dir.path());
+        let cases = [
+            (
+                json!({"name": "wiki", "url": "http://wiki.example.com/", "for": "connection:wiki"}),
+                "cannot be on plain http to wiki.example.com",
+            ),
+            (
+                json!({"name": "jira", "for": "worklog:gone"}),
+                "the vault entry jira is bound to the worklog of the project gone, which is not on \
+                 this machine: add the project here first",
+            ),
+            (
+                json!({"name": "notes", "project": "gone"}),
+                "the vault entry notes is the project gone's, which is not on this machine: add \
+                 the project here first",
+            ),
+            (json!({"name": "odd", "for": "bogus"}), "bogus is neither"),
+        ];
+        for (entry, said) in cases {
+            let refused = receive(&daemon, &entry, SHARED, "pc").await.unwrap_err();
+            assert!(refused.contains(said), "{entry}: {refused}");
+            let name = entry["name"].as_str().unwrap();
+            assert_eq!(daemon.vault.read(name).await.unwrap(), None, "{name}");
+        }
+        assert!(listed(&daemon).await.is_empty(), "nothing was kept");
+    }
+
+    #[tokio::test]
+    async fn a_share_the_store_refuses_leaves_no_secret_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("store.db");
+        let paths = Paths {
+            runtime: dir.path().join("runtime"),
+            state: dir.path().join("state"),
+            config: dir.path().join("config"),
+            data: dir.path().join("data"),
+        };
+        std::fs::create_dir_all(&paths.config).unwrap();
+        std::fs::write(paths.config.join(CHOICE), "backend = \"memory\"\n").unwrap();
+        let store = flottille_core::store::Store::open(&file).unwrap();
+        let projects = crate::projects::Projects::open(&paths).unwrap();
+        let daemon = std::sync::Arc::new(Daemon::new(&paths, store, projects, 0, None));
+        // A disk that refuses the write, played by the store's own refusal.
+        rusqlite::Connection::open(&file)
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER full BEFORE INSERT ON vault_entries \
+                 BEGIN SELECT RAISE(ABORT, 'the disk is full'); END",
+            )
+            .unwrap();
+
+        let refused = receive(&daemon, &json!({"name": "tracker"}), SHARED, "pc")
+            .await
+            .unwrap_err();
+
+        assert!(refused.contains("the disk is full"), "{refused}");
+        assert_eq!(daemon.vault.read("tracker").await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn a_share_answers_the_ask_waiting_for_its_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = a_daemon(dir.path());
+        daemon
+            .write(|store| {
+                let event = store.append_event(
+                    "vault.asked",
+                    json!({"agent": "a1", "project": "app", "name": "tracker",
+                        "why": "read the tracker"}),
+                )?;
+                Ok(((), event))
+            })
+            .unwrap();
+        assert_eq!(daemon.read(asks).unwrap().open.len(), 1);
+
+        receive(&daemon, &json!({"name": "tracker"}), SHARED, "pc")
+            .await
+            .unwrap();
+
+        assert!(
+            daemon.read(asks).unwrap().open.is_empty(),
+            "the ask is answered"
+        );
+    }
+
     #[tokio::test]
     async fn a_new_entry_still_needs_its_secret() {
         let dir = tempfile::tempdir().unwrap();
