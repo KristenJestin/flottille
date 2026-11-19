@@ -200,6 +200,7 @@ pub const METHODS: &[(&str, Class)] = &[
     ("agent.reload_tools", Drive),
     ("agent.compact", Drive),
     ("agent.rename", Drive),
+    ("agent.ending", Read),
     ("agent.detach", Drive),
     ("agent.mode", Drive),
     ("agent.options", Drive),

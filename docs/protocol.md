@@ -1886,6 +1886,15 @@ secrets; an empty one or one on several lines is refused (`invalid-params`), and
 whose title is its `agent_launch` title. `agent.titled` is emitted with `by` `user`. Answers
 `{"agent", "title", "by": "user"}`.
 
+#### `agent.ending`
+
+`{"agent"}`. Reads, changing nothing, what ending the session of `agent` ends besides it: the
+sessions it leads and theirs in turn, in its project and in others, those that have not ended
+(`docs/tools.md`, "The pilot ends"). Answers `{"agent", "sessions": [{"id", "title", "project",
+"workspace", "state", "losses"}]}`, `workspace` `null` in the project's folder, `state` what its
+workspace holds that is not saved, as `project.removal` says it (`clean`, `uncommitted`,
+`unpushed` or `unknown`), `losses` each as a sentence. The window reads it for its confirmation.
+
 #### `agent.detach`
 
 `{"agent"}`. Takes a session an agent started (`launched_by`, led or handed) away from that agent,
