@@ -4471,7 +4471,7 @@ fn publish_never_runs_on_a_commit_no_verify_passed_on() {
     let verify = job("verify");
     assert!(
         verify.contains(
-            "needs: [verified-on-dev, changes, check, build-tests, doc-tests, test, hub]"
+            "needs: [verified-on-dev, changes, check, build-tests, doc-tests, test, test-selected, hub]"
         ),
         "{verify}"
     );
@@ -4715,6 +4715,308 @@ fn the_suite_runs_only_when_the_decision_does_not_say_otherwise() {
             job.contains("&& needs.changes.outputs.rust != 'false'"),
             "{job}"
         );
+    }
+}
+
+/// What `.github/scripts/pr-tests.sh` selects for a pull request: `base` is a throwaway
+/// repository's files, `changed` are written over (or added to) them and `deleted` removed, in the
+/// pull request's one commit, whose description is `body`.
+fn selected_tests(base: &[&str], changed: &[&str], deleted: &[&str], body: &str) -> String {
+    let repo = Repo::new();
+    let write = |paths: &[&str], content: &str| {
+        for path in paths {
+            let file = repo.dir.path().join(path);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(&file, content).unwrap();
+        }
+    };
+    write(base, "base");
+    repo.git(&["add", "--all"]);
+    repo.git(&["commit", "--quiet", "--allow-empty", "-m", "base"]);
+    let base_commit = repo.head();
+    write(changed, "changed");
+    for path in deleted {
+        std::fs::remove_file(repo.dir.path().join(path)).unwrap();
+    }
+    repo.git(&["add", "--all"]);
+    repo.git(&["commit", "--quiet", "--allow-empty", "-m", "change"]);
+    let output = Command::new("bash")
+        .arg(tool(".github/scripts/pr-tests.sh"))
+        .current_dir(repo.dir.path())
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("BASE", &base_commit)
+        .env("HEAD", repo.head())
+        .env("BODY", body)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
+}
+
+#[test]
+fn a_pull_request_runs_the_test_binaries_whose_files_it_changes() {
+    let base = ["crates/flottille-core/tests/families.rs"];
+    assert_eq!(
+        selected_tests(&base, &["crates/flottille-core/tests/families.rs"], &[], ""),
+        "--test families"
+    );
+    // Every crate's tests/ folder, the binaries in alphabetical order, each once.
+    assert_eq!(
+        selected_tests(
+            &base,
+            &[
+                "crates/flottille/tests/release.rs",
+                "crates/flottille-core/tests/families.rs",
+                "crates/flottille/tests/alerts.rs",
+                "crates/flottille-core/src/lib.rs",
+            ],
+            &[],
+            ""
+        ),
+        "--test alerts --test families --test release"
+    );
+}
+
+#[test]
+fn a_pull_request_runs_a_grouped_binary_for_any_file_of_its_folder() {
+    // A binary made of a folder (tests/<name>/main.rs, the way #1106 groups the files) is run for
+    // a change of any file in it; a folder with no main.rs (shared helpers) is no binary.
+    let base = [
+        "crates/flottille/tests/sessions/main.rs",
+        "crates/flottille/tests/common/mod.rs",
+    ];
+    assert_eq!(
+        selected_tests(&base, &["crates/flottille/tests/sessions/wake.rs"], &[], ""),
+        "--test sessions"
+    );
+    assert_eq!(
+        selected_tests(&base, &["crates/flottille/tests/common/mod.rs"], &[], ""),
+        ""
+    );
+}
+
+#[test]
+fn a_test_file_added_is_run_and_one_deleted_is_not() {
+    let base = [
+        "crates/flottille/tests/old.rs",
+        "crates/flottille/tests/kept.rs",
+    ];
+    assert_eq!(
+        selected_tests(
+            &base,
+            &["crates/flottille/tests/new.rs"],
+            &["crates/flottille/tests/old.rs"],
+            ""
+        ),
+        "--test new"
+    );
+}
+
+#[test]
+fn the_tests_line_of_the_description_adds_the_binaries_it_lists() {
+    let base = ["crates/flottille/tests/other.rs"];
+    let changed = ["crates/flottille/tests/other.rs"];
+    for (body, expected) in [
+        ("Tests: families", "--test other --test families"),
+        (
+            "Closes #1\r\n\r\nTests: families, release\r\n",
+            "--test other --test families --test release",
+        ),
+        (
+            "text\n  Tests:  families   release  \nmore",
+            "--test other --test families --test release",
+        ),
+        // A binary a file already selected is run once.
+        ("Tests: other", "--test other"),
+        // Another line, or the word in a sentence, is no list.
+        ("The Tests: families are slow", "--test other"),
+        ("Test: families", "--test other"),
+    ] {
+        assert_eq!(
+            selected_tests(&base, &changed, &[], body),
+            expected,
+            "{body:?}"
+        );
+    }
+    // Alone: nothing else changed.
+    assert_eq!(
+        selected_tests(&base, &["docs/a.md"], &[], "Tests: families"),
+        "--test families"
+    );
+}
+
+#[test]
+fn a_name_that_is_not_a_binary_name_is_never_passed_on() {
+    // The description is the author's, and its words reach a command line: only letters, digits,
+    // dashes and underscores are names.
+    let output = selected_tests(
+        &[],
+        &["docs/a.md"],
+        &[],
+        "Tests: ok $(touch pwned) a;b `id` --release ../x ok-2_b",
+    );
+    assert_eq!(output, "--test ok --test ok-2_b");
+}
+
+#[test]
+fn the_unit_tests_of_a_small_crate_run_when_no_binary_is_selected() {
+    let base = [
+        "crates/flottille-core/src/lib.rs",
+        "crates/flottille-protocol/src/lib.rs",
+    ];
+    assert_eq!(
+        selected_tests(&base, &["crates/flottille-core/src/lib.rs"], &[], ""),
+        "-p flottille-core --lib"
+    );
+    assert_eq!(
+        selected_tests(
+            &base,
+            &[
+                "crates/flottille-protocol/src/lib.rs",
+                "crates/flottille-core/src/model/mod.rs",
+            ],
+            &[],
+            ""
+        ),
+        "-p flottille-core -p flottille-protocol --lib"
+    );
+}
+
+#[test]
+fn the_unit_tests_do_not_run_beside_a_binary_nor_for_a_big_crate_nor_for_a_crate_with_no_library() {
+    let base = [
+        "crates/flottille-core/src/lib.rs",
+        "crates/flottille/src/lib.rs",
+        "crates/flottille-window/src/lib.rs",
+        "crates/flottille-fake-gh/src/main.rs",
+    ];
+    // A binary is selected (by a file, or by the description): the crates' unit tests are not.
+    assert_eq!(
+        selected_tests(
+            &base,
+            &[
+                "crates/flottille-core/src/lib.rs",
+                "crates/flottille-core/tests/families.rs"
+            ],
+            &[],
+            ""
+        ),
+        "--test families"
+    );
+    assert_eq!(
+        selected_tests(
+            &base,
+            &["crates/flottille-core/src/lib.rs"],
+            &[],
+            "Tests: release"
+        ),
+        "--test release"
+    );
+    // flottille and the window are too big to build for their unit tests alone; a fake has no
+    // library.
+    for path in [
+        "crates/flottille/src/lib.rs",
+        "crates/flottille-window/src/lib.rs",
+        "crates/flottille-fake-gh/src/main.rs",
+    ] {
+        assert_eq!(selected_tests(&base, &[path], &[], ""), "", "{path}");
+    }
+}
+
+#[test]
+fn a_pull_request_that_changes_no_test_and_no_source_runs_no_test() {
+    assert_eq!(
+        selected_tests(&["docs/a.md"], &["docs/a.md", "Cargo.lock"], &[], ""),
+        ""
+    );
+}
+
+#[test]
+fn a_pull_request_runs_the_selected_tests_alone_and_a_push_the_whole_suite() {
+    let selected = ci_job("test-selected");
+    assert!(
+        selected.contains("needs: [verified-on-dev, changes]"),
+        "{selected}"
+    );
+    let condition: String = selected.split_whitespace().collect::<Vec<_>>().join(" ");
+    for part in [
+        "needs.changes.outputs.rust != 'false'",
+        "needs.changes.outputs.suite == 'false'",
+        "needs.changes.outputs.selected != ''",
+    ] {
+        assert!(condition.contains(part), "{part}: {selected}");
+    }
+    // The whole suite: unless the pull request said it runs the fast check (`suite=false`, which
+    // only the step that read the pull request writes: a failure of it runs everything).
+    for name in ["build-tests", "doc-tests"] {
+        let job = ci_job(name);
+        assert!(
+            job.contains("&& needs.changes.outputs.suite != 'false'"),
+            "{name}: {job}"
+        );
+    }
+    let test = ci_job("test");
+    assert!(test.contains("needs: [build-tests]"), "{test}");
+    // `verify` waits for the selected tests, and reads their flaky ones.
+    let verify = ci_job("verify");
+    assert!(
+        verify.contains(
+            "needs: [verified-on-dev, changes, check, build-tests, doc-tests, test, test-selected, hub]"
+        ),
+        "{verify}"
+    );
+}
+
+#[test]
+fn every_job_that_compiles_links_with_mold() {
+    for name in [
+        "check",
+        "build-tests",
+        "test-selected",
+        "doc-tests",
+        "build",
+        "hub",
+    ] {
+        let job = ci_job(name);
+        assert!(job.contains("uses: rui314/setup-mold@v1"), "{name}: {job}");
+    }
+}
+
+#[test]
+fn a_pull_request_passes_verify_on_its_checks_and_its_selected_tests() {
+    let script = step_script(".github/workflows/ci.yml", "verdict");
+    let run = |suite: &str, check: &str, selected: &str| {
+        Fake::new()
+            .run(
+                &script,
+                &[
+                    ("CHECK", check),
+                    ("BUILD", "skipped"),
+                    ("DOC", "skipped"),
+                    ("TEST", "skipped"),
+                    ("SELECTED", selected),
+                    ("SUITE", suite),
+                    ("RUST", "true"),
+                ],
+            )
+            .status
+            .success()
+    };
+
+    // The selected tests ran and passed, or there were none to run.
+    assert!(run("false", "success", "success"));
+    assert!(run("false", "success", "skipped"));
+    // Anything else is red, as ever.
+    for selected in ["failure", "cancelled"] {
+        assert!(!run("false", "success", selected), "selected: {selected}");
+    }
+    for check in ["failure", "cancelled", "skipped"] {
+        assert!(!run("false", check, "success"), "check: {check}");
+    }
+    // The decision that failed (no `suite`) or says "whole": the selected tests are not the suite.
+    for suite in ["", "true"] {
+        assert!(!run(suite, "success", "success"), "suite: {suite:?}");
     }
 }
 
