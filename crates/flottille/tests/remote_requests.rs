@@ -961,9 +961,11 @@ fn pc_server_and(
 }
 
 /// A user whose agents are the fake agent, Claude enabled, its login where its own home says and
-/// no sign-in variable: Claude is signed in once its login file is there.
+/// no sign-in variable: Claude is signed in once its login file is there, and seen so within a
+/// moment.
 fn runner_user() -> User {
     let user = User::with_fake_agent()
+        .with_env("FLOTTILLE_TEST_OFFER_MS", "300")
         .with_env("ANTHROPIC_API_KEY", "")
         .with_env("CLAUDE_CODE_OAUTH_TOKEN", "")
         .with_env("ANTHROPIC_AUTH_TOKEN", "");
@@ -1187,6 +1189,8 @@ fn a_runner_s_capabilities_reach_its_peers_and_follow_a_change() {
     let text = std::fs::read_to_string(&file).unwrap();
     assert!(text.contains("max_children = 12"), "{text}");
     std::fs::write(&file, text.replace("max_children = 12", "max_children = 3")).unwrap();
+    // The daemon sees a file edited by hand at the next request about projects.
+    server.user.call("project.list", json!({})).unwrap();
     pc.wait_until("server offers app with 3 slots", |seen| {
         slots_of(offers_of(seen, "server"), "app") == Some(3)
     });
@@ -1434,4 +1438,105 @@ fn a_spec_developed_aimed_at_a_controller_is_refused() {
 #[test]
 fn a_review_aimed_at_a_controller_is_refused() {
     refused_on_a_controller("review.start", json!({"agent": "a1"}));
+}
+
+/// What `pid` read so far: its read calls, and their bytes.
+fn reads(pid: u64) -> (u64, u64) {
+    let io = std::fs::read_to_string(format!("/proc/{pid}/io")).unwrap();
+    let field = |name: &str| {
+        io.lines()
+            .find_map(|line| line.strip_prefix(name))
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .unwrap()
+    };
+    (field("syscr:"), field("rchar:"))
+}
+
+/// How many times the threads of `pid` gave the processor back or had it taken.
+fn switches(pid: u64) -> u64 {
+    std::fs::read_dir(format!("/proc/{pid}/task"))
+        .unwrap()
+        .flatten()
+        .filter_map(|task| std::fs::read_to_string(task.path().join("status")).ok())
+        .flat_map(|status| {
+            status
+                .lines()
+                .filter(|line| line.contains("ctxt_switches:"))
+                .filter_map(|line| line.split_whitespace().last()?.parse::<u64>().ok())
+                .collect::<Vec<_>>()
+        })
+        .sum()
+}
+
+/// The read calls, the bytes read and the wake-ups of `machine`'s daemon in ten quiet seconds,
+/// each per second.
+fn at_rest(machine: &Machine) -> (f64, f64, f64) {
+    let pid = machine.user.status()["pid"].as_u64().unwrap();
+    // What the last request left to finish ends first.
+    std::thread::sleep(Duration::from_secs(3));
+    let span = Duration::from_secs(10);
+    let ((calls, bytes), woken) = (reads(pid), switches(pid));
+    std::thread::sleep(span);
+    let ((calls_after, bytes_after), woken_after) = (reads(pid), switches(pid));
+    let per_second = |before: u64, after: u64| (after - before) as f64 / span.as_secs_f64();
+    (
+        per_second(calls, calls_after),
+        per_second(bytes, bytes_after),
+        per_second(woken, woken_after),
+    )
+}
+
+/// A runner at rest with remote on reads next to nothing, its offer looked at only when something
+/// changed. Measured over ten seconds, a second: 1.4 read calls and no byte with no link, 3.8 and
+/// 250 bytes with one; when the offer was looked at every second, 19.5 calls and 3.3 kB with no
+/// link, 21.5 and 4.8 kB with one.
+const READ_CALLS_PER_SECOND: f64 = 8.0;
+const BYTES_PER_SECOND: f64 = 1_500.0;
+/// The daemon's own timers and the link's round (measured: 2.4 to 4.3; 8.7 to 11.7 when the offer
+/// was looked at every second), with room for a loaded machine.
+const WAKE_UPS_PER_SECOND: f64 = 8.0;
+
+#[test]
+fn a_runner_looks_at_what_it_offers_only_when_it_changed() {
+    let hub = TestHub::new();
+    let pc = Machine::new();
+    set_up(&hub, &pc);
+    // Projects whose files, sessions and slots an offer looked at every second.
+    for n in 0..8 {
+        let folder = pc.user.path(&format!("work/p{n}"));
+        pc.user.git_init(&folder);
+        std::fs::write(folder.join("README.md"), "p\n").unwrap();
+        pc.user.git(&folder, &["add", "README.md"]);
+        pc.user.git(&folder, &["commit", "--quiet", "-m", "start"]);
+        pc.user
+            .call(
+                "project.add",
+                json!({"folder": folder, "name": format!("p{n}")}),
+            )
+            .unwrap();
+    }
+
+    let check = |when: &str, (calls, bytes, woken): (f64, f64, f64)| {
+        assert!(
+            calls <= READ_CALLS_PER_SECOND && bytes <= BYTES_PER_SECOND,
+            "{when}: {calls:.1} read calls and {bytes:.0} bytes a second (at most \
+             {READ_CALLS_PER_SECOND} and {BYTES_PER_SECOND})"
+        );
+        assert!(
+            woken <= WAKE_UPS_PER_SECOND,
+            "{when}: {woken:.1} wake-ups a second (at most {WAKE_UPS_PER_SECOND})"
+        );
+    };
+    let no_link = at_rest(&pc);
+
+    let server = Machine::new();
+    pair(&pc, &server, "server", "runner");
+    pc.wait_for("server", "online");
+    // The offer was sent when the link was made.
+    server.wait_until("pc offers its projects", |seen| {
+        slots_of(offers_of(seen, "pc"), "p0").is_some()
+    });
+    let one_link = at_rest(&pc);
+    check("with no link", no_link);
+    check("with one link", one_link);
 }

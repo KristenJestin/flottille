@@ -1993,4 +1993,86 @@ mod tests {
         tokio::time::sleep(LEARN_EVERY).await;
         assert!(remote.learning.lock().unwrap().is_empty());
     }
+
+    /// A link over loopback between two machines of a test's: one end and the other, and the
+    /// endpoints that hold them.
+    async fn linked(folder: &Path) -> ((Endpoint, Endpoint), Link, Link) {
+        let ours = MachineKey::load_or_make(&folder.join("ours")).unwrap();
+        let theirs = MachineKey::load_or_make(&folder.join("theirs")).unwrap();
+        let listening = Endpoint::bind(&theirs, "127.0.0.1:0".parse().unwrap()).unwrap();
+        let at = listening.addresses();
+        let accepting = listening.clone();
+        let accepted = tokio::spawn(async move {
+            let accepting = accepting.accept().await.unwrap();
+            accepting.handshake(&hello(), "ours").await.unwrap()
+        });
+        let dialler = Endpoint::dialler(&ours).unwrap();
+        let link = dialler
+            .connect(theirs.public(), &at, Traffic::Machine, &hello(), "theirs")
+            .await
+            .unwrap();
+        let other = accepted.await.unwrap();
+        ((dialler, listening), link, other)
+    }
+
+    fn app() -> Capabilities {
+        Capabilities {
+            projects: vec![Offered {
+                name: "app".to_owned(),
+                slots: 1,
+            }],
+            agents: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn an_offer_that_was_not_taken_is_sent_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_ends, ours, theirs) = linked(dir.path()).await;
+        let (_offered, receiver) = tokio::sync::watch::channel(Some(app()));
+        tokio::spawn(offer(ours, receiver));
+        let is_offer = |message: &Message| matches!(message, Message::Machine(MachineMessage::Capabilities(offers)) if *offers == app());
+
+        // Refused, as by a machine whose list does not say yet that this one is a runner.
+        let first = tokio::time::timeout(Duration::from_secs(5), theirs.next())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(is_offer(first.message()));
+        first.answer(Err("not a runner yet".to_owned()));
+        let again = tokio::time::timeout(Duration::from_secs(10), theirs.next())
+            .await
+            .expect("the offer is sent again")
+            .unwrap();
+        assert!(is_offer(again.message()));
+        again.answer(Ok(json!({})));
+        // Taken: not sent again.
+        assert!(
+            tokio::time::timeout(Duration::from_secs(3), theirs.next())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_late_offer_of_a_link_replaced_is_not_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let (remote, keys) = remote_in(dir.path(), 1);
+        let (_ends, link, _other) = linked(dir.path()).await;
+        let key = keys[0];
+        let kept = |remote: &Remote| remote.seen.lock().unwrap()[key.as_bytes()].offers.clone();
+        remote
+            .seen
+            .lock()
+            .unwrap()
+            .entry(*key.as_bytes())
+            .or_insert_with(Seen::new)
+            .link = Some((2, link, true));
+
+        // The link of generation 1 was replaced by the 2nd: what it said last is not kept.
+        remote.keep_offers(&key, 1, app());
+        assert_eq!(kept(&remote), None);
+        remote.keep_offers(&key, 2, app());
+        assert_eq!(kept(&remote), Some(app()));
+    }
 }
