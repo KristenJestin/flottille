@@ -80,8 +80,12 @@ impl Site<'_> {
         masked(&text)
     }
 
-    /// `GET /rest/api/3/<path>?<query>`: what Jira answered, as JSON.
-    pub(super) async fn get(&self, path: &str, query: &[(&str, &str)]) -> Result<Value, String> {
+    /// `GET /rest/api/3/<path>?<query>`: the status and the text Jira answered.
+    async fn read(
+        &self,
+        path: &str,
+        query: &[(&str, &str)],
+    ) -> Result<(http::StatusCode, String), String> {
         let mut url = rest_url(self.site, path)?;
         url.query_pairs_mut().extend_pairs(query);
         let answer = tokio::time::timeout(
@@ -102,14 +106,50 @@ impl Site<'_> {
                 READ_TIME.as_secs()
             )),
             Ok(Err(why)) => Err(self.clean(&why)),
-            Ok(Ok((status, text))) if status.is_success() => serde_json::from_str(&text)
+            Ok(Ok(answered)) => Ok(answered),
+        }
+    }
+
+    /// `GET /rest/api/3/<path>?<query>`: what Jira answered, as JSON.
+    pub(super) async fn get(&self, path: &str, query: &[(&str, &str)]) -> Result<Value, String> {
+        match self.read(path, query).await? {
+            (status, text) if status.is_success() => serde_json::from_str(&text)
                 .map_err(|_| format!("Jira on {} answered what is not JSON", self.site)),
-            Ok(Ok((status, text))) => Err(format!(
+            (status, text) => Err(format!(
                 "Jira on {} answered {status}: {}",
                 self.site,
                 self.clean(&super::worklog::first_words(&text))
             )),
         }
+    }
+
+    /// The display name the site gives the account `id` (`GET /rest/api/3/user?accountId=`); none
+    /// for an id the site does not know.
+    pub(super) async fn display_name(&self, id: &str) -> Result<Option<String>, String> {
+        let (status, text) = self.read("user", &[("accountId", id)]).await?;
+        if status == http::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if !status.is_success() {
+            return Err(format!(
+                "Jira on {} answered {status} to the look-up of the account {}: {}",
+                self.site,
+                self.clean(id),
+                self.clean(&super::worklog::first_words(&text))
+            ));
+        }
+        let name = serde_json::from_str::<Value>(&text)
+            .ok()
+            .and_then(|user| user["displayName"].as_str().map(str::to_owned))
+            .filter(|name| !name.trim().is_empty());
+        name.map(|name| Some(self.clean(name.trim())))
+            .ok_or_else(|| {
+                format!(
+                    "Jira on {} answered no display name for the account {}",
+                    self.site,
+                    self.clean(id)
+                )
+            })
     }
 }
 

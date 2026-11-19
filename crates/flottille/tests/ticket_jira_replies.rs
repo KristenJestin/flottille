@@ -1040,7 +1040,9 @@ fn the_card_says_who_a_mention_notifies() {
     ));
     let card = card_of_the_last(&user);
     assert!(
-        card.contains("It mentions Ana Example, Ben Sample, who are notified"),
+        card.contains(&format!(
+            "It mentions Ana Example ({ANA}), Ben Sample ({BEN}), who are notified"
+        )),
         "{card}"
     );
     assert!(
@@ -1056,7 +1058,7 @@ fn the_card_says_who_a_mention_notifies() {
     ));
     let card = card_of_the_last(&user);
     assert!(
-        card.contains("It mentions Ben Sample, who is notified"),
+        card.contains(&format!("It mentions Ben Sample ({BEN}), who is notified")),
         "{card}"
     );
     assert!(card.contains("20000"), "{card}");

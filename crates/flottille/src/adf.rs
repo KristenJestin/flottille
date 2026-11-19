@@ -47,6 +47,14 @@ pub(crate) fn from_markdown(text: &str) -> Value {
 /// The scheme of the link that is a mention: `[@Display Name](mention:<accountId>)`.
 const MENTION: &str = "mention:";
 
+/// The mention node of `[@Display Name](mention:<accountId>)`: the name is written once with its
+/// `@`, whether the text gave it or not.
+fn mention_node(id: &str, children: &[Node]) -> Value {
+    let name = plain(children);
+    let name = name.trim().trim_start_matches('@');
+    json!({"type": "mention", "attrs": {"id": id, "text": format!("@{name}")}})
+}
+
 /// The words of inline nodes, marks left out.
 fn plain(nodes: &[Node]) -> String {
     nodes
@@ -70,6 +78,24 @@ pub(crate) fn mentions(node: &Value) -> Vec<(String, String)> {
         found.extend(mentions(child));
     }
     found
+}
+
+/// Writes into each mention node the display name the site gave its account, `(id, name)`: the
+/// text of a mention is the agent's own, and it must read as who is notified.
+pub(crate) fn name_mentions(node: &mut Value, names: &[(String, String)]) {
+    if node["type"] == "mention"
+        && let Some((_, name)) = names
+            .iter()
+            .find(|(id, _)| node["attrs"]["id"].as_str() == Some(id))
+    {
+        node["attrs"]["text"] = Value::from(format!("@{name}"));
+    }
+    // `get_mut`: indexing a `&mut Value` by a missing key would insert a `null` there.
+    if let Some(children) = node.get_mut("content").and_then(Value::as_array_mut) {
+        for child in children {
+            name_mentions(child, names);
+        }
+    }
 }
 
 /// The link definitions (`[id]: url`) of a document, by their identifier.
@@ -278,11 +304,7 @@ impl Converter<'_> {
                 // `[@Display Name](mention:<accountId>)`: the only way a person is notified, an
                 // `@Name` written as text stays text.
                 Node::Link(link) if link.url.starts_with(MENTION) => {
-                    let id = &link.url[MENTION.len()..];
-                    let name = plain(&link.children);
-                    let name = name.trim().trim_start_matches('@');
-                    out.push(json!({"type": "mention",
-                        "attrs": {"id": id, "text": format!("@{name}")}}));
+                    out.push(mention_node(&link.url[MENTION.len()..], &link.children));
                 }
                 Node::Link(link) => {
                     let mark = link_mark(&link.url, link.title.as_deref());
@@ -290,6 +312,10 @@ impl Converter<'_> {
                 }
                 Node::LinkReference(reference) => match self.definitions.get(&reference.identifier)
                 {
+                    // `[@Ana][x]` with `[x]: mention:<accountId>` is the same mention.
+                    Some((url, _)) if url.starts_with(MENTION) => {
+                        out.push(mention_node(&url[MENTION.len()..], &reference.children));
+                    }
                     Some((url, title)) => {
                         let mark = link_mark(url, title.as_deref());
                         self.inline_into(&reference.children, &with(mark), out);

@@ -15,6 +15,36 @@ use flottille_core::store::Store;
 use serde_json::{Value, json};
 
 const SITE: &str = "example.atlassian.net";
+/// What the daemon reads to send its Jira calls to a server of this machine (a debug build only).
+const BASE: &str = "FLOTTILLE_TEST_JIRA_BASE";
+
+/// A site of this machine whose comment list holds the comments 20000 to 20002, none a reply: the
+/// card of a Jira reply reads the thread of the comment it answers there (#1068). No test reaches
+/// a real site.
+fn site() -> String {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { return };
+            let mut chunk = [0u8; 4096];
+            let _ = stream.read(&mut chunk);
+            let said = json!({"startAt": 0, "maxResults": 5000, "total": 3, "comments": [
+                {"id": "20000"}, {"id": "20001"}, {"id": "20002"}]})
+            .to_string();
+            let _ = stream.write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\
+                     Connection: close\r\n\r\n{said}",
+                    said.len()
+                )
+                .as_bytes(),
+            );
+        }
+    });
+    base
+}
 
 fn user() -> User {
     User::with_fake_agent()
@@ -1393,7 +1423,7 @@ fn the_card_of_a_reply_shows_what_is_posted_and_who_is_notified() {
 
 #[test]
 fn a_reply_to_an_internal_note_or_a_hidden_comment_is_refused() {
-    let user = user();
+    let user = user().with_env(BASE, &site());
     on_jira_with_entry(&user);
     let mut note = person_with_account("20001", "Internal: the key is rotated");
     note["jsdPublic"] = json!(false);
@@ -1495,7 +1525,7 @@ fn a_comment_of_another_issue_is_not_one_to_reply_to() {
 
 #[test]
 fn a_comment_that_goes_or_is_restricted_after_the_card_is_not_answered() {
-    let user = user();
+    let user = user().with_env(BASE, &site());
     on_jira_with_entry(&user);
     let script = |comments: Value| {
         jira_script(
@@ -1541,7 +1571,7 @@ fn github_issue_with(comment: &str) -> Value {
 
 #[test]
 fn a_comment_edited_after_the_card_is_not_answered() {
-    let user = user();
+    let user = user().with_env(BASE, &site());
     on_jira_with_entry(&user);
     let script = |text: &str| {
         jira_script(
