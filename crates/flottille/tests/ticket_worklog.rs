@@ -682,18 +682,26 @@ fn ledger_over(state: Items, cut: bool, page: usize) -> Jira {
     Jira::reply(move |request| {
         let items = state.lock().unwrap().clone();
         let path = request.path.split('?').next().unwrap_or_default();
-        // One worklog of an item (`/issue/<KEY>/worklog/<id>`): read, changed or deleted. A
-        // worklog that is not on that item is a 404, as it is on the site.
-        for (key, _, worklogs) in &items {
+        // One worklog (`/issue/<KEY>/worklog/<id>`): read, changed or deleted. As the site does
+        // when the work item exists, it answers any worklog it knows, of that work item or of
+        // another, which says which work item it is on (`issueId`).
+        let on = |key: &str| items.iter().position(|(item, _, _)| *item == key);
+        for (key, _, _) in &items {
             let Some(id) = path.strip_prefix(&format!("/rest/api/3/issue/{key}/worklog/")) else {
                 continue;
             };
-            let Some(worklog) = worklogs.iter().find(|worklog| worklog["id"] == id) else {
+            let Some((holder, worklog)) = items.iter().enumerate().find_map(|(at, (_, _, all))| {
+                all.iter()
+                    .find(|worklog| worklog["id"] == id)
+                    .map(|w| (at, w))
+            }) else {
                 return (
                     "404 Not Found",
                     json!({"errorMessages": ["Worklog does not exist"]}).to_string(),
                 );
             };
+            let mut worklog = worklog.clone();
+            worklog["issueId"] = item_id(holder).into();
             return match request.method.as_str() {
                 "DELETE" => ("204 No Content", String::new()),
                 _ => ("200 OK", worklog.to_string()),
@@ -741,7 +749,11 @@ fn ledger_over(state: Items, cut: bool, page: usize) -> Jira {
         }
         for (key, title, worklogs) in &items {
             if path == format!("/rest/api/3/issue/{key}") {
-                return said(json!({"key": key, "fields": {"summary": title}}).to_string());
+                return said(
+                    json!({"id": item_id(on(key).unwrap()), "key": key,
+                        "fields": {"summary": title}})
+                    .to_string(),
+                );
             }
             if path == format!("/rest/api/3/issue/{key}/worklog") {
                 let start = number("startAt");
@@ -771,6 +783,11 @@ fn ledger_over(state: Items, cut: bool, page: usize) -> Jira {
         }
         said(json!({"errorMessages": ["Issue does not exist"]}).to_string())
     })
+}
+
+/// The id Jira gives the work item that comes `at`th in a `ledger`.
+fn item_id(at: usize) -> String {
+    format!("{}", 20_000 + at)
 }
 
 /// A query string as the daemon sent it, decoded: `+` and `%XX` as the text they stand for.
@@ -1798,10 +1815,14 @@ fn the_token_never_appears_in_what_is_stored_of_a_worklog_edit() {
                 "200 OK",
                 json!({"accountId": MINE, "displayName": "Jane Doe"}).to_string(),
             ),
-            "GET" => (
-                "200 OK",
-                mine("2026-11-06T09:00:00.000+0100", 3_600, None).to_string(),
-            ),
+            "GET" if path == "/rest/api/3/issue/ABC-1" => {
+                ("200 OK", json!({"id": "20000", "key": "ABC-1"}).to_string())
+            }
+            "GET" => {
+                let mut worklog = mine("2026-11-06T09:00:00.000+0100", 3_600, None);
+                worklog["issueId"] = "20000".into();
+                ("200 OK", worklog.to_string())
+            }
             _ => (
                 "401 Unauthorized",
                 json!({"errorMessages": [format!(
