@@ -1322,12 +1322,12 @@ fn run(call: &Call) -> Verdict {
     }
     // The copy of a pull request a review reads is someone else's code: a line that does more
     // than read there runs it, which only the user lets a review do, in every mode.
-    if (!reads || files)
-        && let Some(number) = call
-            .paths
-            .first()
-            .and_then(|folder| pull_request_copy(call.own, folder))
-    {
+    let copy = call
+        .paths
+        .first()
+        .and_then(|folder| pull_request_copy(call.own, folder))
+        .filter(|_| !reads || files);
+    if let Some((number, _)) = &copy {
         found.base(format!(
             "it runs the code of pull request #{number}, in the copy its review reads: only the \
              user lets a review run it"
@@ -1379,6 +1379,14 @@ fn run(call: &Call) -> Verdict {
                 found.base(why);
                 continue;
             }
+            // Inside the copy of the pull request it runs in, Flottille's data folder holds the
+            // pull request's files: what the line does there is already held for the user.
+            if copy
+                .as_ref()
+                .is_some_and(|(_, folder)| inside_copy(folder, path))
+            {
+                continue;
+            }
             if let Some(why) = forbidden(call.own, call.grant.place.home.as_deref(), path, true) {
                 return Verdict::Deny(why);
             }
@@ -1421,27 +1429,40 @@ fn run(call: &Call) -> Verdict {
     found.verdict(Kind::Call)
 }
 
-/// The pull request whose copy `folder` is in: a place of Review's in Flottille's data folder,
-/// named after the pull request it holds (`reviews/pr<number>-…`).
-fn pull_request_copy(own: &[PathBuf], folder: &Resolved) -> Option<u64> {
+/// The pull request whose copy `folder` is in, and the copy's folder: a place of Review's in
+/// Flottille's data folder, named after the pull request it holds (`reviews/pr<number>-…`).
+fn pull_request_copy(own: &[PathBuf], folder: &Resolved) -> Option<(u64, PathBuf)> {
     let reviews = own.first()?.join("reviews");
     let real = place::real_path(&reviews).ok();
     [&folder.path, &folder.written]
         .into_iter()
         .find_map(|path| {
-            let rest = path
-                .strip_prefix(&reviews)
-                .ok()
-                .or_else(|| path.strip_prefix(real.as_ref()?).ok())?;
-            rest.iter()
-                .next()?
+            let (top, rest) = match path.strip_prefix(&reviews) {
+                Ok(rest) => (&reviews, rest),
+                Err(_) => (real.as_ref()?, path.strip_prefix(real.as_ref()?).ok()?),
+            };
+            let name = rest.iter().next()?;
+            let number = name
                 .to_str()?
                 .strip_prefix("pr")?
                 .split('-')
                 .next()?
                 .parse()
-                .ok()
+                .ok()?;
+            Some((number, top.join(name)))
         })
+}
+
+/// Whether `path`, both as written and where it leads, is inside the copy `folder` (never the
+/// copy itself).
+fn inside_copy(folder: &Path, path: &Resolved) -> bool {
+    let real = place::real_path(folder).ok();
+    [&path.path, &path.written].into_iter().all(|path| {
+        [Some(folder), real.as_deref()]
+            .into_iter()
+            .flatten()
+            .any(|folder| path.starts_with(folder) && path != folder)
+    })
 }
 
 /// A layer that deletes untracked files: where, the folders its `-C`s go to from the run's, and
