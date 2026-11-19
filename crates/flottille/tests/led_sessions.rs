@@ -705,6 +705,55 @@ fn a_pilot_s_turn_that_ends_ends_no_led_session() {
     assert_eq!(session["led_by"], lead.as_str(), "{session}");
 }
 
+#[test]
+fn agent_ending_lists_the_led_sessions_a_pilot_s_end_would_end_and_their_unsaved_work() {
+    let user = User::with_fake_agent();
+    let (lead, mcp) = lead(&user);
+    let workspace = user
+        .call(
+            "workspace.create",
+            json!({"project": "app", "name": "login", "offline": true}),
+        )
+        .unwrap();
+    let (login, login_mcp) = launch(
+        &user,
+        &mcp,
+        json!({"kind": "led", "title": "Login", "brief": "Do it.", "workspace": "login"}),
+    )
+    .1
+    .unwrap();
+    let (docs, _) = led_titled(&user, &mcp, "Docs");
+    eventually("their first turns", || {
+        turns(&user, &login) == 1 && turns(&user, &docs) == 1
+    });
+    let opened = user.received_requests("session/new").len();
+    let answer = login_mcp.call(
+        "agent_launch",
+        json!({"kind": "led", "title": "Tests", "brief": "Write the tests."}),
+    );
+    let (tests, _) = allowed_launch(&user, answer, "Tests", opened);
+    let folder = workspace["folder"].as_str().unwrap();
+    std::fs::write(std::path::Path::new(folder).join("notes.txt"), "draft\n").unwrap();
+
+    let ending = user.call("agent.ending", json!({"agent": lead})).unwrap();
+
+    let listed = ending["sessions"].as_array().unwrap();
+    let ids: Vec<&str> = listed.iter().map(|s| s["id"].as_str().unwrap()).collect();
+    for id in [&login, &docs, &tests] {
+        assert!(ids.contains(&id.as_str()), "{id}: {ending}");
+    }
+    assert_eq!(ids.len(), 3, "{ending}");
+    let of = |id: &str| listed.iter().find(|s| s["id"] == id).unwrap();
+    assert_eq!(of(&login)["title"], "Login");
+    assert_eq!(of(&login)["project"], "app");
+    assert_eq!(of(&login)["workspace"], "login");
+    assert_eq!(of(&login)["state"], "uncommitted", "{ending}");
+    assert!(!of(&login)["losses"].as_array().unwrap().is_empty());
+    assert_eq!(of(&docs)["state"], "clean", "{ending}");
+    // Nothing ended by reading it.
+    assert!(!has_ended(&user, &login));
+}
+
 // Detach.
 
 fn subscriptions_of(user: &User, agent: &str) -> Vec<Value> {
