@@ -630,11 +630,11 @@ fn logged(account: &str, name: &str, started: &str, seconds: u64, comment: Optio
         "author": {"accountId": account, "displayName": name},
         "started": started,
         "timeSpentSeconds": seconds,
-        "timeSpent": format!("{}", match (seconds / 3600, seconds % 3600 / 60) {
+        "timeSpent": match (seconds / 3600, seconds % 3600 / 60) {
             (0, m) => format!("{m}m"),
             (h, 0) => format!("{h}h"),
             (h, m) => format!("{h}h {m}m"),
-        }),
+        },
     });
     if let Some(text) = comment {
         worklog["comment"] = json!({"type": "doc", "version": 1, "content": [
@@ -1453,6 +1453,15 @@ fn ready(jira: &Jira) -> (User, Mcp) {
     (user, mcp)
 }
 
+/// A change of a worklog: a new duration for an edit, nothing more for a delete.
+fn changing(action: &str, ticket: &str, worklog: &str) -> Value {
+    let mut args = json!({"action": action, "ticket": ticket, "worklog": worklog});
+    if action == "worklog_edit" {
+        args["duration"] = "1h".into();
+    }
+    args
+}
+
 /// The writes the site received.
 fn written(jira: &Jira) -> Vec<Received> {
     jira.received()
@@ -1594,12 +1603,7 @@ fn a_worklog_of_another_author_is_refused_before_anything_is_asked() {
     let (user, mcp) = ready(&jira);
 
     for action in ["worklog_edit", "worklog_delete"] {
-        let said = refused_at_once(
-            &user,
-            &mcp,
-            json!({"action": action, "ticket": "ABC-1", "worklog": "11800",
-                "duration": "1h"}),
-        );
+        let said = refused_at_once(&user, &mcp, changing(action, "ABC-1", "11800"));
         assert!(
             said.contains("worklog 11800 is John Roe's, not your account's"),
             "{said}"
@@ -1616,12 +1620,7 @@ fn a_worklog_not_on_that_work_item_is_refused() {
     // 12700 is the account's, on ABC-2; 99999 is nobody's.
     for worklog in ["12700", "99999"] {
         for action in ["worklog_edit", "worklog_delete"] {
-            let said = refused_at_once(
-                &user,
-                &mcp,
-                json!({"action": action, "ticket": "ABC-1", "worklog": worklog,
-                    "duration": "1h"}),
-            );
+            let said = refused_at_once(&user, &mcp, changing(action, "ABC-1", worklog));
             assert!(
                 said.contains(&format!("ABC-1 has no worklog {worklog}")),
                 "{said}"
@@ -1680,11 +1679,7 @@ fn worklog_edit_and_delete_are_refused_on_github() {
     let (mcp, _) = root_in(&user);
 
     for action in ["worklog_edit", "worklog_delete"] {
-        let said = refused_at_once(
-            &user,
-            &mcp,
-            json!({"action": action, "ticket": "#1", "worklog": "13600", "duration": "1h"}),
-        );
+        let said = refused_at_once(&user, &mcp, changing(action, "#1", "13600"));
         assert!(said.contains("GitHub has no worklogs"), "{said}");
     }
     assert!(jira.received().is_empty());
@@ -1698,11 +1693,7 @@ fn worklog_edit_and_delete_without_an_entry_say_how_to_add_one() {
     let (mcp, _) = root_in(&user);
 
     for action in ["worklog_edit", "worklog_delete"] {
-        let said = refused_at_once(
-            &user,
-            &mcp,
-            json!({"action": action, "ticket": "ABC-1", "worklog": "13600", "duration": "1h"}),
-        );
+        let said = refused_at_once(&user, &mcp, changing(action, "ABC-1", "13600"));
         assert!(said.contains("worklog_token"), "{said}");
     }
     assert!(jira.received().is_empty());
