@@ -1062,12 +1062,53 @@ tickets {action: "log_time", ticket: "ABC-123", duration: "2h 30m", started: "20
   the agents that worked at the same time each counted, never the time between the first and the
   last message. The agent proposes it to the user, who confirms or changes it; it never logs it
   alone. A turn whose agent reported no usage is not on record and not counted.
+- **A worklog already logged is corrected, not added to**: `worklog_edit` and `worklog_delete`
+  ("Correcting a worklog" below).
 - The tests send the call to a fake HTTP server of this machine (`FLOTTILLE_TEST_JIRA_BASE`, read
   by a debug build only), with the daemon's in-memory keyring.
 
 **The maintainer checks it on their Jira site**: one worklog logged on a real work item, with an
 API token of their own: Jira Cloud's answer to a worklog written as above is not something this was
 written against.
+
+### Correcting a worklog
+
+`log_time` only adds time. A wrong duration, a wrong day, a comment to change or a worklog logged
+on the wrong work item is corrected with the id `worklogs` gives, through Jira's REST API as
+`log_time` posts, with the same vault entry (`worklog_token`), the daemon using the secret itself
+toward the tracker's site and no other:
+
+```
+tickets {action: "worklog_edit", ticket: "ABC-123", worklog: "10234", duration?: "1h", started?: "2026-11-06T09:00:00+01:00", comment?: "…"}
+tickets {action: "worklog_delete", ticket: "ABC-123", worklog: "10234"}
+```
+
+- **`worklog_edit`** is `PUT /rest/api/3/issue/<KEY>/worklog/<id>` with what changes alone: at least
+  one of `duration`, `started` and `comment` is required, and their forms are `log_time`'s
+  (`comment` being the worklog's new text, Markdown converted to ADF, its mentions checked as every
+  Jira text's are). What is left out stays as it is. **`worklog_delete`** is `DELETE
+  /rest/api/3/issue/<KEY>/worklog/<id>`, with Jira's default `adjustEstimate=auto`. `ticket` and
+  `worklog` are required, and `worklog` is the number `worklogs` gives.
+- **Only the token's own account's worklogs**: the worklog is read first (`GET
+  /rest/api/3/issue/<KEY>/worklog/<id>`) and its author compared with the account `worklogs`
+  finds (`GET /rest/api/3/myself`, kept per project, entry and site, "Reading worklogs"). One of
+  another author is refused before anything is asked (`refused: worklog 10234 is Jane Doe's, not
+  your account's`), and so is one that is not on that work item or does not exist (`refused: ABC-1
+  has no worklog 10234`). The worklog is read again, and the author checked again, when the call is
+  done.
+- **Held for the user like `log_time`**: each edit and each delete is a write to Jira, judged like
+  `comment`, answered at once, the result coming later as a delivery. The card says the work item,
+  the worklog as it is and what it becomes, or that it is deleted: `It is now: 1h, started
+  2026-11-06T08:00:00Z, "Pairing"`, `It becomes: 2h, started 2026-11-06T08:00:00Z, "Pairing"`, `It
+  deletes the worklog 10234 of ABC-1: …`.
+- **GitHub is refused** (`GitHub has no worklogs`); no entry named, or one with no username, is
+  refused with `log_time`'s sentence. The secret is in no argument, result, event, log nor error:
+  what Jira answers is masked of it.
+- The tests send the calls to the fake Jira REST server of the `log_time` tests.
+
+**The maintainer checks it on their Jira site**: one worklog of their own corrected and one
+deleted on a real work item. The answers of the worklog endpoint to a `PUT` and a `DELETE` were not
+read from a real site.
 
 ### Reading worklogs
 
@@ -1098,8 +1139,9 @@ sentence as `log_time`, how to set one up. GitHub is refused: `GitHub has no wor
   endpoint is asked for the range too (`startedAfter` and `startedBefore`, in milliseconds, with a
   day of margin each side), so that the worklogs of other days are not all read; the local cut
   stays.
-- **The answer**: per day, each worklog as `KEY title — 1h30 (started 09:12) "comment"` (the comment
-  as one line, cut at 300 characters), the day's total, then the range's total.
+- **The answer**: per day, each worklog as `KEY title — 1h30 (started 09:12, worklog 10234)
+  "comment"` (the comment as one line, cut at 300 characters; the worklog's id is what
+  `worklog_edit` and `worklog_delete` take), the day's total, then the range's total.
 - **`search` and anyone's worklogs**: a `jql` that uses `worklogDate` without `worklogAuthor` (`=`
   or `in`; `!=` and `not in` do not keep to anyone) matches
   the work items on which *anyone* logged time that day, not the user's: its result says so.

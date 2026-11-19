@@ -1296,7 +1296,12 @@ Jira: their account id, else their e-mail). The card shows the names as given.
   account unless `author` names another (an account id, or a name `people` finds). It uses the
   same vault entry as `log_time`, toward the tracker's site alone, and says whose time it is
   (`your account (Jane Doe)`) and in which time zone the days are (`docs/tickets.md`, "Reading
-  worklogs").
+  worklogs"). **`worklog_edit {ticket, worklog, duration?, started?, comment?}`** and
+  **`worklog_delete {ticket, worklog}`** change or delete a worklog already logged, `worklog` being
+  the id `worklogs` gives, **only one of the token's own account** (another author's, one not on
+  that work item and a missing one are refused before anything is asked); writes held like
+  `log_time`, the card saying the worklog as it is and what it becomes, with the same vault entry,
+  refused on GitHub (`docs/tickets.md`, "Correcting a worklog").
 - **Links and comments**: `link_types` (a read, never held) lists the kinds of link the tracker has;
   `link {ticket, kind, other}` and `unlink {ticket, kind, other}` make and remove a link;
   `comment_edit {ticket, comment, body}` and `comment_delete {ticket, comment}` change or delete a
