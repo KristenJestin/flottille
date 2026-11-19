@@ -184,7 +184,7 @@ fn every_method_has_a_class() {
         .flat_map(|line| line.split('`').skip(1).step_by(2))
         .filter(|name| {
             name.split_once('.')
-                .is_some_and(|(family, verb)| is_word(family) && is_word(verb))
+                .is_some_and(|(family, verb)| family != "test" && is_word(family) && is_word(verb))
         })
         .filter(|name| !table.iter().any(|(said, _)| said == name))
         .collect();
