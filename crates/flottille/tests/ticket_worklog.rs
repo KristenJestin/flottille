@@ -1827,6 +1827,41 @@ fn a_worklog_edit_is_allowed_in_full_as_log_time_is() {
 }
 
 #[test]
+fn the_judge_reads_the_card_of_a_worklog_edit() {
+    let jira = ledger_to_correct();
+    let (user, mcp) = ready_in(&jira, "auto");
+
+    let done = mcp.call(
+        "tickets",
+        json!({"action": "worklog_edit", "ticket": "ABC-1", "worklog": "13600",
+            "duration": "2h", "comment": "Reviewed the fix"}),
+    );
+
+    assert!(!done.error, "{}", done.text);
+    let prompts: Vec<String> = user
+        .judge_received()
+        .iter()
+        .filter(|e| e["received"]["method"] == "session/prompt")
+        .map(|e| e["received"]["params"]["prompt"][0]["text"].to_string())
+        .collect();
+    assert_eq!(prompts.len(), 1, "{prompts:?}");
+    for said in [
+        // The worklog as it is, and what it becomes: the lines of the user's card.
+        "It is now: 1h, started 2026-11-06T08:00:00Z",
+        "Pairing on the redirect",
+        "It becomes: 2h, started 2026-11-06T08:00:00Z",
+        "Reviewed the fix",
+    ] {
+        assert!(
+            prompts[0].contains(said),
+            "{said} is not in: {}",
+            prompts[0]
+        );
+    }
+    assert!(!prompts[0].contains(SECRET), "the token is in the prompt");
+}
+
+#[test]
 fn worklog_edit_and_delete_are_refused_on_github() {
     let jira = Jira::accepting();
     let user = user(&jira);
