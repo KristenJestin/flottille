@@ -147,13 +147,32 @@ for HEAD and its branch by default):
 
 ## What CI checks
 
-`.github/workflows/ci.yml` judges a commit **once**. A push to `dev`, `main`, `stable/*` or
-`next/*` runs everything; a push to a feature branch (`feat/**`, `fix/**`) runs **nothing**: its
-commits are judged by its pull request's run (the same suite on the same commit, run twice, was
-twelve runners instead of six and two chances for an unlucky test to turn a pull request red).
-The jobs of a run:
+`.github/workflows/ci.yml` judges a commit **once**, and a pull request only by a **fast check**:
+about five minutes, not twenty.
 
-- **`check`**: formatting and clippy.
+- **A pull request** (the required check is its `verify`) runs `check` (formatting and clippy),
+  `commit-messages`, and **the tests it touches** (`test-selected`): the test binaries whose
+  files it adds or changes (`crates/<crate>/tests/<name>.rs` is the binary `<name>`; so is any file
+  of `crates/<crate>/tests/<name>/` that has a `main.rs`, the way grouped binaries are made), and the
+  binaries listed on a line of its description, `Tests: <name> <name>…` (the developing agent lists
+  those it ran; the description is read when the jobs run, so running them again picks up a line
+  written after the push). When it selects no binary, it runs the unit tests of the crates whose
+  `src/` it changes, if they have a library and are not `flottille` or `flottille-window` (too big
+  to build for that). `.github/scripts/pr-tests.sh` decides, from the files and the description,
+  nothing else. A pull request that touches no test and no such source runs `check` alone. A push
+  to a feature branch (`feat/**`, `fix/**`) runs **nothing**: its pull request's run is its run.
+- **A push** to `dev` (each merge), `main`, `stable/*`, `next/*` or a tag runs **the whole suite**
+  (below). It **blocks nothing**: a pull request's `verify` never waits for it, and a failure there
+  names the test and the merge that brought it, to be fixed by a pull request of its own while
+  merges go on (no freeze of `dev`). What it does gate is the publish of that push (`dev`'s beta,
+  a line's release candidate): `publish` waits for its `verify`.
+
+Every job that compiles links with **mold** (`rui314/setup-mold@v1`, which makes it the default
+`ld`: no flag changes, so the caches stay valid).
+
+The jobs of the whole suite's run:
+
+- **`check`**: formatting and clippy (on a pull request too).
 - **`build-tests`** compiles every test once and packs them, with the fakes they spawn, in a
   nextest archive (`cargo nextest archive`), uploaded as an artifact (kept a day).
 - **`test`**, twelve partitions at once: each downloads the archive and runs its twelfth
@@ -161,9 +180,11 @@ The jobs of a run:
   its own checkout of the repository (`--workspace-remap .`, for the files the tests read). A
   partition compiles nothing.
 - **`doc-tests`** runs the doc tests once (nextest does not), beside the partitions.
-- **`verify`**, the required check, fails unless `check`, `build-tests`, `doc-tests` and every
-  partition passed (skipped is a pass only when `changes` said the Rust suite is not needed, and
-  when `hub` ran, that it passed).
+- **`verify`**, the required check, always concludes. On a push it fails unless `check`,
+  `build-tests`, `doc-tests` and every partition passed; on a pull request, unless `check` and
+  `test-selected` did (`test-selected` skipped, for a pull request that selects nothing, is a
+  pass). Skipped is also a pass when `changes` said the Rust suite is not needed, and when `hub`
+  ran, it must have passed.
 
 **A failed test is retried**, twice (`.config/nextest.toml`, the profile `ci`): one that passes
 on a retry does not fail the run, and **is not hidden**. Each partition's summary, and `verify`'s
