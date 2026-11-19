@@ -17,8 +17,11 @@ use std::time::{Duration, Instant, SystemTime};
 use common::mcp::{Mcp, server_of};
 use common::{Spawned, User};
 use flottille_hub::{Hub, Served, SystemClock};
-use flottille_link::{DeviceKey, Hello, Keyring, KeyringError, Request};
+use flottille_link::{
+    DeviceKey, Endpoint, Hello, Keyring, KeyringError, MachineKey, PublicKey, Request, Traffic,
+};
 use serde_json::{Value, json};
+use tokio::io::AsyncReadExt;
 use zeroize::Zeroizing;
 
 /// How long a link, or the hub's news, may take: the daemons try again every second.
@@ -780,4 +783,92 @@ fn the_tunnels_are_listed_and_closed_from_the_command_line() {
     let said = refused(pc.user.run(&["tunnel", "close", &id]));
     assert!(said.contains(&format!("no tunnel {id}")), "{said}");
     let _ = tunnel.lines.try_recv();
+}
+
+#[test]
+fn a_ninth_tunnel_of_a_device_is_refused() {
+    let (_hub, pc, server) = pc_and_server(User::new());
+    let (run, _port) = web_on(&server.user);
+    let _open: Vec<Open> = (0..8).map(|_| open(&pc, "server", &run, &[])).collect();
+    assert_eq!(tunnels(&pc).len(), 8);
+    let said = refused(pc.on("server", &["tunnel", "open", &run]));
+    assert!(
+        said.contains("refused: 8 tunnels are open for this device already"),
+        "{said}"
+    );
+    assert_eq!(tunnels(&pc).len(), 8);
+}
+
+#[test]
+fn a_tunnel_carries_at_most_64_connections_at_once() {
+    let (_hub, pc, server) = pc_and_server(User::new());
+    let (run, _port) = web_on(&server.user);
+    let tunnel = open(&pc, "server", &run, &[]);
+    let local = tunnel.local_port();
+    // Held with no request: the fake server serves one at a time, so these wait on it.
+    let held: Vec<TcpStream> = (0..64)
+        .map(|_| TcpStream::connect(("127.0.0.1", local)).unwrap())
+        .collect();
+    eventually("64 connections to be carried", || {
+        tunnels(&pc)[0]["connections"] == 64
+    });
+    // The 65th is closed at once.
+    let mut over = TcpStream::connect(("127.0.0.1", local)).unwrap();
+    over.set_read_timeout(Some(WAIT)).unwrap();
+    let mut said = Vec::new();
+    assert_eq!(over.read_to_end(&mut said).unwrap_or(0), 0);
+    assert_eq!(tunnels(&pc)[0]["connections"], 64);
+    drop(held);
+    eventually("the connections to be let go", || {
+        tunnels(&pc)[0]["connections"] == 0
+    });
+}
+
+#[test]
+fn a_connection_for_a_tunnel_nobody_opened_is_closed() {
+    let (_hub, pc, server) = pc_and_server(User::new());
+    let _web = web_on(&server.user);
+    let server_key: PublicKey =
+        serde_json::from_value(server.remote()["this"]["key"].clone()).unwrap();
+    let address: SocketAddr = server.remote()["this"]["listening"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    // pc's daemon is stopped, so that its own link does not replace the one below: the key is
+    // what a program that held pc's machine key would have.
+    assert!(pc.user.run(&["daemon", "stop"]).status.success());
+    server.wait_for("pc", "offline");
+    let machine_key = MachineKey::load_or_make(&pc.folder()).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let read = runtime.block_on(async {
+        let endpoint = Endpoint::dialler(&machine_key).unwrap();
+        let link = endpoint
+            .connect(
+                server_key,
+                &[address],
+                Traffic::Client,
+                &Hello::ours("0.4.1"),
+                "server",
+            )
+            .await
+            .unwrap();
+        // A tunnel that does not exist: closed, and no byte of the run's port comes back.
+        let mut stream = link.tunnel("t0000000000000000").await.unwrap();
+        let _ = tokio::io::AsyncWriteExt::write_all(&mut stream, b"GET / HTTP/1.1\r\n\r\n").await;
+        let mut back = Vec::new();
+        let ended = tokio::time::timeout(WAIT, async { stream.read_to_end(&mut back).await }).await;
+        endpoint.close().await;
+        (ended.is_ok(), back)
+    });
+    assert!(read.0, "the connection was left open");
+    assert!(read.1.is_empty(), "{:?}", read.1);
+    eventually("the server to say it closed it", || {
+        server
+            .log()
+            .contains("opened a connection of a tunnel t0000000000000000 that is none of its")
+    });
 }
