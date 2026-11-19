@@ -56,6 +56,7 @@ pub(super) fn is_account(text: &str) -> bool {
 
 /// One of the author's worklogs in the range.
 struct Entry {
+    id: String,
     started: Zoned,
     key: String,
     title: String,
@@ -123,6 +124,25 @@ impl Site<'_> {
         }
     }
 
+    /// `GET /rest/api/3/issue/<key>/worklog/<id>`: the worklog, or none when Jira has no such
+    /// worklog. One that is on another work item is answered too (its `issueId` says which).
+    async fn worklog(&self, key: &str, id: &str) -> Result<Option<Value>, String> {
+        let (status, text) = self.read(&format!("issue/{key}/worklog/{id}"), &[]).await?;
+        if status == http::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        if !status.is_success() {
+            return Err(format!(
+                "Jira on {} answered {status}: {}",
+                self.site,
+                self.clean(&super::worklog::first_words(&text))
+            ));
+        }
+        serde_json::from_str(&text)
+            .map(Some)
+            .map_err(|_| format!("Jira on {} answered what is not JSON", self.site))
+    }
+
     /// The display name the site gives the account `id` (`GET /rest/api/3/user?accountId=`); none
     /// for an id the site does not know.
     pub(super) async fn display_name(&self, id: &str) -> Result<Option<String>, String> {
@@ -159,13 +179,15 @@ impl Site<'_> {
     /// success alone; a time-out, or a failure once the request is sent, may follow a change Jira
     /// applied, so it is said as not confirmed.
     pub(super) async fn put(&self, path: &str, body: &Value) -> Result<(), String> {
-        self.write(http::Method::PUT, path, body).await.map(drop)
+        self.write(http::Method::PUT, path, Some(body))
+            .await
+            .map(drop)
     }
 
     /// `POST /rest/api/3/<path>` with `body` as JSON: what Jira created, as JSON, said as `put`
     /// says a refusal and a doubt.
     pub(super) async fn post(&self, path: &str, body: &Value) -> Result<Value, String> {
-        let text = self.write(http::Method::POST, path, body).await?;
+        let text = self.write(http::Method::POST, path, Some(body)).await?;
         serde_json::from_str(&text).map_err(|_| {
             format!(
                 "the change was not confirmed: Jira on {} answered what is not JSON; check the \
@@ -175,22 +197,22 @@ impl Site<'_> {
         })
     }
 
+    /// `DELETE /rest/api/3/<path>`: Jira answers `204`, or says why it refused; said as `put` says
+    /// a refusal and a doubt.
+    pub(super) async fn delete(&self, path: &str) -> Result<(), String> {
+        self.write(http::Method::DELETE, path, None).await.map(drop)
+    }
+
     async fn write(
         &self,
         method: http::Method,
         path: &str,
-        body: &Value,
+        body: Option<&Value>,
     ) -> Result<String, String> {
         let url = rest_url(self.site, path)?;
         let answer = tokio::time::timeout(
             READ_TIME,
-            request(
-                method,
-                &url,
-                &self.authorization,
-                Some(body),
-                WRITE_ANSWER_BYTES,
-            ),
+            request(method, &url, &self.authorization, body, WRITE_ANSWER_BYTES),
         )
         .await;
         match answer {
@@ -349,14 +371,91 @@ pub(super) async fn signed_in<'a>(
     Ok((jira, name, stamp))
 }
 
+/// A worklog's comment as one line, masked and cut.
+fn comment_line(comment: &Value) -> String {
+    let text = crate::adf::to_markdown(comment);
+    masked(text.split_whitespace().collect::<Vec<_>>().join(" ").trim())
+        .chars()
+        .take(COMMENT_CHARS)
+        .collect()
+}
+
+/// One worklog of the token's own account, as Jira has it now.
+pub(super) struct Current {
+    /// Jira's form of the time spent (`1h 30m`).
+    pub time: String,
+    /// When it started, in milliseconds since 1970.
+    pub started: u64,
+    pub comment: String,
+}
+
+/// A worklog the work item does not have: it does not exist, or it is on another work item.
+fn not_on_the_item(key: &str, id: &str) -> Outcome {
+    Outcome::Refused(format!(
+        "refused: {key} has no worklog {}: tickets worklogs gives the id of each worklog, and the \
+         work item it is on; nothing was written",
+        masked(id)
+    ))
+}
+
+/// The worklog `id` of the work item `key`, once it is known to be the token's own account's:
+/// refused, before anything is written, when it is not on that work item (or does not exist) or
+/// is another author's.
+pub(super) async fn own_worklog(
+    project: &Project,
+    jira: &Site<'_>,
+    entry: (&str, u64),
+    key: &str,
+    id: &str,
+) -> Result<Current, Outcome> {
+    let Some(worklog) = jira
+        .worklog(key, id)
+        .await
+        .map_err(|why| Outcome::Failed(format!("the worklog could not be read: {why}")))?
+    else {
+        return Err(not_on_the_item(key, id));
+    };
+    // Jira answers a worklog of another work item too, naming the work item it is on: that one is
+    // compared with this one's id, not taken for a 404.
+    let item = jira
+        .get(&format!("issue/{key}"), &[("fields", "id")])
+        .await
+        .map_err(|why| Outcome::Failed(format!("the work item could not be read: {why}")))?;
+    if item["id"].as_str().is_none() || worklog["issueId"].as_str() != item["id"].as_str() {
+        return Err(not_on_the_item(key, id));
+    }
+    let (account, _) = own_account(project, jira, entry).await?;
+    if worklog["author"]["accountId"].as_str() != Some(account.as_str()) {
+        let author = worklog["author"]["displayName"]
+            .as_str()
+            .or_else(|| worklog["author"]["accountId"].as_str())
+            .unwrap_or("another account");
+        return Err(Outcome::Refused(format!(
+            "refused: worklog {} is {}'s, not your account's; nothing was written",
+            masked(id),
+            masked(author)
+        )));
+    }
+    let seconds = worklog["timeSpentSeconds"].as_u64().unwrap_or(0);
+    Ok(Current {
+        time: worklog["timeSpent"]
+            .as_str()
+            .map_or_else(|| span(seconds), masked),
+        started: worklog["started"]
+            .as_str()
+            .and_then(started_of)
+            .map_or(0, |at| u64::try_from(at.as_millisecond()).unwrap_or(0)),
+        comment: comment_line(&worklog["comment"]),
+    })
+}
+
 /// Whose worklogs are read: the account, and how the answer names it.
 async fn account(
     project: &Project,
     jira: &Site<'_>,
-    (entry, stamp): (&str, u64),
+    entry: (&str, u64),
     asked: &TicketsCall,
 ) -> Result<(String, String), Outcome> {
-    let failed = |why: String| Outcome::Failed(why);
     match asked
         .author
         .as_deref()
@@ -367,37 +466,46 @@ async fn account(
         Some(author) => people::account_of(project, author)
             .await
             .map_err(Outcome::Refused),
-        None => {
-            let key = (
-                project.name.clone(),
-                entry.to_owned(),
-                jira.site.to_owned(),
-                stamp,
-            );
-            let kept = ACCOUNTS
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .get(&key)
-                .cloned();
-            if let Some((account, name)) = kept {
-                return Ok((account, format!("your account ({name})")));
-            }
-            let me = jira.get("myself", &[]).await.map_err(failed)?;
-            let account = me["accountId"].as_str().unwrap_or_default().to_owned();
-            if account.is_empty() {
-                return Err(failed(format!(
-                    "Jira on {} did not say whose account the token is",
-                    jira.site
-                )));
-            }
-            let name = masked(me["displayName"].as_str().unwrap_or(&account));
-            ACCOUNTS
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .insert(key, (account.clone(), name.clone()));
-            Ok((account, format!("your account ({name})")))
-        }
+        None => own_account(project, jira, entry).await,
     }
+}
+
+/// The account the token belongs to, asked of the site once and kept (`GET /rest/api/3/myself`),
+/// and how an answer names it.
+pub(super) async fn own_account(
+    project: &Project,
+    jira: &Site<'_>,
+    (entry, stamp): (&str, u64),
+) -> Result<(String, String), Outcome> {
+    let failed = |why: String| Outcome::Failed(why);
+    let key = (
+        project.name.clone(),
+        entry.to_owned(),
+        jira.site.to_owned(),
+        stamp,
+    );
+    let kept = ACCOUNTS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(&key)
+        .cloned();
+    if let Some((account, name)) = kept {
+        return Ok((account, format!("your account ({name})")));
+    }
+    let me = jira.get("myself", &[]).await.map_err(failed)?;
+    let account = me["accountId"].as_str().unwrap_or_default().to_owned();
+    if account.is_empty() {
+        return Err(failed(format!(
+            "Jira on {} did not say whose account the token is",
+            jira.site
+        )));
+    }
+    let name = masked(me["displayName"].as_str().unwrap_or(&account));
+    ACCOUNTS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(key, (account.clone(), name.clone()));
+    Ok((account, format!("your account ({name})")))
 }
 
 async fn read(
@@ -527,18 +635,9 @@ async fn read(
                 }
                 name_seen = name_seen
                     .or_else(|| worklog["author"]["displayName"].as_str().map(str::to_owned));
-                let comment = crate::adf::to_markdown(&worklog["comment"]);
-                let comment: String = masked(
-                    comment
-                        .split_whitespace()
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                        .trim(),
-                )
-                .chars()
-                .take(COMMENT_CHARS)
-                .collect();
+                let comment = comment_line(&worklog["comment"]);
                 days.entry(started.date()).or_default().push(Entry {
+                    id: worklog["id"].as_str().map(masked).unwrap_or_default(),
                     started,
                     key: key.clone(),
                     title: title.clone(),
@@ -577,12 +676,13 @@ async fn read(
         text.push_str(&format!("{day}\n"));
         for entry in entries.iter() {
             text.push_str(&format!(
-                "- {} {} — {} (started {:02}:{:02})",
+                "- {} {} — {} (started {:02}:{:02}, worklog {})",
                 entry.key,
                 entry.title,
                 span(entry.seconds),
                 entry.started.hour(),
-                entry.started.minute()
+                entry.started.minute(),
+                entry.id
             ));
             if !entry.comment.is_empty() {
                 text.push_str(&format!(" \"{}\"", entry.comment));

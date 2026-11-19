@@ -463,11 +463,13 @@ async fn performed(
     // A verdict on a pull request is read as it stood: its card says the head it was given on.
     // A ticket created in a milestone goes in the one its card named, not one merely named so now.
     // A reply goes out with the quote its card showed, not with the comment as edited since.
+    // A worklog is changed or deleted as its card showed it, not as it became since.
     let review = gate::decides_a_review(tool, &request.arguments);
     if request.kind == Kind::Action
         || review
         || gate::creates_in_a_milestone(tool, &request.arguments)
         || gate::replies_to_a_comment(tool, &request.arguments)
+        || gate::changes_a_worklog(tool, &request.arguments)
     {
         match actions::prepared(daemon, &grant, tool, &request.arguments).await {
             Err(
