@@ -2457,8 +2457,8 @@ async fn played_in(
                             // Its own workspace is removed only with the user's word, and so is
                             // a session written to for the first time; so are a service stopped
                             // and a pull request approved or blocked, by `forge` or by a line,
-                            // and the worklog's token sent to another site or entry, and a
-                            // connection written.
+                            // and the worklog's token sent to another site or entry, a
+                            // worklog deleted, and a connection written.
                             _ if mode == GateMode::Full
                                 && !removes_own_workspace(grant, tool, &args)
                                 && !gate::asks_leave(&ask)
@@ -2467,6 +2467,7 @@ async fn played_in(
                                 && !crate::services::stops(tool, &args)
                                 && !crate::extensions::held_for_the_user(tool, &args)
                                 && !gate::asks_review(&ask)
+                                && !gate::asks_worklog_delete(&ask)
                                 && !crate::actions::sends_a_worklog_token(
                                     daemon, grant, tool, &args,
                                 ) =>

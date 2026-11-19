@@ -616,6 +616,17 @@ pub fn replies_to_a_comment(tool: &str, args: &Value) -> bool {
     tool == "tickets" && args["action"] == "reply"
 }
 
+/// Why `tickets worklog_delete` comes to the user, every time: a worklog deleted cannot be got
+/// back, and its time may already be billed.
+pub const WORKLOG_DELETE: &str = "a deleted worklog cannot be got back: only the user deletes \
+    one, in every mode, Full included";
+
+/// Whether a held call deletes a worklog: held for the user in every mode, Full included, and
+/// never decided by the judge.
+pub fn asks_worklog_delete(ask: &Ask) -> bool {
+    ask.reasons.iter().any(|reason| reason == WORKLOG_DELETE)
+}
+
 /// Whether a call of `tickets` changes or deletes a worklog: its card says the worklog as it
 /// stood, and one changed in Jira before the user allows it is not written over unseen.
 pub fn changes_a_worklog(tool: &str, args: &Value) -> bool {
@@ -1045,6 +1056,9 @@ fn tickets(call: &Call) -> Verdict {
     }
     let mut found = Found::default();
     found.judge(said);
+    if action == "worklog_delete" {
+        found.base(WORKLOG_DELETE.into());
+    }
     if let Err(refused) = texts(
         call.grant,
         call.args,
