@@ -15,7 +15,8 @@ session every machine keeps to it and the first member's setup (`crates/flottill
 `crates/flottille-link/src/control.rs`, `crates/flottille/src/hub_session.rs`), and pairing
 through the hub: invitations, joining, the four words, adding, renaming and removing members
 from the command line (#812), and the user's requests to another machine, signed by the client,
-carried by its daemon and checked by the machine they are for (`--machine`, #813). What is decided is said as such; the defaults taken are in "Defaults taken, to
+carried by its daemon and checked by the machine they are for (`--machine`, #813), and a vault
+entry shared with another machine (#832). What is decided is said as such; the defaults taken are in "Defaults taken, to
 confirm"; what is open is in "Open questions". It replaces the proposal of 2026-11-03 (a relay
 every device connects to, on a private network) and the review that put Tailscale and SSH at the
 centre: Flottille stays generic (`AGENTS.md`), and depends on no one network and no account of a
@@ -592,7 +593,7 @@ what it recorded (that this agent of that machine started that session, or is th
 | `deliver` | A delivery for an agent of the receiver: a report, a question, an answer, a request forwarded, `session-turn-ended`, a child's news, as `design.md` §5.2–5.3 make them. |
 | `call` | One of the tree's tools aimed at a session it started: `agent_send`, `agent_status`, `agent_stop`, `session_send`, `session_read`, `approval_answer`. Judged as on one machine. |
 | `capabilities` | What a runner offers: its projects, its agents signed in, its free slots ("Roles"). |
-| `share` | A vault entry or a connection the user shared, signed by their device ("Sharing"). |
+| `share` | A vault entry or a connection the user shared, signed by their device ("Sharing"): `{"request", "entry", "secret"}`, the device's signed `vault.share` as the client wrote it, the entry's metadata, its secret. |
 | `addresses` | Every address the sender may be reached at now: kept for it, so that the two link again without the hub ("The transport"). |
 
 Nothing else: no user method, no `approval.approve`, no `agent.mode`, no `agent.send` as the user, no
@@ -791,6 +792,9 @@ and removes its workspace as today, through `call`.
   replaces it. A machine with no keyring refuses it, saying so.
 - An entry bound to a use (`for`) keeps it; a `worklog:<project>` entry needs that project on the
   other machine.
+- **Built (#832)**: `vault.share {name, machine}` (`protocol.md`), `flottille vault share <name>
+  --machine <m>`, and Settings, Vault, a row's **Share with…**. How it is checked, and what it
+  leaves where, is `vault.md`, "Shared with another machine".
 
 ### Connections
 

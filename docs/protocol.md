@@ -961,8 +961,9 @@ door alone reaches them: an agent's only part is the `vault` tool, which lists, 
 for an entry a feature names and that is missing.
 
 - `vault.list {project?}` answers `{"entries": [{"name", "description", "url", "username",
-  "project", "for"}]}`, by name, `for` the use it is bound to or `null` (`docs/vault.md`, "Bound to
-  one use"); with `project`, the entries its agents see (its own and every project's).
+  "project", "for", "shared_from"}]}`, by name, `for` the use it is bound to or `null` (`docs/vault.md`, "Bound to
+  one use"), `shared_from` the machine of the user's it was shared from, `null` for this machine's
+  own; with `project`, the entries its agents see (its own and every project's).
 - `vault.set {name, secret, description?, url?, username?, project?, for?}` keeps the secret in
   the keyring and the rest in the store, in place of the entry of that name if there is one, and
   answers the entry as listed. `for` binds it to one use (`worklog:<project>`,
@@ -976,6 +977,16 @@ for an entry a feature names and that is missing.
   answers `{"removed": <entry>}`; `refused`, naming the feature and what stops working, for an
   entry bound to a feature that names it, unless `confirmed`; `not-found` when there is none; `unavailable` when the keyring refuses
   (locked), the entry then left whole.
+
+- `vault.share {name, machine}` sends the entry to the user's machine `machine`, a runner
+  (`docs/vault.md`, "Shared with another machine"): served only as a request the user's device
+  signed (`docs/remote.md`, "Requests from another machine's clients"), aimed at this machine by
+  its own name (`remote.machines`' `this.name`), whose signature goes with the secret for the other
+  machine to check; answers `{"name", "machine"}` once that machine kept it. `refused` for a
+  client that did not sign (`sharing a vault entry is signed by the user's device: …`), a machine
+  that runs no agent, or what the other machine refused, in its words (`server refused: this
+  machine has no keyring: …`); `unavailable` for a machine that is off (`server is offline since
+  22:14`) or a keyring that cannot be read here; `not-found` for an unknown entry or machine.
 
 Both writes emit `vault.changed`, and give the agents of every project the tools their roles have
 now (`vault` is listed to an agent whose project sees an entry, misses one a feature names, or has
@@ -1003,9 +1014,9 @@ remote on (`[remote] on = true` in `daemon.toml`). With it off, each is `refused
 turn it on in daemon.toml ([remote] on = true)`); with a link that could not listen, `unavailable`,
 with the reason. No method answers a private key.
 
-- `remote.machines` answers `{"this": {"key", "fingerprint", "listening", "addresses": [{"address",
+- `remote.machines` answers `{"this": {"name", "key", "fingerprint", "listening", "addresses": [{"address",
   "how"}]}, "machines": [{"name", "key", "fingerprint", "state", "since", "reason",
-  "addresses"}]}`: this machine's public key, the socket its link listens on (`null` until
+  "addresses"}]}`: this machine's member name (`null` until it is set up), its public key, the socket its link listens on (`null` until
   `[remote] listen` is set), and its addresses,
   `how` being `found` (the one it listens on, or its interfaces' when it listens on all of them) or
   `declared` (by hand, with the link's port when it gave none); then each machine it trusts, its

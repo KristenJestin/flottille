@@ -245,6 +245,38 @@ window's confirmation, which says that the change stays even if the request is t
 and the agent can do neither. `vault::secret` and the connections' reading take the use asking, and refuse an entry bound to
 another.
 
+## Shared with another machine
+
+The one way a secret leaves its machine (`docs/remote.md`, "Vault entries"): the user shares an
+entry, one at a time, with another of their machines that runs agents, from Settings, Vault, the
+row's **Share with…** (a dialog that lists the machines online), or `flottille vault share <name>
+--machine <machine>`.
+
+- **Only the user's device asks it.** `vault.share {name, machine}` is a request the client signs
+  with the device key (`docs/remote.md`, "Requests from another machine's clients"), for its own
+  machine: the daemon, which never holds that key, serves it only so signed, and refuses a client
+  that does not sign (`sharing a vault entry is signed by the user's device: …`).
+- **The signature goes with the secret.** The holding daemon reads the secret from its keyring
+  and sends it, with the entry's metadata and the user's signed request as the client wrote it,
+  in a `share` message over the link, encrypted end to end between the two machines. The other
+  machine checks that request itself as it checks any user's request: signed by a member's
+  device, for the machine that sent it, within five minutes, never seen before, of a role that may
+  drive, `vault.share` of that very entry with this machine. A machine's message alone shares
+  nothing: a machine key read by an agent's code cannot put a secret of its choosing into another
+  machine's keyring, nor play a share again.
+- **Kept as any secret there.** The other machine masks the secret first, then writes it into its
+  own keyring under the entry's name, and the metadata into its store, marked as shared from the
+  machine it came from (`shared_from`, the row's `Shared from pc`). It is a copy, not kept in
+  sync: sharing again replaces it, and a secret set there by hand makes it that machine's own. A
+  use (`for`) goes with it; a `worklog:<project>` entry is refused there until that project is
+  (`the vault entry jira is bound to the worklog of the project app, which is not on this machine:
+  add the project here first`).
+- **A machine with no keyring refuses**, saying so (`this machine has no keyring: no Secret Service
+  runs in its session …`): the vault keeps no secret in a file, there either.
+- **Nowhere else.** Neither side writes the secret to a file, the store, an event, a log or an
+  error; the logs say what was shared, with which machine, and by whom, never the value. The hub
+  never sees it.
+
 ## The runtime folder
 
 The keyring answers on the session bus, whose socket is in the user's runtime folder
