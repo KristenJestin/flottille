@@ -244,6 +244,21 @@ mod tests {
     }
 
     #[test]
+    fn the_lead_is_told_that_its_end_ends_the_sessions_it_leads_and_that_a_session_to_keep_is_detached_first()
+     {
+        let folder = Path::new("/work/zebra");
+        let text = instructions(role(LEAD).unwrap(), &session(folder), &[]);
+        assert!(
+            text.contains("ends the sessions it leads"),
+            "the lead is not told that ending it ends its led sessions"
+        );
+        assert!(
+            text.contains("detached") && text.contains("keep"),
+            "the lead is not told to detach a session to keep"
+        );
+    }
+
+    #[test]
     fn the_rules_name_no_brief_a_root_does_not_have() {
         let folder = Path::new("/work/zebra");
         // A root's first message is the user's, a child's its parent's brief: the rules are the

@@ -60,6 +60,7 @@ use crate::conversation::{
     ConnectionReview, Conversation, DiffLine, Ending, STARTED_SESSION_KIND, Summary,
     TIME_LOGGING_KIND, USER, VaultAsk, WOKEN_BY_KIND, in_sight, is_hidden,
 };
+use crate::end_led::{self, LedEnd};
 use crate::kept::{Draft, DraftKey, Keeping, Written};
 use crate::leaves::LeaveList;
 use crate::link::{Connect, Update};
@@ -342,6 +343,8 @@ pub struct SessionPage {
     needs_you: bool,
     /// The confirmation of ending the session is open.
     ending: bool,
+    /// The led sessions that end with it, as the daemon read them when the confirmation opened.
+    led: Vec<LedEnd>,
     /// What the daemon said when it refused to end the session.
     end_error: Option<SharedString>,
     /// What the header said last of who started or leads it, and the element id it said it in,
@@ -477,6 +480,7 @@ impl SessionPage {
             text_viewer: cx.new(|_| TextViewer::new()),
             needs_you,
             ending: false,
+            led: Vec::new(),
             end_error: None,
             by_said: (SharedString::default(), "session-started-by"),
             resuming: false,
@@ -792,6 +796,9 @@ impl SessionPage {
         if self.endable() && !self.ending {
             self.ending = true;
             self.end_error = None;
+            self.led.clear();
+            let session = self.opened.id.clone();
+            self.perform(Command::ReadEnding { session }, cx);
             cx.notify();
         }
     }
@@ -810,6 +817,14 @@ impl SessionPage {
         let session = self.opened.id.clone();
         self.perform(Command::Stop { session }, cx);
         cx.notify();
+    }
+
+    /// The led sessions the end would end, as the daemon read them: the confirmation lists them.
+    pub fn led_read(&mut self, led: Vec<LedEnd>, cx: &mut Context<Self>) {
+        if self.ending && self.led != led {
+            self.led = led;
+            cx.notify();
+        }
     }
 
     /// What the daemon answered to an end: it says why when it refused.
@@ -2359,15 +2374,10 @@ impl SessionPage {
                     ))
                     .test_support(),
             )
+            .child(end_led::block("session-end", &self.led, cx))
             .action(
-                Button::danger(
-                    "session-end-confirm",
-                    match count {
-                        0 | 1 => "End session".to_owned(),
-                        n => format!("End {n} agents"),
-                    },
-                )
-                .on_click(cx.listener(|this, _, _, cx| this.confirm_end(cx))),
+                Button::danger("session-end-confirm", end_led::end_label(count, &self.led))
+                    .on_click(cx.listener(|this, _, _, cx| this.confirm_end(cx))),
             )
     }
 
