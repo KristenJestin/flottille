@@ -1317,3 +1317,64 @@ fn a_launch_aimed_at_a_controller_is_refused() {
     assert_eq!(error_of(&answer), NO_AGENT);
     assert!(!tablet.log().contains(SERVED), "{}", tablet.log());
 }
+
+#[test]
+fn an_offer_of_a_machine_that_is_no_runner_is_refused() {
+    let (_hub, pc, server, tablet) =
+        pc_server_and(User::new(), User::new(), "tablet", "controller");
+    // A controller's daemon offers nothing, and is seen as what it is.
+    let seen = server.remote();
+    let entry = seen["machines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|machine| machine["name"] == "tablet")
+        .unwrap()
+        .clone();
+    assert_eq!(entry["role"], "controller", "{seen}");
+    assert!(entry["offers"].is_null(), "{seen}");
+    assert_eq!(pc.remote()["this"]["role"], "runner");
+
+    // Its machine key, as code that read it would hold it, says it offers a project.
+    let server_key: PublicKey = serde_json::from_value(seen["this"]["key"].clone()).unwrap();
+    let address: SocketAddr = seen["this"]["listening"].as_str().unwrap().parse().unwrap();
+    assert!(tablet.user.run(&["daemon", "stop"]).status.success());
+    server.wait_for("tablet", "offline");
+    let machine_key = MachineKey::load_or_make(&tablet.folder()).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let refusal = runtime.block_on(async {
+        let endpoint = Endpoint::dialler(&machine_key).unwrap();
+        let link = tokio::time::timeout(
+            WAIT,
+            endpoint.connect(
+                server_key,
+                &[address],
+                Traffic::Machine,
+                &Hello::ours("0.4.1"),
+                "server",
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let offer = json!({"machine": {"capabilities": {
+            "projects": [{"name": "app", "slots": 12}],
+            "agents": ["claude"],
+        }}});
+        let answer = link.send_raw(offer.to_string().as_bytes()).await;
+        endpoint.close().await;
+        answer.unwrap_err().to_string()
+    });
+    assert_eq!(
+        refusal,
+        "server refused: tablet is a controller: only a runner offers"
+    );
+    let seen = server
+        .user
+        .call("remote.machines", json!({"project": "app"}))
+        .unwrap();
+    assert_eq!(seen["offered"], json!([]), "{seen}");
+}
