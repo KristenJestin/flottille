@@ -19,6 +19,28 @@ use crate::subscription::Subscription;
 use crate::workspace::{Action, Failure, Step, StepState, Workspace};
 use crate::{Error, Result};
 
+/// The code of one repository that travelled for a launch (`travels`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Travel {
+    /// `out` when it went to `machine`, `in` when it came from it.
+    pub way: String,
+    /// The other machine's key.
+    pub machine: String,
+    pub launch: String,
+    /// Its path in the project.
+    pub repository: String,
+    pub project: String,
+    pub folder: String,
+    /// The sender's branch.
+    pub branch: String,
+    pub tip: String,
+    pub snapshot: String,
+    pub workspace: Option<String>,
+    pub there: Option<String>,
+    pub returned: Option<String>,
+    pub at: u64,
+}
+
 /// A run's process recorded while it runs (`run_processes`), what a daemon started after a crash
 /// ends.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -787,6 +809,30 @@ const MIGRATIONS: &[&str] = &[
     CREATE TABLE window_state (
         key   TEXT PRIMARY KEY,
         value TEXT NOT NULL
+    ) STRICT;
+",
+    "
+    -- The code of a repository that went to another machine for a launch (`out`), or came from
+    -- one (`in`) (`docs/remote.md`, \"What travels\"): what a machine checks a bundle coming back
+    -- against, and what it sends back past. `machine` is the other machine's key. `folder` is the
+    -- repository it was sent from, or the one it was fetched into; `tip` the commit the sender's
+    -- branch was on, `snapshot` its uncommitted work; `workspace` and `there` the workspace made
+    -- of it on the receiving machine and its branch; `returned` the last commit that came back.
+    CREATE TABLE travels (
+        way        TEXT NOT NULL CHECK (way IN ('out', 'in')),
+        machine    TEXT NOT NULL,
+        launch     TEXT NOT NULL,
+        repository TEXT NOT NULL,
+        project    TEXT NOT NULL,
+        folder     TEXT NOT NULL,
+        branch     TEXT NOT NULL,
+        tip        TEXT NOT NULL,
+        snapshot   TEXT NOT NULL,
+        workspace  TEXT,
+        there      TEXT,
+        returned   TEXT,
+        at         INTEGER NOT NULL,
+        PRIMARY KEY (way, machine, launch, repository)
     ) STRICT;
 ",
 ];
@@ -2846,6 +2892,94 @@ impl Store {
         Ok(before.unwrap_or_default())
     }
 
+    /// Keeps what travelled; `false`, and nothing written, when that repository of that launch
+    /// travelled that way with that machine already.
+    pub fn record_travel(&mut self, travel: &Travel) -> Result<bool> {
+        let added = self.connection.execute(
+            "INSERT OR IGNORE INTO travels (way, machine, launch, repository, project, folder, \
+             branch, tip, snapshot, workspace, there, returned, at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            params![
+                travel.way,
+                travel.machine,
+                travel.launch,
+                travel.repository,
+                travel.project,
+                travel.folder,
+                travel.branch,
+                travel.tip,
+                travel.snapshot,
+                travel.workspace,
+                travel.there,
+                travel.returned,
+                travel.at as i64,
+            ],
+        )?;
+        Ok(added == 1)
+    }
+
+    /// What travelled `way` for `launch`, with `machine` or with any, by repository.
+    pub fn travels(&self, way: &str, machine: Option<&str>, launch: &str) -> Result<Vec<Travel>> {
+        let mut statement = self.connection.prepare_cached(
+            "SELECT way, machine, launch, repository, project, folder, branch, tip, snapshot, \
+             workspace, there, returned, at FROM travels \
+             WHERE way = ?1 AND (?2 IS NULL OR machine = ?2) AND launch = ?3 \
+             ORDER BY repository",
+        )?;
+        let rows = statement.query_map(params![way, machine, launch], |row| {
+            Ok(Travel {
+                way: row.get(0)?,
+                machine: row.get(1)?,
+                launch: row.get(2)?,
+                repository: row.get(3)?,
+                project: row.get(4)?,
+                folder: row.get(5)?,
+                branch: row.get(6)?,
+                tip: row.get(7)?,
+                snapshot: row.get(8)?,
+                workspace: row.get(9)?,
+                there: row.get(10)?,
+                returned: row.get(11)?,
+                at: row.get::<_, i64>(12)? as u64,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// The workspace made on this machine of what came from `machine` for `launch`, and its
+    /// branch, for each of its repositories.
+    pub fn set_travel_place(
+        &mut self,
+        machine: &str,
+        launch: &str,
+        workspace: &str,
+        there: &str,
+    ) -> Result<()> {
+        self.connection.execute(
+            "UPDATE travels SET workspace = ?3, there = ?4 \
+             WHERE way = 'in' AND machine = ?1 AND launch = ?2",
+            params![machine, launch, workspace, there],
+        )?;
+        Ok(())
+    }
+
+    /// The last commit of a repository of `launch` that came back, or was sent back.
+    pub fn set_travel_returned(
+        &mut self,
+        way: &str,
+        machine: &str,
+        launch: &str,
+        repository: &str,
+        commit: &str,
+    ) -> Result<()> {
+        self.connection.execute(
+            "UPDATE travels SET returned = ?5 \
+             WHERE way = ?1 AND machine = ?2 AND launch = ?3 AND repository = ?4",
+            params![way, machine, launch, repository, commit],
+        )?;
+        Ok(())
+    }
+
     /// The keys of the drafts the composers hold.
     pub fn draft_keys(&self) -> Result<Vec<String>> {
         let mut statement = self
@@ -4453,6 +4587,7 @@ mod tests {
                 },
                 resumed: false,
                 resumed_branch: None,
+                laid: None,
             }],
             steps: vec![
                 Step {

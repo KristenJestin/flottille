@@ -62,6 +62,10 @@ pub struct Worktree {
     /// was recorded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resumed_branch: Option<String>,
+    /// The uncommitted work of another machine's repository, a commit on top of the base, laid
+    /// on the worktree as uncommitted changes once it is made (`docs/remote.md`, "What travels").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub laid: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

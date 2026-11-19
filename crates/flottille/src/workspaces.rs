@@ -709,6 +709,25 @@ async fn rename_branch(daemon: &Daemon, asked: WorkspaceRenameBranch) -> Answer 
 // Creation.
 
 async fn create(daemon: Arc<Daemon>, asked: WorkspaceCreate) -> Answer {
+    create_from(daemon, asked, None).await
+}
+
+/// What another machine sent a new workspace is made of (`docs/remote.md`, "What travels"): for
+/// each repository, by its path, the commit the sender's branch was on, its base here, and the
+/// sender's uncommitted work, laid on it.
+pub struct Travelled {
+    /// The machine it came from, as the base's note says it.
+    pub from: String,
+    pub repositories: BTreeMap<String, (String, String)>,
+}
+
+/// `workspace.create`, or the workspace made of what another machine sent: on the branch asked,
+/// which its caller found free, started at the sender's commits, and never fetched.
+pub async fn create_from(
+    daemon: Arc<Daemon>,
+    asked: WorkspaceCreate,
+    travelled: Option<Travelled>,
+) -> Answer {
     // The request's own time: the fetches below are part of what the workspace took to be ready.
     let requested_at = now_ms();
     let project = projects::load_project(&daemon, &asked.project)?;
@@ -751,7 +770,11 @@ async fn create(daemon: Arc<Daemon>, asked: WorkspaceCreate) -> Answer {
     }
     // A branch named that no repository has, nor its remote, would be started everywhere: refused
     // before anything is fetched.
-    if named && let Some(refusal) = outside_format() {
+    // A branch that came from another machine is the sender's name for it, whatever the format.
+    if named
+        && travelled.is_none()
+        && let Some(refusal) = outside_format()
+    {
         let mut anywhere = false;
         for path in &taken {
             let remote = project
@@ -794,6 +817,28 @@ async fn create(daemon: Arc<Daemon>, asked: WorkspaceCreate) -> Answer {
             .find(|r| &r.path == path)
             .expect("a repository taken is one of the project's");
         let main = main_checkout(&project.folder, path);
+        if let Some(travelled) = &travelled {
+            let (tip, snapshot) = travelled.repositories.get(path).ok_or_else(|| {
+                Failure::refused(format!("nothing of {path} came from {}", travelled.from))
+            })?;
+            repositories.push(Worktree {
+                path: path.clone(),
+                base: Base {
+                    branch: branch.clone(),
+                    remote: repository.remote.clone(),
+                    reference: tip.clone(),
+                    commit: tip.clone(),
+                    fetched_now: false,
+                    fetched_at: None,
+                    note: Some(format!("started from what {} sent", travelled.from)),
+                    fetch: None,
+                },
+                resumed: false,
+                resumed_branch: None,
+                laid: Some(snapshot.clone()),
+            });
+            continue;
+        }
         let rule = match asked.bases.get(path) {
             Some(chosen) => {
                 check_branch(&main, chosen).await?;
@@ -840,10 +885,12 @@ async fn create(daemon: Arc<Daemon>, asked: WorkspaceCreate) -> Answer {
             base,
             resumed,
             resumed_branch: resumed.then(|| branch.clone()),
+            laid: None,
         });
     }
     // A branch resumed everywhere was named before the format: it is taken as it is.
-    if repositories.iter().any(|worktree| !worktree.resumed)
+    if travelled.is_none()
+        && repositories.iter().any(|worktree| !worktree.resumed)
         && let Some(refusal) = outside_format()
     {
         return Err(refusal);
@@ -1833,6 +1880,9 @@ async fn make_worktree(workspace: &Workspace, repository: &str) -> Result<(), St
             Class::Work,
         )
         .await?;
+    }
+    if let Some(snapshot) = &worktree.laid {
+        git::bundle::lay_snapshot(Path::new(&target), snapshot).await?;
     }
     Ok(())
 }

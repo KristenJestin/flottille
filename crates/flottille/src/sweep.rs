@@ -239,6 +239,13 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Result<Va
         tokio::time::sleep(Duration::from_millis(asked.ms)).await;
         return Ok(json!({}));
     }
+    // What `agent_launch` will start on another machine (#816), in a test build only.
+    if matches!(method, "test.travel" | "test.travel_back")
+        && cfg!(debug_assertions)
+        && std::env::var_os("FLOTTILLE_TEST_TRAVEL").is_some()
+    {
+        return travel(&daemon, method, params).await;
+    }
     if std::env::var_os("FLOTTILLE_TEST_CLOCK").is_none() || method != "test.advance" {
         return Err(Failure::new(
             "unknown-method",
@@ -249,4 +256,64 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Result<Va
     advance_clock(asked.ms);
     sweep(&daemon);
     Ok(json!({"now": now_ms()}))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Travel {
+    #[serde(default)]
+    machine: String,
+    #[serde(default)]
+    project: String,
+    launch: String,
+    /// A workspace of the project; the project's own folder when left out.
+    #[serde(default)]
+    workspace: Option<String>,
+    #[serde(default)]
+    corrupt: bool,
+}
+
+/// `test.travel`: the code of a place sent to a machine; `test.travel_back`: the new commits of a
+/// launch received sent back.
+async fn travel(daemon: &Arc<Daemon>, method: &str, params: Value) -> Result<Value, Failure> {
+    let asked: Travel = serde_json::from_value(params)?;
+    if method == "test.travel_back" {
+        return crate::travel::send_back(daemon, &asked.launch)
+            .await
+            .map_err(Failure::refused);
+    }
+    let project = crate::projects::load_project(daemon, &asked.project)?;
+    let place: Vec<(String, std::path::PathBuf)> = match &asked.workspace {
+        Some(name) => {
+            let workspace = daemon
+                .read(|store| store.workspace(&project.name, name))?
+                .ok_or_else(|| Failure::refused(format!("no workspace {name}")))?;
+            workspace
+                .repositories
+                .iter()
+                .map(|worktree| (worktree.path.clone(), workspace.folder_of(&worktree.path)))
+                .collect()
+        }
+        None => project
+            .repositories
+            .iter()
+            .map(|repository| {
+                let folder = match repository.path.as_str() {
+                    "." => project.folder.clone(),
+                    path => project.folder.join(path),
+                };
+                (repository.path.clone(), folder)
+            })
+            .collect(),
+    };
+    crate::travel::send(
+        daemon,
+        &asked.machine,
+        &asked.launch,
+        &project.name,
+        &place,
+        asked.corrupt,
+    )
+    .await
+    .map_err(Failure::refused)
 }
