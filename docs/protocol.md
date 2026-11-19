@@ -202,6 +202,7 @@ no device calls a `local` one over a link (`docs/remote.md`, "Roles").
 | `vault.list` | read |
 | `vault.set` | drive |
 | `vault.remove` | drive |
+| `vault.share` | drive |
 | `vault.asks` | read |
 | `vault.ask_dismiss` | drive |
 | `remote.machines` | read |
