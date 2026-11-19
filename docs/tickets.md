@@ -1095,12 +1095,23 @@ tickets {action: "worklog_delete", ticket: "ABC-123", worklog: "10234"}
   another author is refused before anything is asked (`refused: worklog 10234 is Jane Doe's, not
   your account's`), and so is one that is not on that work item or does not exist (`refused: ABC-1
   has no worklog 10234`). The worklog is read again, and the author checked again, when the call is
-  done.
+  done. Jira answers a worklog of another work item as well as one of the right work item, so the
+  worklog's `issueId` is compared with the work item's id (`GET /rest/api/3/issue/<KEY>?fields=id`),
+  never taken from a `404`.
 - **Held for the user like `log_time`**: each edit and each delete is a write to Jira, judged like
   `comment`, answered at once, the result coming later as a delivery. The card says the work item,
   the worklog as it is and what it becomes, or that it is deleted: `It is now: 1h, started
   2026-11-06T08:00:00Z, "Pairing"`, `It becomes: 2h, started 2026-11-06T08:00:00Z, "Pairing"`, `It
-  deletes the worklog 10234 of ABC-1: …`.
+  deletes the worklog 10234 of ABC-1: …`. The card is compared again when the user allows the call,
+  as a reply's is: a worklog that was changed, deleted or given to another author in Jira
+  between the card and the Allow is not written, and the user is told what it is now.
+- **`worklog_delete` is the user's alone, in every mode, Full included**: a worklog deleted cannot
+  be got back, so it is held as a base call, never passed by the judge, and Full does not let it
+  through. `worklog_edit` stays as `log_time` is: judged in Auto, allowed in Full. The Auto judge
+  reads the same lines as the card (`It is now`, `It becomes`), not the rules' reasons alone.
+- **A comment cannot be cleared**: an empty `comment` is dropped as if it were left out, so
+  `worklog_edit` cannot turn a worklog's comment into none; to remove the text, the user edits the
+  worklog in Jira.
 - **GitHub is refused** (`GitHub has no worklogs`); no entry named, or one with no username, is
   refused with `log_time`'s sentence. The secret is in no argument, result, event, log nor error:
   what Jira answers is masked of it.

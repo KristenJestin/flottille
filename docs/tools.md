@@ -1300,8 +1300,10 @@ Jira: their account id, else their e-mail). The card shows the names as given.
   **`worklog_delete {ticket, worklog}`** change or delete a worklog already logged, `worklog` being
   the id `worklogs` gives, **only one of the token's own account** (another author's, one not on
   that work item and a missing one are refused before anything is asked); writes held like
-  `log_time`, the card saying the worklog as it is and what it becomes, with the same vault entry,
-  refused on GitHub (`docs/tickets.md`, "Correcting a worklog").
+  `log_time`, the card saying the worklog as it is and what it becomes (compared again when the
+  user allows it), with the same vault entry, refused on GitHub; **`worklog_delete`** is held for
+  the user in every mode, Full included, and never judged (`docs/tickets.md`, "Correcting a
+  worklog").
 - **Links and comments**: `link_types` (a read, never held) lists the kinds of link the tracker has;
   `link {ticket, kind, other}` and `unlink {ticket, kind, other}` make and remove a link;
   `comment_edit {ticket, comment, body}` and `comment_delete {ticket, comment}` change or delete a
