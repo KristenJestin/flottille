@@ -824,3 +824,217 @@ fn the_first_approved_message_to_the_session_started_in_another_project_is_count
     });
     eventually("it is counted", || exchanges() == Some(1));
 }
+
+// A title finds a session of another project (#1087).
+
+/// A root of `project` that the user titled.
+fn titled(user: &User, project: &str, title: &str) -> String {
+    let (id, _) = root(user, project);
+    user.call("agent.rename", json!({"agent": id, "title": title}))
+        .unwrap();
+    id
+}
+
+/// A write to the session of `project` titled `title`.
+fn send_in(from: &Mcp, project: &str, title: &str, text: &str) -> Answer {
+    from.call(
+        "session_send",
+        json!({"project": project, "session": title, "text": text}),
+    )
+}
+
+#[test]
+fn a_session_of_another_project_is_reached_by_its_project_and_title() {
+    let user = user();
+    let (lead, mcp) = lead(&user, "full");
+    let other = titled(&user, "kit", "Tokens");
+    // The same title in the caller's own project is another session: `project` says which.
+    titled(&user, "app", "Tokens");
+
+    let number = held(&send_in(&mcp, "kit", "Tokens", "Is the release out?"));
+    let request = requests(&user)
+        .into_iter()
+        .find(|r| r["number"] == number)
+        .unwrap();
+    assert_eq!(request["call"]["session"], other.as_str(), "{request}");
+    answer(&user, number, "approval.approve");
+    eventually("the message", || {
+        written_to(&user, &other)
+            .iter()
+            .any(|b| b.contains("Is the release out?"))
+    });
+    assert_eq!(leaves(&user, &other), [(lead.clone(), other.clone())]);
+
+    // With the leave, the title writes and reads as the id does.
+    let again = send_in(&mcp, "kit", "Tokens", "Thanks.");
+    assert!(again.text.starts_with("Sent to "), "{}", again.text);
+    let page = mcp.call(
+        "session_read",
+        json!({"project": "kit", "session": "Tokens"}),
+    );
+    assert!(!page.error, "{}", page.text);
+    assert!(
+        page.text.contains("another session of project kit"),
+        "{}",
+        page.text
+    );
+}
+
+#[test]
+fn a_title_of_another_project_still_asks_the_user_s_leave_first() {
+    let user = user();
+    let (_, mcp) = lead(&user, "full");
+    let other = titled(&user, "kit", "Tokens");
+
+    let number = held(&send_in(&mcp, "kit", "Tokens", "Is the release out?"));
+    let says = requests(&user)[0]["says"].to_string();
+    assert!(says.contains("kit"), "{says}");
+    assert!(says.contains("Is the release out?"), "{says}");
+    assert!(written_to(&user, &other).is_empty());
+    assert!(leaves(&user, &other).is_empty());
+
+    // A read by title asks too, as a read by id does, and one leave covers both.
+    let read = mcp.call(
+        "session_read",
+        json!({"project": "kit", "session": "Tokens"}),
+    );
+    assert!(
+        read.text
+            .contains(&format!("request #{number} already asks")),
+        "{}",
+        read.text
+    );
+    assert_eq!(requests(&user).len(), 1, "{:?}", requests(&user));
+    user.call("approval.deny", json!({"number": number}))
+        .unwrap();
+    assert!(written_to(&user, &other).is_empty());
+}
+
+#[test]
+fn an_ambiguous_title_in_another_project_is_refused_with_the_ids() {
+    let user = user();
+    let (_, mcp) = lead(&user, "full");
+    let first = titled(&user, "kit", "Fonts");
+    let second = titled(&user, "kit", "Fonts");
+
+    let refused = send_in(&mcp, "kit", "Fonts", "Hello.");
+
+    assert!(refused.error, "{}", refused.text);
+    assert!(
+        refused
+            .text
+            .starts_with("refused: 2 sessions of project kit are titled \"Fonts\""),
+        "{}",
+        refused.text
+    );
+    assert!(refused.text.contains(&first), "{}", refused.text);
+    assert!(refused.text.contains(&second), "{}", refused.text);
+    assert!(requests(&user).is_empty());
+
+    // Read the same way.
+    let refused = mcp.call(
+        "session_read",
+        json!({"project": "kit", "session": "Fonts"}),
+    );
+    assert!(refused.error, "{}", refused.text);
+    assert!(refused.text.contains(&first), "{}", refused.text);
+    assert!(requests(&user).is_empty());
+}
+
+#[test]
+fn a_child_of_another_project_is_not_reached_by_its_title() {
+    let user = user();
+    let (_, mcp) = lead(&user, "full");
+    let (_, kit_mcp) = root(&user, "kit");
+    let launched = kit_mcp.call(
+        "agent_launch",
+        json!({"kind": "child", "title": "Hidden worker", "brief": "Wait."}),
+    );
+    assert!(!launched.error, "{}", launched.text);
+    eventually("the child", || {
+        agents(&user).iter().any(|a| a["title"] == "Hidden worker")
+    });
+    let child = agents(&user)
+        .into_iter()
+        .find(|a| a["title"] == "Hidden worker")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let refused = send_in(&mcp, "kit", "Hidden worker", "Hello.");
+
+    assert!(refused.error, "{}", refused.text);
+    assert!(
+        refused.text.starts_with(
+            "refused: no session of project kit has the id or the title \"Hidden worker\""
+        ),
+        "{}",
+        refused.text
+    );
+    assert!(!refused.text.contains(&child), "{}", refused.text);
+    assert!(requests(&user).is_empty());
+}
+
+#[test]
+fn an_unregistered_project_is_refused_before_anything_is_asked() {
+    let user = user();
+    let (_, mcp) = lead(&user, "full");
+    titled(&user, "kit", "Tokens");
+    let judged = judge_prompts(&user);
+
+    for refused in [
+        send_in(&mcp, "ghost", "Tokens", "Hello."),
+        mcp.call(
+            "session_read",
+            json!({"project": "ghost", "session": "Tokens"}),
+        ),
+    ] {
+        assert!(refused.error, "{}", refused.text);
+        assert!(
+            refused
+                .text
+                .starts_with("refused: project ghost is not registered"),
+            "{}",
+            refused.text
+        );
+        assert!(
+            refused.text.contains("app") && refused.text.contains("kit"),
+            "{}",
+            refused.text
+        );
+    }
+    assert!(requests(&user).is_empty());
+    assert_eq!(judge_prompts(&user), judged);
+}
+
+#[test]
+fn without_project_a_title_is_still_matched_in_the_caller_s_project_only() {
+    let user = user();
+    let (_, mcp) = lead(&user, "full");
+    let in_app = titled(&user, "app", "Fonts");
+    titled(&user, "kit", "Fonts");
+    let only_kit = titled(&user, "kit", "Tokens");
+
+    let number = held(&send(&mcp, "Fonts", "Hello."));
+    let request = requests(&user)
+        .into_iter()
+        .find(|r| r["number"] == number)
+        .unwrap();
+    assert_eq!(request["call"]["session"], in_app.as_str(), "{request}");
+
+    for refused in [
+        send(&mcp, "Tokens", "Hello."),
+        mcp.call("session_read", json!({"session": "Tokens"})),
+    ] {
+        assert!(refused.error, "{}", refused.text);
+        assert!(
+            refused.text.starts_with(
+                "refused: no session of your project has the id or the title \"Tokens\""
+            ),
+            "{}",
+            refused.text
+        );
+        assert!(!refused.text.contains(&only_kit), "{}", refused.text);
+    }
+}
