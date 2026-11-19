@@ -6,7 +6,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use flottille_link::{
     Action, DeviceKey, Keyring, KeyringError, MemberList, Members, NONCES_PER_DEVICE, Request,
-    Requests, Role, Signature,
+    Requests, Role, Signature, runs_agents,
 };
 use flottille_protocol::{Class, METHODS};
 use serde_json::{Value, json};
@@ -344,7 +344,7 @@ fn a_viewer_may_read_but_not_drive_and_the_refusal_says_which_role_may() {
     let text = signed(&tablet, "approval.approve", json!({"request": 3}), 0);
     assert_eq!(
         refused(&mut requests, &text, &members, 0),
-        "refused: tablet may only view: a controller or a runner may call approval.approve"
+        "refused: tablet may only view: a controller or a runner may answer a request"
     );
 
     for driver in [&pc, &pixel] {
@@ -396,12 +396,15 @@ fn every_method_of_the_catalogue_has_a_class() {
         match class {
             Class::Read => assert!(viewed.is_ok(), "a viewer may call {method}"),
             Class::Local => unreachable!("checked above"),
-            Class::Drive => assert_eq!(
-                viewed.unwrap_err().to_string(),
-                format!(
-                    "refused: tablet may only view: a controller or a runner may call {method}"
-                )
-            ),
+            Class::Drive => {
+                let refusal = viewed.unwrap_err().to_string();
+                assert!(
+                    refusal.starts_with(
+                        "refused: tablet may only view: a controller or a runner may "
+                    ),
+                    "{method}: {refusal}"
+                );
+            }
         }
     }
 }
@@ -530,4 +533,75 @@ fn remote_setup_is_answered_only_on_its_own_machine() {
         refused.contains("remote.setup is answered only on its own machine"),
         "{refused}"
     );
+}
+
+#[test]
+fn a_refusal_says_which_role_allows_it() {
+    let (_, _, tablet, list) = three();
+    let members = members(&list);
+    let mut requests = Requests::new(time(0));
+    for (method, deed) in [
+        ("approval.approve", "answer a request"),
+        ("approval.deny", "answer a request"),
+        ("agent.answer", "answer a question"),
+        ("agent.send", "send a message"),
+        ("agent.start", "start a session"),
+        ("agent.run", "start a session"),
+        ("agent.stop", "stop a session"),
+        ("agent.cancel", "stop a turn"),
+        ("agent.mode", "switch the mode"),
+        ("remote.invite", "invite a device"),
+        ("remote.change", "add, remove or rename a device"),
+        // A method with no words of its own is named.
+        ("project.add", "call project.add"),
+    ] {
+        let text = signed(&tablet, method, Value::Null, 0);
+        assert_eq!(
+            refused(&mut requests, &text, &members, 0),
+            format!("refused: tablet may only view: a controller or a runner may {deed}"),
+            "{method}"
+        );
+    }
+}
+
+#[test]
+fn a_launch_on_a_machine_that_is_no_runner_is_refused() {
+    let (pc, pixel, tablet, list) = three();
+    let members = members(&list);
+    let mut requests = Requests::new(time(0));
+    // `pixel` and `tablet` checking a launch of the user's: their member runs no agent.
+    for (machine, role) in [("pixel", "controller"), ("tablet", "viewer")] {
+        let request = Request::sign(
+            &pc,
+            "7",
+            machine,
+            "agent.start",
+            &json!({"project": "app"}),
+            time(0),
+        )
+        .unwrap();
+        let text = serde_json::to_string(&request).unwrap();
+        let why = format!("refused: {machine} is a {role}: it runs no agent, a runner does");
+        assert_eq!(
+            requests
+                .check(&text, machine, &members, time(0))
+                .unwrap_err()
+                .to_string(),
+            why
+        );
+        // The same sentence for the machine that carries it, before it is sent.
+        assert_eq!(
+            runs_agents(&members, machine, "agent.start")
+                .unwrap_err()
+                .to_string(),
+            why
+        );
+        // What starts no session is served there.
+        assert!(runs_agents(&members, machine, "agent.list").is_ok());
+    }
+    // A runner takes it, and a name that is no member's is the carrier's to say.
+    assert!(runs_agents(&members, "pc", "agent.start").is_ok());
+    assert!(runs_agents(&members, "nowhere", "agent.start").is_ok());
+    let text = signed(&pixel, "agent.start", json!({"project": "app"}), 0);
+    assert!(requests.check(&text, "pc", &members, time(0)).is_ok());
 }

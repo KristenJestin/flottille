@@ -942,3 +942,378 @@ fn a_forge_watched_on_another_machine_stays_read_while_the_watch_runs() {
         .unwrap();
     assert!(changed["data"].to_string().contains("failing"), "{changed}");
 }
+
+/// A hub, `pc`, `server` (a runner on `server_user`) and a third machine on `third_user`, paired
+/// as `name` with `role`, the three linked.
+fn pc_server_and(
+    server_user: User,
+    third_user: User,
+    name: &str,
+    role: &str,
+) -> (TestHub, Machine, Machine, Machine) {
+    let (hub, pc, server) = pc_and_server(server_user);
+    let third = Machine::of(third_user);
+    pair(&pc, &third, name, role);
+    pc.wait_for(name, "online");
+    server.wait_for(name, "online");
+    third.wait_for("server", "online");
+    (hub, pc, server, third)
+}
+
+/// A user whose agents are the fake agent, Claude enabled, its login where its own home says and
+/// no sign-in variable: Claude is signed in once its login file is there.
+fn runner_user() -> User {
+    let user = User::with_fake_agent()
+        .with_env("ANTHROPIC_API_KEY", "")
+        .with_env("CLAUDE_CODE_OAUTH_TOKEN", "")
+        .with_env("ANTHROPIC_AUTH_TOKEN", "");
+    let claude = user.path("home/.claude");
+    let user = user.with_env("CLAUDE_CONFIG_DIR", claude.to_str().unwrap());
+    user.write_providers("[claude]\nenabled = true\n");
+    user
+}
+
+/// Claude's login file on `user`'s machine, holding `text`.
+fn sign_in(user: &User, text: &str) -> std::path::PathBuf {
+    let folder = user.path("home/.claude");
+    std::fs::create_dir_all(&folder).unwrap();
+    let file = folder.join(".credentials.json");
+    std::fs::write(&file, text).unwrap();
+    file
+}
+
+/// What `machine` offers as `seen` (`remote.machines`) says it.
+fn offers_of<'a>(seen: &'a Value, machine: &str) -> &'a Value {
+    seen["machines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|seen| seen["name"] == machine)
+        .map_or(&Value::Null, |seen| &seen["offers"])
+}
+
+fn slots_of(offers: &Value, project: &str) -> Option<u64> {
+    offers["projects"]
+        .as_array()?
+        .iter()
+        .find(|offered| offered["name"] == project)
+        .and_then(|offered| offered["slots"].as_u64())
+}
+
+fn agents_of(offers: &Value) -> Vec<String> {
+    offers["agents"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|agent| agent.as_str().map(str::to_owned))
+        .collect()
+}
+
+/// A project `app` on `user`'s machine over a throwaway repository.
+fn app_on(user: &User) -> std::path::PathBuf {
+    let folder = repository(user);
+    user.call("project.add", json!({"folder": folder, "name": "app"}))
+        .unwrap();
+    folder
+}
+
+#[test]
+fn a_viewer_reads_but_cannot_send_answer_or_start() {
+    let (_hub, _pc, server, laptop) = pc_server_and(User::new(), User::new(), "laptop", "viewer");
+    let device = laptop.device();
+
+    let read = laptop.raw(&signed(&device, "1", "server", "agent.list", json!({})));
+    assert!(read["error"].is_null(), "{read}");
+    assert!(read["result"]["agents"].is_array(), "{read}");
+
+    for (n, (method, deed)) in [
+        ("agent.send", "send a message"),
+        ("agent.answer", "answer a question"),
+        ("approval.approve", "answer a request"),
+        ("agent.start", "start a session"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let id = format!("{}", n + 2);
+        let answer = laptop.raw(&signed(&device, &id, "server", method, json!({})));
+        assert_eq!(answer["id"], id.as_str());
+        assert_eq!(
+            error_of(&answer),
+            format!("refused: laptop may only view: a controller or a runner may {deed}"),
+            "{method}"
+        );
+    }
+    // The viewer's own command line is told the same.
+    let sent = laptop.on("server", &["agent", "send", "a1", "go on"]);
+    assert!(!sent.status.success());
+    let said = String::from_utf8_lossy(&sent.stderr);
+    assert!(
+        said.contains("laptop may only view: a controller or a runner may send a message"),
+        "{said}"
+    );
+    // Only the read was served.
+    assert_eq!(server.log().matches(SERVED).count(), 1, "{}", server.log());
+}
+
+#[test]
+fn a_controller_answers_a_request_and_starts_a_session_on_a_runner() {
+    let (_hub, _pc, server, tablet) =
+        pc_server_and(User::with_fake_agent(), User::new(), "tablet", "controller");
+    let folder = app_on(&server.user);
+    std::fs::write(folder.join(".gitignore"), ".env\n").unwrap();
+    std::fs::write(folder.join(".env"), "DB_PASSWORD=invented-for-a-test\n").unwrap();
+    server
+        .user
+        .call("workspace.create", json!({"project": "app", "name": "w"}))
+        .unwrap();
+    eventually("the workspace", || {
+        server
+            .user
+            .call("workspace.show", json!({"project": "app", "name": "w"}))
+            .unwrap()["state"]
+            == "ready"
+    });
+    let device = tablet.device();
+    let opened = server.user.received_requests("session/new").len();
+    let started = tablet.raw(&signed(
+        &device,
+        "1",
+        "server",
+        "agent.run",
+        json!({"project": "app", "workspace": "w", "message": "hello"}),
+    ));
+    let id = started["result"]["agent"]["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("not started: {started}"))
+        .to_owned();
+    assert!(server.user.call("agent.show", json!({"agent": id})).is_ok());
+
+    // The session's agent asks for what the gate holds for the user.
+    let (url, authorization) = server_of(&server.user, opened);
+    let mcp = Mcp::initialize(&url, &authorization);
+    let answer = mcp.call("fs_read", json!({"path": ".env"}));
+    let number: u64 = answer
+        .text
+        .strip_prefix("Waiting for the user's approval, request #")
+        .and_then(|rest| rest.split_once('.'))
+        .map(|(number, _)| number.parse().unwrap())
+        .unwrap_or_else(|| panic!("not held: {}", answer.text));
+
+    let approved = tablet.raw(&signed(
+        &device,
+        "2",
+        "server",
+        "approval.approve",
+        json!({"number": number}),
+    ));
+    assert!(approved["error"].is_null(), "{approved}");
+    let listed = server.user.call("approval.list", json!({})).unwrap();
+    assert!(
+        listed["requests"].as_array().unwrap().is_empty(),
+        "{listed}"
+    );
+    let log = server.log();
+    assert!(
+        log.contains("agent.run asked by tablet from tablet"),
+        "{log}"
+    );
+    assert!(
+        log.contains("approval.approve asked by tablet from tablet"),
+        "{log}"
+    );
+}
+
+#[test]
+fn a_viewer_cannot_invite_or_remove_a_device() {
+    let (_hub, pc, server, laptop) = pc_server_and(User::new(), User::new(), "laptop", "viewer");
+
+    // On its own machine, the hub and the list refuse it.
+    let invited = laptop.user.run(&["remote", "invite"]);
+    assert!(!invited.status.success());
+    let said = String::from_utf8_lossy(&invited.stderr);
+    assert!(
+        said.contains("laptop may only view: a controller or a runner may invite a device"),
+        "{said}"
+    );
+    let removed = laptop.user.run(&["remote", "remove", "server"]);
+    assert!(!removed.status.success());
+    let said = String::from_utf8_lossy(&removed.stderr);
+    assert!(
+        said.contains("a controller or a runner may remove"),
+        "{said}"
+    );
+
+    // Aimed at the runner, its signed requests are refused before they are served.
+    let device = laptop.device();
+    for (id, method, deed) in [
+        ("1", "remote.invite", "invite a device"),
+        ("2", "remote.change", "add, remove or rename a device"),
+        ("3", "remote.refuse", "refuse a device"),
+    ] {
+        let answer = laptop.raw(&signed(&device, id, "server", method, json!({})));
+        assert_eq!(
+            error_of(&answer),
+            format!("refused: laptop may only view: a controller or a runner may {deed}"),
+            "{method}"
+        );
+    }
+    assert!(!server.log().contains(SERVED), "{}", server.log());
+    pc.wait_for_member("server", true);
+    server.wait_for_member("laptop", true);
+}
+
+#[test]
+fn a_runner_s_capabilities_reach_its_peers_and_follow_a_change() {
+    let (_hub, pc, server) = pc_and_server(runner_user());
+    pc.wait_until("server offers no project, and no agent", |seen| {
+        let offers = offers_of(seen, "server");
+        offers["projects"] == json!([]) && !agents_of(offers).contains(&"claude".to_owned())
+    });
+    assert_eq!(
+        pc.remote()["machines"][0]["role"],
+        "runner",
+        "{}",
+        pc.remote()
+    );
+
+    // A project registered: its slots are its cap.
+    app_on(&server.user);
+    pc.wait_until("server offers app with 12 slots", |seen| {
+        slots_of(offers_of(seen, "server"), "app") == Some(12)
+    });
+    // Its cap changed.
+    let file = server.user.project_file("app");
+    let text = std::fs::read_to_string(&file).unwrap();
+    assert!(text.contains("max_children = 12"), "{text}");
+    std::fs::write(&file, text.replace("max_children = 12", "max_children = 3")).unwrap();
+    pc.wait_until("server offers app with 3 slots", |seen| {
+        slots_of(offers_of(seen, "server"), "app") == Some(3)
+    });
+    // Claude signed in, then out.
+    let login = sign_in(&server.user, "{}");
+    pc.wait_until("server offers claude", |seen| {
+        agents_of(offers_of(seen, "server")).contains(&"claude".to_owned())
+    });
+    std::fs::remove_file(login).unwrap();
+    pc.wait_until("server no longer offers claude", |seen| {
+        !agents_of(offers_of(seen, "server")).contains(&"claude".to_owned())
+    });
+    // The other way too: pc is a runner, and the server sees what it offers.
+    server.wait_until("pc offers no project", |seen| {
+        offers_of(seen, "pc")["projects"] == json!([])
+    });
+}
+
+#[test]
+fn a_login_file_is_checked_for_presence_and_never_read() {
+    use std::os::unix::fs::PermissionsExt;
+    let (_hub, pc, server) = pc_and_server(runner_user());
+    // A login no one may read, holding what a token would look like: its presence is enough.
+    let marker = "sk-invented-login-0123456789";
+    let login = sign_in(&server.user, &format!("{{\"token\": \"{marker}\"}}"));
+    std::fs::set_permissions(&login, std::fs::Permissions::from_mode(0o000)).unwrap();
+    pc.wait_until("server offers claude", |seen| {
+        agents_of(offers_of(seen, "server")).contains(&"claude".to_owned())
+    });
+
+    let seen = pc.remote().to_string();
+    assert!(!seen.contains(marker), "{seen}");
+    for log in [server.log(), pc.log()] {
+        assert!(!log.contains(marker), "{log}");
+    }
+    // Left as it was.
+    let metadata = std::fs::metadata(&login).unwrap();
+    assert_eq!(metadata.permissions().mode() & 0o777, 0);
+    std::fs::set_permissions(&login, std::fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(
+        std::fs::read_to_string(&login).unwrap().contains(marker),
+        "the login file was changed"
+    );
+}
+
+#[test]
+fn only_runners_with_the_agent_signed_in_and_a_free_slot_are_offered() {
+    let (_hub, pc, server, laptop) =
+        pc_server_and(runner_user(), runner_user(), "laptop", "runner");
+    // Both have the project; only the server's Claude is signed in.
+    app_on(&server.user);
+    app_on(&laptop.user);
+    sign_in(&server.user, "{}");
+    pc.wait_until("both offer app, the server Claude", |seen| {
+        slots_of(offers_of(seen, "server"), "app").is_some()
+            && slots_of(offers_of(seen, "laptop"), "app").is_some()
+            && agents_of(offers_of(seen, "server")).contains(&"claude".to_owned())
+    });
+
+    let offered = |params: Value| -> Value {
+        pc.user.call("remote.machines", params).unwrap()["offered"].clone()
+    };
+    assert_eq!(
+        offered(json!({"project": "app", "agent": "claude"})),
+        json!(["server"])
+    );
+    // No agent named: any signed in, and the laptop has none.
+    assert_eq!(offered(json!({"project": "app"})), json!(["server"]));
+    assert_eq!(
+        offered(json!({"project": "shop", "agent": "claude"})),
+        json!([])
+    );
+
+    // The command line lists the runners with what they offer, and only those that take it.
+    let listed = pc.user.run(&[
+        "remote",
+        "members",
+        "--runners",
+        "--project",
+        "app",
+        "--agent",
+        "claude",
+    ]);
+    assert!(
+        listed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&listed.stderr)
+    );
+    let text = String::from_utf8_lossy(&listed.stdout);
+    assert!(text.contains("server"), "{text}");
+    assert!(!text.contains("laptop"), "{text}");
+    let all = pc.user.run(&["remote", "members", "--runners"]);
+    let text = String::from_utf8_lossy(&all.stdout);
+    assert!(
+        text.contains("server") && text.contains("laptop") && text.contains("app"),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_launch_aimed_at_a_controller_is_refused() {
+    let (_hub, pc, _server, tablet) =
+        pc_server_and(User::new(), User::new(), "tablet", "controller");
+    const NO_AGENT: &str = "refused: tablet is a controller: it runs no agent, a runner does";
+
+    // Refused by the machine that would carry it.
+    let answer = pc.raw(&signed(
+        &pc.device(),
+        "1",
+        "tablet",
+        "agent.start",
+        json!({"project": "app", "message": "go"}),
+    ));
+    assert_eq!(error_of(&answer), NO_AGENT);
+    let started = pc.on("tablet", &["agent", "start", "app", "go"]);
+    assert!(!started.status.success());
+    let said = String::from_utf8_lossy(&started.stderr);
+    assert!(said.contains(NO_AGENT), "{said}");
+
+    // And by the controller's own daemon, asked by its name.
+    let answer = tablet.raw(&signed(
+        &tablet.device(),
+        "2",
+        "tablet",
+        "agent.run",
+        json!({"project": "app", "message": "go"}),
+    ));
+    assert_eq!(error_of(&answer), NO_AGENT);
+    assert!(!tablet.log().contains(SERVED), "{}", tablet.log());
+}
