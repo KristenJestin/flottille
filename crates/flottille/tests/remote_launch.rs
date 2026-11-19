@@ -383,26 +383,15 @@ fn id_in(text: &str) -> String {
 
 /// The one agent of `machine` whose title is `title`, once there.
 fn titled(machine: &Machine, title: &str) -> Value {
-    let mut found = Value::Null;
-    eventually(&format!("an agent titled {title}"), || {
-        match machine
+    let find = || {
+        machine
             .agents()
             .into_iter()
             .find(|agent| agent["title"] == title)
-        {
-            Some(agent) => {
-                found = agent;
-                true
-            }
-            None => false,
-        }
-    });
-    // `eventually` takes a `Fn`: the agent is read once more.
-    machine
-        .agents()
-        .into_iter()
-        .find(|agent| agent["title"] == title)
-        .unwrap_or(found)
+    };
+    eventually(&format!("an agent titled {title}"), || find().is_some());
+    // The whole agent, as `agent.show` gives it: the list gives a summary.
+    machine.agent(find().unwrap()["id"].as_str().unwrap())
 }
 
 /// The folder of the agent's place on its machine.
@@ -522,7 +511,10 @@ fn without_machine_agent_launch_is_unchanged() {
     assert_eq!(folder_of(&child), pc.folder());
     // Nothing went to the server.
     assert!(server.agents().is_empty());
-    assert!(!server.log().contains("received"), "{}", server.log());
+    assert_eq!(
+        server.user.call("workspace.list", json!({})).unwrap()["workspaces"],
+        json!([])
+    );
 }
 
 #[test]
@@ -893,7 +885,7 @@ fn a_forged_launch_without_a_recorded_caller_is_refused() {
         &server,
         vec![
             // A launch that names no agent of the sender's.
-            MachineMessage::Launch(launch_ask("l1", "")),
+            MachineMessage::Launch(Box::new(launch_ask("l1", ""))),
             // Code for a launch this machine never recorded.
             MachineMessage::Git(Git::Offer(GitOffer {
                 transfer: "l2/0".into(),
@@ -1010,7 +1002,7 @@ fn a_machine_leaves_a_bounded_number_of_launches_waiting_for_their_code() {
         &key,
         &server,
         (0..5)
-            .map(|n| MachineMessage::Launch(launch_ask(&format!("w{n}"), root)))
+            .map(|n| MachineMessage::Launch(Box::new(launch_ask(&format!("w{n}"), root))))
             .collect(),
     );
 
