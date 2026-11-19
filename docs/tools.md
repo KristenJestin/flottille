@@ -1699,7 +1699,12 @@ Both are the same kind of session otherwise:
   fails and may be resumed, its sessions staying led by it), a compaction and a restart of the
   daemon end nothing. The window's confirmation lists the sessions that end with it, by title and
   project, each with the work its workspace holds that is not saved, read by `agent.ending`
-  (`docs/protocol.md`): one confirmation for the whole end.
+  (`docs/protocol.md`): one confirmation for the whole end. The card of an `agent_stop` the user
+  is asked about says the same, by the same read: one line for each led session that ends with
+  the session named (its title, its project, and what it holds that is not saved), so that the
+  user never allows an end without seeing everything that ends. The lead's role text tells a
+  pilot that its end ends its sessions and that one to keep is detached first
+  (`crates/flottille/roles/lead.md`, "When you end").
 
 A session launched before `kind` keeps its relation: one whose starter still followed it is led,
 the others are handed (a migration of the store sets it, and turns the following into the
