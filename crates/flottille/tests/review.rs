@@ -2045,7 +2045,7 @@ fn a_pull_request_is_reviewed_from_its_merge_base() {
         pulled.commits[2]
     );
     assert!(
-        user.git_output(&folder, &["symbolic-ref", "--quiet", "HEAD"])
+        user.git_output(&folder, &["branch", "--show-current"])
             .is_empty()
     );
     assert!(

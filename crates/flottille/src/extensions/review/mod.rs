@@ -4,6 +4,7 @@
 //! findings once; Flottille checks them, keeps them and delivers those that matter.
 
 use std::collections::BTreeSet;
+use std::path::PathBuf;
 use std::sync::{Arc, PoisonError};
 
 use flottille_core::Result;
@@ -21,6 +22,9 @@ use crate::git::Class;
 use crate::mcp::{Definition, Grant, Outcome};
 use crate::projects::Failure;
 use crate::providers;
+use pull_request::PullRequest;
+
+mod pull_request;
 
 /// The passes a review may run, in their order; the verifier comes after them.
 const PASSES: &[&str] = &["spec", "bugs", "standards", "security"];
@@ -203,7 +207,10 @@ pub const EXTENSION: Extension = Extension {
         settled_in INTEGER,
         UNIQUE (session, key)
     ) STRICT;
-    "],
+    ",
+    // A review of a pull request (#1091): the pull request (JSON {repository, slug, number, head,
+    // folder, place}) and the place it is read in. Its session is the caller, its workspace empty.
+    "ALTER TABLE ext_review_reviews ADD COLUMN pull_request TEXT;"],
     methods: Methods {
         prefix: "review",
         call,
@@ -256,13 +263,21 @@ const TOOL: Tool = Tool {
     definition: Definition {
         name: "review",
         title: "Review a change",
-        description: "A review of a session's change with fresh eyes (`docs/extensions.md`, \
-            \"Review\"). start, for a session: what the user's /review does. Start one only when \
-            the user asks for one, or when the project's instructions say to, never on your own. \
-            It reviews your own change from its base, or, with agent, the change of a session you \
-            lead (agent_launch led), in its workspace; the findings come later as a delivery \
-            [flottille:review] to the session reviewed, and you are told of them for one you \
-            lead; two rounds at most, the second reading what changed since the first. run_pass, for the pilot of a review: \
+        description: "A review of a change with fresh eyes (`docs/extensions.md`, \"Review\"): \
+            what a session built, or a pull request. Start one only when the user asks for one, \
+            or when the project's instructions say to, never on your own. Do not read a diff by \
+            hand to review it: this tool does it, with checks of its own. start has three forms. \
+            Your own change from its base, what the user's /review does: {\"action\": \"start\"}. The change of a session you \
+            lead (agent_launch led), in its workspace: {\"action\": \"start\", \"agent\": \
+            \"<session>\"}; two rounds at most, the second reading what changed since the first. A \
+            pull request of the project's forge, a colleague's or one already pushed, which \
+            Flottille fetches into a place of its own, read only: {\"action\": \"start\", \
+            \"pull_request\": 7}; with repository (its path in the project) when the project \
+            has several, and from, a commit of the pull request, to review only the commits \
+            after it: {\"action\": \"start\", \"pull_request\": 7, \"from\": \"<commit>\"}. The \
+            findings come later as a delivery [flottille:review]: to the session reviewed (and \
+            you are told of them for one you lead), or, for a pull request, to you. Nothing is \
+            posted on the forge: post what you choose with forge review. run_pass, for the pilot of a review: \
             run one pass as your child (pass spec, bugs, standards, security or verifier; brief, \
             what it should look at), each once. report, for the pilot: the findings, once \
             (summary; findings [{severity high|medium|low|info, confidence confirmed|plausible|\
@@ -289,6 +304,9 @@ fn tool_schema() -> Value {
     json!({"type": "object", "properties": {
         "action": {"type": "string", "enum": ["start", "run_pass", "report"]},
         "agent": {"type": "string"},
+        "pull_request": {"type": "integer", "minimum": 1},
+        "repository": {"type": "string"},
+        "from": {"type": "string"},
         "pass": {"type": "string", "enum": ["spec", "bugs", "standards", "security", "verifier"]},
         "brief": {"type": "string"},
         "summary": {"type": "string"},
@@ -331,6 +349,8 @@ struct Review {
     why: Option<String>,
     started_at: u64,
     ended_at: Option<u64>,
+    /// The pull request it reads, for a review of one; none for a workspace's change.
+    pull: Option<PullRequest>,
 }
 
 /// Where a repository's diff starts.
@@ -365,7 +385,7 @@ struct Snapshot {
 }
 
 const COLUMNS: &str = "id, project, session, workspace, pilot, round, spec, state, passes, files, \
-    diffs, before, changed, summary, why, started_at, ended_at";
+    diffs, before, changed, summary, why, started_at, ended_at, pull_request";
 
 fn row(row: &rusqlite::Row) -> rusqlite::Result<Review> {
     let json = |at: usize| -> rusqlite::Result<String> { row.get(at) };
@@ -387,6 +407,9 @@ fn row(row: &rusqlite::Row) -> rusqlite::Result<Review> {
         why: row.get(14)?,
         started_at: row.get(15)?,
         ended_at: row.get(16)?,
+        pull: row
+            .get::<_, Option<String>>(17)?
+            .and_then(|json| serde_json::from_str(&json).ok()),
     })
 }
 
@@ -673,7 +696,7 @@ async fn start(daemon: &Arc<Daemon>, session: &Agent) -> std::result::Result<Val
     };
     let of_session = |daemon: &Daemon| {
         read(daemon, |tables| {
-            reviews_where(tables, "session = ?1", &session.id)
+            reviews_where(tables, "session = ?1 AND pull_request IS NULL", &session.id)
         })
     };
     fail_orphans(daemon, &of_session(daemon)?)?;
@@ -695,6 +718,7 @@ async fn start(daemon: &Arc<Daemon>, session: &Agent) -> std::result::Result<Val
     let open = read(daemon, |tables| {
         Ok(findings_of(tables, &session.id)?
             .into_iter()
+            .filter(|finding| earlier.iter().any(|review| review.id == finding.review))
             .filter(|finding| finding.status == "open" && delivered(finding))
             .collect::<Vec<_>>())
     })?;
@@ -764,7 +788,6 @@ async fn start(daemon: &Arc<Daemon>, session: &Agent) -> std::result::Result<Val
         .filter(|pass| *pass != "spec" || spec.is_some())
         .map(str::to_owned)
         .collect();
-    let instructions = instructions_of(daemon, "pilot", None)?;
     let brief = pilot_brief(
         &workspace_name,
         round,
@@ -774,35 +797,94 @@ async fn start(daemon: &Arc<Daemon>, session: &Agent) -> std::result::Result<Val
         spec.as_ref(),
         &open,
     );
-    let slot = slot(daemon, &project, session, "pilot")?;
+    launch_pilot(
+        daemon,
+        &project,
+        session,
+        Launch {
+            workspace: workspace_name,
+            round,
+            spec: spec.as_ref().map(|spec| spec.id),
+            passes,
+            files,
+            diffs,
+            before,
+            brief,
+            pull: None,
+        },
+    )
+}
+
+/// What a review starts with, once its diff is known.
+struct Launch {
+    workspace: String,
+    round: u64,
+    spec: Option<u64>,
+    passes: Vec<String>,
+    files: Vec<String>,
+    diffs: Vec<Diff>,
+    before: Vec<Snapshot>,
+    brief: String,
+    /// The pull request it reads, whose place its agents work in.
+    pull: Option<PullRequest>,
+}
+
+/// Writes the review and launches its pilot, a child of `session`: the review is written before
+/// the pilot is, and goes with it if the launch is refused.
+fn launch_pilot(
+    daemon: &Arc<Daemon>,
+    project: &flottille_core::project::Project,
+    session: &Agent,
+    launch: Launch,
+) -> std::result::Result<Value, Failure> {
+    let Launch {
+        workspace,
+        round,
+        spec,
+        passes,
+        files,
+        diffs,
+        before,
+        brief,
+        pull,
+    } = launch;
+    let instructions = instructions_of(daemon, "pilot", None)?;
+    let slot = slot(daemon, project, session, "pilot")?;
+    let title = match &pull {
+        Some(pull) => format!("Review of pull request #{}", pull.number),
+        None => format!("Review, round {round}"),
+    };
+    let at = pull.as_ref().map(|pull| PathBuf::from(&pull.place));
     let mut id = 0;
     let pilot = super::launch(
         daemon,
         &EXTENSION,
         session,
         "pilot",
-        &format!("Review, round {round}"),
+        &title,
         &brief,
         instructions,
         slot,
+        at,
         |pilot| {
             id = in_space(daemon, |space| {
                 space.tables().execute(
                     "INSERT INTO ext_review_reviews (project, session, workspace, pilot, round, \
-                     spec, state, passes, files, diffs, before, started_at) \
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'running', ?7, ?8, ?9, ?10, ?11)",
+                     spec, state, passes, files, diffs, before, started_at, pull_request) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'running', ?7, ?8, ?9, ?10, ?11, ?12)",
                     params![
                         project.name,
                         session.id,
-                        workspace_name,
+                        workspace,
                         pilot.id,
                         round,
-                        spec.as_ref().map(|spec| spec.id),
+                        spec,
                         json!(passes).to_string(),
                         json!(files).to_string(),
                         json!(diffs).to_string(),
                         json!(before).to_string(),
                         now_ms(),
+                        pull.as_ref().map(|pull| json!(pull).to_string()),
                     ],
                 )?;
                 let id = space.tables().last_insert_rowid() as u64;
@@ -845,6 +927,95 @@ async fn start(daemon: &Arc<Daemon>, session: &Agent) -> std::result::Result<Val
     )
 }
 
+/// The review of a pull request the caller asked for, or why not: said before any agent starts.
+/// The pull request is read on its forge and fetched into a place of its own; the findings go to
+/// the caller, and nothing is posted.
+async fn start_pull(
+    daemon: &Arc<Daemon>,
+    caller: &Agent,
+    number: u64,
+    repository: Option<&str>,
+    from: Option<&str>,
+) -> std::result::Result<Value, Failure> {
+    let project = super::active(daemon, &EXTENSION, &caller.project)?;
+    if caller.parent.is_some() {
+        return Err(Failure::refused(
+            "a review of a pull request is asked by a session: this agent is a child",
+        ));
+    }
+    if caller.state.is_final() {
+        return Err(Failure::refused(format!(
+            "session {} ended: a review is delivered to a session that runs",
+            caller.id
+        )));
+    }
+    let Some(_starting) = Starting::take(&format!("{}#{number}", caller.id)) else {
+        return Err(Failure::refused(format!(
+            "a review of pull request #{number} runs already: its findings come as a delivery"
+        )));
+    };
+    let of_pull_requests = |daemon: &Daemon| {
+        read(daemon, |tables| {
+            reviews_where(
+                tables,
+                "session = ?1 AND pull_request IS NOT NULL",
+                &caller.id,
+            )
+        })
+    };
+    fail_orphans(daemon, &of_pull_requests(daemon)?)?;
+    if of_pull_requests(daemon)?.iter().any(|review| {
+        review.state == "running"
+            && review.pull.as_ref().is_some_and(|pull| {
+                pull.number == number && repository.is_none_or(|path| path == pull.repository)
+            })
+    }) {
+        return Err(Failure::refused(format!(
+            "a review of pull request #{number} runs already: its findings come as a delivery"
+        )));
+    }
+    let prepared = pull_request::prepare(daemon, &project, number, repository, from).await?;
+    let (folder, place) = (
+        PathBuf::from(&prepared.pull.folder),
+        PathBuf::from(&prepared.pull.place),
+    );
+    let enabled = super::value(daemon, &EXTENSION, &project, "passes");
+    let started = match enabled {
+        Err(failure) => Err(failure),
+        Ok(enabled) => {
+            let passes: Vec<String> = enabled
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .filter(|pass| *pass != "spec")
+                .map(str::to_owned)
+                .collect();
+            let brief = pull_brief(&prepared, &passes);
+            launch_pilot(
+                daemon,
+                &project,
+                caller,
+                Launch {
+                    workspace: String::new(),
+                    round: 1,
+                    spec: None,
+                    passes,
+                    files: prepared.files.clone(),
+                    diffs: vec![prepared.diff.clone()],
+                    before: vec![prepared.before.clone()],
+                    brief,
+                    pull: Some(prepared.pull.clone()),
+                },
+            )
+        }
+    };
+    if started.is_err() {
+        pull_request::remove(&folder, &place).await;
+    }
+    started
+}
+
 async fn git_line(folder: &std::path::Path, args: &[&str]) -> Option<String> {
     crate::git::output(folder, args, Class::Read)
         .await
@@ -874,6 +1045,25 @@ async fn snapshot(path: &str, folder: &std::path::Path) -> Snapshot {
         .await
         .unwrap_or_default(),
     }
+}
+
+/// At the daemon's start: the reviews of a pull request whose pilot is gone are failed, and every
+/// place no running review holds is removed, whatever left it (a daemon killed between making a
+/// place and ending its review).
+pub async fn close_left_at_start(daemon: &Daemon) {
+    let of_pull_requests = || {
+        read(daemon, |tables| {
+            reviews_where(tables, "pull_request IS NOT NULL AND 1 = ?1", &1)
+        })
+        .unwrap_or_default()
+    };
+    let _ = fail_orphans(daemon, &of_pull_requests());
+    let keep: Vec<String> = of_pull_requests()
+        .into_iter()
+        .filter(|review| review.state == "running")
+        .filter_map(|review| review.pull.map(|pull| pull.place))
+        .collect();
+    pull_request::sweep(daemon, &keep).await;
 }
 
 /// The model an agent of the review runs on: its slot in the project or in Review's tab, else
@@ -1019,6 +1209,29 @@ fn pilot_brief(
     secrets::mask(&text, &env)
 }
 
+/// The pilot's first message for a pull request: what it reads, and what it does not do.
+fn pull_brief(prepared: &pull_request::Prepared, passes: &[String]) -> String {
+    let pull = &prepared.pull;
+    let mut text = format!(
+        "Review of pull request #{} of {}, in a copy of its head ({}) that holds nothing else.\n\n{}",
+        pull.number,
+        pull.slug,
+        &pull.head[..pull.head.len().min(12)],
+        diff_said(std::slice::from_ref(&prepared.diff), &prepared.files)
+    );
+    text.push_str(
+        "\n\nThe pull request develops no spec: the spec pass is skipped. Nothing is posted on \
+         the forge: your findings are delivered to the session that asked for the review, which \
+         posts what it chooses.",
+    );
+    text.push_str(&format!(
+        "\n\nThe passes you may run, each once: {}; then {VERIFIER} on the candidates.",
+        passes.join(", ")
+    ));
+    let env = std::env::vars_os().collect();
+    secrets::mask(&text, &env)
+}
+
 fn finding_line(finding: &Finding) -> String {
     let place = match (&finding.file, &finding.lines) {
         (Some(file), Some(lines)) => format!(" at {file}:{lines}"),
@@ -1115,6 +1328,9 @@ fn review_json(daemon: &Daemon, review: &Review, findings: &[Finding]) -> Value 
         "project": review.project,
         "session": review.session,
         "workspace": review.workspace,
+        "pull_request": review.pull.as_ref().map(|pull| json!({
+            "repository": pull.repository, "slug": pull.slug, "number": pull.number,
+            "head": pull.head})),
         "pilot": review.pilot,
         "round": review.round,
         "spec": review.spec,
@@ -1311,7 +1527,22 @@ fn agent_ended(daemon: &Arc<Daemon>, data: &Value) {
         Ok((true, Some(event)))
     })
     .unwrap_or(false);
-    if failed {
+    if let Some(pull) = &review.pull {
+        let (folder, place) = (PathBuf::from(&pull.folder), PathBuf::from(&pull.place));
+        tokio::spawn(async move { pull_request::remove(&folder, &place).await });
+    }
+    if failed && let Some(pull) = &review.pull {
+        super::tell(
+            daemon,
+            &EXTENSION,
+            &review.session,
+            &format!(
+                "The review of pull request #{} ended without its findings: {reason}. Ask for it \
+                 again with the review tool.",
+                pull.number
+            ),
+        );
+    } else if failed {
         super::tell(
             daemon,
             &EXTENSION,
@@ -1341,6 +1572,15 @@ struct ToolCall {
     /// With `start`: the session the caller leads whose change to review, else its own.
     #[serde(default)]
     agent: Option<String>,
+    /// With `start`: the number of a pull request of the project's forge to review.
+    #[serde(default)]
+    pull_request: Option<u64>,
+    /// With `pull_request`: the repository of the project it is on.
+    #[serde(default)]
+    repository: Option<String>,
+    /// With `pull_request`: a commit of it, the review reading what comes after.
+    #[serde(default)]
+    from: Option<String>,
     #[serde(default)]
     pass: Option<String>,
     #[serde(default)]
@@ -1392,7 +1632,51 @@ fn tool_call(daemon: &Arc<Daemon>, grant: &Grant, args: Value) -> super::Called 
             Ok(Some(caller)) => caller,
             _ => return Outcome::Failed(format!("there is no agent {agent}")),
         };
+        if asked.action != "start"
+            && (asked.pull_request.is_some() || asked.repository.is_some() || asked.from.is_some())
+        {
+            return Outcome::Refused(
+                "refused: review: pull_request, repository and from are for start".into(),
+            );
+        }
+        if asked.pull_request.is_none() && (asked.repository.is_some() || asked.from.is_some()) {
+            return Outcome::Refused(
+                "refused: review: repository and from go with pull_request, the pull request to \
+                 review"
+                    .into(),
+            );
+        }
+        if asked.pull_request.is_some() && asked.agent.is_some() {
+            return Outcome::Refused(
+                "refused: review: agent and pull_request are exclusive: a pull request is \
+                 reviewed for you, a session's change for that session"
+                    .into(),
+            );
+        }
         let done = match asked.action.as_str() {
+            "start" if asked.pull_request.is_some() => {
+                let number = asked.pull_request.unwrap_or_default();
+                start_pull(
+                    &daemon,
+                    &caller,
+                    number,
+                    asked.repository.as_deref(),
+                    asked.from.as_deref(),
+                )
+                .await
+                .map(|started| {
+                    format!(
+                        "Started the review of pull request #{number}: review {}, its pilot \
+                         agent {}. It is not yours to steer: the agent_* tools do not reach it, \
+                         and its findings come to you as [flottille:review] once it reports; \
+                         nothing is posted on the forge, forge review posts what you choose. Go \
+                         on, or end your turn.",
+                        started["review"],
+                        started["pilot"].as_str().unwrap_or_default()
+                    )
+                })
+                .map_err(|failure| failure.message)
+            }
             "start" => match asked.agent {
                 None => start(&daemon, &caller)
                     .await
@@ -1544,6 +1828,7 @@ async fn run_pass(
         &text,
         instructions,
         slot,
+        review.pull.as_ref().map(|pull| PathBuf::from(&pull.place)),
         |child| {
             in_space(daemon, |space| {
                 space.tables().execute(
@@ -1776,6 +2061,9 @@ async fn report(
     for pass in crate::tree::descendants(daemon, &pilot.id) {
         crate::tree::stop_tree(daemon, &pass.id, "its review reported");
     }
+    if let Some(pull) = &review.pull {
+        pull_request::remove(&PathBuf::from(&pull.folder), &PathBuf::from(&pull.place)).await;
+    }
     if off {
         return Ok(
             "Review was turned off meanwhile: your report is not applied. End your turn.".into(),
@@ -1818,6 +2106,10 @@ async fn report(
 /// The lead of the reviewed session, when it has one, is told what happened to its review, as it is
 /// told what happens to the sessions it leads; `said` is given how the session is named.
 fn tell_lead(daemon: &Arc<Daemon>, review: &Review, said: impl FnOnce(&str) -> String) {
+    // A pull request's findings go to the one who asked: it is no session's change.
+    if review.pull.is_some() {
+        return;
+    }
     let Some(session) = daemon
         .read(|store| store.agent(&review.session))
         .ok()
@@ -1930,12 +2222,20 @@ fn delivery(
                 .filter(move |f| f.severity == *severity && delivered(f))
         })
         .collect();
-    let mut text = format!(
-        "The review of your change, round {} of {ROUNDS}, is done: {} finding{}.",
-        review.round,
-        shown.len(),
-        if shown.len() == 1 { "" } else { "s" }
-    );
+    let plural = if shown.len() == 1 { "" } else { "s" };
+    let mut text = match &review.pull {
+        Some(pull) => format!(
+            "The review of pull request #{} of {} is done: {} finding{plural}.",
+            pull.number,
+            pull.slug,
+            shown.len()
+        ),
+        None => format!(
+            "The review of your change, round {} of {ROUNDS}, is done: {} finding{plural}.",
+            review.round,
+            shown.len()
+        ),
+    };
     if let Some(summary) = summary.filter(|s| !s.trim().is_empty()) {
         text.push_str(&format!("\n\n{summary}"));
     }
@@ -1949,10 +2249,23 @@ fn delivery(
         }
     }
     if let Some(changed) = changed {
-        text.push_str(&format!(
-            "\n\nThe workspace changed during the review, which modifies nothing: {changed}. \
-             Look at it before you go on."
-        ));
+        text.push_str(&match review.pull {
+            Some(_) => format!(
+                "\n\nThe copy of the pull request changed during the review, which modifies \
+                 nothing: {changed}. Read the findings with that in mind."
+            ),
+            None => format!(
+                "\n\nThe workspace changed during the review, which modifies nothing: {changed}. \
+                 Look at it before you go on."
+            ),
+        });
+    }
+    if review.pull.is_some() {
+        text.push_str(
+            "\n\nNothing was posted on the forge, and findings block nothing: post what you \
+             agree with through forge review, or tell the user.",
+        );
+        return text;
     }
     text.push_str("\n\nFindings block nothing: fix what you agree with, say why for the others. ");
     if review.round < ROUNDS {

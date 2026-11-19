@@ -885,6 +885,8 @@ pub struct Launched {
     pub kind: &'static str,
     /// The extension's text, after the role's: what it is and what it may do.
     pub instructions: String,
+    /// The folder it works in when that is not its parent's place: a pull request's copy.
+    pub at: Option<std::path::PathBuf>,
 }
 
 /// Writes a new agent, its instructions and tools frozen in it; nothing is sent to it yet.
@@ -899,6 +901,15 @@ pub fn create(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent
 pub fn made(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent, Failure> {
     crate::projects::refuse_removing(daemon, &project.name)?;
     let (place, folder, repositories) = match &new.workspace {
+        // An extension's agent that reads a place of the extension's own (a pull request's copy).
+        None if new.launched.as_ref().is_some_and(|l| l.at.is_some()) => {
+            let at = new.launched.as_ref().and_then(|l| l.at.clone()).unwrap();
+            (
+                "the copy of a pull request".to_owned(),
+                at.clone(),
+                vec![(".".to_owned(), at.clone(), at)],
+            )
+        }
         None => {
             let repositories: Vec<_> = project
                 .repositories

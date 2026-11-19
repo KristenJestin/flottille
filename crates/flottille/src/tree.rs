@@ -646,6 +646,7 @@ pub fn launch_for_extension(
     brief: &str,
     instructions: String,
     provider: providers::Asked,
+    at: Option<std::path::PathBuf>,
     before: impl FnOnce(&Agent) -> Result<(), String>,
 ) -> Result<Agent, Failure> {
     let launcher = crate::extensions::launched(daemon, &parent.id);
@@ -685,7 +686,10 @@ pub fn launch_for_extension(
         &project,
         New {
             id: None,
-            workspace: parent.workspace.clone(),
+            workspace: match at {
+                Some(_) => None,
+                None => parent.workspace.clone(),
+            },
             preparing: false,
             role: &roles::LAUNCHED,
             parent: Some((parent.id.clone(), parent.depth)),
@@ -701,6 +705,7 @@ pub fn launch_for_extension(
                 extension,
                 kind,
                 instructions,
+                at,
             }),
         },
     )?;
