@@ -4723,11 +4723,13 @@ fn the_suite_runs_only_when_the_decision_does_not_say_otherwise() {
 /// pull request's one commit, whose description is `body`.
 fn selected_tests(base: &[&str], changed: &[&str], deleted: &[&str], body: &str) -> String {
     let repo = Repo::new();
+    // A file is `path`, or `path::text` when the text it holds matters.
     let write = |paths: &[&str], content: &str| {
         for path in paths {
+            let (path, text) = path.split_once("::").unwrap_or((path, content));
             let file = repo.dir.path().join(path);
             std::fs::create_dir_all(file.parent().unwrap()).unwrap();
-            std::fs::write(&file, content).unwrap();
+            std::fs::write(&file, text).unwrap();
         }
     };
     write(base, "base");
@@ -4922,6 +4924,31 @@ fn the_unit_tests_do_not_run_beside_a_binary_nor_for_a_big_crate_nor_for_a_crate
     ] {
         assert_eq!(selected_tests(&base, &[path], &[], ""), "", "{path}");
     }
+}
+
+#[test]
+fn a_changed_workflow_or_tool_runs_the_tests_that_name_it() {
+    // The tests that read ci.yml or run package.sh are the ones to judge a change of them.
+    let base = [
+        "crates/flottille/tests/release.rs::reads .github/workflows/ci.yml and tools/package.sh",
+        "crates/flottille-hub/tests/publish.rs::reads .github/workflows/ci.yml",
+        "crates/flottille/tests/grouped/main.rs::runs tools/package.sh",
+        "crates/flottille/tests/other.rs::says nothing of them",
+    ];
+    assert_eq!(
+        selected_tests(&base, &[".github/workflows/ci.yml"], &[], ""),
+        "--test publish --test release"
+    );
+    assert_eq!(
+        selected_tests(&base, &["tools/package.sh"], &[], ""),
+        "--test grouped --test release"
+    );
+    // No test names it, and a file of the docs is no workflow: nothing is selected.
+    assert_eq!(
+        selected_tests(&base, &[".github/scripts/none.sh"], &[], ""),
+        ""
+    );
+    assert_eq!(selected_tests(&base, &["docs/a.md"], &[], ""), "");
 }
 
 #[test]
