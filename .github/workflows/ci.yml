@@ -90,8 +90,14 @@ jobs:
   # suite then runs, as if it had said so.
   changes:
     runs-on: ubuntu-latest
+    # It runs a script of the pull request's own code: it can only read.
+    permissions:
+      contents: read
+      pull-requests: read
     outputs:
       rust: ${{ steps.decide.outputs.rust }}
+      suite: ${{ steps.tests.outputs.suite }}
+      selected: ${{ steps.tests.outputs.selected }}
       hub: ${{ steps.hub.outputs.hub }}
       alpha: ${{ steps.alpha.outputs.alpha }}
     steps:
@@ -145,6 +151,30 @@ jobs:
           if [ -z "$files" ]; then rust=true; fi
           if [ "$rust" = false ]; then echo "::notice::Only apps/android/ and site/ changed: the Rust suite does not run."; fi
           echo "rust=$rust" >> "$GITHUB_OUTPUT"
+      # A pull request runs a fast check, not the whole suite (docs/releases.md, "What CI checks"):
+      # `check`, and the tests it touches (`.github/scripts/pr-tests.sh`), which `test-selected`
+      # runs. Only this step says `suite=false`: a failure of it says nothing, and the whole suite
+      # runs, as it does on every push.
+      - name: Which tests does this pull request run
+        id: tests
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          EVENT_BODY: ${{ github.event.pull_request.body }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          # The description as it is now, not as it was when the run started: running the jobs
+          # again picks up a `Tests:` line written after the push. The event's is the fallback.
+          BODY=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" --jq '.body // ""') || BODY=$EVENT_BODY
+          export BODY
+          selected=$(.github/scripts/pr-tests.sh)
+          echo "::notice::Tests run by this pull request: ${selected:-none}."
+          {
+            echo "suite=false"
+            echo "selected=$selected"
+          } >> "$GITHUB_OUTPUT"
       # The hub's jobs (`hub`) are not in every pull request's CI: only in one that changes the hub,
       # what it is built from, or the files that build and publish it, or that publishes an alpha
       # (`alpha`), which holds the hub's archives. A push always runs them: a push publishes. A
@@ -183,11 +213,14 @@ jobs:
   # No real agent, no real configuration: the suites run against a fake ACP agent and throwaway
   # repositories (see AGENTS.md, Testing).
   #
-  # The suite is built once and run on twelve runners at once: `build-tests` compiles every test
-  # and packs them in a nextest archive, the matrix `test` downloads it and runs a twelfth of the
-  # tests each (`cargo nextest run --archive-file … --partition count:k/12`), never compiling.
-  # `doc-tests` (nextest does not run doc tests) and `check` (formatting and clippy) run beside
-  # them, and `verify`, the required check, reports what they all said.
+  # A push (dev, main, a stable or next line, a tag) runs the whole suite, built once and run on
+  # twelve runners at once: `build-tests` compiles every test and packs them in a nextest archive,
+  # the matrix `test` downloads it and runs a twelfth of the tests each
+  # (`cargo nextest run --archive-file … --partition count:k/12`), never compiling. `doc-tests`
+  # (nextest does not run doc tests) runs beside them. A pull request runs `test-selected`
+  # instead: the tests it touches only. `check` (formatting and clippy) runs on both, and `verify`,
+  # the required check, reports what they all said. Every job that compiles links with mold
+  # (`setup-mold` makes it the default `ld`: no flag changes, so the caches stay valid).
   check:
     needs: [verified-on-dev, changes]
     # `verified-on-dev` is skipped off main: `!cancelled()` keeps that from skipping this job.
@@ -200,6 +233,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: rustup component add rustfmt clippy
+      - uses: rui314/setup-mold@v1
       - uses: Swatinem/rust-cache@v2
         with:
           # The key does not follow Cargo.toml: bump this one when a profile changes, or the
@@ -224,12 +258,18 @@ jobs:
 
   build-tests:
     needs: [verified-on-dev, changes]
-    if: ${{ !cancelled() && needs.verified-on-dev.outputs.verified != 'true' && needs.changes.outputs.rust != 'false' }}
+    # `!= 'false'`: only a pull request says `suite=false`, and a step of it that failed says nothing.
+    if: ${{ !cancelled() && needs.verified-on-dev.outputs.verified != 'true' && needs.changes.outputs.rust != 'false' && needs.changes.outputs.suite != 'false' }}
     runs-on: ubuntu-latest
     env:
       CARGO_INCREMENTAL: 0
+      # The archive is most of this job: line tables keep a panic's file and line, and are a
+      # smaller thing to pack, upload and download twelve times. The same on every job that shares
+      # this cache (the key follows the environment).
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@v4
+      - uses: rui314/setup-mold@v1
       - uses: Swatinem/rust-cache@v2
         with:
           prefix-key: v1-rust
@@ -312,16 +352,76 @@ jobs:
         run: df -h /
         continue-on-error: true
 
+  # A pull request's tests: the binaries it touches, and those its description lists
+  # (`.github/scripts/pr-tests.sh`), built and run here, from the cache the pushes to dev write
+  # (this job only reads it). The fakes the tests spawn are built first, as AGENTS.md says to for a
+  # test binary run alone. Skipped when the pull request touches none.
+  test-selected:
+    needs: [verified-on-dev, changes]
+    if: ${{ !cancelled() && needs.verified-on-dev.outputs.verified != 'true' && needs.changes.outputs.rust != 'false' && needs.changes.outputs.suite == 'false' && needs.changes.outputs.selected != '' }}
+    runs-on: ubuntu-latest
+    env:
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      # Names of test binaries and crates, nothing else (the script keeps only those).
+      SELECTED: ${{ needs.changes.outputs.selected }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rui314/setup-mold@v1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v1-rust
+          shared-key: verify
+          save-if: false
+      - name: Have the window's system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libfontconfig-dev libfreetype-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libxcb1-dev libvulkan-dev
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.152
+      - name: Build the fakes the tests spawn
+        run: |
+          fakes=()
+          for crate in crates/flottille-fake-*; do fakes+=(-p "${crate#crates/}"); done
+          cargo build --locked "${fakes[@]}"
+      # The profile `ci` retries a failed test twice, as on the partitions: a flaky one is listed.
+      - run: cargo nextest run --locked --profile ci $SELECTED
+      - name: Flaky tests
+        if: ${{ !cancelled() }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/junit"
+          report=target/nextest/ci/junit.xml
+          if [ ! -f "$report" ]; then
+            echo "::warning::No JUnit report: the flaky tests are not known."
+            exit 0
+          fi
+          cp "$report" "$RUNNER_TEMP/junit/junit-selected.xml"
+          .github/scripts/flaky-report.sh "$report" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: junit-selected
+          path: ${{ runner.temp }}/junit
+          if-no-files-found: ignore
+          retention-days: 1
+      - name: Disk left
+        if: always()
+        run: df -h /
+        continue-on-error: true
+
   # nextest does not run doc tests: this job does, once, beside the partitions. It builds the
   # libraries itself, from the cache `build-tests` writes (this one only reads it).
   doc-tests:
     needs: [verified-on-dev, changes]
-    if: ${{ !cancelled() && needs.verified-on-dev.outputs.verified != 'true' && needs.changes.outputs.rust != 'false' }}
+    if: ${{ !cancelled() && needs.verified-on-dev.outputs.verified != 'true' && needs.changes.outputs.rust != 'false' && needs.changes.outputs.suite != 'false' }}
     runs-on: ubuntu-latest
     env:
       CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@v4
+      - uses: rui314/setup-mold@v1
       - uses: Swatinem/rust-cache@v2
         with:
           prefix-key: v1-rust
@@ -337,7 +437,7 @@ jobs:
   # partitions (failed, cancelled, never started), so that it never waits on a job skipped.
   # `check` and the tests skipped are a pass only when `changes` said the suite is not needed.
   verify:
-    needs: [verified-on-dev, changes, check, build-tests, doc-tests, test, hub]
+    needs: [verified-on-dev, changes, check, build-tests, doc-tests, test, test-selected, hub]
     # Skipped only when this commit passed it on dev (on main, see `verified-on-dev`).
     if: ${{ always() && needs.verified-on-dev.outputs.verified != 'true' }}
     runs-on: ubuntu-latest
@@ -349,6 +449,8 @@ jobs:
           BUILD: ${{ needs.build-tests.result }}
           DOC: ${{ needs.doc-tests.result }}
           TEST: ${{ needs.test.result }}
+          SELECTED: ${{ needs.test-selected.result }}
+          SUITE: ${{ needs.changes.outputs.suite }}
           RUST: ${{ needs.changes.outputs.rust }}
           HUB: ${{ needs.hub.result }}
         run: |
@@ -358,11 +460,19 @@ jobs:
             echo "::error::hub: $HUB."
             exit 1
           fi
-          if [ "$CHECK" = success ] && [ "$BUILD" = success ] && [ "$DOC" = success ] && [ "$TEST" = success ]; then exit 0; fi
-          if [ "$RUST" = false ] && [ "$CHECK" = skipped ] && [ "$BUILD" = skipped ] && [ "$DOC" = skipped ] && [ "$TEST" = skipped ]; then
+          if [ "$RUST" = false ] && [ "$CHECK" = skipped ] && [ "$BUILD" = skipped ] && [ "$DOC" = skipped ] && [ "$TEST" = skipped ] && [ "${SELECTED:-skipped}" = skipped ]; then
             echo "::notice::The Rust suite was not needed for this change."
             exit 0
           fi
+          # A pull request (`suite=false`, said by `changes` alone) runs `check` and the tests it
+          # touches: skipped is a pass for those only when it touches none. Whatever else it says
+          # is the whole suite's, which must have passed.
+          if [ "$SUITE" = false ]; then
+            if [ "$CHECK" = success ] && { [ "$SELECTED" = success ] || [ "$SELECTED" = skipped ]; }; then exit 0; fi
+            echo "::error::check: $CHECK, selected tests: $SELECTED."
+            exit 1
+          fi
+          if [ "$CHECK" = success ] && [ "$BUILD" = success ] && [ "$DOC" = success ] && [ "$TEST" = success ]; then exit 0; fi
           echo "::error::check: $CHECK, build-tests: $BUILD, doc-tests: $DOC, test: $TEST, rust suite needed: ${RUST:-unknown}."
           exit 1
       # The flaky tests of every partition, as the summary of the run: a test that passed on a
@@ -500,6 +610,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y pkg-config libfontconfig-dev libfreetype-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libxcb1-dev libvulkan-dev
       - if: steps.version.outputs.skip != 'true'
+        uses: rui314/setup-mold@v1
+      - if: steps.version.outputs.skip != 'true'
         uses: Swatinem/rust-cache@v2
       - name: Build
         if: steps.version.outputs.skip != 'true'
@@ -584,6 +696,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - uses: rui314/setup-mold@v1
       - name: Have the musl and the cross compilers, and the target
         run: |
           sudo apt-get update
