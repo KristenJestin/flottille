@@ -333,6 +333,55 @@ pub async fn judge(
         return judged(judgement, None, None);
     }
     let prompt = prompt(daemon, grant, tool, args, reasons);
+    answered(daemon, judge, prompt, &grant.place, started).await
+}
+
+/// The judgement of a launch another machine asked for (`docs/remote.md`, "Starting a session on
+/// another machine"), in `place`, the project's here: the call as it is recorded, its words, the
+/// brief whole. Nothing of the caller's conversation, which is on the other machine.
+pub async fn judge_launch(
+    daemon: &Arc<Daemon>,
+    judge: &Judge,
+    place: &Place,
+    args: &Value,
+    reasons: &[String],
+) -> Judgement {
+    let started = std::time::Instant::now();
+    let prompt = compose(
+        place,
+        "agent_launch",
+        args,
+        reasons,
+        &[],
+        None,
+        &[],
+        &[],
+        None,
+    );
+    answered(daemon, judge, prompt, place, started)
+        .await
+        .judgement
+}
+
+/// What the judge answered `prompt`, within its time.
+async fn answered(
+    daemon: &Arc<Daemon>,
+    judge: &Judge,
+    prompt: String,
+    place: &Place,
+    started: std::time::Instant,
+) -> Judged {
+    let failed = |why: String| Judgement {
+        by: judge.who(),
+        verdict: "failed".into(),
+        reason: format!("the judge could not decide: {why}"),
+    };
+    let judged = |judgement, input, answer| Judged {
+        judgement,
+        input,
+        answer,
+        duration: started.elapsed(),
+    };
     let answer = match tokio::time::timeout(timeout(), ask(daemon, judge, &prompt)).await {
         Err(_) => {
             let judgement = failed(format!(
@@ -348,7 +397,7 @@ pub async fn judge(
         Some((verdict, reason)) => Judgement {
             by: judge.who(),
             verdict,
-            reason: mcp::masked(&reason, &grant.place),
+            reason: mcp::masked(&reason, place),
         },
         None => failed("its answer was not the JSON verdict it is asked for".into()),
     };

@@ -38,8 +38,9 @@ pub(crate) const MOST_BYTES: u64 = 2 << 30;
 /// How long a bundle being read may go without a frame before it is given up.
 const FRAME_WAIT: Duration = Duration::from_secs(60);
 
-/// Whether code travels between this machine and the others: only in a test build that asks for
-/// it, until a travel is tied to a launch this machine's gate accepted (#816).
+/// Whether code travels between this machine and the others without a launch: only in a test
+/// build that asks for it (`test.travel`). Otherwise code is taken only for a launch this
+/// machine's gate did not refuse (`launches`), and sent only by a launch.
 pub fn on() -> bool {
     cfg!(debug_assertions) && std::env::var_os("FLOTTILLE_TEST_TRAVEL").is_some()
 }
@@ -204,7 +205,7 @@ async fn send_place<'a>(
         let asked = GitRepository {
             project: project.to_owned(),
             repository: repository.clone(),
-            launch: None,
+            launch: Some(launch.to_owned()),
         };
         let has = ask(link, Git::Has(asked)).await?;
         let has: Vec<String> = serde_json::from_value(has["commits"].clone()).unwrap_or_default();
@@ -362,18 +363,11 @@ async fn ask(link: &Link, git: Git) -> Result<Value, String> {
         .map_err(|error| error.to_string())
 }
 
-/// A `git` message another machine sent on `link`, served once code travels in this build and
-/// that machine is still one of the user's: what sends code to run here (`Has`, `Offer`,
-/// `Place`) only from a runner's or a controller's machine, one thing at a time.
+/// A `git` message another machine sent on `link`, served while that machine is still one of
+/// the user's: what sends code here (`Has`, `Offer`, `Place`) only for a launch this machine's
+/// gate did not refuse (or in a test build that travels without one), from a runner's or a
+/// controller's machine, one thing at a time.
 pub(crate) async fn serve(remote: Arc<Remote>, link: Link, received: Received, git: Git) {
-    if !on() {
-        received.answer(Err(
-            "this machine takes no code from another yet: code travels only with a launch its \
-             gate accepted"
-                .to_owned(),
-        ));
-        return;
-    }
     let from = link.peer();
     let Some(name) = remote.name_of(&from) else {
         received.answer(Err("it was removed from the member list".to_owned()));
@@ -385,6 +379,29 @@ pub(crate) async fn serve(remote: Arc<Remote>, link: Link, received: Received, g
     };
     if let Git::Fetch(fetch) = git {
         stream(&remote, &from, fetch, received).await;
+        return;
+    }
+    // The launch the code is for: one this machine's gate did not refuse, waiting for its code.
+    let named = match &git {
+        Git::Has(asked) => asked.launch.clone(),
+        Git::Offer(offer) if !offer.back => Some(offer.launch.clone()),
+        Git::Place(place) => Some(place.launch.clone()),
+        _ => None,
+    };
+    let launch = named
+        .as_deref()
+        .and_then(|named| crate::launches::open(&daemon, &hex(from.as_bytes()), named));
+    if launch.is_none() && !on() {
+        received.answer(Err(match named {
+            Some(named) => {
+                format!(
+                    "launch {named} was not accepted by this machine, which takes no code for it"
+                )
+            }
+            None => "this machine takes no code but a launch's: code travels only with a launch \
+                     its gate accepted"
+                .to_owned(),
+        }));
         return;
     }
     if let Err(refused) = may_send_code(&remote, &from, &name) {
@@ -401,7 +418,7 @@ pub(crate) async fn serve(remote: Arc<Remote>, link: Link, received: Received, g
         },
         Git::Place(place) => match remote.receiving.hold(&from, &name) {
             Err(refused) => Err(refused),
-            Ok(_held) => placed(&daemon, &from, &name, place).await,
+            Ok(_held) => placed(&daemon, &from, &name, place, launch).await,
         },
     };
     received.answer(answer);
@@ -629,11 +646,12 @@ async fn placed(
     from: &PublicKey,
     name: &str,
     place: GitPlace,
+    launch: Option<crate::launches::Launch>,
 ) -> Result<Value, String> {
     let machine = hex(from.as_bytes());
     let _placing = PLACING.lock().await;
     let travels = stored(daemon.read(|store| store.travels("in", Some(&machine), &place.launch)))?;
-    let made = place_travels(daemon, &machine, name, &place, &travels).await;
+    let made = place_travels(daemon, &machine, name, &place, &travels, launch.as_ref()).await;
     // What came is in the workspace now, or is of no use: its refs go, either way.
     for travel in &travels {
         let folder = Path::new(&travel.folder);
@@ -647,7 +665,11 @@ async fn placed(
             );
         }
     }
-    made
+    match launch {
+        // Its agent, started or waiting for the user's answer, once its place is made.
+        Some(launch) => crate::launches::placed(daemon, launch, made?).await,
+        None => made,
+    }
 }
 
 async fn place_travels(
@@ -656,6 +678,7 @@ async fn place_travels(
     name: &str,
     place: &GitPlace,
     travels: &[Travel],
+    launch: Option<&crate::launches::Launch>,
 ) -> Result<Value, String> {
     let mut repositories = BTreeMap::new();
     let mut folders = Vec::new();
@@ -672,6 +695,10 @@ async fn place_travels(
     }
     let branch = free_everywhere(&folders, &place.branch).await?;
     let workspace = free_name(daemon, &place.project, &branch)?;
+    // Known before it is made: a launch held for the user holds its setup from the first step.
+    if let Some(launch) = launch {
+        crate::launches::set_workspace(daemon, launch, &workspace)?;
+    }
     let asked = flottille_core::protocol::WorkspaceCreate {
         project: place.project.clone(),
         name: workspace.clone(),
@@ -684,6 +711,7 @@ async fn place_travels(
     let travelled = Travelled {
         from: name.to_owned(),
         repositories,
+        setup: launch.is_some(),
     };
     let made = workspaces::create_from(daemon.clone(), asked, Some(travelled))
         .await

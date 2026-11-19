@@ -97,7 +97,7 @@ pub enum MachineMessage {
     /// `machine`), judged by the receiving machine's gate (`docs/remote.md`, "Starting a session
     /// on another machine"). Answered `{"state": "accepted" | "held"}`, or refused; its code
     /// follows as `git` messages of the same launch.
-    Launch(LaunchAsk),
+    Launch(Box<LaunchAsk>),
 }
 
 /// A launch another machine asks for one of its agents.

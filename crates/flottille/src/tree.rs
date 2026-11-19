@@ -141,6 +141,9 @@ struct Launch {
     /// With `led` or `handed`: the registered project the session is started in, the caller's
     /// when left out (`docs/tools.md`, "Sessions an agent starts").
     project: Option<String>,
+    /// Another of the user's machines, a runner, to start it on, in a copy of the caller's place
+    /// (`docs/remote.md`, "Starting a session on another machine"); this one when left out.
+    machine: Option<String>,
 }
 
 /// What `agent_launch` starts: a child in the caller's place, a session the caller leads, or a
@@ -215,6 +218,7 @@ pub fn names_main(daemon: &Daemon, project: &str, name: &str) -> bool {
 pub fn launch_refusal(project: &str, workspace: Option<&str>, args: &Value) -> Result<(), Outcome> {
     let asked = Launch::of(args.clone())?;
     asked.elsewhere_refusal(project)?;
+    asked.machine_refusal()?;
     asked.place(workspace).map(|_| ())
 }
 
@@ -269,6 +273,30 @@ impl Launch {
                  \"{project}\", \"title\": \"...\", \"brief\": \"...\"}}, held for the user"
             ))),
             _ => Ok(()),
+        }
+    }
+
+    /// On another machine, the agent works in a copy of the caller's place there: no other place
+    /// is taken with `machine`.
+    fn machine_refusal(&self) -> Result<(), Outcome> {
+        if self.machine.is_none() {
+            return Ok(());
+        }
+        let given = [
+            ("workspace", self.workspace.is_some()),
+            ("new_workspace", self.new_workspace.is_some()),
+            ("repositories", self.repositories.is_some()),
+            ("branch", self.branch.is_some()),
+            ("base", self.base.is_some()),
+            ("project", self.project.is_some()),
+        ];
+        match given.iter().find(|(_, given)| *given) {
+            Some((field, _)) => Err(refused(format!(
+                "refused: {field} is not taken with machine: the agent works there in a new \
+                 workspace, a copy of your place (your branch and your uncommitted changes): \
+                 drop {field}"
+            ))),
+            None => Ok(()),
         }
     }
 
@@ -369,6 +397,19 @@ async fn launch(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
             asked.role.as_deref().unwrap_or_default()
         ))
     })?;
+    asked.machine_refusal()?;
+    if let Some(machine) = &asked.machine {
+        let remote = crate::launches::Asked {
+            kind: asked.kind(),
+            title: asked.title.trim().to_owned(),
+            brief: asked.brief.clone(),
+            provider: asked.provider.unwrap_or_else(|| caller.provider.clone()),
+            model: asked.model.clone(),
+            effort: asked.effort.clone(),
+            role: role.name.to_owned(),
+        };
+        return crate::launches::launch(daemon, caller, machine, remote).await;
+    }
     let project = match &elsewhere {
         Some(name) => projects::load_project(daemon, name)
             .map_err(|f| refused(format!("refused: {}", f.message)))?,
@@ -591,13 +632,13 @@ impl Drop for Opening<'_> {
 
 /// A slot of a project's children cap, taken by a launch until its child exists (and counts as a
 /// live child), or the launch fails.
-struct Slot<'a> {
+pub(crate) struct Slot<'a> {
     daemon: &'a Daemon,
     project: String,
 }
 
 impl<'a> Slot<'a> {
-    fn take(daemon: &'a Daemon, project: &str, cap: u8) -> Result<Slot<'a>, Outcome> {
+    pub(crate) fn take(daemon: &'a Daemon, project: &str, cap: u8) -> Result<Slot<'a>, Outcome> {
         let mut launching = daemon.launching.lock().unwrap();
         let taken = launching.get(project).copied().unwrap_or(0);
         let running = daemon
@@ -744,7 +785,8 @@ pub fn brief_at_start(daemon: &Arc<Daemon>) {
         let launched = agent.parent.is_some()
             || agent.launched_by.is_some()
             || agent.detached_from.is_some()
-            || crate::extensions::started(daemon, &agent.id);
+            || crate::extensions::started(daemon, &agent.id)
+            || crate::launches::started_here(daemon, &agent.id);
         if agent.state.is_final() || agent.brief.is_none() || !launched {
             continue;
         }
@@ -778,6 +820,16 @@ pub const LAUNCHED: &str = " started this session for the user with this message
 pub fn first_message(daemon: &Daemon, agent: &Agent) -> (&'static str, String) {
     let brief = agent.brief.clone().unwrap_or_default();
     // Detached, it is still that agent's words.
+    // Started for an agent of another machine: that agent's words, never the user's.
+    if let Some((caller, machine, child)) = crate::launches::launched_from(daemon, &agent.id) {
+        if child {
+            return ("brief", brief);
+        }
+        return (
+            "launched",
+            format!("agent {caller} of {machine}{LAUNCHED}\n\n{brief}"),
+        );
+    }
     let Some(launcher) = agent.launched_by.as_ref().or(agent.detached_from.as_ref()) else {
         // An extension's session was not started with the user's words.
         let theirs = agent.parent.is_none() && !crate::extensions::started(daemon, &agent.id);

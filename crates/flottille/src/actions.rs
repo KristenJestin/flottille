@@ -2196,6 +2196,10 @@ async fn launch_says(daemon: &Daemon, grant: &Grant, args: &Value) -> Result<Vec
         return Err(Outcome::Refused(CHILD_ROOTS.into()));
     }
     crate::tree::launch_refusal(&grant.place.project, grant.place.workspace.as_deref(), args)?;
+    // Judged by the machine it starts on, with its own words.
+    if !args["machine"].is_null() {
+        return Ok(Vec::new());
+    }
     if let Some(elsewhere) = crate::tree::launched_elsewhere(&grant.place.project, args) {
         return launch_elsewhere_says(daemon, grant, elsewhere, args).await;
     }

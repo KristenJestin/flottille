@@ -72,14 +72,25 @@ tokio::task_local! {
     /// machine: the events its serving emits name it (`docs/remote.md`, "Requests from another
     /// machine's clients").
     static ASKED_BY: Arc<str>;
+    /// That request whole, as the device signed it: `agent.mode` keeps a switch to Full signed by
+    /// the user, which a launch on another machine needs to start in Full there.
+    static SIGNED: Arc<str>;
 }
 
-/// `future` run as the member `asked_by` asked, when one did.
-async fn as_asked_by<F: std::future::Future>(asked_by: Option<Arc<str>>, future: F) -> F::Output {
+/// `future` run as the member `asked_by` asked, when one did, with the request as it signed it.
+async fn as_asked_by<F: std::future::Future>(
+    asked_by: Option<(Arc<str>, Arc<str>)>,
+    future: F,
+) -> F::Output {
     match asked_by {
-        Some(device) => ASKED_BY.scope(device, future).await,
+        Some((device, signed)) => ASKED_BY.scope(device, SIGNED.scope(signed, future)).await,
         None => future.await,
     }
+}
+
+/// The request being served as its device signed it, when it came from another machine's client.
+pub(crate) fn signed_request() -> Option<Arc<str>> {
+    SIGNED.try_with(Arc::clone).ok()
 }
 
 /// `data` naming `device` (`device`), unless it names one already.
@@ -735,12 +746,19 @@ pub(crate) fn served_for(
     daemon: Arc<Daemon>,
     stream: UnixStream,
     device: String,
+    signed: String,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
-    Box::pin(ASKED_BY.scope(Arc::from(device), connection(daemon, stream)))
+    Box::pin(as_asked_by(
+        Some((Arc::from(device), Arc::from(signed))),
+        connection(daemon, stream),
+    ))
 }
 
 async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
-    let asked_by = ASKED_BY.try_with(Arc::clone).ok();
+    let asked_by = ASKED_BY
+        .try_with(Arc::clone)
+        .ok()
+        .zip(SIGNED.try_with(Arc::clone).ok());
     // A watch carried to another machine whose link dropped ends the connection: its client
     // resumes it after the last event it saw.
     let (dropped, mut watch_dropped) = mpsc::channel::<()>(1);
