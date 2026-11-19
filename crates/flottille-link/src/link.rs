@@ -87,8 +87,77 @@ pub enum MachineMessage {
     /// Every address the sender may be reached at now, so that the two can link again without
     /// the hub.
     Addresses(Vec<String>),
+    /// What a runner offers: its projects with their free slots, the agents signed in on it
+    /// (`docs/remote.md`, "Roles"). Sent when a link is made, and again when it changes.
+    Capabilities(crate::Capabilities),
+    /// A place's code on its way, or a session's new commits on their way back (`docs/remote.md`,
+    /// "What travels").
+    Git(Git),
     /// A vault entry the user shared with the receiver (`docs/remote.md`, "Vault entries").
     Share(Share),
+}
+
+/// The `git` messages: what the receiver has, a bundle offered, its bytes, the workspace made of
+/// it. A bundle never goes in one frame: the side it is offered to reads it on a stream of its
+/// own (`Fetch`), and only that side may.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Git {
+    /// Which commits the receiver has of a repository of a project: its branches and
+    /// `refs/flottille/machines/*`. Answered `{"commits": […]}`, `null` for a repository it does
+    /// not have yet.
+    Has(GitRepository),
+    /// A bundle to read and fetch. Answered once it is fetched, or refused.
+    Offer(GitOffer),
+    /// The bytes of a bundle offered to the side that asks: answered frame by frame, each
+    /// `{"chunk": "<base64>"}`.
+    Fetch(GitFetch),
+    /// The workspace made of the bundles of a launch, one per repository, on the sender's branch
+    /// name or the first free one after it. Answered `{"workspace", "branch", "folder"}`.
+    Place(GitPlace),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GitRepository {
+    pub project: String,
+    /// Its path in the project, `.` for the project's folder.
+    pub repository: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GitOffer {
+    /// What the receiver reads it by (`Fetch`).
+    pub transfer: String,
+    pub launch: String,
+    pub project: String,
+    pub repository: String,
+    /// The sender's branch.
+    pub branch: String,
+    /// The bundle's length in bytes, and its SHA-256 in hexadecimal: what is read must be both.
+    pub size: u64,
+    pub sha256: String,
+    /// New commits on their way back to the machine that sent the launch.
+    #[serde(default)]
+    pub back: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GitFetch {
+    pub transfer: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GitPlace {
+    pub launch: String,
+    pub project: String,
+    pub branch: String,
+    /// The repositories of the place, by their paths in the project, each received for this
+    /// launch.
+    pub repositories: Vec<String>,
 }
 
 /// A vault entry the user shared: their device's signed `vault.share`, which the receiver checks

@@ -605,8 +605,10 @@ fn cancelling_a_waiting_message_folds_its_bubble_away_and_the_root_never_receive
 ) {
     let user = user();
     let lead = lead(&user);
+    // The turn lasts until it is cancelled: one that ends first hands the root the message before
+    // the click, however slow the runner.
     let (shell, page, _, delivery, cx) =
-        with_a_waiting_message(&user, &lead, "work a while", "azdsqdsq", cx);
+        with_a_waiting_message(&user, &lead, "work until stopped", "azdsqdsq", cx);
 
     cx.update(|window, cx| window.click(queued_button(&delivery, "cancel"), cx));
 
@@ -620,7 +622,7 @@ fn cancelling_a_waiting_message_folds_its_bubble_away_and_the_root_never_receive
     // shows it.
     user.call("agent.cancel", json!({"agent": lead})).unwrap();
     until(&shell, cx, "the turn ends", |cx| {
-        row_of(&page, cx, |b| is_message(b, "work a while")).is_some()
+        row_of(&page, cx, |b| is_message(b, "work until stopped")).is_some()
             && state_of(&user, &lead) == "idle"
     });
     assert!(prompts(&user).iter().all(|p| !p.contains("azdsqdsq")));
@@ -644,11 +646,13 @@ fn editing_a_waiting_message_puts_its_text_and_pictures_in_the_composer_after_wh
     user.fake_script(with_images);
     std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
     let lead = lead(&user);
+    // The turn never ends: one that ends first hands the root the message before the edit, or the
+    // edited one when it is sent again, however slow the runner.
     let (shell, page, reply, delivery, cx) = {
         let (shell, page, cx) = open_session(&user, &lead, cx);
         user.call(
             "agent.send",
-            json!({"agent": lead, "message": "work a while"}),
+            json!({"agent": lead, "message": "work until stopped"}),
         )
         .unwrap();
         let reply = shell

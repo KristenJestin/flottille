@@ -13,6 +13,7 @@ mod hello;
 mod invitation;
 mod link;
 mod members;
+mod offers;
 mod request;
 mod serial;
 mod transport;
@@ -38,15 +39,17 @@ pub use control::{
 pub use hello::{Hello, NeedsUpdate, PeerState, choose};
 pub use invitation::{Invitation, InvitationAsk, InvitationError, Token};
 pub use link::{
-    Accepting, Answers, Endpoint, FRAME_LIMIT, Link, LinkError, MachineMessage, Message, Received,
-    Secret, Share, Streamed, Traffic,
+    Accepting, Answers, Endpoint, FRAME_LIMIT, Git, GitFetch, GitOffer, GitPlace, GitRepository,
+    Link, LinkError, MachineMessage, Message, Received, Secret, Share, Streamed, Traffic,
 };
 pub use members::{
     Action, Change, ChangeHash, ListError, MANAGING_HEADROOM, MOST_CHANGES, Member, MemberList,
     Members, Role, Signature,
 };
+pub use offers::{Capabilities, MOST_AGENTS, MOST_PROJECTS, Offered};
 pub use request::{
     Accepted, NONCES_PER_DEVICE, Nonce, REQUEST_WINDOW, Request, RequestError, Requests, Signed,
+    runs_agents,
 };
 pub use transport::TlsServer;
 pub use words::verification_words;

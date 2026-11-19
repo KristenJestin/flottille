@@ -25,7 +25,8 @@ fn every_method_of_the_catalogue_is_answered() {
     // fake agent, so that listing them runs no program of the machine's.
     let user = User::with_fake_providers()
         .with_env("FLOTTILLE_TEST_HOLD", "1")
-        .with_env("FLOTTILLE_TEST_CLOCK", "1");
+        .with_env("FLOTTILLE_TEST_CLOCK", "1")
+        .with_env("FLOTTILLE_TEST_TRAVEL", "1");
 
     // `daemon.stop` last: it ends the daemon the others ask.
     let mut methods: Vec<&str> = METHODS.iter().map(|(name, _)| *name).collect();
@@ -137,6 +138,61 @@ fn every_method_the_sources_name_is_catalogued() {
     }
 
     assert!(unknown.is_empty(), "not catalogued: {unknown:?}");
+}
+
+/// `docs/protocol.md` says each method's class beside it, in the table of "The classes": the
+/// same methods and the same classes as the catalogue, and every method a heading of the
+/// reference names is in it, so that a method documented and not catalogued fails here. The
+/// `test.*` methods are the tests' own, not the reference's.
+#[test]
+fn every_method_has_a_class() {
+    let crates = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    let reference = fs::read_to_string(crates.join("../docs/protocol.md")).unwrap();
+    let mut table = Vec::new();
+    let mut inside = false;
+    for line in reference.lines() {
+        if line.starts_with('#') {
+            inside = line == "### The classes";
+            continue;
+        }
+        if !inside || !line.starts_with("| `") {
+            continue;
+        }
+        let cells: Vec<&str> = line.split('|').map(str::trim).collect();
+        let name = cells[1].trim_matches('`').to_owned();
+        table.push((name, cells[2].to_owned()));
+    }
+    let catalogue: Vec<(String, String)> = METHODS
+        .iter()
+        .filter(|(name, _)| !name.starts_with("test."))
+        .map(|(name, class)| ((*name).to_owned(), format!("{class:?}").to_lowercase()))
+        .collect();
+    let missing: Vec<&(String, String)> = catalogue
+        .iter()
+        .filter(|method| !table.contains(method))
+        .collect();
+    let extra: Vec<&(String, String)> = table
+        .iter()
+        .filter(|method| !catalogue.contains(method))
+        .collect();
+    assert!(
+        missing.is_empty() && extra.is_empty(),
+        "not said, or not as the catalogue: {missing:?}; said and not catalogued so: {extra:?}"
+    );
+    let unclassed: Vec<&str> = reference
+        .lines()
+        .filter(|line| line.starts_with('#'))
+        .flat_map(|line| line.split('`').skip(1).step_by(2))
+        .filter(|name| {
+            name.split_once('.')
+                .is_some_and(|(family, verb)| family != "test" && is_word(family) && is_word(verb))
+        })
+        .filter(|name| !table.iter().any(|(said, _)| said == name))
+        .collect();
+    assert!(
+        unclassed.is_empty(),
+        "headings with no class: {unclassed:?}"
+    );
 }
 
 /// Each text between two quotes of `source`, a literal or not: one that reads `family.verb` can

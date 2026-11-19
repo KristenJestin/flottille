@@ -90,7 +90,8 @@ impl Role {
         self != Role::Viewer
     }
 
-    fn word(self) -> &'static str {
+    /// The role as the user reads it: `runner`, `controller`, `viewer`.
+    pub fn word(self) -> &'static str {
         match self {
             Role::Runner => "runner",
             Role::Controller => "controller",
