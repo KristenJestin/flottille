@@ -1,0 +1,37 @@
+//! The test binary `group_remote`: connections, the vault, MCP and everything that reaches another machine.
+//!
+//! Each test file stays in `tests/` and is a module of this binary, so a test is named
+//! `<file>::<test>` and `cargo test -p flottille --test group_remote <file>::` runs one file
+//! (`AGENTS.md`, "Adding a test file", says how a new one joins a group).
+
+#[path = "../common/mod.rs"]
+mod common;
+
+#[path = "../connection_requests.rs"]
+mod connection_requests;
+#[path = "../connection_secrets.rs"]
+mod connection_secrets;
+#[path = "../connections.rs"]
+mod connections;
+#[path = "../mcp.rs"]
+mod mcp;
+#[path = "../remote_code.rs"]
+mod remote_code;
+#[path = "../remote_hub.rs"]
+mod remote_hub;
+#[path = "../remote_keys.rs"]
+mod remote_keys;
+#[path = "../remote_link.rs"]
+mod remote_link;
+#[path = "../remote_requests.rs"]
+mod remote_requests;
+#[path = "../ssh_agent.rs"]
+mod ssh_agent;
+#[path = "../vault.rs"]
+mod vault;
+#[path = "../vault_ask.rs"]
+mod vault_ask;
+#[path = "../web.rs"]
+mod web;
+#[path = "../web_entries.rs"]
+mod web_entries;
