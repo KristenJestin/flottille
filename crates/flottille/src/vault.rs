@@ -1895,12 +1895,8 @@ mod tests {
             "vault.set",
             json!({"name": "tracker", "secret": "own-t0ken-Zr81", "url": "https://own.example.com"}),
         ));
-        let mut share = std::pin::pin!(receive(
-            &daemon,
-            &json!({"name": "tracker", "url": "https://theirs.example.com"}),
-            SHARED,
-            "pc",
-        ));
+        let theirs = json!({"name": "tracker", "url": "https://theirs.example.com"});
+        let mut share = std::pin::pin!(receive(&daemon, &theirs, SHARED, "pc",));
         // The user's Save waits on the keyring when the share comes, which waits on it too.
         assert!(futures::poll!(set.as_mut()).is_pending());
         assert!(futures::poll!(share.as_mut()).is_pending());
