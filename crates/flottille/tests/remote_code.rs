@@ -897,3 +897,24 @@ fn a_launch_whose_sending_failed_part_way_is_sent_again() {
         );
     }
 }
+
+#[test]
+fn a_place_whose_worktree_fails_fails_and_is_sent_again() {
+    let (_hub, pc, server) = pc_and_server();
+    pc.travel("server", "l0", json!({})).unwrap();
+    // The next launch's branch is being made there meanwhile: git holds the lock of its name.
+    let lock = server.folder().join(".git/refs/heads/feat/export-2.lock");
+    std::fs::create_dir_all(lock.parent().unwrap()).unwrap();
+    std::fs::write(&lock, "").unwrap();
+
+    let (_, failed) = pc.travel("server", "l1", json!({})).unwrap_err();
+
+    assert!(failed.contains("feat/export-2"), "{failed}");
+    // Nothing is kept as placed: once the lock is gone, the launch is sent again.
+    std::fs::remove_file(&lock).unwrap();
+    let sent = pc.travel("server", "l1", json!({})).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(folder_of(&sent).join("b.txt")).unwrap(),
+        "b\n"
+    );
+}
