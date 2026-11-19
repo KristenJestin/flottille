@@ -16,9 +16,10 @@ session every machine keeps to it and the first member's setup (`crates/flottill
 through the hub: invitations, joining, the four words, adding, renaming and removing members
 from the command line (#812), and the user's requests to another machine, signed by the client,
 carried by its daemon and checked by the machine they are for (`--machine`, #813), a place's
-code sent to another machine over the link and its new commits brought back (#815; `agent_launch`
-does not send it yet, #816), and the roles bounding what each device may do, with what each
-runner offers its peers (#862). What is decided is said as such; the defaults taken are in
+code sent to another machine over the link and its new commits brought back (#815), and the roles
+bounding what each device may do, with what each runner offers its peers (#862), and `agent_launch`
+starting a child or a led or handed session on another machine, judged by that machine's gate,
+its code sent by itself (#816; the deliveries that come back, #817, are not built). What is decided is said as such; the defaults taken are in
 "Defaults taken, to confirm"; what is open is in "Open questions". It replaces the proposal of 2026-11-03 (a relay
 every device connects to, on a private network) and the review that put Tailscale and SSH at the
 centre: Flottille stays generic (`AGENTS.md`), and depends on no one network and no account of a
@@ -864,6 +865,16 @@ on a real phone, by hand, and reported.
   launch on the same machine stays unjudged.
 - A session on another machine is in Full only with the user's signed switch to Full of the
   launcher's tree; otherwise Auto.
+- That signed switch is the `agent.mode` request a device signed, kept whole by the caller's
+  machine while the tree stays in Full, checked by the receiving machine for its signature, its
+  signer's role, the caller's machine, the tree and Full, never for its time or its nonce.
+- A launch held for the user on the receiving machine makes its agent and its workspace there once
+  its code came, the agent sent nothing and the setup waiting until the user allows it; the code
+  of a launch is taken when the gate accepted it or held it for the user, never when it refused it.
+- A child on another machine counts in its parent's cap on the parent's machine while its parent
+  lives, until its end is told back (#817); a launch whose code never came holds a slot of the
+  receiving machine's cap until it is forgotten, an hour after it was asked.
+- A machine may leave 4 launches waiting for their code on another.
 - The returned commits go to `refs/flottille/machines/<machine>/<launch>/<branch>`, never onto
   the user's branch.
 - Deliveries between machines are kept 30 days by the sender; the user's requests to an offline
@@ -1095,7 +1106,7 @@ on a real phone, by hand, and reported.
   `viewer`, it is refused by the machine that would carry it and by that machine itself
   (`refused: tablet is a controller: it runs no agent, a runner does`), in one check of
   `flottille-link` (`runs_agents`). A launch by an agent on another machine (`agent_launch
-  {machine}`) is #816's, and is to take the same check. `task.run` is no launch: it runs a
+  {machine}`) takes the same check, on both machines. `task.run` is no launch: it runs a
   command of the project, not an agent.
 - What a runner offers (`capabilities`, `crates/flottille-link/src/offers.rs`) is looked at only
   while a machine is linked to this one: when a link is made, after an event that may change it (a
@@ -1109,7 +1120,7 @@ on a real phone, by hand, and reported.
   projects and 64 agents at most, each name 1 to 64 characters with no control or invisible one.
   It is taken only from a runner's machine, and only from the link kept for it (one replaced says
   nothing any more), and forgotten when its link ends: an offline runner offers nothing. The slots
-  bound the children launched from another machine (#816), not a session for the user. No event
+  bound the children launched from another machine, not a session for the user. No event
   says it changed yet: a client reads `remote.machines` again.
 - A watch (`events.watch`) carried for a device ends when the device leaves the member list: each
   list taken, the machine that serves it looks again whether the device is still a member.
@@ -1127,9 +1138,10 @@ on a real phone, by hand, and reported.
   about submodules and remotes, not a file of Flottille's; and `fetch.fsckObjects` and
   `transfer.fsckObjects`: an object git finds malformed fetches nothing.
 - The snapshot's ref on the sending side is removed once the travel ends, placed or failed; the
-  incoming refs on the receiving side once its workspace is made, or its making failed. An offer
-  never followed by a `place` (the sender gone mid-way) leaves its incoming ref until the launch
-  is sent again.
+  incoming refs on the receiving side once its workspace is made, or its making failed. A launch
+  whose code never came whole (the sender gone mid-way) is forgotten an hour after it was asked,
+  with its incoming refs, when its machine next asks a launch; and a machine may leave 4 launches
+  at most waiting for their code, its next refused until they are placed or forgotten.
 - The snapshot is laid with `read-tree -m -u HEAD <snapshot>`, then `reset`, on a workspace with
   no change of its own (refused otherwise): every change is unstaged, and a file `HEAD` does not
   have is untracked there, even one the sender had staged.
@@ -1150,9 +1162,10 @@ on a real phone, by hand, and reported.
   and fetch it. Only the machine a bundle is offered to may read it, and only until its offer is
   answered. `place` (the launch, the project, the branch, the repositories): the workspace made of
   what came, answered with its name, its branch and its folder.
-- Until a travel is tied to a launch the receiving machine's gate accepted (#816), the `git`
-  message is served only by a test build run with `FLOTTILLE_TEST_TRAVEL` set; any other build
-  answers that it takes no code from another machine. Even then, `has`, `offer` and `place` are
+- `has`, `offer` and `place` are taken only for a launch the receiving machine recorded and its
+  gate did not refuse (`launch l2 was not accepted by this machine, which takes no code for
+  it`); a test build run with `FLOTTILLE_TEST_TRAVEL` set also takes them without one
+  (`test.travel`). Even then, they are
   taken only from a runner's or a controller's machine, by the checked member list: a viewer's
   machine, or one the peers' file trusts that is no member's, is refused. `fetch` is answered
   only to the machine a bundle is offered to.
@@ -1169,17 +1182,55 @@ on a real phone, by hand, and reported.
   the sender's name or the first of `-2`, `-3`… that no repository of the place has, its name the
   branch's with every other character a dash, and its base, in each repository, the commit the
   sender's branch was on (`started from what pc sent`); the snapshot is laid on each worktree as
-  soon as it is made. The project's setup does not run on it: it comes with the launch the gate
-  accepts (#816).
+  soon as it is made. A worktree that fails fails the place, which its sender may send again.
+  Made for a launch, it takes the project's setup, which runs at once when the gate accepted the
+  launch and waits, from its first step after the worktrees, while it is held for the user, a start
+  of the daemon included; made by `test.travel`, it takes its worktrees alone.
 - Each side keeps what travelled in its store (`travels`): the machine, the launch, the repository,
   the commits sent, and the workspace made. The sender keeps a launch as sent only once its
   workspace is made there: one that failed part way is sent again under its name. A bundle coming
   back is taken only for a repository of a launch this machine sent to that very machine, into the
   repository it was sent from, under the name this machine gives that machine; the way back sends
   the commits past the sender's tip, its snapshot, and what came back already.
-- Until `agent_launch` sends code (#816), a test build run with `FLOTTILLE_TEST_TRAVEL` set
-  answers `test.travel {machine, project, launch, workspace?, corrupt?, hold_ms?}` and
-  `test.travel_back {launch}`, so that two daemons can be made to send code to each other.
+- A test build run with `FLOTTILLE_TEST_TRAVEL` set answers `test.travel {machine, project,
+  launch, workspace?, corrupt?, hold_ms?}` and `test.travel_back {launch}`, so that two daemons
+  can be made to send code to each other without an agent; nothing else sends the commits back
+  until the deliveries cross machines (#817).
+- `agent_launch {machine}` (`crates/flottille/src/launches.rs`): the caller's machine refuses it
+  at once when `machine` is no machine of the user's, is this one, is not a runner, is offline, or
+  its offer lacks the project, the caller's provider or, for a child, a free slot, naming the
+  runners whose offers would take it; `workspace`, `new_workspace`, `repositories`, `branch`,
+  `base` and `project` are refused with it, since the place is a copy of the caller's. It then
+  sends the `launch` machine message (the launch's name, the caller and the root of its tree, the
+  kind, the project, the title, the brief, the provider, model, effort and role, the mode, the
+  kept switch to Full, the caller's branch and repositories), and the code of the caller's place
+  under the launch's name, and answers with the agent started there or the request waiting there.
+- The receiving machine takes a `launch` only from a runner's machine, for an agent it names, while
+  it runs agents itself, and checks again the project and its repositories, the provider signed in
+  there, the brief's length (the judge's 8,000 characters) and, for a child, a free slot of its own
+  cap. Its gate then judges it: Full (with a switch it verified) accepts it; Auto asks its judge,
+  with the words and the brief whole, nothing of the caller's conversation (which is on the other
+  machine), and holds what the judge does not allow, or everything when no judge is chosen; Ask
+  holds it. A launch held makes its agent and its workspace once the code came, and a request for
+  the user of that machine (an action, its words the launch's), its agent sent nothing and its
+  setup waiting until the user allows it; refused, the agent ends (`the user refused its launch`).
+  Its answer is for no agent of that machine: kept as sent, never delivered.
+- The agent started there is a root of that machine's tree (the caller is on another machine),
+  in the mode the launch took, its role the caller's choice (`worker` for a child, `lead` for a
+  session by default). A child's first message is its brief; a session's says `agent <id> of
+  <machine> started this session for the user with this message:` above the brief, never the
+  user's words. `agent_status`, `agent_send`, reports, questions and the way back of the commits
+  across machines are #817's and #818's.
+- The user's switch to Full is kept by the caller's machine when `agent.mode {mode: full}` came
+  from another machine's client, signed by a device: the request whole, as it was signed. Any
+  other switch of that tree's mode forgets it. The receiving machine takes it only signed by a
+  member that may switch a mode (a runner or a controller), for the caller's machine, that tree
+  and Full; neither its time nor its nonce is checked, since it lasts as long as the tree stays in
+  Full. A switch made in the window or the command line of the caller's own machine is signed by
+  no device: a launch from such a tree starts in Auto.
+- A child on another machine counts in its parent's project cap on the parent's machine from its
+  launch for as long as its parent lives, since its end is not told back yet (#817); in the
+  receiving machine's cap from its launch until it ends.
 
 ## Open questions
 
