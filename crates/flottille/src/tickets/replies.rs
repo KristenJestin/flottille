@@ -1,20 +1,26 @@
-//! `tickets reply` (#934, `docs/tickets.md`, "Replies"): an answer to a comment of a ticket, which
-//! any comment has, not only an agent's own.
+//! `tickets reply` (#934, #1068, `docs/tickets.md`, "Replies"): an answer to a comment of a ticket,
+//! which any comment has, not only an agent's own.
 //!
-//! Neither tracker has threads on a ticket, so a reply is a new comment that says whom it answers
-//! and what it quotes. On GitHub the quote is Markdown (`> @alice wrote:`). On Jira it is the
-//! document Jira's own Reply makes: a mention of the author, the comment in a quote, the answer.
-//! `acli jira workitem comment create` has no flag for a visibility (it uses the project's
-//! default), so a comment restricted to a role or a group, or a Service Management internal note,
-//! is not answered: the quote would go out to everyone. Nor is a comment GitHub hides
-//! (minimized).
+//! GitHub has no threads on an issue, so a reply is a new comment that says whom it answers and
+//! quotes it (`> @alice wrote:`). Jira Cloud has them, one level deep: a reply is `POST
+//! /rest/api/3/issue/<key>/comment` with `parentId`, the comment answered or, when that is itself
+//! a reply, the first comment of its thread, and the answer alone (no quote, no "wrote:"), with
+//! the project's tracker entry, as `acli`'s `comment create` has no way to name a parent. A comment
+//! that mentions someone goes the same way: `[@Display Name](mention:<accountId>)` is a mention
+//! node, the only text that notifies on Jira.
+//! A comment restricted to a role or a group, or a Service Management internal note, is not
+//! answered: the answer would stand in the open under it, and the API call carries no visibility.
+//! Nor is a comment GitHub hides (minimized).
+
+use std::collections::HashMap;
 
 use flottille_core::declared::ProjectTracker;
 use flottille_core::project::Project;
 use flottille_core::ticket::Key;
 use serde_json::{Value, json};
 
-use super::{AdfFile, Comment, TicketsCall, acli_run, jira_site};
+use super::worklogs::Site;
+use super::{Comment, TicketsCall};
 use crate::daemon::Daemon;
 use crate::mcp::Outcome;
 
@@ -31,15 +37,11 @@ pub(super) fn restriction(comment: &Value) -> Option<String> {
             .as_str()
             .map_or_else(|| "a role or a group".to_owned(), super::masked);
         return Some(format!(
-            "restricted to {who}, and acli cannot post a comment in a visibility (its comment \
-             create uses the project's default)"
+            "restricted to {who}, and a reply is posted without a visibility"
         ));
     }
-    (comment["jsdPublic"] == false).then(|| {
-        "an internal note, and acli cannot post one (its comment create uses the project's \
-         default)"
-            .to_owned()
-    })
+    (comment["jsdPublic"] == false)
+        .then(|| "an internal note, and a reply is posted without a visibility".to_owned())
 }
 
 /// Why a GitHub comment is not for everyone: it is hidden (minimized), and a quote would show it.
@@ -111,32 +113,160 @@ fn markdown(comment: &Comment, body: &str) -> String {
     format!("> {who} wrote:\n{}\n\n{body}", quoted(comment))
 }
 
-/// A Jira reply as a document: the author mentioned when Jira gave their account, the comment
-/// quoted, then the answer. The quote is built by the converter, under its rules for the text of
-/// a quote (a quote, a heading, a rule or a table in it is written as paragraphs, which Jira
-/// takes).
-fn document(comment: &Comment, body: &str) -> Value {
-    let who = match &comment.account {
-        Some(account) => {
-            json!({"type": "mention", "attrs": {"id": account, "text": format!("@{}", comment.author)}})
-        }
-        None => json!({"type": "text", "text": comment.author}),
-    };
-    let mut content =
-        vec![json!({"type": "paragraph", "content": [who, {"type": "text", "text": " wrote:"}]})];
-    for part in [quoted(comment).as_str(), body] {
-        if let Some(blocks) = crate::adf::from_markdown(part)["content"].as_array() {
-            content.extend(blocks.iter().cloned());
-        }
+/// The Jira actions whose text may mention someone, and how each says what it does with the
+/// project's entry: `to` completes "no vault entry to …", `never` is what Flottille never does
+/// with a sign-in it was not given.
+pub(super) fn mention_use(action: &str) -> Option<(&'static str, &'static str)> {
+    match action {
+        "comment" | "comment_edit" => Some(("mention someone in a comment with", "comments")),
+        "reply" => Some(("reply under a Jira comment with", "replies")),
+        "create" | "edit" => Some(("mention someone in a description with", "descriptions")),
+        "log_time" => Some(("mention someone in a worklog's comment with", "logs time")),
+        _ => None,
     }
-    json!({"type": "doc", "version": 1, "content": content})
 }
 
-/// What the card says of a reply: the comment as it goes out, quote and answer, and whom it
-/// mentions, who is notified. Refused, with why, when the comment cannot be answered.
-pub async fn says(daemon: &Daemon, project: &Project, args: &Value) -> Result<Vec<String>, String> {
-    if args["action"] != "reply" {
+/// Why a Jira text cannot be written, before anyone is asked: a mention that names no account, a
+/// reply or a text that mentions without the entry the project's tracker names.
+pub(super) fn unwritable(tracker: &ProjectTracker, action: &str, args: &Value) -> Option<String> {
+    let ProjectTracker::Jira { worklog_token, .. } = tracker else {
+        return None;
+    };
+    if action == "reply" && worklog_token.is_none() {
+        return Some(super::worklog::no_entry_to(
+            "reply under a Jira comment with",
+            "replies",
+        ));
+    }
+    let (to, never) = mention_use(action)?;
+    let body = args["body"]
+        .as_str()
+        .map(str::trim)
+        .filter(|b| !b.is_empty())?;
+    let mentioned = crate::adf::mentions(&crate::adf::from_markdown(body));
+    if let Some((id, text)) = mentioned
+        .iter()
+        .find(|(id, _)| !super::worklogs::is_account(id))
+    {
+        return Some(format!(
+            "refused: the mention [{}](mention:{}) names no Jira account: after mention: goes the \
+             account id (24 hexadecimal digits, or <number>:<uuid>) that tickets people gives, \
+             not a name; nothing was written",
+            super::masked(text),
+            super::masked(id)
+        ));
+    }
+    (!mentioned.is_empty() && worklog_token.is_none())
+        .then(|| super::worklog::no_entry_to(to, never))
+}
+
+pub(super) fn text_of(outcome: Outcome) -> String {
+    match outcome {
+        Outcome::Refused(why)
+        | Outcome::Failed(why)
+        | Outcome::Invalid(why)
+        | Outcome::Held(why)
+        | Outcome::Done(why) => why,
+    }
+}
+
+/// Asks the site who each mention of `document` is, as the entry's account sees it: the display
+/// name Jira gives each account id, written into the mention (the text the agent wrote is its
+/// own, Jira's notifies). An id the site does not know is refused, before anything is written.
+/// The accounts, `(id, name)`, once each, in the order of the text.
+pub(super) async fn verified(
+    jira: &Site<'_>,
+    document: &mut Value,
+) -> Result<Vec<(String, String)>, Outcome> {
+    let mut names: Vec<(String, String)> = Vec::new();
+    for (id, _) in crate::adf::mentions(document) {
+        if names.iter().any(|(known, _)| *known == id) {
+            continue;
+        }
+        match jira.display_name(&id).await {
+            Ok(Some(name)) => names.push((id, name)),
+            Ok(None) => {
+                return Err(Outcome::Refused(format!(
+                    "refused: the mention names the account {}, and the site has no such \
+                     account: tickets people gives the account ids; nothing was written",
+                    super::masked(&id)
+                )));
+            }
+            Err(why) => {
+                return Err(Outcome::Failed(format!(
+                    "the people the text mentions could not be checked: {why}; nothing was \
+                     written"
+                )));
+            }
+        }
+    }
+    crate::adf::name_mentions(document, &names);
+    Ok(names)
+}
+
+/// What the card says of a Jira text that mentions someone: how it goes out, and who is notified
+/// as the site names them (`Ana Example (5b10…)`), whatever the text says. Refused when the entry
+/// is not there or the site does not know an account.
+async fn mentions_say(
+    daemon: &Daemon,
+    project: &Project,
+    args: &Value,
+) -> Result<Vec<String>, String> {
+    let action = args["action"].as_str().unwrap_or_default();
+    let (Some(ProjectTracker::Jira { site, .. }), Some(use_of)) =
+        (&project.tracker, mention_use(action))
+    else {
         return Ok(Vec::new());
+    };
+    let Some(body) = args["body"]
+        .as_str()
+        .map(str::trim)
+        .filter(|b| !b.is_empty())
+    else {
+        return Ok(Vec::new());
+    };
+    let mut document = crate::adf::from_markdown(body);
+    if crate::adf::mentions(&document).is_empty() {
+        return Ok(Vec::new());
+    }
+    let (entry, _, _) = super::worklog::entry_of(daemon, project)?;
+    let jira = signed_in(daemon, project, site, use_of)
+        .await
+        .map_err(text_of)?;
+    let names = verified(&jira, &mut document).await.map_err(text_of)?;
+    let mut says = Vec::new();
+    // A reply and a worklog always go through the API, which their own lines say.
+    let what = match action {
+        "comment" => Some("posts the comment"),
+        "comment_edit" => Some("changes the comment"),
+        "create" | "edit" => Some("sets the description"),
+        _ => None,
+    };
+    if let Some(what) = what {
+        says.push(format!(
+            "It {what} through Jira's API with the vault entry {entry}, so that its mentions \
+             notify"
+        ));
+    }
+    let who: Vec<String> = names
+        .iter()
+        .map(|(id, name)| format!("{name} ({id})"))
+        .collect();
+    says.push(format!(
+        "It mentions {}, who {} notified",
+        who.join(", "),
+        if who.len() == 1 { "is" } else { "are" }
+    ));
+    Ok(says)
+}
+
+/// What the card says of a reply, and of a Jira text that mentions someone. A reply: the comment
+/// answered and the answer, and on GitHub the quote as it goes out. Refused, with why, when the
+/// comment cannot be answered.
+pub async fn says(daemon: &Daemon, project: &Project, args: &Value) -> Result<Vec<String>, String> {
+    let mut says = mentions_say(daemon, project, args).await?;
+    if args["action"] != "reply" {
+        return Ok(says);
     }
     let (Some(ticket), Some(named), Some(body)) = (
         args["ticket"].as_str(),
@@ -146,36 +276,279 @@ pub async fn says(daemon: &Daemon, project: &Project, args: &Value) -> Result<Ve
             .map(str::trim)
             .filter(|b| !b.is_empty()),
     ) else {
-        return Ok(Vec::new());
+        return Ok(says);
     };
     let Ok(key) = super::accepted(project, ticket) else {
-        return Ok(Vec::new());
+        return Ok(says);
     };
-    let (_, comment) = match answerable(daemon, project, &key, named).await {
+    let (ticket, comment) = match answerable(daemon, project, &key, named).await {
         Ok(found) => found,
         Err(Outcome::Refused(why)) => return Err(why),
-        // A card without its quote would say less than what is posted.
+        // A card without its comment would say less than what is posted.
         Err(Outcome::Failed(why) | Outcome::Invalid(why) | Outcome::Held(why)) => {
             return Err(format!("refused: {why}; nothing was written"));
         }
-        Err(Outcome::Done(_)) => return Ok(Vec::new()),
+        Err(Outcome::Done(_)) => return Ok(says),
     };
-    let jira = matches!(key, Key::Jira(_));
-    let mut says = vec![format!(
-        "It posts, the comment quoted first: {}",
-        match jira {
-            true => crate::adf::to_markdown(&document(&comment, body)),
-            false => markdown(&comment, body),
-        }
-    )];
+    if let (Key::Jira(work_item), Some(ProjectTracker::Jira { site, .. })) =
+        (&key, &project.tracker)
+    {
+        let (entry, _, _) = super::worklog::entry_of(daemon, project)?;
+        // The answer goes under the first comment of the thread: that one is named, as read.
+        let jira = signed_in(
+            daemon,
+            project,
+            site,
+            ("reply under a Jira comment with", "replies"),
+        )
+        .await
+        .map_err(text_of)?;
+        let id = comment.id.clone().unwrap_or_default();
+        let root = thread_root(&jira, work_item, &id, &ticket.reference)
+            .await
+            .map_err(text_of)?;
+        let root = ticket
+            .comments
+            .iter()
+            .find(|c| super::links::same_comment(c.id.as_deref(), &root))
+            .unwrap_or(&comment);
+        let who = match root.author.is_empty() {
+            true => String::new(),
+            false => format!(" by {}", root.author),
+        };
+        let mut card = vec![
+            format!(
+                "It replies under the comment {}{who}, in its thread: {}",
+                root.id.as_deref().unwrap_or_default(),
+                super::cut(&root.body, QUOTED_CHARS)
+            ),
+            format!("Its answer: {body}"),
+            format!("It posts it through Jira's API with the vault entry {entry}"),
+        ];
+        card.append(&mut says);
+        return Ok(card);
+    }
+    says.insert(
+        0,
+        format!(
+            "It posts, the comment quoted first: {}",
+            markdown(&comment, body)
+        ),
+    );
     // On GitHub the quote's `@login` notifies its author; a deleted user has none.
-    if (jira && comment.account.is_some()) || (!jira && !comment.author.is_empty()) {
-        says.push(format!("It mentions {}, who is notified", comment.author));
+    if !comment.author.is_empty() {
+        says.insert(
+            1,
+            format!("It mentions {}, who is notified", comment.author),
+        );
     }
     Ok(says)
 }
 
-/// `tickets reply`: a comment that answers the one named, on the tracker of the project.
+/// The comments of a work item as Jira's REST gives them: each id, and the id of the comment it
+/// answers when it is a reply (`parentId`).
+async fn parents(jira: &Site<'_>, key: &str) -> Result<HashMap<String, Option<String>>, String> {
+    let mut found = HashMap::new();
+    let mut start = 0;
+    // A page holds up to a thousand comments; a ticket with more is read in pages.
+    for _ in 0..50 {
+        let at = start.to_string();
+        let page = jira
+            .get(
+                &format!("issue/{key}/comment"),
+                &[("startAt", at.as_str()), ("maxResults", "1000")],
+            )
+            .await?;
+        let comments = page["comments"].as_array().map_or(&[][..], Vec::as_slice);
+        for comment in comments {
+            let Some(id) = comment["id"].as_str() else {
+                continue;
+            };
+            let parent = match &comment["parentId"] {
+                Value::Number(number) => Some(number.to_string()),
+                Value::String(text) if !text.is_empty() => Some(text.clone()),
+                _ => None,
+            };
+            found.insert(id.to_owned(), parent);
+        }
+        start += comments.len();
+        let total = page["total"].as_u64().unwrap_or(0);
+        if comments.is_empty() || start as u64 >= total {
+            break;
+        }
+    }
+    Ok(found)
+}
+
+/// The comment a reply to `id` goes under: Jira's threads are one level deep, so an answer to a
+/// reply goes under the first comment of its thread. As a number, as the call takes it.
+async fn thread_root(
+    jira: &Site<'_>,
+    work_item: &str,
+    id: &str,
+    reference: &str,
+) -> Result<String, Outcome> {
+    let read = parents(jira, work_item)
+        .await
+        .map_err(|why| Outcome::Failed(format!("{why}; nothing was written")))?;
+    let Some(parent) = read.get(id) else {
+        return Err(Outcome::Failed(format!(
+            "Jira's own list of the comments of {reference} has no comment {id}: nothing was \
+             written"
+        )));
+    };
+    let root = parent.clone().unwrap_or_else(|| id.to_owned());
+    match root.parse::<u64>() {
+        Ok(_) => Ok(root),
+        Err(_) => Err(Outcome::Failed(format!(
+            "Jira gave the comment {id} of {reference} a thread that is no number: nothing was \
+             written"
+        ))),
+    }
+}
+
+/// Fills the `parent` of the comments of a Jira ticket `show` draws, when the project has its
+/// entry; why they could not be read, when that is so. A project without the entry draws the
+/// comments flat, as acli's view gives them.
+pub(super) async fn threaded(
+    daemon: &Daemon,
+    project: &Project,
+    key: &Key,
+    ticket: &mut super::Ticket,
+) -> Option<String> {
+    let (
+        Some(ProjectTracker::Jira {
+            site,
+            worklog_token,
+            ..
+        }),
+        Key::Jira(work_item),
+    ) = (&project.tracker, key)
+    else {
+        return None;
+    };
+    if worklog_token.is_none() || ticket.comments.is_empty() {
+        return None;
+    }
+    let jira = match super::worklogs::signed_in(daemon, project, site, String::new()).await {
+        Ok((jira, _, _)) => jira,
+        Err(why) => return Some(why),
+    };
+    match parents(&jira, work_item).await {
+        Ok(read) => {
+            for comment in &mut ticket.comments {
+                comment.parent = comment
+                    .id
+                    .as_ref()
+                    .and_then(|id| read.get(id).cloned().flatten());
+            }
+            None
+        }
+        Err(why) => Some(why),
+    }
+}
+
+/// The calls to Jira's REST API as the project's entry signs them, or the refusal that says how to
+/// set the entry. `to` completes "no vault entry to …", `never` is what Flottille never does with
+/// a sign-in it was not given.
+pub(super) async fn signed_in<'a>(
+    daemon: &Daemon,
+    project: &Project,
+    site: &'a str,
+    (to, never): (&str, &str),
+) -> Result<Site<'a>, Outcome> {
+    super::worklogs::signed_in(
+        daemon,
+        project,
+        site,
+        super::worklog::no_entry_to(to, never),
+    )
+    .await
+    .map(|(jira, _, _)| jira)
+    .map_err(Outcome::Refused)
+}
+
+/// `POST /rest/api/3/issue/<key>/comment` of `document`, a reply when `parent` is given, recorded
+/// as the agent's comment under the id Jira answered. The secret goes to the site alone.
+pub(super) async fn post_comment(
+    daemon: &Daemon,
+    on: (&str, &str, &str, &str),
+    jira: &Site<'_>,
+    (document, parent): (&Value, Option<u64>),
+    by_id_only: bool,
+) -> Result<(), Outcome> {
+    let mut body = json!({"body": document});
+    if let Some(parent) = parent {
+        body["parentId"] = json!(parent);
+    }
+    let answer = jira
+        .post(&format!("issue/{}/comment", on.3), &body)
+        .await
+        .map_err(Outcome::Failed)?;
+    let id = answer["id"].as_str().map(|id| jira.clean(id));
+    if id.is_some() || !by_id_only {
+        crate::posts::record_comment(daemon, on, id, &crate::adf::to_markdown(document));
+    }
+    Ok(())
+}
+
+/// A comment of a Jira work item that mentions someone, through Jira's API: `acli` is not asked,
+/// which a signed-out one would fail for nothing.
+pub(super) async fn comment_with_mentions(
+    daemon: &Daemon,
+    project: &Project,
+    on: (&str, &str, &str, &str),
+    site: &str,
+    (mut document, by_id_only): (Value, bool),
+) -> Outcome {
+    let jira = match signed_in(
+        daemon,
+        project,
+        site,
+        mention_use("comment").unwrap_or_default(),
+    )
+    .await
+    {
+        Ok(jira) => jira,
+        Err(refused) => return refused,
+    };
+    if let Err(outcome) = verified(&jira, &mut document).await {
+        return outcome;
+    }
+    match post_comment(daemon, on, &jira, (&document, None), by_id_only).await {
+        Ok(()) => Outcome::Done(format!("The comment was posted on {}.", on.3)),
+        Err(outcome) => outcome,
+    }
+}
+
+/// `comment_edit` of a comment that mentions someone: `PUT /rest/api/3/issue/<key>/comment/<id>`
+/// with the project's entry, the record of the comment (by its id) replaced with the new words.
+pub(super) async fn edit_comment_with_mentions(
+    daemon: &Daemon,
+    project: &Project,
+    on: (&str, &str, &str, &str),
+    (site, id): (&str, &str),
+    mut document: Value,
+) -> Result<(), Outcome> {
+    let jira = signed_in(
+        daemon,
+        project,
+        site,
+        mention_use("comment_edit").unwrap_or_default(),
+    )
+    .await?;
+    verified(&jira, &mut document).await?;
+    jira.put(
+        &format!("issue/{}/comment/{id}", on.3),
+        &json!({"body": document}),
+    )
+    .await
+    .map_err(Outcome::Failed)?;
+    crate::posts::replace_comment(daemon, on, id, &crate::adf::to_markdown(&document));
+    Ok(())
+}
+
+/// `tickets reply`: an answer to the comment named, on the tracker of the project.
 pub(super) async fn reply(
     daemon: &Daemon,
     project: &Project,
@@ -195,26 +568,24 @@ pub(super) async fn reply(
     let done = format!("The reply to the comment {id} of {reference} was posted.");
     match (&project.tracker, key) {
         (Some(ProjectTracker::Jira { site, .. }), Key::Jira(work_item)) => {
-            if let Err(problem) = jira_site(site, "written").await {
-                return Outcome::Failed(problem);
-            }
-            let document = document(&comment, body);
-            let file = match AdfFile::json(daemon, &document) {
-                Ok(file) => file,
-                Err(why) => return Outcome::Failed(why),
+            let jira = match signed_in(
+                daemon,
+                project,
+                site,
+                mention_use("reply").unwrap_or_default(),
+            )
+            .await
+            {
+                Ok(jira) => jira,
+                Err(refused) => return refused,
             };
-            let args = [
-                "jira",
-                "workitem",
-                "comment",
-                "create",
-                "--key",
-                work_item,
-                "--body-file",
-                file.path(),
-            ];
-            if let Err(why) = acli_run(&args).await {
-                return Outcome::Failed(why);
+            let root = match thread_root(&jira, work_item, &id, reference).await {
+                Ok(root) => root,
+                Err(outcome) => return outcome,
+            };
+            let mut document = crate::adf::from_markdown(body);
+            if let Err(outcome) = verified(&jira, &mut document).await {
+                return outcome;
             }
             let (repository, item) = super::events::item_of(project, key).unwrap_or_default();
             let on = (
@@ -223,10 +594,18 @@ pub(super) async fn reply(
                 repository.as_str(),
                 item.as_str(),
             );
-            let posted = crate::adf::to_markdown(&document);
-            let posted_id = super::posted_comment_id(daemon, on, site, &posted).await;
-            crate::posts::record_comment(daemon, on, posted_id, &posted);
-            Outcome::Done(done)
+            match post_comment(
+                daemon,
+                on,
+                &jira,
+                (&document, root.parse().ok()),
+                asked.by_id_only,
+            )
+            .await
+            {
+                Ok(()) => Outcome::Done(done),
+                Err(outcome) => outcome,
+            }
         }
         (Some(ProjectTracker::Github { .. }), Key::Issue(_)) => {
             let call = json!({"action": "comment", "ticket": key.text(),
