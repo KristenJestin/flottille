@@ -339,7 +339,25 @@ pub async fn log_time(
     };
     let mut body = json!({"timeSpent": duration, "started": jira_time(started)});
     if let Some(text) = asked.body.as_deref().filter(|b| !b.trim().is_empty()) {
-        body["comment"] = crate::adf::from_markdown(text);
+        let mut document = crate::adf::from_markdown(text);
+        // The people it mentions are asked of the site: its names are what the comment reads.
+        if !crate::adf::mentions(&document).is_empty() {
+            let jira = match super::replies::signed_in(
+                daemon,
+                project,
+                site,
+                super::replies::mention_use("log_time").unwrap_or_default(),
+            )
+            .await
+            {
+                Ok(jira) => jira,
+                Err(refused) => return refused,
+            };
+            if let Err(outcome) = super::replies::verified(&jira, &mut document).await {
+                return outcome;
+            }
+        }
+        body["comment"] = document;
     }
     let credentials =
         base64::engine::general_purpose::STANDARD.encode(format!("{account}:{secret}"));

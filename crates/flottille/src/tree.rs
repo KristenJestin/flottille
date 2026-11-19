@@ -920,6 +920,10 @@ fn send(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
 #[serde(deny_unknown_fields)]
 pub struct SessionSend {
     pub session: String,
+    /// Another registered project, whose root sessions a title is matched among
+    /// (`session_name`): by then `session` is the id.
+    #[allow(dead_code)]
+    pub project: Option<String>,
     pub text: String,
 }
 
