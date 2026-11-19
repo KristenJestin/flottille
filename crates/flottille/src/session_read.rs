@@ -34,6 +34,10 @@ const BATCH: usize = 500;
 pub struct SessionRead {
     /// Left out: the caller's own session.
     pub session: Option<String>,
+    /// Another registered project, whose root sessions a title is matched among
+    /// (`session_name`): by then `session` is the id.
+    #[allow(dead_code)]
+    pub project: Option<String>,
     pub last: Option<u64>,
     pub since: Option<String>,
     pub until: Option<String>,
