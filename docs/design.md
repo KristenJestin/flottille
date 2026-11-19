@@ -1509,6 +1509,14 @@ Omarchy theme's colours followed live, or **Flottille**, Flottille's own palette
 **Dark**, even on an Omarchy desktop. Until the user chooses, Omarchy when an Omarchy theme is
 found, Flottille Dark otherwise; Omarchy chosen and no theme that can be used, Flottille in its
 shade. A change applies at once: the colours cross-fade, as when the Omarchy theme changes. The
+daemon owns the choice and the window cannot ask it before its first frame, so the window keeps a
+copy of its own, `window-appearance.json` in its state folder, in the words of `appearance.show`
+(`theme`, `shade`): written when the user chooses and when the daemon says what it keeps, read
+before anything is drawn. The first frame is in the chosen theme (Omarchy's read from the desktop
+at that moment, the copy holds the choice, not the colours), the daemon's answer only confirms it,
+and nothing switches at start-up when the choice did not change; a choice made from another
+client changes it with the usual cross-fade. With no copy, or one that cannot be read, the window
+draws in the default above, as it always did. The
 light palette has the dark one's roles, its surfaces a step toward the ink from a near-white page
 (never white cards), every text at WCAG AA on each surface it is drawn on. Only the keys of a theme file that name a colour are read: another string (`mode = "light"`, a name) is ignored, a colour key with a value that is not a colour refuses the theme. A light theme
 gets a light palette: the body and the bars are shaded toward the foreground (below the background in lightness), and

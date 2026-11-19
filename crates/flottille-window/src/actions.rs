@@ -3016,7 +3016,7 @@ pub(crate) fn read_providers(
 }
 
 /// The appearance in the words of `appearance.show`.
-fn appearance_json(appearance: gpui_design_system::Appearance) -> Value {
+pub(crate) fn appearance_json(appearance: gpui_design_system::Appearance) -> Value {
     use gpui_design_system::Source;
     use gpui_design_system::theme::Shade;
     let theme = match appearance.source {
