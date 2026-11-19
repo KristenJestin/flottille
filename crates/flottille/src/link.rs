@@ -1218,7 +1218,7 @@ async fn serve_clients(remote: Arc<Remote>, link: Link, from: String) {
                 ));
                 continue;
             }
-            Err(received) => received,
+            Err(received) => *received,
         };
         let Message::Client(request) = received.message().clone() else {
             // Kept apart by the link's protocol name: refused before it gets here.

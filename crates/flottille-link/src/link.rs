@@ -875,13 +875,13 @@ impl Received {
 
     /// The tunnel connection this is, with the id of the tunnel it names, or the message back
     /// when it is any other.
-    pub fn take_tunnel(self) -> Result<(String, crate::TunnelStream), Received> {
+    pub fn take_tunnel(self) -> Result<(String, crate::TunnelStream), Box<Received>> {
         match self.reply {
             Replying::Tunnel(id, raw) => Ok((id, crate::TunnelStream::new(raw))),
-            reply => Err(Received {
+            reply => Err(Box::new(Received {
                 message: self.message,
                 reply,
-            }),
+            })),
         }
     }
 
