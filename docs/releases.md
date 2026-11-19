@@ -153,8 +153,9 @@ about five minutes, not twenty.
 - **A pull request** (the required check is its `verify`) runs `check` (formatting and clippy),
   `commit-messages`, and **the tests it touches** (`test-selected`): the test binaries whose
   files it adds or changes (`crates/<crate>/tests/<name>.rs` is the binary `<name>`; so is any file
-  of `crates/<crate>/tests/<name>/` that has a `main.rs`, the way grouped binaries are made), and the
-  binaries listed on a line of its description, `Tests: <name> <name>…` (the developing agent lists
+  of `crates/<crate>/tests/<name>/` that has a `main.rs`, the way grouped binaries are made), the
+  binaries whose files name a changed file of `.github/` or `tools/` (the tests that read `ci.yml`
+  or run `package.sh` judge a change of them), and the binaries listed on a line of its description, `Tests: <name> <name>…` (the developing agent lists
   those it ran; the description is read when the jobs run, so running them again picks up a line
   written after the push). When it selects no binary, it runs the unit tests of the crates whose
   `src/` it changes, if they have a library and are not `flottille` or `flottille-window` (too big
