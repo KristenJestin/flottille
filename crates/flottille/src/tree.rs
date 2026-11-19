@@ -2081,47 +2081,20 @@ pub fn unfollowed(daemon: &Arc<Daemon>, following: &Subscription) {
     );
 }
 
-/// The pilot ended: the sessions it led go on, handed to the user, each told once.
-fn hand_over(daemon: &Arc<Daemon>, pilot: &Agent) {
+/// The pilot ended for good: the sessions it leads end with it, in its project and in others,
+/// and each one's own led sessions in turn, since it ends as any session does. A led session the
+/// user kept was detached before and is no one's to end. A pilot that failed ends nothing: it can
+/// be resumed, and its sessions go on led by it.
+fn end_led(daemon: &Arc<Daemon>, pilot: &Agent) {
     let Ok(agents) = daemon.read(|store| store.agents()) else {
         return;
     };
-    for session in agents
-        .into_iter()
-        .filter(|agent| agent.led && agent.launched_by.as_deref() == Some(pilot.id.as_str()))
-    {
-        let _ = daemon.write(|store| {
-            let (_, event) = store.change_agent(
-                &session.id,
-                AgentChange {
-                    led: Some(false),
-                    ..AgentChange::default()
-                },
-                Some((
-                    "agent.handed",
-                    json!({"agent": session.id, "from": pilot.id}),
-                )),
-            )?;
-            Ok(((), event))
-        });
-        if session.state.is_final() {
-            continue;
-        }
-        let moved = questions_to_user(daemon, &session, &pilot.id);
-        deliveries::deliver(
-            daemon,
-            &session.id,
-            "handed",
-            Some(format!("handed-{}-{}", session.id, pilot.id)),
-            &format!(
-                "{}, which led this session, ended. The session goes on, handed to the user: what \
-                 you need answered now goes through ask to the user, and that agent no longer \
-                 reads you.{}",
-                named(pilot),
-                moved_said(moved)
-            ),
-            approval::BETWEEN_TURNS,
-        );
+    for session in agents.into_iter().filter(|agent| {
+        agent.led
+            && agent.launched_by.as_deref() == Some(pilot.id.as_str())
+            && !agent.state.is_final()
+    }) {
+        stop_tree(daemon, &session.id, "its pilot ended");
     }
 }
 
@@ -2393,7 +2366,9 @@ fn end(daemon: &Arc<Daemon>, id: &str, state: AgentState, reason: &str) -> bool 
         _ => format!("ended: {reason}"),
     };
     crate::subscriptions::followed_ended(daemon, &agent, &why);
-    hand_over(daemon, &agent);
+    if state == AgentState::Ended {
+        end_led(daemon, &agent);
+    }
     agents::tell(daemon, id, Order::Stop);
     let (daemon, id) = (daemon.clone(), id.to_owned());
     tokio::spawn(async move { crate::runs::stop_runs_of(&daemon, &id).await });

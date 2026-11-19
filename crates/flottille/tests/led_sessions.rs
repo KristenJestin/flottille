@@ -504,22 +504,6 @@ fn a_paused_following_sends_the_question_to_the_user() {
 }
 
 #[test]
-fn a_pilot_that_ends_with_a_question_open_hands_it_to_the_user() {
-    let user = User::with_fake_agent();
-    let (lead, _, session) = asked_its_pilot(&user);
-
-    user.call("agent.stop", json!({"agent": lead})).unwrap();
-
-    reached_the_user(&user, &session);
-    eventually("the session told", || {
-        !delivered(&user, &session, "handed").is_empty()
-    });
-    let told = delivered(&user, &session, "handed");
-    assert_eq!(told.len(), 1, "{told:?}");
-    assert!(told[0].contains("went to the user"), "{}", told[0]);
-}
-
-#[test]
 fn detaching_a_session_hands_its_open_question_to_the_user() {
     let user = User::with_fake_agent();
     let (_, _, session) = asked_its_pilot(&user);
@@ -614,40 +598,6 @@ fn the_user_talks_to_a_led_session_directly() {
         pending["requests"].as_array().unwrap().is_empty(),
         "{pending}"
     );
-}
-
-#[test]
-fn a_led_session_goes_on_when_its_pilot_ends_and_is_handed() {
-    let user = User::with_fake_agent();
-    user.fake_script(json!({"turns": [
-        {"when": "Ask now", "do": [asks("Ship it?"), {"say": "Asked."}]}
-    ]}));
-    let (lead, mcp) = lead(&user);
-    let (session, _) = led(&user, &mcp, "Fix the login.");
-    eventually("its first turn", || turns(&user, &session) == 1);
-    assert_eq!(shown(&user, &session)["led_by"], lead.as_str());
-
-    user.call("agent.stop", json!({"agent": lead})).unwrap();
-
-    eventually("handed", || shown(&user, &session)["led_by"].is_null());
-    let session_now = shown(&user, &session);
-    assert_eq!(session_now["launched_by"], lead.as_str());
-    assert!(
-        !["ended", "failed"].contains(&session_now["state"].as_str().unwrap()),
-        "{session_now}"
-    );
-    eventually("the session told once", || {
-        delivered(&user, &session, "handed").len() == 1
-    });
-    // Its questions now reach the user.
-    user.call(
-        "agent.send",
-        json!({"agent": session, "message": "Ask now"}),
-    )
-    .unwrap();
-    eventually("the question in the inbox", || {
-        questions_in_inbox(&user, &session) == ["Ship it?"]
-    });
 }
 
 // A led session ends with its pilot (#1089, `docs/tools.md`, "The pilot ends").
