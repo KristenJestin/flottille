@@ -4938,7 +4938,7 @@ fn an_alpha_built_from_a_pull_request_is_named_after_its_branch_and_its_head() {
 
     assert!(output.status.success(), "{output:?}");
     assert!(outputs.starts_with("channel=alpha\nversion="), "{outputs}");
-    assert!(outputs.contains(".alpha.feat-12-topic."), "{outputs}");
+    assert!(outputs.contains("-alpha.feat-12-topic."), "{outputs}");
 }
 
 #[test]
