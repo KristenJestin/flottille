@@ -344,6 +344,17 @@ impl Conn {
         })
     }
 
+    /// A stream that sends `bytes` and then nothing, held by the stream it gives back (tests).
+    #[cfg(test)]
+    pub(crate) async fn open_unfinished(
+        &self,
+        bytes: &[u8],
+    ) -> (quinn::SendStream, quinn::RecvStream) {
+        let (mut send, recv) = self.0.open_bi().await.unwrap();
+        send.write_all(bytes).await.unwrap();
+        (send, recv)
+    }
+
     pub(crate) fn close(&self, code: u32, reason: &str) {
         self.0.close(code.into(), reason.as_bytes());
     }

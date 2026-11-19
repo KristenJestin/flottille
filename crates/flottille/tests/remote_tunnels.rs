@@ -354,18 +354,24 @@ fn run_server(user: &User, name: &str, line: &str, extra: Value) -> String {
 /// The server's run of the fake HTTP server on a free port, once it says it listens: the run and
 /// the port.
 fn web_on(user: &User) -> (String, u16) {
+    web_with(user, "--listen 0")
+}
+
+/// The same with `line` as the server's options (`--host`, `--serve`...): the run and the port it
+/// took.
+fn web_with(user: &User, line: &str) -> (String, u16) {
     app_on(user);
-    let run = run_server(user, "web", "--listen 0", json!({}));
+    let run = run_server(user, "web", line, json!({}));
     let mut port = 0;
     eventually("the server listens", || {
         let output = user.call("run.output", json!({"run": run})).unwrap();
         let text = output["output"].as_str().unwrap_or_default().to_owned();
         match text
             .lines()
-            .find_map(|line| line.strip_prefix("listening on http://127.0.0.1:"))
+            .find_map(|line| line.strip_prefix("listening on http://"))
         {
             Some(found) => {
-                port = found.parse().unwrap();
+                port = found.rsplit(':').next().unwrap().parse().unwrap();
                 true
             }
             None => false,
@@ -619,19 +625,6 @@ fn a_taken_local_port_gets_another_said_in_the_answer() {
     assert_eq!(tunnel.answer["port"], port);
     assert_ne!(tunnel.local_port(), port, "{}", tunnel.answer);
     assert!(get(tunnel.local_port()).starts_with("HTTP/1.1 204"));
-    // A run's address nothing listens on yet, whose port is free here, is the same port.
-    let free = TcpListener::bind("127.0.0.1:0").unwrap();
-    let wanted = free.local_addr().unwrap().port();
-    drop(free);
-    let waiting = run_server(
-        &server.user,
-        "later",
-        "--wait 600000",
-        json!({"url": format!("http://127.0.0.1:{wanted}")}),
-    );
-    let same = open(&pc, "server", &waiting, &[]);
-    assert_eq!(same.answer["port"], wanted, "{}", same.answer);
-    assert_eq!(same.local_port(), wanted, "{}", same.answer);
 }
 
 #[test]
@@ -871,4 +864,186 @@ fn a_connection_for_a_tunnel_nobody_opened_is_closed() {
             .log()
             .contains("opened a connection of a tunnel t0000000000000000 that is none of its")
     });
+}
+
+/// Another machine's link to `server`, with the machine key of `machine` (whose daemon is
+/// stopped, so that its own link does not replace this one): `tunnel` is opened on it, and what
+/// comes back of a request line written to it.
+fn read_through_a_link_of(
+    machine: &Machine,
+    name: &str,
+    server: &Machine,
+    tunnel: &str,
+) -> (bool, Vec<u8>) {
+    let server_key: PublicKey =
+        serde_json::from_value(server.remote()["this"]["key"].clone()).unwrap();
+    let address: SocketAddr = server.remote()["this"]["listening"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(machine.user.run(&["daemon", "stop"]).status.success());
+    server.wait_for(name, "offline");
+    let machine_key = MachineKey::load_or_make(&machine.folder()).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let endpoint = Endpoint::dialler(&machine_key).unwrap();
+        let link = endpoint
+            .connect(
+                server_key,
+                &[address],
+                Traffic::Client,
+                &Hello::ours("0.4.1"),
+                "server",
+            )
+            .await
+            .unwrap();
+        let mut stream = link.tunnel(tunnel).await.unwrap();
+        let _ = tokio::io::AsyncWriteExt::write_all(&mut stream, b"GET / HTTP/1.1\r\n\r\n").await;
+        let mut back = Vec::new();
+        let ended = tokio::time::timeout(WAIT, async { stream.read_to_end(&mut back).await }).await;
+        endpoint.close().await;
+        (ended.is_ok(), back)
+    })
+}
+
+#[test]
+fn a_tunnel_id_from_another_machine_s_link_is_refused() {
+    let (_hub, pc, server, tablet) =
+        pc_server_and(User::new(), User::new(), "tablet", "controller");
+    let (run, _port) = web_on(&server.user);
+    // A real tunnel, opened for pc: its id is no secret, and the tablet's machine knows it.
+    let tunnel = open(&pc, "server", &run, &[]);
+    let id = tunnel.id();
+    assert!(get(tunnel.local_port()).starts_with("HTTP/1.1 204"));
+
+    let (ended, back) = read_through_a_link_of(&tablet, "tablet", &server, &id);
+    assert!(ended, "the connection was left open");
+    assert!(back.is_empty(), "{:?}", String::from_utf8_lossy(&back));
+    eventually("the server to say it closed it", || {
+        server.log().contains(&format!(
+            "opened a connection of a tunnel {id} that is none of its"
+        ))
+    });
+    // pc's own tunnel still carries.
+    assert!(get(tunnel.local_port()).starts_with("HTTP/1.1 204"));
+}
+
+#[test]
+fn a_port_taken_by_a_foreign_listener_after_the_run_s_closed_is_refused_at_the_next_connection() {
+    let (_hub, pc, server) = pc_and_server(User::new());
+    // The run answers one request, then closes its listener and stays.
+    let (run, port) = web_with(&server.user, "--listen 0 --serve 1");
+    let tunnel = open(&pc, "server", &run, &[]);
+    assert!(get(tunnel.local_port()).starts_with("HTTP/1.1 204"));
+    // Another process takes the port the run gave up.
+    let mut foreign = None;
+    eventually("the port to be free", || {
+        foreign = TcpListener::bind(("127.0.0.1", port)).ok();
+        foreign.is_some()
+    });
+    let foreign = foreign.unwrap();
+    foreign.set_nonblocking(true).unwrap();
+
+    let mut stream = TcpStream::connect(("127.0.0.1", tunnel.local_port())).unwrap();
+    stream.set_read_timeout(Some(WAIT)).unwrap();
+    let _ = stream.write_all(b"GET / HTTP/1.1\r\nHost: app\r\n\r\n");
+    let mut said = Vec::new();
+    assert_eq!(stream.read_to_end(&mut said).unwrap_or(0), 0);
+    assert!(
+        foreign.accept().is_err(),
+        "the foreign listener was reached"
+    );
+    eventually("the server to say it closed it", || {
+        server.log().contains(&format!(
+            "port {port} is no longer one of run {run}'s: a connection of tunnel"
+        ))
+    });
+}
+
+#[test]
+fn a_tunnel_closes_when_its_device_is_removed() {
+    let (_hub, pc, server, tablet) =
+        pc_server_and(User::new(), User::new(), "tablet", "controller");
+    let (run, _port) = web_on(&server.user);
+    let mut tunnel = open(&tablet, "server", &run, &[]);
+    let local = tunnel.local_port();
+    assert!(get(local).starts_with("HTTP/1.1 204"));
+
+    let removed = pc.user.run(&["remote", "remove", "tablet"]);
+    assert!(
+        removed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&removed.stderr)
+    );
+    eventually("the server to close the tunnel", || {
+        server.log().contains("the tunnel asked by tablet ended")
+    });
+    eventually("the tunnel to close on the tablet", || {
+        tunnels(&tablet).is_empty()
+    });
+    eventually("the command to end", || tunnel.ended().is_some());
+    eventually("the local port to close", || {
+        TcpStream::connect(("127.0.0.1", local)).is_err()
+    });
+}
+
+#[test]
+fn a_v6_listener_beside_a_foreign_v4_one_is_refused() {
+    let (_hub, pc, server) = pc_and_server(User::new());
+    // The run listens on [::1]:P. Linux lets another process listen on 127.0.0.1:P beside it:
+    // the bytes of a tunnel to P must not reach that one.
+    let (run, port) = web_with(&server.user, "--listen 0 --host ::1");
+    let foreign = TcpListener::bind(("127.0.0.1", port)).unwrap();
+    foreign.set_nonblocking(true).unwrap();
+
+    for extra in [&[][..], &["--port", &port.to_string()][..]] {
+        let said = refused(pc.on("server", &[&["tunnel", "open", &run], extra].concat()));
+        assert!(said.contains("refused:"), "{said}");
+        assert!(said.contains("another process listens"), "{said}");
+    }
+    assert!(
+        foreign.accept().is_err(),
+        "the foreign listener was reached"
+    );
+    assert!(tunnels(&pc).is_empty());
+}
+
+#[test]
+fn a_run_listening_on_the_ipv6_loopback_alone_is_reached_there() {
+    let (_hub, pc, server) = pc_and_server(User::new());
+    let (run, port) = web_with(&server.user, "--listen 0 --host ::1");
+    let tunnel = open(&pc, "server", &run, &[]);
+    assert_eq!(tunnel.answer["port"], port, "{}", tunnel.answer);
+    assert!(get(tunnel.local_port()).starts_with("HTTP/1.1 204"));
+}
+
+#[test]
+fn an_address_port_no_process_of_the_run_listens_on_is_refused() {
+    let (_hub, pc, server) = pc_and_server(User::new());
+    app_on(&server.user);
+    // Something else listens on the port the run reports (a script of the workspace may print
+    // any address): the run itself listens on none.
+    let foreign = TcpListener::bind("127.0.0.1:0").unwrap();
+    foreign.set_nonblocking(true).unwrap();
+    let port = foreign.local_addr().unwrap().port();
+    let run = run_server(
+        &server.user,
+        "liar",
+        "--wait 600000",
+        json!({"url": format!("http://127.0.0.1:{port}")}),
+    );
+
+    for extra in [&[][..], &["--port", &port.to_string()][..]] {
+        let said = refused(pc.on("server", &[&["tunnel", "open", &run], extra].concat()));
+        assert!(said.contains("refused:"), "{said}");
+    }
+    assert!(
+        foreign.accept().is_err(),
+        "the foreign listener was reached"
+    );
+    assert!(tunnels(&pc).is_empty());
 }

@@ -63,3 +63,57 @@ impl Link {
             .map_err(|failure| self.lost(failure))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::net::{IpAddr, SocketAddr};
+    use std::time::Duration;
+
+    use crate::{Endpoint, Hello, MachineKey, Traffic};
+
+    /// A client link from one machine to another, both ends, on the loopback.
+    async fn linked() -> (tempfile::TempDir, Link, Link) {
+        let state = tempfile::tempdir().unwrap();
+        let bind = |name: &str| {
+            let key = MachineKey::load_or_make(&state.path().join(name)).unwrap();
+            Endpoint::bind(&key, SocketAddr::new(IpAddr::from([127, 0, 0, 1]), 0)).unwrap()
+        };
+        let (laptop, server) = (bind("laptop"), bind("server"));
+        let ours = Hello::ours("0.4.1");
+        let (endpoint, hello) = (server.clone(), ours.clone());
+        let accepting = tokio::spawn(async move {
+            let accepting = endpoint.accept().await.unwrap();
+            accepting.handshake(&hello, "laptop").await.unwrap()
+        });
+        let link = laptop
+            .connect(
+                server.key(),
+                &server.addresses(),
+                Traffic::Client,
+                &ours,
+                "server",
+            )
+            .await
+            .unwrap();
+        (state, link, accepting.await.unwrap())
+    }
+
+    #[tokio::test]
+    async fn a_stream_that_never_ends_its_opening_line_does_not_stall_the_link() {
+        let (_state, link, accepted) = linked().await;
+        // A member machine that says it opens a tunnel and never ends the line.
+        let _stalled = link.conn.open_unfinished(b"\0{\"tunnel\":\"t1\"").await;
+        let serving = tokio::spawn(async move {
+            let received = accepted.next().await.unwrap();
+            let (id, _stream) = received.take_tunnel().ok().unwrap();
+            (id, accepted)
+        });
+        let _open = link.tunnel("t2").await.unwrap();
+        // Well within the time the stalled line is waited for.
+        let (id, _accepted) = tokio::time::timeout(Duration::from_secs(2), serving)
+            .await
+            .expect("the link took no other stream while a line was unfinished")
+            .unwrap();
+        assert_eq!(id, "t2");
+    }
+}
