@@ -28,7 +28,8 @@ pub enum Bundled {
     NothingNew,
 }
 
-/// What a received bundle laid in the repository, under `refs/flottille/incoming/<launch>`.
+/// What a received bundle laid in the repository, under
+/// `refs/flottille/incoming/<machine>/<launch>`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Received {
     /// The sender's snapshot.
@@ -42,14 +43,30 @@ pub fn outgoing_ref(launch: &str) -> String {
     format!("refs/flottille/outgoing/{launch}")
 }
 
-/// The ref that holds a launch's snapshot on the receiving side, until its workspace is made.
-pub fn incoming_ref(launch: &str) -> String {
-    format!("refs/flottille/incoming/{launch}")
+/// The ref that holds the snapshot of the launch `launch` of `machine` on the receiving side,
+/// until its workspace is made: two machines' launches of one name are two refs.
+pub fn incoming_ref(machine: &str, launch: &str) -> String {
+    format!("refs/flottille/incoming/{machine}/{launch}")
 }
 
-/// The ref a machine's new commits on `branch` come back to.
-pub fn machines_ref(machine: &str, branch: &str) -> String {
-    format!("refs/flottille/machines/{machine}/{branch}")
+/// The ref the new commits on `branch` of a machine's work for `launch` come back to: two
+/// launches from one branch are two refs.
+pub fn machines_ref(machine: &str, launch: &str, branch: &str) -> String {
+    format!("refs/flottille/machines/{machine}/{launch}/{branch}")
+}
+
+/// Removes `reference` from `repository`, when it is there.
+pub async fn remove_ref(repository: &Path, reference: &str) -> Result<(), String> {
+    if commit_of(repository, reference).await?.is_none() {
+        return Ok(());
+    }
+    output_git(
+        repository,
+        &["update-ref", "-d", "--end-of-options", reference],
+        Class::Work,
+    )
+    .await
+    .map(drop)
 }
 
 /// Makes the changed and untracked files of `repository` that are not ignored one commit on top
@@ -218,11 +235,17 @@ pub async fn verify(repository: &Path, bundle: &Path) -> Result<(), String> {
         .map_err(|reason| format!("the bundle is refused: {reason}"))
 }
 
-/// Fetches a launch's bundle into `repository`, under [`incoming_ref`]: no branch of the
-/// repository moves. A bundle refused by [`verify`], or whose pack git cannot read, fetches
-/// nothing.
-pub async fn receive(repository: &Path, bundle: &Path, launch: &str) -> Result<Received, String> {
-    let into = incoming_ref(launch);
+/// Fetches the bundle of `machine`'s launch into `repository`, under [`incoming_ref`]: no branch
+/// of the repository moves. A bundle refused by [`verify`], or whose pack or objects git cannot
+/// read or finds malformed, fetches nothing.
+pub async fn receive(
+    repository: &Path,
+    bundle: &Path,
+    machine: &str,
+    launch: &str,
+) -> Result<Received, String> {
+    let into = incoming_ref(machine, launch);
+    one_component(repository, "machine", machine, &into).await?;
     one_component(repository, "launch", launch, &into).await?;
     let refspec = format!("+{}:{into}", outgoing_ref(launch));
     fetch(repository, bundle, &refspec).await?;
@@ -237,12 +260,17 @@ pub async fn receive(repository: &Path, bundle: &Path, launch: &str) -> Result<R
 
 /// A repository never received: made at `folder` from the bundle alone, never from a remote, and
 /// given none. A refused bundle leaves no folder behind.
-pub async fn clone(folder: &Path, bundle: &Path, launch: &str) -> Result<Received, String> {
+pub async fn clone(
+    folder: &Path,
+    bundle: &Path,
+    machine: &str,
+    launch: &str,
+) -> Result<Received, String> {
     std::fs::create_dir(folder)
         .map_err(|error| format!("cannot make {}: {error}", folder.display()))?;
     let made = async {
         output_git(folder, &["init", "--quiet"], Class::Read).await?;
-        receive(folder, bundle, launch).await
+        receive(folder, bundle, machine, launch).await
     }
     .await;
     if made.is_err() {
@@ -298,17 +326,19 @@ pub async fn lay_snapshot(worktree: &Path, snapshot: &str) -> Result<(), String>
     Ok(())
 }
 
-/// Fetches the commits a machine sent back into [`machines_ref`] for `branch`, never onto a
-/// branch of the user's: the ref the bundle holds, whatever its name there. A name that would
-/// write anywhere else is refused before anything is read.
+/// Fetches the commits a machine sent back for `launch` into [`machines_ref`] for `branch`, never
+/// onto a branch of the user's: the ref the bundle holds, whatever its name there. A name that
+/// would write anywhere else is refused before anything is read.
 pub async fn fetch_returned(
     repository: &Path,
     bundle: &Path,
     machine: &str,
+    launch: &str,
     branch: &str,
 ) -> Result<String, String> {
-    let into = machines_ref(machine, branch);
+    let into = machines_ref(machine, launch, branch);
     one_component(repository, "machine", machine, &into).await?;
+    one_component(repository, "launch", launch, &into).await?;
     check_branch(repository, branch).await?;
     let list: [&OsStr; 4] = [
         "bundle".as_ref(),
@@ -344,6 +374,11 @@ async fn fetch(repository: &Path, bundle: &Path, refspec: &str) -> Result<(), St
         // (meant for submodules and remotes) is not about a file of Flottille's own.
         "-c",
         "protocol.file.allow=always",
+        // The objects come from another machine: each is checked before any is kept.
+        "-c",
+        "fetch.fsckObjects=true",
+        "-c",
+        "transfer.fsckObjects=true",
         "fetch",
         "--quiet",
         "--no-tags",

@@ -8,19 +8,20 @@
 //! fetch it. Only that side may read it, and only while it is offered. Nothing is pushed, no
 //! remote is contacted, nothing is asked.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use base64::Engine;
 use flottille_core::store::{Travel, now_ms};
 use flottille_link::{
     Git, GitFetch, GitOffer, GitPlace, GitRepository, Link, MachineMessage, Message, PublicKey,
-    Received,
+    Received, Role,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 
 use crate::daemon::Daemon;
 use crate::git::{self, Class, bundle};
@@ -30,6 +31,68 @@ use crate::workspaces::{self, Travelled};
 
 /// The bytes of a bundle in one frame of its stream: well under the link's frame once in base64.
 const CHUNK: usize = 192 * 1024;
+
+/// The longest bundle a machine sends or takes: past it, it is refused before a byte is read.
+pub(crate) const MOST_BYTES: u64 = 2 << 30;
+
+/// How long a bundle being read may go without a frame before it is given up.
+const FRAME_WAIT: Duration = Duration::from_secs(60);
+
+/// Whether code travels between this machine and the others: only in a test build that asks for
+/// it, until a travel is tied to a launch this machine's gate accepted (#816).
+pub fn on() -> bool {
+    cfg!(debug_assertions) && std::env::var_os("FLOTTILLE_TEST_TRAVEL").is_some()
+}
+
+/// What a test asks of a travel: its bundle broken, each offer held open a while.
+#[derive(Default)]
+pub struct Testing {
+    pub corrupt: bool,
+    pub hold: Duration,
+}
+
+/// The machines this one is taking something from: one thing at a time each, so that a machine
+/// fills no disk with bundles read side by side and makes no workspace twice.
+#[derive(Default)]
+pub(crate) struct Receiving(Mutex<HashSet<[u8; 32]>>);
+
+impl Receiving {
+    /// `peer` held until what is returned is dropped; refused while it is already.
+    fn hold<'a>(&'a self, peer: &PublicKey, name: &str) -> Result<Held<'a>, String> {
+        if !self.0.lock().unwrap().insert(*peer.as_bytes()) {
+            return Err(format!(
+                "{name} is sending something already: one thing at a time"
+            ));
+        }
+        Ok(Held {
+            receiving: self,
+            peer: *peer.as_bytes(),
+        })
+    }
+}
+
+struct Held<'a> {
+    receiving: &'a Receiving,
+    peer: [u8; 32],
+}
+
+impl Drop for Held<'_> {
+    fn drop(&mut self) {
+        self.receiving.0.lock().unwrap().remove(&self.peer);
+    }
+}
+
+/// Refuses a bundle longer than [`MOST_BYTES`].
+fn fits(size: u64) -> Result<(), String> {
+    if size > MOST_BYTES {
+        return Err("the bundle is refused: it is more than 2 GiB".to_owned());
+    }
+    Ok(())
+}
+
+/// Workspaces are made of what came one at a time: a branch found free stays free until its
+/// worktree is made.
+static PLACING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// The bundles this machine offers, by transfer: the machine each is for, and its file.
 #[derive(Default)]
@@ -81,30 +144,68 @@ fn stored<T>(result: flottille_core::Result<T>) -> Result<T, String> {
 /// Sends the code of a place to the machine named `machine` for `launch`: for each repository of
 /// `place` (its path in `project`, and its folder here), its uncommitted work made a snapshot and
 /// a bundle of what that machine lacks; then has it make a workspace of them. What that machine
-/// answered, with what was sent of each repository.
+/// answered, with what was sent of each repository. The launch is kept as sent only once its
+/// workspace is made there: one that failed part way is sent again. The snapshots' refs are
+/// removed once it ends, either way.
 pub async fn send(
     daemon: &Arc<Daemon>,
     machine: &str,
     launch: &str,
     project: &str,
     place: &[(String, PathBuf)],
-    corrupt: bool,
+    testing: Testing,
 ) -> Result<Value, String> {
     let remote = remote_of(daemon)?;
     let (link, key) = remote.link_to(machine)?;
     if !stored(daemon.read(|store| store.travels("out", None, launch)))?.is_empty() {
         return Err(format!("launch {launch} was sent already"));
     }
+    let mut snapshotted = Vec::new();
+    let sent = send_place(
+        daemon,
+        &remote,
+        (&link, &key, machine),
+        launch,
+        project,
+        place,
+        &testing,
+        &mut snapshotted,
+    )
+    .await;
+    for folder in snapshotted {
+        if let Err(error) = bundle::remove_ref(folder, &bundle::outgoing_ref(launch)).await {
+            eprintln!(
+                "flottille daemon: the snapshot of launch {launch} in {} is kept: {error}",
+                folder.display()
+            );
+        }
+    }
+    sent
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn send_place<'a>(
+    daemon: &Arc<Daemon>,
+    remote: &Remote,
+    (link, key, machine): (&Link, &PublicKey, &str),
+    launch: &str,
+    project: &str,
+    place: &'a [(String, PathBuf)],
+    testing: &Testing,
+    snapshotted: &mut Vec<&'a Path>,
+) -> Result<Value, String> {
     let mut sent = Vec::new();
+    let mut records = Vec::new();
     let mut branch = None;
     for (index, (repository, folder)) in place.iter().enumerate() {
         let snapshot = bundle::snapshot(folder, launch).await?;
+        snapshotted.push(folder);
         branch.get_or_insert_with(|| snapshot.branch.clone());
         let asked = GitRepository {
             project: project.to_owned(),
             repository: repository.clone(),
         };
-        let has = ask(&link, Git::Has(asked)).await?;
+        let has = ask(link, Git::Has(asked)).await?;
         let has: Vec<String> = serde_json::from_value(has["commits"].clone()).unwrap_or_default();
         let scratch = scratch()?;
         let file = scratch.path().join("bundle");
@@ -113,14 +214,17 @@ pub async fn send(
                 "{machine} has the snapshot of {repository} already"
             ));
         }
-        if corrupt {
+        if testing.corrupt {
             corrupted(&file)?;
         }
-        let prerequisites = prerequisites(&file)?;
+        let prerequisites = prerequisites(&file).await?;
         let commits = counted(folder, &bundle::outgoing_ref(launch), &prerequisites).await?;
         let (size, sha256) = measured(&file).await?;
+        fits(size).map_err(|_| format!("the bundle of {repository} is more than 2 GiB"))?;
         let transfer = format!("{launch}/{index}");
-        let _offered = Offered::new(&remote.transfers, transfer.clone(), &key, &file);
+        let _offered = Offered::new(&remote.transfers, transfer.clone(), key, &file);
+        eprintln!("flottille daemon: offers {repository} of launch {launch} to {machine}");
+        tokio::time::sleep(testing.hold).await;
         let offer = GitOffer {
             transfer,
             launch: launch.to_owned(),
@@ -131,26 +235,22 @@ pub async fn send(
             sha256,
             back: false,
         };
-        ask(&link, Git::Offer(offer)).await?;
-        stored(daemon.write(|store| {
-            store
-                .record_travel(&Travel {
-                    way: "out".into(),
-                    machine: hex(key.as_bytes()),
-                    launch: launch.to_owned(),
-                    repository: repository.clone(),
-                    project: project.to_owned(),
-                    folder: folder.to_string_lossy().into_owned(),
-                    branch: snapshot.branch.clone(),
-                    tip: snapshot.head.clone(),
-                    snapshot: snapshot.commit.clone(),
-                    workspace: None,
-                    there: None,
-                    returned: None,
-                    at: now_ms(),
-                })
-                .map(|_| ((), None))
-        }))?;
+        ask(link, Git::Offer(offer)).await?;
+        records.push(Travel {
+            way: "out".into(),
+            machine: hex(key.as_bytes()),
+            launch: launch.to_owned(),
+            repository: repository.clone(),
+            project: project.to_owned(),
+            folder: folder.to_string_lossy().into_owned(),
+            branch: snapshot.branch.clone(),
+            tip: snapshot.head.clone(),
+            snapshot: snapshot.commit.clone(),
+            workspace: None,
+            there: None,
+            returned: None,
+            at: now_ms(),
+        });
         sent.push(json!({
             "path": repository,
             "commits": commits,
@@ -161,7 +261,7 @@ pub async fn send(
         return Err("a place has at least one repository".to_owned());
     };
     let placed = ask(
-        &link,
+        link,
         Git::Place(GitPlace {
             launch: launch.to_owned(),
             project: project.to_owned(),
@@ -170,6 +270,12 @@ pub async fn send(
         }),
     )
     .await?;
+    stored(daemon.write(|store| {
+        for record in &records {
+            store.record_travel(record)?;
+        }
+        Ok(((), None))
+    }))?;
     let mut answer = placed;
     answer["repositories"] = sent.into();
     Ok(answer)
@@ -177,7 +283,7 @@ pub async fn send(
 
 /// Sends back the new commits of the workspace this machine made for `launch`: for each of its
 /// repositories, a bundle of the commits of its branch past what was sent and what came back
-/// already, fetched there into `refs/flottille/machines/<this machine>/<branch>`.
+/// already, fetched there into `refs/flottille/machines/<this machine>/<launch>/<branch>`.
 pub async fn send_back(daemon: &Arc<Daemon>, launch: &str) -> Result<Value, String> {
     let remote = remote_of(daemon)?;
     let travels = stored(daemon.read(|store| store.travels("in", None, launch)))?;
@@ -210,12 +316,14 @@ pub async fn send_back(daemon: &Arc<Daemon>, launch: &str) -> Result<Value, Stri
             back.push(json!({"path": travel.repository, "commits": 0}));
             continue;
         }
-        let commits = counted(&folder, &reference, &prerequisites(&file)?).await?;
+        let commits = counted(&folder, &reference, &prerequisites(&file).await?).await?;
         let tip = git::output(&folder, &["rev-parse", "--verify", &reference], Class::Read)
             .await?
             .trim()
             .to_owned();
         let (size, sha256) = measured(&file).await?;
+        fits(size)
+            .map_err(|_| format!("the bundle of {} is more than 2 GiB", travel.repository))?;
         let transfer = format!("{launch}/back/{index}");
         let _offered = Offered::new(&remote.transfers, transfer.clone(), &key, &file);
         let answered = ask(
@@ -253,9 +361,18 @@ async fn ask(link: &Link, git: Git) -> Result<Value, String> {
         .map_err(|error| error.to_string())
 }
 
-/// A `git` message another machine sent on `link`, served once that machine is still one of the
-/// user's.
+/// A `git` message another machine sent on `link`, served once code travels in this build and
+/// that machine is still one of the user's: what sends code to run here (`Has`, `Offer`,
+/// `Place`) only from a runner's or a controller's machine, one thing at a time.
 pub(crate) async fn serve(remote: Arc<Remote>, link: Link, received: Received, git: Git) {
+    if !on() {
+        received.answer(Err(
+            "this machine takes no code from another yet: code travels only with a launch its \
+             gate accepted"
+                .to_owned(),
+        ));
+        return;
+    }
     let from = link.peer();
     let Some(name) = remote.name_of(&from) else {
         received.answer(Err("it was removed from the member list".to_owned()));
@@ -265,14 +382,41 @@ pub(crate) async fn serve(remote: Arc<Remote>, link: Link, received: Received, g
         received.answer(Err("the daemon is stopping".to_owned()));
         return;
     };
-    match git {
-        Git::Fetch(fetch) => stream(&remote, &from, fetch, received).await,
-        Git::Has(asked) => received.answer(has(&daemon, &asked).await),
-        Git::Offer(offer) if offer.back => {
-            received.answer(came_back(&daemon, &link, &from, &name, offer).await)
-        }
-        Git::Offer(offer) => received.answer(offered(&daemon, &link, &from, &name, offer).await),
-        Git::Place(place) => received.answer(placed(&daemon, &from, &name, place).await),
+    if let Git::Fetch(fetch) = git {
+        stream(&remote, &from, fetch, received).await;
+        return;
+    }
+    if let Err(refused) = may_send_code(&remote, &from, &name) {
+        received.answer(Err(refused));
+        return;
+    }
+    let answer = match git {
+        Git::Fetch(_) => unreachable!("served above"),
+        Git::Has(asked) => has(&daemon, &asked).await,
+        Git::Offer(offer) => match remote.receiving.hold(&from, &name) {
+            Err(refused) => Err(refused),
+            Ok(_held) if offer.back => came_back(&daemon, &link, &from, &name, offer).await,
+            Ok(_held) => offered(&daemon, &link, &from, &name, offer).await,
+        },
+        Git::Place(place) => match remote.receiving.hold(&from, &name) {
+            Err(refused) => Err(refused),
+            Ok(_held) => placed(&daemon, &from, &name, place).await,
+        },
+    };
+    received.answer(answer);
+}
+
+/// Refuses a machine that is no runner's or controller's: a viewer's, or one of no member.
+fn may_send_code(remote: &Remote, from: &PublicKey, name: &str) -> Result<(), String> {
+    let refused = |who: &str| {
+        Err(format!(
+            "{name} is {who}: only a runner's or a controller's machine sends code to run here"
+        ))
+    };
+    match remote.role_of(from) {
+        Some(Role::Runner | Role::Controller) => Ok(()),
+        Some(Role::Viewer) => refused("a viewer's machine"),
+        None => refused("no member's machine"),
     }
 }
 
@@ -316,6 +460,7 @@ async fn stream(remote: &Remote, from: &PublicKey, fetch: GitFetch, received: Re
 /// Reads the bundle offered as `offer` from the machine on `link` into `file`: refused unless it
 /// is the length and the SHA-256 offered.
 async fn read_offered(link: &Link, offer: &GitOffer, file: &Path) -> Result<(), String> {
+    fits(offer.size)?;
     let fetch = Git::Fetch(GitFetch {
         transfer: offer.transfer.clone(),
     });
@@ -328,7 +473,13 @@ async fn read_offered(link: &Link, offer: &GitOffer, file: &Path) -> Result<(), 
         .map_err(|error| format!("cannot write the bundle: {error}"))?;
     let mut hash = Sha256::new();
     let mut size = 0u64;
-    while let Some(frame) = answers.next().await {
+    loop {
+        let Ok(frame) = tokio::time::timeout(FRAME_WAIT, answers.next()).await else {
+            return Err("the bundle is refused: nothing of it came for a minute".to_owned());
+        };
+        let Some(frame) = frame else {
+            break;
+        };
         let frame = frame.map_err(|error| error.to_string())?;
         let bytes = frame["chunk"]
             .as_str()
@@ -413,8 +564,10 @@ async fn has(daemon: &Daemon, asked: &GitRepository) -> Result<Value, String> {
     Ok(json!({"commits": commits}))
 }
 
-/// `Offer` of a launch's code: read, checked, and fetched under `refs/flottille/incoming/<launch>`
-/// of the project's repository, which is cloned from it when this machine never received it.
+/// `Offer` of a launch's code: read, checked, and fetched under
+/// `refs/flottille/incoming/<machine>/<launch>` of the project's repository, which is cloned from
+/// it when this machine never received it. A launch whose workspace is not made yet takes a
+/// repository again: its sending failed part way and is tried again.
 async fn offered(
     daemon: &Daemon,
     link: &Link,
@@ -425,20 +578,14 @@ async fn offered(
     let folder = repository_of(daemon, &offer.project, &offer.repository)?;
     let machine = hex(from.as_bytes());
     let before = stored(daemon.read(|store| store.travels("in", Some(&machine), &offer.launch)))?;
-    if before
-        .iter()
-        .any(|travel| travel.repository == offer.repository)
-    {
-        return Err(format!(
-            "{} of launch {} was received already",
-            offer.repository, offer.launch
-        ));
+    if before.iter().any(|travel| travel.workspace.is_some()) {
+        return Err(format!("launch {} has a workspace already", offer.launch));
     }
     let scratch = scratch()?;
     let file = scratch.path().join("bundle");
     read_offered(link, &offer, &file).await?;
     let received = if received_before(&folder)? {
-        bundle::receive(&folder, &file, &offer.launch).await?
+        bundle::receive(&folder, &file, &machine, &offer.launch).await?
     } else {
         if folder.exists() {
             std::fs::remove_dir(&folder)
@@ -446,7 +593,7 @@ async fn offered(
             folder.parent().map_or(Ok(()), std::fs::create_dir_all)
         }
         .map_err(|error| format!("cannot make {}: {error}", folder.display()))?;
-        bundle::clone(&folder, &file, &offer.launch).await?
+        bundle::clone(&folder, &file, &machine, &offer.launch).await?
     };
     eprintln!(
         "flottille daemon: received {} of project {} from {name} for launch {}",
@@ -483,7 +630,32 @@ async fn placed(
     place: GitPlace,
 ) -> Result<Value, String> {
     let machine = hex(from.as_bytes());
+    let _placing = PLACING.lock().await;
     let travels = stored(daemon.read(|store| store.travels("in", Some(&machine), &place.launch)))?;
+    let made = place_travels(daemon, &machine, name, &place, &travels).await;
+    // What came is in the workspace now, or is of no use: its refs go, either way.
+    for travel in &travels {
+        let folder = Path::new(&travel.folder);
+        if let Err(error) =
+            bundle::remove_ref(folder, &bundle::incoming_ref(&machine, &place.launch)).await
+        {
+            eprintln!(
+                "flottille daemon: what came for launch {} in {} is kept: {error}",
+                place.launch,
+                folder.display()
+            );
+        }
+    }
+    made
+}
+
+async fn place_travels(
+    daemon: &Arc<Daemon>,
+    machine: &str,
+    name: &str,
+    place: &GitPlace,
+    travels: &[Travel],
+) -> Result<Value, String> {
     let mut repositories = BTreeMap::new();
     let mut folders = Vec::new();
     for path in &place.repositories {
@@ -517,7 +689,7 @@ async fn placed(
         .map_err(|failure| failure.message)?;
     stored(daemon.write(|store| {
         store
-            .set_travel_place(&machine, &place.launch, &workspace, &branch)
+            .set_travel_place(machine, &place.launch, &workspace, &branch)
             .map(|()| ((), None))
     }))?;
     eprintln!(
@@ -528,7 +700,7 @@ async fn placed(
 }
 
 /// `Offer` of new commits coming back for a launch this machine sent to `from`: fetched into
-/// `refs/flottille/machines/<that machine>/<branch>` of the repository they were sent from,
+/// `refs/flottille/machines/<that machine>/<launch>/<branch>` of the repository they were sent from,
 /// never onto a branch. A launch this machine did not send to that machine is refused.
 async fn came_back(
     daemon: &Daemon,
@@ -552,7 +724,8 @@ async fn came_back(
     let file = scratch.path().join("bundle");
     read_offered(link, &offer, &file).await?;
     let folder = PathBuf::from(&travel.folder);
-    let reference = bundle::fetch_returned(&folder, &file, name, &travel.branch).await?;
+    let reference =
+        bundle::fetch_returned(&folder, &file, name, &offer.launch, &travel.branch).await?;
     let tip = git::output(&folder, &["rev-parse", "--verify", &reference], Class::Read)
         .await?
         .trim()
@@ -634,27 +807,43 @@ async fn counted(folder: &Path, reference: &str, past: &[String]) -> Result<u64,
         .map_err(|_| format!("git counted {count:?}"))
 }
 
-/// The prerequisites written in a bundle's header.
-fn prerequisites(file: &Path) -> Result<Vec<String>, String> {
-    let bytes = std::fs::read(file).map_err(|error| format!("cannot read the bundle: {error}"))?;
-    let end = bytes
-        .windows(2)
-        .position(|pair| pair == b"\n\n")
-        .unwrap_or(bytes.len());
-    Ok(String::from_utf8_lossy(&bytes[..end])
-        .lines()
-        .filter_map(|line| line.strip_prefix('-'))
-        .filter_map(|line| line.split(' ').next())
-        .map(str::to_owned)
-        .collect())
+/// The prerequisites written in a bundle's header: its lines up to the first blank one, never
+/// the pack after it.
+async fn prerequisites(file: &Path) -> Result<Vec<String>, String> {
+    let failed = |error: std::io::Error| format!("cannot read the bundle: {error}");
+    let mut lines =
+        tokio::io::BufReader::new(tokio::fs::File::open(file).await.map_err(failed)?).lines();
+    let mut found = Vec::new();
+    while let Some(line) = lines.next_line().await.map_err(failed)? {
+        if line.is_empty() {
+            break;
+        }
+        if let Some(id) = line
+            .strip_prefix('-')
+            .and_then(|line| line.split(' ').next())
+        {
+            found.push(id.to_owned());
+        }
+    }
+    Ok(found)
 }
 
-/// The length of a bundle, and its SHA-256 in hexadecimal.
+/// The length of a bundle, and its SHA-256 in hexadecimal, read a chunk at a time.
 async fn measured(file: &Path) -> Result<(u64, String), String> {
-    let bytes = tokio::fs::read(file)
-        .await
-        .map_err(|error| format!("cannot read the bundle: {error}"))?;
-    Ok((bytes.len() as u64, hex(&Sha256::digest(&bytes))))
+    let failed = |error: std::io::Error| format!("cannot read the bundle: {error}");
+    let mut read = tokio::fs::File::open(file).await.map_err(failed)?;
+    let mut hash = Sha256::new();
+    let mut size = 0u64;
+    let mut buffer = vec![0; CHUNK];
+    loop {
+        let n = read.read(&mut buffer).await.map_err(failed)?;
+        if n == 0 {
+            break;
+        }
+        hash.update(&buffer[..n]);
+        size += n as u64;
+    }
+    Ok((size, hex(&hash.finalize())))
 }
 
 fn hex(bytes: &[u8]) -> String {

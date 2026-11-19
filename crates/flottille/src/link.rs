@@ -206,6 +206,9 @@ pub struct Remote {
     daemon: std::sync::OnceLock<std::sync::Weak<Daemon>>,
     /// The bundles offered to another machine, while it reads them (`travel.rs`).
     pub(crate) transfers: crate::travel::Transfers,
+    /// The machines this one is reading a bundle from or placing code of, one thing at a time
+    /// each (`travel.rs`).
+    pub(crate) receiving: crate::travel::Receiving,
 }
 
 /// Starts the link: the endpoint, the loop that accepts and the one that dials. A link that
@@ -307,6 +310,7 @@ impl Remote {
             requests: Mutex::new(flottille_link::Requests::new(SystemTime::now())),
             daemon: std::sync::OnceLock::new(),
             transfers: Default::default(),
+            receiving: Default::default(),
         }
     }
 
@@ -994,6 +998,13 @@ impl Remote {
                 )
             })?;
         Ok((self.machine_link(&peer)?, peer.key))
+    }
+
+    /// The role of the member whose machine is `key`, by the checked member list; none when it
+    /// is no member's, or there is no list. (#1097 adds the role helpers this will use.)
+    pub(crate) fn role_of(&self, key: &PublicKey) -> Option<flottille_link::Role> {
+        let (members, _) = self.listed().ok()?;
+        members.by_machine(key).map(|member| member.role)
     }
 
     /// The name of the machine of `key`, while this one trusts it.

@@ -2892,11 +2892,11 @@ impl Store {
         Ok(before.unwrap_or_default())
     }
 
-    /// Keeps what travelled; `false`, and nothing written, when that repository of that launch
-    /// travelled that way with that machine already.
-    pub fn record_travel(&mut self, travel: &Travel) -> Result<bool> {
-        let added = self.connection.execute(
-            "INSERT OR IGNORE INTO travels (way, machine, launch, repository, project, folder, \
+    /// Keeps what travelled, in place of what that repository of that launch was when it
+    /// travelled that way with that machine before: a launch whose sending failed is sent again.
+    pub fn record_travel(&mut self, travel: &Travel) -> Result<()> {
+        self.connection.execute(
+            "INSERT OR REPLACE INTO travels (way, machine, launch, repository, project, folder, \
              branch, tip, snapshot, workspace, there, returned, at) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
@@ -2915,7 +2915,7 @@ impl Store {
                 travel.at as i64,
             ],
         )?;
-        Ok(added == 1)
+        Ok(())
     }
 
     /// What travelled `way` for `launch`, with `machine` or with any, by repository.

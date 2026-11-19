@@ -240,10 +240,7 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Result<Va
         return Ok(json!({}));
     }
     // What `agent_launch` will start on another machine (#816), in a test build only.
-    if matches!(method, "test.travel" | "test.travel_back")
-        && cfg!(debug_assertions)
-        && std::env::var_os("FLOTTILLE_TEST_TRAVEL").is_some()
-    {
+    if matches!(method, "test.travel" | "test.travel_back") && crate::travel::on() {
         return travel(&daemon, method, params).await;
     }
     if std::env::var_os("FLOTTILLE_TEST_CLOCK").is_none() || method != "test.advance" {
@@ -271,6 +268,9 @@ struct Travel {
     workspace: Option<String>,
     #[serde(default)]
     corrupt: bool,
+    /// How long each bundle stays offered before the other machine is told of it.
+    #[serde(default)]
+    hold_ms: u64,
 }
 
 /// `test.travel`: the code of a place sent to a machine; `test.travel_back`: the new commits of a
@@ -312,7 +312,10 @@ async fn travel(daemon: &Arc<Daemon>, method: &str, params: Value) -> Result<Val
         &asked.launch,
         &project.name,
         &place,
-        asked.corrupt,
+        crate::travel::Testing {
+            corrupt: asked.corrupt,
+            hold: std::time::Duration::from_millis(asked.hold_ms),
+        },
     )
     .await
     .map_err(Failure::refused)

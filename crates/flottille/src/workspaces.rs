@@ -896,6 +896,12 @@ pub async fn create_from(
         return Err(refusal);
     }
 
+    // Another machine's code runs nothing here until a launch this machine's gate accepted
+    // brings its setup with it (#816): its worktrees alone.
+    let mut steps = snapshot(&project, &taken);
+    if travelled.is_some() {
+        steps.retain(|step| matches!(step.action, Action::Worktree));
+    }
     let workspace = Workspace {
         id: 0,
         project: project.name.clone(),
@@ -905,7 +911,7 @@ pub async fn create_from(
         project_folder: project.folder.clone(),
         created_at: requested_at,
         variables: project.variables.clone(),
-        steps: snapshot(&project, &taken),
+        steps,
         repositories,
         ticket,
     };
@@ -1829,6 +1835,12 @@ async fn make_worktree(workspace: &Workspace, repository: &str) -> Result<(), St
     .await?
     .success;
     let target = target.to_string_lossy().into_owned();
+    // Another machine's code goes on a branch of its own, never on one made meanwhile.
+    if exists && worktree.laid.is_some() {
+        return Err(format!(
+            "the branch {branch} was made meanwhile: another machine's code is not put on it"
+        ));
+    }
     if exists {
         // Made by an earlier attempt: taken again, never made twice.
         git::output(
