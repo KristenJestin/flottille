@@ -63,20 +63,19 @@ impl Capabilities {
     }
 
     /// Why the runner `machine` that offers this would not take a session of `project` on
-    /// `agent` (any agent signed in, when none is named); `None` when it would.
+    /// `agent` (any agent signed in, when none is named); `None` when it would. The slots do not
+    /// bound it: a session for the user counts in no children cap; they bound the children
+    /// launched from another machine (#816).
     pub fn refusal(&self, machine: &str, project: &str, agent: Option<&str>) -> Option<String> {
-        let Some(offered) = self.projects.iter().find(|offered| offered.name == project) else {
+        if !self.projects.iter().any(|offered| offered.name == project) {
             return Some(format!("the project {project} is not on {machine}"));
-        };
+        }
         match agent {
             Some(agent) if !self.agents.iter().any(|signed_in| signed_in == agent) => {
-                return Some(format!("{agent} is not signed in on {machine}"));
+                Some(format!("{agent} is not signed in on {machine}"))
             }
-            None if self.agents.is_empty() => {
-                return Some(format!("no agent is signed in on {machine}"));
-            }
-            _ => {}
+            None if self.agents.is_empty() => Some(format!("no agent is signed in on {machine}")),
+            _ => None,
         }
-        (offered.slots == 0).then(|| format!("{machine} has no slot free for project {project}"))
     }
 }
