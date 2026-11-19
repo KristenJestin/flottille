@@ -673,6 +673,26 @@ pub(super) async fn comment(
     let done = |what: &str| format!("The comment {id} of {reference} was {what}.");
     match (&project.tracker, key) {
         (Some(ProjectTracker::Jira { site, .. }), Key::Jira(key)) => {
+            // A text that mentions someone is changed through Jira's REST API, with the project's
+            // entry (that `acli` keeps a mention node is not confirmed): `acli` is not asked.
+            if let Some(document) = body
+                .filter(|_| !delete)
+                .map(crate::adf::from_markdown)
+                .filter(|document| !crate::adf::mentions(document).is_empty())
+            {
+                return match super::replies::edit_comment_with_mentions(
+                    daemon,
+                    project,
+                    on,
+                    (site, &id),
+                    document,
+                )
+                .await
+                {
+                    Ok(()) => Outcome::Done(done("changed")),
+                    Err(outcome) => outcome,
+                };
+            }
             if let Err(problem) = jira_site(site, "written").await {
                 return Outcome::Failed(problem);
             }
