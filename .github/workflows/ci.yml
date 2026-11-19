@@ -184,7 +184,7 @@ jobs:
         with:
           # The key does not follow Cargo.toml: bump this one when a profile changes, or the
           # cache keeps the artefacts of the old profiles and never saves the new ones.
-          prefix-key: v1-rust
+          prefix-key: v2-rust
           # Clippy's own artefacts, apart from the tests' (`test`).
           shared-key: check
       # The window links against fontconfig and freetype; GPUI loads Wayland and Vulkan at run
@@ -217,7 +217,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: v1-rust
+          prefix-key: v2-rust
           # The name of the job that wrote the cache before the suite was split: the
           # dependencies already cached are kept. The partitions build the same thing: one saves.
           shared-key: verify

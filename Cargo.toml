@@ -19,8 +19,23 @@ strip = "none"
 [profile.release.package."*"]
 debug = false
 
+# The suite is CPU-bound, not waiting: the window's scenarios lay out and draw thousands of rows
+# through GPUI, the daemon and the reader parse and scale pictures and PDFs, the link signs and
+# verifies a thousand changes. Unoptimised, a test of those takes two to five times longer
+# (measured on one runner: 17 s against 4 s for a long conversation scrolled up). One level of
+# optimisation, debug assertions and overflow checks kept, so that no test guards less.
+[profile.dev]
+opt-level = 1
+
 # The release tests sum a 1.4 GB debug binary: unoptimised, that takes 25 s a sum.
 [profile.dev.package.sha2]
+opt-level = 3
+
+# The signatures the link and the hub check by the thousand in their tests.
+[profile.dev.package.curve25519-dalek]
+opt-level = 3
+
+[profile.dev.package.ed25519-dalek]
 opt-level = 3
 
 # The GPUI dependencies are most of every test binary's debug info; line tables keep a panic's
