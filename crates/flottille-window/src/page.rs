@@ -111,6 +111,11 @@ impl MainArea {
         }
     }
 
+    /// Whether Flottille was read once.
+    pub fn read(&self) -> bool {
+        self.read
+    }
+
     pub fn restarting(&self) -> bool {
         self.restarting
     }

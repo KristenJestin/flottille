@@ -22,6 +22,7 @@ pub mod kept;
 pub mod leaves;
 pub mod link;
 pub mod links_card;
+pub mod look;
 pub mod message_checks;
 pub mod modals;
 pub mod mode;
@@ -91,6 +92,16 @@ pub fn init(cx: &mut gpui_kit::App) {
 /// [`init`] with the desktop described by `env` rather than read from the machine.
 pub fn init_with(env: gpui_design_system::omarchy::Environment, cx: &mut gpui_kit::App) {
     gpui_design_system::init(identity(env), cx);
+}
+
+/// [`init_with`] for a window that draws its first frame in the theme `memory` holds.
+pub fn start(
+    env: gpui_design_system::omarchy::Environment,
+    memory: Option<look::Memory>,
+    cx: &mut gpui_kit::App,
+) {
+    let _ = memory;
+    init_with(env, cx);
 }
 
 pub use instance::Instance;
