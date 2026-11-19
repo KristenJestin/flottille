@@ -2852,6 +2852,17 @@ fn version_step_on_main(repo: &Repo, sha: &str) -> (Output, String) {
 /// a `tag`) at `sha`, in a clone of the repository with its `origin`. Its outputs, or its
 /// failure, and the changelog it wrote.
 fn version_step(repo: &Repo, name: &str, kind: &str, sha: &str) -> (Output, String, String) {
+    version_step_with(repo, name, kind, sha, &[])
+}
+
+/// `version_step` with more of the run's environment: a pull request's `HEAD_REF` and `HEAD_SHA`.
+fn version_step_with(
+    repo: &Repo,
+    name: &str,
+    kind: &str,
+    sha: &str,
+    more: &[(&str, &str)],
+) -> (Output, String, String) {
     let clone = tempfile::tempdir().unwrap();
     repo.git(&[
         "clone",
@@ -2876,6 +2887,7 @@ fn version_step(repo: &Repo, name: &str, kind: &str, sha: &str) -> (Output, Stri
         .env("GITHUB_SHA", sha)
         .env("GITHUB_OUTPUT", &outputs)
         .env("RUNNER_TEMP", temp.path())
+        .envs(more.iter().copied())
         .output()
         .unwrap();
     (
@@ -4458,7 +4470,9 @@ fn publish_never_runs_on_a_commit_no_verify_passed_on() {
     // `verify` is skipped only when the commit passed it on dev.
     let verify = job("verify");
     assert!(
-        verify.contains("needs: [verified-on-dev, changes, check, test, hub]"),
+        verify.contains(
+            "needs: [verified-on-dev, changes, check, build-tests, doc-tests, test, hub]"
+        ),
         "{verify}"
     );
     assert!(
@@ -4468,7 +4482,7 @@ fn publish_never_runs_on_a_commit_no_verify_passed_on() {
     // `publish` needs `verify` to have passed, or to have been skipped for that reason.
     let publish = job("publish");
     assert!(
-        publish.contains("needs: [verified-on-dev, verify, build, hub]"),
+        publish.contains("needs: [verified-on-dev, changes, verify, build, hub]"),
         "{publish}"
     );
     let condition: String = publish.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -4502,7 +4516,13 @@ fn verify_fails_unless_the_checks_and_every_partition_passed() {
         Fake::new()
             .run(
                 &script,
-                &[("CHECK", check), ("TEST", test), ("RUST", "true")],
+                &[
+                    ("CHECK", check),
+                    ("BUILD", "success"),
+                    ("DOC", "success"),
+                    ("TEST", test),
+                    ("RUST", "true"),
+                ],
             )
             .status
             .success()
@@ -4518,11 +4538,48 @@ fn verify_fails_unless_the_checks_and_every_partition_passed() {
 }
 
 #[test]
+fn verify_fails_when_the_tests_were_not_built_or_the_doc_tests_failed() {
+    // The partitions are skipped when the archive was not built, and the doc tests are a job of
+    // their own: neither may let a red suite through.
+    let script = step_script(".github/workflows/ci.yml", "verdict");
+    let run = |build: &str, doc: &str, test: &str| {
+        Fake::new()
+            .run(
+                &script,
+                &[
+                    ("CHECK", "success"),
+                    ("BUILD", build),
+                    ("DOC", doc),
+                    ("TEST", test),
+                    ("RUST", "true"),
+                ],
+            )
+            .status
+            .success()
+    };
+
+    assert!(run("success", "success", "success"));
+    for state in ["failure", "cancelled", "skipped"] {
+        assert!(!run(state, "success", "skipped"), "build-tests: {state}");
+        assert!(!run("success", state, "success"), "doc-tests: {state}");
+    }
+}
+
+#[test]
 fn verify_passes_skipped_jobs_only_when_the_paths_said_the_suite_is_not_needed() {
     let script = step_script(".github/workflows/ci.yml", "verdict");
     let run = |rust: &str, check: &str, test: &str| {
         Fake::new()
-            .run(&script, &[("CHECK", check), ("TEST", test), ("RUST", rust)])
+            .run(
+                &script,
+                &[
+                    ("CHECK", check),
+                    ("BUILD", test),
+                    ("DOC", test),
+                    ("TEST", test),
+                    ("RUST", rust),
+                ],
+            )
             .status
             .success()
     };
@@ -4640,7 +4697,7 @@ fn the_rust_suite_always_runs_off_a_pull_request() {
 #[test]
 fn the_suite_runs_only_when_the_decision_does_not_say_otherwise() {
     let workflow = std::fs::read_to_string(tool(".github/workflows/ci.yml")).unwrap();
-    for name in ["check", "test"] {
+    for name in ["check", "build-tests", "doc-tests"] {
         let lines: Vec<&str> = workflow.lines().collect();
         let at = lines
             .iter()
@@ -4737,5 +4794,327 @@ fn the_version_says_the_channel_and_the_commit() {
     assert!(
         said.trim().starts_with("flottille ") && said.contains(&format!("({channel}")),
         "{said}"
+    );
+}
+
+/// A job of `ci.yml`: its lines, from its name to the next job's.
+fn ci_job(name: &str) -> String {
+    let workflow = std::fs::read_to_string(tool(".github/workflows/ci.yml")).unwrap();
+    let lines: Vec<&str> = workflow.lines().collect();
+    let at = lines
+        .iter()
+        .position(|l| *l == format!("  {name}:"))
+        .unwrap_or_else(|| panic!("a job {name}"));
+    lines[at + 1..]
+        .iter()
+        .take_while(|l| !(l.starts_with("  ") && !l.starts_with("   ") && l.ends_with(':')))
+        .copied()
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn a_push_to_a_feature_branch_runs_no_check_and_no_test() {
+    // Its pull request's run judges it (and publishes its alpha): a push run too would run the
+    // whole suite twice on the same commit.
+    let workflow = std::fs::read_to_string(tool(".github/workflows/ci.yml")).unwrap();
+    let triggers = &workflow[..workflow.find("\nconcurrency:").expect("concurrency")];
+    let branches = triggers
+        .lines()
+        .find(|l| l.trim_start().starts_with("branches:"))
+        .expect("the branches pushed");
+    for kept in ["main", "dev", "stable/*", "next/*"] {
+        assert!(branches.contains(kept), "{kept}: {branches}");
+    }
+    for feature in ["feat/", "fix/"] {
+        assert!(!branches.contains(feature), "{feature}: {branches}");
+    }
+    assert!(triggers.contains("\n  pull_request:\n"), "{triggers}");
+}
+
+/// The `changes` step that says whether a pull request publishes an alpha, as GitHub runs it.
+fn publishes_an_alpha(event: &str, head_ref: &str, head_repo: &str) -> String {
+    let out = tempfile::tempdir().unwrap();
+    let output_file = out.path().join("github-output");
+    let output = Command::new("bash")
+        .args([
+            "-e",
+            "-c",
+            &step_script(".github/workflows/ci.yml", "alpha"),
+        ])
+        .env("EVENT_NAME", event)
+        .env("HEAD_REF", head_ref)
+        .env("HEAD_REPO", head_repo)
+        .env("GITHUB_REPOSITORY", "o/r")
+        .env("GITHUB_OUTPUT", &output_file)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    std::fs::read_to_string(&output_file)
+        .unwrap()
+        .trim()
+        .to_owned()
+}
+
+#[test]
+fn a_pull_request_of_a_feature_branch_of_the_repository_publishes_its_alpha() {
+    for head_ref in ["feat/12-topic", "fix/7-bug", "feat/a/b"] {
+        assert_eq!(
+            publishes_an_alpha("pull_request", head_ref, "o/r"),
+            "alpha=true",
+            "{head_ref}"
+        );
+    }
+}
+
+#[test]
+fn no_other_run_publishes_an_alpha() {
+    // Another branch never had one; a fork's token cannot write; a push's own build publishes its
+    // channel's release, not an alpha.
+    for (event, head_ref, head_repo) in [
+        ("pull_request", "ci/1-topic", "o/r"),
+        ("pull_request", "docs/1-topic", "o/r"),
+        ("pull_request", "dev", "o/r"),
+        ("pull_request", "feat/12-topic", "someone/r"),
+        ("push", "", ""),
+        ("workflow_dispatch", "", ""),
+    ] {
+        assert_eq!(
+            publishes_an_alpha(event, head_ref, head_repo),
+            "alpha=false",
+            "{event} {head_ref} {head_repo}"
+        );
+    }
+}
+
+#[test]
+fn the_alpha_of_a_pull_request_is_built_and_published_for_the_head_of_its_branch() {
+    let build = ci_job("build");
+    assert!(build.contains("needs: [changes]"), "{build}");
+    let condition: String = build.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        condition.contains("|| needs.changes.outputs.alpha == 'true')"),
+        "{build}"
+    );
+    // What is built is the head a person pushed, not the merge commit GitHub makes.
+    assert!(
+        build.contains("ref: ${{ github.event.pull_request.head.sha }}"),
+        "{build}"
+    );
+    // `publish` still needs `verify` to have passed on this very run.
+    let publish = ci_job("publish");
+    let condition: String = publish.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        condition.contains("|| needs.changes.outputs.alpha == 'true')"),
+        "{publish}"
+    );
+    assert!(
+        condition.contains("(needs.verify.result == 'success' ||"),
+        "{publish}"
+    );
+    // The branch's own name keeps the alpha's series and its cleanup, not `<n>/merge`.
+    assert!(
+        publish.contains("group: publish-${{ github.head_ref || github.ref_name }}"),
+        "{publish}"
+    );
+}
+
+#[test]
+fn an_alpha_built_from_a_pull_request_is_named_after_its_branch_and_its_head() {
+    let repo = ready_for_a_release();
+    repo.git(&["checkout", "--quiet", "-b", "feat/12-topic"]);
+    repo.commit("fix(cli): a typo (#2)");
+    let head = repo.head();
+    repo.git(&["checkout", "--quiet", "dev"]);
+
+    // A pull request's run is on a merge ref, `12/merge`, at a commit no one pushed.
+    let (output, outputs, _) = version_step_with(
+        &repo,
+        "12/merge",
+        "branch",
+        "0000000000000000000000000000000000000000",
+        &[("HEAD_REF", "feat/12-topic"), ("HEAD_SHA", &head)],
+    );
+
+    assert!(output.status.success(), "{output:?}");
+    assert!(outputs.starts_with("channel=alpha\nversion="), "{outputs}");
+    assert!(outputs.contains(".alpha.feat-12-topic."), "{outputs}");
+}
+
+#[test]
+fn the_alpha_of_a_pull_request_is_published_for_its_head_when_the_branch_still_is_there() {
+    let fake = Fake::new();
+    let run = |tip: &str| {
+        fake.run(
+            &step_script(".github/workflows/ci.yml", "publish"),
+            &[
+                ("GH_TOKEN", "unused"),
+                ("CHANNEL", "alpha"),
+                ("VERSION", "0.2.0-alpha.feat-12-topic.1"),
+                ("TAG", "v0.2.0-alpha.feat-12-topic.1"),
+                ("GITHUB_REF_NAME", "12/merge"),
+                ("GITHUB_SHA", "merge999"),
+                ("HEAD_REF", "feat/12-topic"),
+                ("HEAD_SHA", "abc123"),
+                ("FAKE_TIP", tip),
+            ],
+        )
+    };
+
+    // The branch moved on: its later push has a pull request run of its own, which publishes.
+    let output = run("def456");
+    assert!(output.status.success(), "{output:?}");
+    assert!(!fake.log().contains("release create"), "{}", fake.log());
+
+    let output = run("abc123");
+    assert!(output.status.success(), "{output:?}");
+    let log = fake.log();
+    assert!(log.contains("--target abc123"), "{log}");
+    assert!(!log.contains("merge999"), "{log}");
+    assert!(log.contains("--prerelease --latest=false"), "{log}");
+    assert!(log.contains("git/ref/heads/feat/12-topic"), "{log}");
+}
+
+#[test]
+fn the_tests_are_built_once_and_run_on_twelve_partitions_of_the_archive() {
+    let build = ci_job("build-tests");
+    assert_eq!(build.matches("cargo nextest archive").count(), 1, "{build}");
+    assert!(build.contains("--archive-file"), "{build}");
+    assert!(build.contains("actions/upload-artifact"), "{build}");
+
+    let test = ci_job("test");
+    assert!(test.contains("needs: [build-tests]"), "{test}");
+    assert!(test.contains("actions/download-artifact"), "{test}");
+    assert!(test.contains("--archive-file"), "{test}");
+    assert!(test.contains("--workspace-remap ."), "{test}");
+    assert!(
+        test.contains("--partition count:${{ matrix.partition }}/12"),
+        "{test}"
+    );
+    let matrix = test
+        .lines()
+        .find(|l| l.trim_start().starts_with("partition:"))
+        .expect("the partitions");
+    assert_eq!(matrix.matches(',').count() + 1, 12, "{matrix}");
+    // A partition only runs: it compiles nothing, and has no cache of a build to restore.
+    for building in ["cargo build", "cargo test", "cargo clippy", "rust-cache"] {
+        assert!(!test.contains(building), "{building}: {test}");
+    }
+    // The doc tests run once, in a job of their own.
+    let doc = ci_job("doc-tests");
+    assert!(doc.contains("cargo test --doc --locked"), "{doc}");
+    assert!(!test.contains("--doc"), "{test}");
+}
+
+#[test]
+fn a_failed_test_is_retried_twice_in_the_profile_ci_uses() {
+    let config = std::fs::read_to_string(tool(".config/nextest.toml")).unwrap();
+    let profile = &config[config.find("[profile.ci]").expect("a profile ci")..];
+    let profile = &profile[..profile[1..].find("\n[").map_or(profile.len(), |at| at + 1)];
+    assert!(profile.contains("retries = 2"), "{config}");
+    // A report to tell the flaky tests by: nextest writes a JUnit file for the profile.
+    assert!(config.contains("[profile.ci.junit]"), "{config}");
+    assert!(
+        test_job_runs_profile_ci(),
+        "the test job runs `--profile ci`"
+    );
+}
+
+fn test_job_runs_profile_ci() -> bool {
+    ci_job("test").contains("--profile ci")
+}
+
+/// The flaky tests of JUnit files, as `flaky-report.sh` lists them.
+fn flaky_report(reports: &[&str]) -> (bool, String) {
+    let dir = tempfile::tempdir().unwrap();
+    let files: Vec<PathBuf> = reports
+        .iter()
+        .enumerate()
+        .map(|(n, xml)| {
+            let file = dir.path().join(format!("junit-{n}.xml"));
+            std::fs::write(&file, xml).unwrap();
+            file
+        })
+        .collect();
+    let output = Command::new(tool(".github/scripts/flaky-report.sh"))
+        .args(&files)
+        .output()
+        .unwrap();
+    (
+        output.status.success(),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+    )
+}
+
+const JUNIT_WITH_A_FLAKY_TEST: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<testsuites name="nextest-run" tests="3" failures="1">
+  <testsuite name="flottille-core::probe" tests="3">
+    <testcase name="flaky_test" classname="flottille-core::probe">
+      <flakyFailure type="test failure with exit code 101"><system-out>first</system-out></flakyFailure>
+      <flakyFailure type="test failure with exit code 101"><system-out>second</system-out></flakyFailure>
+    </testcase>
+    <testcase name="steady_test" classname="flottille-core::probe"/>
+    <testcase name="broken_test" classname="flottille-core::probe">
+      <failure type="test failure with exit code 101"/>
+      <rerunFailure type="test failure with exit code 101"/>
+      <rerunFailure type="test failure with exit code 101"/>
+    </testcase>
+  </testsuite>
+</testsuites>
+"#;
+
+#[test]
+fn a_flaky_test_is_listed_with_its_attempts_under_a_heading() {
+    let (ok, report) = flaky_report(&[JUNIT_WITH_A_FLAKY_TEST]);
+    assert!(ok, "{report}");
+    assert!(report.starts_with("## Flaky tests\n"), "{report}");
+    assert!(
+        report.contains("| `flottille-core::probe flaky_test` | 3 |"),
+        "{report}"
+    );
+    // A test that passed first time, and one that failed every attempt (it fails its job), are
+    // not flaky.
+    assert!(!report.contains("steady_test"), "{report}");
+    assert!(!report.contains("broken_test"), "{report}");
+}
+
+#[test]
+fn nothing_is_said_when_no_test_was_flaky() {
+    let report = r#"<?xml version="1.0"?><testsuites><testsuite name="a"><testcase name="t" classname="c"/></testsuite></testsuites>"#;
+    let (ok, said) = flaky_report(&[report, report]);
+    assert!(ok, "{said}");
+    assert_eq!(said, "");
+}
+
+#[test]
+fn the_flaky_tests_of_every_partition_are_listed_once_in_one_report() {
+    let other = JUNIT_WITH_A_FLAKY_TEST
+        .replace("flaky_test", "another_flaky_test")
+        .replace("<flakyFailure type=\"test failure with exit code 101\"><system-out>second</system-out></flakyFailure>\n", "");
+    let (ok, report) = flaky_report(&[JUNIT_WITH_A_FLAKY_TEST, &other]);
+    assert!(ok, "{report}");
+    assert_eq!(report.matches("## Flaky tests").count(), 1, "{report}");
+    assert!(
+        report.contains("`flottille-core::probe flaky_test` | 3 |"),
+        "{report}"
+    );
+    assert!(report.contains("another_flaky_test` | 2 |"), "{report}");
+}
+
+#[test]
+fn verify_and_the_partitions_both_put_the_flaky_tests_in_their_summary() {
+    for job in ["test", "verify"] {
+        let text = ci_job(job);
+        assert!(
+            text.contains(".github/scripts/flaky-report.sh"),
+            "{job}: {text}"
+        );
+        assert!(text.contains("$GITHUB_STEP_SUMMARY"), "{job}: {text}");
+    }
+    // The summary is informational: it never decides the verdict.
+    assert!(
+        ci_job("verify").contains("continue-on-error: true"),
+        "{}",
+        ci_job("verify")
     );
 }

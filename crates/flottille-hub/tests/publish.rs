@@ -423,6 +423,11 @@ fn the_hub_jobs_run_on_a_pull_request_only_when_the_hub_or_the_release_changes()
         assert!(changes.contains(path), "{path}: {changes}");
     }
 
+    // An alpha's pull request builds it too: its release holds the hub's archives.
+    assert!(
+        changes.contains("ALPHA: ${{ steps.alpha.outputs.alpha }}"),
+        "{changes}"
+    );
     // A pull request elsewhere runs none of it; a push runs it, since a push publishes.
     let hub = job(&workflow, "hub");
     assert!(
@@ -430,6 +435,7 @@ fn the_hub_jobs_run_on_a_pull_request_only_when_the_hub_or_the_release_changes()
         "{hub}"
     );
     assert!(hub.contains("github.event_name == 'pull_request'"), "{hub}");
+    assert!(hub.contains("needs.changes.outputs.alpha"), "{hub}");
     assert!(hub.contains("needs.build.result == 'success'"), "{hub}");
 
     // Both architectures, musl, the second one cross-compiled: no emulation.
@@ -479,7 +485,7 @@ fn the_release_carries_the_hub_archives_and_its_image_is_pushed_by_a_job_that_ru
     // after; a release is made whole or not at all.
     let publish = job(&workflow, "publish");
     assert!(
-        publish.contains("needs: [verified-on-dev, verify, build, hub]"),
+        publish.contains("needs: [verified-on-dev, changes, verify, build, hub]"),
         "{publish}"
     );
     assert!(
@@ -532,7 +538,9 @@ fn verify_fails_when_the_hub_job_ran_and_failed() {
     let verify = job(&workflow, "verify");
     // `publish` needs `hub`: a red hub check merged would stop every release.
     assert!(
-        verify.contains("needs: [verified-on-dev, changes, check, test, hub]"),
+        verify.contains(
+            "needs: [verified-on-dev, changes, check, build-tests, doc-tests, test, hub]"
+        ),
         "{verify}"
     );
     assert!(verify.contains("HUB: ${{ needs.hub.result }}"), "{verify}");
@@ -550,6 +558,8 @@ fn verify_fails_when_the_hub_job_ran_and_failed() {
             .args(["-e", "-c", &script])
             .current_dir(work.path())
             .env("CHECK", "success")
+            .env("BUILD", "success")
+            .env("DOC", "success")
             .env("TEST", "success")
             .env("RUST", "true")
             .env("HUB", hub)
