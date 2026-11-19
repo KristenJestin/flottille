@@ -631,8 +631,7 @@ impl Link {
 
     /// Sends `message`, and waits for its answer.
     pub async fn send(&self, message: &Message) -> Result<Value, LinkError> {
-        self.send_raw(&serde_json::to_vec(message).expect("a message is JSON"))
-            .await
+        self.send_raw(&framed(message)).await
     }
 
     /// Sends a frame as it is. What it holds is the receiver's to judge: a peer is never trusted
@@ -678,6 +677,8 @@ impl Link {
     pub async fn next(&self) -> Option<Received> {
         loop {
             let (bytes, reply) = self.conn.next(FRAME_LIMIT).await?;
+            // A frame may carry a vault entry's secret (`share`): wiped once it is read.
+            let bytes = Zeroizing::new(bytes);
             match self.judge(&bytes) {
                 Ok(message) => return Some(Received { message, reply }),
                 Err(reason) => reply.send(&answer(Err(reason))).await,
@@ -723,6 +724,26 @@ impl Link {
     pub async fn closed(&self) -> String {
         self.lost(self.conn.closed().await).to_string()
     }
+}
+
+/// `message` as a frame, wiped when it is dropped: one may carry a vault entry's secret
+/// (`share`). Sized first, so that no buffer it outgrew is freed with a copy of it.
+fn framed(message: &Message) -> Zeroizing<Vec<u8>> {
+    struct Counted(usize);
+    impl std::io::Write for Counted {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 += bytes.len();
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut counted = Counted(0);
+    serde_json::to_writer(&mut counted, message).expect("a message is JSON");
+    let mut frame = Zeroizing::new(Vec::with_capacity(counted.0));
+    serde_json::to_writer(&mut *frame, message).expect("a message is JSON");
+    frame
 }
 
 impl fmt::Debug for Link {
