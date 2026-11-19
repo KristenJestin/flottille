@@ -229,11 +229,14 @@ async fn fetched(
 }
 
 /// Removes a place, and what the repository holds of it: the worktree, then the folder if it is
-/// still there, then the registration of a folder that was removed. Nothing is reported: a place
-/// that cannot be removed now is removed by the sweep of the next start.
+/// still there. Nothing is reported: a place that cannot be removed now is removed by the sweep
+/// of the next start. Never `git worktree prune`, which would drop every worktree of the user's
+/// whose folder is away (a drive not mounted): when git could not remove the place, its own
+/// registration alone goes.
 pub(super) async fn remove(folder: &Path, place: &Path) {
+    let registration = registration_of(place);
     let place_text = place.to_string_lossy().into_owned();
-    let _ = git::output(
+    let removed = git::output(
         folder,
         &[
             "worktree",
@@ -244,18 +247,39 @@ pub(super) async fn remove(folder: &Path, place: &Path) {
         ],
         Class::Work,
     )
-    .await;
+    .await
+    .is_ok();
     let gone = place.to_owned();
-    let _ = tokio::task::spawn_blocking(move || std::fs::remove_dir_all(gone)).await;
-    let _ = git::output(folder, &["worktree", "prune"], Class::Work).await;
+    let _ = tokio::task::spawn_blocking(move || {
+        let _ = std::fs::remove_dir_all(gone);
+        if !removed && let Some(registration) = registration {
+            let _ = std::fs::remove_dir_all(registration);
+        }
+    })
+    .await;
+}
+
+/// The git directory a place's `.git` file leads to: `<repository>/.git/worktrees/<name>`.
+fn git_dir_of(place: &Path) -> Option<PathBuf> {
+    let link = std::fs::read_to_string(place.join(".git")).ok()?;
+    Some(PathBuf::from(link.trim().strip_prefix("gitdir:")?.trim()))
+}
+
+/// The repository's record of the place as one of its worktrees, when it is that place's and
+/// nothing else: a folder of the repository's `worktrees` whose `gitdir` leads back to it.
+fn registration_of(place: &Path) -> Option<PathBuf> {
+    let registration = git_dir_of(place)?;
+    if registration.parent()?.file_name()? != "worktrees" {
+        return None;
+    }
+    let back = std::fs::read_to_string(registration.join("gitdir")).ok()?;
+    (Path::new(back.trim()) == place.join(".git")).then_some(registration)
 }
 
 /// The repository a place is a worktree of, read from the place's own `.git` file.
 fn repository_of(place: &Path) -> Option<PathBuf> {
-    let link = std::fs::read_to_string(place.join(".git")).ok()?;
-    let gitdir = PathBuf::from(link.trim().strip_prefix("gitdir:")?.trim());
     // `<repository>/.git/worktrees/<name>`: the git directory, which git takes for a folder.
-    Some(gitdir.parent()?.parent()?.to_owned())
+    Some(git_dir_of(place)?.parent()?.parent()?.to_owned())
 }
 
 /// Removes every place no review of a running pilot holds: those a daemon that died left, and one
