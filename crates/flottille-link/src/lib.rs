@@ -40,7 +40,7 @@ pub use hello::{Hello, NeedsUpdate, PeerState, choose};
 pub use invitation::{Invitation, InvitationAsk, InvitationError, Token};
 pub use link::{
     Accepting, Answers, Endpoint, FRAME_LIMIT, Git, GitFetch, GitOffer, GitPlace, GitRepository,
-    Link, LinkError, MachineMessage, Message, Received, Streamed, Traffic,
+    LaunchAsk, Link, LinkError, MachineMessage, Message, Received, Streamed, Traffic,
 };
 pub use members::{
     Action, Change, ChangeHash, ListError, MANAGING_HEADROOM, MOST_CHANGES, Member, MemberList,
@@ -49,7 +49,7 @@ pub use members::{
 pub use offers::{Capabilities, MOST_AGENTS, MOST_PROJECTS, Offered};
 pub use request::{
     Accepted, NONCES_PER_DEVICE, Nonce, REQUEST_WINDOW, Request, RequestError, Requests, Signed,
-    runs_agents,
+    full_switch, runs_agents,
 };
 pub use transport::TlsServer;
 pub use words::verification_words;

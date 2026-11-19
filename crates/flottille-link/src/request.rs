@@ -318,6 +318,41 @@ pub fn runs_agents(members: &Members, machine: &str, method: &str) -> Result<(),
     }
 }
 
+/// The member whose device switched the tree `tree` of the machine `machine` to Full, as `text`
+/// holds the switch: a request that device signed for that machine, `agent.mode {agent: tree,
+/// mode: full}`, by a member that may switch the mode (a runner or a controller). A launch on
+/// another machine starts in Full only with it (`docs/remote.md`, "Starting a session on another
+/// machine"): a machine alone cannot raise a mode. It is kept as long as the tree stays in Full,
+/// so neither its time nor its nonce is checked.
+pub fn full_switch(
+    text: &str,
+    machine: &str,
+    tree: &str,
+    members: &Members,
+) -> Result<Member, RequestError> {
+    let refused = |why: &str| Err(RequestError(format!("the switch to Full {why}")));
+    let Ok(request) = serde_json::from_str::<Request>(text) else {
+        return refused("is not a signed request");
+    };
+    let Some(member) = members
+        .get(&request.signed.device)
+        .filter(|_| request.signed())
+    else {
+        return refused("is not signed by a member");
+    };
+    if member.role == Role::Viewer {
+        return refused(&format!("is {}'s, who may only view", member.name));
+    }
+    if request.machine != machine || request.signed.method != "agent.mode" {
+        return refused(&format!("is not one of {}'s", shown(machine)));
+    }
+    let params: Value = serde_json::from_str(&request.signed.params).unwrap_or_default();
+    if params["agent"] != tree || params["mode"] != "full" {
+        return refused("is for another tree or another mode");
+    }
+    Ok(member.clone())
+}
+
 /// What `method` does, as a refusal names it: the user's words for what they do most, the
 /// method's name otherwise.
 fn deed(method: &str) -> String {

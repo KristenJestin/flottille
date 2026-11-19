@@ -93,6 +93,45 @@ pub enum MachineMessage {
     /// A place's code on its way, or a session's new commits on their way back (`docs/remote.md`,
     /// "What travels").
     Git(Git),
+    /// A session or a child started for an agent of the sender's (`agent_launch` with
+    /// `machine`), judged by the receiving machine's gate (`docs/remote.md`, "Starting a session
+    /// on another machine"). Answered `{"state": "accepted" | "held"}`, or refused; its code
+    /// follows as `git` messages of the same launch.
+    Launch(LaunchAsk),
+}
+
+/// A launch another machine asks for one of its agents.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LaunchAsk {
+    /// The sender's name for it: its code travels under it.
+    pub launch: String,
+    /// The sender's agent that launches: the child's parent, or the session's pilot.
+    pub caller: String,
+    /// The root of the caller's tree, whose mode the launch takes.
+    pub tree: String,
+    /// `child`, `led` or `handed`.
+    pub kind: String,
+    pub project: String,
+    pub title: String,
+    pub brief: String,
+    pub provider: String,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub effort: Option<String>,
+    #[serde(default)]
+    pub role: Option<String>,
+    /// The mode of the caller's tree: `ask`, `auto` or `full`, Full taken only with `switch`.
+    pub mode: String,
+    /// The user's switch of the tree to Full, as the device signed it (a signed request, kept by
+    /// the caller's machine): the only way a launch starts in Full.
+    #[serde(default)]
+    pub switch: Option<String>,
+    /// The caller's branch, which the new workspace takes.
+    pub branch: String,
+    /// The repositories of the caller's place, by their paths in the project.
+    pub repositories: Vec<String>,
 }
 
 /// The `git` messages: what the receiver has, a bundle offered, its bytes, the workspace made of
@@ -121,6 +160,9 @@ pub struct GitRepository {
     pub project: String,
     /// Its path in the project, `.` for the project's folder.
     pub repository: String,
+    /// The launch it is asked for: code is taken only for a launch the receiver accepted.
+    #[serde(default)]
+    pub launch: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

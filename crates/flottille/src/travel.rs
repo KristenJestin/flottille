@@ -204,6 +204,7 @@ async fn send_place<'a>(
         let asked = GitRepository {
             project: project.to_owned(),
             repository: repository.clone(),
+            launch: None,
         };
         let has = ask(link, Git::Has(asked)).await?;
         let has: Vec<String> = serde_json::from_value(has["commits"].clone()).unwrap_or_default();
