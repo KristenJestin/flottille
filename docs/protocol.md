@@ -2315,6 +2315,17 @@ is a view of the stored events.
 and development"); otherwise `unknown-method`. Moves the daemon's clock `ms` milliseconds ahead and
 runs the sweep at once: `{"now"}`, the clock's time.
 
+### `test.travel`, `test.travel_back`
+
+Only in a test build run with `FLOTTILLE_TEST_TRAVEL` set; otherwise `unknown-method`. What
+`agent_launch` will start on another machine (`docs/remote.md`, "What travels"), until it does.
+`test.travel {"machine", "project", "launch", "workspace"?, "corrupt"?}` sends the code of a
+workspace of the project, or of the project's own folder, to the machine for that launch:
+`{"workspace", "branch", "folder", "repositories"}`, the workspace made there, and for each
+repository its path, the commits sent and the bundle's prerequisites. `test.travel_back
+{"launch"}` sends back the new commits of the workspace made here for that launch: `{"machine",
+"repositories"}`, each with its path, the commits sent and the ref they landed in.
+
 ### The approval methods
 
 The requests of the gate (`docs/tools.md`, "The gate"). A request in a result:

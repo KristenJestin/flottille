@@ -15,7 +15,9 @@ session every machine keeps to it and the first member's setup (`crates/flottill
 `crates/flottille-link/src/control.rs`, `crates/flottille/src/hub_session.rs`), and pairing
 through the hub: invitations, joining, the four words, adding, renaming and removing members
 from the command line (#812), and the user's requests to another machine, signed by the client,
-carried by its daemon and checked by the machine they are for (`--machine`, #813). What is decided is said as such; the defaults taken are in "Defaults taken, to
+carried by its daemon and checked by the machine they are for (`--machine`, #813), and a place's
+code sent to another machine over the link and its new commits brought back (#815; `agent_launch`
+does not send it yet, #816). What is decided is said as such; the defaults taken are in "Defaults taken, to
 confirm"; what is open is in "Open questions". It replaces the proposal of 2026-11-03 (a relay
 every device connects to, on a private network) and the review that put Tailscale and SSH at the
 centre: Flottille stays generic (`AGENTS.md`), and depends on no one network and no account of a
@@ -1101,6 +1103,31 @@ on a real phone, by hand, and reported.
   The sending side's clean filters run as the user's own `git add` would run them, locally.
 - A returning bundle holds the one branch of the workspace; a `machine` is one ref component and
   the `branch` a branch name git accepts, or nothing is fetched.
+- Over the link (`crates/flottille/src/travel.rs`), the `git` message is one of four. `has`
+  (a project and a repository's path in it): the receiver answers the commits of its branches and
+  of `refs/flottille/machines/*`, or none when it does not have the repository yet. `offer` (a
+  transfer's name, the launch, the project, the repository, the sender's branch, the bundle's
+  length and SHA-256): the receiver reads the bundle with `fetch`, on a stream of its own where
+  each frame is a base64 chunk of 192 KiB, checks the length and the SHA-256, then has git verify
+  and fetch it. Only the machine a bundle is offered to may read it, and only until its offer is
+  answered. `place` (the launch, the project, the branch, the repositories): the workspace made of
+  what came, answered with its name, its branch and its folder.
+- The receiver takes a bundle only into a project registered under the same name with that
+  repository; a repository whose folder is missing or empty is cloned from it, and a folder that
+  holds something else is refused. A repository of a launch is taken once from a machine. The
+  workspace is made offline (no fetch of the receiver's own remote), its branch the sender's name
+  or the first of `-2`, `-3`… that no repository of the place has, its name the branch's with
+  every other character a dash, and its base, in each repository, the commit the sender's branch
+  was on (`started from what pc sent`); the snapshot is laid on each worktree as soon as it is
+  made, before the project's setup runs.
+- Each side keeps what travelled in its store (`travels`): the machine, the launch, the
+  repository, the commits sent, and the workspace made. A bundle coming back is taken only for a
+  repository of a launch this machine sent to that very machine, into the repository it was sent
+  from, under the name this machine gives that machine; the way back sends the commits past the
+  sender's tip, its snapshot, and what came back already.
+- Until `agent_launch` sends code (#816), a test build run with `FLOTTILLE_TEST_TRAVEL` set
+  answers `test.travel {machine, project, launch, workspace?, corrupt?}` and `test.travel_back {launch}`, so
+  that two daemons can be made to send code to each other.
 
 ## Open questions
 
