@@ -309,6 +309,51 @@ fn a_message_queued_and_not_yet_delivered_is_delivered_once_after_a_restart() {
 }
 
 #[test]
+fn a_message_taken_but_not_yet_sent_is_delivered_once_after_a_restart() {
+    let user = user();
+    let (agent, _) = root(&user, "hello");
+    at_rest(&user);
+    assert!(user.run(&["daemon", "stop"]).status.success());
+    // The daemon was killed once it had taken the message for a prompt, before the agent's
+    // process started: nothing was sent.
+    let mut store = Store::open(&user.path("state/flottille/flottille.db")).unwrap();
+    let message = flottille_core::approval::Delivery {
+        id: "taken-1".into(),
+        agent: agent.clone(),
+        kind: "user".into(),
+        body: "Mind the header.".into(),
+        urgency: flottille_core::approval::BETWEEN_TURNS.into(),
+        state: "queued".into(),
+        created_at: 0,
+        sent_at: None,
+        images: Vec::new(),
+        typed: None,
+        commands: Vec::new(),
+    };
+    store.deliver(&message).unwrap();
+    store
+        .move_deliveries(&agent, &[message.id.clone()], "queued", "sending", "prompt")
+        .unwrap();
+    drop(store);
+    let before = prompts(&user).len();
+
+    user.status();
+    eventually("the message taken", || {
+        since(&user, before)
+            .iter()
+            .any(|p| p.contains("Mind the header."))
+    });
+    settle();
+
+    let given = since(&user, before);
+    let header = given
+        .iter()
+        .filter(|p| p.contains("Mind the header."))
+        .count();
+    assert_eq!(header, 1, "{given:#?}");
+}
+
+#[test]
 fn the_pilot_is_not_woken_by_a_restart() {
     let user = user();
     let (lead, mcp) = root(&user, "hello");
