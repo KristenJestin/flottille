@@ -974,6 +974,7 @@ fn events_since(paths: &Paths, args: Value) -> Done {
         .watch(WatchParams {
             after: Some(after),
             client: None,
+            forge: None,
         })
         .map_err(failure)?;
     let last = Client::connect_or_start(paths)

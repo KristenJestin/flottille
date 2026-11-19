@@ -613,7 +613,7 @@ fn two_machines_dialing_at_once_keep_one_link() {
 }
 
 #[test]
-fn a_client_link_s_requests_are_refused_until_they_are_served() {
+fn a_client_link_s_requests_are_refused_on_a_machine_with_no_member_list() {
     use flottille_link::{Endpoint, Hello, MachineKey, Message, PublicKey, Traffic};
     let server = Machine::new();
     let addresses: Vec<std::net::SocketAddr> = server
@@ -647,16 +647,22 @@ fn a_client_link_s_requests_are_refused_until_they_are_served() {
         .await
         .unwrap()
         .unwrap();
-        let refused = link
-            .send(&Message::Client(
-                json!({"id": 1, "method": "daemon.status"}),
+        // No hub, so no member to have signed it: nothing is served.
+        let mut answers = link
+            .ask(&Message::Client(
+                json!({"id": "1", "method": "daemon.status"}),
             ))
             .await
-            .unwrap_err();
+            .unwrap();
+        let refused = answers.next().await.unwrap().unwrap();
+        assert_eq!(refused["id"], "1");
+        assert_eq!(refused["error"]["code"], "refused");
         assert_eq!(
-            refused.to_string(),
-            "server refused: requests from another machine's clients are not served yet"
+            refused["error"]["message"],
+            "refused: this machine is not set up with a hub: flottille remote setup, or \
+             flottille remote join"
         );
+        assert!(answers.next().await.is_none());
         client.close().await;
     });
 }
