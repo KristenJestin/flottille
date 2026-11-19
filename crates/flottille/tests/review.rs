@@ -2444,15 +2444,12 @@ fn a_worktree_of_the_user_whose_folder_is_away_stays_registered_after_a_review()
     );
 }
 
-#[test]
-fn the_fetch_refs_a_dead_daemon_left_are_removed_at_the_next_start() {
-    let user = forge_user();
-    pulled(&user);
-    let app = user.path("work/app");
-    // What a daemon killed between the fetch and the deletion of its refs leaves.
+/// What a daemon killed between the fetch of a review and the deletion of its refs leaves in
+/// the repository.
+fn leave_the_refs_of_a_fetch(user: &User, app: &std::path::Path) {
     for end in ["head", "base"] {
         user.git(
-            &app,
+            app,
             &[
                 "update-ref",
                 &format!("refs/flottille/review/pr7-1-0-{end}"),
@@ -2460,8 +2457,11 @@ fn the_fetch_refs_a_dead_daemon_left_are_removed_at_the_next_start() {
             ],
         );
     }
-    let daemon = user.status()["pid"].as_u64().unwrap();
+}
 
+/// Kills the daemon and starts it again.
+fn kill_and_restart(user: &User) {
+    let daemon = user.status()["pid"].as_u64().unwrap();
     // SAFETY: kill has no memory precondition.
     unsafe { libc::kill(daemon as i32, libc::SIGKILL) };
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -2470,6 +2470,18 @@ fn the_fetch_refs_a_dead_daemon_left_are_removed_at_the_next_start() {
         std::thread::sleep(Duration::from_millis(20));
     }
     user.status();
+}
+
+#[test]
+fn the_fetch_refs_a_dead_daemon_left_are_removed_at_the_next_start() {
+    let user = forge_user();
+    pulled(&user);
+    let app = user.path("work/app");
+    leave_the_refs_of_a_fetch(&user, &app);
+    // A review makes its folder before its fetch: the daemon that died had made it.
+    std::fs::create_dir_all(user.path("data/flottille/reviews")).unwrap();
+
+    kill_and_restart(&user);
 
     eventually("the refs removed", || {
         user.git_output(&app, &["for-each-ref", "refs/flottille/review/"])
@@ -2482,6 +2494,27 @@ fn the_fetch_refs_a_dead_daemon_left_are_removed_at_the_next_start() {
             .git_output(&app, &["for-each-ref", "refs/heads/feature"])
             .trim()
             .is_empty()
+    );
+}
+
+#[test]
+fn a_start_with_review_never_used_reads_no_repository_of_the_user() {
+    let user = forge_user();
+    pulled(&user);
+    let app = user.path("work/app");
+    // A ref under the name Review uses, though no review ever made its folder: the start does
+    // not look in the repository at all.
+    leave_the_refs_of_a_fetch(&user, &app);
+
+    kill_and_restart(&user);
+    std::thread::sleep(Duration::from_millis(1500));
+
+    assert!(
+        !user
+            .git_output(&app, &["for-each-ref", "refs/flottille/review/"])
+            .trim()
+            .is_empty(),
+        "the start of a daemon whose Review was never used went through the repository"
     );
 }
 
@@ -2570,7 +2603,19 @@ fn a_pull_request_is_checked_out_without_the_user_s_filters() {
             &["config", &format!("filter.{driver}.smudge"), &smudge],
         );
     }
+    // And one that would write a marker when it reads a file back: files just written are
+    // racily clean, so a `git diff` or `git status` of the working tree runs it.
+    let cleaned = user.path("a-clean-filter-ran");
+    user.git(
+        &app,
+        &[
+            "config",
+            "filter.mark.clean",
+            &format!("touch '{}'; cat", cleaned.display()),
+        ],
+    );
     let _ = std::fs::remove_file(&marker);
+    let _ = std::fs::remove_file(&cleaned);
     let (lead, mcp) = lead(&user);
 
     ok(mcp.call("review", json!({"action": "start", "pull_request": 7})));
@@ -2585,6 +2630,10 @@ fn a_pull_request_is_checked_out_without_the_user_s_filters() {
     assert!(
         !marker.exists(),
         "a filter of the user ran on the pull request"
+    );
+    assert!(
+        !cleaned.exists(),
+        "a clean filter of the user ran in the pull request's copy"
     );
 }
 
