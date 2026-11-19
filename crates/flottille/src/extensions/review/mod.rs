@@ -628,8 +628,10 @@ impl Drop for Starting {
 
 /// A running review whose pilot is gone or ended, which no `agent.ended` failed (a launch that
 /// failed once the review was written, a daemon stopped meanwhile), is failed: it would hold the
-/// session's next review back for ever.
-fn fail_orphans(daemon: &Daemon, reviews: &[Review]) -> Result<()> {
+/// session's next review back for ever. The pull requests of those it failed are returned: their
+/// places are removed with them.
+fn fail_orphans(daemon: &Daemon, reviews: &[Review]) -> Result<Vec<PullRequest>> {
+    let mut failed = Vec::new();
     for review in reviews.iter().filter(|review| review.state == "running") {
         let pilot = match &review.pilot {
             Some(pilot) => daemon.read(|store| store.agent(pilot))?,
@@ -638,14 +640,14 @@ fn fail_orphans(daemon: &Daemon, reviews: &[Review]) -> Result<()> {
         if pilot.is_some_and(|pilot| !pilot.state.is_final()) {
             continue;
         }
-        in_space(daemon, |space| {
+        let failed_now = in_space(daemon, |space| {
             let changed = space.tables().execute(
                 "UPDATE ext_review_reviews SET state = 'failed', why = ?2, ended_at = ?3 \
                  WHERE id = ?1 AND state = 'running'",
                 params![review.id, "its lead is gone", now_ms()],
             )?;
             if changed == 0 {
-                return Ok(((), None));
+                return Ok((false, None));
             }
             let event = space.append_event(
                 "review.failed",
@@ -653,10 +655,13 @@ fn fail_orphans(daemon: &Daemon, reviews: &[Review]) -> Result<()> {
                     "session": review.session, "agent": review.pilot,
                     "why": "its lead is gone"}),
             )?;
-            Ok(((), Some(event)))
+            Ok((true, Some(event)))
         })?;
+        if failed_now && let Some(pull) = &review.pull {
+            failed.push(pull.clone());
+        }
     }
-    Ok(())
+    Ok(failed)
 }
 
 /// The review a session asked for, or why not: said before any agent starts.
@@ -963,7 +968,10 @@ async fn start_pull(
             )
         })
     };
-    fail_orphans(daemon, &of_pull_requests(daemon)?)?;
+    // An orphan's place goes with it: no end of its pilot was heard to remove it.
+    for pull in fail_orphans(daemon, &of_pull_requests(daemon)?)? {
+        pull_request::remove(&PathBuf::from(&pull.folder), &PathBuf::from(&pull.place)).await;
+    }
     if of_pull_requests(daemon)?.iter().any(|review| {
         review.state == "running"
             && review.pull.as_ref().is_some_and(|pull| {
