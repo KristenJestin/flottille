@@ -278,6 +278,30 @@ mod tests {
     }
 
     #[test]
+    fn every_method_that_starts_an_agent_is_a_launch() {
+        for method in [
+            "agent.start",
+            "agent.run",
+            "agent.resume",
+            "agent.quota_resume",
+            "spec.new",
+            "spec.from_ticket",
+            "spec.develop",
+            "review.start",
+        ] {
+            assert!(launches(method), "{method}");
+        }
+        // A command, a message to a session that runs, a read: no agent starts.
+        for method in ["task.run", "agent.send", "agent.list", "spec.list"] {
+            assert!(!launches(method), "{method}");
+        }
+        // Each launch is a method of the catalogue, and changes something.
+        for method in LAUNCHES {
+            assert_eq!(class(method), Some(Drive), "{method}");
+        }
+    }
+
+    #[test]
     fn a_method_the_daemon_does_not_answer_has_no_class() {
         assert_eq!(class("agent.nope"), None);
         assert_eq!(class("agent"), None);

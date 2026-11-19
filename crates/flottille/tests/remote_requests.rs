@@ -1378,3 +1378,60 @@ fn an_offer_of_a_machine_that_is_no_runner_is_refused() {
         .unwrap();
     assert_eq!(seen["offered"], json!([]), "{seen}");
 }
+
+/// A hub, `pc` its first member, and another machine paired as `name` with `role`, the two
+/// linked.
+fn pc_and(name: &str, role: &str) -> (TestHub, Machine, Machine) {
+    let hub = TestHub::new();
+    let (pc, other) = (Machine::new(), Machine::new());
+    set_up(&hub, &pc);
+    pair(&pc, &other, name, role);
+    pc.wait_for(name, "online");
+    other.wait_for("pc", "online");
+    (hub, pc, other)
+}
+
+/// `method`, which starts an agent, aimed at the controller `tablet`: refused by `pc`, which
+/// would carry it, and by the tablet's own daemon, which serves nothing of it.
+fn refused_on_a_controller(method: &str, params: Value) {
+    let (_hub, pc, tablet) = pc_and("tablet", "controller");
+    const NO_AGENT: &str = "refused: tablet is a controller: it runs no agent, a runner does";
+    let carried = pc.raw(&signed(&pc.device(), "1", "tablet", method, params.clone()));
+    assert_eq!(error_of(&carried), NO_AGENT, "{method}");
+    let asked = tablet.raw(&signed(&tablet.device(), "2", "tablet", method, params));
+    assert_eq!(error_of(&asked), NO_AGENT, "{method}");
+    assert!(!tablet.log().contains(SERVED), "{}", tablet.log());
+}
+
+#[test]
+fn a_resume_aimed_at_a_controller_is_refused() {
+    refused_on_a_controller("agent.resume", json!({"agent": "a1"}));
+}
+
+#[test]
+fn a_resume_after_the_quota_aimed_at_a_controller_is_refused() {
+    refused_on_a_controller("agent.quota_resume", json!({"agent": "a1", "resume": true}));
+}
+
+#[test]
+fn a_spec_written_by_a_session_aimed_at_a_controller_is_refused() {
+    refused_on_a_controller("spec.new", json!({"project": "app", "idea": "a page"}));
+}
+
+#[test]
+fn a_spec_of_a_ticket_aimed_at_a_controller_is_refused() {
+    refused_on_a_controller(
+        "spec.from_ticket",
+        json!({"project": "app", "ticket": "APP-1"}),
+    );
+}
+
+#[test]
+fn a_spec_developed_aimed_at_a_controller_is_refused() {
+    refused_on_a_controller("spec.develop", json!({"spec": 1}));
+}
+
+#[test]
+fn a_review_aimed_at_a_controller_is_refused() {
+    refused_on_a_controller("review.start", json!({"agent": "a1"}));
+}

@@ -605,3 +605,28 @@ fn a_launch_on_a_machine_that_is_no_runner_is_refused() {
     let text = signed(&pixel, "agent.start", json!({"project": "app"}), 0);
     assert!(requests.check(&text, "pc", &members, time(0)).is_ok());
 }
+
+#[test]
+fn every_method_that_starts_an_agent_is_refused_on_a_machine_that_is_no_runner() {
+    let (_, _, _, list) = three();
+    let members = members(&list);
+    for method in [
+        "agent.resume",
+        "agent.quota_resume",
+        "spec.new",
+        "spec.from_ticket",
+        "spec.develop",
+        "review.start",
+    ] {
+        assert_eq!(
+            runs_agents(&members, "pixel", method)
+                .unwrap_err()
+                .to_string(),
+            "refused: pixel is a controller: it runs no agent, a runner does",
+            "{method}"
+        );
+        assert!(runs_agents(&members, "pc", method).is_ok(), "{method}");
+    }
+    // A command of the project's runs no agent.
+    assert!(runs_agents(&members, "pixel", "task.run").is_ok());
+}
