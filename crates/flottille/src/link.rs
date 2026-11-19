@@ -1317,6 +1317,8 @@ impl Remote {
         ));
         let (read, mut write) = ours.into_split();
         let once = accepted.method != "events.watch";
+        // The key of the member that signed it, its public half: never the device's own key.
+        let flottille_link::Member { key: signer, .. } = accepted.device;
         let mut line = serde_json::to_vec(&flottille_core::protocol::Request {
             id: accepted.id,
             method: accepted.method,
@@ -1331,7 +1333,7 @@ impl Remote {
             _write: write,
             once,
             watch_of: (!once).then(|| accepted.device.name.clone()),
-            device: accepted.device.key,
+            device: signer,
         })
     }
 
