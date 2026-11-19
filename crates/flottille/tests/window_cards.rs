@@ -4,8 +4,8 @@
 //! On GPUI's test platform in front of a real daemon whose agent is the fake ACP agent, with a
 //! throwaway user; the rows are events made up for the page. No window opens on a screen.
 
-mod common;
-mod guard;
+use crate::common;
+use crate::guard;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};

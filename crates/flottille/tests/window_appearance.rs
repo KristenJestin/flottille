@@ -3,7 +3,7 @@
 //! is described by temporary files: an os-release and an invented Omarchy theme in its own state
 //! folder, never the machine's. No window opens on a screen.
 
-mod common;
+use crate::common;
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;

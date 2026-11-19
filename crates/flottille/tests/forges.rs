@@ -2,7 +2,7 @@
 //! through a fake `gh` (`crates/flottille-fake-gh`) on the daemon's `PATH`, in throwaway
 //! repositories whose `origin` looks like GitHub's. No test ever calls GitHub.
 
-mod common;
+use crate::common;
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};

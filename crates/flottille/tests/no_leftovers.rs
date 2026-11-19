@@ -5,7 +5,7 @@
 
 #![cfg(target_os = "linux")]
 
-mod common;
+use crate::common;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

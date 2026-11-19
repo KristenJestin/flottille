@@ -5,7 +5,7 @@
 //! fake ACP agents (`crates/flottille-fake-agent`), in throwaway repositories and temporary XDG
 //! folders.
 
-mod common;
+use crate::common;
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};

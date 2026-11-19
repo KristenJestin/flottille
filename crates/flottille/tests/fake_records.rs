@@ -2,7 +2,7 @@
 //! at once (`join_all` over program, host and scope), so several fake processes append to the same
 //! `received.jsonl` together: each record has to land as one whole line, never mixed with another.
 
-mod common;
+use crate::common;
 
 use std::path::Path;
 use std::process::{Command, Stdio};

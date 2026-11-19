@@ -4,7 +4,7 @@
 //! the judge are fake ACP agents (`crates/flottille-fake-agent`), in throwaway repositories and
 //! temporary XDG folders.
 
-mod common;
+use crate::common;
 
 use std::io::{BufRead, Write};
 use std::path::PathBuf;

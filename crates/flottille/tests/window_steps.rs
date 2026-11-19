@@ -1,7 +1,7 @@
 //! A setup step's ink, on GPUI's test platform: it fades when the step's state changes and then
 //! stops asking for frames; with reduced motion it jumps.
 
-mod kit_common;
+use crate::kit_common;
 
 use flottille_window::steps::{StepRow, StepTone};
 use gpui_design_system::motion::PANEL;

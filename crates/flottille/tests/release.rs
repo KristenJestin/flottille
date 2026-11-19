@@ -3,7 +3,7 @@
 //! against a local server standing for the releases, in a throwaway home. Nothing here talks to
 //! GitHub; what only a real push proves is said in `docs/releases.md`.
 
-mod common;
+use crate::common;
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};

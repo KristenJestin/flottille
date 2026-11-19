@@ -1,7 +1,7 @@
 //! The protocol's version and its catalogue of methods (`docs/protocol.md`), against the real
 //! binary.
 
-mod common;
+use crate::common;
 
 use std::collections::HashSet;
 use std::fs;

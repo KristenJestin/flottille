@@ -5,7 +5,7 @@
 //! the device key, `pc`'s daemon carries it over its link, and `server` checks it before it serves
 //! it as one of its own clients'.
 
-mod common;
+use crate::common;
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::SocketAddr;

@@ -4,7 +4,7 @@
 //! their MCP server as their client would; the forge is the fake `gh`; the remotes are throwaway
 //! bare repositories.
 
-mod common;
+use crate::common;
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};

@@ -3,7 +3,7 @@
 //! own first, a new entry made in Settings' own form set to the project, and the list following
 //! the vault live. No window opens on a screen, and the user's own keyring is never reached.
 
-mod common;
+use crate::common;
 
 use std::path::PathBuf;
 use std::sync::Arc;

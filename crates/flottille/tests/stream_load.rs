@@ -13,7 +13,7 @@
 //! kill %1; rm /tmp/busy
 //! ```
 
-mod common;
+use crate::common;
 
 use std::io::Write;
 use std::os::unix::net::UnixStream;

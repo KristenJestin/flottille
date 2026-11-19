@@ -2,7 +2,7 @@
 //! run drawer on what the step runs and writes. On GPUI's test platform in front of a real daemon,
 //! with a throwaway user and repository. No window opens on a screen.
 
-mod common;
+use crate::common;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

@@ -5,7 +5,7 @@
 //! fake ACP agent, a fake `gh`, a throwaway repository whose fetch fails at once, temporary XDG
 //! folders; no test calls GitHub.
 
-mod common;
+use crate::common;
 
 use std::time::{Duration, Instant};
 

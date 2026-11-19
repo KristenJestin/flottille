@@ -2,7 +2,7 @@
 //! user's answers from the command line, and the result stored for the agent that asked. The
 //! agent is the fake ACP agent, in a throwaway repository and temporary XDG folders.
 
-mod common;
+use crate::common;
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};

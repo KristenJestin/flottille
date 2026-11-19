@@ -6,7 +6,7 @@
 //! its development tells the session, and `amend` is refused while it is a Draft. A fake ACP
 //! agent, a fake `gh`, a throwaway repository, temporary XDG folders; no test calls GitHub.
 
-mod common;
+use crate::common;
 
 use std::time::{Duration, Instant};
 

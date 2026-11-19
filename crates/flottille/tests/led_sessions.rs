@@ -2,7 +2,7 @@
 //! starts", "Where a question goes"): a launch names its kind, never guessed, and a question goes
 //! where the daemon says for the caller. The fake ACP agent, temporary folders, no real agent.
 
-mod common;
+use crate::common;
 
 use std::time::{Duration, Instant};
 

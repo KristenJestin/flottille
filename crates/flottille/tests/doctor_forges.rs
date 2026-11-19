@@ -3,7 +3,7 @@
 //! or not, and what to do when not. Fakes of the three, a PATH of the test's own and temporary XDG
 //! folders: no real `gh`, `bkt` nor `acli` is ever run, and none of their folders is read.
 
-mod common;
+use crate::common;
 
 use common::User;
 use serde_json::{Value, json};

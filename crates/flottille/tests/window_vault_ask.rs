@@ -4,7 +4,7 @@
 //! away once the user saved the entry. On GPUI's test platform in front of a real daemon whose agent is
 //! the fake ACP agent, with the in-memory keyring; no window opens on a screen.
 
-mod common;
+use crate::common;
 
 use std::path::Path;
 use std::sync::Arc;

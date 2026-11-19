@@ -2,7 +2,7 @@
 //! "The models"). On GPUI's test platform in front of a real daemon whose providers are fake ACP
 //! agents, with a throwaway user. No window opens on a screen.
 
-mod common;
+use crate::common;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};

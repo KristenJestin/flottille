@@ -2,7 +2,7 @@
 //! opening another. Tested without a display: the first window is a listener of the test's own,
 //! and the second command is the real binary, which must talk to it and leave. No window opens.
 
-mod common;
+use crate::common;
 
 use std::process::Stdio;
 use std::sync::mpsc::{Receiver, channel};
