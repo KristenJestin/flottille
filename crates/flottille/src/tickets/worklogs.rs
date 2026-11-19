@@ -124,8 +124,8 @@ impl Site<'_> {
         }
     }
 
-    /// `GET /rest/api/3/issue/<key>/worklog/<id>`: the worklog, or none when the work item has no
-    /// such worklog (Jira answers 404 for one that is on another work item too).
+    /// `GET /rest/api/3/issue/<key>/worklog/<id>`: the worklog, or none when Jira has no such
+    /// worklog. One that is on another work item is answered too (its `issueId` says which).
     async fn worklog(&self, key: &str, id: &str) -> Result<Option<Value>, String> {
         let (status, text) = self.read(&format!("issue/{key}/worklog/{id}"), &[]).await?;
         if status == http::StatusCode::NOT_FOUND {
@@ -389,6 +389,15 @@ pub(super) struct Current {
     pub comment: String,
 }
 
+/// A worklog the work item does not have: it does not exist, or it is on another work item.
+fn not_on_the_item(key: &str, id: &str) -> Outcome {
+    Outcome::Refused(format!(
+        "refused: {key} has no worklog {}: tickets worklogs gives the id of each worklog, and the \
+         work item it is on; nothing was written",
+        masked(id)
+    ))
+}
+
 /// The worklog `id` of the work item `key`, once it is known to be the token's own account's:
 /// refused, before anything is written, when it is not on that work item (or does not exist) or
 /// is another author's.
@@ -404,12 +413,17 @@ pub(super) async fn own_worklog(
         .await
         .map_err(|why| Outcome::Failed(format!("the worklog could not be read: {why}")))?
     else {
-        return Err(Outcome::Refused(format!(
-            "refused: {key} has no worklog {}: tickets worklogs gives the id of each worklog, and \
-             the work item it is on; nothing was written",
-            masked(id)
-        )));
+        return Err(not_on_the_item(key, id));
     };
+    // Jira answers a worklog of another work item too, naming the work item it is on: that one is
+    // compared with this one's id, not taken for a 404.
+    let item = jira
+        .get(&format!("issue/{key}"), &[("fields", "id")])
+        .await
+        .map_err(|why| Outcome::Failed(format!("the work item could not be read: {why}")))?;
+    if item["id"].as_str().is_none() || worklog["issueId"].as_str() != item["id"].as_str() {
+        return Err(not_on_the_item(key, id));
+    }
     let (account, _) = own_account(project, jira, entry).await?;
     if worklog["author"]["accountId"].as_str() != Some(account.as_str()) {
         let author = worklog["author"]["displayName"]
