@@ -259,7 +259,9 @@ fn a_delivery_already_given_is_not_given_again_after_a_restart() {
 
     // Stopped in the turn: the prompt that started it was given, the turn is cut.
     restart(&user);
-    eventually("the word on the cut turn", || since(&user, before).len() == 1);
+    eventually("the word on the cut turn", || {
+        since(&user, before).len() == 1
+    });
     settle();
 
     let given = since(&user, before);
