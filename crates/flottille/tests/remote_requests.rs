@@ -1440,6 +1440,43 @@ fn a_review_aimed_at_a_controller_is_refused() {
     refused_on_a_controller("review.start", json!({"agent": "a1"}));
 }
 
+#[test]
+fn a_watch_carried_for_a_removed_device_ends() {
+    let (_hub, pc, server) = pc_and_server(User::new());
+    let laptop = Machine::new();
+    pair(&pc, &laptop, "laptop", "controller");
+    server.wait_for_member("laptop", true);
+    let device = laptop.device();
+
+    // The laptop's watch of the server, carried by pc, a machine that stays trusted.
+    pc.user.status();
+    let mut stream = UnixStream::connect(pc.user.path("runtime/flottille/daemon.sock")).unwrap();
+    let line = signed(&device, "1", "server", "events.watch", json!({"after": 0}));
+    writeln!(stream, "{line}").unwrap();
+    stream.set_read_timeout(Some(WAIT)).unwrap();
+    let mut reading = BufReader::new(stream);
+    let mut first = String::new();
+    reading.read_line(&mut first).unwrap();
+    let answer: Value = serde_json::from_str(&first).unwrap();
+    assert!(answer["error"].is_null(), "{answer}");
+    assert!(
+        server.log().contains("events.watch asked by laptop"),
+        "{}",
+        server.log()
+    );
+
+    let removed = pc.user.run(&["remote", "remove", "laptop"]);
+    assert!(
+        removed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&removed.stderr)
+    );
+    server.wait_for_member("laptop", false);
+    eventually("the removed device's watch to end", || {
+        server.log().contains("the watch asked by laptop ended")
+    });
+}
+
 /// What `pid` read so far: its read calls, and their bytes.
 fn reads(pid: u64) -> (u64, u64) {
     let io = std::fs::read_to_string(format!("/proc/{pid}/io")).unwrap();
