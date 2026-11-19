@@ -19,7 +19,7 @@ use std::time::{Duration, SystemTime};
 use common::User;
 use common::mcp::{Mcp, server_of};
 use flottille_link::{DeviceKey, Endpoint, Hello, MachineKey, PublicKey, Request, Traffic};
-use remote::{Machine, NoKeyring, WAIT, error_of, json_of, pc_and_server, signed};
+use remote::{Machine, NoKeyring, WAIT, error_of, json_of, pair, pc_and_server, signed};
 use serde_json::{Value, json};
 
 /// The entry's secret: invented, long enough to be masked.
@@ -255,6 +255,18 @@ fn share_message(request: Value, name: &str) -> Value {
 
 /// `vault.share` of `name` to `to`, signed by `key` for `machine` now.
 fn share_request(key: &DeviceKey, machine: &str, method: &str, name: &str, to: &str) -> Value {
+    share_request_at(key, machine, method, name, to, SystemTime::now())
+}
+
+/// `share_request`, signed at `at`.
+fn share_request_at(
+    key: &DeviceKey,
+    machine: &str,
+    method: &str,
+    name: &str,
+    to: &str,
+    at: SystemTime,
+) -> Value {
     serde_json::to_value(
         Request::sign(
             key,
@@ -262,23 +274,58 @@ fn share_request(key: &DeviceKey, machine: &str, method: &str, name: &str, to: &
             machine,
             method,
             &json!({"name": name, "machine": to}),
-            SystemTime::now(),
+            at,
         )
         .unwrap(),
     )
     .unwrap()
 }
 
-#[test]
-fn a_machine_message_alone_cannot_share_an_entry() {
-    let (_hub, pc, server) = pc_and_server(User::new());
-    let server_key: PublicKey =
-        serde_json::from_value(server.remote()["this"]["key"].clone()).unwrap();
-    let address: SocketAddr = server.remote()["this"]["listening"]
+/// `frames` sent, one after the other, on a machine link opened with `machine_key` to `to`: what
+/// each was answered.
+fn sent_as(machine_key: &MachineKey, to: &Machine, frames: &[Value]) -> Vec<Result<(), String>> {
+    let key: PublicKey = serde_json::from_value(to.remote()["this"]["key"].clone()).unwrap();
+    let address: SocketAddr = to.remote()["this"]["listening"]
         .as_str()
         .unwrap()
         .parse()
         .unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let endpoint = Endpoint::dialler(machine_key).unwrap();
+        let link = tokio::time::timeout(
+            WAIT,
+            endpoint.connect(
+                key,
+                &[address],
+                Traffic::Machine,
+                &Hello::ours("0.4.1"),
+                "server",
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let mut answers = Vec::new();
+        for frame in frames {
+            answers.push(
+                link.send_raw(frame.to_string().as_bytes())
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| error.to_string()),
+            );
+        }
+        endpoint.close().await;
+        answers
+    })
+}
+
+#[test]
+fn a_machine_message_alone_cannot_share_an_entry() {
+    let (_hub, pc, server) = pc_and_server(User::new());
     // pc's daemon is stopped, so that no link of its own takes the one below: pc's machine key is
     // only what the test holds, as an agent that read it would hold it.
     assert!(pc.user.run(&["daemon", "stop"]).status.success());
@@ -325,36 +372,7 @@ fn a_machine_message_alone_cannot_share_an_entry() {
         share_message(valid.clone(), "tracker"),
         share_message(valid, "tracker"),
     ];
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    let answers = runtime.block_on(async {
-        let endpoint = Endpoint::dialler(&machine_key).unwrap();
-        let link = tokio::time::timeout(
-            WAIT,
-            endpoint.connect(
-                server_key,
-                &[address],
-                Traffic::Machine,
-                &Hello::ours("0.4.1"),
-                "server",
-            ),
-        )
-        .await
-        .unwrap()
-        .unwrap();
-        let mut answers = Vec::new();
-        for frame in &frames {
-            answers.push(
-                link.send_raw(frame.to_string().as_bytes())
-                    .await
-                    .map_err(|error| error.to_string()),
-            );
-        }
-        endpoint.close().await;
-        answers
-    });
+    let answers = sent_as(&machine_key, &server, &frames);
 
     let refusal = |at: usize| answers[at].clone().unwrap_err();
     assert_eq!(
@@ -539,4 +557,125 @@ fn the_shared_value_is_masked_on_the_other_machine() {
         page.contains("the tracker token is [masked], keep it"),
         "{page}"
     );
+}
+
+#[test]
+fn a_share_does_not_replace_the_other_machine_s_own_entry() {
+    let (_hub, pc, server) = pc_and_server(User::new());
+    pc.user
+        .call("vault.set", json!({"name": "tracker", "secret": SECRET}))
+        .unwrap();
+    server
+        .user
+        .call(
+            "vault.set",
+            json!({"name": "tracker", "secret": SECOND, "description": "The server's own"}),
+        )
+        .unwrap();
+
+    let refused = failed(&share(&pc, "tracker", "server"));
+
+    assert!(
+        refused.contains(
+            "server refused: this machine has its own vault entry tracker: remove or rename it \
+             here first"
+        ),
+        "{refused}"
+    );
+    let own = entry(&server, "tracker").unwrap();
+    assert_eq!(own["description"], "The server's own", "{own}");
+    assert!(own["shared_from"].is_null(), "{own}");
+}
+
+/// pc and server, and phone, a viewer of the user's, all three online.
+fn with_a_viewer() -> (remote::TestHub, Machine, Machine, Machine) {
+    let (hub, pc, server) = pc_and_server(User::new());
+    let phone = Machine::new();
+    pair(&pc, &phone, "phone", "viewer");
+    server.wait_for_member("phone", true);
+    pc.wait_for("phone", "online");
+    pc.user
+        .call("vault.set", json!({"name": "tracker", "secret": SECRET}))
+        .unwrap();
+    (hub, pc, server, phone)
+}
+
+#[test]
+fn a_viewer_s_share_is_refused_by_both_machines() {
+    let (_hub, pc, server, phone) = with_a_viewer();
+    let params = json!({"name": "tracker", "machine": "server"});
+
+    let answer = pc.raw(&signed(&phone.device(), "1", "pc", "vault.share", params));
+    assert_eq!(
+        error_of(&answer),
+        "refused: phone may only view: a controller or a runner may call vault.share"
+    );
+
+    // Its signature carried to the server by pc's machine key, as code that read it could.
+    assert!(pc.user.run(&["daemon", "stop"]).status.success());
+    server.wait_for("pc", "offline");
+    let request = share_request(&phone.device(), "pc", "vault.share", "tracker", "server");
+    let answers = sent_as(
+        &MachineKey::load_or_make(&pc.folder()).unwrap(),
+        &server,
+        &[share_message(request, "tracker")],
+    );
+    assert_eq!(
+        answers[0].clone().unwrap_err(),
+        "server refused: refused: phone may only view: a controller or a runner may call \
+         vault.share"
+    );
+    assert!(entry(&server, "tracker").is_none());
+}
+
+#[test]
+fn a_share_with_a_machine_that_is_not_a_runner_is_refused() {
+    let (_hub, pc, _server, phone) = with_a_viewer();
+
+    let refused = failed(&share(&pc, "tracker", "phone"));
+
+    assert!(
+        refused.contains("phone runs no agent: a vault entry is shared with a runner"),
+        "{refused}"
+    );
+    assert!(entry(&phone, "tracker").is_none());
+}
+
+#[test]
+fn a_share_older_than_its_window_is_refused_by_both_machines() {
+    let (_hub, pc, server) = pc_and_server(User::new());
+    pc.user
+        .call("vault.set", json!({"name": "tracker", "secret": SECRET}))
+        .unwrap();
+    let old = SystemTime::now() - Duration::from_secs(6 * 60);
+    let device = pc.device();
+
+    let request = Request::sign(
+        &device,
+        "1",
+        "pc",
+        "vault.share",
+        &json!({"name": "tracker", "machine": "server"}),
+        old,
+    )
+    .unwrap();
+    let answer = pc.raw(&serde_json::to_string(&request).unwrap());
+    assert_eq!(
+        error_of(&answer),
+        "refused: this request is older than five minutes"
+    );
+
+    assert!(pc.user.run(&["daemon", "stop"]).status.success());
+    server.wait_for("pc", "offline");
+    let request = share_request_at(&device, "pc", "vault.share", "tracker", "server", old);
+    let answers = sent_as(
+        &MachineKey::load_or_make(&pc.folder()).unwrap(),
+        &server,
+        &[share_message(request, "tracker")],
+    );
+    assert_eq!(
+        answers[0].clone().unwrap_err(),
+        "server refused: refused: this request is older than five minutes"
+    );
+    assert!(entry(&server, "tracker").is_none());
 }
