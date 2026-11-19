@@ -270,7 +270,7 @@ struct ShareWith {
 }
 
 /// What a client that does not sign is answered for `vault.share`.
-pub const NOT_SIGNED: &str = "sharing a vault entry is signed by the user's device: ask it with                               flottille vault share, or from the window's Settings, Vault";
+pub const NOT_SIGNED: &str = "sharing a vault entry is signed by the user's device: ask it with `flottille vault share`, or from the window's Settings, Vault";
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
