@@ -4987,6 +4987,12 @@ fn the_tests_are_built_once_and_run_on_twelve_partitions_of_the_archive() {
     assert!(test.contains("actions/download-artifact"), "{test}");
     assert!(test.contains("--archive-file"), "{test}");
     assert!(test.contains("--workspace-remap ."), "{test}");
+    // The test binaries hold the paths of their build (`env!("CARGO_BIN_EXE_flottille")`, the
+    // fakes beside it): the archive is extracted where `target/` was, in the checkout.
+    assert!(
+        test.contains("--extract-to \"$GITHUB_WORKSPACE\" --extract-overwrite"),
+        "{test}"
+    );
     assert!(
         test.contains("--partition count:${{ matrix.partition }}/12"),
         "{test}"
