@@ -2748,11 +2748,11 @@ fn a_call_running_when_the_connection_is_turned_off_answers_that_it_failed() {
 /// The limit of one answer of a server, in bytes (`docs/extensions.md`, "A result").
 const ANSWER_LIMIT: u64 = 16 * 1024 * 1024;
 
-/// The `almanac` whose action `write` answers `bytes` bytes of text, a megabyte at a time with
-/// `pause_ms` between.
 /// The pieces the fake writes a big answer in.
 const PIECE: u64 = 1 << 20;
 
+/// The `almanac` whose action `write` answers `bytes` bytes of text, a megabyte at a time with
+/// `pause_ms` between.
 fn answering(bytes: u64, pause_ms: u64) -> Value {
     let mut script = almanac();
     script["answers"]["write"] =
