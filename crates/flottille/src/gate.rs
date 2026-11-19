@@ -586,6 +586,19 @@ fn session_send(grant: &Grant, args: &Value) -> Verdict {
     found.verdict(Kind::Action)
 }
 
+/// What the reason of a line that runs a pull request's code in the copy its review reads ends
+/// with: `asks_pull_request_code` finds it, and Full does not let it through.
+pub const PULL_REQUEST_CODE: &str = "in the copy its review reads: only the user lets a review run \
+    it, in every mode, Full included";
+
+/// Whether a held call runs the code of a pull request in its review's copy: held for the user in
+/// every mode, Full included, and never decided by the judge.
+pub fn asks_pull_request_code(ask: &Ask) -> bool {
+    ask.reasons
+        .iter()
+        .any(|reason| reason.contains(PULL_REQUEST_CODE))
+}
+
 /// What every reason of a verdict on a pull request ends with, whichever way it is given (the
 /// tool `forge`, a `gh` or a `bkt` line): `asks_review` finds it, and Full does not let it through.
 pub const REVIEW_VERDICT: &str = "only the user approves a pull request or asks for changes on \
@@ -1329,8 +1342,7 @@ fn run(call: &Call) -> Verdict {
         .filter(|_| !reads || files);
     if let Some((number, _)) = &copy {
         found.base(format!(
-            "it runs the code of pull request #{number}, in the copy its review reads: only the \
-             user lets a review run it"
+            "it runs the code of pull request #{number}, {PULL_REQUEST_CODE}"
         ));
     }
     if let Some((name, command)) = call.command {

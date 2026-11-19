@@ -2462,7 +2462,7 @@ async fn played_in(
                             // a session written to for the first time; so are a service stopped
                             // and a pull request approved or blocked, by `forge` or by a line,
                             // and the worklog's token sent to another site or entry, and a
-                            // connection written.
+                            // connection written, and a pull request's code run by its review.
                             _ if mode == GateMode::Full
                                 && !removes_own_workspace(grant, tool, &args)
                                 && !gate::asks_leave(&ask)
@@ -2471,6 +2471,7 @@ async fn played_in(
                                 && !crate::services::stops(tool, &args)
                                 && !crate::extensions::held_for_the_user(tool, &args)
                                 && !gate::asks_review(&ask)
+                                && !gate::asks_pull_request_code(&ask)
                                 && !crate::actions::sends_a_worklog_token(
                                     daemon, grant, tool, &args,
                                 ) =>
