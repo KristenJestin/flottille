@@ -20,8 +20,9 @@ const SUMMARY: &str = "## Goal\nFix the login.\n## Next steps\nCover the logout.
 const WAKE: &str = "session-turn-ended";
 
 /// What the agents play. A session that starts from a summary (the brief given again with it)
-/// only picks up; a first message alone reports, so that a led session given it wakes its pilot,
-/// and says enough that a summary is smaller than its conversation.
+/// only picks up; a first message alone reports (a child's only works, a child that reports
+/// ending), so that a led session given it wakes its pilot, and says enough that a summary is
+/// smaller than its conversation.
 fn script() -> Value {
     let details = format!(
         "Details: {}",
@@ -32,6 +33,7 @@ fn script() -> Value {
         {"when": "Fix the login.", "do": [
             {"mcp": {"tool": "report", "arguments": {"text": "The login is fixed."}}},
             {"say": details}]},
+        {"when": "Write the tests.", "do": [{"say": details}]},
         {"when": "HANG", "do": [{"hold": "release"}]}
     ]})
 }
@@ -79,9 +81,14 @@ fn root(user: &User, message: &str) -> (String, Mcp) {
 /// The session the root started with `agent_launch` of `kind` (`led` or `handed`), briefed
 /// `Fix the login.`: its id, once its first turn ended.
 fn launched(user: &User, mcp: &Mcp, kind: &str) -> String {
+    launched_with(user, mcp, kind, "Fix the login.")
+}
+
+/// `launched`, briefed `brief`.
+fn launched_with(user: &User, mcp: &Mcp, kind: &str, brief: &str) -> String {
     let answer = mcp.call(
         "agent_launch",
-        json!({"kind": kind, "title": "Login", "brief": "Fix the login."}),
+        json!({"kind": kind, "title": "Login", "brief": brief}),
     );
     assert!(!answer.error, "{}", answer.text);
     let id = user.call("agent.list", json!({})).unwrap()["agents"]
@@ -197,6 +204,22 @@ fn a_handed_session_at_rest_gets_no_prompt_after_a_restart() {
     let (_, mcp) = root(&user, "hello");
     let session = launched(&user, &mcp, "handed");
     compact(&user, &session);
+    at_rest(&user);
+    let before = prompts(&user).len();
+
+    restart(&user);
+    settle();
+
+    assert_eq!(since(&user, before), Vec::<String>::new());
+}
+
+#[test]
+fn a_child_at_rest_gets_no_prompt_after_a_restart() {
+    let user = user();
+    let (_, mcp) = root(&user, "hello");
+    // A child that reports ends: this one only works, and is left idle.
+    let child = launched_with(&user, &mcp, "child", "Write the tests.");
+    compact(&user, &child);
     at_rest(&user);
     let before = prompts(&user).len();
 
