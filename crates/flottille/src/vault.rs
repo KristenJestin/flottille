@@ -33,6 +33,24 @@ const CHOICE: &str = "keyring.toml";
 const APPLICATION: (&str, &str) = ("application", "flottille");
 const ENTRY: &str = "flottille-entry";
 
+/// The writes in progress, one lock per entry name: a Save, a removal and a share each check
+/// what the vault holds, await the keyring, then write the store, and two of them on one name
+/// would interleave (a share that saw no entry overwriting the one the user just saved).
+static WRITES: std::sync::LazyLock<Mutex<HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Waits until no other write of the entry `name` is in progress; it is this one's until the
+/// guard is dropped.
+async fn writing(name: &str) -> tokio::sync::OwnedMutexGuard<()> {
+    let lock = {
+        let mut writes = WRITES.lock().unwrap();
+        // A lock no write holds nor waits for is forgotten: the map keeps the names in use only.
+        writes.retain(|_, lock| std::sync::Arc::strong_count(lock) > 1);
+        writes.entry(name.to_owned()).or_default().clone()
+    };
+    lock.lock_owned().await
+}
+
 /// Where the secrets are.
 pub enum Keyring {
     /// The Secret Service of the session (`oo7`).
@@ -332,6 +350,7 @@ pub async fn call(
         }
         "vault.remove" => {
             let Remove { name, confirmed } = serde_json::from_value(params)?;
+            let _writing = writing(&name).await;
             let entries = daemon.read(|store| store.vault_entries())?;
             let Some(entry) = entries.iter().find(|entry| entry.name == name) else {
                 return Err(Failure::new(
@@ -413,6 +432,7 @@ async fn set(daemon: &std::sync::Arc<Daemon>, params: Value) -> Result<Value, Fa
     };
     // Trimmed first: an empty project is every project's, which no project has to load.
     let project = given(asked.project);
+    let _writing = writing(&asked.name).await;
     let existing = daemon
         .read(|store| store.vault_entries())?
         .into_iter()
@@ -591,6 +611,7 @@ pub async fn receive(
             "refused: a secret is {VAULT_SHORTEST} characters at least"
         ));
     }
+    let _writing = writing(&name).await;
     let existing = daemon
         .read(|store| store.vault_entries())
         .map_err(|error| error.to_string())?
