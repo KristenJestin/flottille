@@ -566,7 +566,7 @@ fn a_refusal_says_which_role_allows_it() {
 
 #[test]
 fn a_launch_on_a_machine_that_is_no_runner_is_refused() {
-    let (pc, pixel, tablet, list) = three();
+    let (pc, pixel, _, list) = three();
     let members = members(&list);
     let mut requests = Requests::new(time(0));
     // `pixel` and `tablet` checking a launch of the user's: their member runs no agent.
