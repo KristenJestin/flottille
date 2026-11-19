@@ -9,7 +9,7 @@ Every branch that matters publishes its own build, with a version that says wher
 | `dev` | beta | `0.3.0-beta.12` | a pre-release, tagged `v0.3.0-beta.12` |
 | `stable/X.Y` | rc (`install.sh` offers none: its builds install by `--version`) | `0.3.2-rc.1`, then `0.3.2` | a pre-release per push, tagged `v0.3.2-rc.1`; its release, marked latest when above the latest (see "Stable lines") |
 | `next/X.Y` | next (`install.sh` offers none: its builds install by `--version`) | `0.5.0-next.7` | a pre-release per push and per merge of dev, tagged `v0.5.0-next.7` (see "The next version") |
-| `feat/*`, `fix/*` | alpha | `0.3.0-alpha.feat-46-packages.4` | a pre-release per push, tagged `v0.3.0-alpha.feat-46-packages.4` like a beta, all deleted with the branch |
+| `feat/*`, `fix/*` | alpha | `0.3.0-alpha.feat-46-packages.4` | a pre-release per push to its pull request, once that run's `verify` passed, tagged `v0.3.0-alpha.feat-46-packages.4` like a beta, all deleted with the branch |
 
 Nothing is published anywhere but GitHub's releases of the repository. **Releases are immutable**
 (since 2026-11-04): a published version is never replaced, its tag never moved nor its files
@@ -145,12 +145,40 @@ for HEAD and its branch by default):
 (`flottille 0.3.2-rc.1 (rc, …)`), a build of `next/X.Y` says `next`. A build CI did not make is `local`:
 `flottille 0.1.0 (local, 3f2a9c1d7b44)`.
 
+## What CI checks
+
+`.github/workflows/ci.yml` judges a commit **once**. A push to `dev`, `main`, `stable/*` or
+`next/*` runs everything; a push to a feature branch (`feat/**`, `fix/**`) runs **nothing**: its
+commits are judged by its pull request's run (the same suite on the same commit, run twice, was
+twelve runners instead of six and two chances for an unlucky test to turn a pull request red).
+The jobs of a run:
+
+- **`check`**: formatting and clippy.
+- **`build-tests`** compiles every test once and packs them, with the fakes they spawn, in a
+  nextest archive (`cargo nextest archive`), uploaded as an artifact (kept a day).
+- **`test`**, twelve partitions at once: each downloads the archive and runs its twelfth
+  (`cargo nextest run --archive-file … --partition count:k/12`) with the `ci` profile, against
+  its own checkout of the repository (`--workspace-remap .`, for the files the tests read). A
+  partition compiles nothing.
+- **`doc-tests`** runs the doc tests once (nextest does not), beside the partitions.
+- **`verify`**, the required check, fails unless `check`, `build-tests`, `doc-tests` and every
+  partition passed (skipped is a pass only when `changes` said the Rust suite is not needed, and
+  when `hub` ran, that it passed).
+
+**A failed test is retried**, twice (`.config/nextest.toml`, the profile `ci`): one that passes
+on a retry does not fail the run, and **is not hidden**. Each partition's summary, and `verify`'s
+for all of them, has a `Flaky tests` section listing each test with its attempts
+(`.github/scripts/flaky-report.sh`, read from nextest's JUnit report), and `verify` raises a
+warning: those tests are fixed, not absorbed. A test that fails every attempt fails the run.
+
 ## What CI publishes
 
-On a push to `dev`, `stable/*`, `next/*`, `feat/**` or `fix/**`, on `main` or a stable line's
-release tag when the `Release` workflow starts it, and on `next/X.Y` when `forward.yml` merged
-`dev` into it,
-`.github/workflows/ci.yml` runs two jobs beside its checks:
+On a push to `dev`, `stable/*` or `next/*`, on `main` or a stable line's release tag when the
+`Release` workflow starts it, and on `next/X.Y` when `forward.yml` merged `dev` into it,
+`.github/workflows/ci.yml` runs two jobs beside its checks. A pull request from a branch of the
+repository named `feat/…` or `fix/…` runs them too, for its alpha, on the **head** commit of the
+branch, not on the merge commit GitHub makes for the tests (`changes` decides it: a fork's token
+cannot write, and a branch of another name never had an alpha):
 
 - **`build`** runs the branch's code with a token that can only read. On Ubuntu 22.04, old
   enough a C library (glibc 2.35) that the binary runs on current Arch and Debian stable, it
@@ -168,7 +196,8 @@ release tag when the `Release` workflow starts it, and on `next/X.Y` when `forwa
     breaking changes, features, fixes, performance and other changes, each
     `- **<scope>**: <subject>` with the pull request number its squash kept.
 - **`publish`**, once `verify` passed on the pushed commit (on `main`, here or on `dev`, see
-  "Releasing"), runs none of the branch's code: it
+  "Releasing"; for an alpha, on the pull request's own run, so that no alpha is published for a
+  commit whose run is red), runs none of the branch's code: it
   takes what `build` made and alone holds the right to write releases and tags. It runs no git
   and never works inside the artifact's folder, whose files the branch's code made (a
   repository's layout left there would hand git its configuration): only `gh`, naming the files
@@ -184,8 +213,9 @@ release tag when the `Release` workflow starts it, and on `next/X.Y` when `forwa
     one marked (always so when only the latest line is kept: the fix reaches its users), and
     not when below (an older line's would take the channel back). When the API does not say
     which is latest, nothing is published and the run fails: run again;
-  - on a feature branch, the pre-release `vX.Y.Z-alpha.<branch>.N`, one per push, marked
-    pre-release and never latest.
+  - for a feature branch's pull request, the pre-release `vX.Y.Z-alpha.<branch>.N`, one per push
+    to the pull request, marked pre-release and never latest. A branch with no pull request has
+    no alpha.
 
   **Nothing is replaced**: the release is made with its files in one `gh release create` (an
   immutable release takes none afterwards), and a version already published, of any channel, is
@@ -247,7 +277,7 @@ what the release promises, each as a step named after its scenario:
 
 It runs on a pull request **only when the hub or its release changes** (`changes`: the hub, `flottille-link`
 and `flottille-protocol` it is built from, `Cargo.toml`, `Cargo.lock`, `LICENSE`, `ci.yml`,
-`release.yml` and the three tools above), and on every push that publishes. `verify`, the required
+`release.yml` and the three tools above), and on every push that publishes, and on the pull request of a feature branch, whose alpha holds its archives. `verify`, the required
 check, fails when `hub` ran and failed (skipped is fine), so that a red hub is not merged and does
 not stop every release afterwards: `publish` waits for it and puts the archives in the same
 `gh release create`: a release is whole or is not made.
@@ -268,7 +298,7 @@ are both Linux architectures ("The hub").
 | `stable/X.Y` | the fix line of a released `X.Y` (see "Stable lines") |
 | `dev` | the next version, `X.Y.0-beta.N` (its minor set by `Release-As`) |
 | `next/X.Y` | the version after `dev`'s, started early (see "The next version") |
-| `feat/<n>-<topic>`, `fix/<n>-<topic>` | a ticket, from the branch its pull request targets; its alphas as on any branch |
+| `feat/<n>-<topic>`, `fix/<n>-<topic>` | a ticket, from the branch its pull request targets; no push run of its own: its pull request's run judges it and publishes its alphas |
 
 `dev`, `stable/*` and `next/*` take pull requests only, merged by squash (but the merges forward
 into `next/*`, below): the `pre-commit` hook refuses a commit on them.
@@ -464,8 +494,8 @@ The tests run the version and changelog scripts on throwaway repositories, the r
 squash and the fast-forward ones after them included, run the `Release` workflow's script and
 `ci.yml`'s version step against a throwaway repository (a `gh` standing for GitHub's API), build
 the archive from a binary, and run `install.sh` and `flottille update` against a local server in
-a throwaway home. What they cannot run is the workflows themselves on GitHub. A push to a feature branch proves the alpha's: `build` on Ubuntu 22.04,
-`publish` with the job's token, a second push publishing the next alpha beside the first,
+a throwaway home. What they cannot run is the workflows themselves on GitHub. The pull request of a feature branch proves the alpha's: `build` on Ubuntu 22.04,
+`publish` with the job's token, from a `pull_request` run, a second push publishing the next alpha beside the first,
 GitHub's API answering as the scripts read it. Deleting the branch proves its cleanup. The first merge into `dev` proves the
 beta's, and the first `Release` run the move of `main` with the workflow's token, the pull
 request shown merged, `ci.yml` started on `main` by it, the stable tag on the commit released and
