@@ -25,7 +25,8 @@ fn every_method_of_the_catalogue_is_answered() {
     // fake agent, so that listing them runs no program of the machine's.
     let user = User::with_fake_providers()
         .with_env("FLOTTILLE_TEST_HOLD", "1")
-        .with_env("FLOTTILLE_TEST_CLOCK", "1");
+        .with_env("FLOTTILLE_TEST_CLOCK", "1")
+        .with_env("FLOTTILLE_TEST_TRAVEL", "1");
 
     // `daemon.stop` last: it ends the daemon the others ask.
     let mut methods: Vec<&str> = METHODS.iter().map(|(name, _)| *name).collect();

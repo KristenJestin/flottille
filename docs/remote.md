@@ -15,9 +15,11 @@ session every machine keeps to it and the first member's setup (`crates/flottill
 `crates/flottille-link/src/control.rs`, `crates/flottille/src/hub_session.rs`), and pairing
 through the hub: invitations, joining, the four words, adding, renaming and removing members
 from the command line (#812), and the user's requests to another machine, signed by the client,
-carried by its daemon and checked by the machine they are for (`--machine`, #813), and the roles
-bounding what each device may do, with what each runner offers its peers (#862). What is decided is said as such; the defaults taken are in "Defaults taken, to
-confirm"; what is open is in "Open questions". It replaces the proposal of 2026-11-03 (a relay
+carried by its daemon and checked by the machine they are for (`--machine`, #813), a place's
+code sent to another machine over the link and its new commits brought back (#815; `agent_launch`
+does not send it yet, #816), and the roles bounding what each device may do, with what each
+runner offers its peers (#862). What is decided is said as such; the defaults taken are in
+"Defaults taken, to confirm"; what is open is in "Open questions". It replaces the proposal of 2026-11-03 (a relay
 every device connects to, on a private network) and the review that put Tailscale and SSH at the
 centre: Flottille stays generic (`AGENTS.md`), and depends on no one network and no account of a
 third party. The user runs one small program of Flottille's, the hub; the data between their
@@ -614,8 +616,8 @@ no tool to move code: bare mode is unchanged. Its daemon sends the code and brin
 **The tool's description says it to the agent**, in these words or close to them: *`machine` starts
 the agent on another of the user's machines. It works on a copy of your place there: your branch and
 your uncommitted changes are sent with it. Its commits come back to you on a branch of their own,
-`refs/flottille/machines/<machine>/<branch>`, which you review and merge as you would a local
-child's work; nothing moves your branch.*
+`refs/flottille/machines/<machine>/<launch>/<branch>`, which you review and merge as you would a
+local child's work; nothing moves your branch.*
 
 - **Who**: as today. `led` and `handed` from a root only; `child` from any agent that launches
   children. A led session on the computer may start a child on the server; a led session on the
@@ -680,7 +682,8 @@ For each repository of the caller's place, before the session starts:
 **Coming back.** When the remote session has committed and reports (`child-report`, or a led
 session's `session-turn-ended` that reports), its daemon sends a bundle of **only the new commits**,
 those past what the caller's machine sent or already has; the caller's machine verifies it and
-fetches it into `refs/flottille/machines/<machine>/<branch>`, and the delivery names that ref.
+fetches it into `refs/flottille/machines/<machine>/<launch>/<branch>`, and the delivery names that
+ref: two launches from one branch come back to two refs, neither overwriting the other.
 Nothing moves the user's branch: the agent or the user reviews and merges it (a `git merge` run,
 judged as any), as a local child's work. The pilot of a led session on another machine stops it
 and removes its workspace as today, through `call`.
@@ -861,8 +864,8 @@ on a real phone, by hand, and reported.
   launch on the same machine stays unjudged.
 - A session on another machine is in Full only with the user's signed switch to Full of the
   launcher's tree; otherwise Auto.
-- The returned commits go to `refs/flottille/machines/<machine>/<branch>`, never onto the user's
-  branch.
+- The returned commits go to `refs/flottille/machines/<machine>/<launch>/<branch>`, never onto
+  the user's branch.
 - Deliveries between machines are kept 30 days by the sender; the user's requests to an offline
   machine are refused.
 - An invitation lasts 5 minutes, works once; a request's signature is valid 5 minutes.
@@ -1117,10 +1120,16 @@ on a real phone, by hand, and reported.
   snapshot was made, so the branch travels below it and the branch's name goes beside the bundle.
   When the other side has every commit already, no bundle is written (git makes no empty one)
   and the answer says "nothing new".
-- A bundle received is verified, then fetched into `refs/flottille/incoming/<launch>`; a
-  repository never received is made by `git init` and that fetch, with no remote. The fetch sets
+- A bundle received is verified, then fetched into `refs/flottille/incoming/<machine>/<launch>`
+  (the sending machine's key: two machines' launches of one name are two refs); a repository
+  never received is made by `git init` and that fetch, with no remote. The fetch sets
   `protocol.file.allow=always` for itself: a configuration that refuses git's file transport is
-  about submodules and remotes, not a file of Flottille's.
+  about submodules and remotes, not a file of Flottille's; and `fetch.fsckObjects` and
+  `transfer.fsckObjects`: an object git finds malformed fetches nothing.
+- The snapshot's ref on the sending side is removed once the travel ends, placed or failed; the
+  incoming refs on the receiving side once its workspace is made, or its making failed. An offer
+  never followed by a `place` (the sender gone mid-way) leaves its incoming ref until the launch
+  is sent again.
 - The snapshot is laid with `read-tree -m -u HEAD <snapshot>`, then `reset`, on a workspace with
   no change of its own (refused otherwise): every change is unstaged, and a file `HEAD` does not
   have is untracked there, even one the sender had staged.
@@ -1130,8 +1139,47 @@ on a real phone, by hand, and reported.
 - Git LFS objects do not travel, their pointers do: the receiving side runs with
   `GIT_LFS_SKIP_SMUDGE=1`, so that its smudge filter downloads nothing and leaves the pointer.
   The sending side's clean filters run as the user's own `git add` would run them, locally.
-- A returning bundle holds the one branch of the workspace; a `machine` is one ref component and
-  the `branch` a branch name git accepts, or nothing is fetched.
+- A returning bundle holds the one branch of the workspace; a `machine` and a `launch` are each
+  one ref component and the `branch` a branch name git accepts, or nothing is fetched.
+- Over the link (`crates/flottille/src/travel.rs`), the `git` message is one of four. `has`
+  (a project and a repository's path in it): the receiver answers the commits of its branches and
+  of `refs/flottille/machines/*`, or none when it does not have the repository yet. `offer` (a
+  transfer's name, the launch, the project, the repository, the sender's branch, the bundle's
+  length and SHA-256): the receiver reads the bundle with `fetch`, on a stream of its own where
+  each frame is a base64 chunk of 192 KiB, checks the length and the SHA-256, then has git verify
+  and fetch it. Only the machine a bundle is offered to may read it, and only until its offer is
+  answered. `place` (the launch, the project, the branch, the repositories): the workspace made of
+  what came, answered with its name, its branch and its folder.
+- Until a travel is tied to a launch the receiving machine's gate accepted (#816), the `git`
+  message is served only by a test build run with `FLOTTILLE_TEST_TRAVEL` set; any other build
+  answers that it takes no code from another machine. Even then, `has`, `offer` and `place` are
+  taken only from a runner's or a controller's machine, by the checked member list: a viewer's
+  machine, or one the peers' file trusts that is no member's, is refused. `fetch` is answered
+  only to the machine a bundle is offered to.
+- A bundle is 2 GiB at most, refused past it before a byte of it is read, on either side. A
+  machine sends one thing at a time to another (an `offer` or a `place`; a second is refused
+  while one is served), and a bundle being read that sends no frame for a minute is given up. The
+  sender hashes its bundle a chunk at a time and reads its prerequisites from its header alone.
+- The receiver takes a bundle only into a project registered under the same name with that
+  repository; a repository whose folder is missing or empty is cloned from it, and a folder that
+  holds something else is refused. A repository of a launch is taken again from the same machine
+  only while the launch has no workspace there (its sending failed part way and is tried again).
+  Workspaces are made one at a time; a branch made meanwhile on the name found free is refused,
+  never reused. The workspace is made offline (no fetch of the receiver's own remote), its branch
+  the sender's name or the first of `-2`, `-3`… that no repository of the place has, its name the
+  branch's with every other character a dash, and its base, in each repository, the commit the
+  sender's branch was on (`started from what pc sent`); the snapshot is laid on each worktree as
+  soon as it is made. The project's setup does not run on it: it comes with the launch the gate
+  accepts (#816).
+- Each side keeps what travelled in its store (`travels`): the machine, the launch, the repository,
+  the commits sent, and the workspace made. The sender keeps a launch as sent only once its
+  workspace is made there: one that failed part way is sent again under its name. A bundle coming
+  back is taken only for a repository of a launch this machine sent to that very machine, into the
+  repository it was sent from, under the name this machine gives that machine; the way back sends
+  the commits past the sender's tip, its snapshot, and what came back already.
+- Until `agent_launch` sends code (#816), a test build run with `FLOTTILLE_TEST_TRAVEL` set
+  answers `test.travel {machine, project, launch, workspace?, corrupt?, hold_ms?}` and
+  `test.travel_back {launch}`, so that two daemons can be made to send code to each other.
 
 ## Open questions
 

@@ -215,6 +215,11 @@ pub struct Remote {
     /// Counts the member lists taken: a watch carried for a device looks again whether the
     /// device is still a member.
     lists: tokio::sync::watch::Sender<u64>,
+    /// The bundles offered to another machine, while it reads them (`travel.rs`).
+    pub(crate) transfers: crate::travel::Transfers,
+    /// The machines this one is reading a bundle from or placing code of, one thing at a time
+    /// each (`travel.rs`).
+    pub(crate) receiving: crate::travel::Receiving,
 }
 
 /// Starts the link: the endpoint, the loop that accepts and the one that dials. A link that
@@ -319,6 +324,8 @@ impl Remote {
             offered: tokio::sync::watch::Sender::new(None),
             offer_now: tokio::sync::Notify::new(),
             lists: tokio::sync::watch::Sender::new(0),
+            transfers: Default::default(),
+            receiving: Default::default(),
         }
     }
 
@@ -1147,6 +1154,16 @@ async fn serve(remote: Arc<Remote>, link: Link, name: String, generation: u64) {
                 }
                 received.answer(answer);
             }
+            // Each in a task of its own: a bundle offered is read back on this same link.
+            Message::Machine(MachineMessage::Git(git)) => {
+                let git = git.clone();
+                tokio::spawn(crate::travel::serve(
+                    remote.clone(),
+                    link.clone(),
+                    received,
+                    git,
+                ));
+            }
             // Kept apart by the link's protocol name: a client's request on a machine link is
             // refused before it gets here (`Link::next`).
             Message::Client(_) => received.answer(Err(
@@ -1254,6 +1271,61 @@ fn message_bytes(message: &flottille_core::protocol::Message) -> Vec<u8> {
 }
 
 impl Remote {
+    /// The machine link to `peer`; why there is none, otherwise.
+    fn machine_link(&self, peer: &Peer) -> Result<Link, String> {
+        let machine = &peer.name;
+        let seen = self.seen.lock().unwrap();
+        match seen.get(peer.key.as_bytes()) {
+            Some(Seen {
+                link: Some((_, link, _)),
+                ..
+            }) => Ok(link.clone()),
+            Some(seen) if seen.state == PeerState::NeedsUpdate => Err(format!(
+                "{machine} needs an update: {}",
+                seen.reason.clone().unwrap_or_default()
+            )),
+            Some(seen) => Err(format!(
+                "{machine} is offline since {}",
+                time_of_day(seen.since)
+            )),
+            None => Err(format!("{machine} is offline")),
+        }
+    }
+
+    /// The machine link to the machine named `machine`, and its key.
+    pub(crate) fn link_to(&self, machine: &str) -> Result<(Link, PublicKey), String> {
+        let peer = self
+            .peers()
+            .machines
+            .into_iter()
+            .find(|peer| peer.name == machine)
+            .ok_or_else(|| {
+                format!(
+                    "no machine of the user's is named {}",
+                    machine.chars().take(64).collect::<String>().escape_debug()
+                )
+            })?;
+        Ok((self.machine_link(&peer)?, peer.key))
+    }
+
+    /// The role of the member whose machine is `key`, by the checked member list; none when it
+    /// is no member's, or there is no list. Code travels from a runner's or a controller's
+    /// machine: `flottille_link::runs_agents` says runner alone, so travel checks the role here.
+    pub(crate) fn role_of(&self, key: &PublicKey) -> Option<flottille_link::Role> {
+        let (members, _) = self.listed().ok()?;
+        members.by_machine(key).map(|member| member.role)
+    }
+
+    /// The name of the machine of `key`, while this one trusts it.
+    pub(crate) fn name_of(&self, key: &PublicKey) -> Option<String> {
+        self.trusted(key).map(|peer| peer.name)
+    }
+
+    /// The daemon, unless it is stopping.
+    pub(crate) fn daemon(&self) -> Option<Arc<Daemon>> {
+        self.daemon.get().and_then(std::sync::Weak::upgrade)
+    }
+
     /// The checked member list this machine keeps, and its own member's name.
     fn listed(&self) -> Result<(flottille_link::Members, String), String> {
         let control = self
@@ -1479,22 +1551,7 @@ pub(crate) async fn forward(
         .await;
         return false;
     };
-    let offline = {
-        let seen = remote.seen.lock().unwrap();
-        match seen.get(peer.key.as_bytes()) {
-            Some(seen) if seen.link.is_some() => None,
-            Some(seen) if seen.state == PeerState::NeedsUpdate => Some(format!(
-                "{machine} needs an update: {}",
-                seen.reason.clone().unwrap_or_default()
-            )),
-            Some(seen) => Some(format!(
-                "{machine} is offline since {}",
-                time_of_day(seen.since)
-            )),
-            None => Some(format!("{machine} is offline")),
-        }
-    };
-    if let Some(offline) = offline {
+    if let Err(offline) = remote.machine_link(&peer) {
         send(error("unavailable", offline)).await;
         return false;
     }
@@ -1848,7 +1905,7 @@ fn control_of(remote: &Remote) -> Result<Arc<crate::hub_session::Control>, Failu
         .ok_or_else(|| Failure::new(flottille_protocol::code::UNAVAILABLE, "the link is not up"))
 }
 
-fn remote_of(daemon: &Daemon) -> Result<Arc<Remote>, Failure> {
+pub(crate) fn remote_of(daemon: &Daemon) -> Result<Arc<Remote>, Failure> {
     match daemon.remote.get() {
         None => Err(Failure::refused(
             "remote is off: turn it on in daemon.toml ([remote] on = true)",

@@ -229,6 +229,8 @@ pub const METHODS: &[(&str, Class)] = &[
     ("test.hold", Drive),
     ("test.wait", Drive),
     ("test.advance", Drive),
+    ("test.travel", Drive),
+    ("test.travel_back", Drive),
 ];
 
 /// The methods that start an agent's process (`docs/remote.md`, "Roles"): a machine whose member
