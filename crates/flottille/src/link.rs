@@ -210,6 +210,11 @@ pub struct Remote {
     /// What this machine offers the others while its member is a runner; none otherwise. Each
     /// link sends it when made and whenever it changes (`offer`).
     offered: tokio::sync::watch::Sender<Option<Capabilities>>,
+    /// Asks `keep_offering` to look at what this machine offers now: a link was made.
+    offer_now: tokio::sync::Notify,
+    /// Counts the member lists taken: a watch carried for a device looks again whether the
+    /// device is still a member.
+    lists: tokio::sync::watch::Sender<u64>,
 }
 
 /// Starts the link: the endpoint, the loop that accepts and the one that dials. A link that
@@ -252,6 +257,7 @@ pub fn start(
         remote.clone(),
         stopping.clone(),
     ));
+    tokio::spawn(keep_offering(remote.clone(), stopping.clone()));
     tokio::spawn(dial(remote.clone(), stopping));
     Ok(remote)
 }
@@ -311,6 +317,8 @@ impl Remote {
             requests: Mutex::new(flottille_link::Requests::new(SystemTime::now())),
             daemon: std::sync::OnceLock::new(),
             offered: tokio::sync::watch::Sender::new(None),
+            offer_now: tokio::sync::Notify::new(),
+            lists: tokio::sync::watch::Sender::new(0),
         }
     }
 
@@ -358,6 +366,8 @@ impl Remote {
             }
         }
         self.peers();
+        self.lists
+            .send_modify(|taken| *taken = taken.wrapping_add(1));
         // A machine removed from the list: its link is cut now, not when it next says something.
         for (key, seen) in self.seen.lock().unwrap().iter() {
             if !trusted.contains(key) {
@@ -641,6 +651,7 @@ impl Remote {
         );
         tokio::spawn(tell(link.clone(), self.told_addresses()));
         tokio::spawn(offer(link.clone(), self.offered.subscribe()));
+        self.offer_now.notify_one();
         tokio::spawn(serve(self.clone(), link, name, generation));
     }
 
@@ -733,8 +744,10 @@ impl Remote {
     }
 
     /// `remote.machines`: this machine, and the others as it sees them, with their roles and what
-    /// the runners offer.
-    fn machines(&self) -> Value {
+    /// the runners offer, this machine's looked at now; with `project`, the runners that would
+    /// take a session of it on `agent` too (`offered`). It reads files and checks the list: called
+    /// on a blocking thread.
+    fn machines(&self, project: Option<&str>, agent: Option<&str>) -> Value {
         let key = self.endpoint.key();
         let listed = self.listed().ok();
         let role_of = |key: &PublicKey| {
@@ -743,10 +756,11 @@ impl Remote {
                 .and_then(|(members, _)| members.by_machine(key))
                 .map(|member| member.role)
         };
+        let offers = self.offers_here(listed.as_ref());
         let this = json!({
             "name": listed.as_ref().map(|(_, name)| name),
             "role": role_of(&key),
-            "offers": *self.offered.borrow(),
+            "offers": offers,
             "key": key,
             "fingerprint": key.fingerprint(),
             "listening": self.endpoint.listening().map(|local| local.to_string()),
@@ -754,13 +768,26 @@ impl Remote {
                 .map(|(address, how)| json!({"address": address, "how": how}))
                 .collect::<Vec<_>>(),
         });
+        // Read before the lock is taken: no file is read under it.
+        let peers = self.peers().machines;
         let mut seen = self.seen.lock().unwrap();
-        let machines: Vec<Value> = self
-            .peers()
-            .machines
+        let mut offered = Vec::new();
+        if let (Some(project), Some((_, name)), Some(offers)) = (project, &listed, &offers)
+            && offers.refusal(name, project, agent).is_none()
+        {
+            offered.push(name.clone());
+        }
+        let machines: Vec<Value> = peers
             .into_iter()
             .map(|peer| {
                 let seen = seen.entry(*peer.key.as_bytes()).or_insert_with(Seen::new);
+                if let Some(project) = project
+                    && seen.link.is_some()
+                    && let Some(offers) = &seen.offers
+                    && offers.refusal(&peer.name, project, agent).is_none()
+                {
+                    offered.push(peer.name.clone());
+                }
                 json!({
                     "name": peer.name,
                     "key": peer.key,
@@ -774,55 +801,53 @@ impl Remote {
                 })
             })
             .collect();
+        drop(seen);
         let hub = self
             .control
             .get()
             .map_or(Value::Null, |control| control.seen());
-        json!({"this": this, "machines": machines, "hub": hub})
+        let mut machines = json!({"this": this, "machines": machines, "hub": hub});
+        // Starting a session from a client: the runners that would take it, this machine first.
+        if project.is_some() {
+            machines["offered"] = json!(offered);
+        }
+        machines
     }
 }
 
 impl Remote {
-    /// The runners that would take a session of `project` on `agent` (any agent signed in, when
-    /// none is named), by their names: this machine first, then those linked, as each last
-    /// offered.
-    fn offered_for(&self, project: &str, agent: Option<&str>) -> Vec<String> {
-        let mut offered = Vec::new();
-        if let Ok((_, name)) = self.listed()
-            && let Some(offers) = &*self.offered.borrow()
-            && offers.refusal(&name, project, agent).is_none()
-        {
-            offered.push(name);
-        }
-        let seen = self.seen.lock().unwrap();
-        for peer in self.peers().machines {
-            if let Some(seen) = seen.get(peer.key.as_bytes())
-                && seen.link.is_some()
-                && let Some(offers) = &seen.offers
-                && offers.refusal(&peer.name, project, agent).is_none()
-            {
-                offered.push(peer.name);
-            }
-        }
-        offered
+    /// What this machine offers now, as `listed` says its member: none unless it is a runner.
+    /// It reads the projects' files and the store: called on a blocking thread.
+    fn offers_here(
+        &self,
+        listed: Option<&(flottille_link::Members, String)>,
+    ) -> Option<Capabilities> {
+        let (members, name) = listed?;
+        let runner = members
+            .members()
+            .iter()
+            .any(|member| member.name == *name && member.role == Role::Runner);
+        let daemon = self.daemon.get().and_then(std::sync::Weak::upgrade)?;
+        runner.then(|| offered(&daemon))
     }
 
-    /// What this machine offers now, kept for the links to send when it changed: none unless
-    /// its member is a runner. Read away from the tasks that take links: the list is checked,
-    /// the projects' files read.
+    /// Whether a machine is linked to this one now.
+    fn linked_to_any(&self) -> bool {
+        self.seen
+            .lock()
+            .unwrap()
+            .values()
+            .any(|seen| seen.link.is_some())
+    }
+
+    /// What this machine offers now, kept for the links to send when it changed. Looked at away
+    /// from the tasks that take links: the list is checked, the projects' files read.
     async fn offer_if_changed(self: &Arc<Self>) {
         let remote = self.clone();
-        let offers = tokio::task::spawn_blocking(move || {
-            let (members, name) = remote.listed().ok()?;
-            let runner = members
-                .members()
-                .iter()
-                .any(|member| member.name == name && member.role == Role::Runner);
-            let daemon = remote.daemon.get().and_then(std::sync::Weak::upgrade)?;
-            runner.then(|| offered(&daemon))
-        })
-        .await
-        .unwrap_or_default();
+        let offers =
+            tokio::task::spawn_blocking(move || remote.offers_here(remote.listed().ok().as_ref()))
+                .await
+                .unwrap_or_default();
         self.offered.send_if_modified(|current| {
             let changed = *current != offers;
             *current = offers;
@@ -830,9 +855,15 @@ impl Remote {
         });
     }
 
-    /// What the machine of `key` offers, said over its link: kept when its member is a runner
-    /// and the offer within its bounds; refused otherwise, with why.
-    fn took_offers(&self, key: &PublicKey, offers: Capabilities) -> Result<Value, String> {
+    /// What the machine of `key` offers, said over its link of `generation`: kept when its member
+    /// is a runner and the offer within its bounds; refused otherwise, with why. It checks the
+    /// list: called on a blocking thread.
+    fn took_offers(
+        &self,
+        key: &PublicKey,
+        generation: u64,
+        offers: Capabilities,
+    ) -> Result<Value, String> {
         let (members, _) = self.listed()?;
         let member = members
             .by_machine(key)
@@ -845,10 +876,96 @@ impl Remote {
             ));
         }
         offers.check()?;
-        if let Some(seen) = self.seen.lock().unwrap().get_mut(key.as_bytes()) {
+        self.keep_offers(key, generation, offers);
+        Ok(json!({}))
+    }
+
+    /// Keeps what the machine of `key` offers, when its link of `generation` is the one kept: a
+    /// link replaced since says nothing of the machine any more.
+    fn keep_offers(&self, key: &PublicKey, generation: u64, offers: Capabilities) {
+        if let Some(seen) = self.seen.lock().unwrap().get_mut(key.as_bytes())
+            && seen
+                .link
+                .as_ref()
+                .is_some_and(|(at, _, _)| *at == generation)
+        {
             seen.offers = Some(offers);
         }
-        Ok(json!({}))
+    }
+}
+
+/// How often, while a link is up, what this machine offers is looked at again for what no event
+/// says: a login file that appeared or went.
+const OFFER_POLL: Duration = Duration::from_secs(30);
+
+/// [`OFFER_POLL`], or, in a test build, `FLOTTILLE_TEST_OFFER_MS`: a test sees a login file
+/// within a moment.
+fn offer_poll() -> Duration {
+    if cfg!(debug_assertions)
+        && let Some(ms) = std::env::var("FLOTTILLE_TEST_OFFER_MS")
+            .ok()
+            .and_then(|ms| ms.parse().ok())
+    {
+        return Duration::from_millis(ms);
+    }
+    OFFER_POLL
+}
+
+/// Whether what this machine offers may have changed with the event `name`: a project added,
+/// edited or removed, a provider changed, a session that started or ended.
+fn moves_offer(name: &str) -> bool {
+    name.starts_with("project.")
+        || name.starts_with("provider.")
+        || matches!(
+            name,
+            "agent.created"
+                | "agent.ended"
+                | "agent.failed"
+                | "agent.died"
+                | "agent.resumed"
+                | "agent.replaced"
+        )
+}
+
+/// Keeps what this machine offers (`docs/remote.md`, "Roles"), looked at when a link is made,
+/// after an event that may change it (`moves_offer`) and every `OFFER_POLL`; never while no
+/// machine is linked to this one.
+async fn keep_offering(remote: Arc<Remote>, mut stopping: tokio::sync::watch::Receiver<bool>) {
+    let mut live = remote
+        .daemon
+        .get()
+        .and_then(std::sync::Weak::upgrade)
+        .and_then(|daemon| daemon.live());
+    let mut poll = tokio::time::interval(offer_poll());
+    poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            _ = remote.offer_now.notified() => {}
+            _ = poll.tick() => {}
+            moved = moved(&mut live) => if !moved { continue },
+            _ = stopping.wait_for(|stopping| *stopping) => return,
+        }
+        if remote.linked_to_any() {
+            remote.offer_if_changed().await;
+        }
+    }
+}
+
+/// The next event of the daemon's: whether it may change what this machine offers. Events
+/// missed say yes; once the daemon stops, no event comes.
+async fn moved(
+    live: &mut Option<tokio::sync::broadcast::Receiver<flottille_protocol::Event>>,
+) -> bool {
+    let Some(events) = live else {
+        return std::future::pending().await;
+    };
+    match events.recv().await {
+        Ok(event) => moves_offer(&event.name),
+        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => true,
+        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+            *live = None;
+            false
+        }
     }
 }
 
@@ -890,19 +1007,40 @@ fn offered(daemon: &Daemon) -> Capabilities {
     Capabilities { projects, agents }
 }
 
+/// The first wait before an offer the other machine did not take is sent again; it doubles up to
+/// `OFFER_RETRY_MOST`.
+const OFFER_RETRY: Duration = Duration::from_secs(1);
+const OFFER_RETRY_MOST: Duration = Duration::from_secs(60);
+
 /// Sends a machine what this one offers when the link is made, then each time it changes, in
-/// order, until the link ends.
+/// order, until the link ends. One it did not take is sent again, waiting longer each time.
 async fn offer(link: Link, mut offered: tokio::sync::watch::Receiver<Option<Capabilities>>) {
+    let mut wait = OFFER_RETRY;
     loop {
         let offers = offered.borrow_and_update().clone();
+        let mut again = None;
         if let Some(offers) = offers {
-            let _ = link
+            let sent = link
                 .send(&Message::Machine(MachineMessage::Capabilities(offers)))
                 .await;
+            match sent {
+                Ok(_) => wait = OFFER_RETRY,
+                Err(_) => {
+                    again = Some(wait);
+                    wait = (wait * 2).min(OFFER_RETRY_MOST);
+                }
+            }
         }
+        let retry = async {
+            match again {
+                Some(wait) => tokio::time::sleep(wait).await,
+                None => std::future::pending().await,
+            }
+        };
         tokio::select! {
             changed = offered.changed() => if changed.is_err() { return },
             _ = link.closed() => return,
+            _ = retry => {}
         }
     }
 }
@@ -997,7 +1135,13 @@ async fn serve(remote: Arc<Remote>, link: Link, name: String, generation: u64) {
                 received.answer(Ok(json!({})));
             }
             Message::Machine(MachineMessage::Capabilities(offers)) => {
-                let answer = remote.took_offers(&link.peer(), offers.clone());
+                // The list is checked, its signatures too: away from the tasks that take links.
+                let (taking, key, offers) = (remote.clone(), link.peer(), offers.clone());
+                let answer = tokio::task::spawn_blocking(move || {
+                    taking.took_offers(&key, generation, offers)
+                })
+                .await
+                .unwrap_or_else(|_| Err("the offer could not be taken".to_owned()));
                 if let Err(why) = &answer {
                     eprintln!("flottille daemon: what {name} offers was not taken: {why}");
                 }
@@ -1053,6 +1197,7 @@ async fn serve_clients(remote: Arc<Remote>, link: Link, from: String) {
         let (remote, from) = (remote.clone(), from.clone());
         tokio::spawn(async move {
             let mut answer = received.stream();
+            let mut lists = remote.lists.subscribe();
             let gone = answer.gone();
             tokio::pin!(gone);
             match remote.serve(&request, &from).await {
@@ -1063,6 +1208,13 @@ async fn serve_clients(remote: Arc<Remote>, link: Link, from: String) {
                     let line = tokio::select! {
                         line = serving.lines.next_line() => line,
                         _ = &mut gone => break,
+                        // A device removed from the list is served no more of its watch.
+                        changed = lists.changed(), if !serving.once => {
+                            if changed.is_err() || !remote.still_member(&serving.device).await {
+                                break;
+                            }
+                            continue;
+                        }
                     };
                     let Ok(Some(line)) = line else { break };
                     if !answer.send(line.as_bytes()).await || serving.once {
@@ -1085,6 +1237,8 @@ struct Serving {
     /// The device a watch is served for: the log says when it ends, which is how a watch that
     /// outlived its client is seen.
     watch_of: Option<String>,
+    /// The key of the device that signed it.
+    device: PublicKey,
 }
 
 impl Drop for Serving {
@@ -1177,7 +1331,21 @@ impl Remote {
             _write: write,
             once,
             watch_of: (!once).then(|| accepted.device.name.clone()),
+            device: accepted.device.key,
         })
+    }
+
+    /// Whether the device of `key` is a member of the list this machine checked: a list that
+    /// cannot be checked says no.
+    async fn still_member(self: &Arc<Self>, key: &PublicKey) -> bool {
+        let (remote, key) = (self.clone(), *key);
+        tokio::task::spawn_blocking(move || {
+            remote
+                .listed()
+                .is_ok_and(|(members, _)| members.members().iter().any(|member| member.key == key))
+        })
+        .await
+        .unwrap_or(false)
     }
 
     /// The client link to `peer`, dialled when there is none.
@@ -1404,7 +1572,6 @@ async fn dial(remote: Arc<Remote>, mut stopping: tokio::sync::watch::Receiver<bo
             continue;
         }
         remote.tell_if_changed();
-        remote.offer_if_changed().await;
         for line in remote.refused_lines(None, Instant::now()) {
             eprintln!("flottille daemon: {line}");
         }
@@ -1534,12 +1701,18 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Result<Va
     let params = if params.is_null() { json!({}) } else { params };
     match method {
         "remote.machines" => {
-            let mut machines = remote.machines();
-            // Starting a session from a client: the runners that would take it.
-            if let Some(project) = params["project"].as_str() {
-                machines["offered"] = json!(remote.offered_for(project, params["agent"].as_str()));
-            }
-            Ok(machines)
+            let project = params["project"].as_str().map(str::to_owned);
+            let agent = params["agent"].as_str().map(str::to_owned);
+            tokio::task::spawn_blocking(move || {
+                remote.machines(project.as_deref(), agent.as_deref())
+            })
+            .await
+            .map_err(|_| {
+                Failure::new(
+                    flottille_protocol::code::UNAVAILABLE,
+                    "the machines could not be read",
+                )
+            })
         }
         "remote.setup" => {
             #[derive(Deserialize)]
@@ -1639,7 +1812,14 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Result<Va
                 )
             })?;
             remote.tell_if_changed();
-            Ok(remote.machines()["this"].clone())
+            tokio::task::spawn_blocking(move || remote.machines(None, None)["this"].clone())
+                .await
+                .map_err(|_| {
+                    Failure::new(
+                        flottille_protocol::code::UNAVAILABLE,
+                        "the machines could not be read",
+                    )
+                })
         }
         _ => Err(Failure::new(
             flottille_protocol::code::UNKNOWN_METHOD,
