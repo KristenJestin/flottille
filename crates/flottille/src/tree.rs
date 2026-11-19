@@ -2086,16 +2086,64 @@ pub fn unfollowed(daemon: &Arc<Daemon>, following: &Subscription) {
 /// user kept was detached before and is no one's to end. A pilot that failed ends nothing: it can
 /// be resumed, and its sessions go on led by it.
 fn end_led(daemon: &Arc<Daemon>, pilot: &Agent) {
-    let Ok(agents) = daemon.read(|store| store.agents()) else {
-        return;
-    };
-    for session in agents.into_iter().filter(|agent| {
-        agent.led
-            && agent.launched_by.as_deref() == Some(pilot.id.as_str())
-            && !agent.state.is_final()
-    }) {
+    for session in led_by_pilot(daemon, &pilot.id) {
         stop_tree(daemon, &session.id, "its pilot ended");
     }
+}
+
+/// The sessions that end with `pilot`'s end, its led sessions and theirs in turn, the oldest
+/// first: what the user is told before they confirm.
+fn led_by_pilot(daemon: &Daemon, pilot: &str) -> Vec<Agent> {
+    let agents = daemon.read(|store| store.agents()).unwrap_or_default();
+    let mut found: Vec<Agent> = Vec::new();
+    let mut pilots = vec![pilot.to_owned()];
+    while let Some(pilot) = pilots.pop() {
+        let sessions: Vec<&Agent> = agents
+            .iter()
+            .filter(|agent| {
+                agent.led
+                    && agent.launched_by.as_deref() == Some(pilot.as_str())
+                    && !agent.state.is_final()
+            })
+            .collect();
+        for session in sessions {
+            pilots.push(session.id.clone());
+            found.push(session.clone());
+        }
+    }
+    found
+}
+
+/// `agent.ending`: the led sessions the end of `id` would end, by title and project, each with
+/// what its workspace holds that is not saved (`clean`, `uncommitted`, `unpushed` or `unknown`,
+/// as `project.removal` says it). Nothing is changed.
+pub async fn ending(daemon: &Arc<Daemon>, id: &str) -> Result<Value, Failure> {
+    let mut sessions = Vec::new();
+    for session in led_by_pilot(daemon, id) {
+        let workspace = match &session.workspace {
+            Some(name) => daemon
+                .read(|store| store.workspace(&session.project, name))
+                .ok()
+                .flatten(),
+            None => None,
+        };
+        let (state, losses) = match workspace {
+            Some(workspace) => match workspaces::loss_state(daemon, &workspace).await {
+                Ok(found) => found,
+                Err(failure) => ("unknown", vec![failure.message]),
+            },
+            None => ("clean", Vec::new()),
+        };
+        sessions.push(json!({
+            "id": session.id,
+            "title": session.title,
+            "project": session.project,
+            "workspace": session.workspace,
+            "state": state,
+            "losses": losses,
+        }));
+    }
+    Ok(json!({"agent": id, "sessions": sessions}))
 }
 
 // Requests.
