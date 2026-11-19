@@ -5145,6 +5145,27 @@ mod tests {
             Fixture::new(Some("w"))
         }
 
+        /// The place of a review of pull request 7: a copy in Flottille's data folder, beside
+        /// another's (`pr8-x`) and the vault's folder, with a link in it to that folder.
+        fn copy() -> Fixture {
+            let mut fixture = Fixture::new(None);
+            let data = fixture.own[0].clone();
+            let copy = data.join("reviews/pr7-x");
+            for folder in [
+                copy.join("sub"),
+                data.join("reviews/pr8-x"),
+                data.join("vault"),
+            ] {
+                std::fs::create_dir_all(folder).unwrap();
+            }
+            std::os::unix::fs::symlink(&data, copy.join("link")).unwrap();
+            let copy = std::fs::canonicalize(copy).unwrap();
+            fixture.grant.place.root = copy.clone();
+            fixture.grant.place.repositories = vec![(".".into(), copy.clone())];
+            fixture.root = copy;
+            fixture
+        }
+
         fn main() -> Fixture {
             Fixture::new(None)
         }
@@ -5271,6 +5292,50 @@ mod tests {
 
     fn base_class(verdict: &Verdict) -> bool {
         matches!(verdict, Verdict::Ask(ask) if ask.class == Class::Base && !ask.reasons.is_empty())
+    }
+
+    #[test]
+    fn a_line_in_a_pull_request_s_copy_never_reaches_another_copy() {
+        let fixture = Fixture::copy();
+        let verdict = fixture.run("rm ../pr8-x/f");
+        assert!(denied(&verdict), "{verdict:?}");
+    }
+
+    #[test]
+    fn a_line_in_a_pull_request_s_copy_never_reaches_flottille_s_folder_through_a_link() {
+        let fixture = Fixture::copy();
+        let verdict = fixture.run("rm link/vault/f");
+        assert!(denied(&verdict), "{verdict:?}");
+    }
+
+    #[test]
+    fn a_line_in_a_pull_request_s_copy_never_climbs_out_of_it_by_dots() {
+        let fixture = Fixture::copy();
+        let verdict = fixture.run("rm sub/../../../vault");
+        assert!(denied(&verdict), "{verdict:?}");
+    }
+
+    #[test]
+    fn a_line_in_a_pull_request_s_copy_never_removes_the_copy_itself() {
+        let fixture = Fixture::copy();
+        let verdict = fixture.run("rm .");
+        assert!(denied(&verdict), "{verdict:?}");
+    }
+
+    #[test]
+    fn a_line_that_runs_in_a_pull_request_s_copy_is_held_as_base() {
+        let fixture = Fixture::copy();
+        let verdict = fixture.run("make");
+        assert!(base_class(&verdict), "{verdict:?}");
+        assert!(reasons(&verdict).contains("pull request #7"), "{verdict:?}");
+        let verdict = fixture.run("rm sub/f");
+        assert!(base_class(&verdict), "{verdict:?}");
+    }
+
+    #[test]
+    fn a_read_in_a_pull_request_s_copy_passes() {
+        let fixture = Fixture::copy();
+        assert_eq!(fixture.run("git diff"), Verdict::Allow);
     }
 
     #[test]
