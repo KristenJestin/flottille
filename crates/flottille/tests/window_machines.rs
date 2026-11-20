@@ -21,7 +21,6 @@ use flottille_window::device::Device;
 use flottille_window::link::Connect;
 use flottille_window::machines::{Machine as Seen, Reached, how_it_failed};
 use flottille_window::machines_page::Removal;
-use flottille_window::tree::{SWITCHER, SWITCHER_THIS};
 use gpui_design_system::motion::PANEL;
 use gpui_design_system::omarchy::Environment;
 use gpui_kit::test::TestWindowExt;
@@ -352,11 +351,6 @@ fn label(cx: &mut VisualTestContext, id: &str) -> Option<String> {
     })
 }
 
-/// The line under an option of the switcher: the machine's state.
-fn state_of(cx: &mut VisualTestContext, name: &str) -> String {
-    label(cx, &format!("{SWITCHER}-{name}-line")).unwrap_or_default()
-}
-
 fn height(cx: &mut VisualTestContext, id: &str) -> f32 {
     cx.update(|window, _| {
         window
@@ -396,40 +390,41 @@ fn machines_tab(shell: &Entity<Shell>, cx: &mut VisualTestContext) {
     click(shell, cx, "settings-tabs-general");
 }
 
-fn option(name: &str) -> String {
-    format!("{SWITCHER}-{name}")
+/// Whether the window read the machine `name` from this machine's daemon.
+fn knows(shell: &Entity<Shell>, cx: &mut VisualTestContext, name: &str) -> bool {
+    shell.read_with(cx, |s, cx| {
+        s.machines()
+            .read(cx)
+            .machines()
+            .is_some_and(|read| read.machine(name).is_some())
+    })
 }
 
 #[gpui_kit::test]
-fn the_switcher_lists_this_machine_first_then_the_runners_with_their_state(
-    cx: &mut TestAppContext,
-) {
+fn the_machines_and_their_state_are_in_settings_not_in_the_sidebar(cx: &mut TestAppContext) {
     let (_hub, pc, server) = pc_and_server(User::new());
     let (shell, cx) = window(&pc, cx);
-    until(&shell, cx, "the switcher shows", |cx| visible(cx, SWITCHER));
+    until(&shell, cx, "the server is read", |cx| {
+        knows(&shell, cx, "server")
+    });
     settle(&shell, cx);
-    click(&shell, cx, SWITCHER);
-    assert!(present(cx, &option(SWITCHER_THIS)));
-    assert!(present(cx, &option("server")));
-    assert!(
-        top(cx, &option(SWITCHER_THIS)) < top(cx, &option("server")),
-        "this machine comes first"
-    );
-    assert_eq!(state_of(cx, "server"), "online");
+    // No switcher: the sidebar lists every machine's sessions in one list.
+    assert!(!present(cx, "machine-switcher"));
 
+    machines_tab(&shell, cx);
+    until(&shell, cx, "the server's state", |cx| {
+        label(cx, &member_tag("server")).as_deref() == Some("online")
+    });
     // Its state follows the machine's: stopped, it is offline since a time of day.
     assert!(server.user.run(&["daemon", "stop"]).status.success());
     pc.wait_for("server", "offline");
-    until(
-        &shell,
-        cx,
-        "the switcher says the server is offline",
-        |cx| state_of(cx, "server").starts_with("offline since "),
-    );
+    until(&shell, cx, "Settings say the server is offline", |cx| {
+        label(cx, &member_tag("server")).is_some_and(|tag| tag.starts_with("offline since "))
+    });
 }
 
 #[gpui_kit::test]
-fn choosing_a_machine_shows_its_sessions(cx: &mut TestAppContext) {
+fn bringing_a_machine_in_front_shows_its_sessions(cx: &mut TestAppContext) {
     let server_user = User::with_fake_agent();
     server_user.fake_script(json!({"turns": [{"when": "", "do": [{"say": "ready"}]}]}));
     let (_hub, pc, server) = pc_and_server(server_user);
@@ -454,11 +449,13 @@ fn choosing_a_machine_shows_its_sessions(cx: &mut TestAppContext) {
     let id = started["agent"]["id"].as_str().unwrap().to_owned();
 
     let (shell, cx) = window(&pc, cx);
-    until(&shell, cx, "the switcher shows", |cx| visible(cx, SWITCHER));
+    until(&shell, cx, "the server is read", |cx| {
+        knows(&shell, cx, "server")
+    });
     settle(&shell, cx);
-    assert!(shell.read_with(cx, |s, _| s.snapshot().projects.is_empty()));
-    click(&shell, cx, SWITCHER);
-    click(&shell, cx, &option("server"));
+    shell.update(cx, |shell, cx| {
+        shell.choose_machine(Some("server".to_owned()), cx)
+    });
     until(&shell, cx, "the server's session is in the tree", |cx| {
         present(cx, &format!("session-{id}"))
     });
@@ -469,10 +466,9 @@ fn choosing_a_machine_shows_its_sessions(cx: &mut TestAppContext) {
     // Served for pc's device, signed.
     assert!(server.log().contains("asked by pc"), "{}", server.log());
 
-    // This machine again: its own (none) are shown.
-    click(&shell, cx, SWITCHER);
-    click(&shell, cx, &option(SWITCHER_THIS));
-    until(&shell, cx, "this machine's tree is back", |cx| {
+    // This machine again: the server's session is its light row of the one list.
+    shell.update(cx, |shell, cx| shell.choose_machine(None, cx));
+    until(&shell, cx, "this machine is in front again", |cx| {
         !present(cx, &format!("session-{id}"))
     });
     assert_eq!(shell.read_with(cx, |s, _| s.machine_shown()), None);
@@ -716,15 +712,25 @@ fn a_machine_that_needs_an_update_says_so_not_offline(cx: &mut TestAppContext) {
     pc.wait_for("server", "needs an update");
 
     let (shell, cx) = window(&pc, cx);
-    until(&shell, cx, "the switcher shows", |cx| visible(cx, SWITCHER));
+    until(&shell, cx, "the server is read", |cx| {
+        knows(&shell, cx, "server")
+    });
     settle(&shell, cx);
-    click(&shell, cx, SWITCHER);
-    let said = state_of(cx, "server");
+    let said = shell.read_with(cx, |s, cx| {
+        s.machines()
+            .read(cx)
+            .machines()
+            .and_then(|read| read.machine("server").map(|m| m.state_words()))
+            .unwrap_or_default()
+    });
     assert!(said.contains("needs an update"), "{said}");
     assert!(!said.contains("offline"), "{said}");
 
-    // Chosen, it is not shown: a failure toast says why.
-    click(&shell, cx, &option("server"));
+    // Brought in front, it is not: a failure toast says why.
+    shell.update(cx, |shell, cx| {
+        shell.choose_machine(Some("server".to_owned()), cx)
+    });
+    settle(&shell, cx);
     assert_eq!(shell.read_with(cx, |s, _| s.machine_shown()), None);
     let failed = shell.read_with(cx, |s, cx| {
         s.toasts()
@@ -1140,7 +1146,9 @@ fn the_address_change_of_a_row_fades(cx: &mut TestAppContext) {
 fn a_machine_that_goes_down_before_its_first_read_is_given_up(cx: &mut TestAppContext) {
     let (_hub, pc, server) = pc_and_server(User::new());
     let (shell, cx) = window(&pc, cx);
-    until(&shell, cx, "the switcher shows", |cx| visible(cx, SWITCHER));
+    until(&shell, cx, "the server is read", |cx| {
+        knows(&shell, cx, "server")
+    });
     settle(&shell, cx);
 
     // This machine's daemon knows the server is gone; the window, which has not polled, still
@@ -1222,7 +1230,9 @@ fn snapshots(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> u64 {
 fn a_read_of_this_machine_queued_before_the_switch_does_not_end_the_wait(cx: &mut TestAppContext) {
     let (_hub, pc, server) = pc_and_server(User::new());
     let (shell, cx) = window(&pc, cx);
-    until(&shell, cx, "the switcher shows", |cx| visible(cx, SWITCHER));
+    until(&shell, cx, "the server is read", |cx| {
+        knows(&shell, cx, "server")
+    });
     settle(&shell, cx);
 
     assert!(server.user.run(&["daemon", "stop"]).status.success());
@@ -1257,7 +1267,9 @@ fn a_read_of_the_machine_given_up_is_not_shown(cx: &mut TestAppContext) {
     let (_hub, pc, server) = pc_and_server(User::new());
     project(&server.user, "harbor");
     let (shell, cx) = window(&pc, cx);
-    until(&shell, cx, "the switcher shows", |cx| visible(cx, SWITCHER));
+    until(&shell, cx, "the server is read", |cx| {
+        knows(&shell, cx, "server")
+    });
     settle(&shell, cx);
 
     // The server's first read is sent, and the limit passes before the window takes it.

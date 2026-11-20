@@ -22,7 +22,7 @@ use flottille_window::device::Device;
 use flottille_window::link::{Connect, Sign};
 use flottille_window::session::SessionPage;
 use flottille_window::shell::Selection;
-use flottille_window::tree::{SWITCHER, session_id};
+use flottille_window::tree::session_id;
 use gpui_design_system::omarchy::Environment;
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{Entity, TestAppContext, VisualTestContext, px, size};
@@ -281,10 +281,19 @@ fn toasts(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Vec<String> {
 
 /// The window shows the server, and its project `app`'s page.
 fn on_the_server(shell: &Entity<Shell>, cx: &mut VisualTestContext) {
-    until(shell, cx, "the switcher shows", |cx| present(cx, SWITCHER));
+    until(shell, cx, "the server is read", |cx| {
+        shell.read_with(cx, |s, cx| {
+            s.machines()
+                .read(cx)
+                .machines()
+                .and_then(|read| read.machine("server"))
+                .is_some_and(|server| server.online())
+        })
+    });
     settle(shell, cx);
-    click(shell, cx, SWITCHER);
-    click(shell, cx, &format!("{SWITCHER}-server"));
+    shell.update(cx, |shell, cx| {
+        shell.choose_machine(Some("server".to_owned()), cx)
+    });
     until(shell, cx, "the server's project is in the tree", |cx| {
         shell.read_with(cx, |s, _| {
             s.machine_shown().as_deref() == Some("server")

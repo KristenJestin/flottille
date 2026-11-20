@@ -323,6 +323,10 @@ fn a_session_of_a_machine_that_is_off_is_greyed_and_cannot_be_opened(cx: &mut Te
     let (shell, cx) = with_row(&pc, &row, cx);
     let said = label(cx, session_machine_id(&row)).unwrap_or_default();
     assert!(said.starts_with("server offline since "), "{said}");
+    let greyed = shell.read_with(cx, |s, cx| {
+        s.session(&row).is_some_and(|row| row.read(cx).offline())
+    });
+    assert!(greyed, "its row is greyed");
 
     cx.update(|window, cx| window.click(session_id(&row), cx));
     settle(&shell, cx);
