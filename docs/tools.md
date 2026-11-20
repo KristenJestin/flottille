@@ -2295,6 +2295,11 @@ agent never drives the user's desktop through a program (`run` has no graphical 
   history rebuild or a page left and come back; a text of the agent's own, a report, a message
   or any other call ends the row, and the next link starts a new card. A link added to a card
   unfolds into it as a line.
+- **On another machine** (the window shows it, `docs/remote.md`, "Tunnels"): a `localhost` link
+  opens through a tunnel to the run that serves its port, then the system's handler is given the
+  local address; a link of the web opens as it is; a file is the agent's machine's, so its line
+  says `server: <path>` with no **Open** and no thumbnail, and the toast says `The agent shares a
+  file of server: <path>` with no button.
 - **One toast, only when it is needed**: a row of links gives one toast, `The agent shares a
   link: <title or host>` with an **Open** button when it holds one, `The agent shares 3 links`
   with **Show** (it goes to the conversation) when it holds more, and only while the

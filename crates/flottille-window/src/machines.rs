@@ -796,6 +796,11 @@ pub struct Shown(pub Option<String>);
 
 impl gpui_kit::Global for Shown {}
 
+/// The machine the window shows, when it is not this one.
+pub fn shown_machine(cx: &gpui_kit::App) -> Option<String> {
+    cx.try_global::<Shown>().and_then(|shown| shown.0.clone())
+}
+
 /// Where a card of the machine shown says it runs: `on server`, nothing on this machine.
 pub fn shown_on(cx: &gpui_kit::App) -> Option<String> {
     cx.try_global::<Shown>()

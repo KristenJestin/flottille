@@ -1027,6 +1027,7 @@ pub fn made(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent, 
     if new.launched.is_some() {
         rules.own.clear();
     }
+    let about = crate::about::effective(&daemon.paths);
     let mut instructions = roles::instructions(
         new.role,
         &roles::Session {
@@ -1038,6 +1039,7 @@ pub fn made(daemon: &Arc<Daemon>, project: &Project, new: New) -> Result<Agent, 
             at_depth_limit: at_depth_limit && new.launched.is_none(),
             skills: &skills,
             rules: &rules,
+            about: &about,
         },
         &files,
     );

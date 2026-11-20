@@ -1000,9 +1000,13 @@ a command grants nothing, each call the session makes goes through its mode like
 ## 8. Instructions
 
 Built as in `reference/hemera.md` §7: a shared base, the role template, a cache boundary, the
-per-session part, then the project layer, frozen per session. The base has two parts. **What
+per-session part, then the project layer, frozen per session. The base has three parts. **What
 Flottille enforces** is fixed text that states what the gate does, so that an agent does not take
-it for its own discipline. **How to work** is the user's: a default text, the user's own for all
+it for its own discipline. **About the user** is what the user says of themselves (`about.toml` in
+the configuration folder, edited in the window's Settings, "About you"): their name, how to refer
+to them and anything every agent should know, each optional; none set, no block. It comes before
+the rules, in the part every project shares, so that every agent and every child has it, and what
+a lead writes for another agent follows it. **How to work** is the user's: a default text, the user's own for all
 projects, with a project's own added after them (`projects.md`, "Rules"). The global rules sit in
 the base, before the boundary, where every project shares them; a project's own sit just after the
 per-session part,
@@ -1307,7 +1311,13 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   its page in place of the list, under the path `Features / Review` (`docs/extensions.md`, "In
   the window").
   **Vault** holds the entries (`vault.md`).
-  **General** holds **Appearance**, with no sentence: **Colours**, Omarchy or Flottille, and for
+  **General** holds first **About you** ("What every agent is told about you, before the rules, and
+  what an agent writes for another one follows. Each field is optional."): **Name** ("What agents
+  call you."), **How to refer to you** ("One line: he/him, she/her, they.") and **Anything every
+  agent should know** (free text, at most 8,000 characters, its placeholder invented examples), each
+  labelled and marked optional; Reset forgets all three, Save unfolds beside it once a field changed,
+  and a save or a reset is a toast ("About you saved · Agents started from now on read it."); the
+  section enters with the page. Then **Appearance**, with no sentence: **Colours**, Omarchy or Flottille, and for
   Flottille **Shade**, Light or Dark, unfolding under it, each a segmented choice; off an Omarchy
   desktop the Omarchy choice is shown disabled, its tooltip saying why. Then **Workspaces folder**
   ("Where new workspaces are made. A project can choose its own."): **Where**, radios `In

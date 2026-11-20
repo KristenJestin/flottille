@@ -17,8 +17,9 @@ use flottille_window::Shell;
 use flottille_window::project_settings::{ProjectSettingsPage, Reveal};
 use flottille_window::services::ServicesPage;
 use gpui_design_system::omarchy::Environment;
+use gpui_kit::base::input::InputState;
 use gpui_kit::test::TestWindowExt;
-use gpui_kit::{Entity, TestAppContext, VisualTestContext, px, size};
+use gpui_kit::{Entity, Focusable as _, TestAppContext, VisualTestContext, px, size};
 use serde_json::json;
 
 /// A user with the fake server in a folder of the test's own, and no project.
@@ -182,6 +183,41 @@ fn has(id: &str, cx: &mut VisualTestContext) -> bool {
 fn click(id: &str, cx: &mut VisualTestContext) {
     let id = id.to_owned();
     cx.update(|window, cx| window.click(id, cx));
+}
+
+/// Opens the menu of a picker of chips, as a click in its field does: the caret is in it and the
+/// text changes, which opens the menu on every item.
+fn open_picker(search: &Entity<InputState>, cx: &mut VisualTestContext) {
+    let search = search.clone();
+    // The caret leaves the field and comes back: that is what opens the menu.
+    cx.update(|window, cx| window.blur(cx));
+    settle(cx);
+    cx.update(|window, cx| {
+        let focus = search.focus_handle(cx);
+        window.focus(&focus, cx);
+    });
+    settle(cx);
+}
+
+/// A click outside the menu of a picker closes it, as it does for a person, and does no more.
+fn close_picker(prefix: &str, cx: &mut VisualTestContext) {
+    click(&format!("{prefix}-modal-title"), cx);
+    settle(cx);
+}
+
+/// Adds `name` to the needs of the form `prefix` (`service` or `task`) with its picker.
+fn add_need(prefix: &str, search: &Entity<InputState>, name: &str, cx: &mut VisualTestContext) {
+    open_picker(search, cx);
+    click(&format!("{prefix}-needs-item-{name}"), cx);
+    settle(cx);
+    close_picker(prefix, cx);
+}
+
+/// Takes `name` out of the needs of the form `prefix` with the remove button of its chip.
+fn drop_need(prefix: &str, name: &str, cx: &mut VisualTestContext) {
+    close_picker(prefix, cx);
+    click(&format!("{prefix}-needs-chip-{name}-remove"), cx);
+    settle(cx);
 }
 
 fn page_of(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Option<Entity<ServicesPage>> {
@@ -378,8 +414,13 @@ fn a_service_is_added_and_edited_from_the_page(cx: &mut TestAppContext) {
         });
     });
     // The services it may need: the others, never itself.
-    assert!(has("service-need-mongo", cx));
-    click("service-need-mongo", cx);
+    let search = form.read_with(cx, |f, _| f.needs_field().unwrap().clone());
+    open_picker(&search, cx);
+    assert!(has("service-needs-item-mongo", cx));
+    assert!(!has("service-needs-item-auth", cx), "never itself");
+    add_need("service", &search, "mongo", cx);
+    click("service-ready-switch", cx);
+    settle(cx);
     click("service-ready-line", cx);
     settle(cx);
     cx.update(|window, cx| ready.update(cx, |f, cx| f.set_value("listening on", window, cx)));
@@ -409,7 +450,13 @@ fn a_service_is_added_and_edited_from_the_page(cx: &mut TestAppContext) {
         form.read_with(cx, |f, _| f.is_open())
     });
     settle(cx);
-    assert!(!has("service-need-auth", cx));
+    open_picker(&search, cx);
+    assert!(!has("service-needs-item-auth", cx), "never itself");
+    assert!(
+        has("service-needs-chip-mongo", cx),
+        "the need it has is a chip"
+    );
+    close_picker("service", cx);
     click("service-flag-ask_before_running", cx);
     cx.update(|window, cx| {
         line.update(cx, |f, cx| {
@@ -522,9 +569,12 @@ fn a_task_s_needs_are_chosen_from_the_services(cx: &mut TestAppContext) {
         .read_with(cx, |p, _| p.tasks().clone());
 
     click("add-task", cx);
-    until(&shell, cx, "the services are offered", |cx| {
-        has("task-need-mongo", cx) && has("task-need-redis", cx)
+    until(&shell, cx, "the form says the services are read", |cx| {
+        has("task-needs-search", cx) && !has("task-no-needs", cx)
     });
+    let search = section.read_with(cx, |s, _| s.needs_field().unwrap().clone());
+    open_picker(&search, cx);
+    assert!(has("task-needs-item-mongo", cx) && has("task-needs-item-redis", cx));
     let (name, line) = section.read_with(cx, |s, _| {
         (
             s.name_field().unwrap().clone(),
@@ -535,7 +585,7 @@ fn a_task_s_needs_are_chosen_from_the_services(cx: &mut TestAppContext) {
         name.update(cx, |f, cx| f.set_value("api", window, cx));
         line.update(cx, |f, cx| f.set_value("git status", window, cx));
     });
-    click("task-need-redis", cx);
+    add_need("task", &search, "redis", cx);
     click("save-task", cx);
     until(&shell, cx, "the task is listed", |cx| {
         section.read_with(cx, |s, _| {
@@ -558,8 +608,8 @@ fn a_task_s_needs_are_chosen_from_the_services(cx: &mut TestAppContext) {
         section.read_with(cx, |s, _| s.is_open())
     });
     settle(cx);
-    click("task-need-redis", cx);
-    click("task-need-mongo", cx);
+    drop_need("task", "redis", cx);
+    add_need("task", &search, "mongo", cx);
     click("save-task", cx);
     until(&shell, cx, "the file says so", |_| {
         std::fs::read_to_string(user.project_file("app"))
@@ -700,6 +750,378 @@ fn a_task_s_needs_say_why_the_services_cannot_be_read(cx: &mut TestAppContext) {
         label_of("task-no-needs", cx).is_some_and(|said| said.contains("services.toml"))
     });
     settle(cx);
+    assert_eq!(pending_frames(cx), 0);
+}
+
+/// `count` services that listen, `svc-00` on.
+fn services_named(user: &User, count: usize) -> String {
+    (0..count)
+        .map(|n| listening(user, &format!("svc-{n:02}"), 0, &[]))
+        .collect()
+}
+
+/// The height of the service dialog's body: what the dialog holds, whatever it shows of it.
+fn form_height(cx: &mut VisualTestContext) -> gpui_kit::Pixels {
+    cx.update(|window, _| window.find("service-form").bounds().size.height)
+}
+
+#[gpui_kit::test]
+fn a_dialog_with_many_services_stays_short(cx: &mut TestAppContext) {
+    let user = user();
+    services_file(&user, &services_named(&user, 12));
+    let (shell, cx) = window(&user, cx);
+    let page = open_services(&shell, cx);
+
+    click("add-service", cx);
+    settle(cx);
+    let with_twelve = form_height(cx);
+    click("service-modal-cancel", cx);
+    settle(cx);
+
+    // Twenty-eight more on the machine: the dialog is not a line taller for them.
+    for n in 12..40 {
+        user.call(
+            "service.add",
+            json!({"name": format!("svc-{n:02}"),
+                "line": format!("{} --listen 0", server_program(&user).display())}),
+        )
+        .unwrap();
+    }
+    until(&shell, cx, "the forty are listed", |cx| {
+        page.read_with(cx, |p, _| p.services().is_some_and(|list| list.len() == 40))
+    });
+    click("add-service", cx);
+    settle(cx);
+    assert_eq!(form_height(cx), with_twelve, "the body is as tall with 40");
+
+    // All forty are offered, in a menu that scrolls by itself.
+    let form = page.read_with(cx, |p, _| p.form().clone());
+    let search = form.read_with(cx, |f, _| f.needs_field().unwrap().clone());
+    open_picker(&search, cx);
+    assert!(has("service-needs-item-svc-00", cx));
+    let (menu, window_height) = cx.update(|window, _| {
+        (
+            window.find("service-needs-menu").bounds().size.height,
+            window.viewport_size().height,
+        )
+    });
+    assert!(menu < window_height / 2., "the menu stays short: {menu:?}");
+    assert_eq!(pending_frames(cx), 0, "nothing is redrawn at rest");
+}
+
+#[gpui_kit::test]
+fn a_dialog_footer_stays_in_view(cx: &mut TestAppContext) {
+    let user = user();
+    services_file(&user, &services_named(&user, 40));
+    let (shell, cx) = window(&user, cx);
+    open_services(&shell, cx);
+    cx.simulate_resize(size(px(1280.), px(480.)));
+    click("add-service", cx);
+    settle(cx);
+
+    let bounds = |id: &str, cx: &mut VisualTestContext| {
+        let id = id.to_owned();
+        cx.update(|window, _| window.find(id).bounds())
+    };
+    let viewport = cx.update(|window, _| window.viewport_size());
+    let (panel, title, save, cancel) = (
+        bounds("service-modal", cx),
+        bounds("service-modal-title", cx),
+        bounds("save-service", cx),
+        bounds("service-modal-cancel", cx),
+    );
+    assert!(
+        panel.top() >= px(0.) && panel.bottom() <= viewport.height,
+        "the dialog fits the window: {panel:?} in {viewport:?}"
+    );
+    assert!(
+        title.top() >= panel.top()
+            && save.bottom() <= panel.bottom()
+            && cancel.bottom() <= panel.bottom(),
+        "title and buttons are in it: {title:?} {save:?} {cancel:?}"
+    );
+    let last = bounds("service-flag-ask_before_running", cx);
+    assert!(
+        last.top() > panel.bottom(),
+        "the last switch is further down"
+    );
+
+    cx.update(|window, cx| {
+        window.scroll(
+            "service-name-field-label",
+            gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(-4000.))),
+            cx,
+        )
+    });
+    settle(cx);
+    assert_eq!(bounds("service-modal-title", cx), title, "the title stays");
+    assert_eq!(bounds("save-service", cx), save, "Save stays");
+    let last = bounds("service-flag-ask_before_running", cx);
+    assert!(
+        last.bottom() <= save.top() && last.top() >= title.bottom(),
+        "the last switch is now between the title and the buttons: {last:?}"
+    );
+
+    // A refusal is above the buttons, in sight, wherever the body was scrolled to.
+    click("save-service", cx);
+    let form = page_of(&shell, cx)
+        .unwrap()
+        .read_with(cx, |p, _| p.form().clone());
+    until(&shell, cx, "the daemon refuses an empty form", |cx| {
+        form.read_with(cx, |f, _| f.form_error().is_some())
+    });
+    settle(cx);
+    let error = bounds("service-error", cx);
+    assert!(
+        error.top() >= title.bottom() && error.bottom() <= save.top(),
+        "the refusal is between the title and the buttons: {error:?}"
+    );
+    assert_eq!(pending_frames(cx), 0, "nothing is redrawn at rest");
+}
+
+#[gpui_kit::test]
+fn the_service_dialog_says_what_is_required_and_what_is_optional_once(cx: &mut TestAppContext) {
+    let user = user();
+    services_file(&user, &services_named(&user, 3));
+    let (shell, cx) = window(&user, cx);
+    open_services(&shell, cx);
+    click("add-service", cx);
+    settle(cx);
+
+    // The first section is the required one, and says so; a line after it says the rest is not.
+    assert_eq!(
+        label_of("service-section-run-tag", cx).as_deref(),
+        Some("required")
+    );
+    assert_eq!(
+        label_of("service-optional", cx).as_deref(),
+        Some("Optional: everything below can stay empty")
+    );
+    let top = |id: &str, cx: &mut VisualTestContext| {
+        let id = id.to_owned();
+        cx.update(|window, _| window.find(id).bounds())
+    };
+    let line = top("service-optional", cx);
+    for required in ["service-name-field-label", "service-line-field-label"] {
+        assert!(
+            top(required, cx).bottom() <= line.top(),
+            "{required} is above the line"
+        );
+    }
+    for optional in [
+        "service-folder-field-label",
+        "service-needs",
+        "service-section-ready-title",
+        "service-section-address-title",
+        "service-section-agents-title",
+    ] {
+        assert!(
+            top(optional, cx).top() >= line.bottom(),
+            "{optional} is below the line"
+        );
+    }
+    // Each part has a heading, and the others' sections say what they are for.
+    for heading in ["run", "where", "ready", "address", "agents"] {
+        assert!(
+            has(&format!("service-section-{heading}-title"), cx),
+            "{heading}"
+        );
+    }
+    // No label carries the word "optional" any more.
+    for field in ["folder", "name", "line"] {
+        let said = label_of(&format!("service-{field}-field-label"), cx).unwrap();
+        assert!(!said.contains("optional"), "{said}");
+    }
+}
+
+#[gpui_kit::test]
+fn the_ready_and_address_fields_of_a_service_unfold_behind_their_switches(cx: &mut TestAppContext) {
+    let user = user();
+    services_file(&user, &listening(&user, "mongo", 0, &[]));
+    let (shell, cx) = window(&user, cx);
+    open_services(&shell, cx);
+    click("add-service", cx);
+    settle(cx);
+
+    // Nothing said: two switches, and no kind, no field.
+    assert!(has("service-ready-switch", cx) && has("service-url-switch", cx));
+    for hidden in [
+        "service-ready-line",
+        "service-url-address",
+        "service-ready-line-block",
+    ] {
+        assert!(!has(hidden, cx), "{hidden}");
+    }
+    // Turned on, the kinds unfold and the first is chosen, its field under it.
+    click("service-ready-switch", cx);
+    settle(cx);
+    assert!(has("service-ready-line", cx) && has("service-ready-line-block", cx));
+    click("service-ready-url", cx);
+    settle(cx);
+    assert!(has("service-ready-url-block", cx) && !has("service-ready-line-block", cx));
+    click("service-url-switch", cx);
+    settle(cx);
+    assert!(has("service-url-address-block", cx));
+    // Turned off, they fold away: nothing said.
+    click("service-ready-switch", cx);
+    settle(cx);
+    click("service-url-switch", cx);
+    settle(cx);
+    assert!(!has("service-ready-url-block", cx) && !has("service-url-address-block", cx));
+    assert_eq!(pending_frames(cx), 0, "nothing is redrawn at rest");
+}
+
+#[gpui_kit::test]
+fn adding_and_removing_a_need_with_the_picker(cx: &mut TestAppContext) {
+    let user = user();
+    services_file(
+        &user,
+        &format!(
+            "{}{}{}",
+            listening(&user, "mongo", 0, &[]),
+            listening(&user, "redis", 0, &[]),
+            listening(&user, "auth", 0, &[]),
+        ),
+    );
+    let (shell, cx) = window(&user, cx);
+    let page = open_services(&shell, cx);
+    click("add-service", cx);
+    settle(cx);
+    let form = page.read_with(cx, |p, _| p.form().clone());
+
+    // Nothing needed: a line says so, no count.
+    assert!(has("service-needs-none", cx));
+    assert!(!has("service-needs-count", cx));
+
+    // The menu offers each service with its line; one added is a chip, a count, and leaves it.
+    let search = form.read_with(cx, |f, _| f.needs_field().unwrap().clone());
+    open_picker(&search, cx);
+    assert!(has("service-needs-item-mongo", cx) && has("service-needs-item-redis", cx));
+    click("service-needs-item-mongo", cx);
+    settle(cx);
+    assert!(has("service-needs-chip-mongo", cx));
+    assert_eq!(label_of("service-needs-count", cx).as_deref(), Some("1"));
+    assert!(!has("service-needs-none", cx));
+    assert!(
+        !has("service-needs-item-mongo", cx),
+        "chosen, no longer offered"
+    );
+
+    // Typing narrows the menu; chips keep the order they were added in.
+    cx.update(|window, cx| search.update(cx, |f, cx| f.set_value("red", window, cx)));
+    settle(cx);
+    assert!(has("service-needs-item-redis", cx) && !has("service-needs-item-auth", cx));
+    click("service-needs-item-redis", cx);
+    cx.update(|window, cx| search.update(cx, |f, cx| f.set_value("", window, cx)));
+    click("service-needs-item-auth", cx);
+    settle(cx);
+    assert_eq!(
+        form.read_with(cx, |f, _| f.needs().to_vec()),
+        ["mongo", "redis", "auth"]
+    );
+    assert_eq!(label_of("service-needs-count", cx).as_deref(), Some("3"));
+
+    // A chip's button takes it out: it folds away and is offered again.
+    drop_need("service", "redis", cx);
+    assert!(!has("service-needs-chip-redis", cx));
+    assert_eq!(
+        form.read_with(cx, |f, _| f.needs().to_vec()),
+        ["mongo", "auth"]
+    );
+    assert_eq!(label_of("service-needs-count", cx).as_deref(), Some("2"));
+    open_picker(&search, cx);
+    assert!(has("service-needs-item-redis", cx));
+    close_picker("service", cx);
+
+    // Saved as the file says them.
+    let (name, line) = form.read_with(cx, |f, _| {
+        (
+            f.name_field().unwrap().clone(),
+            f.line_field().unwrap().clone(),
+        )
+    });
+    cx.update(|window, cx| {
+        name.update(cx, |f, cx| f.set_value("web", window, cx));
+        line.update(cx, |f, cx| {
+            f.set_value(
+                format!("{} --listen 0", server_program(&user).display()),
+                window,
+                cx,
+            )
+        });
+    });
+    click("save-service", cx);
+    until(&shell, cx, "the file says so", |_| {
+        services_text(&user).contains("[services.web]")
+    });
+    assert!(
+        services_text(&user).contains("needs = [\"mongo\", \"auth\"]"),
+        "{}",
+        services_text(&user)
+    );
+    settle(cx);
+    assert_eq!(pending_frames(cx), 0);
+}
+
+#[gpui_kit::test]
+fn adding_and_removing_a_need_with_the_picker_of_a_task(cx: &mut TestAppContext) {
+    let user = user();
+    services_file(
+        &user,
+        &format!(
+            "{}{}",
+            listening(&user, "mongo", 0, &[]),
+            listening(&user, "redis", 0, &[]),
+        ),
+    );
+    project(&user, &[]);
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the project is known", |cx| {
+        shell.read_with(cx, |s, _| !s.snapshot().projects.is_empty())
+    });
+    shell.update_in(cx, |s, window, cx| {
+        s.open_project_settings_at("app", Reveal::Tasks, window, cx)
+    });
+    until(&shell, cx, "the settings are read", |cx| {
+        shell.read_with(cx, |s, cx| {
+            s.main()
+                .read(cx)
+                .project_settings_page()
+                .is_some_and(|page| page.read(cx).is_loaded())
+        })
+    });
+    settle(cx);
+    let section = shell.read_with(cx, |s, cx| {
+        s.main()
+            .read(cx)
+            .project_settings_page()
+            .unwrap()
+            .read(cx)
+            .tasks()
+            .clone()
+    });
+    click("add-task", cx);
+    until(&shell, cx, "the form says the services are read", |cx| {
+        has("task-needs-search", cx) && !has("task-no-needs", cx)
+    });
+
+    assert!(has("task-needs-none", cx));
+    let search = section.read_with(cx, |s, _| s.needs_field().unwrap().clone());
+    add_need("task", &search, "redis", cx);
+    add_need("task", &search, "mongo", cx);
+    assert!(has("task-needs-chip-redis", cx) && has("task-needs-chip-mongo", cx));
+    assert_eq!(label_of("task-needs-count", cx).as_deref(), Some("2"));
+    assert_eq!(
+        section.read_with(cx, |s, _| s.needs().to_vec()),
+        ["redis", "mongo"],
+        "in the order added"
+    );
+    drop_need("task", "redis", cx);
+    assert!(!has("task-needs-chip-redis", cx));
+    assert_eq!(section.read_with(cx, |s, _| s.needs().to_vec()), ["mongo"]);
+    drop_need("task", "mongo", cx);
+    assert!(has("task-needs-none", cx), "the line is back");
+    assert!(!has("task-needs-count", cx));
     assert_eq!(pending_frames(cx), 0);
 }
 

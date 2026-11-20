@@ -880,7 +880,7 @@ fn reach(url: Option<&str>, inodes: &HashSet<u64>, listeners: &[Listener]) -> Re
     shared.retain(|port| ours.contains(port));
     listening.retain(|port, _| !shared.contains(port));
     Reached {
-        address: url.and_then(address_port),
+        address: url.and_then(flottille_core::address::local_port),
         listening,
         shared,
     }
@@ -934,25 +934,6 @@ impl Reached {
 
 fn list<'a>(ports: impl Iterator<Item = &'a u16>) -> String {
     ports.map(u16::to_string).collect::<Vec<_>>().join(", ")
-}
-
-/// The port of an address a run reports (`http://localhost:3000/`) when it is one of this machine:
-/// `localhost`, a name under it, `127.0.0.1`, `[::1]` or `0.0.0.0`, with a port written.
-fn address_port(url: &str) -> Option<u16> {
-    let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
-    let authority = rest.split(['/', '?', '#']).next()?;
-    let authority = authority
-        .rsplit_once('@')
-        .map_or(authority, |(_, host)| host);
-    let (host, port) = authority.rsplit_once(':')?;
-    let host = host
-        .trim_start_matches('[')
-        .trim_end_matches(']')
-        .to_ascii_lowercase();
-    let here = host == "localhost"
-        || host.ends_with(".localhost")
-        || matches!(host.as_str(), "127.0.0.1" | "::1" | "0.0.0.0");
-    if here { port.parse().ok() } else { None }
 }
 
 /// The inodes of the sockets the processes `pids` hold open.
@@ -1042,21 +1023,6 @@ mod tests {
         assert_eq!(got, taken);
         // On the loopback alone.
         assert!(_same.local_addr().unwrap().ip().is_loopback());
-    }
-
-    #[test]
-    fn a_run_s_address_is_a_port_of_this_machine_or_none() {
-        assert_eq!(address_port("http://localhost:3000/"), Some(3000));
-        assert_eq!(address_port("http://127.0.0.1:8080"), Some(8080));
-        assert_eq!(address_port("https://app.localhost:5173/x?y=1"), Some(5173));
-        assert_eq!(address_port("http://[::1]:9000/"), Some(9000));
-        assert_eq!(address_port("http://0.0.0.0:4000"), Some(4000));
-        // No port written, a host of another machine, a name that only ends like it.
-        assert_eq!(address_port("http://localhost/"), None);
-        assert_eq!(address_port("https://example.org:8443/"), None);
-        assert_eq!(address_port("http://evil-localhost:80/"), None);
-        assert_eq!(address_port("http://user@example.org:8443/"), None);
-        assert_eq!(address_port("not a url"), None);
     }
 
     const TABLE: &str = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n\
