@@ -21,7 +21,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use flottille_core::paths::Paths;
 use flottille_link::{
     Address, Capabilities, Endpoint, Hello, Link, LinkError, MachineKey, MachineMessage, Message,
-    Offered, PeerState, PublicKey, Role, Traffic,
+    Offered, PeerState, PublicKey, Role, Share, Traffic,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -768,6 +768,8 @@ impl Remote {
         };
         let offers = self.offers_here(listed.as_ref());
         let this = json!({
+            // Its member's name, once it is one: what a client signs a request of this machine's
+            // for (`vault.share`).
             "name": listed.as_ref().map(|(_, name)| name),
             "role": role_of(&key),
             "offers": offers,
@@ -1167,6 +1169,13 @@ async fn serve(remote: Arc<Remote>, link: Link, name: String, generation: u64) {
                     git,
                 ));
             }
+            Message::Machine(MachineMessage::Share(share)) => {
+                let (remote, share, peer) = (remote.clone(), share.clone(), link.peer());
+                tokio::spawn(async move {
+                    let answered = remote.shared(&peer, share).await;
+                    received.answer(answered);
+                });
+            }
             // Kept apart by the link's protocol name: a client's request on a machine link is
             // refused before it gets here (`Link::next`).
             Message::Client(_) => received.answer(Err(
@@ -1247,7 +1256,7 @@ async fn serve_clients(remote: Arc<Remote>, link: Link, from: String) {
                 answer.end().await;
                 return;
             }
-            match remote.start(accepted, &from).await {
+            match remote.start(accepted, request.to_string(), &from).await {
                 Err(refused) => {
                     let _ = answer.send(&message_bytes(&refused)).await;
                 }
@@ -1383,7 +1392,7 @@ impl Remote {
         from: &str,
     ) -> Result<Serving, Box<flottille_core::protocol::Message>> {
         let accepted = self.accept(request)?;
-        self.start(accepted, from).await
+        self.start(accepted, request.to_string(), from).await
     }
 
     /// `request` as a link or a client of this machine carried it, checked
@@ -1410,10 +1419,12 @@ impl Remote {
     }
 
     /// A request `accept` took, served on a connection of its own as one of a local client's, the
-    /// member that signed it named in the log and in the events its serving emits.
+    /// member that signed it named in the log and in the events its serving emits; `signed` is the
+    /// request as it was signed, which a method that carries the user's consent further sends on.
     async fn start(
         &self,
         accepted: flottille_link::Accepted,
+        signed: String,
         from: &str,
     ) -> Result<Serving, Box<flottille_core::protocol::Message>> {
         use flottille_core::protocol::Message as Answer;
@@ -1440,7 +1451,10 @@ impl Remote {
         tokio::spawn(crate::daemon::served_for(
             daemon,
             theirs,
-            accepted.device.name.clone(),
+            crate::daemon::Asked {
+                device: accepted.device.name.clone(),
+                signed,
+            },
         ));
         let (read, mut write) = ours.into_split();
         let once = accepted.method != "events.watch";
@@ -1512,6 +1526,105 @@ impl Remote {
             link.close("it failed");
         }
     }
+}
+
+impl Remote {
+    /// A vault entry the user shared, as the machine `peer` sent it: taken only with the user's
+    /// own request, which this machine checks itself as it checks any request of a device (a
+    /// machine alone shares nothing): `vault.share` of that very entry with this machine, signed
+    /// for the machine that sent it, within its time, and never twice.
+    async fn shared(&self, peer: &PublicKey, share: Share) -> Result<Value, String> {
+        let (members, name) = self.listed().map_err(|why| format!("refused: {why}"))?;
+        let sender = members
+            .by_machine(peer)
+            .ok_or_else(|| "refused: this machine is no member's".to_owned())?;
+        let from = sender.name.clone();
+        // As code (`travel`): a viewer's machine sends nothing the user decided, whoever signed.
+        if sender.role == Role::Viewer {
+            return Err(format!(
+                "refused: {from} is a viewer's machine: only a runner's or a controller's \
+                 machine shares a vault entry"
+            ));
+        }
+        let accepted = self
+            .requests
+            .lock()
+            .unwrap()
+            .check(
+                &share.request.to_string(),
+                &from,
+                &members,
+                SystemTime::now(),
+            )
+            .map_err(|error| error.to_string())?;
+        if accepted.method != "vault.share" {
+            return Err(format!(
+                "refused: {} is not the user's share of a vault entry",
+                accepted.method
+            ));
+        }
+        let shown = |value: &Value| {
+            value
+                .as_str()
+                .unwrap_or_default()
+                .chars()
+                .take(64)
+                .collect::<String>()
+                .escape_debug()
+                .to_string()
+        };
+        if accepted.params["machine"].as_str() != Some(name.as_str()) {
+            return Err(format!(
+                "refused: the user shared it with {}, not with {name}",
+                shown(&accepted.params["machine"])
+            ));
+        }
+        if accepted.params["name"] != share.entry["name"] || !share.entry["name"].is_string() {
+            return Err(format!(
+                "refused: the user shared {}, not {}",
+                shown(&accepted.params["name"]),
+                shown(&share.entry["name"])
+            ));
+        }
+        let daemon = self
+            .daemon
+            .get()
+            .and_then(std::sync::Weak::upgrade)
+            .ok_or_else(|| "the daemon is stopping".to_owned())?;
+        crate::vault::receive(&daemon, &share.entry, &share.secret.0, &from).await?;
+        Ok(json!({"name": share.entry["name"]}))
+    }
+}
+
+/// Sends the vault entry the user shared, `share`, to their machine `machine`, a runner, which
+/// checks the user's signature it carries and keeps it: what it answered, or why it is refused.
+pub(crate) async fn share(daemon: &Daemon, machine: &str, share: Share) -> Result<(), String> {
+    let remote = remote_of(daemon).map_err(|failure| failure.message)?;
+    let (members, _) = remote.listed()?;
+    let Some(peer) = remote
+        .peers()
+        .machines
+        .into_iter()
+        .find(|peer| peer.name == machine)
+    else {
+        return Err(format!(
+            "no machine of the user's is named {}",
+            machine.chars().take(64).collect::<String>().escape_debug()
+        ));
+    };
+    if members
+        .by_machine(&peer.key)
+        .is_none_or(|member| member.role != flottille_link::Role::Runner)
+    {
+        return Err(format!(
+            "{machine} runs no agent: a vault entry is shared with a runner"
+        ));
+    }
+    let link = remote.machine_link(&peer)?;
+    link.send(&Message::Machine(MachineMessage::Share(share)))
+        .await
+        .map(|_| ())
+        .map_err(|error| error.to_string())
 }
 
 /// `since`, milliseconds since the Unix epoch, as the time of day it was here (`22:14`).

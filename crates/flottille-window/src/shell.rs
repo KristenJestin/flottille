@@ -364,6 +364,14 @@ impl Shell {
                 cx,
             );
             modals.add(
+                crate::vault::SHARE_MODAL,
+                &vault,
+                |vault, window, cx| vault.share_dialog(window, cx),
+                VaultSection::is_sharing,
+                |_, _| None,
+                cx,
+            );
+            modals.add(
                 crate::extensions::connections::FORM_MODAL,
                 &connections,
                 |section, window, cx| section.form_dialog(window, cx),
@@ -1705,6 +1713,18 @@ impl Shell {
                 }
                 let section = self.settings.read(cx).vault().clone();
                 section.update(cx, |section, cx| section.listed(listed, cx));
+            }
+            Outcome::ShareMachines { listed } => {
+                let section = self.settings.read(cx).vault().clone();
+                section.update(cx, |section, cx| section.share_machines(listed, cx));
+            }
+            Outcome::VaultShared {
+                name,
+                machine,
+                refused,
+            } => {
+                let section = self.settings.read(cx).vault().clone();
+                section.update(cx, |section, cx| section.shared(name, machine, refused, cx));
             }
             Outcome::VaultWritten { refused } => {
                 let section = self.settings.read(cx).vault().clone();

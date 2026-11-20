@@ -472,7 +472,18 @@ mod tests {
 
     /// The code of the daemon's, before its tests: what the daemon runs.
     fn daemon_code(text: &str) -> &str {
-        text.split("#[cfg(test)]\nmod tests").next().unwrap()
+        // The test module may be private or `pub(crate)` (another module's tests borrow from it).
+        let marker = "#[cfg(test)]\n";
+        let mut from = 0;
+        while let Some(at) = text[from..].find(marker) {
+            let start = from + at;
+            let after = &text[start + marker.len()..];
+            if after.starts_with("mod tests") || after.starts_with("pub(crate) mod tests") {
+                return &text[..start];
+            }
+            from = start + marker.len();
+        }
+        text
     }
 
     #[test]

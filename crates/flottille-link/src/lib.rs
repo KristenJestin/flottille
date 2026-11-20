@@ -41,7 +41,7 @@ pub use hello::{Hello, NeedsUpdate, PeerState, choose};
 pub use invitation::{Invitation, InvitationAsk, InvitationError, Token};
 pub use link::{
     Accepting, Answers, Endpoint, FRAME_LIMIT, Git, GitFetch, GitOffer, GitPlace, GitRepository,
-    Link, LinkError, MachineMessage, Message, Received, Streamed, Traffic,
+    Link, LinkError, MachineMessage, Message, Received, Secret, Share, Streamed, Traffic,
 };
 pub use members::{
     Action, Change, ChangeHash, ListError, MANAGING_HEADROOM, MOST_CHANGES, Member, MemberList,
