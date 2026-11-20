@@ -322,7 +322,13 @@ No parameters. The result:
   "protocol": 1,
   "pid": 4242,
   "uptime_s": 192,
-  "agents": {"running": 0, "waiting_for_user": 0, "failed": 0}
+  "agents": {"running": 0, "waiting_for_user": 0, "failed": 0},
+  "sandbox": {
+    "landlock_abi": 6,
+    "private_mounts": true,
+    "ssh_agent": {"lent": true, "why": null},
+    "warnings": []
+  }
 }
 ```
 
@@ -332,6 +338,10 @@ that an older client would misread (`docs/remote.md`, "The version").
 `agents` counts the agents running (starting or in a turn), the root agents waiting for the user
 (with a request the user holds, `approval.list`, or a question not answered yet), and the agents
 that failed (`docs/agents.md`).
+`sandbox` is what confines the daemon's commands (`docs/vault.md`, "The runtime folder"):
+Landlock's ABI (0 without it), whether they start in their private mount namespace, whether the
+SSH agent is lent to a push and to the daemon's fetch (`why` says why not), and a sentence for each
+gap, which `flottille doctor` adds to its warnings.
 
 ### `daemon.stop`
 

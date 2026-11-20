@@ -325,20 +325,43 @@ push the gate let through, and its checks' dry run, are the exception (below):
   browser shown on the screen, and the SSH agent's socket lent to the daemon's own fetch (below).
   The daemon's own socket is not among them. X11's socket folder (`/tmp/.X11-unix`) is emptied
   the same way, unless the process is given X11's display; and `~/.ssh` is read-only there
-  (below). The mounts are made by the process before it runs its program, which runs as the
-  user, not as root of the namespace: it holds no capability to unmount or remount them, and a
-  namespace it makes inside gets them locked. Landlock's rules apply after it, unchanged. Where
-  the kernel refuses (a kernel built without user namespaces, a distribution that forbids them to
-  unprivileged users), the process starts without it, and the daemon's log and
-  `flottille doctor` (its `sandbox` part, with Landlock's ABI) say so.
+  (below). A session bus the daemon's `DBUS_SESSION_BUS_ADDRESS` names by a path outside the
+  runtime folders (`unix:path=/tmp/dbus-…`, as `dbus-launch` makes one), found at the daemon's
+  start, is hidden there under `/dev/null`. The mounts are made by the process before it runs its
+  program, which runs as the user, not as root of the namespace, with `no_new_privs` set first
+  (a program with file capabilities gains none in the namespace): it holds no capability to
+  unmount or remount them, and a namespace it makes inside gets them locked. Landlock's rules
+  apply after it, unchanged. Where the kernel refuses (a kernel built without user namespaces, a
+  distribution that forbids them to unprivileged users), the process starts without it, and the
+  daemon's log and `flottille doctor` (its `sandbox` part, with Landlock's ABI, as the daemon
+  has it) say so. The daemon probes it once, by a child that makes one: a probe that concludes
+  nothing (no process could be made, the user's namespaces are all taken) is not kept, and the
+  process still starts in its namespace, or fails to start.
 
 **`~/.ssh` is read-only** in that namespace: the user's `$HOME/.ssh` and the account's own (the
-password database's home) when they differ, where each leads when it is a link, every link inside
-it that leads out of it, and every file its `config` includes (`Include`, through the files they
-include in turn) that lies outside it. Creating, changing, renaming, removing a file there and
-`chmod` are refused; reading stays allowed (ssh reads its config and `known_hosts`). What
-`~/.ssh/config` runs (`ProxyCommand`, `Match exec`) runs with the user's credentials when a push
-the gate let through signs in, so no confined command may write it.
+password database's home) when they differ, where each leads when it is a link, where every link
+inside it leads, the folder of every pattern its `config` includes (`Include`, through the files
+they include in turn: the last folder above the pattern's first part with a `*`, `?` or `[`, so
+that no file is added to a glob's folder and none is made where an included file is missing), and
+where each included file leads. Creating, changing, renaming, removing a file there and `chmod`
+are refused; reading stays allowed (ssh reads its config and `known_hosts`). A read-only mount
+keeps the file, not the way to it, so the way is kept too: every folder between the home and one
+of them that the user could rename or remove is bound onto itself (a mount point can be neither),
+and so is every link on the way (`~/.ssh` itself when it is a link): it still leads where it did,
+and cannot be removed, renamed or replaced. What `~/.ssh/config` runs (`ProxyCommand`,
+`Match exec`) runs with the user's credentials when a push the gate let through signs in, so no
+confined command may write it, nor what it reads.
+
+Where that cannot be kept, **the SSH agent is lent to nothing**: no push the gate let through gets
+`SSH_AUTH_SOCK`, and the daemon's own fetch of an SSH remote is not lent it. That is when a home's
+`~/.ssh` does not exist (a run could make it, and a `config` in it), when an `Include`'s folder
+does not exist or is the home itself, or holds it (`Include ~/forge.conf`: the home cannot be
+read-only), and when a file `ssh` reads is not a regular file of at most 1 MiB (a FIFO would hang
+`ssh`, or feed it what a run writes into it). `flottille doctor` says why (`sandbox.ssh_agent`
+in `--json`), and makes it a warning when the daemon found an agent at its start. The
+configuration is read by the daemon without waiting (a FIFO is opened and refused at once), each
+file at most 1 MiB, and read again only when a path it looked at changed (an `lstat` of each per
+confined command).
 
 **The SSH agent stays out of every run.** What the daemon runs gets no `SSH_AUTH_SOCK`. The socket
 the daemon's own environment named when it started (resolved then, links followed) is also kept out
@@ -436,9 +459,12 @@ The gaps, where the platform does not allow more:
 - `/proc/<pid>/root` leads to the mounts of another process: Landlock keeps a confined process
   from every process outside its domain, so it is closed wherever Landlock is used (its second
   ABI or later), and open without it;
-- when `~/.ssh` is a link, where it leads is read-only, but the link itself lies in the home,
-  which a run writes: a run can replace it with a folder of its own, which the next push outside
-  the sandbox then reads;
+- what `~/.ssh/config` reads beyond its `Include`s and its links is not kept: an
+  `IdentityFile`, a `UserKnownHostsFile` or a `CertificateFile` outside `~/.ssh`, the links found
+  inside a folder a link of `~/.ssh` leads to, and the tokens `ssh` expands in an `Include`
+  (`%d`, `${HOME}`), read as written;
+- the home itself, and the folders above it, are not pinned: where the user may rename the home
+  (its parent is theirs), a run could move it away and make another;
 - a push the gate let through runs with what the repository's settings say, as the user's own
   push from that folder would: a script the gate never read may have changed them before
   (`credential.helper`, `core.sshCommand`, `core.fsmonitor`, `url.*.insteadOf`), and that applies
@@ -468,7 +494,10 @@ The gaps, where the platform does not allow more:
 - without Landlock (a kernel before 5.19, or one built without it), the process runs as before,
   with only the environment kept from it;
 - a bus listening on an abstract socket (`unix:abstract=…`, older setups) is not a path, and is
-  kept out only from Landlock's sixth ABI on (its abstract scope, above);
+  kept out only from Landlock's sixth ABI on (its abstract scope, above). A bus by its path
+  outside the runtime folders is hidden only when the daemon's own `DBUS_SESSION_BUS_ADDRESS`
+  named it at its start: one another program of the session uses, or one started later, is not
+  known, and below Landlock's ninth ABI it is reached by its path;
 - X11 by its socket's path where the kernel refuses the private mount namespace, which gives a
   process that is not given X11 an empty `/tmp/.X11-unix`: at every ABI, a process can connect to
   `/tmp/.X11-unix/X0` itself (a program of its own, or an X11 library given that path as its

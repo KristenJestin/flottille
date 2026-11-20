@@ -120,6 +120,10 @@ command), never a failure, and `ready` stays the providers'. `--json` adds `"for
 and trackers that use it (`"shop: api"`, `"shop: tracker"`) and its `warning` (`null` when
 nothing is wrong), the warnings also being in `"warnings"`.
 
+The sandbox's state is the daemon's, asked of it (and the daemon started when none runs):
+`--json` adds `"sandbox"`, as `daemon.status` gives it (`docs/protocol.md`), and each gap it says
+(no private mount namespace, an SSH agent lent to nothing and why) is a warning.
+
 ```
 $ flottille doctor
 ok   claude: 2.1.300 (/usr/bin/claude)
