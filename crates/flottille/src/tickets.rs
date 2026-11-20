@@ -53,6 +53,7 @@ pub use replies::says as reply_says;
 pub use worklog::change_says as worklog_change_says;
 pub use worklog::says as worklog_says;
 pub use worklog::unset as worklog_unset;
+pub(crate) use worklogs::is_account;
 
 /// A call of `acli` is cut after this.
 const ACLI_TIME: Duration = Duration::from_secs(30);

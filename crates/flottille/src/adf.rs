@@ -595,8 +595,11 @@ fn inline(nodes: &[Value], hard: &str) -> String {
                 continue;
             }
             // The form an agent writes back, so a mention read can be repeated: a name alone
-            // would notify no one.
-            "mention" if !node["attrs"]["id"].as_str().unwrap_or_default().is_empty() => {
+            // would notify no one. An id that is no account id is not put into a link, where its
+            // characters could break the text around it.
+            "mention"
+                if crate::tickets::is_account(node["attrs"]["id"].as_str().unwrap_or_default()) =>
+            {
                 let name = node["attrs"]["text"].as_str().unwrap_or("@");
                 let id = node["attrs"]["id"].as_str().unwrap_or_default();
                 runs.push((
