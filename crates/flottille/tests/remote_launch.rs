@@ -5,7 +5,7 @@
 //! in-memory keyring and fake agents; throwaway repositories. No build here travels code by the
 //! test gate (`FLOTTILLE_TEST_TRAVEL`): code travels only with a launch.
 
-mod common;
+use crate::common;
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::SocketAddr;
