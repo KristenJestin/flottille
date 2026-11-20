@@ -638,6 +638,10 @@ async fn serve(
         daemon.stopping.subscribe(),
     ));
     tokio::spawn(sweep::run(daemon.clone(), daemon.stopping.subscribe()));
+    tokio::spawn(crate::notifications::run(
+        daemon.clone(),
+        daemon.stopping.subscribe(),
+    ));
     crate::models::check(&daemon);
     crate::inactive::check(&daemon);
     crate::quota::check(&daemon);
@@ -1027,6 +1031,13 @@ fn handle(daemon: &Arc<Daemon>, request: Request) -> (Message, Option<Subscripti
         ),
         method if method.starts_with("leave.") => (
             match crate::leaves::call(daemon, method, request.params) {
+                Ok(result) => Message::result(id, result),
+                Err(failure) => failure.answer(Some(id)),
+            },
+            None,
+        ),
+        method if method.starts_with("notifications.") => (
+            match crate::notifications::call(daemon, method, request.params) {
                 Ok(result) => Message::result(id, result),
                 Err(failure) => failure.answer(Some(id)),
             },
