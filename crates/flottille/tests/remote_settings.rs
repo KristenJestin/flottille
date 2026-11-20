@@ -136,7 +136,7 @@ fn no_tailnet_address_is_refused_by_name() {
     let (code, message) = user
         .call("remote.configure", json!({"listen": "tailnet"}))
         .unwrap_err();
-    assert_eq!(code, "invalid_params");
+    assert_eq!(code, "invalid-params");
     assert!(message.contains("tailnet"), "{message}");
 }
 
@@ -183,7 +183,7 @@ fn an_address_that_cannot_be_listened_on_is_refused_and_changes_nothing() {
     let (code, _) = user
         .call("remote.configure", json!({"listen": "not an address"}))
         .unwrap_err();
-    assert_eq!(code, "invalid_params");
+    assert_eq!(code, "invalid-params");
 }
 
 #[test]

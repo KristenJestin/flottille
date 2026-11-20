@@ -1556,8 +1556,8 @@ fn turning_remote_on_in_settings_starts_the_link(cx: &mut TestAppContext) {
     assert!(pc.user.call("remote.machines", json!({})).is_ok());
     assert!(!present(cx, "remote-notice"), "the notice is gone");
     assert!(!present(cx, "turn-on-remote"));
-    // A machine with no hub offers to join one, or to set one up.
-    assert!(present(cx, "join-machines") && present(cx, "open-hub-setup"));
+    // A machine with no hub is offered Set up a hub.
+    assert!(present(cx, "open-hub-setup"));
 }
 
 #[gpui_kit::test]
@@ -1643,7 +1643,7 @@ fn choosing_where_this_machine_is_reached_listens_there(cx: &mut TestAppContext)
     });
     type_into(cx, &field, "127.0.0.1:0");
     click(&shell, cx, "reach-other-use");
-    until(&shell, cx, "the daemon listens there", |cx| {
+    until(&shell, cx, "the daemon listens there", |_| {
         pc.user.call("remote.settings", json!({})).unwrap()["listening"]
             .as_str()
             .is_some_and(|at| at.starts_with("127.0.0.1:"))
@@ -1675,12 +1675,12 @@ fn turning_remote_off_closes_the_links_and_keeps_the_hub(cx: &mut TestAppContext
     settle(&shell, cx);
     // One confirmation, a dialog: nothing closes until it is confirmed.
     click(&shell, cx, "remote-switch");
-    assert!(present(cx, "remote-off-action"));
+    assert!(present(cx, "member-removal-action"));
     assert_eq!(
         pc.user.call("remote.settings", json!({})).unwrap()["on"],
         true
     );
-    click(&shell, cx, "remote-off-action");
+    click(&shell, cx, "member-removal-action");
     until(&shell, cx, "the notice is back", |cx| {
         present(cx, "remote-notice")
     });
@@ -1737,33 +1737,6 @@ fn a_change_that_waits_for_the_next_start_says_so(cx: &mut TestAppContext) {
     let said = label(cx, "reach-waits").unwrap();
     assert!(said.contains("next start"), "{said}");
     assert!(said.contains("agent"), "{said}");
-}
-
-#[gpui_kit::test]
-fn a_machine_with_no_hub_offers_join_first_and_says_setup_is_for_the_first(
-    cx: &mut TestAppContext,
-) {
-    let laptop = Machine::new();
-    let (shell, cx) = window(&laptop, cx);
-    machines_tab(&shell, cx);
-    until(&shell, cx, "both are offered", |cx| {
-        present(cx, "join-machines") && present(cx, "open-hub-setup")
-    });
-    settle(&shell, cx);
-    assert!(
-        top(cx, "join-machines") < top(cx, "open-hub-setup"),
-        "Join your machines is the default, first"
-    );
-    assert_eq!(
-        label(cx, "join-machines").as_deref(),
-        Some("Join your machines")
-    );
-    assert_eq!(label(cx, "open-hub-setup").as_deref(), Some("Set up a hub"));
-    let join = label(cx, "join-note").unwrap();
-    assert!(join.contains("invitation"), "{join}");
-    let setup = label(cx, "setup-note").unwrap();
-    assert!(setup.contains("first machine"), "{setup}");
-    assert!(setup.contains("code the hub printed"), "{setup}");
 }
 
 #[gpui_kit::test]
@@ -1895,94 +1868,4 @@ fn an_invitation_that_expires_closes_its_dialog(cx: &mut TestAppContext) {
     settle(&shell, cx);
     assert!(stack(&shell, cx).is_empty());
     assert!(!present(cx, "invitation-qr-code"));
-}
-
-#[gpui_kit::test]
-fn a_second_machine_joins_from_the_window_with_the_invitation(cx: &mut TestAppContext) {
-    let hub = TestHub::new();
-    let pc = Machine::new();
-    let laptop = Machine::new();
-    set_up(&hub, &pc);
-    let invited = pc.user.run(&["remote", "invite", "--json"]);
-    assert!(invited.status.success(), "{}", pc.log());
-    let invited: Value = serde_json::from_slice(&invited.stdout).unwrap();
-    let code = invited["code"].as_str().unwrap().to_owned();
-
-    let (shell, cx) = window(&laptop, cx);
-    machines_tab(&shell, cx);
-    until(&shell, cx, "Join is offered", |cx| {
-        present(cx, "join-machines")
-    });
-    click(&shell, cx, "join-machines");
-    assert_eq!(stack(&shell, cx), vec!["join-hub"]);
-
-    // Something that is no invitation is refused in the dialog, which stays on its first step.
-    let field = shell.read_with(cx, |s, cx| {
-        s.machines().read(cx).invitation_field().unwrap().clone()
-    });
-    type_into(cx, &field, "not an invitation");
-    click(&shell, cx, "join-hub-go");
-    until(&shell, cx, "the refusal is said", |cx| {
-        label(cx, "join-hub-problem").is_some_and(|said| !said.is_empty())
-    });
-    assert!(!present(cx, "join-hub-words"));
-
-    // The invitation pasted, then the four words to compare with the other screen.
-    type_into(cx, &field, &code);
-    click(&shell, cx, "join-hub-go");
-    until(&shell, cx, "the four words are shown", |cx| {
-        present(cx, "join-hub-words")
-    });
-    let words = label(cx, "join-hub-words").unwrap();
-    assert_eq!(words.split(' ').count(), 4, "{words}");
-    // Then it waits for the other machine to accept.
-    until(&shell, cx, "it waits", |cx| present(cx, "join-hub-waiting"));
-    assert!(
-        label(cx, "join-hub-waiting")
-            .unwrap()
-            .contains("waiting for the other machine to accept")
-    );
-    // The other machine shows the same four words.
-    let deadline = Instant::now() + WAIT;
-    let request = loop {
-        if let Some(first) = pc.requests().first() {
-            break first.clone();
-        }
-        assert!(Instant::now() < deadline, "no join request came");
-        std::thread::sleep(Duration::from_millis(200));
-    };
-    let theirs = request["words"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|w| w.as_str().unwrap())
-        .collect::<Vec<_>>()
-        .join(" ");
-    assert_eq!(words, theirs);
-
-    // Accepted there: done, and a toast says it.
-    let id = request["request"].as_str().unwrap();
-    let accepted = pc.user.run(&[
-        "remote", "accept", id, "--name", "laptop", "--role", "runner",
-    ]);
-    assert!(
-        accepted.status.success(),
-        "{}",
-        String::from_utf8_lossy(&accepted.stderr)
-    );
-    until(&shell, cx, "the dialog closes", |cx| {
-        stack(&shell, cx).is_empty()
-    });
-    until(&shell, cx, "its devices are listed", |cx| {
-        present(cx, "add-device")
-    });
-    assert!(
-        toasts(&shell, cx)
-            .iter()
-            .any(|t| t.starts_with("Joined the hub")),
-        "{:?}",
-        toasts(&shell, cx)
-    );
-    assert!(laptop.member("laptop").is_some());
-    assert!(!laptop.log().contains(&code));
 }
