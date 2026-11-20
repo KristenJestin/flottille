@@ -115,9 +115,13 @@ pub fn sandbox() -> serde_json::Value {
         Namespaces::Available => Vec::new(),
     };
     warnings.extend(bus_replaced().then_some(BUS_REPLACED_GAP));
+    let unlent = crate::pushed::unlent();
+    let mut warnings: Vec<String> = warnings.into_iter().map(str::to_owned).collect();
+    warnings.extend(unlent.as_ref().map(|why| crate::pushed::said(why)));
     serde_json::json!({
         "landlock_abi": crate::landlock::abi(),
         "private_mounts": namespaces == Namespaces::Available,
+        "ssh_lent": unlent.is_none(),
         "warnings": warnings,
     })
 }
@@ -146,6 +150,8 @@ pub struct Plan {
     kept: Vec<Kept>,
     trees: Vec<libc::c_int>,
     cwd: Option<CString>,
+    pinned: Vec<CString>,
+    read_only: Vec<(CString, libc::c_ulong)>,
 }
 
 /// Whether the kernel gives a confined command a private mount namespace.
@@ -285,7 +291,48 @@ pub fn plan(
         trees: vec![-1; put_back.len()],
         kept: put_back,
         cwd: cwd.filter(|cwd| cwd.is_absolute()).and_then(c),
+        pinned: Vec::new(),
+        read_only: Vec::new(),
     })
+}
+
+impl Plan {
+    /// The plan, which also keeps each `pinned` folder where it is (bound onto itself: a mount
+    /// point is neither moved nor removed) and makes each `read_only` path read-only, with what is
+    /// below it, before anything else (`pushed.rs`). None where a path cannot be a C string.
+    pub fn protecting(mut self, pinned: &[PathBuf], read_only: &[PathBuf]) -> Option<Plan> {
+        let c = |path: &Path| CString::new(path.as_os_str().as_bytes()).ok();
+        self.pinned = pinned.iter().map(|p| c(p)).collect::<Option<_>>()?;
+        self.read_only = read_only
+            .iter()
+            .map(|p| Some((c(p)?, locked(p))))
+            .collect::<Option<_>>()?;
+        Some(self)
+    }
+}
+
+/// The flags of the mount `path` is in that a namespace of the user's cannot clear, kept when it
+/// is made read-only there: a remount that drops them is refused.
+fn locked(path: &Path) -> libc::c_ulong {
+    let Ok(c) = CString::new(path.as_os_str().as_bytes()) else {
+        return 0;
+    };
+    // SAFETY: a valid C string, and a buffer alive for the call.
+    let flags = unsafe {
+        let mut stat: libc::statvfs = std::mem::zeroed();
+        match libc::statvfs(c.as_ptr(), &mut stat) {
+            0 => stat.f_flag,
+            _ => 0,
+        }
+    };
+    [
+        (libc::ST_NOSUID, libc::MS_NOSUID),
+        (libc::ST_NODEV, libc::MS_NODEV),
+        (libc::ST_NOEXEC, libc::MS_NOEXEC),
+    ]
+    .into_iter()
+    .filter(|(st, _)| flags & *st != 0)
+    .fold(0, |all, (_, ms)| all | ms)
 }
 
 fn check(result: libc::c_long) -> io::Result<()> {
@@ -335,6 +382,44 @@ impl Plan {
                 libc::MS_REC | libc::MS_PRIVATE,
                 std::ptr::null(),
             ) as libc::c_long)?;
+            // What a push reads, before the rest: each folder on its way kept where it is, then
+            // the paths themselves read-only. One gone since the daemon's start is not there to
+            // protect; the push judges it (`pushed::unlent`).
+            for folder in &self.pinned {
+                let pinned = libc::mount(
+                    folder.as_ptr(),
+                    folder.as_ptr(),
+                    none,
+                    libc::MS_BIND | libc::MS_REC,
+                    std::ptr::null(),
+                );
+                if pinned != 0 && io::Error::last_os_error().raw_os_error() != Some(libc::ENOENT) {
+                    return Err(io::Error::last_os_error());
+                }
+            }
+            for (path, flags) in &self.read_only {
+                let bound = libc::mount(
+                    path.as_ptr(),
+                    path.as_ptr(),
+                    none,
+                    libc::MS_BIND | libc::MS_REC,
+                    std::ptr::null(),
+                );
+                if bound != 0 {
+                    let error = io::Error::last_os_error();
+                    match error.raw_os_error() {
+                        Some(libc::ENOENT) => continue,
+                        _ => return Err(error),
+                    }
+                }
+                check(libc::mount(
+                    none,
+                    path.as_ptr(),
+                    none,
+                    libc::MS_REMOUNT | libc::MS_BIND | libc::MS_RDONLY | flags,
+                    std::ptr::null(),
+                ) as libc::c_long)?;
+            }
             for (kept, tree) in self.kept.iter().zip(self.trees.iter_mut()) {
                 let fd = libc::syscall(
                     libc::SYS_open_tree,

@@ -177,8 +177,15 @@ fn confine<'a>(
                 .map(Path::to_owned)
                 .into_iter()
                 .collect();
-            let cwd = command.as_std().get_current_dir().map(Path::to_owned);
-            crate::mounts::plan(&emptied, &kept, &masked, cwd.as_deref())
+            // The daemon's own folder where the command names none: one it held from before a
+            // folder on its way was kept in place would still reach below it.
+            let cwd = command
+                .as_std()
+                .get_current_dir()
+                .map(Path::to_owned)
+                .or_else(|| std::env::current_dir().ok());
+            crate::mounts::plan(&emptied, &kept, &masked, cwd.as_deref())?
+                .protecting(&crate::pushed::pinned(), &crate::pushed::read_only())
         })
         .flatten();
     if let Some(mut plan) = namespace {
