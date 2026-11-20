@@ -403,6 +403,28 @@ fn links_go_on_while_the_hub_is_down() {
 }
 
 #[test]
+fn the_hub_s_state_is_said_as_an_event_when_it_changes() {
+    let mut hub = TestHub::new();
+    let (pc, server) = (
+        Machine::new(Some("127.0.0.1:0")),
+        Machine::new(Some("127.0.0.1:0")),
+    );
+    members(&hub, &pc, &server);
+    pc.wait_for("server", "online");
+
+    hub.down();
+    pc.wait_until("the hub is not said unreachable", |seen| {
+        seen["hub"]["state"] == "unreachable"
+    });
+    // The clients that watch learn it at once, not at their next read.
+    let said = pc.events("remote.hub");
+    assert!(
+        said.iter().any(|event| event["state"] == "unreachable"),
+        "{said:?}"
+    );
+}
+
+#[test]
 fn two_machines_that_cannot_reach_each_other_say_which_address_failed() {
     let hub = TestHub::new();
     // Neither listens; each declares an address nobody listens on, which the hub tells the other.

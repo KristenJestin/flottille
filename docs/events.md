@@ -384,6 +384,12 @@ A link to another machine of the user's was made, or ended (`docs/remote.md`, "T
 `name` and `fingerprint` of the machine, and, when it ended, `reason` (`it was removed from the
 member list`, for a machine whose member was removed: its link is cut at once).
 
+### `remote.hub`
+
+The state of this machine's session to the hub, or the reason it gives, changed (`docs/remote.md`,
+"The hub"): `state`, as `remote.machines`' `hub` says it (`connected`, `unreachable`, …). The
+reason and the time are read there; the event only says that they changed.
+
 ### `remote.delivery_dropped`
 
 A message this machine kept for another was dropped (`docs/remote.md`, "Deliveries across

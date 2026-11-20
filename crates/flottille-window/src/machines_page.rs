@@ -10,7 +10,8 @@ use std::time::Duration;
 
 use gpui_design_system::{
     Button, Card, Confirm, EmptyLine, Field, Icon, ListCard, ListRow, Listing, Menu, Modal, QrCode,
-    RadioChoices, Section, Toast, enter, palette, presence, space, toast,
+    RadioChoices, Section, Toast, changed, changing, enter, palette, presence, presence_of, space,
+    tipped_when_cut, toast,
 };
 use gpui_kit::base::input::{Input, InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -24,7 +25,8 @@ use zeroize::Zeroizing;
 
 use crate::commands::{boxed, line_field, menu_of, problem_line, spaced, stack};
 use crate::machines::{
-    Ask, Asked, Invitation, JoinRequest, Machines, Member, News, ROLES, Remote, role_words,
+    Ask, Asked, Hub, Invitation, JoinRequest, Machines, Member, News, ROLES, Remote, how_it_failed,
+    role_words,
 };
 use crate::modals::Modals;
 
@@ -43,6 +45,9 @@ const SETUP_SENTENCE: &str = "Your machines find each other through a hub you ru
 const DEVICES_SENTENCE: &str = "Each device in this list reaches your machines with the role it \
                                 was given. Add one from here, and check the four words on both \
                                 screens.";
+const HUB_SENTENCE: &str = "The hub tells your machines each other's addresses and keeps the \
+                            list of your devices. It carries nothing of what they say to each \
+                            other.";
 const ADDRESSES_SENTENCE: &str = "Where your other machines reach this one: found on its network, \
                                   or declared by hand (a VPN address, a name, a forwarded port).";
 
@@ -125,6 +130,11 @@ impl MachinesSection {
 
     pub fn invitation(&self) -> Option<&Invitation> {
         self.invitation.as_ref()
+    }
+
+    /// Whether an invitation is being asked of the hub.
+    pub fn is_inviting(&self) -> bool {
+        self.inviting
     }
 
     pub fn join(&self) -> Option<&JoinRequest> {
@@ -373,7 +383,14 @@ impl MachinesSection {
 
     /// Add a device: an invitation from the hub, its QR and its code.
     pub fn invite(&mut self, cx: &mut Context<Self>) {
-        if self.inviting {
+        // The hub makes the invitation: out of reach, there is nothing to ask.
+        if self.inviting
+            || self
+                .read
+                .as_ref()
+                .and_then(|read| read.hub.as_ref())
+                .is_some_and(|hub| !hub.usable())
+        {
             return;
         }
         self.inviting = true;
@@ -678,7 +695,46 @@ impl MachinesSection {
             )
     }
 
-    fn member_row(&mut self, member: &Member, cx: &mut Context<Self>) -> ListRow {
+    /// The hub: its address, whether it answers, and when it does not, which address was tried
+    /// and how it failed.
+    fn hub_section(&mut self, hub: &Hub, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let p = palette(cx);
+        let row = ListRow::new("hub-state", hub.url.clone())
+            .mono()
+            .tag(hub.state_words());
+        let reason = hub
+            .reason
+            .as_deref()
+            .map(|reason| SharedString::from(how_it_failed(reason).to_owned()));
+        Section::new("hub", "Hub").sentence(HUB_SENTENCE).child(
+            stack(space::MD)
+                .child(spaced(space::MD, ListCard::new("hub-card").row(row)))
+                .child(
+                    presence_of("hub-reason-block", reason, move |said| {
+                        // A reason that changes while it is shown fades back in.
+                        changing("hub-reason-text", said, move |said| {
+                            div()
+                                .id("hub-reason")
+                                .aria_label(said.clone())
+                                .text_size(px(12.5))
+                                .text_color(p.mute)
+                                .child(said)
+                                .test_support()
+                                .into_any_element()
+                        })
+                        .into_any_element()
+                    })
+                    .space(space::MD),
+                ),
+        )
+    }
+
+    fn member_row(
+        &mut self,
+        member: &Member,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> ListRow {
         let name = member.name.clone();
         let this = cx.entity().downgrade();
         let menu = menu_of(&mut self.menus, "member", &name, cx, move |key, menu| {
@@ -725,13 +781,31 @@ impl MachinesSection {
             .iter()
             .find(|(key, _, _)| *key == member.role)
             .map_or(member.role.as_str(), |(_, words, _)| words);
+        // Where a machine is reached, or why not: said for each machine this one links to.
+        let address = (!this_one)
+            .then(|| read.seen(member))
+            .flatten()
+            .map(|machine| {
+                let usable = read.hub.as_ref().is_none_or(|hub| hub.usable());
+                address_line(
+                    format!("member-address-{name}"),
+                    machine.address_words(usable).into(),
+                    window,
+                    cx,
+                )
+            });
         ListRow::new(ElementId::Name(format!("member-{name}").into()), name)
             .tag(state)
             .line(format!("{said}. {added}"))
+            .when_some(address, |row, address| row.below(address))
             .more(menu)
     }
 
-    fn devices_section(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn devices_section(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
         let p = palette(cx);
         let listed = self.read.as_ref().map(|read| read.members.clone());
         if let Some(listed) = listed {
@@ -747,7 +821,7 @@ impl MachinesSection {
             .collect();
         let mut list = ListCard::new("member-list");
         for (key, placement, member) in drawn {
-            let row = self.member_row(&member, cx);
+            let row = self.member_row(&member, window, cx);
             list = list.item(
                 ElementId::Name(format!("member-item-{key}").into()),
                 placement,
@@ -820,17 +894,43 @@ impl MachinesSection {
                 .test_support();
         let panel = Card::new().id("invitation-card").child(content);
         let count = self.members.len();
+        let hub_down = self
+            .read
+            .as_ref()
+            .and_then(|read| read.hub.as_ref())
+            .and_then(|hub| hub.needs_words());
+        let hub_usable = hub_down.is_none();
         Section::new("devices", "Devices")
             .count(count.to_string())
             .sentence(DEVICES_SENTENCE)
             .action(
                 Button::secondary("add-device", "Add a device")
                     .leading(Icon::Plus)
-                    .disabled(self.inviting)
+                    .disabled(self.inviting || !hub_usable)
                     .on_click(cx.listener(|this, _, _, cx| this.invite(cx))),
             )
             .child(
                 stack(space::MD)
+                    .child(
+                        presence_of(
+                            "devices-hub-down",
+                            hub_down.map(SharedString::from),
+                            move |said| {
+                                changing("devices-hub-down-text", said, move |said| {
+                                    div()
+                                        .id("devices-hub-down-line")
+                                        .aria_label(said.clone())
+                                        .text_size(px(12.5))
+                                        .text_color(p.mute)
+                                        .child(said)
+                                        .test_support()
+                                        .into_any_element()
+                                })
+                                .into_any_element()
+                            },
+                        )
+                        .space(space::MD),
+                    )
                     .child(presence("invitation", shown, panel).space(space::MD))
                     .child(presence("member-list-block", count > 0, list).space(space::MD)),
             )
@@ -949,7 +1049,11 @@ impl MachinesSection {
     }
 
     /// The sections of the tab, top to bottom, each entering on its own.
-    pub fn blocks(&mut self, cx: &mut Context<Self>) -> Vec<(&'static str, gpui_kit::AnyElement)> {
+    pub fn blocks(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<(&'static str, gpui_kit::AnyElement)> {
         let Some(read) = self.read.clone() else {
             let waiting = gpui_design_system::Skeleton::new("machines-skeleton").h(px(120.));
             return vec![("machines-loading", waiting.into_any_element())];
@@ -965,18 +1069,24 @@ impl MachinesSection {
         if !read.member() {
             return vec![("hub-setup", self.setup_section(cx).into_any_element())];
         }
-        vec![
-            ("devices", self.devices_section(cx).into_any_element()),
-            ("addresses", self.addresses_section(cx).into_any_element()),
-        ]
+        let hub = read.hub.as_ref().map(|hub| self.hub_section(hub, cx));
+        let mut blocks = Vec::new();
+        blocks.extend(hub.map(|hub| ("hub", hub.into_any_element())));
+        blocks.push((
+            "devices",
+            self.devices_section(window, cx).into_any_element(),
+        ));
+        blocks.push(("addresses", self.addresses_section(cx).into_any_element()));
+        blocks
     }
 }
 
 impl Render for MachinesSection {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.fields(window, cx);
-        let blocks = self.blocks(cx);
+        let blocks = self.blocks(window, cx);
         div()
+            .id("machines-blocks")
             .flex()
             .flex_col()
             .children(blocks.into_iter().enumerate().map(|(n, (part, block))| {
@@ -986,6 +1096,7 @@ impl Render for MachinesSection {
                     block,
                 ))
             }))
+            .test_support()
     }
 }
 
@@ -1019,4 +1130,29 @@ impl Render for RemovalDialog {
         self.section
             .update(cx, |section, cx| section.removal_confirm(cx))
     }
+}
+
+/// The line under a machine's row that says where it is reached, or why it is not: the text
+/// fades back in when it changes, and is cut with its whole text in a tooltip when it is wider
+/// than the row.
+fn address_line(
+    id: String,
+    said: SharedString,
+    window: &mut Window,
+    cx: &mut App,
+) -> gpui_kit::AnyElement {
+    let p = palette(cx);
+    let id = ElementId::Name(id.into());
+    let fading = changed(&id, &said, window, cx);
+    let line = div()
+        .id(id)
+        .aria_label(said.clone())
+        .opacity(fading)
+        .text_size(px(12.5))
+        .text_color(p.faint)
+        .overflow_hidden()
+        .whitespace_nowrap()
+        .text_ellipsis()
+        .child(said.clone());
+    tipped_when_cut(line, said, window, cx)
 }
