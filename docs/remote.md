@@ -1511,6 +1511,12 @@ on a real phone, by hand, and reported.
   the pilot sends does not make it `running` again here). An ended launch leaves its pilot's
   rows unless its last delivery was a report: a reported child stays, `reported`, under its pilot
   while the pilot lives. A session handed to the user is not shown under the agent that started it.
+  The daemon leaves them out of `remote.launches` itself, in one read, and also a reported launch
+  whose caller ended: an old launch is never read again. A launch held for the user there is
+  `waiting` until something of it is heard here (its approval there sends nothing back).
+- Those rows are rows of the tree only (`Snapshot.elsewhere`): this machine's daemon does not know
+  those sessions, so a project's page, search, a session's page and the inbox do not list them,
+  and nothing offers to end them from here.
 - Those rows are shown only while the window shows this machine: another machine's tree is its own,
   and lists what its agents started elsewhere on its own machine only.
 
