@@ -596,8 +596,7 @@ fn the_inbox_and_question_cards_name_the_other_machine(cx: &mut TestAppContext) 
         shell.read_with(cx, |s, _| {
             s.machine_shown().as_deref() == Some("server")
                 && s.snapshot().bell.iter().any(|item| {
-                    item.session.as_deref() == Some(id.as_str())
-                        && item.key.starts_with("question-")
+                    item.session.as_deref() == Some(id.as_str()) && item.kind == "question"
                 })
         })
     });
