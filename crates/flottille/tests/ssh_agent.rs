@@ -423,7 +423,8 @@ fn marker(user: &User, path: &Path) {
 #[test]
 fn an_allowed_push_runs_the_user_s_global_ssh_command() {
     let (user, _agent, _bus) = user();
-    let own = user.path("own/ssh");
+    // In `~/.ssh`, which no run can change.
+    let own = user.path("home/.ssh/own-ssh");
     marker(&user, &own);
     // The user's own, for several accounts of a forge: in their global settings (the test's,
     // which the harness otherwise empties).
@@ -444,7 +445,7 @@ fn an_allowed_push_runs_the_user_s_global_ssh_command() {
 
     assert!(pushed.contains("exited with code 0"), "{pushed}");
     assert!(
-        user.path("own/ssh-ran").exists(),
+        user.path("home/.ssh/own-ssh-ran").exists(),
         "the user's ssh did not run"
     );
     assert!(remote_has(&user, "own"));
@@ -453,7 +454,7 @@ fn an_allowed_push_runs_the_user_s_global_ssh_command() {
 #[test]
 fn an_allowed_push_keeps_the_daemon_s_git_ssh_command() {
     let (user, _agent, _bus) = user();
-    let own = user.path("own/ssh");
+    let own = user.path("home/.ssh/own-ssh");
     marker(&user, &own);
     let user = user.with_env("GIT_SSH_COMMAND", own.to_str().unwrap());
     let mcp = session(&user, SSH_REMOTE);
@@ -465,7 +466,7 @@ fn an_allowed_push_keeps_the_daemon_s_git_ssh_command() {
 
     assert!(pushed.contains("exited with code 0"), "{pushed}");
     assert!(
-        user.path("own/ssh-ran").exists(),
+        user.path("home/.ssh/own-ssh-ran").exists(),
         "the user's ssh did not run"
     );
     assert!(remote_has(&user, "own"));
@@ -1444,4 +1445,206 @@ fn an_agent_socket_outside_the_runtime_folder_is_lent_to_the_daemon_s_fetch() {
         .unwrap();
     let reached = format!("reached {}", lent.display());
     assert!(ssh_said(&user).contains(&reached), "{:?}", ssh_said(&user));
+}
+
+/// A program at `planted/<name>` that notes in `<name>-ran` that it ran, then fails: what a run
+/// could name in the repository's settings.
+fn planted(user: &User, name: &str) -> PathBuf {
+    let planted = user.path(&format!("planted/{name}"));
+    script(
+        &planted,
+        &format!(
+            "echo ran >> '{}'\nexit 1\n",
+            user.path(&format!("{name}-ran")).display()
+        ),
+    );
+    planted
+}
+
+#[test]
+fn a_receivepack_a_run_wrote_never_runs_on_push() {
+    let (user, _agent, _bus) = user();
+    let remote = user.path("remotes/app.git");
+    project(&user, remote.to_str().unwrap());
+    let planted = planted(&user, "receivepack");
+    // As a run could write it (`git config remote.origin.receivepack …`): a remote reached by
+    // its path runs it on this machine.
+    user.git(
+        &user.path("work/app"),
+        &[
+            "config",
+            "remote.origin.receivepack",
+            planted.to_str().unwrap(),
+        ],
+    );
+    // A branch format: the checks' dry run reaches the remote first.
+    user.call(
+        "project.set_conventions",
+        json!({"name": "app", "branch_format": "^(feat|fix)/[a-z-]+$"}),
+    )
+    .unwrap();
+    let mcp = agent(&user);
+
+    let pushed = line(&user, &mcp, "git push origin HEAD:refs/heads/fix/received");
+
+    assert!(
+        !user.path("receivepack-ran").exists(),
+        "the planted receivepack ran: {}",
+        pushed.text
+    );
+    assert!(
+        pushed.text.contains("exited with code 0"),
+        "{}",
+        pushed.text
+    );
+    assert!(remote_has(&user, "fix/received"));
+}
+
+#[test]
+fn a_git_proxy_a_run_wrote_never_runs_on_push() {
+    let (user, _agent, _bus) = user();
+    project(&user, "git://forge.invalid/app.git");
+    let planted = planted(&user, "proxy");
+    user.git(
+        &user.path("work/app"),
+        &["config", "core.gitProxy", planted.to_str().unwrap()],
+    );
+    let mcp = agent(&user);
+
+    let pushed = line(&user, &mcp, "git push origin HEAD:refs/heads/proxied");
+
+    assert!(
+        !user.path("proxy-ran").exists(),
+        "the planted proxy ran: {}",
+        pushed.text
+    );
+}
+
+#[test]
+fn an_askpass_a_run_wrote_never_runs_on_push() {
+    let (user, _agent, _bus) = user();
+    // No credential helper: git asks for the sign-in.
+    let (_server, url) = http_remote(&user);
+    project(&user, &url);
+    let planted = planted(&user, "askpass");
+    user.git(
+        &user.path("work/app"),
+        &["config", "core.askPass", planted.to_str().unwrap()],
+    );
+    let mcp = agent(&user);
+
+    let pushed = line(&user, &mcp, "git push origin HEAD:refs/heads/asked");
+
+    assert!(
+        !user.path("askpass-ran").exists(),
+        "the planted askpass ran: {}",
+        pushed.text
+    );
+}
+
+#[test]
+fn a_negotiation_a_run_asked_for_runs_no_upload_pack() {
+    let (user, _agent, _bus) = user();
+    let remote = user.path("remotes/app.git");
+    project(&user, remote.to_str().unwrap());
+    let planted = planted(&user, "uploadpack");
+    let folder = user.path("work/app");
+    // A push that negotiates first fetches, with the remote's upload command.
+    user.git(&folder, &["config", "push.negotiate", "true"]);
+    user.git(
+        &folder,
+        &[
+            "config",
+            "remote.origin.uploadpack",
+            planted.to_str().unwrap(),
+        ],
+    );
+    let mcp = agent(&user);
+
+    let pushed = line(&user, &mcp, "git push origin HEAD:refs/heads/negotiated");
+
+    assert!(
+        !user.path("uploadpack-ran").exists(),
+        "the planted uploadpack ran: {}",
+        pushed.text
+    );
+    assert!(remote_has(&user, "negotiated"), "{}", pushed.text);
+}
+
+#[test]
+fn the_ssh_command_of_an_include_for_the_repository_is_used() {
+    let (user, _agent, _bus) = user();
+    // The user's command for the accounts of `~/work`, in a file their settings include for the
+    // repositories there.
+    let own = user.path("home/.ssh/work-ssh");
+    marker(&user, &own);
+    std::fs::write(
+        user.path("home/.gitconfig-work"),
+        format!("[core]\n\tsshCommand = {}\n", own.display()),
+    )
+    .unwrap();
+    let global = user.path("home/.gitconfig");
+    std::fs::write(
+        &global,
+        format!(
+            "[includeIf \"gitdir:{}/\"]\n\tpath = {}\n",
+            user.path("work").display(),
+            user.path("home/.gitconfig-work").display()
+        ),
+    )
+    .unwrap();
+    let user = user.with_env("GIT_CONFIG_GLOBAL", global.to_str().unwrap());
+    let mcp = session(&user, SSH_REMOTE);
+
+    let pushed = done(mcp.call(
+        "run",
+        json!({"line": "git push origin HEAD:refs/heads/work"}),
+    ));
+
+    assert!(pushed.contains("exited with code 0"), "{pushed}");
+    assert!(
+        user.path("home/.ssh/work-ssh-ran").exists(),
+        "the user's ssh for the repository did not run"
+    );
+    assert!(remote_has(&user, "work"));
+}
+
+#[test]
+fn a_push_lent_to_nothing_runs_no_ssh() {
+    let (user, _agent, _bus) = user();
+    // A configuration that reaches a file a run can write.
+    std::fs::create_dir_all(user.path("home/.ssh")).unwrap();
+    std::fs::write(user.path("home/.ssh/config"), "Include ~/dots/forge.conf\n").unwrap();
+    std::fs::create_dir_all(user.path("home/dots")).unwrap();
+    std::fs::write(user.path("home/dots/forge.conf"), "Host forge.invalid\n").unwrap();
+    let mcp = session(&user, SSH_REMOTE);
+
+    let pushed = mcp.call(
+        "run",
+        json!({"line": "git push origin HEAD:refs/heads/unlent"}),
+    );
+
+    assert!(ssh_said(&user).is_empty(), "{:?}", ssh_said(&user));
+    assert!(!remote_has(&user, "unlent"));
+    assert!(pushed.text.contains("lent to no push"), "{}", pushed.text);
+    assert!(pushed.text.contains("dots/forge.conf"), "{}", pushed.text);
+}
+
+#[test]
+fn a_user_ssh_command_a_run_can_change_lends_no_push() {
+    let (user, _agent, _bus) = user();
+    // A program outside `~/.ssh`, in a folder a run writes.
+    let own = user.path("own/ssh");
+    marker(&user, &own);
+    let user = user.with_env("GIT_SSH_COMMAND", own.to_str().unwrap());
+    let mcp = session(&user, SSH_REMOTE);
+
+    let pushed = mcp.call(
+        "run",
+        json!({"line": "git push origin HEAD:refs/heads/changed"}),
+    );
+
+    assert!(!user.path("own/ssh-ran").exists(), "{}", pushed.text);
+    assert!(!remote_has(&user, "changed"));
+    assert!(pushed.text.contains("lent to no push"), "{}", pushed.text);
 }
