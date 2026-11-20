@@ -118,6 +118,9 @@ pub fn sandbox() -> serde_json::Value {
     let unlent = crate::pushed::unlent();
     let mut warnings: Vec<String> = warnings.into_iter().map(str::to_owned).collect();
     warnings.extend(unlent.as_ref().map(|why| crate::pushed::said(why)));
+    if crate::git::program().is_none() {
+        warnings.push(crate::git::UNFOUND.to_owned());
+    }
     serde_json::json!({
         "landlock_abi": crate::landlock::abi(),
         "private_mounts": namespaces == Namespaces::Available,

@@ -492,9 +492,37 @@ pub async fn run(
         true => String::new(),
         false => format!("started the services it needs: {}\n", started.join(", ")),
     };
-    // Only a push the gate read, and that the user or the judge let through, goes out: outside
-    // the sandbox, as the user's own, judged from what its `ssh` reads now.
-    let judged = match approved && gate::is_push(&words) {
+    let env = match environment(daemon, place, &repository) {
+        Ok(env) => env,
+        Err(why) => return Outcome::Failed(why),
+    };
+    // Only a push the gate read, and that the user or the judge let through, goes out. The
+    // remote's program that receives it is git's own, over a `remote.<name>.receivepack` a run
+    // may have written: git takes the first it reads, the repository's, so only the line's own
+    // option wins over it (the gate refuses the agent's).
+    let pushing = approved && gate::is_push(&words);
+    let pushed_words = match pushing {
+        true => receiving(&words),
+        false => words.clone(),
+    };
+    // A push to paths alone needs nothing of the user's: it runs in the sandbox, as a run's own
+    // would, with the hooks and settings of the repositories it reaches. Any other goes outside
+    // the sandbox, as the user's own, judged from what its `ssh` reads now, and to no path.
+    let to_paths = match pushing {
+        true => {
+            let to_paths_env = to_paths_env(&env);
+            tokio::select! {
+                paths = to_paths(&folder.path, &pushed_words, &to_paths_env) => {
+                    paths.then_some(to_paths_env)
+                }
+                () = cancelled.cancelled() => {
+                    return Outcome::Failed("the call was stopped before it ended".into());
+                }
+            }
+        }
+        false => None,
+    };
+    let judged = match pushing && to_paths.is_none() {
         true => Some(crate::pushed::judged(&folder.path).await),
         false => None,
     };
@@ -509,24 +537,31 @@ pub async fn run(
             judged.unlent.is_none(),
         )
     });
-    // The remote's program that receives it is git's own, over a `remote.<name>.receivepack` a
-    // run may have written: git takes the first it reads, the repository's, so only the line's
-    // own option wins over it (the gate refuses the agent's).
+    // Outside the sandbox, the `git` found at the daemon's start, never one a run put first in
+    // the `PATH`.
     let pushed_words = match &lifted {
-        Some(_) => receiving(&words),
-        None => words.clone(),
+        Some(_) => match crate::git::program() {
+            Some(git) => {
+                let mut words = pushed_words;
+                words[0] = git.to_string_lossy().into_owned();
+                words
+            }
+            None => return Outcome::Refused(format!("refused: {}", crate::git::UNFOUND)),
+        },
+        None => pushed_words,
     };
     let services_said = format!("{unlent_said}{services_said}");
-    let env = match environment(daemon, place, &repository) {
-        Ok(env) => env,
-        Err(why) => return Outcome::Failed(why),
-    };
     // The project's checks of each commit the push sends, and its branch format on each branch
     // it makes, before it goes: however the commits were made, through a command the checks at
     // commit time read or not.
-    if let Some(lifted) = &lifted {
+    let checked_with = match (&lifted, &to_paths) {
+        (Some(lifted), _) => Some((lifted, true)),
+        (None, Some(to_paths)) => Some((to_paths, false)),
+        (None, None) => None,
+    };
+    if let Some((pushed_env, outside)) = checked_with {
         tokio::select! {
-            checked = crate::message_checks::push(&at, &pushed_words, lifted) => {
+            checked = crate::message_checks::push(&at, &pushed_words, pushed_env, outside) => {
                 if let Err(refusal) = checked {
                     return Outcome::Refused(refusal);
                 }
@@ -536,6 +571,11 @@ pub async fn run(
             }
         }
     }
+    // Never the submodules' pushes, which run with their own settings and receiving program.
+    let pushed_words = match pushing {
+        true => unrecursed(&pushed_words),
+        false => pushed_words,
+    };
     let secret_values = place.secret_values();
     let (url, url_error, probe) = match readied(
         daemon,
@@ -589,7 +629,7 @@ pub async fn run(
         daemon,
         run,
         pushed_words,
-        env,
+        to_paths.unwrap_or(env),
         lifted,
         secret_values,
         Phase::Waited,
@@ -847,11 +887,68 @@ fn defend(env: &mut BTreeMap<OsString, OsString>, empty: &Path) {
     // kept: it holds no secret of the user's, and its socket is at a fixed path anyway.
     env.remove(&OsString::from("DBUS_SESSION_BUS_ADDRESS"));
     env.remove(&OsString::from(crate::ssh_agent::VARIABLE));
-    configure(
-        env,
-        "url./dev/null/flottille-refused-push/.pushInsteadOf",
-        "",
+    configure(env, NOWHERE, "");
+}
+
+/// The setting that rewrites every push URL of a run to a path that is no remote.
+const NOWHERE: &str = "url./dev/null/flottille-refused-push/.pushInsteadOf";
+
+/// The environment of a push the gate let through to paths alone: the run's own, in the
+/// sandbox, the push not rewritten to nowhere, and no transport but a path's.
+fn to_paths_env(env: &BTreeMap<OsString, OsString>) -> BTreeMap<OsString, OsString> {
+    let mut env = env.clone();
+    let rewrite = env
+        .iter()
+        .find(|(name, value)| {
+            name.to_str()
+                .is_some_and(|name| name.starts_with("GIT_CONFIG_KEY_"))
+                && value.to_str() == Some(NOWHERE)
+        })
+        .map(|(name, _)| name.clone());
+    // In its place, a setting the run has already: the count of the others stays right.
+    if let Some(name) = rewrite {
+        let value = name.to_string_lossy().replace("_KEY_", "_VALUE_");
+        env.insert(name, "core.hooksPath".into());
+        env.insert(value.into(), "/dev/null".into());
+    }
+    env.insert("GIT_ALLOW_PROTOCOL".into(), "file".into());
+    env
+}
+
+/// Whether the push of `words` goes to paths alone, as git reads its line and the repository's
+/// settings: its dry run, in the sandbox and with no transport but a path's, refuses none. It
+/// may reach the repositories it would push to, in the sandbox, as a run may.
+async fn to_paths(folder: &Path, words: &[String], env: &BTreeMap<OsString, OsString>) -> bool {
+    let at_push = gate::git_globals(&words[1..]).0 + 1;
+    let end = words[at_push + 1..]
+        .iter()
+        .position(|word| word == "--" || word == "--end-of-options")
+        .map_or(words.len(), |at| at_push + 1 + at);
+    // Last among its options, so that none of the line's turns them off.
+    let mut dry = words.to_vec();
+    dry.splice(
+        end..end,
+        ["--dry-run", "--porcelain", "--no-recurse-submodules"].map(String::from),
     );
+    match crate::git::run_in(folder, &dry, env, None).await {
+        Ok(tried) => {
+            !(tried.stderr.contains("transport '") && tried.stderr.contains("not allowed"))
+        }
+        Err(_) => false,
+    }
+}
+
+/// The push's `words`, its submodules not pushed, whatever the line or the settings say: last
+/// among its options, it wins over theirs.
+fn unrecursed(words: &[String]) -> Vec<String> {
+    let at_push = gate::git_globals(&words[1..]).0 + 1;
+    let end = words[at_push + 1..]
+        .iter()
+        .position(|word| word == "--" || word == "--end-of-options")
+        .map_or(words.len(), |at| at_push + 1 + at);
+    let mut words = words.to_vec();
+    words.insert(end, "--no-recurse-submodules".into());
+    words
 }
 
 /// The environment of a run that is itself a `git push` the user, the judge, a rule or Full mode
@@ -863,7 +960,8 @@ fn defend(env: &mut BTreeMap<OsString, OsString>, empty: &Path) {
 /// have written in the repository, and only git's own transports are allowed, never an `ext::`
 /// URL it may have set; not SSH, and not the user's agent, where it is `lent` to no push. The
 /// programs the repository's settings may name for a transport are not run either: an empty
-/// `GIT_PROXY_COMMAND` and `GIT_ASKPASS` win over `core.gitProxy` and `core.askPass`. No session bus where the one found at
+/// `GIT_PROXY_COMMAND` and `GIT_ASKPASS` win over `core.gitProxy` and `core.askPass`, the user's
+/// own credential helpers over a repository's, and no signing program runs. No session bus where the one found at
 /// the daemon's start was replaced (`mounts::bus_replaced`): what is at its path now may be a
 /// run's.
 fn lifted(ssh: OsString, bus_replaced: bool, lent: bool) -> BTreeMap<OsString, OsString> {
@@ -876,6 +974,15 @@ fn lifted(ssh: OsString, bus_replaced: bool, lent: bool) -> BTreeMap<OsString, O
     );
     env.insert("GIT_PROXY_COMMAND".into(), "".into());
     env.insert("GIT_ASKPASS".into(), "".into());
+    // The user's own credential helpers alone: an empty one empties those read before, the
+    // repository's among them, and these are read last.
+    for (key, value) in crate::git::helper_settings() {
+        configure(&mut env, &key, &value);
+    }
+    // Nor the signing program a repository's settings name: a push is not signed.
+    for (key, value) in UNSIGNED {
+        configure(&mut env, key, value);
+    }
     if !lent {
         env.remove(&OsString::from(crate::ssh_agent::VARIABLE));
     }
@@ -884,6 +991,17 @@ fn lifted(ssh: OsString, bus_replaced: bool, lent: bool) -> BTreeMap<OsString, O
     }
     env
 }
+
+/// What a push the gate let through is not signed with: the program a repository's settings
+/// would name runs outside the sandbox. A line's `--signed` fails on it.
+const UNSIGNED: [(&str, &str); 6] = [
+    ("push.gpgSign", "false"),
+    ("gpg.program", "/dev/null/flottille-unsigned"),
+    ("gpg.openpgp.program", "/dev/null/flottille-unsigned"),
+    ("gpg.x509.program", "/dev/null/flottille-unsigned"),
+    ("gpg.ssh.program", "/dev/null/flottille-unsigned"),
+    ("gpg.ssh.defaultKeyCommand", ""),
+];
 
 /// The push's `words`, git's own program to receive it named on its line, right after `push`.
 fn receiving(words: &[String]) -> Vec<String> {

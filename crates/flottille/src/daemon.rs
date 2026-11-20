@@ -151,6 +151,8 @@ pub fn run(paths: &Paths) -> Result<()> {
     }
     // Before any repository is read: the user's own credential helpers, the only ones it runs.
     crate::git::find_helpers();
+    // Before anything runs: the git a push the gate let through runs, never one planted later.
+    crate::git::find_git();
     // Before anything runs: what a push reads, which every run has read-only.
     crate::pushed::find(true);
     let machine_key = crate::remote::machine_key(paths)?;

@@ -22,7 +22,7 @@ static SSH: OnceLock<Option<PathBuf>> = OnceLock::new();
 /// Finds the user's SSH agent and `ssh` at the daemon's start, before anything runs.
 pub fn find() {
     SSH.get_or_init(|| {
-        let (ssh, rooted) = chosen(candidates())?;
+        let (ssh, rooted) = chosen(candidates("ssh"))?;
         if !rooted {
             eprintln!(
                 "flottille daemon: no ssh of the PATH is owned by root in a folder owned by \
@@ -41,12 +41,13 @@ pub fn find() {
     });
 }
 
-/// Every `ssh` of the daemon's `PATH`, in its order, each the program its links lead to.
-fn candidates() -> Vec<PathBuf> {
+/// Every `name` of the daemon's `PATH` (`ssh`, `git`), in its order, each the program its links
+/// lead to.
+pub(crate) fn candidates(name: &str) -> Vec<PathBuf> {
     let path = std::env::var_os("PATH").unwrap_or_default();
     std::env::split_paths(&path)
         .filter(|dir| dir.is_absolute())
-        .filter_map(|dir| dir.join("ssh").canonicalize().ok())
+        .filter_map(|dir| dir.join(name).canonicalize().ok())
         .filter(|ssh| {
             std::fs::metadata(ssh).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
         })
@@ -55,7 +56,7 @@ fn candidates() -> Vec<PathBuf> {
 
 /// The first of `candidates` that only root may change (its file and its folder are root's),
 /// else the first, said not to be (`false`): open by default, as the user's own `PATH` is.
-fn chosen(candidates: Vec<PathBuf>) -> Option<(PathBuf, bool)> {
+pub(crate) fn chosen(candidates: Vec<PathBuf>) -> Option<(PathBuf, bool)> {
     let root = |path: &Path| std::fs::metadata(path).is_ok_and(|m| m.uid() == 0);
     if let Some(rooted) = candidates
         .iter()

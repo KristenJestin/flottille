@@ -23,6 +23,9 @@ use std::sync::OnceLock;
 /// only: the tests' daemon is given its own, never the machine's `~/.ssh`.
 const ACCOUNT_HOME: &str = "FLOTTILLE_TEST_ACCOUNT_HOME";
 
+/// The variable that plays a kernel without Landlock, read by a test build only.
+const NO_LANDLOCK: &str = "FLOTTILLE_TEST_NO_LANDLOCK";
+
 /// What `ssh` runs a program, or loads one, for.
 const RUNNING: [&str; 6] = [
     "proxycommand",
@@ -32,6 +35,60 @@ const RUNNING: [&str; 6] = [
     "securitykeyprovider",
     "xauthlocation",
 ];
+
+/// `ssh`'s short options that take a value (its `getopt` list).
+const SSH_VALUED: &str = "bceilmopBDEFIJLOPQRSWw";
+
+/// Keys of an `-o` that share a connection or forward the agent, besides those that run a
+/// program: [`crate::git::SSH_OPTIONS`] sets them first, a later one is refused to say so.
+const SHARING: [&str; 5] = [
+    "controlmaster",
+    "controlpath",
+    "controlpersist",
+    "forwardagent",
+    "include",
+];
+
+/// Why a short flag of the user's `ssh` command is refused.
+fn ssh_flag(letter: char) -> Result<(), String> {
+    match letter {
+        'A' => Err("has -A, which forwards the user's agent to the host: leave it out".into()),
+        'M' => Err("has -M, which shares the connection with any run: leave it out".into()),
+        _ => Ok(()),
+    }
+}
+
+/// Why a short option of the user's `ssh` command, with its value, is refused.
+fn ssh_option(letter: char, value: &str) -> Result<(), String> {
+    match letter {
+        'F' if value == "/dev/null" => Ok(()),
+        'F' | 'I' => Err(format!(
+            "has -{letter}, which makes ssh read a file Flottille does not keep: put what it \
+             says in ~/.ssh/config"
+        )),
+        'S' => Err("has -S, which shares the connection with any run: leave it out".into()),
+        'o' => {
+            let key = value
+                .split('=')
+                .next()
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            if RUNNING.contains(&key.as_str()) || key == "match" {
+                return Err(format!(
+                    "runs a program (-o {value}), which a run may have written"
+                ));
+            }
+            match SHARING.contains(&key.as_str()) {
+                true => Err(format!(
+                    "has -o {value}, which shares the connection or the agent, or reads a \
+                     file Flottille does not keep: leave it out"
+                )),
+                false => Ok(()),
+            }
+        }
+        _ => Ok(()),
+    }
+}
 
 /// The entries of `~/.ssh` looked at, at most: a folder holding more is not judged.
 const ENTRIES_MAX: usize = 10_000;
@@ -240,10 +297,26 @@ pub fn ssh_unlent() -> Option<String> {
                 .into(),
         );
     }
+    if !landlock_enforced() {
+        return Some(
+            "the kernel has no Landlock (its second ABI or later) to confine the commands \
+             Flottille runs, so they reach ~/.ssh through /proc as a process outside their \
+             namespace sees it"
+                .into(),
+        );
+    }
     match found() {
         Some(found) => folder_unlent(found),
         None => Some("the account's home could not be read at the daemon's start".into()),
     }
+}
+
+/// Whether the commands Flottille confines are confined by Landlock (`landlock::confined`).
+fn landlock_enforced() -> bool {
+    if cfg!(debug_assertions) && std::env::var_os(NO_LANDLOCK).is_some() {
+        return false;
+    }
+    crate::landlock::abi() >= 2
 }
 
 /// The sentence that says why, as `flottille doctor` and a push say it.
@@ -295,17 +368,65 @@ fn folder_unlent(found: &Found) -> Option<String> {
     if let Some(why) = changed(found, ssh) {
         return Some(why);
     }
-    if let Some(why) = tree(ssh) {
-        return Some(why);
-    }
     if let Some(why) = aliased(ssh) {
         return Some(why);
     }
+    let mut read = Read::default();
     let config = ssh.join("config");
-    match std::fs::symlink_metadata(&config) {
-        Ok(_) => configuration(&config, ssh, &found.account, 0).err(),
-        Err(_) => None,
+    if std::fs::symlink_metadata(&config).is_ok()
+        && let Err(why) = configuration(&config, ssh, &found.account, 0, &mut read)
+    {
+        return Some(why);
     }
+    tree(ssh, &read)
+}
+
+/// The files of `~/.ssh` the configuration names, which `ssh` reads: its `Include`s, keys,
+/// certificates and known hosts. `any` where one is named by a token or a variable, which could
+/// be any file.
+#[derive(Default)]
+struct Read {
+    paths: Vec<PathBuf>,
+    any: bool,
+}
+
+/// The directives whose values are files `ssh` reads.
+const READ_FILES: [&str; 5] = [
+    "identityfile",
+    "certificatefile",
+    "userknownhostsfile",
+    "globalknownhostsfile",
+    "revokedhostkeys",
+];
+
+impl Read {
+    /// Whether `ssh` may read `path` (a link, or a folder on the way to a file it reads): by
+    /// default (`config`, `id_*`, `known_hosts*`), or as the configuration names it.
+    fn reads(&self, path: &Path) -> bool {
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy())
+            .unwrap_or_default();
+        self.any
+            || name == "config"
+            || name.starts_with("id_")
+            || name.starts_with("known_hosts")
+            || self.paths.iter().any(|read| read.starts_with(path))
+    }
+}
+
+/// Whether the link at `path` leads to a file of `ssh_folder` with no other link on the way,
+/// which no command can change.
+fn inside(path: &Path, ssh_folder: &Path) -> bool {
+    let Ok(target) = std::fs::read_link(path) else {
+        return false;
+    };
+    let lexical = path.parent().unwrap_or(Path::new("/")).join(target);
+    let within = lexical.strip_prefix(ssh_folder).is_ok_and(|rest| {
+        rest.components()
+            .all(|part| matches!(part, Component::Normal(_)))
+    });
+    within && lexical.canonicalize().is_ok_and(|real| real == lexical)
 }
 
 /// Why `path`, made read-only at the daemon's start, may no longer be what a command sees
@@ -323,10 +444,11 @@ fn changed(found: &Found, path: &Path) -> Option<String> {
 }
 
 /// Why a link or a hard link in the folder, or its size, leaves something a command writes in
-/// reach of `ssh`.
-fn tree(folder: &Path) -> Option<String> {
+/// reach of `ssh`. A link to a file of the folder is kept with it; a link to a socket that `ssh`
+/// does not read (`read`), as a terminal multiplexer keeps the agent's, is never read.
+fn tree(root: &Path, read: &Read) -> Option<String> {
     let mut seen = 0;
-    let mut folders = vec![folder.to_owned()];
+    let mut folders = vec![root.to_owned()];
     while let Some(folder) = folders.pop() {
         let entries = match std::fs::read_dir(&folder) {
             Ok(entries) => entries,
@@ -346,6 +468,12 @@ fn tree(folder: &Path) -> Option<String> {
                 continue;
             };
             if meta.file_type().is_symlink() {
+                use std::os::unix::fs::FileTypeExt;
+                let socket =
+                    std::fs::metadata(&path).is_ok_and(|target| target.file_type().is_socket());
+                if inside(&path, root) || (socket && !read.reads(&path)) {
+                    continue;
+                }
                 return Some(format!(
                     "{} is a link, which ssh follows to a file a run can write: put the file \
                      itself in ~/.ssh",
@@ -373,12 +501,14 @@ fn configuration(
     ssh_folder: &Path,
     account: &Path,
     depth: usize,
+    read: &mut Read,
 ) -> Result<(), String> {
     let shown = file.display();
     if depth > INCLUDES_MAX {
         return Err(format!("{shown} is included more than {INCLUDES_MAX} deep"));
     }
-    let meta = std::fs::symlink_metadata(file).map_err(|e| format!("{shown}: {e}"))?;
+    // Through a link, as `ssh` reads it: one out of `~/.ssh` is refused by `tree`.
+    let meta = std::fs::metadata(file).map_err(|e| format!("{shown}: {e}"))?;
     if !meta.is_file() {
         return Ok(());
     }
@@ -392,25 +522,40 @@ fn configuration(
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        let end = line
-            .find(|c: char| c.is_whitespace() || c == '=')
-            .unwrap_or(line.len());
-        let keyword = line[..end].to_ascii_lowercase();
-        let rest = line[end..].trim_start();
-        let rest = rest.strip_prefix('=').unwrap_or(rest).trim();
+        let words = ssh_words(line);
+        let Some((keyword, args)) = words.split_first() else {
+            continue;
+        };
+        let keyword = keyword.to_ascii_lowercase();
+        let rest = args.join(" ");
         if RUNNING.contains(&keyword.as_str()) && !rest.eq_ignore_ascii_case("none") {
             return Err(format!(
                 "{shown} runs a program ({}), which a run may have written: Flottille lends \
                  the agent to no push whose ssh runs one",
-                &line[..end]
+                words[0]
             ));
         }
+        if READ_FILES.contains(&keyword.as_str()) {
+            for value in args
+                .iter()
+                .filter(|value| !value.eq_ignore_ascii_case("none"))
+            {
+                if value.contains(['%', '$']) {
+                    read.any = true;
+                }
+                match value.strip_prefix("~/") {
+                    Some(rest) => read.paths.push(account.join(rest)),
+                    None => {
+                        read.paths.push(ssh_folder.join(value));
+                        read.paths.push(account.join(value));
+                    }
+                }
+            }
+        }
         if keyword == "match"
-            && rest.split_whitespace().any(|word| {
-                word.trim_start_matches('!')
-                    .trim_matches('"')
-                    .eq_ignore_ascii_case("exec")
-            })
+            && args
+                .iter()
+                .any(|word| word.trim_start_matches('!').eq_ignore_ascii_case("exec"))
         {
             return Err(format!(
                 "{shown} runs a program (Match exec), which a run may have written: Flottille \
@@ -418,17 +563,44 @@ fn configuration(
             ));
         }
         if keyword == "include" {
-            for pattern in rest.split_whitespace() {
-                let pattern = pattern.trim_matches('"');
+            for pattern in args {
                 for included in includes(pattern, ssh_folder, account)
                     .map_err(|why| format!("{shown} includes {pattern}, {why}"))?
                 {
-                    configuration(&included, ssh_folder, account, depth + 1)?;
+                    read.paths.push(included.clone());
+                    configuration(&included, ssh_folder, account, depth + 1, read)?;
                 }
             }
         }
     }
     Ok(())
+}
+
+/// The words of a line of `ssh`'s configuration, as `ssh` splits it: at blanks, the first `=`
+/// too, quotes and a backslash's escape undone (`"ProxyCommand"` is the keyword).
+fn ssh_words(line: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut word: Option<String> = None;
+    let mut quote: Option<char> = None;
+    let mut equals = false;
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        match (quote, c) {
+            (Some(open), c) if c == open => quote = None,
+            (None, '"' | '\'') => {
+                quote = Some(c);
+                word.get_or_insert_default();
+            }
+            (_, '\\') => word.get_or_insert_default().extend(chars.next()),
+            (None, c) if c.is_whitespace() || (c == '=' && !equals) => {
+                equals |= c == '=';
+                words.extend(word.take());
+            }
+            (_, c) => word.get_or_insert_default().push(c),
+        }
+    }
+    words.extend(word);
+    words
 }
 
 /// The files the `Include` pattern names, read as `ssh` reads it: `~` the account's home, a
@@ -581,8 +753,8 @@ fn included_files(file: &Path, home: Option<&Path>, seen: &mut Vec<PathBuf>) {
     let _ = included(file, home, seen);
 }
 
-/// [`included_files`], with why one of them is not a file that can be protected: missing (a run
-/// could make it), under git's own prefix, or a hard link.
+/// [`included_files`], with why one of them is not a file that can be protected: under git's
+/// own prefix, or a hard link. A missing one is left out, as git leaves it.
 fn included(file: &Path, home: Option<&Path>, seen: &mut Vec<PathBuf>) -> Result<(), String> {
     if seen.len() > INCLUDES_MAX {
         return Err(format!(
@@ -611,12 +783,10 @@ fn included(file: &Path, home: Option<&Path>, seen: &mut Vec<PathBuf>) -> Result
             }
             None => file.parent().unwrap_or(Path::new("/")).join(&value),
         };
+        // Missing, git reads it as nothing: one made since the start is not protected, which
+        // the judgement of each push finds (`git_unlent`).
         let Ok(path) = path.canonicalize() else {
-            return Err(format!(
-                "{} includes {value}, which is not there: a run could make it; remove the line \
-                 or make the file, then restart the daemon",
-                file.display()
-            ));
+            continue;
         };
         if seen.contains(&path) {
             continue;
@@ -696,8 +866,9 @@ pub async fn ssh_command(folder: &Path) -> Result<OsString, String> {
 
 /// The user's own `ssh` command, as a push may run it: `ssh` named alone is the one found at the
 /// start; another program must be in `~/.ssh` or only root's to change. No `-F` (another
-/// configuration), no `-I` (a library), no option that runs a program, and nothing the shell
-/// would read as more than words.
+/// configuration, but `/dev/null`), no `-I` (a library), no option that runs a program, shares a
+/// connection (`-M`, `-S`, `ControlPath`…) or forwards the agent (`-A`), and nothing the shell
+/// would read as more than words. Given [`crate::git::SSH_OPTIONS`] first, which win over its own.
 fn checked(own: &str, found: Option<&Found>) -> Result<OsString, String> {
     let plain = |c: char| c.is_ascii_alphanumeric() || " \t._/~=@:+,-".contains(c);
     if !own.chars().all(plain) {
@@ -707,27 +878,31 @@ fn checked(own: &str, found: Option<&Found>) -> Result<OsString, String> {
     }
     let mut words = own.split_whitespace();
     let program = words.next().ok_or("is empty")?;
-    for word in words {
-        if word == "-F" || word.starts_with("-F") || word == "-I" || word.starts_with("-I") {
-            return Err(format!(
-                "has {word}, which makes ssh read a file Flottille does not keep: put what it \
-                 says in ~/.ssh/config"
-            ));
-        }
-        let option = word.strip_prefix("-o").unwrap_or(word);
-        let key = option
-            .split('=')
-            .next()
-            .unwrap_or_default()
-            .to_ascii_lowercase();
-        if RUNNING.contains(&key.as_str()) || key == "match" {
-            return Err(format!(
-                "runs a program ({word}), which a run may have written"
-            ));
+    let words: Vec<&str> = words.collect();
+    let mut at = 0;
+    while let Some(word) = words.get(at) {
+        at += 1;
+        let Some(letters) = word.strip_prefix('-').filter(|l| !l.starts_with('-')) else {
+            continue;
+        };
+        for (index, letter) in letters.char_indices() {
+            if !SSH_VALUED.contains(letter) {
+                ssh_flag(letter)?;
+                continue;
+            }
+            let value = match &letters[index + letter.len_utf8()..] {
+                "" => {
+                    at += 1;
+                    words.get(at - 1).copied().unwrap_or_default()
+                }
+                rest => rest,
+            };
+            ssh_option(letter, value)?;
+            break;
         }
     }
+    let rest = &own.trim_start()[program.len()..];
     if program == "ssh" {
-        let rest = own.trim_start().strip_prefix("ssh").unwrap_or_default();
         let mut command = crate::git::ssh_command();
         command.push(rest);
         return Ok(command);
@@ -752,7 +927,7 @@ fn checked(own: &str, found: Option<&Found>) -> Result<OsString, String> {
         .and_then(|path| path.canonicalize().ok())
         .is_some_and(|real| real.ancestors().all(root));
     match in_ssh || rooted {
-        true => Ok(own.into()),
+        true => Ok(format!("{program} {}{rest}", crate::git::SSH_OPTIONS).into()),
         false => Err(format!(
             "runs {program}, which a run could change: put it in ~/.ssh, or name ssh itself"
         )),
@@ -816,7 +991,7 @@ mod tests {
         ] {
             std::fs::write(&config, text).unwrap();
             assert_eq!(
-                configuration(&config, &ssh, temp.path(), 0).is_err(),
+                configuration(&config, &ssh, temp.path(), 0, &mut Read::default()).is_err(),
                 refused,
                 "{text}"
             );
@@ -824,7 +999,7 @@ mod tests {
         // Through an include.
         std::fs::write(ssh.join("more"), "ProxyCommand nc %h %p\n").unwrap();
         std::fs::write(&config, "Include more\n").unwrap();
-        assert!(configuration(&config, &ssh, temp.path(), 0).is_err());
+        assert!(configuration(&config, &ssh, temp.path(), 0, &mut Read::default()).is_err());
     }
 
     #[test]
