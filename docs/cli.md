@@ -277,6 +277,24 @@ Fixes
 $ flottille changes --since 0.4.0-beta.104
 ```
 
+### `flottille remote on [--listen <address>|tailnet|nowhere] [--json]`, `off`, `listen <address>`
+
+Remote is off until it is turned on (`docs/remote.md`, "Identity and keys"): `remote on` turns
+it on, `remote off` closes the links and keeps the hub's setup, and `remote listen` says where this
+machine is reached, as Settings, Machines does. `--listen` and `listen` take an address and its port
+(7447 when it has none), `tailnet` (this machine's first Tailscale or WireGuard address) or `nowhere`
+(the default: it dials the others, nobody dials it). The daemon writes `daemon.toml` itself, keeping
+every other key and comment, and takes the change at once, with no restart; while an agent runs,
+a new address waits for the next start, and the command says so. `--json` prints what
+`remote.settings` answers (`protocol.md`, "The remote methods"). `remote.configure`.
+
+```
+$ flottille remote on --listen tailnet
+Remote is on. This machine is reached at 100.64.0.7:7447.
+$ flottille remote off
+Remote is off: the links are closed, the hub's setup is kept.
+```
+
 ### `flottille remote setup <hub URL> [--name <name>] [--replace] [--json]`
 
 Makes this machine the first member of a new hub (`docs/remote.md`, "The first member"), with the

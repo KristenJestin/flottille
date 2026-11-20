@@ -1254,10 +1254,14 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   unfolding and folding away, and an empty list says so. A field saved
   on its own shows its Save only once it changed (rule 4);
 - Settings, in tabs by subject (`reference/gpui.md`, rule 13): **Agents**, **Approvals**,
-  **Features**, **Vault** and **General**, one shown at a time, as in a project's settings. It
-  opens on Agents; a link to a section opens its tab with the section in view; Usage will be the
-  sixth tab and the last. No part of Flottille adds a tab of its own: what the user turns on or
-  off is a row of Features.
+  **Features**, **Vault**, **Machines** and **General**, one shown at a time, as in a project's
+  settings. It opens on Agents; a link to a section opens its tab with the section in view (an old
+  link to General's machines section, `general#machines`, opens Machines); Usage will be a
+  seventh tab and the last. A part of Flottille gets a tab of its own when it fits: a subject the
+  user goes to on its own, with several sections of its own (Machines now; Usage and
+  Notifications later). A smaller part stays a row of Features, which the user turns on or off,
+  or a section of the tab of its subject. The limit is the mess, not a number: when the tabs are
+  no longer readable at a glance the structure is reviewed (#1145).
   **Agents** holds five sections. **Providers** (a count; "The agent programs Flottille can
   start. Each signs in with its own login."): one row per provider, its switch labelled with its
   name (`Claude`), its version as a tag (the path of its program in the version's tooltip), and
@@ -1309,10 +1313,30 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   ("Where new workspaces are made. A project can choose its own."): **Where**, radios `In
   Flottille's data folder`, `Beside each project` and `A folder you choose`, each line the folder
   it gives relative to `~`, and the **Folder** field unfolding under the last (`docs/projects.md`,
-  "Where the workspaces go"). Later **Machines** (§12) comes under it. Last **Developer mode**,
+  "Where the workspaces go"). Then **Developer mode**,
   with no sentence: a switch, "Log what Flottille decides" ("Why each call was allowed, held or
   refused, one JSON line each, secrets masked. For working on Flottille."), off by default
-  (`developer.md`), and the path of its log unfolding under it;
+  (`developer.md`), and the path of its log unfolding under it. Last **Version** (`releases.md`,
+  "Updating").
+  **Machines** is Remote (`remote.md`), and nothing of it is typed on the page: a section says the
+  state and holds the buttons, and what is typed, or what a request shows, is a dialog of the
+  window's host. First whether remote is on: off, a notice ("Remote is off. This machine can join
+  a hub and link to your other machines; nothing is opened until you say where it is reached.")
+  and **Turn on**; on, a **Remote** switch ("Turn it off and the links close; the hub's setup is
+  kept"), whose off asks once, in the one confirmation dialog. The notice folds away and the
+  settings unfold, and back. Then **Where this machine is reached**, one select: **Nowhere** (the
+  default: it dials the others, nobody dials it), each address of this machine named by its
+  interface, a Tailscale or WireGuard one first and marked ("Only your tailnet"), then the local
+  network's, **Every network** (`0.0.0.0`, with a warning that it opens a port on any network the
+  machine joins) and **Another address…**, whose field (an address and its port) unfolds under
+  it; the port is 7447 unless another is typed there. The choice is taken at once, without a
+  restart; while an agent runs, a change of address waits for the next start and the section says
+  so. While this machine is in no hub, **Hub** holds **Set up a hub**, which opens its dialog (the
+  hub's address and the setup code, the refusal under its fields, a toast when it is done);
+  then the hub's state, **Devices** (**Add a device** shows its invitation, QR, code, Copy code
+  and expiry in a dialog, which closes when the invitation is used or expires; a join request
+  is a dialog too, wherever the user is; Rename is one) and **Addresses** (**New address** is a
+  dialog);
 - a session page: the root's conversation, live (messages, the user's own as selectable as the agent's, thoughts collapsed (their head says how long the thinking lasted, from the event before it
   to the one after it, and no time when it lasted less than a tenth of a second), tool calls with
   their result (a result cut at the source says so on its step, with the number of characters left out), the children launched, a session started for the user as one line, `started the session "<title>"` (it is no sub-agent), reports and an edit's diff, each folded to one line until a click unfolds it), one compact line for each command a
