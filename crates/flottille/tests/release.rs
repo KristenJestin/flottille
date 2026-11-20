@@ -4722,6 +4722,17 @@ fn the_suite_runs_only_when_the_decision_does_not_say_otherwise() {
 /// repository's files, `changed` are written over (or added to) them and `deleted` removed, in the
 /// pull request's one commit, whose description is `body`.
 fn selected_tests(base: &[&str], changed: &[&str], deleted: &[&str], body: &str) -> String {
+    let output = selection(base, changed, deleted, body);
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
+}
+
+/// The whole output of `.github/scripts/pr-tests.sh` (its notices and warnings are on stderr).
+fn selection(
+    base: &[&str],
+    changed: &[&str],
+    deleted: &[&str],
+    body: &str,
+) -> std::process::Output {
     let repo = Repo::new();
     // A file is `path`, or `path::text` when the text it holds matters.
     let write = |paths: &[&str], content: &str| {
@@ -4753,7 +4764,7 @@ fn selected_tests(base: &[&str], changed: &[&str], deleted: &[&str], body: &str)
         .output()
         .unwrap();
     assert!(output.status.success(), "{output:?}");
-    String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    output
 }
 
 #[test]
@@ -4929,6 +4940,22 @@ fn a_file_a_group_does_not_declare_selects_no_test() {
         selected_tests(&base, &["crates/flottille/tests/common/mod.rs"], &[], ""),
         ""
     );
+}
+
+#[test]
+fn a_changed_test_file_no_group_declares_is_a_warning_not_a_notice() {
+    let output = selection(
+        &grouped_crate(),
+        &["crates/flottille/tests/orphan.rs"],
+        &[],
+        "",
+    );
+    let said = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        said.contains("::warning::crates/flottille/tests/orphan.rs is declared by no group"),
+        "{said}"
+    );
+    assert!(said.contains("#[path = \"../orphan.rs\"]"), "{said}");
 }
 
 #[test]
