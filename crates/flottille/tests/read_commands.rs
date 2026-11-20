@@ -236,7 +236,8 @@ fn a_sed_command_that_edits_is_handled_as_today() {
         "cat notes.md other.md",
         "cat",
     ] {
-        let answer = mcp.call("run", json!({ "line": line }));
+        // `tail -f` never ends: it is left running after a second, not thirty.
+        let answer = mcp.call("run", json!({ "line": line, "timeout": 1 }));
         assert!(
             !answer.text.starts_with("read with fs_read"),
             "{line}: {}",

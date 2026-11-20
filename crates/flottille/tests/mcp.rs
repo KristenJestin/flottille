@@ -1402,9 +1402,11 @@ fn a_client_that_outlives_its_command_and_its_parent_is_still_refused() {
 
 #[test]
 fn daemon_stop_from_a_run_never_ends_a_stuck_daemon() {
+    // The test's own end asks the stuck daemon to stop too: it is not waited for 30 s to be ended.
     let user = User::with_fake_agent()
         .with_allowing_judge()
-        .with_env("FLOTTILLE_TEST_HOLD", "1");
+        .with_env("FLOTTILLE_TEST_HOLD", "1")
+        .with_env("FLOTTILLE_STOP_WAIT_MS", "1000");
     project(&user);
     let folder = workspace(&user);
     let (_, url, authorization) = agent(&user, json!({"workspace": "w"}));
