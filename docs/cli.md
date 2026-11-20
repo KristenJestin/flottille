@@ -335,6 +335,19 @@ pc  runner  3f2a-91bc-0d4e-77a1  added by pc  (this machine)
 server  runner  8c41-77d0-a2e9-5b13  added by pc
 ```
 
+### `flottille remote members --runners [--project <name> [--agent <provider>]] [--json]`
+
+The runners instead, this machine first when it is one, with what each offers over its link: its
+projects and their free slots (the project's children cap minus the children that run), and the
+agents signed in there (`docs/remote.md`, "Roles"). With `--project`, only the runners linked that
+would take a session of that project (on `--agent`, or any agent signed in): the project there,
+the agent signed in (a session for the user counts in no children cap). `remote.machines`.
+
+```
+$ flottille remote members --runners --project app --agent claude
+server  projects: app (12 free), site (none free)  agents: claude
+```
+
 ### `flottille remote rename <name> <new name> [--json]`
 
 Renames a member: a change signed by this session's device key. `remote.change`.

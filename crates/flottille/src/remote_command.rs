@@ -73,6 +73,16 @@ pub enum RemoteAction {
     },
     /// The members of the hub's list, as this machine last checked it
     Members {
+        /// The runners instead, with what each offers: its projects and their free slots, its
+        /// agents signed in
+        #[arg(long)]
+        runners: bool,
+        /// With --runners: only those that would take a session of this project
+        #[arg(long, requires = "runners")]
+        project: Option<String>,
+        /// With --project: only those where this agent is signed in
+        #[arg(long, requires = "project")]
+        agent: Option<String>,
         #[arg(long)]
         json: bool,
     },
@@ -296,7 +306,33 @@ pub fn run(paths: &Paths, action: RemoteAction) -> Result<ExitCode> {
             }
             return Ok(ExitCode::SUCCESS);
         }
-        RemoteAction::Members { json } => {
+        RemoteAction::Members {
+            runners: true,
+            project,
+            agent,
+            json,
+        } => {
+            let params = match &project {
+                Some(project) => json!({"project": project, "agent": agent}),
+                None => json!({}),
+            };
+            let machines = ask("remote.machines", params)?;
+            if json {
+                println!("{machines}");
+                return Ok(ExitCode::SUCCESS);
+            }
+            let offered = machines["offered"].as_array();
+            let others = machines["machines"].as_array().into_iter().flatten();
+            for machine in std::iter::once(&machines["this"]).chain(others) {
+                let name = machine["name"].as_str().unwrap_or_default();
+                let taken = offered.is_none_or(|offered| offered.iter().any(|n| n == name));
+                if machine["role"] == "runner" && taken {
+                    println!("{name}  {}", offer_line(machine));
+                }
+            }
+            return Ok(ExitCode::SUCCESS);
+        }
+        RemoteAction::Members { json, .. } => {
             let members = ask("remote.members", json!({}))?;
             if json {
                 println!("{members}");
@@ -438,6 +474,48 @@ fn words_of(request: &Value) -> String {
         .filter_map(Value::as_str)
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// What a runner offers, as `remote members --runners` says it: `app (3 free), site (none
+/// free)  agents: claude`; `offers nothing it said` for one whose offer did not come.
+fn offer_line(machine: &Value) -> String {
+    let offers = &machine["offers"];
+    if offers.is_null() {
+        return format!(
+            "{}  offers nothing it said",
+            machine["state"].as_str().unwrap_or("this machine")
+        );
+    }
+    let projects: Vec<String> = offers["projects"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|project| {
+            let name = project["name"].as_str().unwrap_or_default();
+            match project["slots"].as_u64().unwrap_or(0) {
+                0 => format!("{name} (none free)"),
+                slots => format!("{name} ({slots} free)"),
+            }
+        })
+        .collect();
+    let agents: Vec<&str> = offers["agents"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    let or_none = |list: String| {
+        if list.is_empty() {
+            "none".to_owned()
+        } else {
+            list
+        }
+    };
+    format!(
+        "projects: {}  agents: {}",
+        or_none(projects.join(", ")),
+        or_none(agents.join(", "))
+    )
 }
 
 /// The key of the member named `name` in `remote.members`' answer.

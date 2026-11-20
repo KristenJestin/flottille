@@ -107,6 +107,206 @@ nothing (a list, a show, a read, `events.watch`), `drive` for any other (`docs/r
 whatever the caller's role (`remote.setup`). A method the catalogue does not name is answered `unknown-method` before anything reads
 it.
 
+### The classes
+
+Each method beside its class, in the order of this reference. A `viewer` may call the `read`
+methods only; a `controller` and a runner's own clients may call every `read` and `drive` method;
+no device calls a `local` one over a link (`docs/remote.md`, "Roles").
+
+| Method | Class |
+|---|---|
+| `daemon.status` | read |
+| `daemon.stop` | drive |
+| `events.watch` | read |
+| `project.list` | read |
+| `project.show` | read |
+| `project.detect` | drive |
+| `project.add` | drive |
+| `project.removal` | read |
+| `project.remove` | drive |
+| `project.check` | read |
+| `project.repositories` | read |
+| `project.add_repository` | drive |
+| `project.remove_repository` | drive |
+| `project.settings` | read |
+| `project.programs` | read |
+| `project.set_settings` | drive |
+| `project.set_conventions` | drive |
+| `project.set_message_checks` | drive |
+| `project.commit_checks` | read |
+| `project.set_commit_checks` | drive |
+| `project.ticket` | read |
+| `project.progress` | read |
+| `rules.show` | read |
+| `rules.set` | drive |
+| `rules.reset` | drive |
+| `judge.show` | read |
+| `judge.set` | drive |
+| `judge.reset` | drive |
+| `compaction.show` | read |
+| `compaction.set` | drive |
+| `compaction.set_guidance` | drive |
+| `compaction.reset_guidance` | drive |
+| `compaction.noticed` | drive |
+| `developer.show` | read |
+| `developer.set` | drive |
+| `extension.list` | read |
+| `extension.set` | drive |
+| `extension.act` | drive |
+| `connection.list` | read |
+| `connection.add` | drive |
+| `connection.edit` | drive |
+| `connection.remove` | drive |
+| `connection.review` | drive |
+| `connection.accept` | drive |
+| `connection.login` | drive |
+| `connection.proposed` | read |
+| `connection.share_entry` | drive |
+| `connection.bind_entry` | drive |
+| `spec.new` | drive |
+| `spec.from_ticket` | drive |
+| `spec.answer` | drive |
+| `spec.list` | read |
+| `spec.show` | read |
+| `spec.write` | drive |
+| `spec.ready` | drive |
+| `spec.ticket` | drive |
+| `spec.departures` | drive |
+| `spec.develop` | drive |
+| `spec.link` | drive |
+| `spec.unlink` | drive |
+| `spec.amendments` | read |
+| `spec.amendment` | drive |
+| `spec.draft` | drive |
+| `review.start` | drive |
+| `review.list` | read |
+| `review.finding` | drive |
+| `review.show` | read |
+| `review.set` | drive |
+| `review.reset` | drive |
+| `autosubscriptions.events` | read |
+| `appearance.show` | read |
+| `appearance.set` | drive |
+| `tool_results.show` | read |
+| `tool_results.set` | drive |
+| `sessions.show` | read |
+| `sessions.set` | drive |
+| `workspaces_folder.show` | read |
+| `workspaces_folder.set` | drive |
+| `draft.get` | local |
+| `draft.set` | local |
+| `draft.clear` | local |
+| `draft.list` | local |
+| `window.get` | local |
+| `window.set` | local |
+| `vault.list` | read |
+| `vault.set` | drive |
+| `vault.remove` | drive |
+| `vault.asks` | read |
+| `vault.ask_dismiss` | drive |
+| `remote.machines` | read |
+| `remote.address.add` | drive |
+| `remote.address.remove` | drive |
+| `remote.members` | read |
+| `remote.requests` | read |
+| `remote.invite` | drive |
+| `remote.refuse` | drive |
+| `remote.change` | drive |
+| `remote.setup` | local |
+| `remote.join` | local |
+| `remote.declare` | local |
+| `skill.list` | read |
+| `skill.show` | read |
+| `skill.add` | drive |
+| `skill.edit` | drive |
+| `skill.remove` | drive |
+| `skill.detect` | read |
+| `skill.import` | drive |
+| `command.list` | read |
+| `command.show` | read |
+| `command.add` | drive |
+| `command.edit` | drive |
+| `command.remove` | drive |
+| `command.detect` | read |
+| `command.import` | drive |
+| `task.list` | read |
+| `task.show` | read |
+| `task.add` | drive |
+| `task.copy` | drive |
+| `task.edit` | drive |
+| `task.remove` | drive |
+| `task.run` | drive |
+| `setup.list` | read |
+| `setup.add` | drive |
+| `setup.edit` | drive |
+| `setup.remove` | drive |
+| `setup.move` | drive |
+| `workspace.create` | drive |
+| `workspace.list` | read |
+| `workspace.show` | read |
+| `workspace.step_output` | read |
+| `workspace.forge` | read |
+| `workspace.ticket` | read |
+| `workspace.link_ticket` | drive |
+| `workspace.rename_branch` | drive |
+| `workspace.prepare` | drive |
+| `workspace.remove` | drive |
+| `items.list` | read |
+| `items.show` | read |
+| `items.refresh` | drive |
+| `run.list` | read |
+| `run.output` | read |
+| `run.stop` | drive |
+| `run.restart` | drive |
+| `run.dismiss` | drive |
+| `service.list` | read |
+| `service.show` | read |
+| `service.add` | drive |
+| `service.edit` | drive |
+| `service.remove` | drive |
+| `service.start` | drive |
+| `service.stop` | drive |
+| `service.output` | read |
+| `agent.start` | drive |
+| `agent.run` | drive |
+| `agent.send` | drive |
+| `agent.send_now` | drive |
+| `agent.unqueue` | drive |
+| `agent.answer` | drive |
+| `agent.image` | read |
+| `agent.cancel` | drive |
+| `agent.stop` | drive |
+| `agent.resume` | drive |
+| `agent.quota_resume` | drive |
+| `agent.reload_tools` | drive |
+| `agent.compact` | drive |
+| `agent.rename` | drive |
+| `agent.ending` | read |
+| `agent.detach` | drive |
+| `agent.mode` | drive |
+| `agent.options` | drive |
+| `agent.list` | read |
+| `agent.show` | read |
+| `agent.read` | read |
+| `agent.status` | read |
+| `agent.tree` | read |
+| `agent.trees` | read |
+| `approval.list` | read |
+| `approval.approve` | drive |
+| `approval.deny` | drive |
+| `subscription.list` | read |
+| `subscription.cancel` | drive |
+| `subscription.resume` | drive |
+| `leave.list` | read |
+| `leave.withdraw` | drive |
+| `inbox.list` | read |
+| `provider.list` | read |
+| `provider.enable` | drive |
+| `provider.disable` | drive |
+| `provider.set_judge` | drive |
+| `provider.set_new_session` | drive |
+| `provider.judge_noticed` | drive |
+
 ### `daemon.status`
 
 No parameters. The result:
@@ -1020,6 +1220,18 @@ with the reason. No method answers a private key.
   or sent a member list that does not check: the sentence says which), `needs an update`, or
   `none` before the first try. Once set up, the machines it trusts are the members' machines of
   the list as last checked.
+
+  Each machine, `this` included, also has its `role` in the list (`runner`, `controller`,
+  `viewer`; `null` before the list is checked) and its `offers` (`docs/remote.md`, "Roles"):
+  `{"projects": [{"name", "slots"}], "agents": ["claude", …]}`, what a runner said over its link,
+  each project with its children cap minus the children that run, and each agent CLI enabled,
+  installed and signed in there (its login file checked for presence only, never read); `null`
+  for a machine that is no runner, and once its link ended. `this` has its member's `name`. A
+  runner says it again when any of it changes; a machine that is no runner is refused it
+  (`pc is a controller: only a runner offers`). `remote.machines {project, agent?}` adds
+  `offered`: the names of the runners linked (this machine first) that would take a session of
+  `project` on `agent` (any agent signed in, when none is named): the project there, the agent
+  signed in, a slot free.
 - `remote.setup {url, code, changes, replace?}` makes this machine the first member of the hub at
   `url` (`docs/remote.md`, "The first member"), with the setup `code` the hub printed. `changes`
   are what the client signed with the device key, which the daemon never holds: the device's own
@@ -2323,6 +2535,19 @@ is a view of the stored events.
 `{"ms"}`. Only when the daemon runs with `FLOTTILLE_TEST_CLOCK` set (`docs/agents.md`, "For tests
 and development"); otherwise `unknown-method`. Moves the daemon's clock `ms` milliseconds ahead and
 runs the sweep at once: `{"now"}`, the clock's time.
+
+### `test.travel`, `test.travel_back`
+
+Only in a test build run with `FLOTTILLE_TEST_TRAVEL` set; otherwise `unknown-method`. What
+`agent_launch` will start on another machine (`docs/remote.md`, "What travels"), until it does.
+`test.travel {"machine", "project", "launch", "workspace"?, "corrupt"?, "hold_ms"?}` sends the
+code of a workspace of the project, or of the project's own folder, to the machine for that launch
+(`hold_ms`: how long each bundle stays offered before that machine is told of it):
+`{"workspace", "branch", "folder", "repositories"}`, the workspace made there, and for each
+repository its path, the commits sent and the bundle's prerequisites. `test.travel_back
+{"launch"}` sends back the new commits of the workspace made here for that launch: `{"machine",
+"repositories"}`, each with its path, the commits sent and the ref they landed in. The other
+machine answers either only in such a build too.
 
 ### The approval methods
 
