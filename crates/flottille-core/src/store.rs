@@ -57,8 +57,20 @@ pub struct Launch {
     pub request: Option<u64>,
     pub agent: Option<String>,
     pub workspace: Option<String>,
+    /// The store's id of `workspace`, the one made of the launch's code; cleared when that
+    /// workspace is removed, as a later one may take its name and its id.
+    pub workspace_id: Option<i64>,
     pub asked: Value,
     pub at: u64,
+}
+
+/// Why `Store::add_launch` did not record a launch: the launch was asked already, or its machine
+/// has as many launches waiting for their code, or for the user, as it may.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LaunchRefused {
+    Known,
+    Waiting,
+    Held,
 }
 
 /// Which launches `Store::launches` gives.
@@ -870,7 +882,9 @@ const MIGRATIONS: &[&str] = &[
     -- on. `machine` is the other machine's key; `caller` the agent that launched it (of this
     -- machine for `out`, of the other for `in`); `state` `held` (for the user there), `accepted`
     -- (by the gate there), `started`, or `refused`; `request` the user's request there while it is
-    -- held; `agent` the agent it started (there for `out`); `asked` the launch as it was asked.
+    -- held; `agent` the agent it started (there for `out`); `workspace` and `workspace_id` the
+    -- workspace made of its code, until that workspace is removed; `asked` the launch as it was
+    -- asked.
     CREATE TABLE launches (
         way       TEXT NOT NULL CHECK (way IN ('out', 'in')),
         machine   TEXT NOT NULL,
@@ -882,6 +896,7 @@ const MIGRATIONS: &[&str] = &[
         request   INTEGER,
         agent     TEXT,
         workspace TEXT,
+        workspace_id INTEGER,
         asked     TEXT NOT NULL,
         at        INTEGER NOT NULL,
         PRIMARY KEY (way, machine, launch)
@@ -1368,6 +1383,7 @@ impl Store {
     pub fn remove_workspace(&mut self, workspace: i64, event: (&str, Value)) -> Result<Event> {
         let transaction = self.connection.transaction()?;
         transaction.execute("DELETE FROM workspaces WHERE id = ?1", params![workspace])?;
+        forget_launches_workspace(&transaction, workspace)?;
         let event = append_event(&transaction, event.0, event.1)?;
         transaction.commit()?;
         Ok(event)
@@ -1389,6 +1405,7 @@ impl Store {
     ) -> Result<(Vec<Event>, Vec<Request>)> {
         let transaction = self.connection.transaction()?;
         transaction.execute("DELETE FROM workspaces WHERE id = ?1", params![workspace])?;
+        forget_launches_workspace(&transaction, workspace)?;
         transaction.execute(
             "UPDATE agents SET workspace = NULL, folder = ?2, instructions = ?3, updated_at = ?4 \
              WHERE id = ?1",
@@ -3062,26 +3079,42 @@ impl Store {
 
     /// Records a launch, in place of the one of the same name with the same machine.
     pub fn record_launch(&mut self, launch: &Launch) -> Result<()> {
-        self.connection.execute(
-            "INSERT OR REPLACE INTO launches (way, machine, launch, caller, kind, project, state, \
-             request, agent, workspace, asked, at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-            params![
-                launch.way,
-                launch.machine,
-                launch.launch,
-                launch.caller,
-                launch.kind,
-                launch.project,
-                launch.state,
-                launch.request.map(|n| n as i64),
-                launch.agent,
-                launch.workspace,
-                serde_json::to_string(&launch.asked)?,
-                launch.at as i64,
-            ],
+        insert_launch(&self.connection, launch)
+    }
+
+    /// Records a new launch `in` from its machine, unless it was asked already or that machine
+    /// has `most_waiting` launches waiting for their code, or `most_held` waiting for the user
+    /// (when this one is held): counted and recorded in one transaction, so that launches asked at
+    /// once never go past them. Why it was not, when it was not.
+    pub fn add_launch(
+        &mut self,
+        launch: &Launch,
+        most_waiting: usize,
+        most_held: usize,
+    ) -> Result<Option<LaunchRefused>> {
+        let transaction = self.connection.transaction()?;
+        let (known, waiting, held): (i64, i64, i64) = transaction.query_row(
+            "SELECT COALESCE(SUM(launch = ?2), 0), \
+             COALESCE(SUM(agent IS NULL AND state != 'refused'), 0), \
+             COALESCE(SUM(state = 'held'), 0) \
+             FROM launches WHERE way = 'in' AND machine = ?1",
+            params![launch.machine, launch.launch],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )?;
-        Ok(())
+        let refused = if known > 0 {
+            Some(LaunchRefused::Known)
+        } else if waiting as usize >= most_waiting {
+            Some(LaunchRefused::Waiting)
+        } else if launch.state == "held" && held as usize >= most_held {
+            Some(LaunchRefused::Held)
+        } else {
+            None
+        };
+        if refused.is_none() {
+            insert_launch(&transaction, launch)?;
+        }
+        transaction.commit()?;
+        Ok(refused)
     }
 
     /// The launches `way` with `machine` (any, when `None`) that match `filter`: `launch` the
@@ -3100,7 +3133,7 @@ impl Store {
         };
         let mut statement = self.connection.prepare_cached(
             "SELECT way, machine, launch, caller, kind, project, state, request, agent, \
-             workspace, asked, at FROM launches \
+             workspace, workspace_id, asked, at FROM launches \
              WHERE way = ?1 AND (?2 IS NULL OR machine = ?2) AND (?3 IS NULL OR launch = ?3) \
              AND (?4 IS NULL OR agent = ?4) AND (?5 IS NULL OR request = ?5) ORDER BY at, launch",
         )?;
@@ -3117,10 +3150,11 @@ impl Store {
                     request: row.get::<_, Option<i64>>(7)?.map(|n| n as u64),
                     agent: row.get(8)?,
                     workspace: row.get(9)?,
+                    workspace_id: row.get(10)?,
                     asked: Value::Null,
-                    at: row.get::<_, i64>(11)? as u64,
+                    at: row.get::<_, i64>(12)? as u64,
                 },
-                row.get::<_, String>(10)?,
+                row.get::<_, String>(11)?,
             ))
         })?;
         rows.map(|row| {
@@ -4235,6 +4269,41 @@ impl Space<'_> {
         checked?;
         Ok(transaction.commit()?)
     }
+}
+
+/// Records a launch, in place of the one of the same name with the same machine.
+fn insert_launch(connection: &Connection, launch: &Launch) -> Result<()> {
+    connection.execute(
+        "INSERT OR REPLACE INTO launches (way, machine, launch, caller, kind, project, state, \
+         request, agent, workspace, workspace_id, asked, at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+        params![
+            launch.way,
+            launch.machine,
+            launch.launch,
+            launch.caller,
+            launch.kind,
+            launch.project,
+            launch.state,
+            launch.request.map(|n| n as i64),
+            launch.agent,
+            launch.workspace,
+            launch.workspace_id,
+            serde_json::to_string(&launch.asked)?,
+            launch.at as i64,
+        ],
+    )?;
+    Ok(())
+}
+
+/// The launches made of the workspace `workspace`, removed now, no longer name it: a workspace
+/// made later may take its name and its id.
+fn forget_launches_workspace(connection: &Connection, workspace: i64) -> Result<()> {
+    connection.execute(
+        "UPDATE launches SET workspace = NULL, workspace_id = NULL WHERE workspace_id = ?1",
+        params![workspace],
+    )?;
+    Ok(())
 }
 
 fn append_event(connection: &Connection, name: &str, data: Value) -> Result<Event> {
