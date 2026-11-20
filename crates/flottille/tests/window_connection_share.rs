@@ -468,7 +468,38 @@ fn share_a_connection_of_the_machine_shown(cx: &mut TestAppContext) {
     notes_on(&server);
     let (shell, cx) = window_showing(&pc, "server", cx);
     open_page(&shell, cx);
+    let started = Instant::now();
+    let seen = std::cell::Cell::new(0u64);
     until(&shell, cx, "the server's connection is listed", |cx| {
+        // DIAGNOSTIC (#1134)
+        let now = started.elapsed().as_secs() / 5;
+        if now > seen.get() {
+            seen.set(now);
+            let section = section(&shell, cx);
+            let listed = section.read_with(cx, |s, _| s.servers().map(|servers| servers.len()));
+            let machine = shell.read_with(cx, |s, _| s.machine_shown());
+            let registry = shell.read_with(cx, |s, cx| {
+                let registry = s.extensions().read(cx);
+                (
+                    registry.is_known(),
+                    registry.listed("connections").map(|l| l.enabled),
+                    registry.switch_on("connections", None),
+                )
+            });
+            let ids: Vec<_> = [
+                "connections-switch",
+                "connection-servers-block",
+                "connection-servers-enter",
+                "connection-servers",
+                "connection-list-block",
+                "connection-list",
+                "connection-notes",
+            ]
+            .into_iter()
+            .map(|id| (id, present(cx, id), shown(cx, id)))
+            .collect();
+            eprintln!("DIAG {now}: {machine:?} listed {listed:?} registry {registry:?} {ids:?}");
+        }
         present(cx, "connection-notes")
     });
     let section = section(&shell, cx);
