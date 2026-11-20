@@ -112,13 +112,16 @@ async fn until(core: &Core, what: &str, holds: impl Fn(&ViewState) -> bool) -> V
     panic!("{what} within 10 s: the view is {:#?}", core.view());
 }
 
+/// A request the runner took, and what its check said.
+type Took = (Value, Result<Accepted, String>);
+
 /// The runner `server`: its endpoint, its daemon's events, and every request it took.
 #[derive(Clone)]
 struct Runner {
     members: Arc<Mutex<Option<Members>>>,
     events: Arc<Mutex<Vec<Value>>>,
     emitted: tokio::sync::broadcast::Sender<Value>,
-    taken: Arc<Mutex<Vec<(Value, Result<Accepted, String>)>>>,
+    taken: Arc<Mutex<Vec<Took>>>,
     answers: Arc<Mutex<HashMap<String, Value>>>,
     links: Arc<Mutex<Vec<Link>>>,
     requests: Arc<Mutex<Requests>>,
@@ -166,7 +169,7 @@ impl Runner {
     }
 
     /// The requests it took of `method`.
-    fn taken(&self, method: &str) -> Vec<(Value, Result<Accepted, String>)> {
+    fn taken(&self, method: &str) -> Vec<Took> {
         self.taken
             .lock()
             .unwrap()
