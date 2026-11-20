@@ -103,7 +103,7 @@ pub async fn output_remote(
     git.env("GIT_ALLOW_PROTOCOL", protocol);
     // Not lent while a file its `ssh` reads could have been written by a confined command.
     let lent = crate::ssh_agent::socket()
-        .filter(|_| protocol == "ssh" && crate::mounts::ssh().unlent.is_none());
+        .filter(|_| protocol == "ssh" && crate::mounts::unlent().is_none());
     match lent {
         Some(socket) => crate::landlock::confined_lent(git.env(crate::ssh_agent::VARIABLE, socket)),
         None => crate::landlock::confined(&mut git),
@@ -183,7 +183,7 @@ fn protocol(url: &str) -> &str {
 
 /// The `ssh` git runs: the one found at the daemon's start, quoted for the shell git reads
 /// `GIT_SSH_COMMAND` with.
-fn ssh_command() -> OsString {
+pub fn ssh_command() -> OsString {
     match crate::ssh_agent::ssh() {
         Some(ssh) => {
             let quoted = ssh.as_os_str().to_string_lossy().replace('\'', "'\\''");

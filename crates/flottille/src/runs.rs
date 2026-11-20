@@ -494,7 +494,8 @@ pub async fn run(
     };
     // Only a push the gate read, and that the user or the judge let through, goes out: outside
     // the sandbox, as the user's own.
-    let lifted = (approved && gate::is_push(&words)).then(lifted);
+    let lifted = (approved && gate::is_push(&words))
+        .then(|| lifted(crate::mounts::unlent().is_none(), crate::git::ssh_command()));
     let env = match environment(daemon, place, &repository) {
         Ok(env) => env,
         Err(why) => return Outcome::Failed(why),
@@ -837,15 +838,17 @@ fn defend(env: &mut BTreeMap<OsString, OsString>, empty: &Path) {
 /// SSH agent, forge command line's sign-in), and no hook: the hooks are files the agent writes.
 /// The project's and the workspace's variables are not applied: they are a file a run may write,
 /// and one of them (`GIT_CONFIG_PARAMETERS`) would undo the hooks setting. It runs outside the
-/// sandbox (`start`).
-fn lifted() -> BTreeMap<OsString, OsString> {
-    let mut env = std::env::vars_os().collect();
+/// sandbox (`start`). The SSH agent only where `lent` (`mounts::unlent`), and `ssh` the one found
+/// at the daemon's start, over a `core.sshCommand` a run may have written in the repository.
+fn lifted(lent: bool, ssh: OsString) -> BTreeMap<OsString, OsString> {
+    let mut env: BTreeMap<OsString, OsString> = std::env::vars_os().collect();
     configure(&mut env, "core.hooksPath", "/dev/null");
     // Not the SSH agent while a file its `ssh` reads could have been written by a confined
-    // command (`mounts::Ssh::unlent`).
-    if crate::mounts::ssh().unlent.is_some() {
+    // command.
+    if !lent {
         env.remove(&OsString::from(crate::ssh_agent::VARIABLE));
     }
+    env.insert("GIT_SSH_COMMAND".into(), ssh);
     env
 }
 
@@ -2636,19 +2639,23 @@ mod tests {
 
     #[test]
     fn a_lifted_push_keeps_the_daemon_s_environment_but_its_hooks() {
-        let env = lifted();
+        let env = lifted(true, "'/usr/bin/ssh'".into());
         let daemon: BTreeMap<OsString, OsString> = std::env::vars_os().collect();
         let count: usize = daemon
             .get(&OsString::from("GIT_CONFIG_COUNT"))
             .map_or(0, |count| count.to_str().unwrap().parse().unwrap());
         for (name, value) in &daemon {
-            if !name.to_str().unwrap_or_default().starts_with("GIT_CONFIG_") {
+            let name_text = name.to_str().unwrap_or_default();
+            if !name_text.starts_with("GIT_CONFIG_") && name_text != "GIT_SSH_COMMAND" {
                 assert_eq!(env.get(name), Some(value), "{name:?}");
             }
         }
         let get = |name: String| env[&OsString::from(name)].to_str().unwrap().to_owned();
         assert_eq!(get(format!("GIT_CONFIG_KEY_{count}")), "core.hooksPath");
         assert_eq!(get(format!("GIT_CONFIG_VALUE_{count}")), "/dev/null");
+        assert_eq!(get("GIT_SSH_COMMAND".into()), "'/usr/bin/ssh'");
+        let unlent = lifted(false, "ssh".into());
+        assert!(!unlent.contains_key(&OsString::from(crate::ssh_agent::VARIABLE)));
     }
 
     #[test]

@@ -18,6 +18,16 @@ use std::sync::OnceLock;
 const OPEN_TREE_CLONE: libc::c_uint = 1;
 const AT_RECURSIVE: libc::c_uint = 0x8000;
 const MOVE_MOUNT_F_EMPTY_PATH: libc::c_uint = 0x4;
+const MOUNT_ATTR_RDONLY: u64 = 0x1;
+
+/// `struct mount_attr` of `mount_setattr(2)`.
+#[repr(C)]
+struct MountAttr {
+    attr_set: u64,
+    attr_clr: u64,
+    propagation: u64,
+    userns_fd: u64,
+}
 
 /// The variable that plays a kernel refusing user namespaces, read by a test build only: the
 /// tests' daemon is given it, never a packaged one.
@@ -79,16 +89,18 @@ fn bus_path(address: &str) -> Option<PathBuf> {
 /// lent (and why not), and the warnings that say each gap.
 pub fn sandbox() -> serde_json::Value {
     let namespaces = namespaces();
-    let ssh = ssh();
+    let unlent = unlent();
     let mut warnings: Vec<String> = Vec::new();
     match namespaces {
         Namespaces::Refused => warnings.push(REFUSED_GAP.into()),
         Namespaces::Unknown => warnings.push(UNKNOWN_GAP.into()),
         Namespaces::Available => {}
     }
+    if namespaces != Namespaces::Refused && !recursive_read_only() {
+        warnings.push(SHALLOW_GAP.into());
+    }
     // A gap only where there is an agent to lend.
-    if let Some(why) = ssh
-        .unlent
+    if let Some(why) = unlent
         .as_ref()
         .filter(|_| crate::ssh_agent::socket().is_some())
     {
@@ -99,9 +111,54 @@ pub fn sandbox() -> serde_json::Value {
     serde_json::json!({
         "landlock_abi": crate::landlock::abi(),
         "private_mounts": namespaces == Namespaces::Available,
-        "ssh_agent": {"lent": ssh.unlent.is_none(), "why": ssh.unlent},
+        "ssh_agent": {"lent": unlent.is_none(), "why": unlent},
         "warnings": warnings,
     })
+}
+
+/// Why the SSH agent is lent to nothing now, if it is not: the kernel gives the commands
+/// Flottille confines no namespace, where nothing `ssh` reads is read-only to them; or a walk of
+/// the SSH configuration found a path no mount keeps, now or once in the daemon's life, since a
+/// command may have written what `ssh` reads while it was open.
+pub fn unlent() -> Option<String> {
+    if namespaces() == Namespaces::Refused {
+        return Some(
+            "the kernel gives no user namespace to the commands Flottille confines, so nothing \
+             ssh reads is read-only to them"
+                .into(),
+        );
+    }
+    let now = ssh().unlent.clone();
+    let once = ONCE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    match (now, &*once) {
+        (Some(why), _) => Some(why),
+        (None, Some(was)) => Some(format!(
+            "{was}, as the daemon found earlier: a confined command may have written what ssh \
+             reads since, so the agent is lent again only once the daemon restarts"
+        )),
+        (None, None) => None,
+    }
+}
+
+/// What a kernel without `mount_setattr` (before 5.12) leaves open, as `flottille doctor` says it.
+const SHALLOW_GAP: &str = "the kernel has no mount_setattr: a mount below a read-only SSH folder \
+     stays writable to the commands Flottille confines";
+
+/// Whether the kernel has `mount_setattr`, which makes a folder read-only with every mount below
+/// it.
+fn recursive_read_only() -> bool {
+    // SAFETY: a call on no file: it fails at once, and says only whether the call exists.
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_mount_setattr,
+            -1,
+            c"".as_ptr(),
+            0,
+            std::ptr::null::<MountAttr>(),
+            0,
+        )
+    };
+    result == 0 || io::Error::last_os_error().raw_os_error() != Some(libc::ENOSYS)
 }
 
 /// What a probe that concluded nothing leaves, as `flottille doctor` says it.
@@ -276,7 +333,13 @@ pub fn plan(
         pinned: ssh.pinned.iter().map(|p| c(p)).collect::<Option<_>>()?,
         read_only: kept_read_only,
         links: ssh.links.iter().map(|p| c(p)).collect::<Option<_>>()?,
-        masked: masked.iter().map(|p| c(p)).collect::<Option<_>>()?,
+        // A socket gone since the start (its bus ended) is no path to hide: one mounted over
+        // would fail every start.
+        masked: masked
+            .iter()
+            .filter(|p| std::fs::symlink_metadata(p).is_ok())
+            .map(|p| c(p))
+            .collect::<Option<_>>()?,
         emptied: folders.into_iter().map(|f| c(f)).collect::<Option<_>>()?,
         trees: vec![-1; put_back.len()],
         kept: put_back,
@@ -386,13 +449,33 @@ impl Plan {
                     libc::MS_BIND | libc::MS_REC,
                     std::ptr::null(),
                 ) as libc::c_long)?;
-                check(libc::mount(
-                    none,
+                // Read-only with every mount below it; a kernel without the call (before 5.12)
+                // gets the folder's own mount alone, and the gap is said (`SHALLOW_GAP`).
+                let attr = MountAttr {
+                    attr_set: MOUNT_ATTR_RDONLY,
+                    attr_clr: 0,
+                    propagation: 0,
+                    userns_fd: 0,
+                };
+                let set = libc::syscall(
+                    libc::SYS_mount_setattr,
+                    libc::AT_FDCWD,
                     path.as_ptr(),
-                    none,
-                    libc::MS_REMOUNT | libc::MS_BIND | libc::MS_RDONLY | flags,
-                    std::ptr::null(),
-                ) as libc::c_long)?;
+                    AT_RECURSIVE,
+                    &attr as *const MountAttr,
+                    std::mem::size_of::<MountAttr>(),
+                );
+                if set != 0 && io::Error::last_os_error().raw_os_error() == Some(libc::ENOSYS) {
+                    check(libc::mount(
+                        none,
+                        path.as_ptr(),
+                        none,
+                        libc::MS_REMOUNT | libc::MS_BIND | libc::MS_RDONLY | flags,
+                        std::ptr::null(),
+                    ) as libc::c_long)?;
+                } else {
+                    check(set)?;
+                }
             }
             for link in &self.links {
                 let fd = libc::syscall(
@@ -523,16 +606,15 @@ struct Walked {
     ssh: std::sync::Arc<Ssh>,
 }
 
+/// The first reason a walk of the SSH configuration found to lend the agent to nothing, kept for
+/// the daemon's life.
+static ONCE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
 /// [`Ssh`] for the user's homes now. Read again only when a path it looked at changed: each
 /// confined spawn costs an `lstat` of those, not a walk.
 pub fn ssh() -> std::sync::Arc<Ssh> {
     static WALKED: std::sync::Mutex<Option<Walked>> = std::sync::Mutex::new(None);
-    let homes: Vec<PathBuf> = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .into_iter()
-        .chain(account_home())
-        .filter(|home| home.is_absolute())
-        .collect();
+    let homes = homes();
     let mut walked = WALKED
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -546,8 +628,14 @@ pub fn ssh() -> std::sync::Arc<Ssh> {
         homes: &homes,
         ..Walk::default()
     };
+    walk.find_work();
     walk.homes_ssh();
     let ssh = std::sync::Arc::new(walk.done());
+    if let Some(why) = &ssh.unlent {
+        ONCE.lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get_or_insert_with(|| why.clone());
+    }
     let seen = std::mem::take(&mut walk.seen);
     *walked = Some(Walked {
         homes,
@@ -557,9 +645,53 @@ pub fn ssh() -> std::sync::Arc<Ssh> {
     ssh
 }
 
+/// The user's homes: `HOME`'s and the account's, each where its links lead, so that a home
+/// behind a link is known as the folder it is. None in the crate's own tests, which never walk
+/// the developer's home: they give theirs to [`Walk`].
+fn homes() -> Vec<PathBuf> {
+    if cfg!(test) {
+        return Vec::new();
+    }
+    real_homes(
+        std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .into_iter()
+            .chain(account_home()),
+    )
+}
+
+fn real_homes(homes: impl Iterator<Item = PathBuf>) -> Vec<PathBuf> {
+    let mut real: Vec<PathBuf> = Vec::new();
+    for home in homes.filter(|home| home.is_absolute()) {
+        let home = home.canonicalize().unwrap_or(home);
+        if !real.contains(&home) {
+            real.push(home);
+        }
+    }
+    real
+}
+
+/// Makes each home's `~/.ssh` (0700) where it is missing, at the daemon's start: a missing one
+/// is a folder a confined command could make, with a configuration in it, and the agent would be
+/// lent to nothing for the daemon's life.
+pub fn make_ssh_folders() {
+    use std::os::unix::fs::DirBuilderExt;
+    for home in homes() {
+        let ssh = home.join(".ssh");
+        if std::fs::symlink_metadata(&ssh).is_err()
+            && let Err(error) = std::fs::DirBuilder::new().mode(0o700).create(&ssh)
+        {
+            eprintln!("flottille daemon: cannot make {}: {error}", ssh.display());
+        }
+    }
+}
+
 #[derive(Default)]
 struct Walk<'a> {
     homes: &'a [PathBuf],
+    /// The folders Flottille's commands work in: its own, each project's and where its
+    /// workspaces go. None is made read-only.
+    work: Vec<PathBuf>,
     seen: Vec<(PathBuf, Option<Stamp>)>,
     read_only: Vec<PathBuf>,
     links: Vec<PathBuf>,
@@ -620,17 +752,60 @@ impl Walk<'_> {
         Some((done, true))
     }
 
-    /// `path` made read-only, unless it holds a home: the agent is then lent to nothing.
+    /// The folders Flottille's commands work in, as the daemon's configuration says them now:
+    /// the projects' files are looked at, so that a project added is a change of the walk.
+    fn find_work(&mut self) {
+        if cfg!(test) {
+            return;
+        }
+        let Ok(paths) = flottille_core::paths::Paths::from_env() else {
+            return;
+        };
+        let projects = paths.projects();
+        self.see(&projects);
+        if let Ok(entries) = std::fs::read_dir(&projects) {
+            for entry in entries.flatten() {
+                self.see(&entry.path());
+            }
+        }
+        self.see(&paths.workspaces_place());
+        let mut work = vec![
+            paths.data.clone(),
+            paths.state.clone(),
+            paths.config.clone(),
+        ];
+        if let Ok(loaded) = flottille_core::registry::Registry::new(&paths).load_all() {
+            for project in loaded.projects {
+                work.push(project.folder);
+                work.push(project.workspaces_root);
+            }
+        }
+        self.work = work
+            .into_iter()
+            .map(|folder| folder.canonicalize().unwrap_or(folder))
+            .collect();
+    }
+
+    /// `path` made read-only, unless it holds a home or the work of Flottille's commands, or is
+    /// shared with others: the agent is then lent to nothing.
     fn read_only(&mut self, path: PathBuf, what: &str) {
-        if self.homes.iter().any(|home| home.starts_with(&path)) {
-            self.unlent.push(format!(
-                "{what} is {}, which holds the home: it cannot be made read-only to the commands \
-                 Flottille confines",
-                path.display()
-            ));
+        let shown = path.display();
+        let why = if self.homes.iter().any(|home| home.starts_with(&path)) {
+            format!("{what} is {shown}, which holds the home")
+        } else if let Some(work) = self.work.iter().find(|work| work.starts_with(&path)) {
+            format!(
+                "{what} is {shown}, which holds {}, where Flottille's commands work",
+                work.display()
+            )
+        } else if shared(&path) {
+            format!("{what} is {shown}, which is shared: others write in it too")
         } else {
             self.read_only.push(path);
-        }
+            return;
+        };
+        self.unlent.push(format!(
+            "{why}: it cannot be made read-only to the commands Flottille confines"
+        ));
     }
 
     /// What `written` leads to read-only; where it is missing, its folder, so that nothing is
@@ -707,6 +882,8 @@ impl Walk<'_> {
     /// The files an SSH configuration includes, and those they include, each once: a relative
     /// path is the user's `~/.ssh`'s, as `ssh` reads the user's own configuration.
     fn config(&mut self, config: &Path, home: &Path, folder: &Path, depth: usize) {
+        // Its stamp: a file written in place changes no folder's.
+        self.see(config);
         let text = match read_config(config) {
             Ok(Some(text)) => text,
             Ok(None) => return,
@@ -747,7 +924,11 @@ impl Walk<'_> {
                     })
                     .collect();
                 match self.resolve(&fixed) {
-                    Some((path, true)) => self.read_only(path, &what),
+                    // The links in it too: a pattern's part may go through one.
+                    Some((path, true)) => {
+                        self.links_in(&path, 0);
+                        self.read_only(path, &what);
+                    }
                     _ => self.unlent.push(format!(
                         "{what} ({}) does not exist: a confined command could make it, and the \
                          file in it",
@@ -786,7 +967,7 @@ impl Walk<'_> {
         let inside = |path: &Path| read_only.iter().any(|done| path.starts_with(done));
         let mut links: Vec<PathBuf> = std::mem::take(&mut self.links)
             .into_iter()
-            .filter(|link| !inside(link) && writable(link.parent()))
+            .filter(|link| !inside(link) && changeable(link.parent()))
             .collect();
         links.sort();
         links.dedup();
@@ -798,7 +979,7 @@ impl Walk<'_> {
                 folder.parent().is_some()
                     && !self.homes.iter().any(|home| home.starts_with(folder))
                     && !inside(folder)
-                    && writable(folder.parent())
+                    && changeable(folder.parent())
             })
             .map(Path::to_owned)
             .collect();
@@ -813,13 +994,39 @@ impl Walk<'_> {
     }
 }
 
-/// Whether the user may change the entries of `folder`: rename or remove what is in it.
-fn writable(folder: Option<&Path>) -> bool {
-    let Some(c) = folder.and_then(|f| CString::new(f.as_os_str().as_bytes()).ok()) else {
+/// Whether the user may change the entries of `folder`: rename or remove what is in it, now or
+/// once they gave themselves the right (a folder of theirs they cannot write yet).
+fn changeable(folder: Option<&Path>) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let Some(folder) = folder else {
+        return false;
+    };
+    // SAFETY: getuid cannot fail.
+    let uid = unsafe { libc::getuid() };
+    std::fs::metadata(folder).is_ok_and(|meta| meta.uid() == uid) || writable(folder)
+}
+
+/// Whether the user may write `path` now.
+fn writable(path: &Path) -> bool {
+    let Ok(c) = CString::new(path.as_os_str().as_bytes()) else {
         return false;
     };
     // SAFETY: a valid C string.
     unsafe { libc::access(c.as_ptr(), libc::W_OK) == 0 }
+}
+
+/// Whether others write in `path` too: it is everyone's (world-writable, or sticky as `/tmp`),
+/// or another's that the user may write. A read-only mount of it would take it from them, in
+/// every command Flottille confines. Another's that the user cannot write is no one's to change
+/// in a command of theirs: read-only, it changes nothing.
+fn shared(path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    // SAFETY: getuid cannot fail.
+    let uid = unsafe { libc::getuid() };
+    meta.mode() & 0o1002 != 0 || (meta.uid() != uid && writable(path))
 }
 
 /// An SSH configuration file's text: None when it is not there or cannot be read. Opened without
@@ -998,7 +1205,7 @@ mod tests {
 
     /// [`Ssh`] of the one home `home`.
     fn walked(home: &Path) -> Ssh {
-        let homes = [home.to_owned()];
+        let homes = real_homes(std::iter::once(home.to_owned()));
         let mut walk = Walk {
             homes: &homes,
             ..Walk::default()
