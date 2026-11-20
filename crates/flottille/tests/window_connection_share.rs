@@ -464,7 +464,20 @@ fn share_a_connection_of_the_machine_shown(cx: &mut TestAppContext) {
                 (s.servers().map(|servers| servers.len()), s.on_count())
             });
             let machine = shell.read_with(cx, |s, _| s.machine_shown());
-            eprintln!("DIAG {now}: machine {machine:?} listed {listed:?} on {on:?}");
+            let ids: Vec<_> = [
+                "connections-switch",
+                "connection-servers",
+                "connection-blocks",
+                "connection-list-block",
+                "connection-list",
+                "connection-item-notes",
+                "connection-notes",
+                "connection-problem",
+            ]
+            .into_iter()
+            .map(|id| (id, present(cx, id), shown(cx, id), height(cx, id)))
+            .collect();
+            eprintln!("DIAG {now}: machine {machine:?} listed {listed:?} on {on:?} {ids:?}");
         }
         present(cx, "connection-notes")
     });
