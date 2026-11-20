@@ -1042,8 +1042,10 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   its notifications read; **Mark all read** marks every one; an empty state says "No
   notifications." The bell's badge counts what is unread, and the panel says it apart, what needs
   the user (a request, a question, a vault entry) and the rest: `2 need you · 5 new`. Opening a
-  session marks its notifications read, and what arrives in the session that is open is read at
-  once, it being in sight; a request or a question answered anywhere (the window, the command line,
+  session marks its notifications read; what arrives in the session that is open stays unread
+  until the user opens it again, clicks the row or marks all read, the window being perhaps open
+  with nobody looking. A row answered says so (`Request #3 answered`), its glyph cross-fading to a
+  check; a request or a question answered anywhere (the window, the command line,
   an agent that holds it) is resolved, and so read. A row read or unread fades between its two
   looks, a row arriving unfolds and one forgotten folds away. The centre keeps 30 days, or 1,000,
   whichever is less; a second window shows the same list and the same marks, following

@@ -2639,13 +2639,16 @@ that tell: the daemon says it, so no client keeps a list of kinds.
 | `paused` | `A session stopped waking` | | the pause resumed (`session.following_resumed`) |
 | `unchecked`, `put_back` | what the daemon says of a run's agent folders | where it ran | never |
 | `dropped` | `A message for another machine was dropped` | for whom and why | never |
-| an extension's | `Needs you` | what the extension says | never |
+| an extension's (its name: `connections`) | `From connections` | what the extension says | never: it tells, and counts with the new ones, no event of the extension saying it is over |
 
 The reports, questions and failures of a child go to its parent and are not here, as in the inbox.
 Every kind of the inbox and every one the window's bell rang before is a notification. A row is
 kept 30 days, or the newest 1,000, whichever is less, and is made once for what it is about: the
 events read twice change nothing. The centre starts with the events that come after it: what was
-told before the daemon kept it is in the inbox, not in rows. Without `after`, the last `limit` (100
+told before the daemon kept it is in the inbox, not in rows, but what still waited for the user at
+the upgrade (a request held for them, a vault entry asked for, a root's unanswered question) is a
+row from the first keep. One keep runs at a time, and its cursor into the events only moves
+forward; a row the store failed to write is tried again at the next keep. Without `after`, the last `limit` (100
 by default); with it, the first `limit` numbered after it; `unread` leaves out the rows read. The
 `unread` count of the answer is of all unread rows: those that need the user, and the others.
 
@@ -2653,8 +2656,9 @@ by default); with it, the first `limit` numbered after it; `unread` leaves out t
 
 `{"ids": [...]}`, `{"session": "<root>"}` or `{"all": true}`: exactly one of the three. Marks those
 notifications read (what is read already keeps the time it was read) and answers `{"read": [ids]}`,
-the numbers that changed. The window marks a session's notifications read when it opens the
-session, as it did the bell's items. Reading a request does not answer it: it stays `resolved:
+the numbers that changed. The window marks a session's notifications read when the user opens the
+session or clicks a row; what arrives in the session already open stays unread, the window being
+perhaps open with nobody looking. Reading a request does not answer it: it stays `resolved:
 false` until it is decided. Every change is told by the event `notifications.changed`
 (`docs/events.md`), so that every client follows.
 
