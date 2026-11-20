@@ -1119,14 +1119,10 @@ impl TasksSection {
                     ))
                     .child(Section::new("task-section-agents", "Agents").child(ask)),
             )
-            .child(problem_line(
-                "task-error",
-                self.form_error.clone(),
-                space::LG,
-                cx,
-            ))
             .test_support();
-        modal.child(body).action(
+        // What a modal keeps in sight is a column without a gap: nothing to fold but the line.
+        let error = problem_line("task-error", self.form_error.clone(), px(0.), cx);
+        modal.child(body).kept(error).action(
             Button::primary("save-task", if original.is_some() { "Save" } else { "Add" })
                 .disabled(self.saving)
                 .on_click(cx.listener(|this, _, _, cx| this.save(cx))),
