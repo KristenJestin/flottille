@@ -170,6 +170,8 @@ impl Jira {
                                 user.as_object_mut().unwrap().remove("canSee");
                                 user
                             })
+                            // Jira answers at most `maxResults` (50 when none is sent).
+                            .take(query("maxresults").parse().unwrap_or(50))
                             .collect();
                         ("200 OK", Value::Array(found).to_string())
                     }
@@ -760,6 +762,15 @@ fn people_site() -> Jira {
     ]))
 }
 
+/// `script`, and the newest work items of the project assigned to `assignee`.
+fn script_assigned(user: &User, assignee: Value) {
+    user.acli_script(json!({"items": {"ABC-1": {"key": "ABC-1",
+        "self": format!("https://{SITE}/rest/api/3/issue/1"),
+        "fields": {"summary": "The login fails", "status": {"name": "To Do"},
+            "comment": {"comments": []}}}},
+        "search": [{"key": "ABC-1", "fields": {"assignee": assignee}}]}));
+}
+
 /// What `people` answers, from the agent's side.
 fn people_said(mcp: &Mcp, args: Value) -> String {
     let answer = mcp.call("tickets", args);
@@ -776,7 +787,7 @@ fn people_finds_on_the_site_someone_never_seen() {
     let said = people_said(&mcp, json!({"action": "people", "query": "ben"}));
 
     assert!(said.contains(&format!("- Ben Sample ({BEN})")), "{said}");
-    let asked = sent(&jira, "GET", "user/search?query=ben");
+    let asked = sent(&jira, "GET", "user/search?query=ben&maxResults=50");
     assert_eq!(asked.len(), 1, "{:?}", jira.received());
     // Signed as the entry's account, and the secret is in nothing the agent reads or `acli` got.
     assert_eq!(asked[0].authorization, basic());
@@ -801,7 +812,16 @@ fn people_finds_on_the_site_someone_never_seen() {
 #[test]
 fn people_on_a_ticket_lists_only_who_can_see_it() {
     let jira = people_site();
-    let (_, mcp) = signed_in(&jira, json!([]));
+    // The newest work items are assigned to someone the site's answer for ABC-1 leaves out:
+    // they are not who can see it, and must not be listed under that header.
+    let user = user(&jira);
+    jira_with(&user, Some("jira-time"));
+    entry(&user);
+    script_assigned(
+        &user,
+        json!({"accountId": "5b10ac8d82e05b22cc7d4ef7", "displayName": "Ana Outsider"}),
+    );
+    let mcp = root_in(&user);
 
     let said = people_said(
         &mcp,
@@ -814,7 +834,7 @@ fn people_on_a_ticket_lists_only_who_can_see_it() {
         sent(
             &jira,
             "GET",
-            "user/viewissue/search?issueKey=ABC-1&query=ana"
+            "user/viewissue/search?issueKey=ABC-1&query=ana&maxResults=50"
         )
         .len(),
         1,
@@ -824,6 +844,50 @@ fn people_on_a_ticket_lists_only_who_can_see_it() {
     // Without a ticket the site's whole search answers: the outsider is found.
     let said = people_said(&mcp, json!({"action": "people", "query": "ana"}));
     assert!(said.contains("- Ana Outsider"), "{said}");
+}
+
+#[test]
+fn people_found_on_the_site_are_said_to_be_named_by_account_id() {
+    let jira = people_site();
+    let (_, mcp) = signed_in(&jira, json!([]));
+
+    let said = people_said(&mcp, json!({"action": "people", "query": "ben"}));
+
+    // Ben is known to the site alone: `assignee` finds a display name among the assignees of the
+    // newest work items only, so the answer must not promise it for him.
+    assert!(!said.contains("who can be named as an assignee"), "{said}");
+    assert!(said.contains("as an assignee or in a mention"), "{said}");
+    assert!(
+        said.contains("not for people found only on the site"),
+        "{said}"
+    );
+    assert!(said.contains("\"assignee\": \"<account id>\""), "{said}");
+}
+
+#[test]
+fn a_full_page_of_the_site_is_said_to_be_cut() {
+    let users: Vec<Value> = (0..50)
+        .map(|n| {
+            json!({"accountId": format!("5b10ac8d82e05b22cc7d{n:04x}"),
+                "displayName": format!("Sam Number{n:02}"), "active": true})
+        })
+        .collect();
+    let jira = Jira::with_users(Value::Array(users));
+    let (_, mcp) = signed_in(&jira, json!([]));
+
+    let said = people_said(&mcp, json!({"action": "people", "query": "sam"}));
+
+    assert_eq!(
+        sent(&jira, "GET", "user/search?query=sam&maxResults=50").len(),
+        1,
+        "{:?}",
+        jira.received()
+    );
+    assert!(said.contains("50 in "), "{said}");
+    assert!(said.contains("narrow with query"), "{said}");
+    // A page that is not full says nothing of it.
+    let said = people_said(&mcp, json!({"action": "people", "query": "number07"}));
+    assert!(!said.contains("narrow with query"), "{said}");
 }
 
 #[test]
