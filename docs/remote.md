@@ -750,13 +750,13 @@ As built (#818):
   the user, as pc is offline, …`; a held request the same, `Waiting for the user's approval`.
 - A child's request held for its parent on another machine is told there as `child-asks`, naming
   the machine it waits on: the parent answers with `approval_answer {request_id, machine, decision,
-  why}`, a `call` checked there against the launch (the parent that started that child, a request
-  of that child's tree it holds, pending). `deny` refuses it, the child told why; `forward` gives
+  why}`, a `call` that names no launch: that machine finds it from the request, the live launch by
+  that parent of the child whose tree asked it, and checks the request is held by it and pending. `deny` refuses it, the child told why; `forward` gives
   it to the user of that machine. A decision other than `deny` or `forward` is refused on both
   machines: no agent, and no machine, allows a request.
 - A led session's pilot of another machine answers with `session_send`, as here: the message is
   stored under an id naming the pilot (`session-<pilot>-<launch>-<call>`), which answers the
-  questions asked of it. It is woken at the turn's end (`session-turn-ended`, `it asked you a
+  questions asked of it, even while it still waits there, queued, the session busy. It is woken at the turn's end (`session-turn-ended`, `it asked you a
   question`), its questions said whole.
 - When the pilot's machine links again, each led session it leads here sends it one
   `session-meanwhile` delivery: each question it asked the user while that machine was off, with
