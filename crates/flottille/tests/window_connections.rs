@@ -1003,7 +1003,7 @@ fn the_form_scrolls_once_in_the_dialog_and_its_footer_stays_in_view(cx: &mut Tes
     });
     settle(cx);
     assert_eq!(bounds(cx, "save-connection"), save, "Save stays");
-    let last = bounds(cx, "connection-headed");
+    let last = bounds(cx, "connection-headed-label");
     assert!(
         last.bottom() <= save.top() && last.top() >= title.bottom(),
         "the last switch is now between the title and the buttons: {last:?}"
@@ -1034,9 +1034,9 @@ fn the_form_says_what_is_required_and_what_is_optional_once(cx: &mut TestAppCont
     };
     let line = bounds(cx, "connection-optional");
     for required in [
-        "connection-name-field",
+        "connection-name-field-label",
         "connection-reach",
-        "connection-command-field",
+        "connection-command-field-label",
     ] {
         assert!(
             bounds(cx, required).bottom() <= line.top(),
@@ -1044,9 +1044,9 @@ fn the_form_says_what_is_required_and_what_is_optional_once(cx: &mut TestAppCont
         );
     }
     for optional in [
-        "connection-variables-field",
-        "connection-limits-field",
-        "connection-headed",
+        "connection-variables-field-label",
+        "connection-limits-field-label",
+        "connection-headed-label",
     ] {
         assert!(
             bounds(cx, optional).top() >= line.bottom(),

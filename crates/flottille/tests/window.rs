@@ -9568,18 +9568,18 @@ fn the_task_dialog_says_what_is_required_and_what_is_optional_once(cx: &mut Test
     );
     cx.update(|window, _| {
         let line = window.find("task-optional").bounds();
-        for required in ["task-name-field", "task-line-field"] {
+        for required in ["task-name-field-label", "task-line-field-label"] {
             assert!(
                 window.find(required).bounds().bottom() <= line.top(),
                 "{required}"
             );
         }
         for optional in [
-            "task-section-kind",
+            "task-section-kind-title",
             "task-needs",
-            "task-section-ready",
-            "task-section-address",
-            "task-section-agents",
+            "task-section-ready-title",
+            "task-section-address-title",
+            "task-section-agents-title",
         ] {
             assert!(
                 window.find(optional).bounds().top() >= line.bottom(),

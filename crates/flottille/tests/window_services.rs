@@ -17,8 +17,9 @@ use flottille_window::Shell;
 use flottille_window::project_settings::{ProjectSettingsPage, Reveal};
 use flottille_window::services::ServicesPage;
 use gpui_design_system::omarchy::Environment;
+use gpui_kit::base::input::InputState;
 use gpui_kit::test::TestWindowExt;
-use gpui_kit::{Entity, TestAppContext, VisualTestContext, px, size};
+use gpui_kit::{Entity, Focusable as _, TestAppContext, VisualTestContext, px, size};
 use serde_json::json;
 
 /// A user with the fake server in a folder of the test's own, and no project.
@@ -184,22 +185,37 @@ fn click(id: &str, cx: &mut VisualTestContext) {
     cx.update(|window, cx| window.click(id, cx));
 }
 
-/// Opens the menu of a picker of chips, as a click on its field does: the caret goes in it.
-fn open_picker(picker: &str, cx: &mut VisualTestContext) {
-    click(&format!("{picker}-search"), cx);
+/// Opens the menu of a picker of chips, as a click in its field does: the caret is in it and the
+/// text changes, which opens the menu on every item.
+fn open_picker(search: &Entity<InputState>, cx: &mut VisualTestContext) {
+    let search = search.clone();
+    // The caret leaves the field and comes back: that is what opens the menu.
+    cx.update(|window, cx| window.blur(cx));
+    settle(cx);
+    cx.update(|window, cx| {
+        let focus = search.focus_handle(cx);
+        window.focus(&focus, cx);
+    });
+    settle(cx);
+}
+
+/// A click outside the menu of a picker closes it, as it does for a person, and does no more.
+fn close_picker(prefix: &str, cx: &mut VisualTestContext) {
+    click(&format!("{prefix}-modal-title"), cx);
     settle(cx);
 }
 
 /// Adds `name` to the needs of the form `prefix` (`service` or `task`) with its picker.
-fn add_need(prefix: &str, name: &str, cx: &mut VisualTestContext) {
-    let picker = format!("{prefix}-needs");
-    open_picker(&picker, cx);
-    click(&format!("{picker}-item-{name}"), cx);
+fn add_need(prefix: &str, search: &Entity<InputState>, name: &str, cx: &mut VisualTestContext) {
+    open_picker(search, cx);
+    click(&format!("{prefix}-needs-item-{name}"), cx);
     settle(cx);
+    close_picker(prefix, cx);
 }
 
 /// Takes `name` out of the needs of the form `prefix` with the remove button of its chip.
 fn drop_need(prefix: &str, name: &str, cx: &mut VisualTestContext) {
+    close_picker(prefix, cx);
     click(&format!("{prefix}-needs-chip-{name}-remove"), cx);
     settle(cx);
 }
@@ -398,11 +414,13 @@ fn a_service_is_added_and_edited_from_the_page(cx: &mut TestAppContext) {
         });
     });
     // The services it may need: the others, never itself.
-    open_picker("service-needs", cx);
+    let search = form.read_with(cx, |f, _| f.needs_field().unwrap().clone());
+    open_picker(&search, cx);
     assert!(has("service-needs-item-mongo", cx));
     assert!(!has("service-needs-item-auth", cx), "never itself");
-    add_need("service", "mongo", cx);
+    add_need("service", &search, "mongo", cx);
     click("service-ready-switch", cx);
+    settle(cx);
     click("service-ready-line", cx);
     settle(cx);
     cx.update(|window, cx| ready.update(cx, |f, cx| f.set_value("listening on", window, cx)));
@@ -432,12 +450,13 @@ fn a_service_is_added_and_edited_from_the_page(cx: &mut TestAppContext) {
         form.read_with(cx, |f, _| f.is_open())
     });
     settle(cx);
-    open_picker("service-needs", cx);
+    open_picker(&search, cx);
     assert!(!has("service-needs-item-auth", cx), "never itself");
     assert!(
         has("service-needs-chip-mongo", cx),
         "the need it has is a chip"
     );
+    close_picker("service", cx);
     click("service-flag-ask_before_running", cx);
     cx.update(|window, cx| {
         line.update(cx, |f, cx| {
@@ -553,7 +572,8 @@ fn a_task_s_needs_are_chosen_from_the_services(cx: &mut TestAppContext) {
     until(&shell, cx, "the form says the services are read", |cx| {
         has("task-needs-search", cx) && !has("task-no-needs", cx)
     });
-    open_picker("task-needs", cx);
+    let search = section.read_with(cx, |s, _| s.needs_field().unwrap().clone());
+    open_picker(&search, cx);
     assert!(has("task-needs-item-mongo", cx) && has("task-needs-item-redis", cx));
     let (name, line) = section.read_with(cx, |s, _| {
         (
@@ -565,7 +585,7 @@ fn a_task_s_needs_are_chosen_from_the_services(cx: &mut TestAppContext) {
         name.update(cx, |f, cx| f.set_value("api", window, cx));
         line.update(cx, |f, cx| f.set_value("git status", window, cx));
     });
-    add_need("task", "redis", cx);
+    add_need("task", &search, "redis", cx);
     click("save-task", cx);
     until(&shell, cx, "the task is listed", |cx| {
         section.read_with(cx, |s, _| {
@@ -589,7 +609,7 @@ fn a_task_s_needs_are_chosen_from_the_services(cx: &mut TestAppContext) {
     });
     settle(cx);
     drop_need("task", "redis", cx);
-    add_need("task", "mongo", cx);
+    add_need("task", &search, "mongo", cx);
     click("save-task", cx);
     until(&shell, cx, "the file says so", |_| {
         std::fs::read_to_string(user.project_file("app"))
@@ -775,7 +795,9 @@ fn a_dialog_with_many_services_stays_short(cx: &mut TestAppContext) {
     assert_eq!(form_height(cx), with_twelve, "the body is as tall with 40");
 
     // All forty are offered, in a menu that scrolls by itself.
-    open_picker("service-needs", cx);
+    let form = page.read_with(cx, |p, _| p.form().clone());
+    let search = form.read_with(cx, |f, _| f.needs_field().unwrap().clone());
+    open_picker(&search, cx);
     assert!(has("service-needs-item-svc-00", cx));
     let (menu, window_height) = cx.update(|window, _| {
         (
@@ -842,8 +864,11 @@ fn a_dialog_footer_stays_in_view(cx: &mut TestAppContext) {
 
     // A refusal is above the buttons, in sight, wherever the body was scrolled to.
     click("save-service", cx);
+    let form = page_of(&shell, cx)
+        .unwrap()
+        .read_with(cx, |p, _| p.form().clone());
     until(&shell, cx, "the daemon refuses an empty form", |cx| {
-        has("service-error", cx)
+        form.read_with(cx, |f, _| f.form_error().is_some())
     });
     settle(cx);
     let error = bounds("service-error", cx);
@@ -877,18 +902,18 @@ fn the_service_dialog_says_what_is_required_and_what_is_optional_once(cx: &mut T
         cx.update(|window, _| window.find(id).bounds())
     };
     let line = top("service-optional", cx);
-    for required in ["service-name-field", "service-line-field"] {
+    for required in ["service-name-field-label", "service-line-field-label"] {
         assert!(
             top(required, cx).bottom() <= line.top(),
             "{required} is above the line"
         );
     }
     for optional in [
-        "service-folder-field",
+        "service-folder-field-label",
         "service-needs",
-        "service-section-ready",
-        "service-section-address",
-        "service-section-agents",
+        "service-section-ready-title",
+        "service-section-address-title",
+        "service-section-agents-title",
     ] {
         assert!(
             top(optional, cx).top() >= line.bottom(),
@@ -929,14 +954,19 @@ fn the_ready_and_address_fields_of_a_service_unfold_behind_their_switches(cx: &m
     }
     // Turned on, the kinds unfold and the first is chosen, its field under it.
     click("service-ready-switch", cx);
+    settle(cx);
     assert!(has("service-ready-line", cx) && has("service-ready-line-block", cx));
     click("service-ready-url", cx);
+    settle(cx);
     assert!(has("service-ready-url-block", cx) && !has("service-ready-line-block", cx));
     click("service-url-switch", cx);
+    settle(cx);
     assert!(has("service-url-address-block", cx));
     // Turned off, they fold away: nothing said.
     click("service-ready-switch", cx);
+    settle(cx);
     click("service-url-switch", cx);
+    settle(cx);
     assert!(!has("service-ready-url-block", cx) && !has("service-url-address-block", cx));
     assert_eq!(pending_frames(cx), 0, "nothing is redrawn at rest");
 }
@@ -964,7 +994,8 @@ fn adding_and_removing_a_need_with_the_picker(cx: &mut TestAppContext) {
     assert!(!has("service-needs-count", cx));
 
     // The menu offers each service with its line; one added is a chip, a count, and leaves it.
-    open_picker("service-needs", cx);
+    let search = form.read_with(cx, |f, _| f.needs_field().unwrap().clone());
+    open_picker(&search, cx);
     assert!(has("service-needs-item-mongo", cx) && has("service-needs-item-redis", cx));
     click("service-needs-item-mongo", cx);
     settle(cx);
@@ -977,7 +1008,6 @@ fn adding_and_removing_a_need_with_the_picker(cx: &mut TestAppContext) {
     );
 
     // Typing narrows the menu; chips keep the order they were added in.
-    let search = form.read_with(cx, |f, _| f.needs_field().unwrap().clone());
     cx.update(|window, cx| search.update(cx, |f, cx| f.set_value("red", window, cx)));
     settle(cx);
     assert!(has("service-needs-item-redis", cx) && !has("service-needs-item-auth", cx));
@@ -999,8 +1029,9 @@ fn adding_and_removing_a_need_with_the_picker(cx: &mut TestAppContext) {
         ["mongo", "auth"]
     );
     assert_eq!(label_of("service-needs-count", cx).as_deref(), Some("2"));
-    open_picker("service-needs", cx);
+    open_picker(&search, cx);
     assert!(has("service-needs-item-redis", cx));
+    close_picker("service", cx);
 
     // Saved as the file says them.
     let (name, line) = form.read_with(cx, |f, _| {
@@ -1075,8 +1106,9 @@ fn adding_and_removing_a_need_with_the_picker_of_a_task(cx: &mut TestAppContext)
     });
 
     assert!(has("task-needs-none", cx));
-    add_need("task", "redis", cx);
-    add_need("task", "mongo", cx);
+    let search = section.read_with(cx, |s, _| s.needs_field().unwrap().clone());
+    add_need("task", &search, "redis", cx);
+    add_need("task", &search, "mongo", cx);
     assert!(has("task-needs-chip-redis", cx) && has("task-needs-chip-mongo", cx));
     assert_eq!(label_of("task-needs-count", cx).as_deref(), Some("2"));
     assert_eq!(

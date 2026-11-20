@@ -15,7 +15,7 @@ use flottille_window::tree::session_id;
 use gpui_design_system::omarchy::Environment;
 use gpui_design_system::toggle_id;
 use gpui_kit::test::TestWindowExt;
-use gpui_kit::{Entity, TestAppContext, VisualTestContext, px, size};
+use gpui_kit::{Entity, Focusable as _, TestAppContext, VisualTestContext, px, size};
 use serde_json::json;
 
 /// A user whose fake agent answers "ok", with the project `app` over a throwaway repository and
@@ -1026,16 +1026,29 @@ fn the_window_draws_no_frame_at_rest_on_a_service_dialog_with_chips(cx: &mut Tes
     });
     settle(&shell, cx);
 
-    // The dialog opened, two needs chosen with the picker, the caret back in the name field.
+    // The dialog opened and two needs chosen with the picker.
     cx.update(|window, cx| window.click("add-service", cx));
     settle(&shell, cx);
+    let search = shell.read_with(cx, |s, cx| {
+        let page = s.main().read(cx).services_page().unwrap().clone();
+        let form = page.read(cx).form().clone();
+        form.read(cx).needs_field().unwrap().clone()
+    });
     for name in ["mongo", "redis"] {
-        cx.update(|window, cx| window.click("service-needs-search", cx));
+        cx.update(|window, cx| window.blur(cx));
+        settle(&shell, cx);
+        cx.update(|window, cx| {
+            let focus = search.focus_handle(cx);
+            window.focus(&focus, cx);
+        });
         settle(&shell, cx);
         cx.update(|window, cx| window.click(format!("service-needs-item-{name}"), cx));
         settle(&shell, cx);
     }
-    cx.update(|window, cx| window.click("service-name", cx));
+    // A click outside the menu closes it; no field keeps the caret, which would blink.
+    cx.update(|window, cx| window.click("service-modal-title", cx));
+    settle(&shell, cx);
+    cx.update(|window, cx| window.blur(cx));
     settle(&shell, cx);
     cx.update(|window, _| {
         assert!(window.find("service-needs-chip-mongo").visible());
