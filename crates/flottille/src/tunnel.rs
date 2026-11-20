@@ -664,7 +664,7 @@ fn run_reached(
         Some(port) => {
             return Err(format!(
                 "refused: port {port} is none of run {run}'s: {}",
-                reached.said(&run)
+                reached.said(run)
             ));
         }
         None => reached
