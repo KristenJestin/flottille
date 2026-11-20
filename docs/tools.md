@@ -1589,13 +1589,18 @@ passes' instructions, and the pilot's first message, say to run none of it (no t
 script). The gate holds for the user, in every mode, Full and Auto included, a `run` (or a task)
 whose folder is in the copy of a pull request and that does more than read: base, its card saying
 `it runs the code of pull request #7, in the copy its review reads: only the user lets a review
-run it, in every mode, Full included`, as `worklog_delete` is held whatever the mode. A line the rules know to only read (`git
-diff`, `git log`, `git show`, `cat`) passes as it does elsewhere: the review reads the pull
-request with them. The copy itself is checked out with none of the user's filters (Large File
-Storage included, whose `.lfsconfig` the pull request would choose): its files are written as its
-commits hold them. The agents of the review see the copy as their place's one repository, `.`, at
-its top: the files it changes are said from there, and naming a repository of the project's
-reaches nothing of the user's checkout.
+run it, in every mode, Full included`, as `worklog_delete` is held whatever the mode. A line the
+rules know to only read (`git diff`, `git log`, `git show`, `cat`) passes as it does elsewhere:
+the review reads the pull request with them. A piped read (`git diff | head`) or one with a
+configuration of its own (`git -c … diff`) is not known to only read: it is held for the user, by
+design. The hold covers the review's copy only: a pilot that clones the pull request elsewhere is
+stopped by its instructions, not by the gate. The copy itself is checked out with none of the
+user's filters (Large File Storage included, whose `.lfsconfig` the pull request would choose):
+its files are written as its commits hold them, and no git the daemon runs in the copy runs a
+filter of the user's either (the files are listed commit to commit, the status is read with the
+filters off). The agents of the review see the copy as their place's one repository, `.`, at its
+top: the files it changes are said from there, and naming a repository of the project's reaches
+nothing of the user's checkout.
 
 ## The tree's tools
 
