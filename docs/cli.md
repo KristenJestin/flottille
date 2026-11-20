@@ -386,10 +386,10 @@ Removes an address declared by hand, and tells the machines linked to this one.
 
 ## Tunnels
 
-### `flottille --machine <name> tunnel open <run> [--port <port>] [--json]`
+### `flottille tunnel open <run> [--port <port>] [--json]`
 
-Reaches a run's port on another machine on a local port (`docs/remote.md`, "Tunnels"). The machine
-checks that the run is one it started and still runs, and that the port is the one the run
+Reaches a run's port on another machine on a local port, so it takes `--machine <name>`
+(`docs/remote.md`, "Tunnels"). The machine checks that the run is one it started and still runs, and that the port is the one the run
 reports as its address or one its processes listen on (`--port` says which when it listens on
 several); any other port is refused. This machine listens on `127.0.0.1` (the run's port when it is
 free, another otherwise), prints where, and keeps the tunnel open until the run ends or you press
