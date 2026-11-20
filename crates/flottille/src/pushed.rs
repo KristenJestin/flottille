@@ -864,6 +864,47 @@ pub async fn ssh_command(folder: &Path) -> Result<OsString, String> {
     }
 }
 
+/// The user's own git settings as they apply to the repository at `folder` (an `includeIf` for
+/// its folder or its branch), read from the files found at the daemon's start alone, in the
+/// order git reads them: what a push the gate let through is given of them, since it runs from a
+/// folder of the daemon's (`push_folder`), where git would read them otherwise. A file that is
+/// gone is none, as git reads it.
+pub async fn user_settings(folder: &Path) -> Result<Vec<(String, String)>, String> {
+    let mut settings = Vec::new();
+    for file in found()
+        .map(|found| found.git.as_slice())
+        .unwrap_or_default()
+    {
+        if std::fs::metadata(file).is_err() {
+            continue;
+        }
+        let read = crate::git::run_with(
+            folder,
+            &["config", "--global", "--includes", "--null", "--list"],
+            crate::git::Class::Read,
+            &[("GIT_CONFIG_GLOBAL", file.as_os_str())],
+        )
+        .await?;
+        if !read.success {
+            return Err(format!(
+                "the user's git settings in {} cannot be read: {}",
+                file.display(),
+                read.stderr.trim()
+            ));
+        }
+        // What they include is listed already: named again, it would be read twice.
+        settings.extend(
+            crate::push_folder::listed_settings(&read.stdout)
+                .into_iter()
+                .filter(|(key, _)| {
+                    key != "include.path"
+                        && !(key.starts_with("includeif.") && key.ends_with(".path"))
+                }),
+        );
+    }
+    Ok(settings)
+}
+
 /// The user's own `ssh` command, as a push may run it: `ssh` named alone is the one found at the
 /// start; another program must be in `~/.ssh` or only root's to change. No `-F` (another
 /// configuration, but `/dev/null`), no `-I` (a library), no option that runs a program, shares a

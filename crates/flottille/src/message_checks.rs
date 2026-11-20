@@ -222,8 +222,15 @@ pub async fn push(
     // Read before any dry run: an option given `--dry-run` as its value would make it the push.
     let said = read(&rest[..end], &PUSH)
         .map_err(|why| unknown(format!("its options cannot be read: {why}")))?;
+    // What is read of the repository is read in the sandbox, from the repository itself: the
+    // folder a push outside it runs from (`push_folder`) is out of a confined command's reach.
+    let read_env: Env = env
+        .iter()
+        .filter(|(name, _)| !(outside && (*name == "GIT_DIR" || *name == "GIT_OBJECT_DIRECTORY")))
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect();
     if !checks.is_empty() {
-        recursion(git, said.submodules, at.folder, env)
+        recursion(git, said.submodules, at.folder, &read_env)
             .await
             .map_err(unknown)?;
     }
@@ -234,10 +241,19 @@ pub async fn push(
     if checks.is_empty() {
         return Ok(());
     }
-    for sha in sent(git, &tried, at.folder, env).await.map_err(unknown)? {
-        let object = read_git(git, &["cat-file", "commit", &sha], at.folder, env, None)
-            .await
-            .map_err(unknown)?;
+    for sha in sent(git, &tried, at.folder, &read_env)
+        .await
+        .map_err(unknown)?
+    {
+        let object = read_git(
+            git,
+            &["cat-file", "commit", &sha],
+            at.folder,
+            &read_env,
+            None,
+        )
+        .await
+        .map_err(unknown)?;
         let message = object.split_once("\n\n").map_or("", |(_, message)| message);
         let subject = crate::mcp::masked(message.lines().next().unwrap_or_default(), at.place);
         let short = &sha[..12.min(sha.len())];
