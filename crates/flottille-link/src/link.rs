@@ -93,6 +93,8 @@ pub enum MachineMessage {
     /// A place's code on its way, or a session's new commits on their way back (`docs/remote.md`,
     /// "What travels").
     Git(Git),
+    /// A vault entry the user shared with the receiver (`docs/remote.md`, "Vault entries").
+    Share(Share),
 }
 
 /// The `git` messages: what the receiver has, a bundle offered, its bytes, the workspace made of
@@ -156,6 +158,41 @@ pub struct GitPlace {
     /// The repositories of the place, by their paths in the project, each received for this
     /// launch.
     pub repositories: Vec<String>,
+}
+
+/// A vault entry the user shared: their device's signed `vault.share`, which the receiver checks
+/// itself (a machine alone shares nothing), the entry's metadata, and its secret.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Share {
+    /// The user's request, as their device signed it for the machine that holds the entry.
+    pub request: Value,
+    /// The entry's metadata, as the holder's vault lists it.
+    pub entry: Value,
+    pub secret: Secret,
+}
+
+/// A secret on its way to another machine's keyring: zeroized when dropped, and never in its
+/// `Debug`.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Secret(pub Zeroizing<String>);
+
+impl fmt::Debug for Secret {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Secret([masked])")
+    }
+}
+
+impl Serialize for Secret {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for Secret {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Secret, D::Error> {
+        Ok(Secret(Zeroizing::new(String::deserialize(deserializer)?)))
+    }
 }
 
 /// The answer to one message.
@@ -662,8 +699,7 @@ impl Link {
 
     /// Sends `message`, and waits for its answer.
     pub async fn send(&self, message: &Message) -> Result<Value, LinkError> {
-        self.send_raw(&serde_json::to_vec(message).expect("a message is JSON"))
-            .await
+        self.send_raw(&framed(message)).await
     }
 
     /// Sends a frame as it is. What it holds is the receiver's to judge: a peer is never trusted
@@ -709,15 +745,19 @@ impl Link {
     pub async fn next(&self) -> Option<Received> {
         loop {
             match self.conn.next_stream().await? {
-                Inbound::Frame(bytes, reply) => match self.judge(&bytes) {
-                    Ok(message) => {
-                        return Some(Received {
-                            message,
-                            reply: Replying::Frame(reply),
-                        });
+                Inbound::Frame(bytes, reply) => {
+                    // A frame may carry a vault entry's secret (`share`): wiped once it is read.
+                    let bytes = Zeroizing::new(bytes);
+                    match self.judge(&bytes) {
+                        Ok(message) => {
+                            return Some(Received {
+                                message,
+                                reply: Replying::Frame(reply),
+                            });
+                        }
+                        Err(reason) => reply.send(&answer(Err(reason))).await,
                     }
-                    Err(reason) => reply.send(&answer(Err(reason))).await,
-                },
+                }
                 // A tunnel's connection (`docs/remote.md`, "Tunnels"), on a client link only.
                 Inbound::Raw(raw, head) => match (self.traffic, tunnel_of(&head)) {
                     (Traffic::Client, Some(id)) => {
@@ -770,6 +810,26 @@ impl Link {
     pub async fn closed(&self) -> String {
         self.lost(self.conn.closed().await).to_string()
     }
+}
+
+/// `message` as a frame, wiped when it is dropped: one may carry a vault entry's secret
+/// (`share`). Sized first, so that no buffer it outgrew is freed with a copy of it.
+fn framed(message: &Message) -> Zeroizing<Vec<u8>> {
+    struct Counted(usize);
+    impl std::io::Write for Counted {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 += bytes.len();
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut counted = Counted(0);
+    serde_json::to_writer(&mut counted, message).expect("a message is JSON");
+    let mut frame = Zeroizing::new(Vec::with_capacity(counted.0));
+    serde_json::to_writer(&mut *frame, message).expect("a message is JSON");
+    frame
 }
 
 impl fmt::Debug for Link {

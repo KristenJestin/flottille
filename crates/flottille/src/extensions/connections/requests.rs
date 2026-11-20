@@ -1689,6 +1689,7 @@ mod tests {
             project: None,
             updated_at: 0,
             bound: None,
+            shared_from: None,
         };
         daemon.write(|store| store.put_vault_entry(&entry)).unwrap();
         let file = || std::fs::read_to_string(dir.path().join("config/extensions.toml")).unwrap();

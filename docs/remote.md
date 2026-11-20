@@ -17,9 +17,10 @@ through the hub: invitations, joining, the four words, adding, renaming and remo
 from the command line (#812), and the user's requests to another machine, signed by the client,
 carried by its daemon and checked by the machine they are for (`--machine`, #813), a place's
 code sent to another machine over the link and its new commits brought back (#815; `agent_launch`
-does not send it yet, #816), and the roles bounding what each device may do, with what each
-runner offers its peers (#862). What is decided is said as such; the defaults taken are in
-"Defaults taken, to confirm"; what is open is in "Open questions". It replaces the proposal of 2026-11-03 (a relay
+does not send it yet, #816), the roles bounding what each device may do, with what each
+runner offers its peers (#862), and a vault entry shared with another machine (#832). What is
+decided is said as such; the defaults taken are in "Defaults taken, to confirm"; what is open is
+in "Open questions". It replaces the proposal of 2026-11-03 (a relay
 every device connects to, on a private network) and the review that put Tailscale and SSH at the
 centre: Flottille stays generic (`AGENTS.md`), and depends on no one network and no account of a
 third party. The user runs one small program of Flottille's, the hub; the data between their
@@ -596,7 +597,7 @@ what it recorded (that this agent of that machine started that session, or is th
 | `deliver` | A delivery for an agent of the receiver: a report, a question, an answer, a request forwarded, `session-turn-ended`, a child's news, as `design.md` §5.2–5.3 make them. |
 | `call` | One of the tree's tools aimed at a session it started: `agent_send`, `agent_status`, `agent_stop`, `session_send`, `session_read`, `approval_answer`. Judged as on one machine. |
 | `capabilities` | What a runner offers: its projects, its agents signed in, its free slots ("Roles"). |
-| `share` | A vault entry or a connection the user shared, signed by their device ("Sharing"). |
+| `share` | A vault entry or a connection the user shared, signed by their device ("Sharing"): `{"request", "entry", "secret"}`, the device's signed `vault.share` as the client wrote it, the entry's metadata, its secret. |
 | `addresses` | Every address the sender may be reached at now: kept for it, so that the two link again without the hub ("The transport"). |
 
 Nothing else: no user method, no `approval.approve`, no `agent.mode`, no `agent.send` as the user, no
@@ -837,14 +838,20 @@ and removes its workspace as today, through `call`.
 
 - **Entry by entry, with consent**: Settings, Vault, an entry's **Share with…** (or `flottille vault
   share <name> --machine <m>`), a signed user request on the machine that holds it. That daemon reads
-  the secret from its keyring and sends it, with the entry's metadata, in a `share` message signed
-  by the device, end to end, to the other runner, which writes it into its own keyring. Never a
+  the secret from its keyring and sends it, with the entry's metadata and the device's signed
+  request, in a `share` message, end to end, to the other runner, which checks that request and
+  the metadata itself, and that a runner's or a controller's machine sent it (never a viewer's),
+  and writes it into its own keyring. **Share with…** lists the runners online. Never a
   file, never an agent, never the store, never an event, never the hub: as `vault.md` says of every
   secret.
 - The copy is marked `shared from pc` on that machine; it is a copy, not kept in sync: sharing again
-  replaces it. A machine with no keyring refuses it, saying so.
+  from the same machine replaces it, never an entry that machine set up itself. A machine with no
+  keyring refuses it, saying so.
 - An entry bound to a use (`for`) keeps it; a `worklog:<project>` entry needs that project on the
   other machine.
+- **Built (#832)**: `vault.share {name, machine}` (`protocol.md`), `flottille vault share <name>
+  --machine <m>`, and Settings, Vault, a row's **Share with…**. How it is checked, and what it
+  leaves where, is `vault.md`, "Shared with another machine".
 
 ### Connections
 

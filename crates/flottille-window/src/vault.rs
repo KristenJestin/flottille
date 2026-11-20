@@ -66,6 +66,8 @@ pub struct VaultEntry {
     /// Its connection's server is given it, which serves every project's agents: the daemon
     /// would refuse it a project.
     pub every_project_only: bool,
+    /// The machine of the user's it was shared from: a copy of that machine's entry.
+    pub shared_from: Option<String>,
 }
 
 impl VaultEntry {
@@ -79,6 +81,7 @@ impl VaultEntry {
             project: text("project"),
             bound: text("for"),
             every_project_only: value["every_project_only"] == true,
+            shared_from: text("shared_from"),
         }
     }
 }
@@ -109,6 +112,17 @@ enum Writing {
 
 /// The id of the entry's dialog, the one the window's host holds.
 pub const MODAL: &str = "vault-modal";
+
+/// The id of the dialog that shares an entry with another machine.
+pub const SHARE_MODAL: &str = "vault-share-modal";
+
+/// What the sharing dialog says of what happens.
+pub const SHARE_SENTENCE: &str = "Its secret goes from this machine's keyring into the keyring of \
+                                  the machine you choose, signed by this device. It is a copy: \
+                                  share it again to replace it.";
+
+/// What the sharing dialog says when no other machine is online.
+pub const NO_MACHINE: &str = "No other machine of yours is online.";
 
 pub struct VaultSection {
     shell: WeakEntity<Shell>,
@@ -149,6 +163,15 @@ pub struct VaultSection {
     every_project: bool,
     /// The entry the confirmation names, kept while it fades away.
     asked: String,
+    /// The entry the sharing dialog is open for.
+    sharing: Option<String>,
+    /// The entry it named, kept while it fades away.
+    shared_name: String,
+    /// The machines it offers: the user's others that are online, `None` until they are read.
+    machines: Option<Result<Vec<String>, String>>,
+    machine_rows: Listing<String>,
+    /// A share the daemon has not answered yet.
+    share_busy: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -191,6 +214,28 @@ pub fn entry_row(id: ElementId, entry: &VaultEntry, cx: &App) -> ListRow {
         (Some(used), None) => format!("For {used} alone"),
         (None, line) => line.unwrap_or_else(|| "No description".to_owned()),
     };
+    let mute = p.mute;
+    // Where a copy came from unfolds under the row's line once the daemon says it.
+    let shared = presence_of(
+        SharedString::from(format!("vault-shared-block-{}", entry.name)),
+        entry
+            .shared_from
+            .as_ref()
+            .map(|machine| SharedString::from(format!("Shared from {machine}"))),
+        {
+            let name = entry.name.clone();
+            move |said| {
+                div()
+                    .id(SharedString::from(format!("vault-shared-{name}")))
+                    .aria_label(said.clone())
+                    .text_size(px(12.5))
+                    .text_color(mute)
+                    .child(said)
+                    .test_support()
+                    .into_any_element()
+            }
+        },
+    );
     ListRow::new(id, SharedString::from(entry.name.clone()))
         .mono()
         .leading(icon(Icon::Key).size(px(14.)).text_color(p.faint))
@@ -201,6 +246,7 @@ pub fn entry_row(id: ElementId, entry: &VaultEntry, cx: &App) -> ListRow {
                 .unwrap_or_else(|| EVERY_PROJECT.to_owned()),
         ))
         .line(SharedString::from(line))
+        .below(shared)
 }
 
 impl VaultSection {
@@ -227,6 +273,11 @@ impl VaultSection {
             request_back: None,
             every_project: false,
             asked: String::new(),
+            sharing: None,
+            shared_name: String::new(),
+            machines: None,
+            machine_rows: Listing::default(),
+            share_busy: false,
             _subscriptions: Vec::new(),
         }
     }
@@ -615,11 +666,158 @@ impl VaultSection {
         cx.notify();
     }
 
+    pub fn is_sharing(&self) -> bool {
+        self.sharing.is_some()
+    }
+
+    /// The machines the sharing dialog offers, once read.
+    pub fn machines(&self) -> Option<&Result<Vec<String>, String>> {
+        self.machines.as_ref()
+    }
+
+    /// Opens the dialog that shares the entry `name` with another machine, and reads which are
+    /// online.
+    pub fn share_with(&mut self, name: &str, cx: &mut Context<Self>) {
+        self.sharing = Some(name.to_owned());
+        self.shared_name = name.to_owned();
+        self.machines = None;
+        self.share_busy = false;
+        perform_later(&self.shell, Command::ShareMachines, cx);
+        self.modals
+            .update(cx, |modals, cx| modals.open(SHARE_MODAL, cx));
+        cx.notify();
+    }
+
+    /// The machines online, as the daemon read them.
+    pub fn share_machines(&mut self, listed: Result<Vec<String>, String>, cx: &mut Context<Self>) {
+        if self.sharing.is_some() {
+            self.machines = Some(listed);
+            cx.notify();
+        }
+    }
+
+    fn share_to(&mut self, machine: &str, cx: &mut Context<Self>) {
+        let Some(name) = self.sharing.clone() else {
+            return;
+        };
+        if self.share_busy {
+            return;
+        }
+        self.share_busy = true;
+        perform_later(
+            &self.shell,
+            Command::VaultShare {
+                name,
+                machine: machine.to_owned(),
+            },
+            cx,
+        );
+        cx.notify();
+    }
+
+    fn close_share(&mut self, cx: &mut Context<Self>) {
+        self.sharing = None;
+        self.share_busy = false;
+        cx.notify();
+    }
+
+    /// The daemon's answer to a share: the dialog closes and a toast says it.
+    pub fn shared(
+        &mut self,
+        name: String,
+        machine: String,
+        refused: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.share_busy = false;
+        self.sharing = None;
+        let said = match refused {
+            None => Toast::success(format!("Entry {name} shared with {machine}"))
+                .detail(format!("Its secret is in the keyring of {machine}.")),
+            Some(why) => Toast::failure(format!("Entry {name} was not shared")).detail(why),
+        };
+        toast(said, cx);
+        cx.notify();
+    }
+
+    /// The dialog that shares an entry: the user's other machines that are online, one row each;
+    /// choosing one shares the entry with it.
+    pub fn share_dialog(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> Modal {
+        let this = cx.entity().downgrade();
+        let modal = Modal::new(
+            SHARE_MODAL,
+            format!("Share the entry {} with…", self.shared_name),
+        )
+        .open(self.sharing.is_some())
+        .on_close(move |_, cx| {
+            this.update(cx, |this, cx| this.close_share(cx)).ok();
+        })
+        .sentence(SHARE_SENTENCE);
+        let names = match &self.machines {
+            Some(Ok(names)) => names.clone(),
+            _ => Vec::new(),
+        };
+        let now = cx.background_executor().now();
+        let reduce = cx.reduce_motion();
+        self.machine_rows.sync(
+            names.into_iter().map(|name| (name.clone(), name)),
+            now,
+            reduce,
+        );
+        let drawn: Vec<_> = self
+            .machine_rows
+            .rows()
+            .map(|row| (row.key.to_owned(), row.placement, row.value.clone()))
+            .collect();
+        let faint = palette(cx).faint;
+        let mut list = ListCard::new("vault-share-machines");
+        for (key, placement, machine) in drawn {
+            let to = machine.clone();
+            let row = ListRow::new(
+                ElementId::Name(format!("share-to-{machine}").into()),
+                SharedString::from(machine.clone()),
+            )
+            .leading(icon(Icon::Service).size(px(14.)).text_color(faint))
+            .line("Online")
+            .on_click(cx.listener(move |this, _, _, cx| this.share_to(&to, cx)));
+            list = list.item(
+                ElementId::Name(format!("share-item-{key}").into()),
+                placement,
+                row,
+            );
+        }
+        let none = matches!(&self.machines, Some(Ok(names)) if names.is_empty());
+        let problem = match &self.machines {
+            Some(Err(why)) => Some(SharedString::from(why.clone())),
+            _ => None,
+        };
+        modal.cancel_label("Close").child(
+            div()
+                .flex()
+                .flex_col()
+                .child(presence(
+                    "vault-share-list-block",
+                    !self.machine_rows.is_empty(),
+                    list,
+                ))
+                .child(
+                    presence(
+                        "vault-share-none-block",
+                        none,
+                        EmptyLine::new("vault-share-none", Icon::Service, NO_MACHINE),
+                    )
+                    .space(space::MD),
+                )
+                .child(problem_line("vault-share-problem", problem, space::MD, cx)),
+        )
+    }
+
     fn menu(&mut self, name: &str, cx: &mut Context<Self>) -> Entity<Menu> {
         let this = cx.entity().downgrade();
         menu_of(&mut self.menus, "vault", name, cx, move |name, menu| {
-            let (replace, remove) = (this.clone(), this.clone());
-            let (to_replace, to_remove) = (name.to_owned(), name.to_owned());
+            let (replace, share, remove) = (this.clone(), this.clone(), this.clone());
+            let (to_replace, to_share, to_remove) =
+                (name.to_owned(), name.to_owned(), name.to_owned());
             menu.entry(
                 format!("replace-vault-{name}"),
                 "Edit",
@@ -627,6 +825,16 @@ impl VaultSection {
                 move |window, cx| {
                     replace
                         .update(cx, |this, cx| this.replace(&to_replace, window, cx))
+                        .ok();
+                },
+            )
+            .entry(
+                format!("share-vault-{name}"),
+                "Share with…",
+                None,
+                move |_, cx| {
+                    share
+                        .update(cx, |this, cx| this.share_with(&to_share, cx))
                         .ok();
                 },
             )

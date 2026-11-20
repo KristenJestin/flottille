@@ -71,11 +71,25 @@ tokio::task_local! {
     /// The member whose device signed the request being served, for a client of another
     /// machine: the events its serving emits name it (`docs/remote.md`, "Requests from another
     /// machine's clients").
-    static ASKED_BY: Arc<str>;
+    static ASKED_BY: Arc<Asked>;
+}
+
+/// A request a device of the user's signed, being served.
+pub(crate) struct Asked {
+    /// The member whose device signed it.
+    pub device: String,
+    /// The request as the device signed it, checked already: what a method that carries the
+    /// user's consent further sends on (`vault.share`), for the next machine to check it again.
+    pub signed: String,
+}
+
+/// The request a device signed that is being served, when it is one.
+pub(crate) fn asked() -> Option<Arc<Asked>> {
+    ASKED_BY.try_with(Arc::clone).ok()
 }
 
 /// `future` run as the member `asked_by` asked, when one did.
-async fn as_asked_by<F: std::future::Future>(asked_by: Option<Arc<str>>, future: F) -> F::Output {
+async fn as_asked_by<F: std::future::Future>(asked_by: Option<Arc<Asked>>, future: F) -> F::Output {
     match asked_by {
         Some(device) => ASKED_BY.scope(device, future).await,
         None => future.await,
@@ -321,7 +335,7 @@ impl Daemon {
     #[track_caller]
     pub fn emit(&self, name: &str, data: Value) -> Result<Event> {
         let data = match ASKED_BY.try_with(Arc::clone) {
-            Ok(device) => naming(data, &device),
+            Ok(asked) => naming(data, &asked.device),
             Err(_) => data,
         };
         let events = self.stored();
@@ -728,15 +742,15 @@ async fn refuse(stream: UnixStream) {
     .await;
 }
 
-/// A request of another machine's client, checked, served on `stream` as one of a local
-/// client's: what its serving emits names `device`.
+/// A request a device signed, checked, served on `stream` as one of a local client's: what its
+/// serving emits names its member, `asked.device`.
 /// Boxed, its type named: a connection carries requests that end up here.
 pub(crate) fn served_for(
     daemon: Arc<Daemon>,
     stream: UnixStream,
-    device: String,
+    asked: Asked,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
-    Box::pin(ASKED_BY.scope(Arc::from(device), connection(daemon, stream)))
+    Box::pin(ASKED_BY.scope(Arc::new(asked), connection(daemon, stream)))
 }
 
 async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
@@ -1201,7 +1215,7 @@ async fn forward(daemon: Arc<Daemon>, mut subscription: Subscription, out: mpsc:
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use flottille_core::agent::{Agent, AgentState, Choices, GateMode};
 
     use super::*;
@@ -1275,7 +1289,7 @@ mod tests {
         assert_eq!(judge(error(ErrorKind::Interrupted), OURS), Socket::Unknown);
     }
 
-    fn an_agent(id: &str) -> Agent {
+    pub(crate) fn an_agent(id: &str) -> Agent {
         Agent {
             id: id.into(),
             provider: "claude".into(),

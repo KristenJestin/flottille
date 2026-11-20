@@ -19,7 +19,8 @@ and an agent running outside Flottille drives it through [`flottille mcp`](#the-
   `flottille: server is offline since 22:14`; nothing is kept for it. `flottille daemon`,
   `window`, `update`, `mcp`, `bridge`, `remote`, `doctor`, `vault provide` and `read-page` are this
   machine's own and refuse the flag; they ignore the variable, which a shell may have exported for
-  the commands it aims, and the daemon a command starts never reads it.
+  the commands it aims, and the daemon a command starts never reads it. `vault share` is this
+  machine's too, and takes the flag as the machine the entry is shared with.
 - **Agents are named by their id**, twelve hexadecimal digits, as `agent list` shows them.
 - **The program answers to `flottille` and to `flot`** (see [The `flot` name](#the-flot-name)).
   The examples below write `flottille`.
@@ -894,6 +895,20 @@ Changed jira; its secret is kept as it was.
 Removes the entry and its secret from the keyring. An entry bound to a feature that names it is
 refused, naming the feature and what stops working, unless `--confirmed`. `--json` prints
 `vault.remove`.
+
+### `flottille vault share <name> --machine <machine>`
+
+Shares the entry with another machine of the user's, a runner (`docs/vault.md`, "Shared with
+another machine"): here `--machine` names where the entry goes, not a machine this command drives.
+The request is this machine's, signed with this device's key; the secret goes from this machine's
+keyring into that machine's, with the entry's metadata, and never into a file. Sharing again
+replaces the copy. Refused for a machine that is off, runs no agent, has no keyring, or lacks the
+project of a worklog's entry, saying so. `--json` prints `vault.share`.
+
+```
+$ flottille vault share jira --machine server
+Shared jira with server: its keyring holds it now.
+```
 
 ### `flottille vault provide <socket>`
 

@@ -92,7 +92,7 @@ fn vault_list_shows_metadata_only() {
         listed["entries"],
         json!([{"name": "jira", "description": "Logs time on Jira",
             "url": "https://tracker.example.com", "username": "dev@example.com",
-            "project": null, "for": null, "every_project_only": false}]),
+            "project": null, "for": null, "shared_from": null, "every_project_only": false}]),
         "{listed}"
     );
 

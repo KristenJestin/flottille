@@ -28,6 +28,25 @@ type Result<T> = std::result::Result<T, String>;
 /// `Client::connect_or_start` in the binary, something else in a test.
 pub type Connect = Arc<dyn Fn() -> std::io::Result<UnixStream> + Send + Sync>;
 
+/// Signs a request for the machine named first with this device's key, which the window reads
+/// and the daemon never holds (`docs/remote.md`, "Requests from another machine's clients"): what
+/// the line written is then. The binary gives the command line's own; a test, a key of its own.
+pub type Sign = Arc<
+    dyn Fn(&str, &flottille_protocol::Request) -> std::io::Result<serde_json::Value> + Send + Sync,
+>;
+
+static SIGN: std::sync::OnceLock<Sign> = std::sync::OnceLock::new();
+
+/// How this window signs what only the user's device may ask (`vault.share`): given once, before
+/// the window opens. A window given none says so when it is asked.
+pub fn sign_with(sign: Sign) {
+    let _ = SIGN.set(sign);
+}
+
+pub(crate) fn signer() -> Option<Sign> {
+    SIGN.get().cloned()
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Update {
     /// A fresh read of everything the shell shows.
@@ -693,6 +712,14 @@ impl Conn {
             link: Connection::new(stream),
             asking: None,
         })
+    }
+
+    /// Every request of this connection signed for the machine `machine` by `sign`.
+    pub(crate) fn signing(mut self, sign: Sign, machine: String) -> Conn {
+        self.link = self
+            .link
+            .signing(Box::new(move |request| sign(&machine, request)));
+        self
     }
 
     pub(crate) fn request(&mut self, method: &str, params: Value) -> Result<Value> {
