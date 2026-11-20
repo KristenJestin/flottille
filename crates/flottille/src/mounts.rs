@@ -61,20 +61,26 @@ fn socket_at(path: &Path) -> Option<Socket> {
         .then(|| (found.dev(), found.ino(), found.ctime(), found.ctime_nsec()))
 }
 
-/// The session bus's socket found at the start, while it is still the one found: a folder or a
-/// socket a confined command made in its place is neither hidden (a mount over a folder would
-/// fail every start) nor the bus.
+/// The path of the session bus's socket found at the start, which every confined command's
+/// namespace hides whatever is there now: the bus, a bus started there again, or what a command
+/// made in its place.
 pub fn bus() -> Option<&'static Path> {
-    let (path, socket) = BUS.get()?.as_ref()?;
-    (socket_at(path) == Some(*socket)).then_some(path.as_path())
+    BUS.get()?.as_ref().map(|(path, _)| path.as_path())
 }
 
 /// Whether the session bus the daemon found at its start is gone from its path, or something
 /// else is there now, which a confined command may have made: no push it lets through is given
 /// the bus's address then.
 pub fn bus_replaced() -> bool {
-    BUS.get().is_some_and(Option::is_some) && bus().is_none()
+    BUS.get()
+        .and_then(Option::as_ref)
+        .is_some_and(|(path, socket)| socket_at(path) != Some(*socket))
 }
+
+/// What a bus gone or replaced leaves, as `flottille doctor` says it.
+const BUS_REPLACED_GAP: &str = "the session bus the daemon found at its start is gone from its \
+     path, or something else is there now: confined commands still have that path hidden, and \
+     a push let through is not given the bus's address (docs/vault.md, \"The gaps\")";
 
 /// The path of the first `unix:path=` of a D-Bus address, its `%xx` escapes undone.
 fn bus_path(address: &str) -> Option<PathBuf> {
@@ -103,11 +109,12 @@ fn bus_path(address: &str) -> Option<PathBuf> {
 /// each gap.
 pub fn sandbox() -> serde_json::Value {
     let namespaces = namespaces();
-    let warnings: Vec<&str> = match namespaces {
+    let mut warnings: Vec<&str> = match namespaces {
         Namespaces::Refused => vec![REFUSED_GAP],
         Namespaces::Unknown => vec![UNKNOWN_GAP],
         Namespaces::Available => Vec::new(),
     };
+    warnings.extend(bus_replaced().then_some(BUS_REPLACED_GAP));
     serde_json::json!({
         "landlock_abi": crate::landlock::abi(),
         "private_mounts": namespaces == Namespaces::Available,
@@ -338,14 +345,30 @@ impl Plan {
                 check(fd)?;
                 *tree = fd as libc::c_int;
             }
+            // Whatever is at a masked path now: nothing there (or a loop of links) is nothing to
+            // reach, and a folder a command made there is hidden under an empty one.
             for socket in &self.masked {
-                check(libc::mount(
+                let masked = libc::mount(
                     c"/dev/null".as_ptr(),
                     socket.as_ptr(),
                     none,
                     libc::MS_BIND,
                     std::ptr::null(),
-                ) as libc::c_long)?;
+                );
+                if masked != 0 {
+                    let error = io::Error::last_os_error();
+                    match error.raw_os_error() {
+                        Some(libc::ENOENT | libc::ELOOP) => {}
+                        Some(libc::ENOTDIR) => check(libc::mount(
+                            c"tmpfs".as_ptr(),
+                            socket.as_ptr(),
+                            c"tmpfs".as_ptr(),
+                            libc::MS_RDONLY | libc::MS_NOSUID | libc::MS_NODEV,
+                            c"mode=0".as_ptr().cast(),
+                        ) as libc::c_long)?,
+                        _ => return Err(error),
+                    }
+                }
             }
             for folder in &self.emptied {
                 check(libc::mount(
