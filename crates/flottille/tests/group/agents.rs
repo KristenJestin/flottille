@@ -7,6 +7,8 @@
 #[path = "../common/mod.rs"]
 mod common;
 
+#[path = "../about.rs"]
+mod about;
 #[path = "../agent_actions.rs"]
 mod agent_actions;
 #[path = "../agent_runs_on.rs"]
