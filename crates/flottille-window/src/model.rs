@@ -13,6 +13,10 @@ pub struct Snapshot {
     /// By name.
     pub projects: Vec<Project>,
     pub sessions: Vec<Session>,
+    /// The sessions this machine's agents started on other machines, each under its pilot: rows
+    /// of the tree only. This machine's daemon does not know them, so nothing else reads them (a
+    /// project's page, search, a session's page).
+    pub elsewhere: Vec<Session>,
     /// By project, then name.
     pub workspaces: Vec<Workspace>,
     /// The notification centre, oldest first, read and unread.
@@ -288,6 +292,45 @@ pub struct Session {
     /// Whether the agent that leads it works in another project: its row sits among its own
     /// project's and names it.
     pub led_from_elsewhere: bool,
+    /// It runs on another machine, started by an agent of this one: its row sits under its
+    /// pilot's, and opening it shows that machine.
+    pub elsewhere: Option<Elsewhere>,
+}
+
+/// A session on another machine, as its row under its pilot shows it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Elsewhere {
+    /// The machine it runs on, by name.
+    pub machine: String,
+    /// Its id on that machine.
+    pub agent: String,
+    /// Its state as last known: `running`, `waiting`, `reported`, `failed`, `offline since 22:14`.
+    pub state: String,
+}
+
+/// The id of the row of the session `agent` of `machine` in this machine's tree: never an id of
+/// this machine's.
+pub fn elsewhere_id(machine: &str, agent: &str) -> String {
+    format!("{agent}@{machine}")
+}
+
+/// The state of a session started on another machine as last known here, in words, and its mark:
+/// what its machine last told, unless that machine is off now.
+fn last_known(
+    launched: &crate::machines::Launched,
+    machine: Option<&crate::machines::Machine>,
+) -> (String, Option<AgentState>) {
+    if let Some(machine) = machine.filter(|machine| !machine.online()) {
+        return (machine.state_words(), None);
+    }
+    // Allowed there, a held launch is told nothing more here: what it sent since says it runs.
+    match launched.heard.as_deref() {
+        None if launched.state == "held" => ("waiting".to_owned(), Some(AgentState::Waiting)),
+        None => ("running".to_owned(), Some(AgentState::Running)),
+        Some("child-report") => ("reported".to_owned(), None),
+        Some("child-failed") => ("failed".to_owned(), None),
+        Some(_) => ("waiting".to_owned(), Some(AgentState::Waiting)),
+    }
 }
 
 /// One notification of the centre the daemon keeps (`notifications.list`, `docs/protocol.md`).
@@ -844,6 +887,7 @@ impl Snapshot {
                             .find(|a| a["id"].as_str() == Some(pilot))
                             .is_some_and(|a| a["project"] != agent["project"])
                     }),
+                    elsewhere: None,
                     id,
                 }
             })
@@ -893,6 +937,7 @@ impl Snapshot {
         Snapshot {
             projects,
             sessions,
+            elsewhere: Vec::new(),
             workspaces,
             bell: Vec::new(),
             unread: (0, 0),
@@ -933,12 +978,14 @@ impl Snapshot {
             .filter(move |s| s.project == project && &s.place == place)
     }
 
-    /// The sessions of a project that have not ended, whatever their place: the one whose last
-    /// exchange is the latest first, then the newest.
+    /// The sessions of a project that have not ended, whatever their place, as the tree lists
+    /// them (those on other machines included): the one whose last exchange is the latest first,
+    /// then the newest.
     pub fn live_sessions_of(&self, project: &str) -> Vec<&Session> {
         let mut live: Vec<&Session> = self
             .sessions
             .iter()
+            .chain(&self.elsewhere)
             .filter(|s| s.project == project && !s.ended)
             .collect();
         live.sort_by(|a, b| {
@@ -958,6 +1005,66 @@ impl Snapshot {
 
     pub fn session(&self, id: &str) -> Option<&Session> {
         self.sessions.iter().find(|s| s.id == id)
+    }
+
+    /// This snapshot with the sessions this machine's agents started on other machines, each
+    /// under the live session whose tree started it: a child or a led session, while it lives or
+    /// once it reported. A session handed to the user is theirs, on its machine only.
+    pub fn with_elsewhere(mut self, machines: &crate::machines::Machines) -> Snapshot {
+        let mut added = Vec::new();
+        for launched in &machines.launches {
+            if launched.kind == "handed"
+                || (launched.state == "ended" && launched.heard.as_deref() != Some("child-report"))
+            {
+                continue;
+            }
+            let root = self.root_of(&launched.caller);
+            let Some(pilot) = self.session(&root).filter(|pilot| !pilot.ended) else {
+                continue;
+            };
+            let (state, mark) = last_known(launched, machines.machine(&launched.machine));
+            let said = |words: &str| {
+                format!(
+                    "{}{} on {}",
+                    words[..1].to_uppercase(),
+                    &words[1..],
+                    launched.machine
+                )
+            };
+            added.push(Session {
+                id: elsewhere_id(&launched.machine, &launched.agent),
+                project: pilot.project.clone(),
+                place: None,
+                title: match launched.title.is_empty() {
+                    true => format!("agent {}", launched.agent),
+                    false => launched.title.clone(),
+                },
+                mark,
+                mark_said: mark.map(|_| said(&state)).unwrap_or_default(),
+                waits: String::new(),
+                agents: 1,
+                live: 1,
+                resumable: false,
+                ended: false,
+                active_at: launched.heard_at.unwrap_or(launched.at),
+                exchanged_at: launched.at,
+                ended_at: launched.heard_at.unwrap_or(launched.at),
+                created_at: launched.at,
+                commands: 0,
+                started_by: None,
+                led_by: Some(pilot.title.clone()),
+                runs: String::new(),
+                pilot: Some(root),
+                led_from_elsewhere: false,
+                elsewhere: Some(Elsewhere {
+                    machine: launched.machine.clone(),
+                    agent: launched.agent.clone(),
+                    state,
+                }),
+            });
+        }
+        self.elsewhere = added;
+        self
     }
 
     pub fn workspace(&self, project: &str, name: &str) -> Option<&Workspace> {
@@ -1820,5 +1927,47 @@ mod tests {
         assert_eq!(ago(now, now - 3_600_000), "1h");
         assert_eq!(ago(now, now - 2 * 86_400_000), "2d");
         assert_eq!(ago(now, now - 21 * 86_400_000), "3w");
+    }
+
+    #[test]
+    fn a_session_on_another_machine_says_its_state_as_last_known() {
+        let launched = |state: &str, heard: Option<&str>| crate::machines::Launched {
+            machine: "server".into(),
+            caller: "r1".into(),
+            kind: "led".into(),
+            title: "Finish the export".into(),
+            agent: "a1".into(),
+            state: state.into(),
+            heard: heard.map(str::to_owned),
+            heard_at: None,
+            at: 1,
+        };
+        let machine = |state: &str| crate::machines::Machine {
+            name: "server".into(),
+            fingerprint: "f".into(),
+            state: state.into(),
+            since: Some(0),
+            reason: None,
+            role: Some("runner".into()),
+            reached: None,
+            addresses: Vec::new(),
+        };
+        let online = machine("online");
+        let words = |l, m| last_known(&l, m).0;
+        assert_eq!(words(launched("started", None), Some(&online)), "running");
+        assert_eq!(words(launched("held", None), Some(&online)), "waiting");
+        // Allowed there, it sends nothing back but what it does: what is heard wins over the hold.
+        let report = Some("child-report");
+        assert_eq!(words(launched("held", report), Some(&online)), "reported");
+        assert_eq!(
+            words(launched("held", Some("child-failed")), Some(&online)),
+            "failed"
+        );
+        let turn = Some("session-turn-ended");
+        assert_eq!(words(launched("started", turn), Some(&online)), "waiting");
+        assert_eq!(words(launched("ended", report), Some(&online)), "reported");
+        let off = machine("offline");
+        assert!(words(launched("started", None), Some(&off)).starts_with("offline since "));
+        assert_eq!(last_known(&launched("started", None), Some(&off)).1, None);
     }
 }

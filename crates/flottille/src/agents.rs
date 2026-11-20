@@ -110,9 +110,9 @@ type Task = (mpsc::UnboundedSender<Order>, JoinHandle<()>);
 #[derive(Default)]
 pub struct Live {
     tasks: crate::locks::Lock<HashMap<String, Task>>,
-    /// The processes this daemon started that have not ended, with their start times: the only
-    /// ones it kills when it stops, whatever the shared table holds.
-    processes: crate::locks::Lock<HashMap<u32, u64>>,
+    /// The processes this daemon started that have not ended, with their start times and their
+    /// agents: the only ones it kills when it stops, whatever the shared table holds.
+    processes: crate::locks::Lock<HashMap<u32, (u64, String)>>,
     /// The agents whose tools the user reloads: their process goes between turns, and the next
     /// one says what changed (`mcp::mint`).
     reloads: crate::locks::Lock<HashSet<String>>,
@@ -125,6 +125,12 @@ impl Live {
     /// Whether a process of an agent runs: a session of some project is at work.
     pub fn any_process(&self) -> bool {
         !self.processes.lock().unwrap().is_empty()
+    }
+
+    /// The agents whose process runs: those a stop of the daemon stops.
+    pub fn with_process(&self) -> HashSet<String> {
+        let processes = self.processes.lock().unwrap();
+        processes.values().map(|(_, agent)| agent.clone()).collect()
     }
 }
 
@@ -1284,7 +1290,7 @@ pub async fn stop_all(daemon: &Daemon) {
         // killed while their leader is alive (the task is aborted after, which kills it too).
         let left: Vec<_> = daemon.agents.processes.lock().unwrap().drain().collect();
         let _ = daemon.read(|store| {
-            for (pid, started) in left {
+            for (pid, (started, _)) in left {
                 kill_left(store, pid, started);
             }
             Ok(())
@@ -1571,7 +1577,8 @@ async fn process(
         }
     };
     if let Some(started) = start_time(pid) {
-        daemon.agents.processes.lock().unwrap().insert(pid, started);
+        let process = (started, agent.id.clone());
+        daemon.agents.processes.lock().unwrap().insert(pid, process);
         let _ = daemon
             .read(|store| store.add_process(pid, started, &agent.id, crate::children::boot()));
     }

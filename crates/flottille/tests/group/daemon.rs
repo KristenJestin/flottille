@@ -49,3 +49,5 @@ mod stream_load;
 mod subscriptions;
 #[path = "../tool_list_cost.rs"]
 mod tool_list_cost;
+#[path = "../update_staged.rs"]
+mod update_staged;

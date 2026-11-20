@@ -114,7 +114,7 @@ fn markdown(comment: &Comment, body: &str) -> String {
 }
 
 /// The Jira actions whose text may mention someone, and how each says what it does with the
-/// project's entry: `to` completes "no vault entry to …", `never` is what Flottille never does
+/// project's entry: `to` completes "no Jira API vault entry to …", `never` is what Flottille never does
 /// with a sign-in it was not given.
 pub(super) fn mention_use(action: &str) -> Option<(&'static str, &'static str)> {
     match action {
@@ -460,7 +460,7 @@ pub(super) async fn threaded(
 }
 
 /// The calls to Jira's REST API as the project's entry signs them, or the refusal that says how to
-/// set the entry. `to` completes "no vault entry to …", `never` is what Flottille never does with
+/// set the entry. `to` completes "no Jira API vault entry to …", `never` is what Flottille never does with
 /// a sign-in it was not given.
 pub(super) async fn signed_in<'a>(
     daemon: &Daemon,

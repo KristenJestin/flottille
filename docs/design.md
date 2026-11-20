@@ -864,7 +864,14 @@ line names, every program a wrapper or a runner runs included:
   (`agent-folders/.guarded`) tells the user's inbox at the daemon's next start; the files also
   exist while the run goes on;
 - **a write in or above Flottille's own folders** (its configuration, data, state and runtime:
-  the store, `providers.toml`, `developer.toml`, the socket), or of Flottille's own program.
+  the store, `providers.toml`, `developer.toml`, the socket), or of Flottille's own program and
+  the build staged beside it (`flottille.next/`, which the daemon's next start makes the program)
+  and the folder a download is unpacked in before it is staged (`.flottille-update-*` beside the
+  program); the program is the file at its path even once an update replaced it under the running
+  daemon (`/proc/self/exe` then ends in ` (deleted)`). `~/.curlrc` and `$XDG_CONFIG_HOME/curlrc`
+  are startup files: every `curl` of the user reads them (the update's reads none, `curl -q`).
+  This covers the file tools and the literal command lines the gate reads; a command an agent
+  runs is not confined by the system away from the program's folder.
   Reading them stays base: a card in Ask and Auto, allowed in Full, since what they hold has its
   secrets masked and the user may want an agent to read a log;
 - **any write through a process's folder in `/proc`** that leads elsewhere (`/proc/<pid>/cwd`,
@@ -1215,7 +1222,7 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   time the window takes the focus back while the tab is shown, in silence (only a line that changes
   moves). Under them, its **Tracker** ("Where the project's tickets come from."): **Tickets from**,
   `Nowhere`, `GitHub issues` or `Jira`, its fields, the state of `gh` or `acli` said as a
-  repository's forge says it, and Log time with (`projects.md`). **Workspaces** holds its
+  repository's forge says it, and Jira API access with (`projects.md`). **Workspaces** holds its
   **Folder**, with no sentence: **Where**, `As in Settings` (its line the folder it gives, relative
   to `~`) or `A folder for this project`, whose field unfolds under it; its **Branches** ("How new
   workspaces name their branch."): **Prefix** (its line `New workspaces get feat/<name>.`) and
@@ -1487,7 +1494,7 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   the vault's form for the entry it names) has it stacked over it, Escape and Cancel close the
   one on top and the focus returns to the one below, which reads again what changed (the request
   reads itself again once the entry is saved). A page that really is a destination (a project's
-  settings from "Set up time logging", Settings from a notice) is a navigation, and opens no
+  settings from "Set up Jira API access", Settings from a notice) is a navigation, and opens no
   dialog;
 - narrow and portrait windows: the rail, then the left tree, become drawers.
 - a history of the pages shown (project pages, sessions with the agent shown in them, settings),

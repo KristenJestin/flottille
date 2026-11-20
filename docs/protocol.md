@@ -150,6 +150,11 @@ no device calls a `local` one over a link (`docs/remote.md`, "Roles").
 | `compaction.noticed` | drive |
 | `developer.show` | read |
 | `developer.set` | drive |
+| `update.show` | read |
+| `update.set` | drive |
+| `update.check` | drive |
+| `update.download` | local |
+| `update.restart` | local |
 | `extension.list` | read |
 | `extension.set` | drive |
 | `extension.act` | drive |
@@ -210,6 +215,7 @@ no device calls a `local` one over a link (`docs/remote.md`, "Roles").
 | `remote.address.add` | drive |
 | `remote.address.remove` | drive |
 | `remote.members` | read |
+| `remote.launches` | read |
 | `remote.requests` | read |
 | `remote.invite` | drive |
 | `remote.refuse` | drive |
@@ -715,6 +721,38 @@ configuration folder.
 
 `developer.set` emits `developer.changed`. The user's door alone reaches them: no tool of an agent
 does.
+
+### The update methods
+
+The update of Flottille from the window (`docs/releases.md`, "Updating"): the daemon checks the
+channel `flottille update` follows, at its start and every 6 hours while `check` of `updates.toml`
+in Flottille's configuration folder is `"automatically"` (the default; `"never"` makes no request
+at all), and downloads or applies nothing unless asked.
+
+- `update.show` answers `{"version", "full", "build_channel", "commit", "channel", "branch",
+  "check", "latest", "failed", "checking", "staged", "downloading", "download_failed", "restart",
+  "refused", "stops"}`: this build's version alone, its `--version` whole, the channel it was built on and
+  its commit; the channel checked (and an alpha's branch); `"automatically"` or `"never"` (an
+  `updates.toml` that cannot be read is `"never"`, and `failed` says why); the
+  channel's latest build when it is newer than this one; why the last check failed; whether a
+  check runs; the version staged beside the binary; the download's `{"done", "total"}` in bytes
+  (`total` null when the server does not say it); why the last download failed; `"idle"` while a
+  restart waits for no agent to run; what this daemon's start refused of a staged build; and the
+  sessions a restart stops, `[{"id", "title", "project"}]` (each root whose agent or one of its
+  sub-agents has a process, whatever its state), oldest first. The download's progress is told at
+  most once a second.
+- `update.set {check}` writes `updates.toml` (`"automatically"` checks at once) and answers as
+  `update.show`.
+- `update.check` checks once now, whatever `check` says.
+- `update.download` downloads the latest build and stages it beside the binary; it answers at once
+  and says the rest in `update.changed`.
+- `update.restart {when}`: `"now"` stops the daemon (its agents stop, and are resumed as after
+  any restart) and starts it again from its binary, which applies the build staged; `"idle"` does
+  it once no agent runs. `nothing-staged` when no build is staged.
+
+Each change emits `update.changed` with what `update.show` answers. `update.download` and
+`update.restart` are `local`: they replace this machine's binary. The user's door alone reaches
+them: no tool of an agent does.
 
 ### The extension methods
 
@@ -1239,8 +1277,9 @@ with the reason. No method answers a private key.
   `declared` (by hand, with the link's port when it gave none); then each machine it trusts, its
   `state` `online`, `offline` or `needs an update`, `since` when it is so (milliseconds since the
   Unix epoch), `reason` why it is not online (`server refused the link: …`, the sentence of
-  `docs/remote.md`, "The version"), or `null`, and `addresses` those it knows it at: given (by
-  the hub, by hand), then told by it. `hub` is the hub this machine pinned (`docs/remote.md`, "The
+  `docs/remote.md`, "The version"), or `null`, `reached` where its live link goes or came from
+  (`{"address", "dialled"}`, `dialled` saying whether this machine dialled it; `null` while it is
+  not linked), and `addresses` those it knows it at: given (by the hub, by hand), then told by it. `hub` is the hub this machine pinned (`docs/remote.md`, "The
   hub"), `null` until it is set up: `{"url", "key", "fingerprint", "state", "since", "reason"}`,
   `state` being `connected`, `unreachable` (`reason`: `the hub at hub.example.net:443 is
   unreachable since 22:14: …`), `reset` (`the hub's member list was reset: set this device up
@@ -1285,6 +1324,17 @@ with the reason. No method answers a private key.
   of the member whose machine this is (`null` when none is), `added_by` the name of the member
   whose signature added it, `machine` the fingerprint of the machine it declared, or `null`.
   `refused` when this machine is not set up with a hub.
+- `remote.launches` answers the sessions and children this machine's agents started on other
+  machines (`docs/remote.md`, "A tree across machines"), as the window's tree shows them under
+  their pilot: those that started a session there, not refused, not handed to the user, and not
+  ended unless their last delivery was a report and the agent that started it has not ended (an
+  old launch is never listed). `{"launches":
+  [{"machine", "launch", "caller", "kind", "project", "title", "agent", "state", "request", "heard",
+  "heard_at", "at"}]}`, `machine` its name, `caller` the agent of this machine that started it,
+  `kind` `child`, `led` or `handed`, `agent` its id there, `state` `held` (waiting for the user
+  there, `request` its number), `started`, or `ended` once its end came back; `heard` the kind of
+  the last delivery it sent here (`child-report`, `session-turn-ended`, `child-question`…) and
+  `heard_at` when, `null` before any: what the window shows as its state as last known.
 - `remote.invite {ask}` carries a member's signed ask for an invitation
   (`flottille_link::InvitationAsk`, signed by the client with the device key) to the hub, and
   answers `{"code", "url", "hub", "inviter", "fingerprint", "expires"}`: the invitation's code,

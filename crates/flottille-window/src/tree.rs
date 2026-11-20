@@ -63,6 +63,12 @@ pub fn ended_scroll_id() -> ElementId {
     ElementId::Name("ended-sessions".into())
 }
 
+/// The element id of the machine a session on another machine runs on, and its state, on its
+/// row's second line: `server · running`.
+pub fn session_machine_id(id: &str) -> ElementId {
+    ElementId::Name(format!("session-machine-{id}").into())
+}
+
 /// The element id of the "⋯" menu a session's row offers.
 pub fn session_menu_id(id: &str) -> ElementId {
     ElementId::Name(format!("session-menu-{id}").into())
@@ -282,6 +288,8 @@ pub struct Sidebar {
     /// The user's machines as this machine last said them, and the one shown (`None`: this one).
     machines: Option<crate::machines::Machines>,
     shown: Option<String>,
+    /// What the foot says of an update of Flottille, when there is one to act on.
+    version_line: Option<SharedString>,
 }
 
 impl Sidebar {
@@ -299,6 +307,7 @@ impl Sidebar {
             loading: true,
             machines: None,
             shown: None,
+            version_line: None,
         }
     }
 
@@ -482,6 +491,21 @@ fn framed<V: Render>(
         .collect()
 }
 
+impl Sidebar {
+    /// What the foot says of an update: it unfolds when there is one, fades when it changes.
+    pub fn set_version_line(&mut self, line: Option<String>, cx: &mut Context<Self>) {
+        let line = line.map(SharedString::from);
+        if self.version_line != line {
+            self.version_line = line;
+            cx.notify();
+        }
+    }
+
+    pub fn version_line(&self) -> Option<&SharedString> {
+        self.version_line.as_ref()
+    }
+}
+
 impl Render for Sidebar {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
@@ -494,6 +518,7 @@ impl Render for Sidebar {
         );
         let shell = self.shell.clone();
         let adds = self.shell.clone();
+        let version = self.shell.clone();
         let ended = self.ended.clone().map(|(group, present)| {
             // At the panel's bottom, under a line; its rows scroll inside their own block, and it
             // folds away when its last session leaves.
@@ -606,6 +631,37 @@ impl Render for Sidebar {
                         .text_color(p.fail)
                         .child(line)
                         .test_support()
+                        .into_any_element()
+                },
+            ))
+            .child(presence_of(
+                "sidebar-version-line",
+                self.version_line.clone(),
+                move |line| {
+                    let opens = version.clone();
+                    div()
+                        .flex_none()
+                        .border_t_1()
+                        .border_color(p.line)
+                        .px(space::SM)
+                        .py(space::XS)
+                        // Its one change (downloading, then ready) fades.
+                        .child(changing("sidebar-version-label", line, move |line| {
+                            Button::quiet("sidebar-version", line)
+                                .full_width()
+                                .on_click(move |_, window, cx| {
+                                    opens
+                                        .update(cx, |shell, cx| {
+                                            shell.open_settings_at(
+                                                crate::settings::Reveal::Version,
+                                                window,
+                                                cx,
+                                            )
+                                        })
+                                        .ok();
+                                })
+                                .into_any_element()
+                        }))
                         .into_any_element()
                 },
             ))
@@ -976,6 +1032,9 @@ pub struct SessionRow {
     /// above draws, and the last one it drew, which stays while it fades out.
     tie: Option<Tie>,
     tie_shown: Tie,
+    /// It runs on another machine: its second line says which and its state as last known, and
+    /// opening it shows that machine.
+    elsewhere: Option<crate::model::Elsewhere>,
     shell: WeakEntity<Shell>,
 }
 
@@ -1021,7 +1080,24 @@ impl SessionRow {
             open: true,
             tie: None,
             tie_shown: Tie::default(),
+            elsewhere: None,
             shell,
+        }
+    }
+
+    /// The machine it runs on and its state, for a session on another machine.
+    pub fn elsewhere(&self) -> Option<&crate::model::Elsewhere> {
+        self.elsewhere.as_ref()
+    }
+
+    pub fn set_elsewhere(
+        &mut self,
+        elsewhere: Option<&crate::model::Elsewhere>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.elsewhere.as_ref() != elsewhere {
+            self.elsewhere = elsewhere.cloned();
+            cx.notify();
         }
     }
 
@@ -1406,14 +1482,18 @@ impl Render for SessionRow {
         self.renders += 1;
         let shell = self.shell.clone();
         let id = self.id.clone();
+        let elsewhere = self.elsewhere.clone();
         let mut row = TreeLevel::Session
             .row(session_id(&self.id), self.title.clone())
             .selected(self.selected)
             .on_click(move |_, window, cx| {
                 let session = id.clone();
+                let elsewhere = elsewhere.clone();
                 shell
-                    .update(cx, |shell, cx| {
-                        shell.open(Selection::Session(session), window, cx)
+                    .update(cx, |shell, cx| match elsewhere {
+                        // Another machine's: the window shows that machine, on that session.
+                        Some(there) => shell.open_elsewhere(there.machine, there.agent, cx),
+                        None => shell.open(Selection::Session(session), window, cx),
                     })
                     .ok();
             })
@@ -1566,7 +1646,7 @@ impl SessionRow {
     /// Under the title, faint: the place's icon and name, then, when there is room, its pull
     /// request and its checks' mark. The line is one line high and wraps: what does not fit goes
     /// under it, out of sight, and the name is cut with an ellipsis. The whole is in a tooltip.
-    fn second_line(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn second_line(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
         let p = palette(cx);
         let (name, icon, said) = match &self.place {
             None => ("main".to_owned(), Icon::Folder, "Project folder"),
@@ -1612,6 +1692,9 @@ impl SessionRow {
             .chain(pull.as_ref().map(pull_said))
             .collect::<Vec<_>>()
             .join(" · ");
+        if let Some(there) = self.elsewhere.clone() {
+            return self.machine_line(there, window, cx);
+        }
         let place = div()
             .id(session_place_id(&self.id))
             .aria_label(SharedString::from(name.clone()))
@@ -1739,7 +1822,65 @@ impl SessionRow {
                     }))
                     .test_support()
             }));
-        tipped(line, SharedString::from(tip), LINE, window, cx)
+        tipped(line, SharedString::from(tip), LINE, window, cx).into_any_element()
+    }
+
+    /// The second line of a session on another machine: the machine's name, then its state as
+    /// last known, whose words fade as they change.
+    fn machine_line(
+        &self,
+        there: crate::model::Elsewhere,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::AnyElement {
+        let p = palette(cx);
+        let said = SharedString::from(format!("{} · {}", there.machine, there.state));
+        let line = div()
+            .id(session_machine_id(&self.id))
+            .aria_label(said.clone())
+            .flex()
+            .items_center()
+            .gap(space::XS)
+            .min_w_0()
+            .h(px(LINE))
+            .overflow_hidden()
+            .text_size(px(11.5))
+            .text_color(p.faint)
+            .child(
+                div().flex_none().child(
+                    gpui_design_system::icon(Icon::Service)
+                        .size(px(11.))
+                        .text_color(p.faint),
+                ),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .whitespace_nowrap()
+                    .child(SharedString::from(there.machine.clone())),
+            )
+            .child(div().flex_none().child("·"))
+            .child(changing(
+                ElementId::Name(format!("session-machine-state-{}", self.id).into()),
+                SharedString::from(there.state.clone()),
+                move |state| {
+                    div()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .child(state)
+                        .into_any_element()
+                },
+            ))
+            .test_support();
+        let tip = div()
+            .id(ElementId::Name(
+                format!("session-machine-tip-{}", self.id).into(),
+            ))
+            .h(px(LINE))
+            .child(line);
+        tipped(tip, said, LINE, window, cx).into_any_element()
     }
 }
 

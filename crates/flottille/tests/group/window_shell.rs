@@ -15,6 +15,8 @@ mod remote;
 mod window_appearance;
 #[path = "../window_centre.rs"]
 mod window_centre;
+#[path = "../window_clicks.rs"]
+mod window_clicks;
 #[path = "../window_code_copy.rs"]
 mod window_code_copy;
 #[path = "../window_composer_tokens.rs"]
@@ -57,6 +59,8 @@ mod window_project_settings;
 mod window_project_vault;
 #[path = "../window_raise.rs"]
 mod window_raise;
+#[path = "../window_remote_tree.rs"]
+mod window_remote_tree;
 #[path = "../window_repositories.rs"]
 mod window_repositories;
 #[path = "../window_selection.rs"]
@@ -71,6 +75,8 @@ mod window_setup_output;
 mod window_sidebar;
 #[path = "../window_switcher.rs"]
 mod window_switcher;
+#[path = "../window_update.rs"]
+mod window_update;
 #[path = "../window_vault.rs"]
 mod window_vault;
 #[path = "../window_vault_ask.rs"]

@@ -396,18 +396,19 @@ fn edit_no_entry() -> String {
     )
 }
 
-/// The refusal of a Jira tracker that names no vault entry for its worklogs, and how to set one.
+/// The refusal of a Jira tracker that names no Jira API vault entry (the one that serves worklogs,
+/// replies, mentions and the people search), and how to set one.
 pub(super) fn no_entry() -> String {
     no_entry_to("log time with", "logs time")
 }
 
-/// The same refusal for another use of the entry: `to` completes "no vault entry to …", `never`
+/// The same refusal for another use of the entry: `to` completes "no Jira API vault entry to …", `never`
 /// is what Flottille never does with a sign-in it was not given.
 pub(super) fn no_entry_to(to: &str, never: &str) -> String {
     format!(
-        "refused: this project names no vault entry to {to}: the user chooses one \
-         in the project's Settings, Tracker (the window offers the way), or creates one \
-         (flottille vault set <name> --username <their Jira account e-mail>, the secret \
+        "refused: this project names no Jira API vault entry to {to}: the user chooses one \
+         in the project's Settings, Tracker, Jira API access (the window offers the way), or creates one \
+         (vault ask, or flottille vault set <name> --username <their Jira account e-mail>, the secret \
          being a Jira API token) and writes its name in the project's file, [tracker] \
          worklog_token = \"<name>\"; Flottille never {never} with a sign-in it was not \
          given"
@@ -472,7 +473,7 @@ pub(super) fn entry_of(
         ..
     }) = &project.tracker
     else {
-        return Err("this project names no vault entry to log time with".into());
+        return Err("this project names no Jira API vault entry to log time with".into());
     };
     let entries = daemon
         .read(|store| store.vault_entries())

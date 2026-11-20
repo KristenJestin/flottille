@@ -265,6 +265,36 @@ fn two_machines_that_trust_each_other_link_over_loopback() {
 }
 
 #[test]
+fn a_linked_machine_says_the_address_it_is_reached_at() {
+    let (laptop, server) = (Machine::new(), Machine::new());
+    // Only the laptop knows where the server is: it is the one that dials.
+    laptop.trust("server", &server, &server.addresses("found"));
+    server.trust("laptop", &laptop, &[]);
+
+    let seen = laptop.wait_for("server", "online");
+    assert_eq!(
+        seen["reached"],
+        json!({"address": server.addresses("found")[0], "dialled": true}),
+        "{seen:#}"
+    );
+
+    // The one that was dialled knows where the link came from, and that it did not dial it.
+    let seen = server.wait_for("laptop", "online");
+    assert_eq!(seen["reached"]["dialled"], false, "{seen:#}");
+    assert!(
+        seen["reached"]["address"]
+            .as_str()
+            .is_some_and(|address| address.starts_with("127.0.0.1:")),
+        "{seen:#}"
+    );
+
+    // A machine that is off is reached at no address.
+    server.stop();
+    let seen = laptop.wait_for("server", "offline");
+    assert_eq!(seen["reached"], Value::Null, "{seen:#}");
+}
+
+#[test]
 fn a_key_that_is_not_trusted_is_refused() {
     let (laptop, server) = (Machine::new(), Machine::new());
     // The laptop trusts the server; the server knows nothing of the laptop.

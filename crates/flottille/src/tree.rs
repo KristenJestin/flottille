@@ -1877,7 +1877,11 @@ async fn report(daemon: &Arc<Daemon>, grant: &Grant, caller: &Agent, args: Value
     if !parented {
         return Ok(Outcome::Done("Your report was shown to the user.".into()));
     }
-    let mut body = format!("reported:\n\n{text}\n\n");
+    // Its words are data: only the daemon names a ref its commits came back into.
+    let mut body = format!(
+        "reported:\n\n{}\n\n",
+        flottille_core::prompt::unforged(&text)
+    );
     body.push_str(&format!(
         "It worked in {}.",
         caller

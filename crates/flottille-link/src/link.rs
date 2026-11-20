@@ -811,6 +811,11 @@ impl Link {
         self.protocol
     }
 
+    /// The other side's address: the one this machine dialled, or the one the link came from.
+    pub fn remote(&self) -> SocketAddr {
+        self.conn.remote()
+    }
+
     /// What the other side said in its hello.
     pub fn theirs(&self) -> &Hello {
         &self.theirs

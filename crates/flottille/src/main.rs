@@ -97,6 +97,7 @@ mod tunnel;
 mod tunnel_command;
 mod turn_failures;
 mod update;
+mod updates;
 mod vault;
 mod vault_command;
 mod watchdog;
@@ -270,7 +271,11 @@ enum Command {
     ReadPage { kind: String, url: String },
     /// Open the window: your projects, where their work happens, their sessions, and what waits
     /// for you
-    Window,
+    Window {
+        /// The page to open, as a window that started again from a new build names it
+        #[arg(long, hide = true)]
+        open: Option<String>,
+    },
     /// Replace Flottille with the latest build of a channel, its sum checked first
     Update {
         /// stable, beta or alpha; the one last chosen, or this build's, by default
@@ -285,8 +290,12 @@ enum Command {
         #[arg(long, value_name = "X.Y.Z[-PRE]", conflicts_with_all = ["channel", "branch"])]
         version: Option<String>,
         /// Install it even when it is this version, or an older one
-        #[arg(long)]
+        #[arg(long, conflicts_with = "stage")]
         force: bool,
+        /// Download it beside the binary, applied at the daemon's next start, without touching
+        /// what runs
+        #[arg(long)]
+        stage: bool,
     },
     /// Print the daemon's events, one JSON object per line
     Watch {
@@ -391,7 +400,7 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
     // and ignores the variable, which a shell may have exported for the commands it aims.
     let here = match &cli.command {
         Command::Daemon { action: None } => Some("daemon"),
-        Command::Window => Some("window"),
+        Command::Window { .. } => Some("window"),
         Command::Update { .. } => Some("update"),
         Command::Mcp => Some("mcp"),
         Command::Bridge { .. } => Some("bridge"),
@@ -584,7 +593,8 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
             branch,
             version,
             force,
-        } => return update::run(&paths, channel, branch, version, force),
+            stage,
+        } => return update::run(&paths, channel, branch, version, force, stage),
         Command::Bridge {
             agent: BridgeAgent::Claude,
         } => return bridge::run(&paths),
@@ -592,7 +602,7 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
             agent: BridgeAgent::Codex,
         } => return codex_bridge::run(&paths),
         Command::ReadPage { .. } => unreachable!("the page's reader returns before the paths"),
-        Command::Window => {
+        Command::Window { open } => {
             // One window: a second command brings the open one to the front and leaves. When
             // that cannot be told (no runtime folder to hold the place), another window is
             // better than none.
@@ -634,6 +644,11 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
                 }),
                 Some(device),
                 instance,
+                flottille_window::Build {
+                    full: VERSION.to_owned(),
+                    reexec: std::sync::Arc::new(window_again),
+                    open,
+                },
             );
         }
         Command::Watch { after, forge } if client::aimed().is_some() => {
@@ -665,6 +680,30 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// The window becomes `flottille window` of the binary that replaced its own (`docs/releases.md`,
+/// "Updating"), on `page`: false, and nothing done, when the binary was not replaced.
+fn window_again(page: Option<String>) -> bool {
+    use std::os::unix::process::CommandExt;
+    let Ok(exe) = std::env::current_exe() else {
+        return false;
+    };
+    let new = client::program_to_start(exe.clone());
+    if new == exe {
+        return false;
+    }
+    let mut command = std::process::Command::new(&new);
+    command.arg("window");
+    if let Some(page) = page {
+        command.args(["--open", &page]);
+    }
+    let error = command.exec();
+    eprintln!(
+        "flottille: the window cannot start again from {}: {error}",
+        new.display()
+    );
+    false
 }
 
 /// `flottille watch` of another machine: its events, carried by this machine's daemon. When the

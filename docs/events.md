@@ -139,6 +139,13 @@ The user switched the developer mode (`developer.set`, `docs/developer.md`).
 |---|---|
 | `log` | Whether the log is written now. |
 
+### `update.changed`
+
+What the daemon knows of an update of Flottille changed: a check began or ended, a download
+progressed, ended or failed, the check was switched, or a restart was asked once no agent runs
+(`docs/releases.md`, "Updating"). Its fields are what `update.show` answers (`docs/protocol.md`,
+"The update methods").
+
 ### `appearance.changed`
 
 The user chose the window's appearance (`appearance.set`): every window takes it.
@@ -395,6 +402,12 @@ only), added at 18:42 from pc`; `removed_by` for a removal; `from` (the name bef
 A link to another machine of the user's was made, or ended (`docs/remote.md`, "The transport"):
 `name` and `fingerprint` of the machine, and, when it ended, `reason` (`it was removed from the
 member list`, for a machine whose member was removed: its link is cut at once).
+
+### `remote.hub`
+
+The state of this machine's session to the hub, or the reason it gives, changed (`docs/remote.md`,
+"The hub"): `state`, as `remote.machines`' `hub` says it (`connected`, `unreachable`, …). The
+reason and the time are read there; the event only says that they changed.
 
 ### `remote.delivery_dropped`
 
@@ -782,7 +795,7 @@ activity.
 | `link` | Only for a `forge` `run` that was done and whose answer gave the run's link: that link. |
 | `pictures` | Only when a result carried images the agent was given (a connection's, an image file `fs_read` opened, an image page `web` read): their names, in order, which `agent.image` gives back (`docs/extensions.md`, "Connections"). The bytes are in the agent's folder of images, never in the event. |
 | `cut` | Only when the result was cut at the source (`docs/tools.md`, "Long results"): `{"result", "chars", "left_out"}`, the id the whole text is read by, its length and how many characters the agent was not shown. |
-| `setup` | Only on a `tickets` `log_time`, `worklog_edit`, `worklog_delete` or `worklogs` that was refused for want of the project's vault entry (none named, one the project does not see, or one with no username): `time_logging`. The window says it in the conversation, with a button to the project's Settings, Tracker (`docs/tickets.md`, "Logging time"). |
+| `setup` | Only on a `tickets` `log_time`, `worklog_edit`, `worklog_delete` or `worklogs` that was refused for want of the project's vault entry (none named, one the project does not see, or one with no username): `time_logging` (the value keeps its name though the entry serves more than worklogs: the window calls it Jira API access). The window says it in the conversation, with a button to the project's Settings, Tracker (`docs/tickets.md`, "Logging time"). |
 
 #### `agent.link_shown`
 

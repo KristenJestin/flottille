@@ -509,11 +509,64 @@ is the old one or the new one, never half of one.
   Flottille"). No release says the schema of its build, so Flottille cannot tell before installing
   that the store would be refused: `--force` is the one guard.
 
+### From the window, applied at the next start
+
+- **The daemon checks** the channel a plain `flottille update` would take (the same rules: its
+  line, the channel remembered, an alpha's branch), at its start and every 6 hours, with the
+  user's `curl` spawned without a shell, by the code of `flottille update`. That `curl` reads no
+  `curlrc` (`-q`, its first argument: a `proxy`, `resolve` or `insecure` there would serve another
+  build with a matching sum) and follows only `https`, redirections included (but for the tests'
+  server, `FLOTTILLE_RELEASES`). A failure (offline,
+  GitHub) is said once in the update's place, never a toast each time. **The check can be turned
+  off**: `check = "never"` in `updates.toml` of Flottille's configuration folder
+  (`$XDG_CONFIG_HOME/flottille/updates.toml`), or **Check for updates: Never** in Settings,
+  General, Version; `check = "automatically"`, or no file, is the default. With never, the daemon
+  makes no request at all, at its start or later; **Check now** checks once. A file that cannot
+  be read (not TOML, or another value) means never too, and the section says why. **Nothing is ever
+  downloaded or applied without the user's click** (Download, Restart to update), whatever the
+  setting.
+- **The window says it**: the foot of the sidebar (`0.4.0-beta.124 is available`, then
+  `Downloading…`, then `Ready to restart`; it opens the section) and Settings, General, **Version**: this build's version, channel and commit, the
+  channel checked, the state of the update and its actions.
+- **Download** (or `flottille update --stage`): the daemon downloads the archive and its sum,
+  checks the sum (a wrong one stages nothing), and unpacks it, from the bytes it checked, in a
+  folder of its own beside the binary (`.flottille-update-<pid>-<n>`, which no agent may write),
+  then moves it beside the installed binary under
+  `<binary>.next/` (`flottille.next/`): the binary, the package's `share/` (the launcher entry and
+  the icons) and `staged.json`, which says the version, the SHA-256 sum of the binary (written
+  again from the archive checked, so the sum is of the archive's binary), the channel
+  and `notes`, the release notes of every release of the staged one's kind after this build up to
+  it (`[{"version", "published_at", "body"}]`, oldest first). A link at the staging name is
+  refused and left as it is; only a build newer than this one is staged. Nothing running is
+  touched: the section says **Ready: applied at the next start**.
+- **Applied at the next start**: the daemon, before anything else and holding its lock (so no
+  other daemon runs from the binary), finds the staging; when it is a folder of the user's with a
+  manifest, a binary that is a file (not a link) whose sum is the manifest's, and a version newer
+  than its own, it renames the binary over itself, writes the launcher entry as `flottille update`
+  does, keeps what it applied in `$XDG_STATE_HOME/flottille/updated.json` (the manifest, with
+  `from`, the version it replaced) and starts again from the new file. Anything else at the
+  staging name is removed (a link, never what it names) and said in the section. The window
+  started from the old file starts again from the new one once it sees the daemon's build differ
+  from its own, on the page it showed; a window whose binary was not replaced goes on as it is.
+- **Restart to update**: with no agent running, the daemon stops, starts again from its binary
+  (which applies the build) and the window comes back on its page. When a session's agent has a
+  process (working, or waiting with its process kept), the one confirmation dialog says which
+  sessions stop, as the daemon lists them (`update.show`'s `stops`) (they are resumed as after any daemon restart) and
+  offers **Restart now** and **Restart when idle**: the daemon then restarts itself once no agent
+  runs.
+- `install.sh` and `flottille update` stay as they are; `flottille update` while a build is
+  staged installs the channel's latest and removes the staged one.
+
 ## For tests
 
 `FLOTTILLE_RELEASES` names another base of the releases' API than
 `https://api.github.com/repos/KristenJestin/flottille`, for `install.sh` and `flottille update`
-alike: the tests serve a fake one on `127.0.0.1` (`crates/flottille/tests/release.rs`).
+alike: the tests serve a fake one on `127.0.0.1` (`crates/flottille/tests/release.rs`). The tests'
+daemons never check for an update on their own: the harness writes `check = "never"` in their
+`updates.toml`, and a test of the check removes it. And no test reaches GitHub: the harness gives
+every command a `FLOTTILLE_RELEASES` where nothing listens, which a test of the update replaces
+with its own server (a test that calls every method, `update.download` included, would otherwise
+download the latest release beside the test binary).
 
 ## What only a real push proves
 

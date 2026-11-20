@@ -73,6 +73,9 @@ pub enum Update {
         judge: bool,
         project: Option<String>,
     },
+    /// What the daemon says of an update of Flottille (`update.show`, `update.changed`): read at
+    /// each connection, so that a daemon started again from another build is seen.
+    UpdateShown(Value),
     /// The developer mode was switched, from any client: the settings page reads it again.
     DeveloperChanged,
     /// The window's appearance was chosen, from any client: the window reads it again.
@@ -339,6 +342,12 @@ fn follow(
             return Ok(());
         }
     }
+    // A daemon too old to say it leaves the version section waiting.
+    if let Ok(shown) = conn.request("update.show", json!({}))
+        && updates.unbounded_send(Update::UpdateShown(shown)).is_err()
+    {
+        return Ok(());
+    }
     // When what the shell shows, and the providers, were first known to be stale.
     let mut stale = Some(Instant::now());
     let mut providers = Some(Instant::now());
@@ -352,6 +361,9 @@ fn follow(
         }
         if let Some(changed) = text_changed(event) {
             let _ = updates.unbounded_send(changed);
+        }
+        if event.name == "update.changed" {
+            let _ = updates.unbounded_send(Update::UpdateShown(event.data.clone()));
         }
         if event.name == "developer.changed" {
             let _ = updates.unbounded_send(Update::DeveloperChanged);

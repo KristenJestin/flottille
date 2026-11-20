@@ -124,11 +124,47 @@ impl Sharing {
     }
 }
 
+/// How a window starts again from the binary that replaced its own, given the page it shows
+/// (`Shell::page_name`): false when there is no other file to start from.
+pub type Reexec = Arc<dyn Fn(Option<String>) -> bool + Send + Sync>;
+
+/// The page a name of [`Shell::page_name`] is, and the tab of Settings it names.
+fn page_named(name: &str) -> Option<(Selection, Option<usize>)> {
+    let (kind, rest) = name.split_once(':').unwrap_or((name, ""));
+    Some(match kind {
+        "session" => (Selection::Session(rest.to_owned()), None),
+        "project" => (Selection::Project(rest.to_owned()), None),
+        "settings" => (Selection::Settings, rest.parse().ok()),
+        "project-settings" => (Selection::ProjectSettings(rest.to_owned()), None),
+        "spec" => {
+            let (spec, project) = rest.split_once(':')?;
+            (
+                Selection::Spec {
+                    project: project.to_owned(),
+                    spec: spec.parse().ok()?,
+                },
+                None,
+            )
+        }
+        "services" => (Selection::Services, None),
+        _ => return None,
+    })
+}
+
 pub struct Shell {
     seen: Arc<Seen>,
     /// What "Restart Flottille" runs, off the UI's thread: `flottille daemon stop`, after which
     /// the link starts Flottille again.
     restart: Arc<dyn Fn() + Send + Sync>,
+    /// This window's own build, and how it starts again from the binary that replaced it: once
+    /// the daemon says another build, the window becomes that one, on the page it shows.
+    build: Option<(String, Reexec)>,
+    /// Set once the window asked to start again: it asks once.
+    reexecuted: bool,
+    /// The page to open once the daemon's first read is in: the one shown before a re-exec.
+    reopen: Option<(Selection, Option<usize>)>,
+    /// The Version section of Settings, General.
+    version: Entity<crate::version::VersionSection>,
     snapshot: Snapshot,
     layout: Layout,
     selected: Option<Selection>,
@@ -261,6 +297,12 @@ pub struct Shell {
     /// The wait for that first read: past [`link::NOT_ANSWERING`] the window is back on this
     /// machine.
     switch_wait: Option<Task<()>>,
+    /// The session of another machine to open once that machine's first read came: the machine
+    /// and its id there.
+    open_there: Option<(String, String)>,
+    /// The daemon's last read as it gave it, before the sessions on other machines are added
+    /// under their pilots.
+    read: Option<Snapshot>,
     /// The machine chosen while its key is read.
     choosing: Option<Task<()>>,
     /// The link's updates, until a task takes them.
@@ -357,6 +399,7 @@ impl Shell {
         let compaction_guidance = cx.new(|_| RulesEditor::compaction(this.clone()));
         let workspaces = cx.new(|_| WorkspacesFolder::new(this.clone(), None));
         let modals = cx.new(|_| Modals::new());
+        let version = cx.new(|_| crate::version::VersionSection::new(this.clone()));
         let vault = cx.new(|_| VaultSection::new(this.clone(), modals.clone()));
         let connections =
             cx.new(|_| ConnectionsSection::new(this.clone(), vault.clone(), modals.clone()));
@@ -386,6 +429,7 @@ impl Shell {
                 vault.clone(),
                 connections.clone(),
                 machines.clone(),
+                version.clone(),
             )
         });
         let services = {
@@ -516,6 +560,10 @@ impl Shell {
         let mut shell = Self {
             seen,
             restart: Arc::new(restart_flottille),
+            build: None,
+            reexecuted: false,
+            reopen: None,
+            version,
             snapshot: Snapshot::default(),
             layout: Layout::Wide,
             selected: None,
@@ -585,6 +633,8 @@ impl Shell {
             machines,
             switching: false,
             switch_wait: None,
+            open_there: None,
+            read: None,
             choosing: None,
             updates: Some(updates),
             _link: Task::ready(()),
@@ -608,11 +658,38 @@ impl Shell {
         if let crate::machines::News::Read(read) = &news {
             let shown = self.aim.machine();
             self.sidebar.update(cx, |sidebar, cx| {
-                sidebar.set_machines(read.clone(), shown, cx)
+                sidebar.set_machines((**read).clone(), shown, cx)
             });
         }
+        let read = matches!(news, crate::machines::News::Read(_));
         self.machines
             .update(cx, |section, cx| section.news(news, window, cx));
+        // The sessions on other machines, or their state, may have changed: their rows follow.
+        if read
+            && !self.switching
+            && let Some(last) = self.read.clone()
+        {
+            let merged = self.with_elsewhere(last, cx);
+            if merged != self.snapshot {
+                self.show(merged, window, cx);
+            }
+        }
+    }
+
+    /// `read` with the sessions this machine's agents started on other machines under their
+    /// pilots, while this machine is shown: another machine's tree is its own.
+    fn with_elsewhere(&self, read: Snapshot, cx: &App) -> Snapshot {
+        match (self.aim.machine(), self.machines.read(cx).machines()) {
+            (None, Some(machines)) => read.with_elsewhere(machines),
+            _ => read,
+        }
+    }
+
+    /// Opens the session `agent` of `machine`, a session an agent of this machine started there:
+    /// the window shows that machine, then that session once its first read came. The switch's
+    /// own wait applies: past it, the window is back on this machine and says why.
+    pub fn open_elsewhere(&mut self, machine: String, agent: String, cx: &mut Context<Self>) {
+        self.choose_then(Some(machine.clone()), Some((machine, agent)), cx);
     }
 
     /// The Machines section of Settings.
@@ -628,11 +705,23 @@ impl Shell {
     /// Shows the machine `name` (`None`: this one): its projects and its sessions, every request
     /// signed with the device key. One that is off, or needs an update, is said so and not shown.
     pub fn choose_machine(&mut self, name: Option<String>, cx: &mut Context<Self>) {
+        self.choose_then(name, None, cx);
+    }
+
+    /// Shows the machine `name`, then the session `then` of it once its first read holds it: only
+    /// once the switch starts, never for a machine that is off or whose key could not be read.
+    fn choose_then(
+        &mut self,
+        name: Option<String>,
+        then: Option<(String, String)>,
+        cx: &mut Context<Self>,
+    ) {
         // A choice still reading the key gives way to this one.
         self.choosing = None;
         if name == self.aim.machine() {
             return;
         }
+        self.open_there = None;
         let Some(name) = name else {
             self.switch_to(None, cx);
             return;
@@ -656,7 +745,10 @@ impl Shell {
         self.choosing = Some(cx.spawn(async move |this, cx| {
             let key = cx.background_spawn(async move { remote.key() }).await;
             this.update(cx, |shell, cx| match key {
-                Ok(key) => shell.switch_to(Some((name, Arc::new(key))), cx),
+                Ok(key) => {
+                    shell.switch_to(Some((name, Arc::new(key))), cx);
+                    shell.open_there = then;
+                }
                 Err(why) => gpui_design_system::toast(
                     gpui_design_system::Toast::failure(format!("{name} cannot be shown"))
                         .detail(why),
@@ -697,9 +789,12 @@ impl Shell {
     ) {
         // The other machine's events start from its own first: none of this one's is resumed.
         let shown = aimed.as_ref().map(|(name, _)| name.clone());
+        // What the machine left said is not merged with what the next one says.
+        self.read = None;
         self.seen.last_seq.store(0, Ordering::SeqCst);
         self.seen.connections.store(0, Ordering::SeqCst);
         self.aim.set(aimed);
+        cx.set_global(crate::machines::Shown(shown.clone()));
         self.seen.last_seq.store(0, Ordering::SeqCst);
         self.seen.connections.store(0, Ordering::SeqCst);
         self.waiting_for_the_daemon(true, cx);
@@ -709,10 +804,33 @@ impl Shell {
         }
     }
 
+    /// The session of another machine asked for, once that machine's read holds it: its page is
+    /// opened, on the agent asked for.
+    fn open_there_now(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((machine, agent)) = self.open_there.clone() else {
+            return;
+        };
+        let root = self.snapshot.root_of(&agent);
+        if self.aim.machine().as_ref() != Some(&machine) || self.snapshot.session(&root).is_none() {
+            return;
+        }
+        self.open_there = None;
+        self.open(Selection::Session(root.clone()), window, cx);
+        if let Some(page) = self.session_page.clone() {
+            page.update(cx, |page, cx| {
+                page.arrive(cx);
+                if root != agent {
+                    page.show(&agent, cx);
+                }
+            });
+        }
+    }
+
     /// The machine chosen gave no first read in time: the window is on this machine again, and
     /// says why.
     fn give_up_switching(&mut self, cx: &mut Context<Self>) {
         self.switch_wait = None;
+        self.open_there = None;
         if !self.switching {
             return;
         }
@@ -1380,7 +1498,18 @@ impl Shell {
                     let connections = self.settings.read(cx).connections().clone();
                     connections.update(cx, |section, cx| section.read(cx));
                 }
+                self.read = Some(snapshot.clone());
+                let snapshot = self.with_elsewhere(snapshot, cx);
                 self.show(snapshot, window, cx);
+                self.open_there_now(window, cx);
+                if let Some((page, tab)) = self.reopen.take()
+                    && self.page_of(&page, cx) != Page::Empty
+                {
+                    self.open(page, window, cx);
+                    if let Some(tab) = tab {
+                        self.settings.update(cx, |page, cx| page.choose(tab, cx));
+                    }
+                }
                 if std::mem::take(&mut self.texts_due) {
                     self.read_texts(cx);
                 }
@@ -1395,6 +1524,7 @@ impl Shell {
             Update::Providers(read, providers) => self.set_providers(read, providers, cx),
             Update::TextChanged { judge: true, .. } => self.actions.send(Command::JudgeRead),
             Update::DeveloperChanged => self.actions.send(Command::DeveloperRead),
+            Update::UpdateShown(shown) => self.update_shown(&shown, cx),
             Update::ToolResultsChanged => self.actions.send(Command::ToolResultsRead),
             Update::CompactionChanged => self.actions.send(Command::CompactionRead),
             Update::SessionsChanged => self.actions.send(Command::SessionsRead),
@@ -1992,6 +2122,13 @@ impl Shell {
                 {
                     self.open_connection_request(number, cx);
                 }
+            }
+            Outcome::Update { method, answer } => {
+                if let Ok(shown) = &answer {
+                    self.update_shown(shown, cx);
+                }
+                self.version
+                    .update(cx, |section, cx| section.answered(method, answer, cx));
             }
             Outcome::Developer { written, shown } => {
                 self.settings
@@ -2729,6 +2866,61 @@ impl Shell {
         }
     }
 
+    /// This window's build (its `--version`) and how it starts again from its binary, given the
+    /// page it shows: what the binary gives; a window given none never starts again.
+    pub fn set_build(&mut self, full: String, reexec: Reexec) {
+        self.build = Some((full, reexec));
+    }
+
+    /// The page to open once the daemon's first read is in, as [`Shell::page_name`] names it.
+    pub fn reopen(&mut self, page: &str) {
+        self.reopen = page_named(page);
+    }
+
+    /// The page shown, named for [`Shell::reopen`]: `session:<id>`, `project:<name>`,
+    /// `settings:<tab>`, `project-settings:<name>`, `spec:<n>:<project>`, `services`.
+    pub fn page_name(&self, cx: &gpui_kit::App) -> Option<String> {
+        Some(match self.selected.as_ref()? {
+            Selection::Session(id) => format!("session:{id}"),
+            Selection::Project(name) => format!("project:{name}"),
+            Selection::Settings => format!("settings:{}", self.settings.read(cx).tab()),
+            Selection::ProjectSettings(name) => format!("project-settings:{name}"),
+            Selection::Spec { project, spec } => format!("spec:{spec}:{project}"),
+            Selection::Services => "services".to_owned(),
+        })
+    }
+
+    pub fn version(&self) -> &Entity<crate::version::VersionSection> {
+        &self.version
+    }
+
+    /// What the daemon says of an update: the Version section and the sidebar's foot show it,
+    /// and a daemon of another build than this window's has the window start again from the
+    /// binary that replaced it, on the page it shows.
+    fn update_shown(&mut self, value: &serde_json::Value, cx: &mut Context<Self>) {
+        let shown = crate::version::Shown::of(value);
+        let foot = shown.foot_line();
+        let full = shown.full.clone();
+        self.version
+            .update(cx, |section, cx| section.set_shown(shown, cx));
+        self.sidebar
+            .update(cx, |sidebar, cx| sidebar.set_version_line(foot, cx));
+        let Some((own, reexec)) = self.build.clone() else {
+            return;
+        };
+        if full.is_empty() || full == own || self.reexecuted {
+            return;
+        }
+        self.reexecuted = true;
+        let page = self.page_name(cx);
+        // What the composers hold reaches the daemon before this process becomes another.
+        self.closing(cx);
+        if !reexec(page) {
+            // No newer file at the binary's path: this window goes on as it is.
+            self.closed = false;
+        }
+    }
+
     /// What "Restart Flottille" runs, in place of `flottille daemon stop`.
     pub fn set_restart(&mut self, restart: Arc<dyn Fn() + Send + Sync>) {
         self.restart = restart;
@@ -2869,15 +3061,18 @@ impl Shell {
                 row.set_scope(scope, cx);
                 row.set_place(&session.place, cx);
                 row.set_pull(pull.as_ref(), cx);
+                // A session on another machine is ended or detached there, not from here.
+                let there = session.elsewhere.is_some();
                 row.set_actions(
-                    session.ended,
-                    session.resumable,
+                    session.ended || there,
+                    session.resumable && !there,
                     session.started_by.as_deref(),
                     cx,
                 );
                 if session.ended {
                     row.set_led_by(None, cx);
                 }
+                row.set_elsewhere(session.elsewhere.as_ref(), cx);
             });
             marks.extend(session.mark);
             shown.push(row.clone());
@@ -2958,8 +3153,10 @@ impl Shell {
             let (started_by, led_by) = (found.started_by.clone(), found.led_by.clone());
             page.update(cx, |page, cx| page.set_by(started_by, led_by, cx));
         }
+        // The sessions on other machines are found there, not here: they are not in `sessions`.
+        let read = self.snapshot.clone();
         self.switcher
-            .update(cx, |switcher, cx| switcher.set_snapshot(&self.snapshot, cx));
+            .update(cx, |switcher, cx| switcher.set_snapshot(&read, cx));
         self.ring(cx);
 
         // What was open is shown as it is now; the first project opens when nothing is.
@@ -3097,20 +3294,26 @@ impl Shell {
                 row.update(cx, |row, cx| row.set_unread(said, cx));
             }
         }
+        // What waits on another machine says which: the inbox is that machine's.
+        let there = self.aim.machine();
         let snapshot = &self.snapshot;
         let rows: Vec<BellRow> = snapshot
             .bell
             .iter()
             .map(|item| {
                 let found = item.session.as_deref().and_then(|id| snapshot.session(id));
+                let mut title = found
+                    .map(|s| match &s.started_by {
+                        Some(by) => format!("{} · started by {by}", s.title),
+                        None => s.title.clone(),
+                    })
+                    .unwrap_or_else(|| "Flottille".to_owned());
+                if let Some(machine) = &there {
+                    title = format!("{title} · on {machine}");
+                }
                 BellRow {
                     item: item.clone(),
-                    title: found
-                        .map(|s| match &s.started_by {
-                            Some(by) => format!("{} · started by {by}", s.title),
-                            None => s.title.clone(),
-                        })
-                        .unwrap_or_else(|| "Flottille".to_owned()),
+                    title,
                     project: found.map(|s| s.project.clone()).unwrap_or_default(),
                 }
             })

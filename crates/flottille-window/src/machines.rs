@@ -71,6 +71,18 @@ pub struct Machine {
     pub reason: Option<String>,
     /// Its role in the list; `None` before the list is checked.
     pub role: Option<String>,
+    /// The address its live link goes to or came from; `None` while it is not linked.
+    pub reached: Option<Reached>,
+    /// The addresses it is known at, as the hub, the user or it told them.
+    pub addresses: Vec<String>,
+}
+
+/// Where a live link to another machine goes.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Reached {
+    pub address: String,
+    /// Whether this machine dialled it; when not, `address` is where the link came from.
+    pub dialled: bool,
 }
 
 impl Machine {
@@ -82,6 +94,17 @@ impl Machine {
             since: value["since"].as_u64(),
             reason: value["reason"].as_str().map(str::to_owned),
             role: value["role"].as_str().map(str::to_owned),
+            reached: value["reached"]["address"].as_str().map(|address| Reached {
+                address: address.to_owned(),
+                dialled: value["reached"]["dialled"].as_bool().unwrap_or(true),
+            }),
+            addresses: value["addresses"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect(),
         }
     }
 
@@ -93,6 +116,31 @@ impl Machine {
 
     pub fn online(&self) -> bool {
         self.state == "online"
+    }
+
+    /// How it is reached, in words: the address of its link (the host only when it dialled this
+    /// machine: its port is the one it dialled from), or how it failed; with the hub out of
+    /// reach, the address it was last known at, which only the hub could have told.
+    pub fn address_words(&self, hub_usable: bool) -> String {
+        if let Some(reached) = &self.reached {
+            return if reached.dialled {
+                format!("Reached at {}", reached.address)
+            } else {
+                format!("Linked from {}", host_of(&reached.address))
+            };
+        }
+        let reason = self.reason.as_deref().map(how_it_failed);
+        let last = self
+            .addresses
+            .first()
+            .filter(|address| !hub_usable && !reason.is_some_and(|r| r.contains(*address)))
+            .map(|address| format!("Last known address {address}."));
+        match (reason, last) {
+            (Some(reason), Some(last)) => format!("{reason} {last}"),
+            (Some(reason), None) => reason.to_owned(),
+            (None, Some(last)) => last,
+            (None, None) => "Not reached yet".to_owned(),
+        }
     }
 
     /// Its state in words: `online`, `offline since 22:14`, `needs an update`.
@@ -155,7 +203,91 @@ pub struct Hub {
     pub url: String,
     /// `connected`, `unreachable`, `reset`, `refused`, `needs an update` or `none`.
     pub state: String,
+    /// Since when it is in that state, in milliseconds since the Unix epoch.
+    pub since: Option<u64>,
     pub reason: Option<String>,
+}
+
+/// A session or a child an agent of this machine started on another (`remote.launches`): what
+/// its row under its pilot shows.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Launched {
+    /// The machine it runs on, by name.
+    pub machine: String,
+    /// The agent of this machine that started it.
+    pub caller: String,
+    /// `child`, `led` or `handed`.
+    pub kind: String,
+    pub title: String,
+    /// Its id on its machine.
+    pub agent: String,
+    /// `held`, `started` or `ended`.
+    pub state: String,
+    /// The kind of the last delivery it sent here, and when.
+    pub heard: Option<String>,
+    pub heard_at: Option<u64>,
+    pub at: u64,
+}
+
+impl Launched {
+    fn of(value: &Value) -> Launched {
+        Launched {
+            machine: text(&value["machine"]),
+            caller: text(&value["caller"]),
+            kind: text(&value["kind"]),
+            title: text(&value["title"]),
+            agent: text(&value["agent"]),
+            state: text(&value["state"]),
+            heard: value["heard"].as_str().map(str::to_owned),
+            heard_at: value["heard_at"].as_u64(),
+            at: value["at"].as_u64().unwrap_or_default(),
+        }
+    }
+}
+
+impl Hub {
+    /// Whether what needs the hub (a device added, a change of the list) can work now.
+    pub fn usable(&self) -> bool {
+        matches!(self.state.as_str(), "connected" | "none")
+    }
+
+    /// Its state in words: `reachable`, `unreachable since 22:14`.
+    pub fn state_words(&self) -> String {
+        match (self.state.as_str(), self.since) {
+            ("connected", _) => "reachable".to_owned(),
+            ("unreachable", Some(since)) => {
+                format!("unreachable since {}", crate::session::clock(since))
+            }
+            ("unreachable", None) => "unreachable".to_owned(),
+            ("none", _) => "not tried yet".to_owned(),
+            ("reset", _) => "list reset".to_owned(),
+            (state, _) => state.to_owned(),
+        }
+    }
+
+    /// What does not work while it is not usable: its state is the tag's to say, not this line's.
+    pub fn needs_words(&self) -> Option<String> {
+        (!self.usable())
+            .then(|| "Adding a device and changing the list wait for the hub.".to_owned())
+    }
+}
+
+/// How a failure to reach something went, without the state and the time the row's tag already
+/// says: `server is unreachable: tried 192.0.2.10:7421 from pc, no answer in 10 s` and `the hub at
+/// hub.example:7420 is unreachable since 22:14: tried 192.0.2.5:7420: refused` keep what follows
+/// the colon after `is unreachable`. Any other reason is kept whole.
+pub fn how_it_failed(reason: &str) -> &str {
+    reason
+        .split_once(" is unreachable")
+        .and_then(|(_, after)| after.split_once(": "))
+        .map_or(reason, |(_, how)| how)
+}
+
+/// The host of a socket address, without its port.
+fn host_of(address: &str) -> String {
+    address
+        .parse::<std::net::SocketAddr>()
+        .map_or_else(|_| address.to_owned(), |socket| socket.ip().to_string())
 }
 
 /// Everything the window shows of the user's machines.
@@ -172,6 +304,8 @@ pub struct Machines {
     /// The hash of the list's last change, which the next one is signed after.
     pub head: Value,
     pub requests: Vec<JoinRequest>,
+    /// The sessions this machine's agents started on the others.
+    pub launches: Vec<Launched>,
 }
 
 impl Machines {
@@ -272,7 +406,7 @@ pub struct Invitation {
 #[derive(Clone, Debug, PartialEq)]
 pub enum News {
     /// A fresh read of the machines.
-    Read(Machines),
+    Read(Box<Machines>),
     /// What was asked was done, or why not.
     Done(Asked, std::result::Result<Option<Invitation>, String>),
     /// A new device asks to join through this machine's member.
@@ -344,7 +478,7 @@ impl Remote {
             let read = read(&mut conn)?;
             if last.as_ref() != Some(&read) {
                 last = Some(read.clone());
-                if !self.tell(News::Read(read)) {
+                if !self.tell(News::Read(Box::new(read))) {
                     return Ok(());
                 }
             }
@@ -386,7 +520,7 @@ impl Remote {
                     && let Ok(mut conn) = Conn::new(stream)
                     && let Ok(read) = read(&mut conn)
                 {
-                    remote.tell(News::Read(read));
+                    remote.tell(News::Read(Box::new(read)));
                 }
             })
             .expect("a thread for what is asked of the machines");
@@ -534,6 +668,7 @@ fn read(conn: &mut Conn) -> Result<Machines> {
     let hub = (!machines["hub"].is_null()).then(|| Hub {
         url: text(&machines["hub"]["url"]),
         state: text(&machines["hub"]["state"]),
+        since: machines["hub"]["since"].as_u64(),
         reason: machines["hub"]["reason"].as_str().map(str::to_owned),
     });
     let mut read = Machines {
@@ -558,7 +693,16 @@ fn read(conn: &mut Conn) -> Result<Machines> {
         members: Vec::new(),
         head: Value::Null,
         requests: Vec::new(),
+        launches: Vec::new(),
     };
+    if let Ok(launched) = conn.ask_within("remote.launches", json!({}), BOUND)? {
+        read.launches = launched["launches"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(Launched::of)
+            .collect();
+    }
     if read.hub.is_some()
         && let Ok(members) = conn.ask_within("remote.members", json!({}), BOUND)?
     {
@@ -633,6 +777,20 @@ pub fn host_name() -> String {
         name if name.is_empty() => "this-machine".to_owned(),
         name => name,
     }
+}
+
+/// The machine the window shows, when it is not this one: what the cards of a session there say
+/// of where it runs.
+#[derive(Default)]
+pub struct Shown(pub Option<String>);
+
+impl gpui_kit::Global for Shown {}
+
+/// Where a card of the machine shown says it runs: `on server`, nothing on this machine.
+pub fn shown_on(cx: &gpui_kit::App) -> Option<String> {
+    cx.try_global::<Shown>()
+        .and_then(|shown| shown.0.clone())
+        .map(|machine| format!("on {machine}"))
 }
 
 // ── The machine shown ─────────────────────────────────────────────────────────────────────────

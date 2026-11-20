@@ -226,9 +226,14 @@ const LISTED: usize = 50;
 
 /// `found` as a `people` answer lists them, one per line: those seen first, the others after.
 pub(crate) fn lines(found: &[&Person]) -> String {
+    lines_saying(found, Person::said)
+}
+
+/// [`lines`] with each person said by `say`.
+pub(crate) fn lines_saying(found: &[&Person], say: impl Fn(&Person) -> String) -> String {
     let mut text = String::new();
     for person in found.iter().take(LISTED) {
-        text.push_str(&format!("- {}\n", person.said()));
+        text.push_str(&format!("- {}\n", say(person)));
     }
     if found.len() > LISTED {
         text.push_str(&format!(

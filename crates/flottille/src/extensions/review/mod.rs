@@ -265,8 +265,14 @@ const TOOL: Tool = Tool {
         title: "Review a change",
         description: "A review of a change with fresh eyes (`docs/extensions.md`, \"Review\"): \
             what a session built, or a pull request. Start one only when the user asks for one, \
-            or when the project's instructions say to, never on your own. Do not read a diff by \
-            hand to review it: this tool does it, with checks of its own. start has three forms. \
+            or when the project's instructions say to, never on your own initiative: you may \
+            offer one, but never start one without the user's yes. Do not read a diff by hand \
+            to review it: this tool does it, with checks of its own. The user's words and the \
+            project's instructions come first; once a review is asked for without saying which, \
+            choose in this order. A session you lead that is still alive: \
+            review it, its findings going to the session that can fix them. Otherwise, if you \
+            have a change of your own: review it. Otherwise (you are in the project folder, or \
+            the session's change ended): review the pull request. start has three forms. \
             Your own change from its base, what the user's /review does: {\"action\": \"start\"}. The change of a session you \
             lead (agent_launch led), in its workspace: {\"action\": \"start\", \"agent\": \
             \"<session>\"}; two rounds at most, the second reading what changed since the first. A \

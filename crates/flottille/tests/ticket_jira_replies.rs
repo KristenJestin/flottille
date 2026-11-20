@@ -59,6 +59,16 @@ struct Jira {
 
 impl Jira {
     fn with_comments(comments: Value) -> Jira {
+        Jira::serving(comments, json!([]))
+    }
+
+    /// A site that also knows `users`, as `GET /rest/api/3/user/search` and `.../viewissue/search`
+    /// answer them: each is `{accountId, displayName, emailAddress?, active?, canSee: [keys]}`.
+    fn with_users(users: Value) -> Jira {
+        Jira::serving(json!([]), users)
+    }
+
+    fn serving(comments: Value, users: Value) -> Jira {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         let received = Arc::new(Mutex::new(Vec::new()));
@@ -125,6 +135,45 @@ impl Jira {
                                 .to_string(),
                             ),
                         }
+                    }
+                    "GET" if path.starts_with("/rest/api/3/user/") => {
+                        let query = |name: &str| {
+                            path.split(['?', '&'])
+                                .find_map(|pair| pair.strip_prefix(&format!("{name}=")))
+                                .unwrap_or_default()
+                                .replace("%20", " ")
+                                .replace("%40", "@")
+                                .replace('+', " ")
+                                .to_lowercase()
+                        };
+                        let (words, issue) = (query("query"), query("issueKey").to_uppercase());
+                        let viewing = path.starts_with("/rest/api/3/user/viewissue/search?");
+                        let found: Vec<Value> = users
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter(|user| {
+                                let held = format!(
+                                    "{} {}",
+                                    user["displayName"].as_str().unwrap_or_default(),
+                                    user["emailAddress"].as_str().unwrap_or_default()
+                                )
+                                .to_lowercase();
+                                held.contains(&words)
+                                    && (!viewing
+                                        || user["canSee"]
+                                            .as_array()
+                                            .is_some_and(|keys| keys.iter().any(|k| *k == issue)))
+                            })
+                            .map(|user| {
+                                let mut user = user.clone();
+                                user.as_object_mut().unwrap().remove("canSee");
+                                user
+                            })
+                            // Jira answers at most `maxResults` (50 when none is sent).
+                            .take(query("maxresults").parse().unwrap_or(50))
+                            .collect();
+                        ("200 OK", Value::Array(found).to_string())
                     }
                     "GET" => (
                         "200 OK",
@@ -515,7 +564,7 @@ fn a_jira_reply_without_a_tracker_entry_is_refused_before_anything_runs() {
 
     let said = refused_at_once(&user, &mcp, ask.clone());
 
-    assert!(said.contains("no vault entry to reply"), "{said}");
+    assert!(said.contains("no Jira API vault entry to reply"), "{said}");
     assert!(said.contains("worklog_token"), "{said}");
 
     // An entry the project names and the vault does not hold: the agent may ask the user for it.
@@ -571,7 +620,7 @@ fn show_full_draws_each_reply_under_its_comment() {
     let at = |id: &str| {
         lines
             .iter()
-            .position(|line| line.contains(&format!("[comment {id}]")))
+            .position(|line| line.contains(&format!("[comment {id},")))
             .unwrap_or_else(|| panic!("{id}: {shown}"))
     };
     let indent = |id: &str| lines[at(id)].len() - lines[at(id)].trim_start().len();
@@ -658,7 +707,10 @@ fn a_mention_in_a_jira_comment_without_a_tracker_entry_is_refused() {
             "body": format!("[@Ana Example](mention:{ANA}) fixed")}),
     );
 
-    assert!(said.contains("no vault entry to mention"), "{said}");
+    assert!(
+        said.contains("no Jira API vault entry to mention"),
+        "{said}"
+    );
     // A comment with no mention is as it was: held for the user.
     held(&mcp.call(
         "tickets",
@@ -676,6 +728,199 @@ fn a_mention_in_a_jira_comment_without_a_tracker_entry_is_refused() {
         json!({"action": "comment", "ticket": "ABC-1", "body": "[@Ana](mention:ana) fixed"}),
     );
     assert!(said.contains("people"), "{said}");
+    assert!(jira.received().is_empty(), "{:?}", jira.received());
+}
+
+#[test]
+fn the_refusal_without_a_tracker_entry_says_how_to_get_one() {
+    let jira = Jira::with_comments(json!([]));
+    let user = user(&jira);
+    jira_with(&user, None);
+    script(&user, json!([]));
+    let mcp = root_in(&user);
+
+    let said = refused_at_once(
+        &user,
+        &mcp,
+        json!({"action": "comment", "ticket": "ABC-1",
+            "body": format!("[@Ana Example](mention:{ANA}) fixed")}),
+    );
+
+    assert!(said.contains("vault ask"), "{said}");
+}
+
+/// The people of the fake site that the search finds, and the work item they can see.
+fn people_site() -> Jira {
+    Jira::with_users(json!([
+        {"accountId": ANA, "displayName": "Ana Example", "emailAddress": "ana@example.org",
+         "active": true, "canSee": ["ABC-1"]},
+        {"accountId": "5b10ac8d82e05b22cc7d4ef7", "displayName": "Ana Outsider",
+         "active": true, "canSee": []},
+        {"accountId": BEN, "displayName": "Ben Sample", "active": true, "canSee": ["ABC-1"]},
+        {"accountId": "5b10ac8d82e05b22cc7d4ef8", "displayName": "Ana Gone", "active": false,
+         "canSee": ["ABC-1"]},
+    ]))
+}
+
+/// `script`, and the newest work items of the project assigned to `assignee`.
+fn script_assigned(user: &User, assignee: Value) {
+    user.acli_script(json!({"items": {"ABC-1": {"key": "ABC-1",
+        "self": format!("https://{SITE}/rest/api/3/issue/1"),
+        "fields": {"summary": "The login fails", "status": {"name": "To Do"},
+            "comment": {"comments": []}}}},
+        "search": [{"key": "ABC-1", "fields": {"assignee": assignee}}]}));
+}
+
+/// What `people` answers, from the agent's side.
+fn people_said(mcp: &Mcp, args: Value) -> String {
+    let answer = mcp.call("tickets", args);
+    assert!(!answer.error, "{}", answer.text);
+    answer.text
+}
+
+#[test]
+fn people_finds_on_the_site_someone_never_seen() {
+    let jira = people_site();
+    // No work item of the project is assigned to anyone: only the site knows Ben.
+    let (user, mcp) = signed_in(&jira, json!([]));
+
+    let said = people_said(&mcp, json!({"action": "people", "query": "ben"}));
+
+    assert!(said.contains(&format!("- Ben Sample ({BEN})")), "{said}");
+    let asked = sent(&jira, "GET", "user/search?query=ben&maxResults=50");
+    assert_eq!(asked.len(), 1, "{:?}", jira.received());
+    // Signed as the entry's account, and the secret is in nothing the agent reads or `acli` got.
+    assert_eq!(asked[0].authorization, basic());
+    assert!(!said.contains(SECRET), "{said}");
+    assert!(
+        !acli_calls(&user).iter().any(|call| call.contains(SECRET)),
+        "{:?}",
+        acli_calls(&user)
+    );
+    // The e-mail, when Jira shows it, beside the account id.
+    let said = people_said(&mcp, json!({"action": "people", "query": "ana"}));
+    assert!(
+        said.contains(&format!(
+            "- Ana Example (ana@example.org), account id {ANA}"
+        )),
+        "{said}"
+    );
+    // A deactivated account is no one to notify.
+    assert!(!said.contains("Ana Gone"), "{said}");
+}
+
+#[test]
+fn people_on_a_ticket_lists_only_who_can_see_it() {
+    let jira = people_site();
+    // The newest work items are assigned to someone the site's answer for ABC-1 leaves out:
+    // they are not who can see it, and must not be listed under that header.
+    let user = user(&jira);
+    jira_with(&user, Some("jira-time"));
+    entry(&user);
+    script_assigned(
+        &user,
+        json!({"accountId": "5b10ac8d82e05b22cc7d4ef7", "displayName": "Ana Outsider"}),
+    );
+    let mcp = root_in(&user);
+
+    let said = people_said(
+        &mcp,
+        json!({"action": "people", "query": "ana", "ticket": "ABC-1"}),
+    );
+
+    assert!(said.contains("- Ana Example"), "{said}");
+    assert!(!said.contains("Ana Outsider"), "{said}");
+    assert_eq!(
+        sent(
+            &jira,
+            "GET",
+            "user/viewissue/search?issueKey=ABC-1&query=ana&maxResults=50"
+        )
+        .len(),
+        1,
+        "{:?}",
+        jira.received()
+    );
+    // Without a ticket the site's whole search answers: the outsider is found.
+    let said = people_said(&mcp, json!({"action": "people", "query": "ana"}));
+    assert!(said.contains("- Ana Outsider"), "{said}");
+}
+
+#[test]
+fn people_found_on_the_site_are_said_to_be_named_by_account_id() {
+    let jira = people_site();
+    let (_user, mcp) = signed_in(&jira, json!([]));
+
+    let said = people_said(&mcp, json!({"action": "people", "query": "ben"}));
+
+    // Ben is known to the site alone: `assignee` finds a display name among the assignees of the
+    // newest work items only, so the answer must not promise it for him.
+    assert!(said.contains("as an assignee or in a mention"), "{said}");
+    assert!(
+        said.contains("not for people found only on the site"),
+        "{said}"
+    );
+    assert!(said.contains("\"assignee\": \"<account id>\""), "{said}");
+}
+
+#[test]
+fn a_full_page_of_the_site_is_said_to_be_cut() {
+    let users: Vec<Value> = (0..50)
+        .map(|n| {
+            json!({"accountId": format!("5b10ac8d82e05b22cc7d{n:04x}"),
+                "displayName": format!("Sam Number{n:02}"), "active": true})
+        })
+        .collect();
+    let jira = Jira::with_users(Value::Array(users));
+    let (_user, mcp) = signed_in(&jira, json!([]));
+
+    let said = people_said(&mcp, json!({"action": "people", "query": "sam"}));
+
+    assert_eq!(
+        sent(&jira, "GET", "user/search?query=sam&maxResults=50").len(),
+        1,
+        "{:?}",
+        jira.received()
+    );
+    assert!(said.contains("50 in "), "{said}");
+    assert!(said.contains("narrow with query"), "{said}");
+    // A page that is not full says nothing of it.
+    let said = people_said(&mcp, json!({"action": "people", "query": "number07"}));
+    assert!(!said.contains("narrow with query"), "{said}");
+}
+
+#[test]
+fn two_people_of_the_same_name_are_both_listed() {
+    let jira = Jira::with_users(json!([
+        {"accountId": ANA, "displayName": "Sam Smith", "emailAddress": "sam@example.org",
+         "active": true},
+        {"accountId": BEN, "displayName": "Sam Smith", "active": true},
+    ]));
+    let (_user, mcp) = signed_in(&jira, json!([]));
+
+    let said = people_said(&mcp, json!({"action": "people", "query": "sam smith"}));
+
+    assert!(said.contains("2 in "), "{said}");
+    assert!(said.contains(&format!("account id {ANA}")), "{said}");
+    assert!(
+        said.contains(&format!("(sam@example.org), account id {ANA}")),
+        "{said}"
+    );
+    assert!(said.contains(&format!("- Sam Smith ({BEN})")), "{said}");
+}
+
+#[test]
+fn people_without_the_entry_says_it_searched_the_assignees_only() {
+    let jira = people_site();
+    let user = user(&jira);
+    jira_with(&user, None);
+    script(&user, json!([]));
+    let mcp = root_in(&user);
+
+    let said = people_said(&mcp, json!({"action": "people", "query": "ben"}));
+
+    assert!(said.contains("Only the assignees were searched"), "{said}");
+    assert!(said.contains("no Jira API vault entry"), "{said}");
     assert!(jira.received().is_empty(), "{:?}", jira.received());
 }
 
@@ -805,7 +1050,10 @@ fn a_description_with_a_mention_without_a_tracker_entry_is_refused() {
         json!({"action": "create", "title": "A new one", "project": "ABC", "body": body}),
     ] {
         let said = refused_at_once(&user, &mcp, ask);
-        assert!(said.contains("no vault entry to mention"), "{said}");
+        assert!(
+            said.contains("no Jira API vault entry to mention"),
+            "{said}"
+        );
     }
     // Neither `acli` nor the site was called.
     assert!(
@@ -979,7 +1227,10 @@ fn a_mention_in_an_edited_jira_comment_without_a_tracker_entry_is_refused() {
             "body": format!("[@Ana Example](mention:{ANA}) second")}),
     );
 
-    assert!(said.contains("no vault entry to mention"), "{said}");
+    assert!(
+        said.contains("no Jira API vault entry to mention"),
+        "{said}"
+    );
     assert!(jira.received().is_empty(), "{:?}", jira.received());
 }
 

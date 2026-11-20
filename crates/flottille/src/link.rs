@@ -816,6 +816,10 @@ impl Remote {
                     "state": seen.state.to_string(),
                     "since": seen.since,
                     "reason": seen.reason,
+                    // Where the live link goes (`dialled`) or came from.
+                    "reached": seen.link.as_ref().map(|(_, link, dialled)| {
+                        json!({"address": link.remote().to_string(), "dialled": dialled})
+                    }),
                     "addresses": peer.known(),
                 })
             })
@@ -2151,6 +2155,8 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Result<Va
                 .await
                 .map_err(Failure::refused)
         }
+        "remote.launches" => crate::across::launched(&daemon)
+            .map_err(|why| Failure::new(flottille_protocol::code::UNAVAILABLE, why)),
         "remote.members" => control_of(&remote)?.members().map_err(Failure::refused),
         "remote.requests" => control_of(&remote)?.requests().map_err(Failure::refused),
         "remote.invite" => {

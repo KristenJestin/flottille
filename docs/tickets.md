@@ -527,14 +527,41 @@ ticket itself.
   - **What the agent posted is recorded by the id Jira answers** (a comment, a reply, an edited
     comment), so it is still the agent's when read back, whatever Jira shows for the mention. A
     description is recorded by its words, the names being Jira's own, as a read gives them.
-  - A mention reads back as `@Display Name`; to keep a mention while editing a text, the agent
-    writes it again. GitHub is unchanged: an `@login` notifies, and a `mention:` link is left as
+  - **The agent is told, and can find the account id** (#1127): the `body` field's description
+    gives the form (and `@login` for GitHub), and `people`'s (`query`) says it gives each person's
+    account id. `people` says the account id of every person (`Ana Example (ana@example.org),
+    account id 5b10…`, once when it is already how they are named), and `show` with `detail
+    full` says the author's account id on each Jira comment's line (`[comment 20000, author
+    account 5b10…]`), so an agent answering someone can mention them.
+  - **A person seen nowhere yet is searched on the site.** `people {query, ticket?}` on Jira also
+    asks the site, with the project's tracker entry (REST, signed as the rest of the calls, the
+    secret in no argument, log nor answer): with a `ticket`, `GET
+    /rest/api/3/user/viewissue/search?issueKey=&query=` (only the people who can see it, what
+    Jira's own picker offers, so a mention reaches someone who can read the ticket), else `GET
+    /rest/api/3/user/search?query=`. A deactivated account and one with no account id are left
+    out. Each line gives the name, the account id and the e-mail when Jira shows it; people of the
+    same name are all listed, never one chosen silently. What `acli` shows (the assignees) comes
+    first and is not repeated. **With a `ticket` the answer is the site's alone**, an assignee
+    matching the query who cannot see the ticket not being listed under a header that says who can.
+    `maxResults=50` is sent, and a full page says so (`there may be more on the site, narrow with
+    query`). **A person found on the site is named by account id for `assignee`**: `edit` finds a
+    display name among the assignees `acli` shows only (below), so the answer's closing line says
+    so, and gives the account id as the way to name them. Without the entry, or when the site
+    cannot be reached, `people` answers from the assignees and says so (`Only the assignees were
+    searched, not the site: …`, with how to set the entry), and claims no ticket filter. No query:
+    no search (Jira's takes words).
+  - A mention reads back as `[@Display Name](mention:<accountId>)`, the form the agent writes, so
+    one read can be repeated (a mention whose id is no account id reads as its text: an id is
+    never put into a link whatever its shape). GitHub is unchanged: an `@login` notifies, and a `mention:` link is left as
     a link. A raw ADF given in `fields` is the agent's own document: its mention nodes are not
     looked up, except those of `fields.description`.
   - Not confirmed against a real site (the fake follows the shapes above): that a `mention` node
     in the body of `POST …/comment`, of the comment's `PUT`, of a description's `PUT` and of a
     worklog notifies the person, and what `GET /rest/api/3/user?accountId=` answers for an
-    account of another site or a deactivated one (a `404` is taken as unknown).
+    account of another site or a deactivated one (a `404` is taken as unknown), and what `GET
+    /rest/api/3/user/search` and `GET /rest/api/3/user/viewissue/search` answer for the entry's
+    account (the fake follows Jira's documentation: an array of users, `active`, at most
+    `maxResults`; whether the second needs more than the entry's account has is unknown).
 **Measured on a real Jira Cloud site**: the shapes of `link type --json`, `link list --json` and
 `view --fields issuelinks` above, `link delete --id <link id> --yes`, and `comment list --key <K>
 --json`, whose comments each carry their `id` (their `body` plain text). The view's comments are
@@ -1042,16 +1069,18 @@ tickets {action: "log_time", ticket: "ABC-123", duration: "2h 30m", started: "20
   while to allow it). **`body`**, optional, is the worklog's comment, Markdown converted to ADF as
   every Jira text is. **`ticket` is required**: the workspace's ticket is never taken for it, so that the card names the work item the user allows.
 - **The token is a vault entry the project names** (`docs/vault.md`): `worklog_token = "<entry>"`
-  in `[tracker]` (`kind = "jira"` only), the entry's secret being a Jira API token and its
+  in `[tracker]` (`kind = "jira"` only; the key keeps its name, but the entry is the project's
+  **Jira API access**: it serves worklogs, replies, mentions, an `edit` with `fields`, and the
+  site search of `people`, and the window and the refusals say "Jira API"), the entry's secret being a Jira API token and its
   username the account's e-mail; the request is `Basic` over `username:secret`. The daemon reads
   the secret with `vault::secret` for this one request. No entry named, an entry the project does
   not see, or one with no username is refused before anyone is asked, with a sentence that says
-  how to set one up: the window's way first (the project's Settings, Tracker, `Log time with`), the
+  how to set one up: the window's way first (the project's Settings, Tracker, `Jira API access with`), the
   file's second. **The window offers that way**: the refusal's `agent.tool_served` carries
   `setup: "time_logging"` (`docs/events.md`), and the conversation shows a line and a `Set up
-  time logging` button that opens the project's Settings at Tracker. The token is in no card, result, log, event nor the store: what Jira
+  Jira API access` button that opens the project's Settings at Tracker. The token is in no card, result, log, event nor the store: what Jira
   answers is masked of it, and so is every error.
-- **A change of the tracker says its entry**: the card of `project set_settings` reads `Set the tracker to Jira on <site> (ABC), logging time with the vault entry `<name>``, so that the user sees which credentials a worklog would use. The entry is bound to the project's worklog, not to a host: when the site or the entry changes, the card says where the secret goes too (`Log time with it: the secret of the vault entry `<name>` will be sent to <site>`). Such a change, an agent's `set_settings` that sends the token to another site or names another entry for it, is held for the user in every mode, **Full included**, and never reaches the judge: answered at once, the result coming later as a delivery, so that an agent cannot send the user's token to a host it chose. A change that keeps the site and the entry passes in Full as before; the window, the command line and an edit of the project's file are the user's own.
+- **A change of the tracker says its entry**: the card of `project set_settings` reads `Set the tracker to Jira on <site> (ABC), Jira API access with the vault entry `<name>``, so that the user sees which credentials a worklog would use. The entry is bound to the project's worklog, not to a host: when the site or the entry changes, the card says where the secret goes too (`Jira API access with it: the secret of the vault entry `<name>` will be sent to <site>`). Such a change, an agent's `set_settings` that sends the token to another site or names another entry for it, is held for the user in every mode, **Full included**, and never reaches the judge: answered at once, the result coming later as a delivery, so that an agent cannot send the user's token to a host it chose. A change that keeps the site and the entry passes in Full as before; the window, the command line and an edit of the project's file are the user's own.
 - **GitHub is refused with a sentence** (`GitHub issues have no time tracking`), and so are a
   duration or a start that is wrong, before anyone is asked.
 - **It is a ticket write**, judged like `comment`: held in Ask, allowed in Full, and the card says
