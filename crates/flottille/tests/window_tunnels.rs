@@ -31,6 +31,10 @@ use serde_json::{Value, json};
 /// How long a link, a launch or a read of the machines may take.
 const WAIT: Duration = Duration::from_secs(60);
 
+/// Each scenario runs three daemons and a hub: one at a time, so that the timing of the other
+/// windows' tests of the group is not tried by their load.
+static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
+
 /// A picture, 1 pixel by 1: what the server's agent shows, to see that the window never reads a
 /// file of another machine on its own disk.
 const PNG: [u8; 70] = [
@@ -118,7 +122,10 @@ struct Machines {
     agent: String,
 }
 
-fn machines() -> Machines {
+fn machines() -> (std::sync::MutexGuard<'static, ()>, Machines) {
+    let turn = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let port = free_port();
     let user = User::with_fake_agent();
     user.fake_script(script(port));
@@ -141,13 +148,16 @@ fn machines() -> Machines {
             .unwrap()["agent"]["state"]
             == "idle"
     });
-    Machines {
-        _hub: hub,
-        pc,
-        server,
-        port,
-        agent,
-    }
+    (
+        turn,
+        Machines {
+            _hub: hub,
+            pc,
+            server,
+            port,
+            agent,
+        },
+    )
 }
 
 /// Signs with the device key the clients of `machine` keep, as the binary's window does.
@@ -370,7 +380,7 @@ fn card_of(
 
 #[gpui_kit::test]
 fn opening_a_run_of_another_machine_opens_a_tunnel_then_the_local_address(cx: &mut TestAppContext) {
-    let machines = machines();
+    let (_turn, machines) = machines();
     let url = format!("http://127.0.0.1:{}", machines.port);
     let run = web(&machines.server.user, &url, machines.port);
     let (shell, cx, opened) = window(&machines.pc, cx);
@@ -418,7 +428,7 @@ fn opening_a_run_of_another_machine_opens_a_tunnel_then_the_local_address(cx: &m
 
 #[gpui_kit::test]
 fn a_localhost_link_of_another_machine_opens_through_a_tunnel(cx: &mut TestAppContext) {
-    let machines = machines();
+    let (_turn, machines) = machines();
     let url = format!("http://127.0.0.1:{}", machines.port);
     let run = web(&machines.server.user, &url, machines.port);
     let (shell, cx, opened) = window(&machines.pc, cx);
@@ -447,7 +457,7 @@ fn a_localhost_link_of_another_machine_opens_through_a_tunnel(cx: &mut TestAppCo
 
 #[gpui_kit::test]
 fn a_public_link_of_another_machine_opens_as_it_is(cx: &mut TestAppContext) {
-    let machines = machines();
+    let (_turn, machines) = machines();
     let (shell, cx, opened) = window(&machines.pc, cx);
     on_the_server(&shell, cx);
     let (_page, at) = card_of(&shell, &machines, "SHOW PUBLIC", cx);
@@ -463,7 +473,7 @@ fn a_public_link_of_another_machine_opens_as_it_is(cx: &mut TestAppContext) {
 
 #[gpui_kit::test]
 fn the_open_tunnel_shows_in_its_row_and_closes(cx: &mut TestAppContext) {
-    let machines = machines();
+    let (_turn, machines) = machines();
     let url = format!("http://127.0.0.1:{}", machines.port);
     let run = web(&machines.server.user, &url, machines.port);
     let (shell, cx, _opened) = window(&machines.pc, cx);
@@ -517,7 +527,7 @@ fn the_open_tunnel_shows_in_its_row_and_closes(cx: &mut TestAppContext) {
 
 #[gpui_kit::test]
 fn the_tunnel_s_line_unfolds_and_folds_away(cx: &mut TestAppContext) {
-    let machines = machines();
+    let (_turn, machines) = machines();
     let url = format!("http://127.0.0.1:{}", machines.port);
     let run = web(&machines.server.user, &url, machines.port);
     let (shell, cx, _opened) = window(&machines.pc, cx);
@@ -566,7 +576,7 @@ fn the_tunnel_s_line_unfolds_and_folds_away(cx: &mut TestAppContext) {
 
 #[gpui_kit::test]
 fn a_tunnel_that_cannot_open_is_a_toast_with_its_reason(cx: &mut TestAppContext) {
-    let machines = machines();
+    let (_turn, machines) = machines();
     let url = format!("http://127.0.0.1:{}", machines.port);
     let run = web(&machines.server.user, &url, machines.port);
     let (shell, cx, opened) = window(&machines.pc, cx);
@@ -591,7 +601,7 @@ fn a_tunnel_that_cannot_open_is_a_toast_with_its_reason(cx: &mut TestAppContext)
 
 #[gpui_kit::test]
 fn a_link_no_run_of_the_machine_serves_is_a_toast_with_its_reason(cx: &mut TestAppContext) {
-    let machines = machines();
+    let (_turn, machines) = machines();
     let (shell, cx, opened) = window(&machines.pc, cx);
     on_the_server(&shell, cx);
     let (_page, at) = card_of(&shell, &machines, "SHOW NOWHERE", cx);
@@ -614,7 +624,7 @@ fn a_link_no_run_of_the_machine_serves_is_a_toast_with_its_reason(cx: &mut TestA
 
 #[gpui_kit::test]
 fn a_file_of_another_machine_says_where_it_is(cx: &mut TestAppContext) {
-    let machines = machines();
+    let (_turn, machines) = machines();
     std::fs::write(machines.server.user.path("work/app/shot.png"), PNG).unwrap();
     let (shell, cx, opened) = window(&machines.pc, cx);
     on_the_server(&shell, cx);
