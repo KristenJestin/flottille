@@ -282,6 +282,23 @@ async fn recursion(
     }
 }
 
+/// Refuses a push whose options cannot be read as git reads them: an option given a word the
+/// daemon adds as its value (`--repo` before `--dry-run`) would change what that word does.
+pub fn push_options(words: &[String]) -> Result<(), String> {
+    let at_push = gate::git_globals(&words[1..]).0 + 1;
+    let rest = &words[at_push + 1..];
+    let end = rest
+        .iter()
+        .position(|word| word == "--" || word == "--end-of-options")
+        .unwrap_or(rest.len());
+    read(&rest[..end], &PUSH).map(|_| ()).map_err(|why| {
+        format!(
+            "refused: the push's options cannot be read ({why}); {}",
+            Checked::Pushed.nothing()
+        )
+    })
+}
+
 /// A ref a push sends, as git's dry run says it: its flag (`*` a new one), its source and its
 /// destination.
 type Pushed = (String, String, String);

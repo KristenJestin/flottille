@@ -501,6 +501,10 @@ pub async fn run(
     // may have written: git takes the first it reads, the repository's, so only the line's own
     // option wins over it (the gate refuses the agent's).
     let pushing = approved && gate::is_push(&words);
+    // The words added to it below (its probe's `--dry-run`) must be read as options of their own.
+    if pushing && let Err(refusal) = crate::message_checks::push_options(&words) {
+        return Outcome::Refused(refusal);
+    }
     let pushed_words = match pushing {
         true => receiving(&words),
         false => words.clone(),
