@@ -155,6 +155,9 @@ no device calls a `local` one over a link (`docs/remote.md`, "Roles").
 | `update.check` | drive |
 | `update.download` | local |
 | `update.restart` | local |
+| `whatsnew.show` | read |
+| `whatsnew.seen` | drive |
+| `whatsnew.fetch` | drive |
 | `extension.list` | read |
 | `extension.set` | drive |
 | `extension.act` | drive |
@@ -750,6 +753,28 @@ at all), and downloads or applies nothing unless asked.
 Each change emits `update.changed` with what `update.show` answers. `update.download` and
 `update.restart` are `local`: they replace this machine's binary. The user's door alone reaches
 them: no tool of an agent does.
+
+### The what's new methods
+
+What changed since the version the user last ran (`docs/releases.md`, "What's new").
+
+- `whatsnew.show {since?}` answers `{"version", "since", "seen", "fetching", "failed", "groups"}`:
+  this build's version; the version that ran before it, which the changes are counted from (null
+  when nothing is new: the first version run, the same one again, a step back); whether the page
+  was opened since this build runs; whether the notes are being read; why they could not be read
+  (null otherwise); and the changes, `[{"key", "title", "scopes": [{"scope", "changes": [{"text",
+  "pr", "url"}]}]}]`, or null while the notes were not read. The groups are the changelog's
+  (`breaking`, `features`, `fixes`, `performance`, `other`) in its order, those with something in
+  them; the scopes alphabetical, the changes without one (`scope` null) last; each change once
+  however many releases list it, the oldest first within a scope; `pr` and `url` null when the
+  line names no pull request. With `since`, the changes are counted from that version instead,
+  read now from the releases whatever `check` says and not kept (`unavailable` when they cannot be
+  read, `invalid-params` when `since` is no version).
+- `whatsnew.seen` records that the page was opened, for good: the window's mark goes.
+- `whatsnew.fetch` reads the notes the daemon lacks now, whatever `check` says, and answers as
+  `whatsnew.show`; the rest comes in `whatsnew.changed`.
+
+`whatsnew.seen` and `whatsnew.fetch` emit `whatsnew.changed` with what `whatsnew.show` answers.
 
 ### The extension methods
 

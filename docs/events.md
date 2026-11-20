@@ -146,6 +146,12 @@ progressed, ended or failed, the check was switched, or a restart was asked once
 (`docs/releases.md`, "Updating"). Its fields are what `update.show` answers (`docs/protocol.md`,
 "The update methods").
 
+### `whatsnew.changed`
+
+What is new since the version last run changed: the notes were read (or could not be), or the
+user opened the page (`docs/releases.md`, "What's new"). Its fields are what `whatsnew.show`
+answers (`docs/protocol.md`, "The what's new methods").
+
 ### `appearance.changed`
 
 The user chose the window's appearance (`appearance.set`): every window takes it.

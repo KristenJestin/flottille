@@ -243,6 +243,34 @@ $ flottille update --stage
 0.3.1-alpha.feat-specs.5 is staged beside ~/.local/bin/flottille: applied at the next start of the daemon.
 ```
 
+### `flottille changes [--since <version>] [--json]`
+
+What changed since the version you last ran, the list the window's **What's new** page shows
+(`docs/releases.md`, "What's new"): every change between that version and this one, from the
+channel's release notes, grouped as the changelog groups them (breaking changes, features, fixes,
+performance, other changes), then by scope, each change once and with its pull request's number.
+`--since <version>` counts from that version instead, reading the notes now whatever the check for
+updates says (the daemon makes no request of its own with the check off). When the notes of the
+version last run were not read yet (a build installed by hand reads them at its first start), the
+command reads them. `--json` prints what `whatsnew.show` answers (`docs/protocol.md`). When
+nothing is new (the first version run, the same one again), it says so.
+
+```
+$ flottille changes
+What's new since 0.4.0-beta.103 (now 0.4.0-beta.105)
+
+Features
+  cli
+    - changes prints what is new (#1120)
+  gui
+    - a mark at the sidebar's foot says what is new (#1120)
+
+Fixes
+  gui
+    - a link opens (#1103)
+$ flottille changes --since 0.4.0-beta.104
+```
+
 ### `flottille remote setup <hub URL> [--name <name>] [--replace] [--json]`
 
 Makes this machine the first member of a new hub (`docs/remote.md`, "The first member"), with the
