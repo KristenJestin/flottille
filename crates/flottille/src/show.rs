@@ -160,3 +160,161 @@ pub fn show(daemon: &Arc<Daemon>, grant: &Grant, args: Value) -> Outcome {
         Err(error) => Outcome::Failed(error.to_string()),
     }
 }
+
+// ── A file shown, served to another device ───────────────────────────────────────────────────
+
+/// The most of a file one answer of `agent.file` carries.
+pub const CHUNK: u64 = 1024 * 1024;
+/// The largest file served: a video of a session, not a disk.
+const MOST_SERVED: u64 = 2 * 1024 * 1024 * 1024;
+/// The bytes per second this machine serves, all devices together: a video plays at it, and a
+/// device that asks without end takes no more of the machine and no more than a quarter of the
+/// requests its signature allows in five minutes (`flottille_link::NONCES_PER_DEVICE`).
+const RATE: u64 = 4 * 1024 * 1024;
+
+/// What `agent.file` serves, by the extension of the file: a picture or a video.
+pub fn media_type(path: &str) -> Option<&'static str> {
+    let extension = std::path::Path::new(path)
+        .extension()?
+        .to_str()?
+        .to_ascii_lowercase();
+    Some(match extension.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "mp4" | "m4v" => "video/mp4",
+        "webm" => "video/webm",
+        "mkv" => "video/x-matroska",
+        "mov" => "video/quicktime",
+        "ogv" => "video/ogg",
+        _ => return None,
+    })
+}
+
+/// When the next chunk may leave: the time the chunks served so far take at [`RATE`].
+static PACE: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+
+/// How long a chunk of `bytes` waits before it leaves, the chunks before it taking their time.
+fn wait_for(
+    bytes: u64,
+    now: std::time::Instant,
+    next: &mut Option<std::time::Instant>,
+) -> std::time::Duration {
+    let start = next.filter(|next| *next > now).unwrap_or(now);
+    *next = Some(start + std::time::Duration::from_secs_f64(bytes as f64 / RATE as f64));
+    start - now
+}
+
+/// `agent.file`: a chunk of a picture or a video `agent` showed, named by the number of the event
+/// that said it (`docs/remote.md`, "A file an agent showed"). Only that file, as it was when it
+/// was shown: the path is never the asker's, the file is opened without following a link and must
+/// still be the very path recorded, a regular file with no execute bit.
+pub async fn serve_file(
+    daemon: &Arc<Daemon>,
+    asked: flottille_core::protocol::AgentFile,
+) -> Result<Value, crate::projects::Failure> {
+    use crate::projects::Failure;
+    let agent = asked.agent;
+    let shown = asked.shown;
+    let none = || {
+        Failure::new(
+            "not-found",
+            format!("{agent} showed no file as {shown}: only a file a session showed is served"),
+        )
+    };
+    let event = daemon
+        .read(|store| store.agent_events(&agent, shown.saturating_sub(1), 1))
+        .map_err(|error| Failure::new("internal", error.to_string()))?
+        .into_iter()
+        .next()
+        .filter(|event| {
+            event.seq == shown && event.name == "agent.link_shown" && event.data["kind"] == "file"
+        })
+        .ok_or_else(none)?;
+    let target = event.data["target"].as_str().ok_or_else(none)?.to_owned();
+    let mime = media_type(&target).ok_or_else(|| {
+        Failure::refused(format!(
+            "{target} is no picture or video: only a picture or a video a session showed is served"
+        ))
+    })?;
+    let (offset, length) = (asked.offset, asked.length.unwrap_or(CHUNK).min(CHUNK));
+    let read = tokio::task::spawn_blocking(move || read_chunk(&target, offset, length))
+        .await
+        .map_err(|error| Failure::new("internal", error.to_string()))?
+        .map_err(Failure::refused)?;
+    let (size, bytes) = read;
+    let wait = wait_for(
+        bytes.len() as u64,
+        std::time::Instant::now(),
+        &mut PACE.lock().unwrap(),
+    );
+    tokio::time::sleep(wait).await;
+    use base64::Engine as _;
+    Ok(json!({"mime": mime, "size": size, "offset": offset,
+        "data": base64::engine::general_purpose::STANDARD.encode(&bytes)}))
+}
+
+/// At most `length` bytes of the file at `target` from `offset`, and its size; why not, otherwise.
+fn read_chunk(target: &str, offset: u64, length: u64) -> Result<(u64, Vec<u8>), String> {
+    use std::io::{Read as _, Seek as _};
+    let refused = |why: &str| format!("refused: {target} is not served: {why}");
+    let file = shown::open_document(std::path::Path::new(target)).map_err(|why| refused(&why))?;
+    // A folder of the path made a link since it was shown leads elsewhere: the file opened must
+    // be the very one recorded.
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::fd::AsRawFd as _;
+        let opened = std::fs::read_link(format!("/proc/self/fd/{}", file.as_raw_fd()))
+            .map_err(|_| refused("where it leads cannot be read"))?;
+        if opened != std::path::Path::new(target) {
+            return Err(refused("it is no longer the file shown"));
+        }
+    }
+    let size = file
+        .metadata()
+        .map_err(|_| refused("it cannot be read"))?
+        .len();
+    if size > MOST_SERVED {
+        return Err(refused("it is larger than 2 GiB"));
+    }
+    let mut file = file;
+    if offset >= size {
+        return Ok((size, Vec::new()));
+    }
+    file.seek(std::io::SeekFrom::Start(offset))
+        .map_err(|_| refused("it cannot be read"))?;
+    let mut bytes = Vec::new();
+    file.take(length)
+        .read_to_end(&mut bytes)
+        .map_err(|_| refused("it cannot be read"))?;
+    Ok((size, bytes))
+}
+
+#[cfg(test)]
+mod served {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn chunks_leave_at_the_rate_whoever_asks() {
+        let now = Instant::now();
+        let mut next = None;
+        assert_eq!(wait_for(RATE, now, &mut next), Duration::ZERO);
+        // A second chunk asked at once waits for the first one's second.
+        assert_eq!(wait_for(RATE / 2, now, &mut next), Duration::from_secs(1));
+        // Once the time has passed, nothing waits.
+        assert_eq!(
+            wait_for(1, now + Duration::from_secs(5), &mut next),
+            Duration::ZERO
+        );
+    }
+
+    #[test]
+    fn only_a_picture_or_a_video_is_served() {
+        assert_eq!(media_type("/w/shot.PNG"), Some("image/png"));
+        assert_eq!(media_type("/w/clip.mp4"), Some("video/mp4"));
+        assert_eq!(media_type("/w/notes.md"), None);
+        assert_eq!(media_type("/w/clip.mp4.sh"), None);
+    }
+}

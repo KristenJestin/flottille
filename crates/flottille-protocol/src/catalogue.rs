@@ -213,6 +213,7 @@ pub const METHODS: &[(&str, Class)] = &[
     ("agent.unqueue", Drive),
     ("agent.answer", Drive),
     ("agent.image", Read),
+    ("agent.file", Read),
     ("agent.cancel", Drive),
     ("agent.stop", Drive),
     ("agent.resume", Drive),
