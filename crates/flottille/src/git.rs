@@ -4,7 +4,7 @@
 
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -99,9 +99,18 @@ pub async fn output_remote(
     .into_iter()
     .chain(args.iter().copied())
     .collect();
-    let mut git = command(dir, &args);
+    // Not lent while what its `ssh` reads could have been written by a confined command, and
+    // only to the `git` found at the start, never one a run put first in the `PATH`.
+    let lent = crate::ssh_agent::socket()
+        .filter(|_| protocol == "ssh" && crate::pushed::ssh_unlent().is_none())
+        .zip(program());
+    let mut git = match lent {
+        Some((_, program)) => command_of(program.as_os_str(), dir, &args),
+        None => command(dir, &args),
+    };
     git.env("GIT_ALLOW_PROTOCOL", protocol);
-    match crate::ssh_agent::socket().filter(|_| protocol == "ssh") {
+    let lent = lent.map(|(socket, _)| socket);
+    match lent {
         Some(socket) => crate::landlock::confined_lent(git.env(crate::ssh_agent::VARIABLE, socket)),
         None => crate::landlock::confined(&mut git),
     };
@@ -140,60 +149,62 @@ pub fn find_helpers() {
     });
 }
 
-/// The `ssh` command of the user's own: the daemon's `GIT_SSH_COMMAND`, else their global
-/// `core.sshCommand` (several accounts of one forge), read at the daemon's start, before a run
-/// could write the file.
-static OWN_SSH: OnceLock<Option<OsString>> = OnceLock::new();
+/// The protocols a push the gate let through may use outside the sandbox
+/// (`GIT_ALLOW_PROTOCOL`): git's own network transports, as for the daemon's fetch, never `ext::`
+/// nor a remote helper a run's settings name; not a path, whose receiving git runs the hooks and
+/// settings of a repository a run may have made (`runs::to_paths`); and not SSH where the user's
+/// agent is `lent` to no push (`pushed::unlent`).
+pub fn push_protocols(lent: bool) -> String {
+    let allowed: Vec<&str> = FETCHED
+        .into_iter()
+        .filter(|protocol| *protocol != "file")
+        .filter(|protocol| lent || *protocol != "ssh")
+        .collect();
+    allowed.join(":")
+}
 
-/// Reads the user's own `ssh` command, before anything runs.
-pub fn find_own_ssh() {
-    OWN_SSH.get_or_init(|| {
-        if let Some(command) = std::env::var_os("GIT_SSH_COMMAND").filter(|c| !c.is_empty()) {
-            return Some(command);
+/// The settings that leave git the user's own credential helpers alone: an empty
+/// `credential.helper` empties the list read so far, and the command's scope is read last.
+pub fn helper_settings() -> Vec<(String, String)> {
+    std::iter::once(("credential.helper".to_owned(), String::new()))
+        .chain(HELPERS.get().into_iter().flatten().cloned())
+        .collect()
+}
+
+/// [`helper_settings`], as `-c` options.
+fn helpers() -> Vec<String> {
+    helper_settings()
+        .into_iter()
+        .flat_map(|(name, helper)| ["-c".to_owned(), format!("{name}={helper}")])
+        .collect()
+}
+
+/// The `git` a push the gate let through runs: the one of the daemon's `PATH` that only root may
+/// change, found at its start, its links followed. Never one a run put first in the `PATH` since
+/// (`~/.local/bin` is the user's, so a run's to write).
+static GIT: OnceLock<Option<PathBuf>> = OnceLock::new();
+
+/// Why a push the gate let through is refused where no such `git` was found.
+pub const UNFOUND: &str = "no git of the daemon's PATH is owned by root in a folder owned by \
+     root, and a push goes outside the sandbox only through one: install git from the system's \
+     packages, then restart the daemon";
+
+/// Finds the `git` of [`GIT`], at the daemon's start, before anything runs.
+pub fn find_git() {
+    GIT.get_or_init(|| {
+        let found = crate::ssh_agent::chosen(crate::ssh_agent::candidates("git"))
+            .filter(|(_, rooted)| *rooted)
+            .map(|(git, _)| git);
+        if found.is_none() {
+            eprintln!("flottille daemon: {UNFOUND}");
         }
-        let output = crate::children::spawn_std(
-            std::process::Command::new("git")
-                .args([
-                    "config",
-                    "--global",
-                    "--includes",
-                    "--get",
-                    "core.sshCommand",
-                ])
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::null()),
-        )
-        .and_then(std::process::Child::wait_with_output)
-        .ok()?;
-        let command = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-        (output.status.success() && !command.is_empty()).then(|| command.into())
+        found
     });
 }
 
-/// The `ssh` a push the gate let through signs in with: the user's own (`find_own_ssh`), else
-/// the one found at the daemon's start; never a `core.sshCommand` of the repository, which a run
-/// may have written.
-pub fn push_ssh_command() -> OsString {
-    OWN_SSH.get().cloned().flatten().unwrap_or_else(ssh_command)
-}
-
-/// The protocols a push the gate let through may use (`GIT_ALLOW_PROTOCOL`): git's own
-/// transports, as for the daemon's fetch, never `ext::` nor a remote helper a run's settings
-/// name.
-pub fn push_protocols() -> String {
-    FETCHED.join(":")
-}
-
-/// `-c` options that leave git the user's own credential helpers alone: an empty
-/// `credential.helper` empties the list read so far, and the command's scope is read last.
-fn helpers() -> Vec<String> {
-    let mut options = vec!["-c".to_owned(), "credential.helper=".to_owned()];
-    for (name, helper) in HELPERS.get().into_iter().flatten() {
-        options.push("-c".to_owned());
-        options.push(format!("{name}={helper}"));
-    }
-    options
+/// The `git` found at the start, if one only root may change was.
+pub fn program() -> Option<&'static Path> {
+    GIT.get()?.as_deref()
 }
 
 /// The protocols the daemon's own git reaches a remote with: git's own transports. Any other
@@ -224,16 +235,23 @@ fn protocol(url: &str) -> &str {
 }
 
 /// The `ssh` git runs: the one found at the daemon's start, quoted for the shell git reads
-/// `GIT_SSH_COMMAND` with.
-fn ssh_command() -> OsString {
-    match crate::ssh_agent::ssh() {
+/// `GIT_SSH_COMMAND` with, and its [`SSH_OPTIONS`].
+pub fn ssh_command() -> OsString {
+    let ssh = match crate::ssh_agent::ssh() {
         Some(ssh) => {
             let quoted = ssh.as_os_str().to_string_lossy().replace('\'', "'\\''");
-            format!("'{quoted}'").into()
+            format!("'{quoted}'")
         }
         None => "ssh".into(),
-    }
+    };
+    format!("{ssh} {SSH_OPTIONS}").into()
 }
+
+/// The options every `ssh` the daemon's git runs is given first, which win over the
+/// configuration's and the later options': no connection shared through a master socket (one in
+/// the read-only `~/.ssh` cannot be made, one elsewhere any run could use), and the agent
+/// forwarded to no host.
+pub const SSH_OPTIONS: &str = "-o ControlMaster=no -o ControlPath=none -o ForwardAgent=no";
 
 /// Runs `words` (`git`, its global options, its command) in `dir` with the environment `env` and
 /// no other, `input` on its standard input: a git line of an agent's, read before it runs, in
@@ -488,6 +506,18 @@ async fn kill(child: &mut tokio::process::Child) {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[test]
+    fn the_ssh_git_runs_shares_no_connection_and_forwards_no_agent() {
+        // First, so that neither `~/.ssh/config` nor a later option sets them: a master socket
+        // in the read-only `~/.ssh` could not be made, and one made elsewhere any run could use.
+        let ssh = ssh_command();
+        assert!(
+            ssh.to_string_lossy()
+                .ends_with(" -o ControlMaster=no -o ControlPath=none -o ForwardAgent=no"),
+            "{ssh:?}"
+        );
+    }
 
     /// An empty home of the tests' own, for every git they run.
     pub(crate) fn home() -> &'static Path {

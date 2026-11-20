@@ -41,6 +41,8 @@ mod remote_settings;
 mod remote_tunnels;
 #[path = "../ssh_agent.rs"]
 mod ssh_agent;
+#[path = "../ssh_files.rs"]
+mod ssh_files;
 #[path = "../vault.rs"]
 mod vault;
 #[path = "../vault_ask.rs"]
