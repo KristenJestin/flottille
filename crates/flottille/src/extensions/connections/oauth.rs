@@ -694,9 +694,9 @@ pub struct Waiting {
     /// The port of its one-shot loopback redirect, and the address its listener is on.
     pub port: u16,
     pub address: std::net::IpAddr,
-    /// The member whose device asked for it, from a client of another machine; none for a
+    /// The key of the device that asked for it, from a client of another machine; none for a
     /// client of this one.
-    pub device: Option<String>,
+    pub signer: Option<flottille_link::PublicKey>,
     /// How it ended: `Some(true)` signed in, `Some(false)` not; `None` while it waits. Its sender
     /// gone (the sign-in begun again) is an end too.
     pub ended: tokio::sync::watch::Receiver<Option<bool>>,
@@ -811,7 +811,7 @@ pub async fn begin(daemon: &Arc<Daemon>, declaration: &Declaration) -> Result<St
         flow: FLOWS.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
         port,
         address: listening,
-        device: crate::daemon::asked().map(|asked| asked.device.clone()),
+        signer: crate::daemon::asked().map(|asked| asked.key),
         ended,
     };
     let weak = Arc::downgrade(daemon);

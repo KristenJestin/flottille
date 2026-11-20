@@ -1460,6 +1460,7 @@ impl Remote {
             theirs,
             crate::daemon::Asked {
                 device: accepted.device.name.clone(),
+                key: accepted.device.key,
                 signed,
             },
         ));

@@ -580,7 +580,7 @@ fn open(
             (run, port, target, Ends::Run(reach))
         }
         (None, Some(name)) if port.is_none() => {
-            let (port, target, ended) = sign_in_reached(daemon, &name, device)?;
+            let (port, target, ended) = sign_in_reached(daemon, &name, signer, device)?;
             (
                 format!("sign-in of {name}"),
                 port,
@@ -619,11 +619,13 @@ fn open(
     Ok((tunnel, ends))
 }
 
-/// The sign-in of the connection `name` a tunnel may reach, for the member `device`: only one
-/// that waits on this machine, that this very device began, and only its one-shot listener.
+/// The sign-in of the connection `name` a tunnel may reach, for the member `device` whose key
+/// `signer` signed: only one that waits on this machine, that this very device began (its key,
+/// not a name another device could be given), and only its one-shot listener.
 fn sign_in_reached(
     daemon: &Arc<Daemon>,
     name: &str,
+    signer: PublicKey,
     device: &str,
 ) -> Result<(u16, Target, watch::Receiver<Option<bool>>), String> {
     let here = crate::link::remote_of(daemon)
@@ -635,7 +637,7 @@ fn sign_in_reached(
             "refused: no sign-in of the connection {name} waits on {here}: begin it first"
         ));
     };
-    if waiting.device.as_deref() != Some(device) {
+    if waiting.signer != Some(signer) {
         return Err(format!(
             "refused: the sign-in of {name} was not begun by {device}: begin it again from \
              this client"
