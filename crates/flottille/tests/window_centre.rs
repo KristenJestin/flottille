@@ -5,8 +5,8 @@
 
 use crate::common;
 use crate::window_notifications::{
-    BRIEF, bell_count, bell_said, eventually, has, held_number, label, lead, session, settle,
-    until, user, window,
+    BRIEF, bell_count, bell_said, eventually, has, held_number, label, lead, open_session, session,
+    settle, until, user, window,
 };
 
 use common::User;
@@ -109,6 +109,62 @@ fn a_request_answered_elsewhere_is_resolved_in_the_centre(cx: &mut TestAppContex
             && shell.read_with(cx, |s, _| {
                 s.snapshot().bell.iter().all(|item| item.resolved)
             })
+    });
+    // The panel says it too: the row no longer says it waits.
+    let key = shell.read_with(cx, |s, _| s.snapshot().bell[0].key.clone());
+    cx.update(|window, cx| window.click("bell", cx));
+    settle(cx);
+    assert_eq!(
+        label(format!("bell-{key}"), cx),
+        Some(format!("Request #{number} answered"))
+    );
+    assert_eq!(
+        bell_said(&shell, cx)[0].0,
+        format!("Request #{number} answered")
+    );
+}
+
+#[gpui_kit::test]
+fn a_request_arriving_in_the_open_session_stays_unread(cx: &mut TestAppContext) {
+    let user = user();
+    let (lead, mcp) = lead(&user);
+    let (shell, cx) = window(&user, cx);
+    open_session(&shell, &lead, cx);
+
+    hold(&mcp);
+
+    until(&shell, cx, "the window has the request", |cx| {
+        shell.read_with(cx, |s, _| s.snapshot().bell.len() == 1)
+    });
+    // Whatever the window would have asked of the daemon, it had the time to.
+    settle(cx);
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    until(&shell, cx, "the window took what the daemon said", |_| true);
+    let kept = rows(&user);
+    assert!(kept[0]["read_at"].is_null(), "nobody read it: {kept:?}");
+    assert_eq!(counts(&shell, cx), (1, 0), "it needs the user");
+}
+
+#[gpui_kit::test]
+fn clicking_a_bell_row_marks_it_read(cx: &mut TestAppContext) {
+    let user = user();
+    let (_, mcp) = lead(&user);
+    hold(&mcp);
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the bell counts the request", |cx| {
+        bell_count(&shell, cx) == 1
+    });
+    let key = shell.read_with(cx, |s, _| s.snapshot().bell[0].key.clone());
+    cx.update(|window, cx| window.click("bell", cx));
+    settle(cx);
+
+    cx.update(|window, cx| window.click(format!("bell-{key}"), cx));
+
+    until(&shell, cx, "the bell has nothing unread", |cx| {
+        bell_count(&shell, cx) == 0
+    });
+    eventually("the daemon has it read", || {
+        rows(&user)[0]["read_at"].is_number()
     });
 }
 
