@@ -18,9 +18,10 @@ use flottille_core::declared::{ProjectTracker, RepositoryForge};
 use flottille_core::project::{branch_matches, cycle_sentence};
 use gpui_design_system::motion::{ENTER, MAX_STAGGER, STAGGER};
 use gpui_design_system::{
-    Button, EmptyLine, Field, Icon, ListCard, ListRow, Listing, Menu, Modal, PageHeader, Section,
-    Select, SelectOption, Skeleton, Subpage, Switch, Tabs, Toast, Type, awaiting, changing, enter,
-    follow_theme, hoverable, icon, palette, presence, presence_of, space, toast,
+    Button, ChipOption, ChipPicker, EmptyLine, Field, Icon, ListCard, ListRow, Listing, Menu,
+    Modal, PageHeader, Section, Select, SelectOption, Skeleton, Subpage, Switch, Tabs, Toast, Type,
+    awaiting, changing, enter, follow_theme, hoverable, icon, palette, presence, presence_of,
+    space, toast,
 };
 use gpui_kit::base::input::{Input, InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -1132,6 +1133,8 @@ impl ProjectSettingsPage {
         repository_field.update(cx, |f, cx| f.set_value(repository, window, cx));
         let branch_field = self.fields(window, cx).branch.clone();
         branch_field.update(cx, |f, cx| f.set_value("", window, cx));
+        let depends_field = self.fields(window, cx).depends.clone();
+        depends_field.update(cx, |f, cx| f.set_value("", window, cx));
         self.forge_kind = shown.as_ref().map_or(ForgeKind::None, ForgeKind::of);
         self.bases = form.base.clone();
         self.depends = form.depends_on.clone();
@@ -1212,14 +1215,10 @@ impl ProjectSettingsPage {
         self.base_error.as_deref()
     }
 
-    /// Whether the dialog's repository depends on `path`, flipped.
-    pub fn toggle_dependency(&mut self, path: &str, cx: &mut Context<Self>) {
-        match self.depends.iter().position(|d| d == path) {
-            Some(at) => {
-                self.depends.remove(at);
-            }
-            None => self.depends.push(path.to_owned()),
-        }
+    /// The repositories the dialog's repository depends on, as the picker gives them: in the order
+    /// they were added.
+    pub fn set_dependencies(&mut self, depends: Vec<String>, cx: &mut Context<Self>) {
+        self.depends = depends;
         self.dialog_error = None;
         cx.notify();
     }
@@ -2111,24 +2110,28 @@ impl ProjectSettingsPage {
             .error(self.base_error.clone())
     }
 
-    /// The other repositories of the project, each a switch: the ones this repository depends on.
-    fn depends_field(&self, path: &str, this: WeakEntity<Self>) -> Field {
+    /// The other repositories of the project, in a picker of chips: the ones this repository
+    /// depends on, in the order they were added.
+    fn depends_picker(
+        &self,
+        path: &str,
+        search: &Entity<InputState>,
+        this: WeakEntity<Self>,
+        cx: &App,
+    ) -> gpui_kit::AnyElement {
+        let p = palette(cx);
         let others: Vec<_> = self.forms.iter().filter(|form| form.path != path).collect();
-        let mut control = div().flex().flex_col().gap(space::MD);
-        for form in &others {
-            let label = repository_label(&self.name, &form.path);
-            let remote = match &form.url {
-                Some(url) => short_remote(url, &self.folder),
-                None => "local only".to_owned(),
-            };
-            let (key, on) = (form.path.clone(), self.depends.contains(&form.path));
-            let switch = Switch::new(format!("depends-on-{label}"), on, label).hint(remote);
-            let this = this.clone();
-            control = control.child(switch.on_click(move |_, _, cx| {
-                this.update(cx, |this, cx| this.toggle_dependency(&key, cx))
-                    .ok();
-            }));
-        }
+        let options: Vec<ChipOption> = others
+            .iter()
+            .map(|form| {
+                let remote = match &form.url {
+                    Some(url) => short_remote(url, &self.folder),
+                    None => "local only".to_owned(),
+                };
+                ChipOption::new(form.path.clone(), repository_label(&self.name, &form.path))
+                    .detail(remote)
+            })
+            .collect();
         let hint = match others.is_empty() {
             true => "The project has no other repository.",
             false => {
@@ -2136,7 +2139,35 @@ impl ProjectSettingsPage {
                       that depends on it."
             }
         };
-        Field::new("depends-field", "Depends on", control).hint(hint)
+        let picker = ChipPicker::new(
+            "depends-on",
+            "Depends on",
+            search,
+            options,
+            self.depends.iter().cloned().map(SharedString::from),
+        )
+        .placeholder("Add a repository…")
+        .on_change(move |keys, _, cx| {
+            let depends = keys.iter().map(ToString::to_string).collect();
+            this.update(cx, |this, cx| this.set_dependencies(depends, cx))
+                .ok();
+        });
+        div()
+            .id("depends-field")
+            .flex()
+            .flex_col()
+            .gap(space::SM)
+            .child(picker)
+            .child(
+                div()
+                    .id("depends-field-hint")
+                    .text_size(px(12.))
+                    .text_color(p.faint)
+                    .child(hint)
+                    .test_support(),
+            )
+            .test_support()
+            .into_any_element()
     }
 
     /// Whether its agents' runs may open windows on the user's screen: the user's alone.
@@ -2221,7 +2252,7 @@ impl ProjectSettingsPage {
                 let this = cx.entity().downgrade();
                 Some((
                     bases,
-                    self.depends_field(&path, this.clone()),
+                    self.depends_picker(&path, &fields.depends, this.clone(), cx),
                     self.delete_branch_switch(this),
                 ))
             }
@@ -2277,17 +2308,35 @@ impl ProjectSettingsPage {
                         div()
                             .flex()
                             .flex_col()
+                            .gap(space::LG)
                             .child(
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .gap(space::LG)
-                                    .child(bases)
-                                    .child(depends)
-                                    .child(delete_branch)
-                                    .child(Field::new("forge-kind-field", "Forge", select)),
+                                Section::new("settings-section-branches", "Branches")
+                                    .sentence(
+                                        "Where a workspace starts from, and what a merge does \
+                                         with the branch.",
+                                    )
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_col()
+                                            .gap(space::LG)
+                                            .child(bases)
+                                            .child(delete_branch),
+                                    ),
                             )
+                            .child(depends)
                             .child(
+                                Section::new("settings-section-forge", "Pull requests")
+                                    .sentence(
+                                        "Where the repository's pull requests are read and \
+                                         opened.",
+                                    )
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_col()
+                                            .child(Field::new("forge-kind-field", "Forge", select))
+                                            .child(
                                 presence(
                                     "forge-host-block",
                                     self.forge_kind == ForgeKind::BitbucketDataCenter,
@@ -2335,6 +2384,8 @@ impl ProjectSettingsPage {
                                     },
                                 )
                                 .space(space::LG),
+                            ),
+                                    ),
                             ),
                     )
                     .kept(error)
