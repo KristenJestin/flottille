@@ -714,6 +714,8 @@ fn every_change_of_the_machines_page_is_animated(cx: &mut TestAppContext) {
     set_up(&hub, &pc);
     pair(&pc, &laptop, "laptop", "controller");
     let (shell, cx) = window(&pc, cx);
+    // Tall enough for the invitation's QR and the rows under it.
+    cx.simulate_resize(size(px(1280.), px(1400.)));
     until(&shell, cx, "the project is read", |cx| {
         shell.read_with(cx, |s, cx| {
             s.machines().read(cx).machines().is_some_and(|m| m.member())
@@ -736,18 +738,17 @@ fn every_change_of_the_machines_page_is_animated(cx: &mut TestAppContext) {
             offsets.push((devices, top(cx, "enter-machines-addresses") - below));
         }
     }
-    let (devices, addresses) = *offsets.last().unwrap();
+    let (devices, gap) = *offsets.last().unwrap();
     assert!(
         offsets[0].0 > devices,
         "the first section rises: {offsets:?}"
     );
-    assert!(offsets[0].1 > addresses, "the second rises: {offsets:?}");
-    let moved = |of: fn(&(f32, f32)) -> f32, last: f32| {
-        offsets.iter().rposition(|at| of(at) != last).unwrap_or(0)
-    };
+    // Staggered: the second starts later, so the space between them first opens, then closes as
+    // the second arrives.
+    let widest = offsets.iter().map(|at| at.1).fold(f32::MIN, f32::max);
     assert!(
-        moved(|t| t.0, devices) <= moved(|t| t.1, addresses),
-        "the second section arrives after the first: {offsets:?}"
+        widest > offsets[0].1 && widest > gap,
+        "the second section rises after the first: {offsets:?}"
     );
     settle(&shell, cx);
 
@@ -760,10 +761,14 @@ fn every_change_of_the_machines_page_is_animated(cx: &mut TestAppContext) {
     settle(&shell, cx);
     let full = height(cx, "invitation");
     assert!(early < full, "it unfolds: {early} then {full}");
+    // The code wraps beside the QR, not a character to a line.
+    assert!(full < 480., "the panel holds the QR and its code: {full}");
 
     // A row removed folds away: a height between its own and none.
     let row = height(cx, "member-item-laptop");
     assert!(row > 0.);
+    cx.update(|window, cx| window.hover("member-laptop", cx));
+    settle(&shell, cx);
     click(&shell, cx, "member-more-laptop");
     click(&shell, cx, "member-remove-laptop");
     click(&shell, cx, "member-removal-action");
