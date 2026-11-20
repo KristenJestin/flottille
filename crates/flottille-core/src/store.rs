@@ -969,10 +969,12 @@ const MIGRATIONS: &[&str] = &[
     ) STRICT;
     CREATE INDEX notifications_by_session ON notifications (session);
     -- The last event the centre made rows of: the last there is, the centre starting with the
-    -- events that come after it.
+    -- events that come after it. `seeded` says the rows of what still waited at the upgrade (a
+    -- request, a question, a vault entry) were made.
     CREATE TABLE notification_cursor (
-        id  INTEGER PRIMARY KEY CHECK (id = 1),
-        seq INTEGER NOT NULL
+        id     INTEGER PRIMARY KEY CHECK (id = 1),
+        seq    INTEGER NOT NULL,
+        seeded INTEGER NOT NULL DEFAULT 0
     ) STRICT;
     INSERT INTO notification_cursor (id, seq) SELECT 1, coalesce(max(seq), 0) FROM events;
 ",
@@ -4357,13 +4359,48 @@ impl Store {
             .optional()?)
     }
 
+    /// Moves the cursor to `seq`, never back: two readers that each read an older cursor leave
+    /// the furthest.
     pub fn set_notification_cursor(&self, seq: u64) -> Result<()> {
         self.connection.execute(
             "INSERT INTO notification_cursor (id, seq) VALUES (1, ?1) \
-             ON CONFLICT (id) DO UPDATE SET seq = excluded.seq",
+             ON CONFLICT (id) DO UPDATE SET seq = max(seq, excluded.seq)",
             [seq],
         )?;
         Ok(())
+    }
+
+    /// Whether the rows of what waited for the user at the upgrade were made.
+    pub fn notifications_seeded(&self) -> Result<bool> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT seeded FROM notification_cursor WHERE id = 1",
+                [],
+                |row| row.get::<_, bool>(0),
+            )
+            .optional()?
+            .unwrap_or(false))
+    }
+
+    pub fn set_notifications_seeded(&self) -> Result<()> {
+        self.connection.execute(
+            "UPDATE notification_cursor SET seeded = 1 WHERE id = 1 AND seeded = 0",
+            [],
+        )?;
+        Ok(())
+    }
+
+    /// Whether `prune_notifications` would forget any: read, so that a keeper with nothing to do
+    /// writes nothing.
+    pub fn prunable_notifications(&self, now: u64) -> Result<bool> {
+        let oldest = now.saturating_sub(notification::KEPT_DAYS * 24 * 3_600_000);
+        Ok(self.connection.query_row(
+            "SELECT EXISTS (SELECT 1 FROM notifications WHERE at < ?1) \
+             OR (SELECT count(*) FROM notifications) > ?2",
+            params![oldest, notification::KEPT_ROWS as i64],
+            |row| row.get(0),
+        )?)
     }
 
     /// How many rows were written since the store was opened: what a reader at rest checks

@@ -157,11 +157,19 @@ fn relevant(event: &Event) -> bool {
 }
 
 /// Makes rows of the events since the last it saw, resolves what they answer, and forgets the
-/// old. Called when an event that matters comes, and by the sweep.
+/// old. Called when an event that matters comes, and by the sweep: one at a time.
 pub fn keep(daemon: &Arc<Daemon>) {
-    let Ok((cursor, upto)) =
-        daemon.read(|store| Ok((store.notification_cursor()?, store.last_seq()?)))
-    else {
+    let _keeping = daemon
+        .notifying
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let Ok((cursor, upto, seeded)) = daemon.read(|store| {
+        Ok((
+            store.notification_cursor()?,
+            store.last_seq()?,
+            store.notifications_seeded()?,
+        ))
+    }) else {
         return;
     };
     // The migration set it: the centre starts with the events that come after it, what was told
@@ -171,21 +179,103 @@ pub fn keep(daemon: &Arc<Daemon>) {
     names.extend(["agent.tool_served"]);
     let extensions = crate::extensions::needs_you();
     names.extend(extensions.iter().map(|(event, _, _)| *event));
+    let mut changed = Vec::new();
+    // What waited for the user at the upgrade still does: its rows are made once.
+    if !seeded {
+        match seed(daemon, cursor, &extensions) {
+            Ok(seeded) => changed.extend(seeded),
+            Err(_) => return,
+        }
+        if daemon
+            .read(|store| store.set_notifications_seeded())
+            .is_err()
+        {
+            return;
+        }
+    }
     let Ok(events) = daemon.read(|store| store.events_named(&names, cursor)) else {
         return;
     };
     at(Point::Read);
-    let mut changed = Vec::new();
+    // A row the store failed to write stops the keeper at its event: the next keep tries again.
+    let mut done = upto;
     for event in events.iter().filter(|event| event.seq <= upto) {
-        changed.extend(note(daemon, event, &extensions));
+        match note(daemon, event, &extensions) {
+            Ok(rows) => changed.extend(rows),
+            Err(_) => {
+                done = event.seq - 1;
+                break;
+            }
+        }
     }
+    let now = now_ms();
     let pruned = daemon
-        .read(|store| store.prune_notifications(now_ms()))
+        .read(|store| match store.prunable_notifications(now)? {
+            true => store.prune_notifications(now),
+            false => Ok(0),
+        })
         .is_ok_and(|pruned| pruned > 0);
-    let _ = daemon.read(|store| store.set_notification_cursor(upto.max(cursor)));
+    // At rest, nothing is written.
+    if done > cursor {
+        let _ = daemon.read(|store| store.set_notification_cursor(done));
+    }
     changed.sort_unstable();
     changed.dedup();
     changed_event(daemon, &changed, pruned, "kept");
+}
+
+/// The rows of what waits for the user from before the cursor: a request still held for them,
+/// a vault entry still asked for, a root's question nothing answered. What was answered makes
+/// none.
+fn seed(
+    daemon: &Arc<Daemon>,
+    cursor: u64,
+    extensions: &[(&'static str, &'static str, crate::extensions::Says)],
+) -> flottille_core::Result<Vec<u64>> {
+    let events = daemon.read(|store| {
+        store.events_named(
+            &[
+                "approval.requested",
+                "approval.forwarded",
+                "vault.asked",
+                "vault.ask_answered",
+                "agent.asked",
+            ],
+            0,
+        )
+    })?;
+    let given: Vec<u64> = events
+        .iter()
+        .filter(|event| event.name == "vault.ask_answered")
+        .filter_map(|event| event.data["ask"].as_u64())
+        .collect();
+    let mut waiting: std::collections::HashMap<String, Vec<u64>> = Default::default();
+    let mut changed = Vec::new();
+    for event in events.iter().filter(|event| event.seq <= cursor) {
+        let still = match event.name.as_str() {
+            // `note` keeps one only while it is held for the user.
+            "approval.requested" | "approval.forwarded" => true,
+            "vault.asked" => !given.contains(&event.seq),
+            "agent.asked" => match root(daemon, event.data["agent"].as_str()) {
+                Some(id) => waiting
+                    .entry(id.clone())
+                    .or_insert_with(|| {
+                        crate::tree::unanswered(daemon, &id)
+                            .unwrap_or_default()
+                            .iter()
+                            .filter_map(|question| question["seq"].as_u64())
+                            .collect()
+                    })
+                    .contains(&event.seq),
+                None => false,
+            },
+            _ => false,
+        };
+        if still {
+            changed.extend(note(daemon, event, extensions)?);
+        }
+    }
+    Ok(changed)
 }
 
 /// The root of the agent's tree, its project and its workspace: the session a row belongs to.
@@ -211,7 +301,25 @@ fn add(
     agent: Option<&str>,
     title: impl Into<String>,
     excerpt: impl Into<String>,
-) -> Vec<u64> {
+) -> flottille_core::Result<Vec<u64>> {
+    add_while(daemon, event, kind, source, agent, title, excerpt, |_| {
+        Ok(true)
+    })
+}
+
+/// Keeps one row while `still` holds, read in the same hold of the store as the row is written:
+/// nothing changes between them.
+#[allow(clippy::too_many_arguments)]
+fn add_while(
+    daemon: &Daemon,
+    event: &Event,
+    kind: &str,
+    source: String,
+    agent: Option<&str>,
+    title: impl Into<String>,
+    excerpt: impl Into<String>,
+    still: impl FnOnce(&flottille_core::store::Store) -> flottille_core::Result<bool>,
+) -> flottille_core::Result<Vec<u64>> {
     let (session, project, workspace) = match agent {
         Some(agent) => {
             let (session, project, workspace) = session_of(daemon, agent);
@@ -238,25 +346,26 @@ fn add(
         title: title.into(),
         excerpt: excerpt.into(),
     };
-    daemon
-        .read(|store| match at(Point::Add) {
-            true => Err(flottille_core::Error::Refused("the store failed".into())),
-            false => store.add_notification(&new),
-        })
-        .ok()
-        .flatten()
+    Ok(daemon
+        .read(|store| {
+            if at(Point::Add) {
+                return Err(flottille_core::Error::Refused("the store failed".into()));
+            }
+            match still(store)? {
+                true => store.add_notification(&new),
+                false => Ok(None),
+            }
+        })?
         .into_iter()
-        .collect()
+        .collect())
 }
 
 /// What an answer resolves: the number of the row when it was waiting.
-fn resolve(daemon: &Daemon, source: &str, at: u64) -> Vec<u64> {
-    daemon
-        .read(|store| store.resolve_notification(source, at))
-        .ok()
-        .flatten()
+fn resolve(daemon: &Daemon, source: &str, at: u64) -> flottille_core::Result<Vec<u64>> {
+    Ok(daemon
+        .read(|store| store.resolve_notification(source, at))?
         .into_iter()
-        .collect()
+        .collect())
 }
 
 /// A root agent: the session itself. A child's report, question and failure go to its parent, never
@@ -267,40 +376,45 @@ fn root(daemon: &Daemon, id: Option<&str>) -> Option<String> {
     agent.parent.is_none().then_some(agent.id)
 }
 
+/// Whether the request waits for the user: held by them, and nothing answered it.
+fn waits(request: &approval::Request) -> bool {
+    request.held_by == approval::USER && request.state == approval::RequestState::Pending
+}
+
 /// The rows an event makes or resolves.
 fn note(
     daemon: &Arc<Daemon>,
     event: &Event,
     extensions: &[(&'static str, &'static str, crate::extensions::Says)],
-) -> Vec<u64> {
+) -> flottille_core::Result<Vec<u64>> {
     let data = &event.data;
     let agent = data["agent"].as_str();
     if let Some((_, kind, text)) = extensions.iter().find(|(name, _, _)| *name == event.name) {
+        // An extension says what happened, and no event of its says when it is over: the row
+        // tells, it does not wait for the user.
         return add(
             daemon,
             event,
             kind,
             format!("event:{}", event.seq),
             None,
-            "Needs you",
+            format!("From {kind}"),
             notification::first_line(&text(data)),
         );
     }
-    match event.name.as_str() {
+    Ok(match event.name.as_str() {
         "approval.requested" | "approval.forwarded" => {
             let Some(number) = data["number"].as_u64() else {
-                return Vec::new();
+                return Ok(Vec::new());
             };
-            let held = daemon.read(|store| store.request(number)).ok().flatten();
+            let held = daemon.read(|store| store.request(number))?;
             match held {
                 // It waits for the user as long as the user holds it and nothing answered it: one
-                // the judge or the user answered before the keeper looked never waited.
-                Some(request)
-                    if request.held_by == approval::USER
-                        && request.state == approval::RequestState::Pending =>
-                {
+                // the judge or the user answered before the keeper looked never waited, nor one
+                // answered while it looked.
+                Some(request) if waits(&request) => {
                     at(Point::SeenPending);
-                    add(
+                    add_while(
                         daemon,
                         event,
                         "request",
@@ -308,18 +422,19 @@ fn note(
                         Some(request.agent.as_str()),
                         format!("Request #{number} waits for you"),
                         notification::excerpt(&notification::asked(&request.tool, &request.shown)),
-                    )
+                        |store| Ok(store.request(number)?.is_some_and(|now| waits(&now))),
+                    )?
                 }
                 _ => Vec::new(),
             }
         }
         "approval.decided" | "approval.cancelled" => match data["number"].as_u64() {
-            Some(number) => resolve(daemon, &format!("request:{number}"), event.at),
+            Some(number) => resolve(daemon, &format!("request:{number}"), event.at)?,
             None => Vec::new(),
         },
         "agent.asked" if data["to"] == "user" => {
             let Some(id) = root(daemon, agent) else {
-                return Vec::new();
+                return Ok(Vec::new());
             };
             let questions = flottille_core::question::of(data);
             let asked = questions
@@ -334,7 +449,7 @@ fn note(
                 Some(id.as_str()),
                 "Asks you a question",
                 notification::first_line(asked),
-            )
+            )?
         }
         "agent.answered" | "agent.replaced" | "agent.resumed" | "agent.ended" | "agent.failed" => {
             let mut changed = match (event.name.as_str(), root(daemon, agent)) {
@@ -346,11 +461,11 @@ fn note(
                     Some(id.as_str()),
                     "Failed",
                     notification::first_line(data["reason"].as_str().unwrap_or_default()),
-                ),
+                )?,
                 _ => Vec::new(),
             };
             if let Some(id) = agent {
-                changed.extend(reconcile_questions(daemon, id, event.at));
+                changed.extend(reconcile_questions(daemon, id, event.at)?);
             }
             changed
         }
@@ -363,7 +478,7 @@ fn note(
                 Some(id.as_str()),
                 "Reported",
                 notification::first_line(data["text"].as_str().unwrap_or_default()),
-            ),
+            )?,
             None => Vec::new(),
         },
         "vault.asked" => add(
@@ -374,9 +489,9 @@ fn note(
             agent,
             "Asks you for a vault entry",
             notification::excerpt(data["name"].as_str().unwrap_or_default()),
-        ),
+        )?,
         "vault.ask_answered" => match data["ask"].as_u64() {
-            Some(ask) => resolve(daemon, &format!("vault:{ask}"), event.at),
+            Some(ask) => resolve(daemon, &format!("vault:{ask}"), event.at)?,
             None => Vec::new(),
         },
         "session.following_paused" => add(
@@ -392,7 +507,7 @@ fn note(
             agent,
             "A session stopped waking",
             "It and the agent that started it talk without you",
-        ),
+        )?,
         "session.following_resumed" => {
             // Every pause of that pair that still waits.
             let prefix = format!(
@@ -400,13 +515,12 @@ fn note(
                 agent.unwrap_or_default(),
                 data["follower"].as_str().unwrap_or_default()
             );
-            let open = daemon
-                .read(|store| store.unresolved_notifications("paused"))
-                .unwrap_or_default();
-            open.iter()
-                .filter(|source| source.starts_with(&prefix))
-                .flat_map(|source| resolve(daemon, source, event.at))
-                .collect()
+            let open = daemon.read(|store| store.unresolved_notifications("paused"))?;
+            let mut changed = Vec::new();
+            for source in open.iter().filter(|source| source.starts_with(&prefix)) {
+                changed.extend(resolve(daemon, source, event.at)?);
+            }
+            changed
         }
         "run.agent_folders_unchecked" => add(
             daemon,
@@ -419,7 +533,7 @@ fn note(
                 "Its run in {} ended",
                 data["folder"].as_str().unwrap_or_default()
             )),
-        ),
+        )?,
         "run.agent_folders_put_back" => add(
             daemon,
             event,
@@ -431,7 +545,7 @@ fn note(
                 "A run in {} wrote in them",
                 data["folder"].as_str().unwrap_or_default()
             )),
-        ),
+        )?,
         "remote.delivery_dropped" => add(
             daemon,
             event,
@@ -440,7 +554,7 @@ fn note(
             None,
             "A message for another machine was dropped",
             notification::first_line(&crate::across::dropped_text(data)),
-        ),
+        )?,
         "agent.tool_served" => match notification::forged(event) {
             Some(forged) => add(
                 daemon,
@@ -454,25 +568,28 @@ fn note(
                 Some(forged.agent.as_str()),
                 forged.said,
                 forged.excerpt,
-            ),
+            )?,
             None => Vec::new(),
         },
         _ => Vec::new(),
-    }
+    })
 }
 
 /// The questions of a root that nothing waits on any more are resolved: the store says which are
 /// open, whatever event told the keeper to look (`tree::unanswered`).
-fn reconcile_questions(daemon: &Arc<Daemon>, agent: &str, at: u64) -> Vec<u64> {
+fn reconcile_questions(
+    daemon: &Arc<Daemon>,
+    agent: &str,
+    at: u64,
+) -> flottille_core::Result<Vec<u64>> {
     let prefix = format!("question:{agent}:");
     let open: Vec<String> = daemon
-        .read(|store| store.unresolved_notifications("question"))
-        .unwrap_or_default()
+        .read(|store| store.unresolved_notifications("question"))?
         .into_iter()
         .filter(|source| source.starts_with(&prefix))
         .collect();
     if open.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     let final_agent = daemon
         .read(|store| store.agent(agent))
@@ -487,16 +604,17 @@ fn reconcile_questions(daemon: &Arc<Daemon>, agent: &str, at: u64) -> Vec<u64> {
             .filter_map(|question| question["seq"].as_u64())
             .collect(),
     };
-    open.iter()
-        .filter(|source| {
-            let seq = source
-                .rsplit(':')
-                .next()
-                .and_then(|seq| seq.parse::<u64>().ok());
-            !seq.is_some_and(|seq| waiting.contains(&seq))
-        })
-        .flat_map(|source| resolve(daemon, source, at))
-        .collect()
+    let mut changed = Vec::new();
+    for source in open.iter().filter(|source| {
+        let seq = source
+            .rsplit(':')
+            .next()
+            .and_then(|seq| seq.parse::<u64>().ok());
+        !seq.is_some_and(|seq| waiting.contains(&seq))
+    }) {
+        changed.extend(resolve(daemon, source, at)?);
+    }
+    Ok(changed)
 }
 
 /// The points of the keeper a test stops at, or makes fail (`tests::at`).
