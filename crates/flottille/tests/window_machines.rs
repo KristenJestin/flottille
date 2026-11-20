@@ -1703,7 +1703,11 @@ fn turning_remote_off_closes_the_links_and_keeps_the_hub(cx: &mut TestAppContext
         false
     );
     server.wait_for("pc", "offline");
-    // Turned on again, the hub's setup is the same. The notice has unfolded before it is pressed.
+    // Turned on again, the hub's setup is the same. The confirmation has faded out (its scrim takes
+    // no click while it does) and the notice has unfolded before it is pressed.
+    until(&shell, cx, "the confirmation is gone", |cx| {
+        !present(cx, "member-removal-action")
+    });
     settle(&shell, cx);
     click(&shell, cx, "turn-on-remote");
     let deadline = Instant::now() + WAIT;
