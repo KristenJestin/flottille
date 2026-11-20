@@ -787,12 +787,14 @@ fn the_window_draws_no_frame_at_rest_on_each_tab_of_settings_and_a_feature_s_pag
     settle(&shell, cx);
     assert_eq!(frames_at_rest(&shell, cx), (0, 0), "agents");
 
-    // The five tabs, each shown by one of its parts.
+    // The other tabs, each shown by one of its parts.
     for (tab, shown) in [
         ("approvals", "judge-model"),
         ("features", "features-review"),
         ("vault", "vault-title"),
         ("general", "appearance-title"),
+        // The machines are the last section of General.
+        ("general", "machines-off"),
     ] {
         cx.update(|window, cx| window.click(format!("settings-tabs-{tab}"), cx));
         until(&shell, cx, "the tab is shown", |cx| {

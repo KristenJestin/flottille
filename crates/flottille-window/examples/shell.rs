@@ -132,7 +132,7 @@ fn main() {
         let connect = Arc::new(move || UnixStream::connect(&socket));
         let (window, shell) = gpui_kit::open_window(options, cx, |window, cx| {
             flottille_window::frame_counter(window, cx);
-            cx.new(|cx| Shell::new(connect, window, cx))
+            cx.new(|cx| Shell::new(connect, None, window, cx))
         })
         .expect("a window");
         // Once the first read of the daemon has come.

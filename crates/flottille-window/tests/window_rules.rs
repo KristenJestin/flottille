@@ -792,8 +792,14 @@ fn no_internal_word_reaches_the_window() {
 
 // ── 8. The same gesture has the same verb ──────────────────────────────────────────────────────
 
-/// What the window registers rather than creates: the project, a folder that exists already.
-const ADDS: [&str; 3] = ["Add a project", "Add project", "Add this folder"];
+/// What the window registers rather than creates: the project, a folder that exists already, a
+/// device that exists already and joins the user's list ("Add a device", `docs/remote.md`).
+const ADDS: [&str; 4] = [
+    "Add a project",
+    "Add project",
+    "Add this folder",
+    "Add a device",
+];
 
 /// A button or a dialog that creates and says "Add …": it says "New …" (a dialog's own button
 /// only says "Add", its title says what is new).
