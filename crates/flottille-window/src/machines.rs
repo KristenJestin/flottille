@@ -406,7 +406,7 @@ pub struct Invitation {
 #[derive(Clone, Debug, PartialEq)]
 pub enum News {
     /// A fresh read of the machines.
-    Read(Machines),
+    Read(Box<Machines>),
     /// What was asked was done, or why not.
     Done(Asked, std::result::Result<Option<Invitation>, String>),
     /// A new device asks to join through this machine's member.
@@ -478,7 +478,7 @@ impl Remote {
             let read = read(&mut conn)?;
             if last.as_ref() != Some(&read) {
                 last = Some(read.clone());
-                if !self.tell(News::Read(read)) {
+                if !self.tell(News::Read(Box::new(read))) {
                     return Ok(());
                 }
             }
@@ -520,7 +520,7 @@ impl Remote {
                     && let Ok(mut conn) = Conn::new(stream)
                     && let Ok(read) = read(&mut conn)
                 {
-                    remote.tell(News::Read(read));
+                    remote.tell(News::Read(Box::new(read)));
                 }
             })
             .expect("a thread for what is asked of the machines");

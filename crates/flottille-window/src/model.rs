@@ -1985,6 +1985,8 @@ mod tests {
             since: Some(0),
             reason: None,
             role: Some("runner".into()),
+            reached: None,
+            addresses: Vec::new(),
         };
         let online = machine("online");
         let words = |l, m| last_known(&l, m).0;

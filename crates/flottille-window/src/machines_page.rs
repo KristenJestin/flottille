@@ -234,8 +234,8 @@ impl MachinesSection {
                 {
                     self.join = None;
                 }
-                if self.read.as_ref() != Some(&read) {
-                    self.read = Some(read);
+                if self.read.as_ref() != Some(&*read) {
+                    self.read = Some(*read);
                     cx.notify();
                 }
             }

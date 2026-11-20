@@ -659,7 +659,7 @@ impl Shell {
         if let crate::machines::News::Read(read) = &news {
             let shown = self.aim.machine();
             self.sidebar.update(cx, |sidebar, cx| {
-                sidebar.set_machines(read.clone(), shown, cx)
+                sidebar.set_machines((**read).clone(), shown, cx)
             });
         }
         let read = matches!(news, crate::machines::News::Read(_));
