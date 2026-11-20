@@ -648,9 +648,7 @@ impl Shell {
     /// the window shows that machine, then that session once its first read came. The switch's
     /// own wait applies: past it, the window is back on this machine and says why.
     pub fn open_elsewhere(&mut self, machine: String, agent: String, cx: &mut Context<Self>) {
-        self.choose_machine(Some(machine.clone()), cx);
-        // The key is read before the switch: the session is opened once that machine read.
-        self.open_there = Some((machine, agent));
+        self.choose(Some(machine.clone()), Some((machine, agent)), cx);
     }
 
     /// The Machines section of Settings.
@@ -666,6 +664,17 @@ impl Shell {
     /// Shows the machine `name` (`None`: this one): its projects and its sessions, every request
     /// signed with the device key. One that is off, or needs an update, is said so and not shown.
     pub fn choose_machine(&mut self, name: Option<String>, cx: &mut Context<Self>) {
+        self.choose(name, None, cx);
+    }
+
+    /// Shows the machine `name`, then the session `then` of it once its first read holds it: only
+    /// once the switch starts, never for a machine that is off or whose key could not be read.
+    fn choose(
+        &mut self,
+        name: Option<String>,
+        then: Option<(String, String)>,
+        cx: &mut Context<Self>,
+    ) {
         // A choice still reading the key gives way to this one.
         self.choosing = None;
         if name == self.aim.machine() {
@@ -695,7 +704,10 @@ impl Shell {
         self.choosing = Some(cx.spawn(async move |this, cx| {
             let key = cx.background_spawn(async move { remote.key() }).await;
             this.update(cx, |shell, cx| match key {
-                Ok(key) => shell.switch_to(Some((name, Arc::new(key))), cx),
+                Ok(key) => {
+                    shell.switch_to(Some((name, Arc::new(key))), cx);
+                    shell.open_there = then;
+                }
                 Err(why) => gpui_design_system::toast(
                     gpui_design_system::Toast::failure(format!("{name} cannot be shown"))
                         .detail(why),
@@ -736,6 +748,8 @@ impl Shell {
     ) {
         // The other machine's events start from its own first: none of this one's is resumed.
         let shown = aimed.as_ref().map(|(name, _)| name.clone());
+        // What the machine left said is not merged with what the next one says.
+        self.read = None;
         self.seen.last_seq.store(0, Ordering::SeqCst);
         self.seen.connections.store(0, Ordering::SeqCst);
         self.aim.set(aimed);
