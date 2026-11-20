@@ -306,8 +306,13 @@ fn a_run_without_windows_cannot_reach_x11() {
             windows(&user, state);
         }
         let reached = reached(&mcp, &place, &socket, &name);
-        // By its abstract name, from Landlock's sixth ABI. By its path it is still reached: the
-        // gap the private mount namespace (#976) closes.
+        // By its path, the folder is an empty one in the run's namespace.
+        if common::user_namespaces() {
+            assert_eq!(reached["path"], "FileNotFoundError", "{state:?}: {reached}");
+        } else {
+            eprintln!("skipped: this kernel refuses user namespaces to this user");
+        }
+        // By its abstract name, from Landlock's sixth ABI.
         match landlock_abi() {
             abi if abi >= 6 => {
                 assert_eq!(
@@ -318,6 +323,34 @@ fn a_run_without_windows_cannot_reach_x11() {
             abi => eprintln!("skipped: this kernel's Landlock (ABI {abi}) has no abstract scope"),
         }
     }
+}
+
+#[test]
+fn the_shared_display_folder_is_still_reachable_in_the_namespace() {
+    if !common::user_namespaces() {
+        eprintln!("skipped: this kernel refuses user namespaces to this user");
+        return;
+    }
+    let user = user_with_display();
+    let _wayland = wayland_socket(&user);
+    let (_, mcp, place) = session(&user);
+    windows(&user, "on");
+
+    let seen = seen(&mcp, &place);
+    let folder = PathBuf::from(seen["env"]["XDG_RUNTIME_DIR"].as_str().unwrap());
+    let reached = reached(&mcp, &place, &folder.join("wayland-0"), "none");
+    let the_session_s = reached_path(&mcp, &place, &user.path("runtime/wayland-0"));
+
+    // Its own folder, under the runtime folder the namespace empties, put back in it.
+    assert_eq!(seen["files"], json!(["wayland-0"]), "{seen}");
+    assert_eq!(reached["path"], "connected", "{reached}");
+    // Beside it, the session's own socket is not there.
+    assert_eq!(the_session_s, "FileNotFoundError");
+}
+
+/// [`reached`] by the path alone.
+fn reached_path(mcp: &Mcp, place: &Path, path: &Path) -> Value {
+    reached(mcp, place, path, "none")["path"].clone()
 }
 
 #[test]
