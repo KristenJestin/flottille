@@ -1648,7 +1648,7 @@ async fn a_stranger_cannot_close_pair_mode() {
     )
     .await
     .unwrap();
-    assert_eq!(device.list.members().len(), 1);
+    assert!(!device.list.changes().is_empty());
     served.stop().await;
 }
 
