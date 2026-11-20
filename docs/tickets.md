@@ -541,17 +541,27 @@ ticket itself.
     /rest/api/3/user/search?query=`. A deactivated account and one with no account id are left
     out. Each line gives the name, the account id and the e-mail when Jira shows it; people of the
     same name are all listed, never one chosen silently. What `acli` shows (the assignees) comes
-    first and is not repeated. Without the entry, or when the site cannot be reached, `people`
-    answers from the assignees and says so (`Only the assignees were searched, not the site: …`,
-    with how to set the entry). No query: no search (Jira's takes words).
+    first and is not repeated. **With a `ticket` the answer is the site's alone**, an assignee
+    matching the query who cannot see the ticket not being listed under a header that says who can.
+    `maxResults=50` is sent, and a full page says so (`there may be more on the site, narrow with
+    query`). **A person found on the site is named by account id for `assignee`**: `edit` finds a
+    display name among the assignees `acli` shows only (below), so the answer's closing line says
+    so, and gives the account id as the way to name them. Without the entry, or when the site
+    cannot be reached, `people` answers from the assignees and says so (`Only the assignees were
+    searched, not the site: …`, with how to set the entry), and claims no ticket filter. No query:
+    no search (Jira's takes words).
   - A mention reads back as `[@Display Name](mention:<accountId>)`, the form the agent writes, so
-    one read can be repeated (a mention with no account id reads as its text). GitHub is unchanged: an `@login` notifies, and a `mention:` link is left as
+    one read can be repeated (a mention whose id is no account id reads as its text: an id is
+    never put into a link whatever its shape). GitHub is unchanged: an `@login` notifies, and a `mention:` link is left as
     a link. A raw ADF given in `fields` is the agent's own document: its mention nodes are not
     looked up, except those of `fields.description`.
   - Not confirmed against a real site (the fake follows the shapes above): that a `mention` node
     in the body of `POST …/comment`, of the comment's `PUT`, of a description's `PUT` and of a
     worklog notifies the person, and what `GET /rest/api/3/user?accountId=` answers for an
-    account of another site or a deactivated one (a `404` is taken as unknown).
+    account of another site or a deactivated one (a `404` is taken as unknown), and what `GET
+    /rest/api/3/user/search` and `GET /rest/api/3/user/viewissue/search` answer for the entry's
+    account (the fake follows Jira's documentation: an array of users, `active`, at most
+    `maxResults`; whether the second needs more than the entry's account has is unknown).
 **Measured on a real Jira Cloud site**: the shapes of `link type --json`, `link list --json` and
 `view --fields issuelinks` above, `link delete --id <link id> --yes`, and `comment list --key <K>
 --json`, whose comments each carry their `id` (their `body` plain text). The view's comments are
