@@ -1,4 +1,4 @@
-//! Settings, Machines (`docs/remote.md`, "The hub", "Pairing", "Roles"): **Set up a hub** while
+//! Settings, General, Machines (`docs/remote.md`, "The hub", "Pairing", "Roles"): **Set up a hub** while
 //! this machine is in no member list; then the devices of the list, each renamed or removed from
 //! its "⋯", **Add a device** with the invitation's QR and its code until it expires, and the
 //! addresses this machine is reached at. A join request is the window's dialog wherever the user
@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use gpui_design_system::{
-    Button, Confirm, EmptyLine, Field, Icon, ListCard, ListRow, Listing, Menu, Modal, QrCode,
+    Button, Card, Confirm, EmptyLine, Field, Icon, ListCard, ListRow, Listing, Menu, Modal, QrCode,
     RadioChoices, Section, Toast, enter, palette, presence, space, toast,
 };
 use gpui_kit::base::input::{Input, InputEvent, InputState};
@@ -762,15 +762,12 @@ impl MachinesSection {
             .unwrap_or_default();
         let shown = self.invitation.is_some();
         let copied = code.clone();
-        let panel =
+        let content =
             div()
                 .id("invitation-panel")
                 .flex()
                 .gap(space::LG)
                 .p(space::LG)
-                .rounded(px(12.))
-                .border_1()
-                .border_color(p.line)
                 // As wide as its plate: the code's column takes the rest.
                 .child(div().flex_none().child(
                     QrCode::new("invitation-qr", code.clone(), "Invitation code").shown(shown),
@@ -821,6 +818,7 @@ impl MachinesSection {
                         ),
                 )
                 .test_support();
+        let panel = Card::new().id("invitation-card").child(content);
         let count = self.members.len();
         Section::new("devices", "Devices")
             .count(count.to_string())
