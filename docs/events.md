@@ -398,7 +398,9 @@ serves it with `device`, the name of the member whose client asked.
 | `machine` | The carrying machine's side: the machine of the run. |
 | `local_port` | The carrying machine's side: the port it listens on, on `127.0.0.1`. |
 | `device` | The serving machine's side: the member that opened it. |
-| `reason` | `tunnel.closed` only: why (`run r1 ended`, `closed by the user`, `the link to server was lost`, `its client left`). |
+| `sign_in` | The carrying machine's side: the connection whose sign-in's redirect it carries, instead of a run's port (`run` is empty then). |
+| `reason` | `tunnel.closed` only: why (`run r1 ended`, `closed by the user`, `the link to server was lost`, `its client left`, `the sign-in of notes ended: signed in`). |
+| `signed_in` | `tunnel.closed` of a sign-in's tunnel only, on the carrying machine: whether the sign-in it carried signed in. |
 
 ### `workspace.created`
 

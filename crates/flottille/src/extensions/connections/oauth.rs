@@ -685,6 +685,49 @@ struct Pending {
     base: Tokens,
 }
 
+/// A sign-in that waits for the browser, as the tunnel of another machine's client reaches it
+/// (`docs/remote.md`, "Connections").
+#[derive(Clone)]
+pub struct Waiting {
+    /// Which sign-in it is: one begun again is another.
+    pub flow: u64,
+    /// The port of its one-shot loopback redirect, and the address its listener is on.
+    pub port: u16,
+    pub address: std::net::IpAddr,
+    /// The key of the device that asked for it, from a client of another machine; none for a
+    /// client of this one.
+    pub signer: Option<flottille_link::PublicKey>,
+    /// How it ended: `Some(true)` signed in, `Some(false)` not; `None` while it waits. Its sender
+    /// gone (the sign-in begun again) is an end too.
+    pub ended: tokio::sync::watch::Receiver<Option<bool>>,
+}
+
+/// A sign-in begun, and its task.
+pub(super) struct Signing {
+    abort: tokio::task::AbortHandle,
+    waiting: Waiting,
+}
+
+/// The sign-in of the connection `name` that waits for the browser now, if one does.
+pub fn waiting(daemon: &Daemon, name: &str) -> Option<Waiting> {
+    let signing = daemon.extensions.connections.signing.lock().unwrap();
+    let waiting = &signing.get(name)?.waiting;
+    let waits = waiting.ended.borrow().is_none() && waiting.ended.has_changed().is_ok();
+    waits.then(|| waiting.clone())
+}
+
+/// The address the redirect's listener is on: `127.0.0.1`, or in a test build the loopback
+/// address `FLOTTILLE_TEST_SIGN_IN_LOOPBACK` names, so that two daemons on one host can play
+/// two machines (the redirect still names `127.0.0.1`, which the client's tunnel then holds).
+fn loopback() -> std::net::IpAddr {
+    cfg!(debug_assertions)
+        .then(|| std::env::var("FLOTTILLE_TEST_SIGN_IN_LOOPBACK").ok())
+        .flatten()
+        .and_then(|address| address.parse::<std::net::IpAddr>().ok())
+        .filter(std::net::IpAddr::is_loopback)
+        .unwrap_or(std::net::Ipv4Addr::LOCALHOST.into())
+}
+
 /// Begins a sign-in of the connection: the address to open in the user's browser. The daemon
 /// waits for the browser on a loopback redirect for five minutes, and says how it ended with
 /// `connection.signed_in` or `connection.sign_in_failed`. A sign-in begun again replaces the one
@@ -700,7 +743,8 @@ pub async fn begin(daemon: &Arc<Daemon>, declaration: &Declaration) -> Result<St
     let (said, scope) = challenge(url).await?;
     let (resource, issuer, scopes) = resource_metadata(url, said).await?;
     let metadata = authorization_metadata(&issuer).await?;
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+    let listening = loopback();
+    let listener = tokio::net::TcpListener::bind((listening, 0))
         .await
         .map_err(|error| format!("no loopback port for the redirect: {error}"))?;
     let port = listener
@@ -761,6 +805,15 @@ pub async fn begin(daemon: &Arc<Daemon>, declaration: &Declaration) -> Result<St
             expires_at: None,
         },
     };
+    static FLOWS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let (ending, ended) = tokio::sync::watch::channel(None);
+    let waiting = Waiting {
+        flow: FLOWS.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
+        port,
+        address: listening,
+        signer: crate::daemon::asked().map(|asked| asked.key),
+        ended,
+    };
     let weak = Arc::downgrade(daemon);
     let task = tokio::spawn(async move {
         let ended = tokio::time::timeout(SIGN_IN_LIMIT, received(&weak, listener, &pending))
@@ -771,9 +824,11 @@ pub async fn begin(daemon: &Arc<Daemon>, declaration: &Declaration) -> Result<St
                     SIGN_IN_LIMIT.as_secs() / 60
                 ))
             });
+        let signed = ended.is_ok();
         if let Some(daemon) = weak.upgrade() {
             super::signed_in(&daemon, &pending.name, ended).await;
         }
+        ending.send_replace(Some(signed));
     });
     let replaced = daemon
         .extensions
@@ -781,9 +836,15 @@ pub async fn begin(daemon: &Arc<Daemon>, declaration: &Declaration) -> Result<St
         .signing
         .lock()
         .unwrap()
-        .insert(declaration.name.clone(), task.abort_handle());
+        .insert(
+            declaration.name.clone(),
+            Signing {
+                abort: task.abort_handle(),
+                waiting,
+            },
+        );
     if let Some(replaced) = replaced {
-        replaced.abort();
+        replaced.abort.abort();
     }
     Ok(address.into())
 }

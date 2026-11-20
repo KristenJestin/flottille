@@ -110,12 +110,18 @@ fn list_text(listed: &Value) -> String {
     let mut text = String::new();
     for tunnel in tunnels {
         let connections = tunnel["connections"].as_u64().unwrap_or(0);
+        let reached = match tunnel["sign_in"].as_str() {
+            Some(name) => format!("the sign-in of {name}"),
+            None => format!(
+                "port {} of run {}",
+                tunnel["port"],
+                tunnel["run"].as_str().unwrap_or("?")
+            ),
+        };
         text.push_str(&format!(
-            "{} {} -> port {} of run {} on {} ({connections} connection{})\n",
+            "{} {} -> {reached} on {} ({connections} connection{})\n",
             tunnel["tunnel"].as_str().unwrap_or("?"),
             tunnel["address"].as_str().unwrap_or("?"),
-            tunnel["port"],
-            tunnel["run"].as_str().unwrap_or("?"),
             tunnel["machine"].as_str().unwrap_or("?"),
             if connections == 1 { "" } else { "s" },
         ));

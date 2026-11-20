@@ -78,6 +78,8 @@ tokio::task_local! {
 pub(crate) struct Asked {
     /// The member whose device signed it.
     pub device: String,
+    /// The public key that signed it: what tells that device from another one given its name.
+    pub key: flottille_link::PublicKey,
     /// The request as the device signed it, checked already: what a method that carries the
     /// user's consent further sends on (`vault.share`), for the next machine to check it again.
     pub signed: String,

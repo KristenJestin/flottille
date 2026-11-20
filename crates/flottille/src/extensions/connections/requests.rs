@@ -1443,7 +1443,11 @@ fn current(
 /// reads in its declaration, whose host is the one the confirmation showed (`host`): no word of
 /// the window's or of an agent's chooses where a secret goes, and agents reach no method of the
 /// user's door.
-pub(super) fn widened(daemon: &Daemon, method: &str, params: &Value) -> Result<Value, Failure> {
+pub(super) async fn widened(
+    daemon: &Daemon,
+    method: &str,
+    params: &Value,
+) -> Result<Value, Failure> {
     let number = params["number"]
         .as_u64()
         .ok_or_else(|| Failure::refused("the request's `number` is required"))?;
@@ -1500,7 +1504,7 @@ pub(super) fn widened(daemon: &Daemon, method: &str, params: &Value) -> Result<V
         )));
     }
     match method {
-        "connection.share_entry" => crate::vault::shared(daemon, entry),
+        "connection.share_entry" => crate::vault::shared(daemon, entry).await,
         _ => {
             // Only a URL's secret line sends an entry to a host.
             let (origin, host) = origin_of(after)
@@ -1522,7 +1526,7 @@ pub(super) fn widened(daemon: &Daemon, method: &str, params: &Value) -> Result<V
                     after.name
                 )));
             }
-            crate::vault::bound_to(daemon, entry, &origin)
+            crate::vault::bound_to(daemon, entry, &origin).await
         }
     }
 }
