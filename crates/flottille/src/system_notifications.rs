@@ -178,7 +178,35 @@ impl Desktop {
     }
 }
 
+/// The session bus's socket when it is a path nobody listens on: the connection is not tried
+/// then. A failed attempt leaves a thread of the D-Bus library's pool behind, which wakes twice a
+/// second for good, and the daemon wakes at rest for nothing (`daemon_at_rest.rs`).
+fn absent_bus_socket() -> Option<String> {
+    let address = std::env::var("DBUS_SESSION_BUS_ADDRESS")
+        .ok()
+        .filter(|address| !address.is_empty())
+        .or_else(|| {
+            let runtime = std::env::var("XDG_RUNTIME_DIR").ok()?;
+            Some(format!("unix:path={runtime}/bus"))
+        })?;
+    let paths = address.split(';').map(|one| {
+        one.strip_prefix("unix:path=")
+            .map(|rest| rest.split(',').next().unwrap_or_default())
+    });
+    // Only addresses of a socket file are known to be absent: a TCP or abstract one is tried.
+    let paths: Vec<&str> = paths.collect::<Option<_>>()?;
+    paths
+        .iter()
+        .all(|path| !std::path::Path::new(path).exists())
+        .then(|| paths.join(", "))
+}
+
 async fn open(hears: &Hears) -> Result<Link, String> {
+    if let Some(path) = absent_bus_socket() {
+        return Err(format!(
+            "no session bus (nothing at {path}: No such file or directory)"
+        ));
+    }
     let connection = zbus::Connection::session()
         .await
         .map_err(|error| format!("no session bus ({error})"))?;
