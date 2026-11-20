@@ -497,11 +497,14 @@ hub's change as one no member signed.
 **Built (#1146), from the command line**: `flottille-hub pair`, `role`, `remove`, `devices`,
 `reset`; `flottille remote pair`, `members`, `rename`, `icon`, `colour`, `remove`. The clients sign
 with the device key; the daemon carries what they signed (`remote.*`, `protocol.md`) and says what
-changed as events (`remote.*`, `events.md`). The window's Connect to your hub follows on #1144's
-modals; the phone's part is not built.
+changed as events (`remote.*`, `events.md`). The phone's part is not built.
 
-**Built (#814), in the window** (before pair mode; its Set up a hub, Add a device and join request
-dialog are replaced by Connect to your hub): Settings, General, Machines shows the devices of the
+**Built (#814, #1146), in the window**: Settings, General, Machines offers **Connect to your hub**
+while this machine is in no member list: one button, which opens a dialog where the code is pasted
+(a field that hides what is typed), and the card this machine proposes confirmed (its name, This
+device is, a select of the five icons, This device can, Run agents / Control only / View only);
+a refusal stays in the dialog, a success closes it with a toast. There is no Add a device and no
+join request: a device is added on the hub's host. Then the page shows the devices of the
 list (each row its name, its machine's state, its role and who added it; Rename and Remove… in its
 "⋯", Remove asking once), and this machine's addresses, found or declared (New address, Remove…).
 Every new member is a toast, `New device: pixel (control only), added at 18:42 by the hub`, with
