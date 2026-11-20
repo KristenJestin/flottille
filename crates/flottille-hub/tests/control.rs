@@ -1,8 +1,9 @@
 //! The hub on the network and the devices' control sessions to it (`docs/remote.md`, "The hub",
-//! "The first member", "Architecture"): a hub served on 127.0.0.1, on a port the system chooses,
-//! from a temporary state folder; devices with their machine keys in temporary folders and their
-//! device keys made from fixed seeds. A hub that lies is played by a server that holds the real
-//! hub's key and says what the test tells it: every device must refuse it by itself.
+//! "Pairing", "Architecture"): a hub served on 127.0.0.1, on a port the system chooses, from a
+//! temporary state folder; devices with their machine keys in temporary folders and their device
+//! keys made from fixed seeds, paired in pair mode. A hub that lies is played by a server that
+//! holds the real hub's key and says what the test tells it: every device must refuse what no key
+//! it trusts signed.
 
 use std::io::{BufRead, BufReader};
 use std::net::SocketAddr;
@@ -12,8 +13,9 @@ use std::time::Duration;
 
 use flottille_hub::{Hub, Served, SystemClock};
 use flottille_link::{
-    Action, Change, ControlError, Device, DeviceKey, Hello, HubKey, InvitationAsk, Keyring,
-    KeyringError, ListError, MachineKey, MemberList, Pushed, Role, Session, Tls, ToDevice, arrive,
+    Action, Change, Colour, ControlError, Device, DeviceKey, Hello, HubKey, Icon, Keyring,
+    KeyringError, ListError, MachineKey, MemberList, PairCode, Proposed, Pushed, Role, Session,
+    Tls, ToDevice, arrive,
 };
 use zeroize::Zeroizing;
 
@@ -42,14 +44,10 @@ fn device_key(n: u8) -> DeviceKey {
     DeviceKey::load_or_make(&Seeded([n; 32]), Path::new("/nonexistent")).unwrap()
 }
 
-/// The key the hub of `folder` holds, as a device key would sign with it: what a hub that tries
-/// to sign a change itself would sign with.
-fn hub_as_signer(folder: &Path) -> DeviceKey {
-    let seed: [u8; 32] = std::fs::read(folder.join(flottille_link::HUB_FILE))
-        .unwrap()
-        .try_into()
-        .unwrap();
-    DeviceKey::load_or_make(&Seeded(seed), Path::new("/nonexistent")).unwrap()
+/// The key the hub of `folder` holds, as a key a test signs with: what a hub that lies signs
+/// with, or what another hub's key signs.
+fn hub_signer(folder: &Path) -> HubKey {
+    HubKey::load_or_make(folder).unwrap()
 }
 
 fn hello() -> Hello {
@@ -83,54 +81,83 @@ impl Place {
         flottille_hub::serve(hub, listener, None, hello()).unwrap()
     }
 
-    /// [`Place::serve`], its waits short: a setup session lasts `QUICK_SETUP` and a connection
-    /// has `QUICK_ARRIVAL` to arrive, not ten and five seconds.
+    /// [`Place::serve`], its waits short: a pairing's session lasts `QUICK_PAIR` and a connection
+    /// has `QUICK_ARRIVAL` to arrive, not thirty and five seconds.
     async fn serve_quickly(&self, at: &str) -> Served<SystemClock> {
         let hub = Hub::open(&self.hub_folder(), SystemClock).unwrap();
         let listener = tokio::net::TcpListener::bind(at).await.unwrap();
         let waits = flottille_hub::Waits {
             arrival: QUICK_ARRIVAL,
-            setup_idle: QUICK_SETUP,
+            pair_idle: QUICK_PAIR,
         };
         flottille_hub::serve_with(hub, listener, None, hello(), waits).unwrap()
     }
 }
 
-const QUICK_SETUP: Duration = Duration::from_secs(2);
+const QUICK_PAIR: Duration = Duration::from_secs(2);
 const QUICK_ARRIVAL: Duration = Duration::from_secs(1);
 
 fn url(address: SocketAddr) -> String {
     format!("http://{address}")
 }
 
-/// The first member's changes: `device`'s own entry, named `name`, then its machine's
-/// declaration.
-fn first_member(device: &DeviceKey, machine: &MachineKey, name: &str) -> Vec<Change> {
-    let mut list = MemberList::start(name, device).unwrap();
-    list.declare(device, machine);
-    list.changes().to_vec()
+/// The card `device` proposes, named `name`, with `role`.
+fn proposed(device: &DeviceKey, name: &str, role: Role) -> Proposed {
+    Proposed {
+        key: device.public(),
+        name: name.to_owned(),
+        role,
+        icon: Icon::Desktop,
+        colour: Colour::of(&device.public()),
+    }
 }
 
-async fn setup(
-    address: SocketAddr,
-    code: &str,
+/// Pair mode opened on the hub, as `flottille-hub pair` opens it, its code holding `at`.
+fn code_at(served: &Served<SystemClock>, at: SocketAddr) -> PairCode {
+    served.with_hub(|hub| hub.open_pairing(&url(at), None).unwrap().1)
+}
+
+/// `device` pairs with `code` through `machine`'s session, as `name` with `role`, then declares its
+/// machine, as a computer does: what it pinned, and its session, a member's machine's now.
+async fn pair_with(
+    code: &PairCode,
     device: &DeviceKey,
     machine: &MachineKey,
     name: &str,
+    role: Role,
 ) -> Result<(Device, Session), ControlError> {
-    Device::setup(
-        &url(address),
+    let mut paired = Device::pair(
         code,
-        first_member(device, machine, name),
+        proposed(device, name, role),
         machine,
         &hello(),
         &Tls::System,
     )
-    .await
+    .await?;
+    let (mut pinned, _) = paired.listed().await?;
+    let declared = Change::sign(
+        pinned.list.head(),
+        Action::Machine {
+            key: device.public(),
+            machine: machine.public(),
+        },
+        device,
+    )
+    .claimed_by(machine);
+    pinned.submit(&mut paired.session, declared).await?;
+    Ok((pinned, paired.session))
 }
 
-fn code_of(served: &Served<SystemClock>) -> String {
-    served.with_hub(|hub| hub.setup_code().unwrap().to_owned())
+/// Pair mode opened, and `device` paired with its code.
+async fn pair_device(
+    served: &Served<SystemClock>,
+    device: &DeviceKey,
+    machine: &MachineKey,
+    name: &str,
+    role: Role,
+) -> Result<(Device, Session), ControlError> {
+    let code = code_at(served, served.address());
+    pair_with(&code, device, machine, name, role).await
 }
 
 /// The next list the hub sends this session, within a few seconds.
@@ -158,82 +185,10 @@ async fn list_of(session: &mut Session, changes: usize) -> MemberList {
     }
 }
 
-/// `pc`, the root, adds `name` with `role` through an invitation, and the new device declares its
-/// machine; both changes go through `pc`'s session, as members' changes. The new device's side of
-/// joining is #812's: here the test answers the invitation on the hub.
-async fn add_member(
-    served: &Served<SystemClock>,
-    pc: &DeviceKey,
-    session: &Session,
-    device: &DeviceKey,
-    machine: &MachineKey,
-    name: &str,
-    role: Role,
-) {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    served.with_hub(|hub| {
-        let ask = InvitationAsk::sign(&hub.key(), now, pc).unwrap();
-        let token = hub.invite(&ask).unwrap();
-        hub.join(&token, device.public()).unwrap();
-    });
-    let head = served.with_hub(|hub| hub.list().head());
-    let added = Change::sign(
-        head,
-        Action::Add {
-            key: device.public(),
-            name: name.to_owned(),
-            role,
-        },
-        pc,
-    );
-    session
-        .ask(flottille_link::Ask::Submit {
-            change: added.clone(),
-        })
-        .await
-        .unwrap();
-    let declared = Change::sign(
-        added.hash(),
-        Action::Machine {
-            key: device.public(),
-            machine: machine.public(),
-        },
-        device,
-    )
-    .claimed_by(machine);
-    session
-        .ask(flottille_link::Ask::Submit { change: declared })
-        .await
-        .unwrap();
-}
-
 /// A hub that lies: it holds the real hub's key (so a device's pin holds) and, to every device
 /// that connects, welcomes it and says `frames`.
 async fn lying_hub(folder: &Path, frames: Vec<ToDevice>) -> SocketAddr {
-    let key = HubKey::load_or_make(folder).unwrap();
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        let key = std::sync::Arc::new(key);
-        loop {
-            let Ok((stream, _)) = listener.accept().await else {
-                return;
-            };
-            let (key, frames) = (key.clone(), frames.clone());
-            tokio::spawn(async move {
-                let arriving = arrive(Box::new(stream), &key, &hello()).await.unwrap();
-                let mut session = arriving.welcome().await.unwrap();
-                for frame in &frames {
-                    session.send(frame).await.unwrap();
-                }
-                let _ = session.ask().await;
-            });
-        }
-    });
-    address
+    answering_hub(HubKey::load_or_make(folder).unwrap(), frames).await
 }
 
 /// `device`, whose pinned hub now answers at `address`, sent a list there: what it says of it.
@@ -253,8 +208,8 @@ async fn told_by(device: &mut Device, address: SocketAddr, machine: &MachineKey)
     refused
 }
 
-/// The root `pc` and a runner `server` it added, each with its device pinned to the hub; the
-/// hub's list as they hold it.
+/// `pc`, a runner, and `server`, a runner, both paired, each with its device pinned to the hub;
+/// the hub's list as they hold it: the hub's root, then each one's entry and machine.
 struct Two {
     pc: DeviceKey,
     pc_machine: MachineKey,
@@ -267,35 +222,16 @@ struct Two {
 async fn two(place: &Place, served: &Served<SystemClock>) -> Two {
     let (pc, server) = (device_key(1), device_key(2));
     let (pc_machine, server_machine) = (place.machine("pc"), place.machine("server"));
-    let (mut pc_device, mut pc_session) =
-        setup(served.address(), &code_of(served), &pc, &pc_machine, "pc")
-            .await
-            .unwrap();
-    add_member(
-        served,
-        &pc,
-        &pc_session,
-        &server,
-        &server_machine,
-        "server",
-        Role::Runner,
-    )
-    .await;
-    pc_device.take(list_of(&mut pc_session, 4).await).unwrap();
-    let mut server_device = Device {
-        url: pc_device.url.clone(),
-        hub: pc_device.hub,
-        root: pc.public(),
-        list: MemberList::default(),
-    };
-    let mut server_session = server_device
-        .connect(&server_machine, &hello(), &Tls::System)
+    let (mut pc_device, mut pc_session) = pair_device(served, &pc, &pc_machine, "pc", Role::Runner)
         .await
         .unwrap();
-    let members = server_device
-        .take(next_list(&mut server_session).await)
-        .unwrap();
-    assert_eq!(members.members().len(), 2);
+    let (server_device, server_session) =
+        pair_device(served, &server, &server_machine, "server", Role::Runner)
+            .await
+            .unwrap();
+    drop(server_session);
+    pc_device.take(list_of(&mut pc_session, 5).await).unwrap();
+    assert_eq!(server_device.members().unwrap().members().len(), 2);
     Two {
         pc,
         pc_machine,
@@ -398,57 +334,123 @@ impl Drop for Running {
     }
 }
 
+/// The pair command's output, line by line, from its process.
+fn pair_command(state: &Path, args: &[&str]) -> (Child, std::sync::mpsc::Receiver<String>) {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_flottille-hub"))
+        .args(["--state", state.to_str().unwrap(), "pair"])
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (send, lines) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            let Ok(line) = line else { return };
+            if send.send(line).is_err() {
+                return;
+            }
+        }
+    });
+    (child, lines)
+}
+
+/// The lines a command said up to the pair code, and the code: the line after the blank line
+/// that follows "Pair mode is open".
+fn read_code(lines: &std::sync::mpsc::Receiver<String>) -> (Vec<String>, String) {
+    let mut seen = Vec::new();
+    loop {
+        let line = lines
+            .recv_timeout(Duration::from_secs(30))
+            .unwrap_or_else(|_| panic!("no code was printed: {seen:?}"));
+        seen.push(line);
+        if seen.len() >= 3 && seen[seen.len() - 3].starts_with("Pair mode is open") {
+            let code = seen.last().unwrap().clone();
+            return (seen, code);
+        }
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
-async fn the_setup_code_is_printed_once_and_makes_the_first_member() {
+async fn pair_mode_prints_a_code_and_its_qr_and_pairs_one_device() {
     let place = Place::new();
     let state = place.hub_folder();
     let running = Running::start(place.dir.path(), &state);
     let (log, address) = running.until_listening();
-    let codes: Vec<&String> = log
-        .iter()
-        .filter(|line| line.contains("setup code: "))
-        .collect();
-    assert_eq!(codes.len(), 1, "{log:#?}");
-    let code = codes[0]
-        .split("setup code: ")
-        .nth(1)
-        .unwrap()
-        .split(',')
-        .next()
-        .unwrap()
-        .to_owned();
-    assert_eq!(code.len(), 19, "{code}");
-
-    let (pc, machine) = (device_key(1), place.machine("pc"));
-    // The code read in lower case and without its hyphens, as a person may type it.
-    let typed = code.replace('-', "").to_lowercase();
-    let (device, session) = setup(address, &typed, &pc, &machine, "pc").await.unwrap();
-    let members = device.members().unwrap();
-    let root = members.get(&pc.public()).unwrap();
-    assert_eq!((root.name.as_str(), root.role), ("pc", Role::Runner));
-    assert_eq!(
-        root.added_by,
-        pc.public(),
-        "the root's entry is signed by itself"
+    assert!(
+        log.iter()
+            .any(|line| line.contains("no device is paired yet: run flottille-hub --state")),
+        "{log:#?}"
     );
-    assert_eq!(root.machine, Some(machine.public()));
-    assert_eq!(members.root(), pc.public());
-    drop(session);
-    running.stop();
-
-    // Started again: no code in the log, and none on demand; the member connects.
-    let running = Running::start(place.dir.path(), &state);
-    let (log, address) = running.until_listening();
     assert!(
         !log.iter().any(|line| line.contains("setup code")),
         "{log:#?}"
     );
-    let again = Command::new(env!("CARGO_BIN_EXE_flottille-hub"))
-        .args(["--state", state.to_str().unwrap(), "setup-code"])
-        .output()
+
+    // `flottille-hub pair` beside the hub that runs: the code holds the hub's address and key.
+    let (mut child, lines) = pair_command(&state, &[]);
+    let (said, code) = read_code(&lines);
+    assert!(
+        said[0].contains(&format!("with the hub at http://{address}")),
+        "{said:?}"
+    );
+    let parsed = PairCode::from_code(&code).unwrap();
+    assert_eq!(parsed.hub_url, url(address));
+    let mut rest = Vec::new();
+    while let Ok(line) = lines.recv_timeout(Duration::from_secs(5)) {
+        let waiting = line.contains("Waiting...");
+        rest.push(line);
+        if waiting {
+            break;
+        }
+    }
+    // Its QR, in half blocks, before what to do with it.
+    assert!(
+        rest.iter()
+            .any(|line| line.contains('▀') || line.contains('▄')),
+        "{rest:?}"
+    );
+    assert!(
+        rest.iter().any(|line| line.contains("keep it to yourself")),
+        "{rest:?}"
+    );
+
+    let (pc, machine) = (device_key(1), place.machine("pc"));
+    let (device, session) = pair_with(&parsed, &pc, &machine, "pc", Role::Runner)
+        .await
         .unwrap();
-    assert!(!again.status.success());
-    assert!(String::from_utf8_lossy(&again.stderr).contains("has a member already"));
+    let members = device.members().unwrap();
+    let entry = members.get(&pc.public()).unwrap();
+    assert_eq!((entry.name.as_str(), entry.role), ("pc", Role::Runner));
+    assert_eq!(
+        entry.added_by, parsed.hub_key,
+        "the entry is signed by the hub"
+    );
+    assert_eq!(entry.machine, Some(machine.public()));
+    assert_eq!(device.hub, parsed.hub_key);
+    assert_eq!(members.root(), parsed.hub_key);
+
+    // The command says who paired, and returns.
+    let paired = lines.recv_timeout(Duration::from_secs(10)).unwrap();
+    assert!(
+        paired.starts_with(&format!(
+            "pc ({}) is paired, a runner",
+            pc.public().fingerprint()
+        )),
+        "{paired}"
+    );
+    assert!(child.wait().unwrap().success());
+    drop(session);
+    running.stop();
+
+    // Started again: the member connects; nothing is printed of pair mode.
+    let running = Running::start(place.dir.path(), &state);
+    let (log, address) = running.until_listening();
+    assert!(
+        !log.iter().any(|line| line.contains("no device is paired")),
+        "{log:#?}"
+    );
     let moved = Device {
         url: url(address),
         ..device.clone()
@@ -463,75 +465,151 @@ async fn the_setup_code_is_printed_once_and_makes_the_first_member() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn the_setup_code_works_only_while_no_member_exists() {
+async fn pair_mode_ends_at_its_minutes_or_when_its_command_stops() {
     let place = Place::new();
-    let served = place.serve("127.0.0.1:0").await;
-    let code = code_of(&served);
+    let state = place.hub_folder();
+    // No hub runs: the command says so.
+    let output = Command::new(env!("CARGO_BIN_EXE_flottille-hub"))
+        .args(["--state", state.to_str().unwrap(), "pair"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let said = String::from_utf8_lossy(&output.stderr);
+    assert!(said.contains("no flottille-hub runs with"), "{said}");
 
-    // A wrong code is refused, and leaves the code working.
-    let (pc, laptop) = (device_key(1), device_key(2));
-    let wrong = setup(
-        served.address(),
-        "0000-0000-0000-0000",
-        &pc,
+    let running = Running::start(place.dir.path(), &state);
+    let (_, address) = running.until_listening();
+    let (mut child, lines) = pair_command(&state, &["--public-url", &url(address)]);
+    let (_, code) = read_code(&lines);
+    let parsed = PairCode::from_code(&code).unwrap();
+    // A second pair mode while one is open: refused.
+    let output = Command::new(env!("CARGO_BIN_EXE_flottille-hub"))
+        .args(["--state", state.to_str().unwrap(), "pair"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("pair mode is open already"));
+
+    // The command stopped: pair mode is closed, its code pairs nothing.
+    child.kill().unwrap();
+    child.wait().unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let refused = pair_with(
+        &parsed,
+        &device_key(1),
         &place.machine("pc"),
         "pc",
+        Role::Runner,
     )
     .await
     .unwrap_err();
     assert!(
-        wrong
-            .to_string()
-            .contains("this setup code is not the hub's"),
-        "{wrong}"
-    );
-
-    // A setup whose machine is not the one that presents the code is refused.
-    let other = first_member(&pc, &place.machine("elsewhere"), "pc");
-    let refused = Device::setup(
-        &url(served.address()),
-        &code,
-        other,
-        &place.machine("pc"),
-        &hello(),
-        &Tls::System,
-    )
-    .await
-    .unwrap_err();
-    assert!(
-        refused.to_string().contains("must declare the machine"),
+        refused.to_string().contains("pair mode is not open"),
         "{refused}"
     );
+    running.stop();
+}
 
-    let (_device, _session) = setup(served.address(), &code, &pc, &place.machine("pc"), "pc")
-        .await
-        .unwrap();
-    // The same code again, by another device: refused, before its session goes any further.
-    let again = setup(
-        served.address(),
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pair_code_pairs_one_device_even_two_at_once() {
+    let place = Place::new();
+    let served = place.serve("127.0.0.1:0").await;
+    let code = code_at(&served, served.address());
+    let (laptop, phone) = (device_key(2), device_key(3));
+    let (laptop_machine, phone_machine) = (place.machine("laptop"), place.machine("phone"));
+    let (one, other) = tokio::join!(
+        pair_with(&code, &laptop, &laptop_machine, "laptop", Role::Runner),
+        pair_with(&code, &phone, &phone_machine, "phone", Role::Controller),
+    );
+    assert!(one.is_ok() != other.is_ok(), "{one:?} {other:?}");
+    let refused = one.err().or(other.err()).unwrap();
+    assert!(
+        refused.to_string().contains("pair mode is not open"),
+        "{refused}"
+    );
+    served.with_hub(|hub| assert_eq!(hub.members().unwrap().members().len(), 1));
+
+    // Played again later, the code pairs nothing either.
+    let late = pair_with(
         &code,
-        &laptop,
-        &place.machine("laptop"),
-        "laptop",
+        &device_key(4),
+        &place.machine("late"),
+        "late",
+        Role::Viewer,
     )
     .await
     .unwrap_err();
-    assert!(
-        again
-            .to_string()
-            .contains("is not one of this hub's members"),
-        "{again}"
-    );
-    // Gone from the hub's state.
-    served.with_hub(|hub| assert!(hub.setup_code().is_err()));
-    assert!(flottille_hub::setup_code(&place.hub_folder()).is_err());
-    let members = served.with_hub(|hub| hub.members().unwrap().members().len());
-    assert_eq!(members, 1);
+    assert!(late.to_string().contains("pair mode is not open"), "{late}");
     served.stop().await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_reset_on_the_hub_is_refused_by_every_device_that_pinned_the_old_root() {
+async fn a_hub_with_another_key_than_its_code_says_is_refused() {
+    let place = Place::new();
+    let served = place.serve("127.0.0.1:0").await;
+    // The code of another hub, whose key is not this one's, pointed at this hub's address.
+    let other = Place::new();
+    let mut code = code_at(&served, served.address());
+    code.hub_key = hub_signer(&other.hub_folder()).public();
+    let refused = pair_with(
+        &code,
+        &device_key(1),
+        &place.machine("pc"),
+        "pc",
+        Role::Runner,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(refused, ControlError::AnotherKey { .. }),
+        "{refused}"
+    );
+    assert_eq!(
+        refused.to_string(),
+        format!(
+            "the hub at {} has another key than the one this device pinned",
+            served.address()
+        )
+    );
+    // Refused before anything was proved: pair mode is still open, and nothing was paired.
+    served.with_hub(|hub| {
+        assert!(hub.pairing_left().is_some());
+        assert!(hub.members().is_none());
+    });
+    served.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_device_paired_again_with_the_same_key_keeps_its_card() {
+    let place = Place::new();
+    let served = place.serve("127.0.0.1:0").await;
+    let (pc, machine) = (device_key(1), place.machine("pc"));
+    let (first, session) = pair_device(&served, &pc, &machine, "pc", Role::Runner)
+        .await
+        .unwrap();
+    drop(session);
+    // Its hub forgotten on the machine (a reinstall), it pairs again with a new code, proposing
+    // another name and role: its entry, its role and its machine are those it had.
+    let code = code_at(&served, served.address());
+    let mut paired = Device::pair(
+        &code,
+        proposed(&pc, "renamed", Role::Viewer),
+        &machine,
+        &hello(),
+        &Tls::System,
+    )
+    .await
+    .unwrap();
+    let (again, members) = paired.listed().await.unwrap();
+    assert_eq!(again.list, first.list);
+    let entry = members.get(&pc.public()).unwrap();
+    assert_eq!((entry.name.as_str(), entry.role), ("pc", Role::Runner));
+    assert_eq!(entry.machine, Some(machine.public()));
+    served.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reset_on_the_hub_is_refused_by_every_device_that_pinned_the_old_list() {
     let place = Place::new();
     let served = place.serve("127.0.0.1:0").await;
     let address = served.address();
@@ -539,8 +617,8 @@ async fn a_reset_on_the_hub_is_refused_by_every_device_that_pinned_the_old_root(
     drop(two.pc_session);
     served.stop().await;
 
-    // On the hub's machine: the list emptied, a new code.
-    let code = flottille_hub::reset(&place.hub_folder()).unwrap();
+    // On the hub's machine: the list emptied.
+    flottille_hub::reset(&place.hub_folder()).unwrap();
     let served = place.serve(&address.to_string()).await;
 
     // Every device that connects is told the list it pinned was reset, and keeps its own.
@@ -556,18 +634,18 @@ async fn a_reset_on_the_hub_is_refused_by_every_device_that_pinned_the_old_root(
         assert!(matches!(refused, ControlError::Reset), "{refused}");
         assert_eq!(
             refused.to_string(),
-            "the hub's member list was reset: set this device up again"
+            "the hub's member list was reset: pair this device again"
         );
         assert_eq!(device.list, kept);
     }
 
-    // Set up again by someone else: the old devices are refused at once, saying it was reset.
-    let (_new, _session) = setup(
-        address,
-        &code,
+    // Another device paired: the old devices are refused at once, saying it was reset.
+    let (_new, _session) = pair_device(
+        &served,
         &device_key(9),
         &place.machine("stranger"),
         "stranger",
+        Role::Runner,
     )
     .await
     .unwrap();
@@ -580,44 +658,18 @@ async fn a_reset_on_the_hub_is_refused_by_every_device_that_pinned_the_old_root(
             .await
             .unwrap_err();
         assert!(matches!(refused, ControlError::Reset), "{refused}");
-        assert_eq!(
-            refused.to_string(),
-            "the hub's member list was reset: set this device up again"
-        );
     }
     let _ = two.pc;
     served.stop().await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_list_change_no_member_signed_is_refused_by_the_hub_and_by_every_device() {
+async fn a_list_change_neither_the_hub_nor_a_member_signed_is_refused_everywhere() {
     let place = Place::new();
     let served = place.serve("127.0.0.1:0").await;
     let mut two = two(&place, &served).await;
     let stranger = device_key(7);
     let head = two.pc_device.list.head();
-    let forged = Change::sign(
-        head,
-        Action::Add {
-            key: stranger.public(),
-            name: "stranger".to_owned(),
-            role: Role::Runner,
-        },
-        &stranger,
-    );
-
-    // The hub refuses it, from a member's session.
-    let refused = two
-        .pc_session
-        .ask(flottille_link::Ask::Submit {
-            change: forged.clone(),
-        })
-        .await
-        .unwrap_err();
-    assert!(
-        refused.to_string().contains("refuses this change"),
-        "{refused}"
-    );
     let renamed = Change::sign(
         head,
         Action::Rename {
@@ -626,54 +678,83 @@ async fn a_list_change_no_member_signed_is_refused_by_the_hub_and_by_every_devic
         },
         &stranger,
     );
+
+    // The hub refuses it, from a member's session.
     let refused = two
         .pc_session
-        .ask(flottille_link::Ask::Submit { change: renamed })
+        .ask(flottille_link::Ask::Submit {
+            change: renamed.clone(),
+        })
         .await
         .unwrap_err();
     assert!(
         refused
             .to_string()
-            .contains("is signed by a key that is not a member"),
+            .contains("is signed by a key that is neither a member nor the hub"),
+        "{refused}"
+    );
+    // A member's addition too: a device is paired on the hub.
+    let added = Change::sign(
+        head,
+        Action::Add {
+            key: stranger.public(),
+            name: "stranger".to_owned(),
+            role: Role::Runner,
+        },
+        &two.pc,
+    );
+    let refused = two
+        .pc_session
+        .ask(flottille_link::Ask::Submit {
+            change: added.clone(),
+        })
+        .await
+        .unwrap_err();
+    assert!(
+        refused.to_string().contains("no member adds one"),
         "{refused}"
     );
 
-    // A hub that sends it anyway is refused by every device.
-    let mut lie = two.pc_device.list.changes().to_vec();
-    lie.push(forged);
-    let lying = lying_hub(
-        &place.hub_folder(),
-        vec![ToDevice::List(MemberList::from_changes(lie))],
-    )
-    .await;
-    for (device, machine) in [
-        (&mut two.pc_device, &two.pc_machine),
-        (&mut two.server_device, &two.server_machine),
+    // A hub that sends them anyway is refused by every device.
+    for (lie, why) in [
+        (
+            renamed,
+            "change 6 is signed by a key that is neither a member nor the hub",
+        ),
+        (
+            added,
+            "change 6 adds a device, signed by pc: a device is paired on the hub",
+        ),
     ] {
-        let refused = told_by(device, lying, machine).await;
-        assert!(
-            refused
-                .to_string()
-                .contains("change 5 is signed by a key that is not a member"),
-            "{refused}"
-        );
+        let mut changes = two.pc_device.list.changes().to_vec();
+        changes.push(lie);
+        let lying = lying_hub(
+            &place.hub_folder(),
+            vec![ToDevice::List(MemberList::from_changes(changes))],
+        )
+        .await;
+        for (device, machine) in [
+            (&mut two.pc_device, &two.pc_machine),
+            (&mut two.server_device, &two.server_machine),
+        ] {
+            let refused = told_by(device, lying, machine).await;
+            assert!(refused.to_string().contains(why), "{refused}");
+        }
     }
 
     // A change signed by a member that was removed before it.
-    let pc = &two.pc;
     let server = device_key(2);
     let mut removed = two.pc_device.list.clone();
     removed.sign(
         Action::Remove {
             key: server.public(),
         },
-        pc,
+        &two.pc,
     );
     removed.sign(
-        Action::Add {
-            key: stranger.public(),
-            name: "stranger".to_owned(),
-            role: Role::Runner,
+        Action::Rename {
+            key: two.pc.public(),
+            name: "mine".to_owned(),
         },
         &server,
     );
@@ -682,7 +763,7 @@ async fn a_list_change_no_member_signed_is_refused_by_the_hub_and_by_every_devic
     assert!(
         refused
             .to_string()
-            .contains("change 6 is signed by a key that is not a member"),
+            .contains("change 7 is signed by a key that is neither a member nor the hub"),
         "{refused}"
     );
 
@@ -700,90 +781,76 @@ async fn a_list_change_no_member_signed_is_refused_by_the_hub_and_by_every_devic
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn the_hub_cannot_add_a_member_or_change_a_role() {
+async fn what_the_hub_signs_is_bounded_and_another_hubs_key_signs_nothing() {
     let place = Place::new();
     let served = place.serve("127.0.0.1:0").await;
     let mut two = two(&place, &served).await;
-    let hub_key = hub_as_signer(&place.hub_folder());
+    let hub_key = hub_signer(&place.hub_folder());
     let intruder = device_key(8);
-    let head = two.pc_device.list.head();
 
-    // The hub signing an addition itself: refused by the hub's own rules...
-    let by_hub = Change::sign(
-        head,
-        Action::Add {
+    // A change signed with the hub's key, carried by a member's session: the hub signs on its
+    // host only.
+    let mut paired = two.pc_device.list.clone();
+    paired.sign_as_hub(
+        Action::Pair {
             key: intruder.public(),
             name: "intruder".to_owned(),
             role: Role::Runner,
+            icon: Icon::Server,
+            colour: Colour::Red,
         },
         &hub_key,
     );
+    let by_hub = paired.changes().last().unwrap().clone();
     let refused = two
         .pc_session
-        .ask(flottille_link::Ask::Submit {
-            change: by_hub.clone(),
-        })
+        .ask(flottille_link::Ask::Submit { change: by_hub })
         .await
         .unwrap_err();
     assert!(
-        refused.to_string().contains("refuses this change"),
+        refused.to_string().contains("the hub's own key"),
         "{refused}"
     );
-    // ...and an addition signed by a member but answering no join request is refused too.
-    let unasked = Change::sign(
-        head,
-        Action::Add {
+
+    // Another hub's key pairing a device: no device takes it.
+    let other = Place::new();
+    let mut lie = two.pc_device.list.clone();
+    lie.sign_as_hub(
+        Action::Pair {
             key: intruder.public(),
             name: "intruder".to_owned(),
             role: Role::Runner,
+            icon: Icon::Server,
+            colour: Colour::Red,
         },
-        &two.pc,
+        &hub_signer(&other.hub_folder()),
     );
-    let refused = two
-        .pc_session
-        .ask(flottille_link::Ask::Submit { change: unasked })
-        .await
-        .unwrap_err();
-    assert!(refused.to_string().contains("no join request"), "{refused}");
+    let lying = lying_hub(&place.hub_folder(), vec![ToDevice::List(lie)]).await;
+    let refused = told_by(&mut two.server_device, lying, &two.server_machine).await;
+    assert!(
+        refused
+            .to_string()
+            .contains("change 6 is signed by a key that is neither a member nor the hub"),
+        "{refused}"
+    );
 
-    // A hub that sends its own addition anyway: refused by every device.
-    let mut lie = two.pc_device.list.changes().to_vec();
-    lie.push(by_hub);
-    let lying = lying_hub(
-        &place.hub_folder(),
-        vec![ToDevice::List(MemberList::from_changes(lie))],
-    )
-    .await;
-    for (device, machine) in [
-        (&mut two.pc_device, &two.pc_machine),
-        (&mut two.server_device, &two.server_machine),
-    ] {
-        let refused = told_by(device, lying, machine).await;
-        assert!(
-            refused
-                .to_string()
-                .contains("change 5 is signed by a key that is not a member"),
-            "{refused}"
-        );
-    }
-
-    // A hub that changes a role in a signed entry: the signature no longer holds.
+    // A role changed in a signed entry: the signature no longer holds.
     let mut json = serde_json::to_value(&two.pc_device.list).unwrap();
-    assert_eq!(json[2]["action"]["role"], "runner");
-    json[2]["action"]["role"] = "viewer".into();
+    assert_eq!(json[3]["action"]["role"], "runner");
+    json[3]["action"]["role"] = "viewer".into();
     let changed: MemberList = serde_json::from_value(json).unwrap();
     let lying = lying_hub(&place.hub_folder(), vec![ToDevice::List(changed)]).await;
     let refused = told_by(&mut two.server_device, lying, &two.server_machine).await;
     assert!(
         refused
             .to_string()
-            .contains("change 3 does not carry its signer's signature"),
+            .contains("change 4 does not carry its signer's signature"),
         "{refused}"
     );
 
-    // A hub that gives a member another machine: only the member itself declares its own.
+    // The hub's own key gives a member another machine, or renames it: only the member does.
     let mut lie = two.pc_device.list.clone();
-    lie.sign(
+    lie.sign_as_hub(
         Action::Machine {
             key: two.pc.public(),
             machine: place.machine("intruder").public(),
@@ -795,10 +862,10 @@ async fn the_hub_cannot_add_a_member_or_change_a_role() {
     assert!(
         refused
             .to_string()
-            .contains("change 5 is signed by a key that is not a member"),
+            .contains("change 6 is the hub's and would declare the machine of a member"),
         "{refused}"
     );
-    // Nothing of it was kept: the members and roles are those the members signed.
+    // Nothing of it was kept: the members and roles are those the hub and the members signed.
     let members = two.server_device.members().unwrap();
     let roles: Vec<(String, Role)> = members
         .members()
@@ -841,14 +908,14 @@ async fn a_hub_with_another_key_is_refused() {
         );
         assert_eq!(
             refused.to_string(),
-            format!("the hub at {address} has another key than when this device joined")
+            format!("the hub at {address} has another key than the one this device pinned")
         );
     }
     impostor.stop().await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_member_removed_is_refused_its_session() {
+async fn a_member_removed_by_a_member_or_on_the_hub_is_refused_its_session() {
     let place = Place::new();
     let served = place.serve("127.0.0.1:0").await;
     let two = two(&place, &served).await;
@@ -875,6 +942,66 @@ async fn a_member_removed_is_refused_its_session() {
             .contains("is not one of this hub's members"),
         "{refused}"
     );
+    // On the hub's host: the other one goes too.
+    served.with_hub(|hub| hub.remove("pc").unwrap());
+    let refused = two
+        .pc_device
+        .connect(&two.pc_machine, &hello(), &Tls::System)
+        .await
+        .unwrap_err();
+    assert!(
+        refused
+            .to_string()
+            .contains("is not one of this hub's members"),
+        "{refused}"
+    );
+    served.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_hubs_host_changes_a_role_and_every_device_sees_it() {
+    let place = Place::new();
+    let served = place.serve("127.0.0.1:0").await;
+    let socket = place.hub_folder().join(flottille_hub::SOCKET_FILE);
+    served.serve_local(&socket).unwrap();
+    let mut two = two(&place, &served).await;
+    let ask = |line: serde_json::Value| {
+        let socket = socket.clone();
+        async move {
+            use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+            let mut stream = tokio::net::UnixStream::connect(&socket).await.unwrap();
+            stream
+                .write_all(format!("{line}\n").as_bytes())
+                .await
+                .unwrap();
+            let mut answer = String::new();
+            tokio::io::BufReader::new(stream)
+                .read_line(&mut answer)
+                .await
+                .unwrap();
+            serde_json::from_str::<serde_json::Value>(&answer).unwrap()
+        }
+    };
+    let changed = ask(serde_json::json!({"role": {"device": "server", "role": "viewer"}})).await;
+    assert_eq!(changed["ok"]["role"], "viewer", "{changed}");
+    let members = two
+        .pc_device
+        .take(list_of(&mut two.pc_session, 6).await)
+        .unwrap();
+    let server = members.get(&device_key(2).public()).unwrap();
+    assert_eq!(server.role, Role::Viewer);
+    let refused = ask(serde_json::json!({"role": {"device": "server", "role": "chief"}})).await;
+    assert_eq!(refused["refused"], "a role is runner, controller or viewer");
+    let devices = ask(serde_json::json!({"devices": {}})).await;
+    assert_eq!(devices["ok"][1]["role"], "viewer", "{devices}");
+    assert_eq!(devices["ok"][1]["added_by"], "the hub", "{devices}");
+    let removed = ask(serde_json::json!({"remove": {"device": "server"}})).await;
+    assert_eq!(removed["ok"]["name"], "server", "{removed}");
+    let members = two
+        .pc_device
+        .take(list_of(&mut two.pc_session, 7).await)
+        .unwrap();
+    assert!(members.get(&device_key(2).public()).is_none());
     served.stop().await;
 }
 
@@ -919,6 +1046,24 @@ async fn the_hub_tells_every_member_the_addresses_their_machines_told() {
     served.stop().await;
 }
 
+#[test]
+fn acme_is_refused_saying_what_to_do_instead() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_flottille-hub"))
+        .args([
+            "--state",
+            dir.path().join("hub").to_str().unwrap(),
+            "--acme",
+            "hub.example.net",
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let said = String::from_utf8_lossy(&output.stderr);
+    assert!(said.contains("ACME is not built yet"), "{said}");
+    assert!(said.contains("--tls-cert"), "{said}");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_connection_that_is_not_a_device_is_answered_as_http_and_closed() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -938,31 +1083,11 @@ async fn a_connection_that_is_not_a_device_is_answered_as_http_and_closed() {
     served.stop().await;
 }
 
-#[test]
-fn acme_is_refused_saying_what_to_do_instead() {
-    let dir = tempfile::tempdir().unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_flottille-hub"))
-        .args([
-            "--state",
-            dir.path().join("hub").to_str().unwrap(),
-            "--acme",
-            "hub.example.net",
-        ])
-        .output()
-        .unwrap();
-    assert!(!output.status.success());
-    let said = String::from_utf8_lossy(&output.stderr);
-    assert!(said.contains("ACME is not built yet"), "{said}");
-    assert!(said.contains("--tls-cert"), "{said}");
-}
-
 // --------------------------------------------------------------------------------------------
 // What a stranger, someone on the path, or a hub that lies may try.
 
-/// A hub that holds `key`, welcomes every device, says `frames`, then answers every ask as done;
-/// a setup with its proof that it holds `code`, when it is given.
-async fn answering_hub(key: HubKey, code: Option<&str>, frames: Vec<ToDevice>) -> SocketAddr {
-    let code = code.map(|code| flottille_link::SetupCode::parse(code).unwrap());
+/// A hub that holds `key`, welcomes every device, says `frames`, then answers every ask as done.
+async fn answering_hub(key: HubKey, frames: Vec<ToDevice>) -> SocketAddr {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -971,7 +1096,7 @@ async fn answering_hub(key: HubKey, code: Option<&str>, frames: Vec<ToDevice>) -
             let Ok((stream, _)) = listener.accept().await else {
                 return;
             };
-            let (key, frames, code) = (key.clone(), frames.clone(), code.clone());
+            let (key, frames) = (key.clone(), frames.clone());
             tokio::spawn(async move {
                 let arriving = arrive(Box::new(stream), &key, &hello()).await.unwrap();
                 let mut session = arriving.welcome().await.unwrap();
@@ -979,18 +1104,9 @@ async fn answering_hub(key: HubKey, code: Option<&str>, frames: Vec<ToDevice>) -
                     session.send(frame).await.unwrap();
                 }
                 while let Ok(asked) = session.ask().await {
-                    let proof = match (&asked.ask, &code) {
-                        (flottille_link::Ask::Setup { changes, .. }, Some(code)) => {
-                            let head = MemberList::from_changes(changes.clone()).head();
-                            Some(session.transcript().setup_proof(code, 1, &head))
-                        }
-                        _ => None,
-                    };
                     let answer = ToDevice::Answer {
                         id: asked.id,
                         refused: None,
-                        proof,
-                        token: None,
                     };
                     if session.send(&answer).await.is_err() {
                         return;
@@ -1044,8 +1160,8 @@ async fn relay(
     (address, seen)
 }
 
-/// A device that comes to a hub whose list is empty: pinned to the hub's key, with its own key as
-/// a root it never set up.
+/// A device that comes to the hub with no list: pinned to the hub's key, with its own key as a
+/// root it never had.
 fn stranger_at(served: &Served<SystemClock>, stranger: &DeviceKey) -> Device {
     Device {
         url: url(served.address()),
@@ -1056,7 +1172,7 @@ fn stranger_at(served: &Served<SystemClock>, stranger: &DeviceKey) -> Device {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_device_set_up_again_after_a_reset_does_not_bring_back_a_removed_member() {
+async fn a_device_paired_after_a_reset_does_not_bring_back_a_removed_member() {
     let place = Place::new();
     let served = place.serve("127.0.0.1:0").await;
     let address = served.address();
@@ -1074,33 +1190,24 @@ async fn a_device_set_up_again_after_a_reset_does_not_bring_back_a_removed_membe
         .await
         .unwrap();
     let old = served.with_hub(|hub| hub.list().clone());
-    assert_eq!(old.changes().len(), 5);
+    assert_eq!(old.changes().len(), 6);
     drop(two.pc_session);
     served.stop().await;
 
-    // The hub reset, and set up again by the very device, machine and name.
-    let code = flottille_hub::reset(&place.hub_folder()).unwrap();
+    // The hub reset, and the very device, machine and name paired again.
+    flottille_hub::reset(&place.hub_folder()).unwrap();
     let served = place.serve(&address.to_string()).await;
-    let (mut again, session) = setup(address, &code, &two.pc, &two.pc_machine, "pc")
+    let (mut again, session) = pair_device(&served, &two.pc, &two.pc_machine, "pc", Role::Runner)
         .await
         .unwrap();
     let fresh = again.list.clone();
-    assert_eq!(fresh.changes().len(), 2);
+    assert_eq!(fresh.changes().len(), 3);
+    assert_ne!(fresh.changes()[0], old.changes()[0], "a new list's id");
 
-    // The old list's changes do not follow on the new one: the hub refuses them, even for a join
-    // request that would take them...
-    served.with_hub(|hub| {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        let ask = InvitationAsk::sign(&hub.key(), now, &two.pc).unwrap();
-        let token = hub.invite(&ask).unwrap();
-        hub.join(&token, device_key(2).public()).unwrap();
-    });
+    // The old list's changes do not follow on the new one: the hub refuses them...
     let refused = session
         .ask(flottille_link::Ask::Submit {
-            change: old.changes()[2].clone(),
+            change: old.changes()[5].clone(),
         })
         .await
         .unwrap_err();
@@ -1110,9 +1217,9 @@ async fn a_device_set_up_again_after_a_reset_does_not_bring_back_a_removed_membe
             .contains("does not follow the change before it"),
         "{refused}"
     );
-    // ...and the device set up again refuses a hub that serves them anyway.
+    // ...and the device paired again refuses a hub that serves them anyway.
     let mut lie = fresh.changes().to_vec();
-    lie.extend_from_slice(&old.changes()[2..4]);
+    lie.extend_from_slice(&old.changes()[3..5]);
     let lying = lying_hub(
         &place.hub_folder(),
         vec![ToDevice::List(MemberList::from_changes(lie))],
@@ -1122,7 +1229,7 @@ async fn a_device_set_up_again_after_a_reset_does_not_bring_back_a_removed_membe
     assert!(
         refused
             .to_string()
-            .contains("change 3 does not follow the change before it"),
+            .contains("change 4 does not follow the change before it"),
         "{refused}"
     );
 
@@ -1144,53 +1251,6 @@ async fn a_device_set_up_again_after_a_reset_does_not_bring_back_a_removed_membe
         .unwrap_err();
     assert!(matches!(refused, ControlError::Reset), "{refused}");
     served.stop().await;
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn a_change_carried_by_a_session_that_is_not_a_member_is_refused() {
-    let place = Place::new();
-    let served = std::sync::Arc::new(place.serve("127.0.0.1:0").await);
-    let code = code_of(&served);
-    // A session opened while the list is empty, by someone who is not setting the hub up.
-    let stranger = device_key(7);
-    let session = stranger_at(&served, &stranger)
-        .connect(&place.machine("stranger"), &hello(), &Tls::System)
-        .await
-        .unwrap();
-
-    // pc sets the hub up while the stranger's ask is on its way: the stranger's ask comes in, then
-    // waits for the hub, which holds pc's setup; the session is not refused yet when it does.
-    let (pc, pc_machine) = (device_key(1), place.machine("pc"));
-    let changes = first_member(&pc, &pc_machine, "pc");
-    let renamed = Change::sign(
-        changes[1].hash(),
-        Action::Rename {
-            key: pc.public(),
-            name: "desk".to_owned(),
-        },
-        &pc,
-    );
-    let holding = served.clone();
-    let setting_up = tokio::task::spawn_blocking(move || {
-        holding.with_hub(|hub| {
-            hub.setup(&code, changes).unwrap();
-            std::thread::sleep(Duration::from_millis(1500));
-        })
-    });
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    let refused = session
-        .ask(flottille_link::Ask::Submit { change: renamed })
-        .await
-        .unwrap_err();
-    setting_up.await.unwrap();
-    assert!(
-        refused
-            .to_string()
-            .contains("is not one of this hub's members"),
-        "{refused}"
-    );
-    served.with_hub(|hub| assert_eq!(hub.list().changes().len(), 2));
-    std::sync::Arc::into_inner(served).unwrap().stop().await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1252,12 +1312,12 @@ async fn connections_that_have_not_proved_a_member_are_capped() {
     // Once they are gone, a device is served again.
     drop(idle);
     tokio::time::sleep(Duration::from_millis(500)).await;
-    let (_device, _session) = setup(
-        served.address(),
-        &code_of(&served),
+    let (_device, _session) = pair_device(
+        &served,
         &device_key(1),
         &place.machine("pc"),
         "pc",
+        Role::Runner,
     )
     .await
     .unwrap();
@@ -1265,36 +1325,23 @@ async fn connections_that_have_not_proved_a_member_are_capped() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_session_opened_before_setup_that_sets_nothing_up_is_closed() {
+async fn a_pairing_session_that_declares_no_machine_is_closed() {
     let place = Place::new();
     let served = place.serve_quickly("127.0.0.1:0").await;
-    let mut session = stranger_at(&served, &device_key(7))
-        .connect(&place.machine("stranger"), &hello(), &Tls::System)
-        .await
-        .unwrap();
-    let ended = tokio::time::timeout(QUICK_SETUP * 5, async {
-        while session.next().await.is_some() {}
-    })
-    .await;
-    assert!(
-        ended.is_ok(),
-        "the session is still open after {:?}",
-        QUICK_SETUP * 5
-    );
-    assert!(session.ended().contains("no setup"), "{}", session.ended());
-    served.stop().await;
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn a_session_that_keeps_asking_before_setup_is_still_closed() {
-    let place = Place::new();
-    let served = place.serve_quickly("127.0.0.1:0").await;
-    let mut session = stranger_at(&served, &device_key(7))
-        .connect(&place.machine("stranger"), &hello(), &Tls::System)
-        .await
-        .unwrap();
-    // It asks every 0.5 s, within the 2 s a session that asks nothing is given: still closed.
-    let asker = session.asker();
+    let code = code_at(&served, served.address());
+    let pc = device_key(1);
+    let mut paired = Device::pair(
+        &code,
+        proposed(&pc, "pc", Role::Runner),
+        &place.machine("pc"),
+        &hello(),
+        &Tls::System,
+    )
+    .await
+    .unwrap();
+    paired.listed().await.unwrap();
+    // It keeps asking, within the 2 s a pairing's session is given: still closed.
+    let asker = paired.session.asker();
     let asking = tokio::spawn(async move {
         loop {
             let _ = asker
@@ -1302,20 +1349,26 @@ async fn a_session_that_keeps_asking_before_setup_is_still_closed() {
                     addresses: Vec::new(),
                 })
                 .await;
-            tokio::time::sleep(QUICK_SETUP / 4).await;
+            tokio::time::sleep(QUICK_PAIR / 4).await;
         }
     });
-    let ended = tokio::time::timeout(QUICK_SETUP * 5 / 2, async {
-        while session.next().await.is_some() {}
+    let ended = tokio::time::timeout(QUICK_PAIR * 5 / 2, async {
+        while paired.session.next().await.is_some() {}
     })
     .await;
     asking.abort();
     assert!(
         ended.is_ok(),
-        "the session that keeps asking is still open after {:?}",
-        QUICK_SETUP * 5 / 2
+        "the pairing's session is still open after {:?}",
+        QUICK_PAIR * 5 / 2
     );
-    assert!(session.ended().contains("no setup"), "{}", session.ended());
+    assert!(
+        paired.session.ended().contains("declared none in time"),
+        "{}",
+        paired.session.ended()
+    );
+    // The device stays paired: it declares its machine in its next session.
+    served.with_hub(|hub| assert!(hub.members().unwrap().get(&pc.public()).is_some()));
     served.stop().await;
 }
 
@@ -1324,10 +1377,9 @@ async fn members_still_connect_while_strangers_hold_the_unauthenticated_places()
     let place = Place::new();
     let served = place.serve("127.0.0.1:0").await;
     let (pc, pc_machine) = (device_key(1), place.machine("pc"));
-    let (pc_device, pc_session) =
-        setup(served.address(), &code_of(&served), &pc, &pc_machine, "pc")
-            .await
-            .unwrap();
+    let (pc_device, pc_session) = pair_device(&served, &pc, &pc_machine, "pc", Role::Runner)
+        .await
+        .unwrap();
     drop(pc_session);
     // Strangers open connections and say nothing: every place for those that have not proved a
     // member's key is held.
@@ -1345,7 +1397,7 @@ async fn members_still_connect_while_strangers_hold_the_unauthenticated_places()
         .await
         .expect("a member connects while strangers hold the places");
     let list = next_list(&mut session).await;
-    assert_eq!(list.changes().len(), 2);
+    assert_eq!(list.changes().len(), 3);
     drop(idle);
     served.stop().await;
 }
@@ -1436,120 +1488,176 @@ fn the_hub_listens_on_loopback_unless_told_otherwise() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn the_setup_code_never_crosses_the_network() {
+async fn the_pair_code_never_crosses_the_network() {
     let place = Place::new();
     let served = place.serve("127.0.0.1:0").await;
-    let code = code_of(&served);
     let (relayed, seen) = relay(served.address(), std::sync::Arc::new(str::to_owned)).await;
-    let (_device, _session) = setup(relayed, &code, &device_key(1), &place.machine("pc"), "pc")
-        .await
-        .unwrap();
-    let seen = String::from_utf8_lossy(&seen.lock().unwrap()).to_uppercase();
-    assert!(!seen.is_empty());
-    for form in [code.clone(), code.replace('-', "")] {
-        assert!(
-            !seen.contains(&form),
-            "the setup code went over the network"
-        );
-    }
+    let code = code_at(&served, relayed);
+    let text = code.code().unwrap();
+    let secret: String = code
+        .secret
+        .0
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    let (_device, _session) = pair_with(
+        &code,
+        &device_key(1),
+        &place.machine("pc"),
+        "pc",
+        Role::Runner,
+    )
+    .await
+    .unwrap();
+    let seen = String::from_utf8_lossy(&seen.lock().unwrap()).to_string();
+    assert!(
+        seen.contains("\"pair\""),
+        "the pairing went through the relay"
+    );
+    assert!(
+        !seen.to_uppercase().contains(&text),
+        "the pair code went over the network"
+    );
+    assert!(
+        !seen.contains(&secret),
+        "the pair code's secret went over the network"
+    );
     served.stop().await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_setup_whose_changes_are_changed_on_the_way_is_refused() {
+async fn a_pairing_whose_card_is_changed_on_the_way_is_refused() {
     let place = Place::new();
     let served = place.serve("127.0.0.1:0").await;
-    let code = code_of(&served);
-    let (pc, machine) = (device_key(1), place.machine("pc"));
-    // Someone on the path puts its own root in, declaring the machine that set up.
-    let attacker = device_key(6);
-    let theirs = first_member(&attacker, &machine, "mine");
-    let theirs = serde_json::to_value(&theirs).unwrap();
+    // Someone on the path raises the role the device proposed.
     let rewrite = std::sync::Arc::new(move |line: &str| {
         let Ok(mut said) = serde_json::from_str::<serde_json::Value>(line) else {
             return line.to_owned();
         };
-        if said["ask"]["kind"] != "setup" {
+        if said["pair"].is_null() {
             return line.to_owned();
         }
-        said["ask"]["changes"] = theirs.clone();
+        said["pair"]["proposed"]["role"] = "runner".into();
         format!("{said}\n")
     });
     let (relayed, _) = relay(served.address(), rewrite).await;
-    let refused = setup(relayed, &code, &pc, &machine, "pc")
-        .await
-        .unwrap_err();
-    assert!(refused.to_string().contains("not the hub's"), "{refused}");
-    served.with_hub(|hub| assert!(hub.members().is_none()));
-    served.stop().await;
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn a_device_trusts_a_hub_only_once_it_proved_the_setup_code() {
-    let place = Place::new();
-    let other = Place::new();
-    // Not the user's hub: another key, and no code of the user's, yet it says yes to everything.
-    let impostor = answering_hub(
-        HubKey::load_or_make(&other.hub_folder()).unwrap(),
-        None,
-        Vec::new(),
-    )
-    .await;
-    let refused = setup(
-        impostor,
-        "7KQ2-M4XP-9TRW-H3CD",
+    let code = code_at(&served, relayed);
+    let refused = pair_with(
+        &code,
         &device_key(1),
-        &place.machine("pc"),
-        "pc",
+        &place.machine("phone"),
+        "phone",
+        Role::Viewer,
     )
     .await
     .unwrap_err();
     assert!(
         refused
             .to_string()
-            .contains("did not prove it knows the setup code"),
+            .contains("did not prove it holds the pair code"),
         "{refused}"
     );
+    served.with_hub(|hub| {
+        assert!(hub.members().is_none());
+        // A wrong proof does not close pair mode at once: the user's device may still pair.
+        assert!(hub.pairing_left().is_some());
+    });
+    served.stop().await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_hub_that_withholds_a_setup_is_refused_by_the_device() {
+async fn a_pairing_played_again_pairs_nothing() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let place = Place::new();
-    // A hub that holds the code, as a hub broken into does: it says yes, then sends a list that
-    // is not the one the device set up.
-    let other_root = first_member(&device_key(6), &place.machine("elsewhere"), "elsewhere");
-    let withholding = answering_hub(
-        HubKey::load_or_make(&place.hub_folder()).unwrap(),
-        Some("7KQ2-M4XP-9TRW-H3CD"),
-        vec![ToDevice::List(MemberList::from_changes(other_root))],
-    )
-    .await;
-    let refused = setup(
-        withholding,
-        "7KQ2-M4XP-9TRW-H3CD",
+    let served = place.serve("127.0.0.1:0").await;
+    let (relayed, seen) = relay(served.address(), std::sync::Arc::new(str::to_owned)).await;
+    let code = code_at(&served, relayed);
+    let (_device, session) = pair_with(
+        &code,
         &device_key(1),
         &place.machine("pc"),
         "pc",
+        Role::Runner,
+    )
+    .await
+    .unwrap();
+    drop(session);
+    // Pair mode opened again for the user's next device; someone who kept every byte of the first
+    // pairing plays them again: the hub's nonce is a new one, and nothing is paired.
+    let _next = code_at(&served, served.address());
+    let played: Vec<u8> = seen.lock().unwrap().clone();
+    let mut stream = tokio::net::TcpStream::connect(served.address())
+        .await
+        .unwrap();
+    let _ = stream.write_all(&played).await;
+    let mut rest = Vec::new();
+    let _ = tokio::time::timeout(Duration::from_secs(5), stream.read_to_end(&mut rest)).await;
+    served.with_hub(|hub| {
+        assert_eq!(hub.members().unwrap().members().len(), 1);
+        assert!(hub.pairing_left().is_some(), "the replay spent pair mode");
+    });
+    served.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_hub_that_sends_a_list_without_the_device_is_refused() {
+    let place = Place::new();
+    // A hub that holds the key the code says, as a hub broken into does: it welcomes the pairing,
+    // then sends a list that does not hold the device.
+    let other = Place::new();
+    let elsewhere = {
+        let mut list = MemberList::start_hub(&hub_signer(&place.hub_folder())).unwrap();
+        list.sign_as_hub(
+            Action::Pair {
+                key: device_key(6).public(),
+                name: "elsewhere".to_owned(),
+                role: Role::Runner,
+                icon: Icon::Server,
+                colour: Colour::Grey,
+            },
+            &hub_signer(&place.hub_folder()),
+        );
+        list
+    };
+    let withholding = answering_hub(
+        hub_signer(&place.hub_folder()),
+        vec![ToDevice::List(elsewhere)],
+    )
+    .await;
+    let code = PairCode {
+        hub_url: url(withholding),
+        hub_key: hub_signer(&place.hub_folder()).public(),
+        secret: flottille_link::PairSecret([1; 16]),
+    };
+    let refused = pair_with(
+        &code,
+        &device_key(1),
+        &other.machine("pc"),
+        "pc",
+        Role::Runner,
     )
     .await
     .unwrap_err();
-    assert!(refused.to_string().contains("withheld"), "{refused}");
+    assert!(
+        refused.to_string().contains("does not hold this device"),
+        "{refused}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_stranger_learns_nothing_of_the_list_from_its_refusal() {
     let place = Place::new();
     let served = place.serve("127.0.0.1:0").await;
+    // With no member yet, a stranger gets no session either.
+    let refused = stranger_at(&served, &device_key(7))
+        .connect(&place.machine("stranger"), &hello(), &Tls::System)
+        .await
+        .unwrap_err();
+    assert!(matches!(refused, ControlError::Refused { .. }), "{refused}");
     let pc = device_key(1);
-    let (_device, _session) = setup(
-        served.address(),
-        &code_of(&served),
-        &pc,
-        &place.machine("pc"),
-        "pc",
-    )
-    .await
-    .unwrap();
+    let (_device, _session) = pair_device(&served, &pc, &place.machine("pc"), "pc", Role::Runner)
+        .await
+        .unwrap();
     let refused = stranger_at(&served, &device_key(7))
         .connect(&place.machine("stranger"), &hello(), &Tls::System)
         .await
@@ -1634,7 +1742,6 @@ async fn a_change_the_hub_withholds_is_said_to_its_submitter() {
     // A hub that says yes and sends back the list without it: said, the list kept as it was.
     let withholding = answering_hub(
         HubKey::load_or_make(&place.hub_folder()).unwrap(),
-        None,
         vec![ToDevice::List(two.pc_device.list.clone())],
     )
     .await;
