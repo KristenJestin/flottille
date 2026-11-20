@@ -533,9 +533,7 @@ fn replace(paths: &Paths, binary: &Path, name: &str, archive: &[u8]) -> Result<S
     let dir = binary.parent().ok_or("the binary has no folder")?;
     let work = tempfile_dir(dir)?;
     let unpacked = (|| -> Result<String> {
-        let file = work.join(name);
-        std::fs::write(&file, archive)?;
-        let folder = unpack(&file, &work, name)?;
+        let folder = unpack(archive, &work, name)?;
         std::fs::rename(folder.join("flottille"), binary)?;
         // The binary is replaced: failing to write the launcher's files is said, not undone.
         if let Err(error) = desktop::write(paths, &folder.join("share"), binary) {
@@ -550,22 +548,56 @@ fn replace(paths: &Paths, binary: &Path, name: &str, archive: &[u8]) -> Result<S
     unpacked
 }
 
-/// Unpacks the archive `file`, named `name`, into `work` with the user's `tar`: the package's
-/// folder.
-fn unpack(file: &Path, work: &Path, name: &str) -> Result<PathBuf> {
-    let status = crate::children::spawn_std(
-        Command::new("tar")
-            .args(["-xzf"])
-            .arg(file)
-            .arg("-C")
-            .arg(work)
-            .stdin(Stdio::null()),
-    )?
-    .wait()?;
-    if !status.success() {
-        return Err(format!("cannot unpack {name}").into());
+/// Unpacks `archive`, named `name`, into `work` with the user's `tar`, from the bytes whose sum
+/// was checked, not from a file that could change since: the package's folder.
+fn unpack(archive: &[u8], work: &Path, name: &str) -> Result<PathBuf> {
+    tar(
+        archive,
+        Command::new("tar").args(["-xzf", "-", "-C"]).arg(work),
+    )
+    .map_err(|e| format!("cannot unpack {name}: {e}"))?;
+    Ok(work.join(package_of(name)))
+}
+
+/// The folder an archive named `name` holds.
+fn package_of(name: &str) -> &str {
+    name.trim_end_matches("-x86_64-linux.tar.gz")
+}
+
+/// The package's binary as `archive`, named `name`, holds it: read from the bytes whose sum was
+/// checked, never from the disk.
+fn binary_in(archive: &[u8], name: &str) -> Result<Vec<u8>> {
+    let member = format!("{}/flottille", package_of(name));
+    tar(
+        archive,
+        Command::new("tar").args(["-xzOf", "-", "--"]).arg(member),
+    )
+    .map_err(|e| format!("{name} holds no binary ({e}): nothing was staged").into())
+}
+
+/// What the user's `tar` writes, given `archive` on its input.
+fn tar(archive: &[u8], command: &mut Command) -> std::result::Result<Vec<u8>, String> {
+    let mut child = crate::children::spawn_std(
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .map_err(|e| format!("cannot run tar: {e}"))?;
+    let mut input = child.stdin.take().ok_or("tar has no input")?;
+    let output = std::thread::scope(|scope| {
+        // Written beside the read of its output, which would fill otherwise; a tar that stops
+        // reading says why in its status.
+        scope.spawn(move || {
+            let _ = std::io::Write::write_all(&mut input, archive);
+        });
+        child.wait_with_output()
+    })
+    .map_err(|e| format!("cannot run tar: {e}"))?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_owned());
     }
-    Ok(work.join(name.trim_end_matches("-x86_64-linux.tar.gz")))
+    Ok(output.stdout)
 }
 
 /// The start of the name of the folder a download is unpacked in, beside the binary: an agent
@@ -671,20 +703,34 @@ fn stage_from(binary: &Path, url: &str, progress: &dyn Fn(u64, Option<u64>)) -> 
         download(url, &file, progress)?;
         let published = String::from_utf8(fetch(&format!("{url}.sha256"))?)?;
         let sum = published.split_whitespace().next().unwrap_or_default();
-        if sum != crate::files::sha256_of(&mut std::fs::File::open(&file)?)? {
+        // Read once: what is unpacked and staged is what was checked.
+        let archive = std::fs::read(&file)?;
+        if sum != sha256(&archive) {
             return Err(format!(
                 "the SHA-256 sum of {name} is not the one published: nothing was staged"
             )
             .into());
         }
-        let folder = unpack(&file, &work, &name)?;
+        let folder = unpack(&archive, &work, &name)?;
         let new = folder.join("flottille");
         if !std::fs::symlink_metadata(&new).is_ok_and(|meta| meta.is_file()) {
             return Err(format!("{name} holds no binary: nothing was staged").into());
         }
+        // The binary staged is the archive's, written again from it: its sum in the manifest is
+        // of what was checked, whatever the unpacked file became meanwhile.
+        let program = binary_in(&archive, &name)?;
+        std::fs::remove_file(&new)?;
+        std::io::Write::write_all(
+            &mut std::os::unix::fs::OpenOptionsExt::mode(
+                std::fs::OpenOptions::new().write(true).create_new(true),
+                0o755,
+            )
+            .open(&new)?,
+            &program,
+        )?;
         let manifest = Manifest {
             version: version.to_string(),
-            sha256: crate::files::sha256_of(&mut std::fs::File::open(&new)?)?,
+            sha256: sha256(&program),
             channel: CHANNEL.to_owned(),
             notes: notes(&Version::parse(VERSION)?, &version),
         };
