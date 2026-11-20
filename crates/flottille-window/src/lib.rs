@@ -67,6 +67,7 @@ pub mod vault;
 pub mod vault_ask;
 pub mod version;
 pub mod waiting;
+pub mod whats_new;
 pub mod workspaces_folder;
 
 use futures::StreamExt as _;

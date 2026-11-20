@@ -284,6 +284,8 @@ pub struct Sidebar {
     shown: Option<String>,
     /// What the foot says of an update of Flottille, when there is one to act on.
     version_line: Option<SharedString>,
+    /// The quiet mark of what is new since the version last run, until its page is opened.
+    whats_new: Option<SharedString>,
 }
 
 impl Sidebar {
@@ -302,6 +304,7 @@ impl Sidebar {
             machines: None,
             shown: None,
             version_line: None,
+            whats_new: None,
         }
     }
 
@@ -498,6 +501,16 @@ impl Sidebar {
     pub fn version_line(&self) -> Option<&SharedString> {
         self.version_line.as_ref()
     }
+
+    /// The mark of what is new: it unfolds and fades in once there is something new that was not
+    /// opened, and folds away and fades out once it was.
+    pub fn set_whats_new(&mut self, mark: Option<String>, cx: &mut Context<Self>) {
+        let mark = mark.map(SharedString::from);
+        if self.whats_new != mark {
+            self.whats_new = mark;
+            cx.notify();
+        }
+    }
 }
 
 impl Render for Sidebar {
@@ -513,6 +526,7 @@ impl Render for Sidebar {
         let shell = self.shell.clone();
         let adds = self.shell.clone();
         let version = self.shell.clone();
+        let whats_new = self.shell.clone();
         let ended = self.ended.clone().map(|(group, present)| {
             // At the panel's bottom, under a line; its rows scroll inside their own block, and it
             // folds away when its last session leaves.
@@ -625,6 +639,47 @@ impl Render for Sidebar {
                         .text_color(p.fail)
                         .child(line)
                         .test_support()
+                        .into_any_element()
+                },
+            ))
+            .child(presence_of(
+                "sidebar-whats-new-line",
+                self.whats_new.clone(),
+                move |mark| {
+                    let opens = whats_new.clone();
+                    div()
+                        .flex_none()
+                        .border_t_1()
+                        .border_color(p.line)
+                        .px(space::SM)
+                        .py(space::XS)
+                        .flex()
+                        .items_center()
+                        .gap(space::SM)
+                        .child(
+                            div().flex_1().min_w_0().child(
+                                Button::quiet("sidebar-whats-new", mark)
+                                    .full_width()
+                                    .on_click(move |_, window, cx| {
+                                        opens
+                                            .update(cx, |shell, cx| {
+                                                shell.open(Selection::WhatsNew, window, cx)
+                                            })
+                                            .ok();
+                                    }),
+                            ),
+                        )
+                        // The dot says it was not opened yet; it goes with the mark.
+                        .child(
+                            div()
+                                .id("sidebar-whats-new-dot")
+                                .flex_none()
+                                .w(px(8.))
+                                .h(px(8.))
+                                .rounded_full()
+                                .bg(p.acc)
+                                .test_support(),
+                        )
                         .into_any_element()
                 },
             ))
