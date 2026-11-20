@@ -29,8 +29,10 @@ use flottille_link::{
     Role, SetupCode, Token,
 };
 
+mod relay;
 mod server;
 
+pub use relay::{RELAY_BURST, RELAY_QUEUE, RELAY_RATE};
 use serde::{Deserialize, Serialize};
 pub use server::{
     KEPT_FOR_MEMBERS, LISTEN, MOST_ARRIVING, SETUP_IDLE, Served, Waits, serve, serve_with,
