@@ -723,7 +723,11 @@ fn a_run_cannot_read_the_user_s_runtime_folder() {
     let kept = read(&note);
     let open = read(&elsewhere);
 
-    assert!(kept.contains("PermissionError"), "{kept}");
+    // Denied by Landlock, or not there at all where the run's namespace empties the folder.
+    assert!(
+        kept.contains("PermissionError") || kept.contains("FileNotFoundError"),
+        "{kept}"
+    );
     assert!(!kept.contains("kept from runs"), "{kept}");
     assert!(open.contains("open to runs"), "{open}");
 }
