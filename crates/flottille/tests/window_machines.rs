@@ -1739,6 +1739,7 @@ fn adding_a_device_shows_its_invitation_in_a_dialog(cx: &mut TestAppContext) {
         !stack(&shell, cx).contains(&"invitation")
     });
     joining.kill().ok();
+    joining.wait().ok();
 }
 
 #[gpui_kit::test]
