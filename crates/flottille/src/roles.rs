@@ -414,6 +414,47 @@ mod tests {
     }
 
     #[test]
+    fn what_the_user_says_of_themselves_comes_before_the_rules_and_is_the_same_for_every_project() {
+        let about = About {
+            name: "Sam".into(),
+            pronouns: "he/him".into(),
+            notes: "Backend developer, new to Rust.".into(),
+        };
+        let alone = Rules {
+            own: "Answer in Spanish.".into(),
+            alone: true,
+            ..Rules::default()
+        };
+        let with = |project: &str, rules: &Rules| {
+            let folder = Path::new("/work").join(project);
+            instructions(
+                role(WORKER).unwrap(),
+                &Session {
+                    project,
+                    rules,
+                    about: &about,
+                    ..session(&folder)
+                },
+                &[],
+            )
+        };
+        let text = with("zebra", &DEFAULT_RULES);
+        let (before, after) = text.split_once(BOUNDARY).unwrap();
+        let block = before.find("# About the user").unwrap();
+        assert!(before.find("# What Flottille enforces").unwrap() < block);
+        assert!(block < before.find("# How to work").unwrap());
+        assert!(before.contains("Name: Sam\nRefer to them as: he/him\n\nBackend developer"));
+        assert!(!after.contains("Sam"));
+        // A project that uses its own rules alone still tells what the user said of themselves.
+        let other = with("other", &alone);
+        let block = |text: &str| {
+            let from = text.find("# About the user").unwrap();
+            text[from..text[from..].find("\n\n---").unwrap() + from].to_owned()
+        };
+        assert_eq!(block(&text), block(&other));
+    }
+
+    #[test]
     fn rules_left_empty_leave_no_section_and_a_token_in_them_is_masked() {
         let folder = Path::new("/work/zebra");
         let blanks = Rules {
