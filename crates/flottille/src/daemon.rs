@@ -312,6 +312,10 @@ pub struct Daemon {
     pub updates: crate::updates::Live,
     /// What is new since the version last run (`whatsnew`).
     pub whatsnew: crate::whatsnew::Live,
+    /// The windows connected, and whether each is focused and which session it shows (#1002).
+    pub presence: crate::presence::Presences,
+    /// What rings: the sounds and the desktop's notifications (#1002).
+    pub rings: crate::rings::Rings,
     /// Becomes true when the daemon stops.
     stopping: watch::Sender<bool>,
 }
@@ -380,6 +384,8 @@ impl Daemon {
             remote: std::sync::OnceLock::new(),
             updates: crate::updates::Live::default(),
             whatsnew: crate::whatsnew::Live::default(),
+            presence: crate::presence::Presences::default(),
+            rings: crate::rings::Rings::new(paths),
             stopping: watch::Sender::new(false),
         }
     }
@@ -854,6 +860,8 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
     let mut watched: HashMap<(String, String), forge::Watch> = HashMap::new();
     // Held while this connection is a window's.
     let mut window: Option<items::Window> = None;
+    // This connection's presence, once it said it: dropped with the connection.
+    let mut presence: Option<crate::presence::Hold> = None;
     let client_left = loop {
         let line = tokio::select! {
             line = lines.next_line() => line,
@@ -894,6 +902,24 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
             let message = format!("unknown method `{}`", request.method);
             let unknown = Message::error(Some(request.id), code::UNKNOWN_METHOD, message);
             let _ = out.send(unknown).await;
+            continue;
+        }
+        // A window's presence belongs to the connection that tells it: it goes with it.
+        if request.method == "presence.set" {
+            let answer = match serde_json::from_value::<crate::presence::Presence>(request.params) {
+                Ok(said) => {
+                    match &presence {
+                        Some(hold) => hold.set(said),
+                        None => presence = Some(crate::presence::Hold::new(&daemon, said)),
+                    }
+                    Message::result(request.id, serde_json::json!({}))
+                }
+                Err(error) => crate::projects::Failure::new("invalid-params", error.to_string())
+                    .answer(Some(request.id)),
+            };
+            if out.send(answer).await.is_err() {
+                break true;
+            }
             continue;
         }
         if request.method == "workspace.forge"
@@ -1052,6 +1078,7 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
     }
     while subscriptions.join_next().await.is_some() {}
     drop(window);
+    drop(presence);
     drop(out);
     let _ = writer.await;
 }

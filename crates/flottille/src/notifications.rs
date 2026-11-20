@@ -76,11 +76,24 @@ pub fn call(daemon: &Daemon, method: &str, params: Value) -> Result<Value, Failu
             },
         ),
         "notifications.read" => read(daemon, serde_json::from_value(params)?),
+        "notifications.status" => Ok(status(daemon)),
         method => Err(Failure::new(
             "unknown-method",
             format!("unknown method `{method}`"),
         )),
     }
+}
+
+/// Whether the desktop shows Flottille's notifications, and what the daemon knows of the window
+/// (#1002).
+fn status(daemon: &Daemon) -> Value {
+    let mut status = daemon.rings.status();
+    let desktop = status.take();
+    let window = daemon
+        .presence
+        .current()
+        .map(|presence| json!({"focused": presence.focused, "session": presence.session}));
+    json!({"desktop": desktop, "window": window})
 }
 
 fn list(daemon: &Daemon, asked: List) -> Result<Value, Failure> {
@@ -125,8 +138,22 @@ pub async fn run(daemon: Arc<Daemon>, mut stopping: watch::Receiver<bool>) {
     let Some(mut live) = daemon.live() else {
         return;
     };
+    // The ringing follows the rows from the last the first keep leaves, and hears the events from
+    // now: what waited before the daemon started is not rung again.
+    let ringing = daemon.live();
     let kept = daemon.clone();
     let _ = tokio::task::spawn_blocking(move || keep(&kept)).await;
+    if let Some(ringing) = ringing {
+        let last = daemon
+            .read(|store| store.last_notification())
+            .unwrap_or_default();
+        tokio::spawn(crate::rings::run(
+            daemon.clone(),
+            ringing,
+            last,
+            stopping.clone(),
+        ));
+    }
     loop {
         // What is awaited is not held across the `spawn_blocking` below: the guard of the watch
         // is not `Send`.

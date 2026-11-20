@@ -241,6 +241,9 @@ pub const METHODS: &[(&str, Class)] = &[
     ("inbox.list", Read),
     ("notifications.list", Read),
     ("notifications.read", Drive),
+    ("notifications.status", Read),
+    // The window's own presence, told on the connection it keeps: only a window of this machine.
+    ("presence.set", Local),
     ("provider.list", Read),
     ("provider.enable", Drive),
     ("provider.disable", Drive),
