@@ -193,11 +193,29 @@ fn the_bell_item_of_a_session_an_agent_started_says_who_started_it(cx: &mut Test
         shell.read_with(cx, |s, cx| s.top().read(cx).count()) == 1
     });
 
-    let session = shell.read_with(cx, |s, _| s.snapshot().bell[0].session.clone());
+    // The launch the user allowed is answered before the session's own request counts alone.
+    until(&shell, cx, "the bell is the launched session's", |cx| {
+        shell.read_with(cx, |s, _| {
+            s.snapshot()
+                .bell
+                .iter()
+                .filter(|item| !item.read)
+                .all(|item| item.session.as_deref() == Some(launched.as_str()))
+        })
+    });
+    let session = shell.read_with(cx, |s, _| {
+        s.snapshot()
+            .bell
+            .iter()
+            .find(|item| !item.read)
+            .and_then(|item| item.session.clone())
+    });
     assert_eq!(session.as_deref(), Some(launched.as_str()));
-    assert_eq!(
-        shell.read_with(cx, |s, cx| s.bell_sessions(cx)),
-        ["Write the docs · started by begin the docs session"]
+    // The answered launch stays in the centre, read; the session's own request says who started it.
+    assert!(
+        shell
+            .read_with(cx, |s, cx| s.bell_sessions(cx))
+            .contains(&"Write the docs · started by begin the docs session".to_owned())
     );
 }
 

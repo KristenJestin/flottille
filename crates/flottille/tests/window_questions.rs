@@ -336,16 +336,22 @@ fn mark_of(shell: &Entity<Shell>, id: &str, cx: &mut VisualTestContext) -> Optio
     })
 }
 
-/// The bell's items of the session: their labels and excerpts.
+/// The bell's unread items of the session: their labels and excerpts, which are the first line
+/// of the question, never the whole of it.
 fn bell_of(shell: &Entity<Shell>, id: &str, cx: &mut VisualTestContext) -> Vec<(String, String)> {
     shell.read_with(cx, |s, _| {
         s.snapshot()
             .bell
             .iter()
-            .filter(|item| item.session.as_deref() == Some(id))
+            .filter(|item| item.session.as_deref() == Some(id) && !item.read)
             .map(|item| (item.label.clone(), item.detail.clone()))
             .collect()
     })
+}
+
+/// What the centre keeps of a question: its first line.
+fn first_line(text: &str) -> String {
+    text.lines().next().unwrap_or_default().to_owned()
 }
 
 #[gpui_kit::test]
@@ -414,7 +420,7 @@ fn a_question_asked_mid_turn_is_in_the_inbox_and_marks_the_row(cx: &mut TestAppC
     assert_eq!(state_of(&user, &id), "working", "mid-turn");
     assert_eq!(
         bell_of(&shell, &id, cx),
-        [("Asks you a question".to_owned(), QUESTION.to_owned())]
+        [("Asks you a question".to_owned(), first_line(QUESTION))]
     );
     let said = shell.read_with(cx, |s, _| {
         s.snapshot().session(&id).unwrap().mark_said.clone()
@@ -514,7 +520,7 @@ fn two_open_questions_both_show_in_order(cx: &mut TestAppContext) {
         .into_iter()
         .map(|(_, d)| d)
         .collect();
-    assert_eq!(bell, [QUESTION, SECOND]);
+    assert_eq!(bell, [first_line(QUESTION).as_str(), SECOND]);
     release(&user);
 }
 
