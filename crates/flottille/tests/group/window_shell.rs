@@ -67,6 +67,8 @@ mod window_setup_output;
 mod window_sidebar;
 #[path = "../window_switcher.rs"]
 mod window_switcher;
+#[path = "../window_update.rs"]
+mod window_update;
 #[path = "../window_vault.rs"]
 mod window_vault;
 #[path = "../window_vault_ask.rs"]
