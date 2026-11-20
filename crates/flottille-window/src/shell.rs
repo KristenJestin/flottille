@@ -3,7 +3,7 @@
 //! again only the parts a change touches.
 
 use crate::glyphs;
-use crate::state::{AgentState, StateIcon, Status};
+use crate::state::AgentState;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -15,7 +15,7 @@ use gpui_design_system::color::mix;
 use gpui_design_system::motion::{ENTER, HOVER, Motion, RISE};
 use gpui_design_system::{
     Badge, Button, Card, Drawer, Icon, Item, ListRow, Listing, Side, Tie, Toast, ToastStack, Type,
-    dismiss_on_navigate, dismiss_top_overlay, enter, forget_overlays, icon, keys_held,
+    dismiss_on_navigate, dismiss_top_overlay, enter, fade, forget_overlays, icon, keys_held,
     open_overlay, palette, presence, pressable, space, toast,
 };
 use gpui_kit::prelude::FluentBuilder as _;
@@ -28,7 +28,7 @@ use gpui_kit::{
 };
 use lyon_tessellation::{LineCap, LineJoin};
 
-use crate::actions::{Actions, Command, Details, Outcome, Pick, RunFrom};
+use crate::actions::{Actions, Command, Details, Outcome, Pick, Reading, RunFrom};
 use crate::add_project::AddProject;
 use crate::composer::{Choice, Composer, PlaceChoice};
 use crate::end_led::LedEnd;
@@ -217,10 +217,9 @@ pub struct Shell {
     /// The pull request of each workspace (its project and name) as a project page last read it:
     /// a session's row says it on its second line. The sidebar asks the forge for none of them.
     pulls: HashMap<(String, String), PullRequest>,
-    /// The tickets and pull requests the sessions' agents created or changed, oldest first: each
-    /// marks its session's row and rings the bell until the session is opened. They live as long
-    /// as the window.
-    forged: Vec<Forged>,
+    /// The notifications the window has asked the daemon to mark read: it asks once for each,
+    /// whatever the answer takes.
+    marked: HashSet<u64>,
     /// What is new in each session since it was last opened, the last of it in words: an agent
     /// said something, reported, was woken, or changed a ticket or a pull request. A session's
     /// row says it with one dot, unless a state mark takes its place; they live as long as the
@@ -602,7 +601,7 @@ impl Shell {
             closed: false,
             sessions: HashMap::new(),
             pulls: HashMap::new(),
-            forged: Vec::new(),
+            marked: HashSet::new(),
             news: HashMap::new(),
             sharing: HashMap::new(),
             forms: HashMap::new(),
@@ -1840,6 +1839,12 @@ impl Shell {
                     page.update(cx, |page, cx| page.command_answered(answer, cx));
                 }
             }
+            // Asked once for each, unless the daemon could not: the next look asks again.
+            Outcome::NotificationsRead { failed } => {
+                if failed {
+                    self.marked.clear();
+                }
+            }
             Outcome::SubscriptionCancelled { session, refused } => {
                 if let Some(page) = self.session_page.clone()
                     && page.read(cx).id() == session
@@ -2689,7 +2694,11 @@ impl Shell {
                         .bell
                         .iter()
                         .rev()
-                        .find(|item| item.session == session.id)
+                        .find(|item| {
+                            item.needs_you
+                                && !item.resolved
+                                && item.session.as_deref() == Some(session.id.as_str())
+                        })
                         .map(|item| item.detail.clone())
                 })
                 .flatten();
@@ -3220,15 +3229,15 @@ impl Shell {
         }
     }
 
-    /// A ticket or a pull request an agent changed: its session's row is marked and the bell
-    /// rings, unless the session is the one open, where it is in sight.
+    /// A ticket or a pull request an agent changed: its session's row is marked, unless the
+    /// session is the one open, where it is in sight. The bell's item is the daemon's own
+    /// notification, which comes with its event.
     fn forged(&mut self, forged: Forged, cx: &mut Context<Self>) {
         let session = self.snapshot.root_of(&forged.agent);
         if self.selected == Some(Selection::Session(session.clone())) {
             return;
         }
         self.news.insert(session, unread_words(&forged.said));
-        self.forged.push(forged);
         self.ring(cx);
     }
 
@@ -3311,25 +3320,10 @@ impl Shell {
         }
     }
 
-    /// Brings the bell and the sessions' marks up to what waits for the user and what the
-    /// agents changed: each item says why it is there, a short excerpt, and its session.
+    /// Brings the bell and the sessions' marks up to the notification centre the daemon keeps
+    /// and what the agents changed: each item says why it is there, a short excerpt, and its
+    /// session, which the panel groups them by.
     fn ring(&mut self, cx: &mut Context<Self>) {
-        let snapshot = &self.snapshot;
-        let mut bell: Vec<BellItem> = snapshot.bell.clone();
-        for forged in &self.forged {
-            let session = snapshot.root_of(&forged.agent);
-            bell.push(BellItem {
-                key: match forged.ticket {
-                    true => format!("ticket-{}", forged.seq),
-                    false => format!("pull-{}", forged.seq),
-                },
-                session,
-                label: forged.said.clone(),
-                detail: forged.excerpt.clone(),
-                at: forged.at,
-            });
-        }
-        bell.sort_by_key(|item| item.at);
         for (id, row) in &self.sessions {
             let said = self.news.get(id).map(String::as_str);
             if row.read(cx).unread() != said {
@@ -3338,28 +3332,71 @@ impl Shell {
         }
         // What waits on another machine says which: the inbox is that machine's.
         let there = self.aim.machine();
-        let items: Vec<(BellItem, String)> = bell
-            .into_iter()
+        let snapshot = &self.snapshot;
+        let rows: Vec<BellRow> = snapshot
+            .bell
+            .iter()
             .map(|item| {
-                let mut title = snapshot
-                    .session(&item.session)
+                let found = item.session.as_deref().and_then(|id| snapshot.session(id));
+                let mut title = found
                     .map(|s| match &s.started_by {
                         Some(by) => format!("{} · started by {by}", s.title),
                         None => s.title.clone(),
                     })
-                    .unwrap_or_default();
+                    .unwrap_or_else(|| "Flottille".to_owned());
                 if let Some(machine) = &there {
                     title = format!("{title} · on {machine}");
                 }
-                (item, title)
+                BellRow {
+                    item: item.clone(),
+                    title,
+                    project: found.map(|s| s.project.clone()).unwrap_or_default(),
+                }
             })
             .collect();
-        let count = items.len();
-        if self.top.read(cx).count != count {
-            self.top.update(cx, |top, cx| top.set_count(count, cx));
+        let counts = snapshot.unread;
+        if self.top.read(cx).counts() != counts {
+            self.top.update(cx, |top, cx| top.set_counts(counts, cx));
         }
-        if self.bell.read(cx).items != items {
-            self.bell.update(cx, |bell, cx| bell.set(items, cx));
+        if self.bell.read(cx).rows != rows {
+            self.bell.update(cx, |bell, cx| bell.set(rows, counts, cx));
+        } else if self.bell.read(cx).counts != counts {
+            self.bell.update(cx, |bell, cx| bell.set_counts(counts, cx));
+        }
+        // What arrives in the session that is open stays unread: the window may be open with
+        // nobody looking. Opening the session, its row or "Mark all read" reads it.
+    }
+
+    /// Asks the daemon to mark a session's unread notifications read, once for each.
+    fn read_session(&mut self, session: &str) {
+        let unread: Vec<u64> = self
+            .snapshot
+            .bell
+            .iter()
+            .filter(|item| !item.read && item.session.as_deref() == Some(session))
+            .map(|item| item.id)
+            .filter(|id| !self.marked.contains(id))
+            .collect();
+        if !unread.is_empty() {
+            self.marked.extend(unread);
+            self.perform(Command::ReadNotifications(Reading::Session(
+                session.to_owned(),
+            )));
+        }
+    }
+
+    /// "Mark all read" in the bell's panel.
+    pub fn read_all(&mut self) {
+        let unread: Vec<u64> = self
+            .snapshot
+            .bell
+            .iter()
+            .filter(|item| !item.read)
+            .map(|item| item.id)
+            .collect();
+        if !unread.is_empty() {
+            self.marked.extend(unread);
+            self.perform(Command::ReadNotifications(Reading::All));
         }
     }
 
@@ -3735,14 +3772,10 @@ impl Shell {
         {
             row.update(cx, |row, cx| row.set_selected(true, cx));
         }
-        // Opened, the session's changes are seen: its mark and its items in the bell go.
+        // Opened, the session's changes are seen: its mark goes, and its notifications are read.
         if let Selection::Session(id) = &selection {
-            let before = self.forged.len();
-            let snapshot = &self.snapshot;
-            self.forged
-                .retain(|forged| &snapshot.root_of(&forged.agent) != id);
-            let read = self.news.remove(id).is_some();
-            if read || self.forged.len() != before {
+            self.read_session(id);
+            if self.news.remove(id).is_some() {
                 self.ring(cx);
             }
         }
@@ -3927,9 +3960,9 @@ impl Shell {
     pub fn bell_sessions(&self, cx: &App) -> Vec<String> {
         self.bell
             .read(cx)
-            .items
+            .rows
             .iter()
-            .map(|(_, title)| title.clone())
+            .map(|row| row.title.clone())
             .collect()
     }
 
@@ -3942,16 +3975,26 @@ impl Shell {
         self.bell_open
     }
 
-    /// Opens what a bell item waits in: its session.
+    /// Opens what a bell item is about: its session, which marks its notifications read; one
+    /// that is no session's is marked read by itself.
     pub fn choose(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let session = self
+        let Some(item) = self
             .snapshot
             .bell
             .iter()
             .find(|item| item.key == key)
-            .map(|item| item.session.clone());
-        if let Some(session) = session {
-            self.open(Selection::Session(session), window, cx);
+            .cloned()
+        else {
+            return;
+        };
+        match item.session {
+            Some(session) if self.snapshot.session(&session).is_some() => {
+                self.open(Selection::Session(session), window, cx)
+            }
+            _ if !item.read && self.marked.insert(item.id) => {
+                self.perform(Command::ReadNotifications(Reading::Ids(vec![item.id])))
+            }
+            _ => {}
         }
     }
 
@@ -4115,7 +4158,8 @@ impl Render for Shell {
 /// The top bar: the mark, search, and the bell with the count of what waits for the user.
 pub struct TopBar {
     shell: WeakEntity<Shell>,
-    count: usize,
+    /// The unread notifications: those that need the user, and the others.
+    counts: (usize, usize),
     online: bool,
     menu: bool,
 }
@@ -4124,24 +4168,29 @@ impl TopBar {
     fn new(shell: WeakEntity<Shell>) -> Self {
         Self {
             shell,
-            count: 0,
+            counts: (0, 0),
             online: true,
             menu: false,
         }
     }
 
-    /// How many things wait for the user.
+    /// How many notifications are unread.
     pub fn count(&self) -> usize {
-        self.count
+        self.counts.0 + self.counts.1
+    }
+
+    /// The unread ones that need the user, and the others.
+    pub fn counts(&self) -> (usize, usize) {
+        self.counts
     }
 
     pub fn online(&self) -> bool {
         self.online
     }
 
-    fn set_count(&mut self, count: usize, cx: &mut Context<Self>) {
-        if self.count != count {
-            self.count = count;
+    fn set_counts(&mut self, counts: (usize, usize), cx: &mut Context<Self>) {
+        if self.counts != counts {
+            self.counts = counts;
             cx.notify();
         }
     }
@@ -4187,12 +4236,16 @@ impl Render for TopBar {
         let menu_shell = self.shell.clone();
         let settings_shell = self.shell.clone();
         let services_shell = self.shell.clone();
-        let mut bell =
-            Button::icon("bell", Icon::Bell, "Waiting for you").on_click(move |_, _, cx| {
-                shell.update(cx, |shell, cx| shell.toggle_bell(cx)).ok();
-            });
-        if self.count > 0 {
-            bell = bell.badge(Badge::count(self.count));
+        let mut bell = Button::icon(
+            "bell",
+            Icon::Bell,
+            counts_said(self.counts, "Notifications"),
+        )
+        .on_click(move |_, _, cx| {
+            shell.update(cx, |shell, cx| shell.toggle_bell(cx)).ok();
+        });
+        if self.count() > 0 {
+            bell = bell.badge(Badge::count(self.count()));
         }
         div()
             .flex_none()
@@ -4287,15 +4340,104 @@ impl Render for TopBar {
     }
 }
 
-/// The list the bell opens: what waits for the user and what the agents changed, oldest first.
-/// Each item says why it is there, a short excerpt, and its session, each on one line cut with an
-/// ellipsis. Its marks exist only while it is open, so that a closed list asks for no frame.
+/// A notification with the session it belongs to, as the panel groups them.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BellRow {
+    pub item: BellItem,
+    /// The session's title, and who started it when an agent did; `Flottille` for what is no
+    /// session's.
+    pub title: String,
+    pub project: String,
+}
+
+/// The unread counts said apart: `2 need you · 5 new`; the fallback when nothing is unread.
+fn counts_said((needs, new): (usize, usize), none: &str) -> String {
+    match (needs, new) {
+        (0, 0) => none.to_owned(),
+        (needs, 0) => format!("{needs} need you"),
+        (0, new) => format!("{new} new"),
+        (needs, new) => format!("{needs} need you · {new} new"),
+    }
+}
+
+/// What the panel's list draws: a session's heading, or one notification under it.
+#[derive(Clone, Debug, PartialEq)]
+enum Entry {
+    Group {
+        session: Option<String>,
+        title: String,
+        project: String,
+        unread: usize,
+    },
+    Row(BellRow),
+}
+
+/// The panel's order: the sessions with something unread first, the one that heard last on top;
+/// under each, its unread notifications first, then the rest, the newest first.
+fn grouped(rows: &[BellRow]) -> Vec<(String, Entry)> {
+    let mut groups: Vec<(Option<String>, Vec<&BellRow>)> = Vec::new();
+    for row in rows {
+        match groups
+            .iter_mut()
+            .find(|(session, _)| *session == row.item.session)
+        {
+            Some((_, found)) => found.push(row),
+            None => groups.push((row.item.session.clone(), vec![row])),
+        }
+    }
+    let newest = |rows: &[&BellRow], unread: bool| {
+        rows.iter()
+            .filter(|row| !unread || !row.item.read)
+            .map(|row| row.item.at)
+            .max()
+            .unwrap_or(0)
+    };
+    groups.sort_by_key(|(_, rows)| {
+        let unread = rows.iter().any(|row| !row.item.read);
+        std::cmp::Reverse((unread, newest(rows, unread)))
+    });
+    let mut entries = Vec::new();
+    for (session, mut rows) in groups {
+        rows.sort_by_key(|row| (row.item.read, std::cmp::Reverse((row.item.at, row.item.id))));
+        let first = rows[0];
+        entries.push((
+            format!("bell-group-{}", session.as_deref().unwrap_or("flottille")),
+            Entry::Group {
+                session,
+                title: first.title.clone(),
+                project: first.project.clone(),
+                unread: rows.iter().filter(|row| !row.item.read).count(),
+            },
+        ));
+        for row in rows {
+            entries.push((row.item.key.clone(), Entry::Row(row.clone())));
+        }
+    }
+    entries
+}
+
+/// The element id of a session's heading in the panel, and of its title.
+pub fn bell_group_id(session: &str) -> ElementId {
+    ElementId::Name(format!("bell-group-{session}").into())
+}
+
+pub fn bell_group_title_id(session: &str) -> ElementId {
+    ElementId::Name(format!("bell-group-{session}-title").into())
+}
+
+/// The element id of a notification's line under its title, which is its excerpt.
+pub fn bell_line_id(key: &str) -> ElementId {
+    ElementId::Name(format!("bell-{key}-line").into())
+}
+
+/// The panel the bell opens: the notification centre the daemon keeps, grouped by session, the
+/// unread first, each with its time. Each line is one line cut with an ellipsis. It draws nothing
+/// while it is closed, so that a closed panel asks for no frame.
 pub struct BellList {
     shell: WeakEntity<Shell>,
-    items: Vec<(BellItem, String)>,
-    list: Listing<(BellItem, String)>,
-    /// The pulsing mark of each item that waits for the user, by its key.
-    marks: HashMap<String, Entity<StateIcon>>,
+    rows: Vec<BellRow>,
+    counts: (usize, usize),
+    list: Listing<Entry>,
     open: bool,
 }
 
@@ -4303,77 +4445,95 @@ impl BellList {
     fn new(shell: WeakEntity<Shell>) -> Self {
         Self {
             shell,
-            items: Vec::new(),
+            rows: Vec::new(),
+            counts: (0, 0),
             list: Listing::default(),
-            marks: HashMap::new(),
             open: false,
         }
     }
 
-    fn set(&mut self, items: Vec<(BellItem, String)>, cx: &mut Context<Self>) {
-        if self.items != items {
-            self.items = items;
-            if self.open {
-                self.show(true, cx);
-            }
-            cx.notify();
-        }
+    fn set(&mut self, rows: Vec<BellRow>, counts: (usize, usize), cx: &mut Context<Self>) {
+        self.rows = rows;
+        self.counts = counts;
+        cx.notify();
+    }
+
+    fn set_counts(&mut self, counts: (usize, usize), cx: &mut Context<Self>) {
+        self.counts = counts;
+        cx.notify();
     }
 
     fn show(&mut self, open: bool, cx: &mut Context<Self>) {
         self.open = open;
-        if !open {
-            self.marks.clear();
-        }
-        for (item, _) in self.items.iter().filter(|(item, _)| waits(item)) {
-            if open && !self.marks.contains_key(&item.key) {
-                let status = cx.new(|_| Status::new(AgentState::NeedsYou));
-                let mark = cx.new(|cx| StateIcon::new(status, cx));
-                self.marks.insert(item.key.clone(), mark);
-            }
-        }
         cx.notify();
     }
 
-    /// The words of each item, in order: why it is there, its excerpt, its session.
+    /// The words of each notification, in the order they were kept: why it is there, its
+    /// excerpt, its session.
     pub fn said(&self) -> Vec<(String, String, String)> {
-        self.items
+        self.rows
             .iter()
-            .map(|(item, session)| (item.label.clone(), item.detail.clone(), session.clone()))
+            .map(|row| {
+                (
+                    label_of(&row.item),
+                    row.item.detail.clone(),
+                    row.title.clone(),
+                )
+            })
+            .collect()
+    }
+
+    /// The panel's order: each session's key, then the keys of its notifications.
+    pub fn order(&self) -> Vec<String> {
+        grouped(&self.rows)
+            .into_iter()
+            .map(|(key, _)| key)
             .collect()
     }
 }
 
-/// Whether a bell item waits for the user's answer, rather than tells them of a change.
-fn waits(item: &BellItem) -> bool {
-    item.key.starts_with("request-") || item.key.starts_with("question-")
+/// Why a notification is there: once what it waited for was answered, it says so rather than
+/// that it still waits.
+fn label_of(item: &BellItem) -> String {
+    if !item.resolved {
+        return item.label.clone();
+    }
+    match item.kind.as_str() {
+        "request" => match item.label.strip_suffix(" waits for you") {
+            Some(request) => format!("{request} answered"),
+            None => "Request answered".to_owned(),
+        },
+        "question" => "Question answered".to_owned(),
+        "vault" => "Vault entry answered".to_owned(),
+        "paused" => "The session wakes again".to_owned(),
+        _ => item.label.clone(),
+    }
 }
 
-/// The element id of a bell item's line under its title, of its excerpt, of its session.
-pub fn bell_line_id(key: &str) -> ElementId {
-    ElementId::Name(format!("bell-{key}-line").into())
-}
-
-pub fn bell_session_id(key: &str) -> ElementId {
-    ElementId::Name(format!("bell-{key}-session").into())
+/// How a kind of notification is drawn in front of its title.
+fn glyph_of(kind: &str) -> gpui_design_system::Icon {
+    match kind {
+        "request" | "question" | "vault" => Icon::Bell,
+        "ticket" => glyphs::TICKET,
+        "pull_request" => glyphs::PULL_REQUEST,
+        // A failure is told, never confused with a request that waits.
+        "failure" | "unchecked" | "put_back" | "dropped" => Icon::Warning,
+        _ => Icon::Text,
+    }
 }
 
 impl Render for BellList {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
         let at = cx.background_executor().now();
-        self.list.sync(
-            self.items
-                .iter()
-                .map(|(item, session)| (item.key.clone(), (item.clone(), session.clone()))),
-            at,
-            cx.reduce_motion(),
-        );
+        let entries = grouped(&self.rows);
+        self.list.sync(entries, at, cx.reduce_motion());
+        let now = now_ms();
         let list = div()
             .id("bell-list")
             .occlude()
-            .w(px(340.))
-            .max_h(px(420.))
+            .w(px(360.))
+            .max_h(px(480.))
             .overflow_y_scroll()
             .p(space::SM)
             .rounded(px(12.))
@@ -4386,74 +4546,183 @@ impl Render for BellList {
         let list = dismiss_on_navigate(list, move |_, cx| {
             shell.update(cx, |shell, cx| shell.set_bell(false, cx)).ok();
         });
-        let rows: Vec<AnyElement> = self
-            .list
-            .rows()
-            .map(|row| {
-                let (item, session) = row.value;
-                let shell = self.shell.clone();
-                let key = item.key.clone();
-                let leading = match self.marks.get(&item.key) {
-                    Some(mark) => mark.clone().into_any_element(),
-                    None => icon(match item.key.starts_with("ticket-") {
-                        true => glyphs::TICKET,
-                        false => glyphs::PULL_REQUEST,
-                    })
-                    .size(px(14.))
-                    .text_color(p.acc)
-                    .into_any_element(),
-                };
-                let line = |id: ElementId, text: &str, ink| {
-                    div()
-                        .id(id)
-                        .min_w_0()
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .text_ellipsis()
-                        .text_size(px(12.))
-                        .text_color(ink)
-                        .aria_label(SharedString::from(text.to_owned()))
-                        .child(SharedString::from(text.to_owned()))
-                        .test_support()
-                };
-                let below = div()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .when(!item.detail.is_empty(), |d| {
-                        d.child(line(bell_line_id(&item.key), &item.detail, p.mute))
-                    })
-                    .child(line(bell_session_id(&item.key), session, p.faint));
-                let content = ListRow::new(
-                    ElementId::Name(format!("bell-{}", item.key).into()),
-                    SharedString::from(item.label.clone()),
-                )
-                .leading(leading)
-                .below(below)
-                .on_click(move |_, window, cx| {
-                    shell
-                        .update(cx, |shell, cx| shell.choose(&key, window, cx))
-                        .ok();
-                });
-                Item::new(
-                    ElementId::Name(format!("bell-item-{}", row.key).into()),
-                    row.placement,
-                    content,
-                )
-                .into_any_element()
-            })
-            .collect();
-        list.child(presence(
-            "bell-empty",
-            self.list.is_empty(),
-            div()
-                .p(space::MD)
-                .text_color(p.faint)
-                .child("Nothing waits for you."),
-        ))
-        .children(rows)
-        .test_support()
-        .into_any_element()
+        let header_shell = self.shell.clone();
+        let header = div()
+            .flex_none()
+            .px(space::SM)
+            .pb(space::SM)
+            .flex()
+            .items_center()
+            .justify_between()
+            .child(
+                div()
+                    .id("bell-counts")
+                    .aria_label(counts_said(self.counts, "Nothing unread"))
+                    .text_size(px(12.5))
+                    .text_color(p.mute)
+                    .child(counts_said(self.counts, "Nothing unread"))
+                    .test_support(),
+            )
+            .child(
+                Button::quiet("bell-mark-all", "Mark all read")
+                    .disabled(self.counts == (0, 0))
+                    .on_click(move |_, _, cx| {
+                        header_shell.update(cx, |shell, _| shell.read_all()).ok();
+                    }),
+            );
+        let rows: Vec<AnyElement> =
+            self.list
+                .rows()
+                .map(|row| {
+                    let content = match row.value {
+                        Entry::Group {
+                            session,
+                            title,
+                            project,
+                            unread,
+                        } => {
+                            let key = session.as_deref().unwrap_or("flottille");
+                            let faded = fade(
+                                ElementId::Name(format!("bell-group-{key}-unread").into()),
+                                *unread > 0,
+                                HOVER,
+                                window,
+                                cx,
+                            );
+                            div()
+                                .id(bell_group_id(key))
+                                .px(space::SM)
+                                .pt(space::MD)
+                                .pb(space::XS)
+                                .flex()
+                                .items_baseline()
+                                .gap(space::SM)
+                                .min_w_0()
+                                .child(
+                                    div()
+                                        .id(bell_group_title_id(key))
+                                        .min_w_0()
+                                        .overflow_hidden()
+                                        .whitespace_nowrap()
+                                        .text_ellipsis()
+                                        .text_size(px(12.5))
+                                        .font_weight(gpui_kit::FontWeight::MEDIUM)
+                                        .text_color(mix(p.mute, p.text, faded))
+                                        .aria_label(SharedString::from(title.clone()))
+                                        .child(SharedString::from(title.clone()))
+                                        .test_support(),
+                                )
+                                .when(!project.is_empty(), |d| {
+                                    d.child(
+                                        div()
+                                            .flex_none()
+                                            .text_size(px(11.))
+                                            .text_color(p.faint)
+                                            .child(SharedString::from(project.clone())),
+                                    )
+                                })
+                                .test_support()
+                                .into_any_element()
+                        }
+                        Entry::Row(BellRow { item, .. }) => {
+                            let shell = self.shell.clone();
+                            let key = item.key.clone();
+                            // Read or unread moves: the ink and the fill fade over `HOVER`.
+                            let unread = fade(
+                                ElementId::Name(format!("bell-{}-unread", item.key).into()),
+                                !item.read,
+                                HOVER,
+                                window,
+                                cx,
+                            );
+                            // Answered, its glyph gives way to a check: the two cross-fade.
+                            let done = fade(
+                                ElementId::Name(format!("bell-{}-resolved", item.key).into()),
+                                item.resolved,
+                                HOVER,
+                                window,
+                                cx,
+                            );
+                            let ink = mix(p.faint, p.acc, unread);
+                            let leading = div()
+                                .relative()
+                                .size(px(14.))
+                                .child(div().absolute().inset_0().opacity(1. - done).child(
+                                    icon(glyph_of(&item.kind)).size(px(14.)).text_color(ink),
+                                ))
+                                .child(
+                                    div()
+                                        .absolute()
+                                        .inset_0()
+                                        .opacity(done)
+                                        .child(icon(Icon::Check).size(px(14.)).text_color(ink)),
+                                )
+                                .into_any_element();
+                            let line = |id: ElementId, text: &str, ink| {
+                                div()
+                                    .id(id)
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .text_size(px(12.))
+                                    .text_color(ink)
+                                    .aria_label(SharedString::from(text.to_owned()))
+                                    .child(SharedString::from(text.to_owned()))
+                                    .test_support()
+                            };
+                            let below = div()
+                                .min_w_0()
+                                .flex()
+                                .flex_col()
+                                .when(!item.detail.is_empty(), |d| {
+                                    d.child(line(bell_line_id(&item.key), &item.detail, p.mute))
+                                });
+                            let when = crate::model::ago(now, item.at);
+                            ListRow::new(
+                                ElementId::Name(format!("bell-{}", item.key).into()),
+                                SharedString::from(label_of(item)),
+                            )
+                            .leading(leading)
+                            .below(below)
+                            .trailing(
+                                div()
+                                    .id(ElementId::Name(format!("bell-{}-time", item.key).into()))
+                                    .text_size(px(11.))
+                                    .text_color(p.faint)
+                                    .aria_label(SharedString::from(when.clone()))
+                                    .child(SharedString::from(when))
+                                    .test_support(),
+                            )
+                            .decorate(move |row| row.opacity(0.6 + 0.4 * unread))
+                            .on_click(move |_, window, cx| {
+                                shell
+                                    .update(cx, |shell, cx| shell.choose(&key, window, cx))
+                                    .ok();
+                            })
+                            .into_any_element()
+                        }
+                    };
+                    Item::new(
+                        ElementId::Name(format!("bell-item-{}", row.key).into()),
+                        row.placement,
+                        content,
+                    )
+                    .into_any_element()
+                })
+                .collect();
+        list.child(header)
+            .child(presence(
+                "bell-empty",
+                self.list.is_empty(),
+                div()
+                    .p(space::MD)
+                    .text_color(p.faint)
+                    .child("No notifications."),
+            ))
+            .children(rows)
+            .test_support()
+            .into_any_element()
     }
 }
 

@@ -314,6 +314,8 @@ no device calls a `local` one over a link (`docs/remote.md`, "Roles").
 | `leave.list` | read |
 | `leave.withdraw` | drive |
 | `inbox.list` | read |
+| `notifications.list` | read |
+| `notifications.read` | drive |
 | `provider.list` | read |
 | `provider.enable` | drive |
 | `provider.disable` | drive |
@@ -2676,6 +2678,75 @@ come with `agent` and `workspace` `null` when no agent of the store ran it. A pa
 A child's own go to its parent and are not here. Without `after`, the last `limit` entries (50 by
 default); with it, the first `limit` entries numbered after it. Nothing is marked read: the inbox
 is a view of the stored events.
+
+The inbox stays as it is, for the agents' use: a view of the stored events, in which nothing is
+marked read. The user's own list, read and unread, is the notification centre (`notifications.list`).
+
+### `notifications.list`
+
+`{"after"?, "limit"?, "unread"?}`. The notification centre: one list of what the daemon tells the
+user, kept in its store, which every client reads and marks (the window's bell, the command line,
+and later the phone). `{"notifications": [...], "unread": {"needs_you", "new"}}`, oldest first.
+A notification is:
+
+```json
+{
+  "id": 12,
+  "at": 1792843730808,
+  "kind": "request",
+  "session": "3f9a1c0b7d2e",
+  "project": "app",
+  "workspace": "login",
+  "title": "Request #3 waits for you",
+  "excerpt": "Read .env",
+  "read_at": null,
+  "resolved": false,
+  "needs_you": true
+}
+```
+
+`id` is the store's, never given twice, and what `after` reads on from. `session` is the root agent
+of the session it belongs to (`null` for what is no session's: a message dropped, an extension's
+word); `project` and `workspace` are its place. `title` says why it is there and `excerpt` says what
+about, one line of 120 characters at most, masked like every stored text, and never a whole call's
+arguments. `read_at` is when it was read, `null` while unread; `resolved` is `true` once what it
+waits for was answered, wherever it was answered, and resolving reads it. `needs_you` is `true` for
+the kinds that wait for the user's answer (`request`, `question`, `vault`), `false` for the kinds
+that tell: the daemon says it, so no client keeps a list of kinds.
+
+| `kind` | Title | Excerpt | Resolved when |
+|---|---|---|---|
+| `request` | `Request #3 waits for you` | what is asked (`Read .env`, `Run npm test`) | the request is decided or cancelled (`approval.decided`, `approval.cancelled`), by the window, the command line or an agent that holds it |
+| `question` | `Asks you a question` | the first question | the root took an answer, a message of the user's or the card's (`agent.answered`), or its session was replaced, resumed or ended |
+| `vault` | `Asks you for a vault entry` | the entry's name | the ask is answered (`vault.ask_answered`) |
+| `report` | `Reported` | the first line of its report | never: it tells |
+| `failure` | `Failed` | its reason | never |
+| `pull_request`, `ticket` | what the session did: `Opened a pull request`, `Commented on a ticket`… | the title, or the start of the text posted | never |
+| `paused` | `A session stopped waking` | | the pause resumed (`session.following_resumed`) |
+| `unchecked`, `put_back` | what the daemon says of a run's agent folders | where it ran | never |
+| `dropped` | `A message for another machine was dropped` | for whom and why | never |
+| an extension's (its name: `connections`) | `From connections` | what the extension says | never: it tells, and counts with the new ones, no event of the extension saying it is over |
+
+The reports, questions and failures of a child go to its parent and are not here, as in the inbox.
+Every kind of the inbox and every one the window's bell rang before is a notification. A row is
+kept 30 days, or the newest 1,000, whichever is less, and is made once for what it is about: the
+events read twice change nothing. The centre starts with the events that come after it: what was
+told before the daemon kept it is in the inbox, not in rows, but what still waited for the user at
+the upgrade (a request held for them, a vault entry asked for, a root's unanswered question) is a
+row from the first keep. One keep runs at a time, and its cursor into the events only moves
+forward; a row the store failed to write is tried again at the next keep. Without `after`, the last `limit` (100
+by default); with it, the first `limit` numbered after it; `unread` leaves out the rows read. The
+`unread` count of the answer is of all unread rows: those that need the user, and the others.
+
+### `notifications.read`
+
+`{"ids": [...]}`, `{"session": "<root>"}` or `{"all": true}`: exactly one of the three. Marks those
+notifications read (what is read already keeps the time it was read) and answers `{"read": [ids]}`,
+the numbers that changed. The window marks a session's notifications read when the user opens the
+session or clicks a row; what arrives in the session already open stays unread, the window being
+perhaps open with nobody looking. Reading a request does not answer it: it stays `resolved:
+false` until it is decided. Every change is told by the event `notifications.changed`
+(`docs/events.md`), so that every client follows.
 
 ### `test.advance`
 

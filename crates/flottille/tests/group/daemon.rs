@@ -29,6 +29,8 @@ mod families;
 mod images;
 #[path = "../no_leftovers.rs"]
 mod no_leftovers;
+#[path = "../notifications.rs"]
+mod notifications;
 #[path = "../programs.rs"]
 mod programs;
 #[path = "../protocol.rs"]

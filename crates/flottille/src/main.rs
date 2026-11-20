@@ -53,6 +53,8 @@ mod message_checks;
 mod models;
 mod mounts;
 mod nofollow;
+mod notifications;
+mod notifications_command;
 mod opencode;
 mod people;
 mod pictures;
@@ -248,6 +250,16 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// The notifications Flottille keeps for you, read and unread (`read` marks them read)
+    Notifications {
+        /// Only the unread ones
+        #[arg(long)]
+        unread: bool,
+        #[arg(long)]
+        json: bool,
+        #[command(subcommand)]
+        action: Option<NotificationsAction>,
+    },
     /// Serve the pilot MCP door on standard input and output, for an agent outside Flottille
     Mcp,
     /// Speak ACP on standard input and output in front of an agent CLI: what the daemon starts
@@ -309,6 +321,19 @@ enum Command {
     },
     #[command(flatten)]
     Extensions(extensions::Command),
+}
+
+#[derive(Subcommand)]
+enum NotificationsAction {
+    /// Mark a notification read, or all of them
+    Read {
+        /// The notification's number, as `flottille notifications` gives it
+        #[arg(required_unless_present = "all", conflicts_with = "all")]
+        id: Option<u64>,
+        /// Mark every notification read
+        #[arg(long)]
+        all: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -563,6 +588,16 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         Command::Approve { number, discard } => approval_command::approve(&paths, number, discard)?,
         Command::Deny { number } => approval_command::deny(&paths, number)?,
         Command::Inbox { after, limit, json } => inbox_command::inbox(&paths, after, limit, json)?,
+        Command::Notifications {
+            unread,
+            json,
+            action,
+        } => match action {
+            Some(NotificationsAction::Read { id, all }) => {
+                notifications_command::read(&paths, id, all)?
+            }
+            None => notifications_command::list(&paths, unread, json)?,
+        },
         Command::Mcp => pilot::run(&paths)?,
         Command::Extensions(command) => return extensions::run(&paths, command),
         Command::Changes { since, json } => changes_command::run(&paths, since, json)?,

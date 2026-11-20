@@ -83,7 +83,7 @@ pub fn actions(projects: &[String], features: &[(String, String)]) -> Vec<Action
         },
         Action {
             title: "Notifications".into(),
-            words: "bell waiting requests questions",
+            words: "bell notifications unread waiting requests questions",
             icon: Icon::Bell,
             then: Do::Bell,
         },
