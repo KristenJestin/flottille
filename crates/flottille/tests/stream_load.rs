@@ -9,11 +9,11 @@
 //!
 //! ```text
 //! ( while :; do dd if=/dev/zero of=/tmp/busy bs=1M count=1024 conv=fsync 2>/dev/null; done ) &
-//! cargo test -p flottille --test stream_load -- --ignored --nocapture
+//! cargo test -p flottille --test group_daemon stream_load:: -- --ignored --nocapture
 //! kill %1; rm /tmp/busy
 //! ```
 
-mod common;
+use crate::common;
 
 use std::io::Write;
 use std::os::unix::net::UnixStream;

@@ -4,7 +4,7 @@
 //! to the judge or the user, and no local or private address is ever reached. The agents and the
 //! judge are fake ACP agents, in throwaway repositories and temporary XDG folders.
 
-mod common;
+use crate::common;
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::{SocketAddr, TcpListener};

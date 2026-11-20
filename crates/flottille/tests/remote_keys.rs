@@ -3,7 +3,7 @@
 //! clients it never reads, and the key folder no agent reaches. Temporary HOME and XDG folders, the
 //! in-memory keyring, fake ACP agents.
 
-mod common;
+use crate::common;
 
 use std::ffi::CString;
 use std::fs::File;

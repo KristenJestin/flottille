@@ -3,7 +3,7 @@
 //! nothing is written, and "where it runs" is kept only when the target has a repository of
 //! that name. Throwaway repositories and temporary XDG folders.
 
-mod common;
+use crate::common;
 
 use common::User;
 use serde_json::json;

@@ -5,6 +5,8 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+# The integration tests link as a few binaries, `[[test]]` below (`tests/group/`), not one each.
+autotests = false
 
 [dependencies]
 agent-client-protocol = { version = "3.5.0", features = ["unstable_end_turn_token_usage"] }
@@ -79,3 +81,39 @@ rustls = { version = "0.23.46", default-features = false, features = ["ring", "s
 rusqlite = { version = "0.41.0", features = ["bundled", "fallible_uint"] }
 # The hub of the remote scenarios runs on a runtime of the test's own.
 tokio = { version = "1.54.1", features = ["rt-multi-thread"] }
+
+[[test]]
+name = "group_agents"
+path = "tests/group/agents.rs"
+
+[[test]]
+name = "group_sessions"
+path = "tests/group/sessions.rs"
+
+[[test]]
+name = "group_forges"
+path = "tests/group/forges.rs"
+
+[[test]]
+name = "group_tickets"
+path = "tests/group/tickets.rs"
+
+[[test]]
+name = "group_remote"
+path = "tests/group/remote.rs"
+
+[[test]]
+name = "group_daemon"
+path = "tests/group/daemon.rs"
+
+[[test]]
+name = "group_window_session"
+path = "tests/group/window_session.rs"
+
+[[test]]
+name = "group_window_shell"
+path = "tests/group/window_shell.rs"
+
+[[test]]
+name = "group_window_work"
+path = "tests/group/window_work.rs"

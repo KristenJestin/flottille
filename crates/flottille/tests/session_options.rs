@@ -2,7 +2,7 @@
 //! against the fake agent, which records the `session/set_config_option` it receives. No real
 //! agent ever runs here.
 
-mod common;
+use crate::common;
 
 use std::path::PathBuf;
 

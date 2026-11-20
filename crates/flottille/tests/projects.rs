@@ -1,7 +1,7 @@
 //! The scenarios of registering projects, asked of the daemon over its socket, with throwaway
 //! repositories and temporary XDG folders.
 
-mod common;
+use crate::common;
 
 use std::path::Path;
 

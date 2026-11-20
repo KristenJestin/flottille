@@ -3,7 +3,7 @@
 //! its days field unfolds when it is switched on, and every movement is animated. No window opens
 //! on a screen.
 
-mod common;
+use crate::common;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};

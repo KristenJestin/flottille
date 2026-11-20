@@ -4,7 +4,7 @@
 //! (`crates/flottille-fake-acli`); the remotes are throwaway bare repositories; the escalating
 //! programs are fakes, first on the daemon's `PATH`, and none runs.
 
-mod common;
+use crate::common;
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};

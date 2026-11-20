@@ -5,7 +5,7 @@
 //! repository; the agent is the fake ACP agent, the forges the fake `gh` and `bkt`, in throwaway
 //! repositories and temporary XDG folders.
 
-mod common;
+use crate::common;
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};

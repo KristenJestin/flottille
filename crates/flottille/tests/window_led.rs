@@ -3,7 +3,7 @@
 //! folds with it, and the user detaches it from its pilot from the row's menu. No window opens on a
 //! screen.
 
-mod common;
+use crate::common;
 
 use std::cell::Cell;
 use std::sync::Arc;

@@ -3,7 +3,7 @@
 //! (`crates/flottille-fake-acli`) on the daemon's `PATH`, in throwaway repositories whose `origin`
 //! looks like GitHub's. No test ever calls GitHub or Jira.
 
-mod common;
+use crate::common;
 
 use std::path::PathBuf;
 

@@ -4,7 +4,7 @@
 //! machine is set up with `flottille remote setup`; the others join it with `flottille remote
 //! invite`, `join` and `accept`, as the user pairs them.
 
-mod common;
+use crate::common;
 
 use std::io::{BufRead, BufReader};
 use std::net::SocketAddr;

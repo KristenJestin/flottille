@@ -3,8 +3,8 @@
 //! of the session's rail, with its state, unfolding to its pilot and passes. No window opens on a
 //! screen.
 
-mod common;
-mod guard;
+use crate::common;
+use crate::guard;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};

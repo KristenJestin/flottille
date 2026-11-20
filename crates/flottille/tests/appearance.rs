@@ -2,7 +2,7 @@
 //! appearance methods"): Omarchy and dark until the user chooses, a choice written to
 //! `appearance.toml`, announced, and still said by a daemon started again. Temporary XDG folders.
 
-mod common;
+use crate::common;
 
 use common::User;
 use serde_json::json;

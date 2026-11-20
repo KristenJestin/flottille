@@ -3,7 +3,7 @@
 //! data folder: nothing here touches the real ones, nor the network. (`release.rs` has its own
 //! server and is not run on a developer's machine; this file is small enough to be.)
 
-mod common;
+use crate::common;
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;

@@ -3,7 +3,7 @@
 //! in what `session_read` gives the agent that started the session, until it is answered. The
 //! fake ACP agent, temporary folders, no real agent.
 
-mod common;
+use crate::common;
 
 use std::time::{Duration, Instant};
 

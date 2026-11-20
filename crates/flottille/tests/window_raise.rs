@@ -2,7 +2,7 @@
 //! GPUI's test platform, where activating a window is observable (the platform's active window),
 //! with the real socket of `window_instance`; no window opens on a screen.
 
-mod common;
+use crate::common;
 
 use std::time::{Duration, Instant};
 

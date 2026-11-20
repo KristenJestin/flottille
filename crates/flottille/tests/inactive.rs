@@ -4,7 +4,7 @@
 //! (`FLOTTILLE_TEST_CLOCK`, `test.advance`). The agent is the fake ACP agent, in a throwaway
 //! repository and temporary XDG folders.
 
-mod common;
+use crate::common;
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};

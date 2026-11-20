@@ -2,7 +2,7 @@
 //! daemon gave a fake agent's session (`crates/flottille-fake-agent`), with throwaway
 //! repositories and temporary XDG folders. No real agent ever runs here.
 
-mod common;
+use crate::common;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

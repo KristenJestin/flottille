@@ -6,8 +6,8 @@
 //! the test, each daemon with its own temporary folders and the in-memory keyring of its
 //! configuration (but where a test plays a machine with none); fake agents.
 
-mod common;
-mod remote;
+use crate::common;
+use crate::remote;
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::{SocketAddr, TcpListener};

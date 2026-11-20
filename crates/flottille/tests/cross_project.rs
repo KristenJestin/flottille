@@ -6,7 +6,7 @@
 //! Against the real daemon with the fake ACP agent, two throwaway projects and temporary XDG
 //! folders.
 
-mod common;
+use crate::common;
 
 use std::time::{Duration, Instant};
 

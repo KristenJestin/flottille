@@ -3,7 +3,7 @@
 //! bell keep the title of its brief and say, small, which agent started it. No window opens on a
 //! screen.
 
-mod common;
+use crate::common;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};

@@ -6,7 +6,7 @@
 //! repository, an HTTP remote a small server of the test's over `git http-backend` that asks for
 //! a sign-in, and the agents and the judge are fake ACP agents.
 
-mod common;
+use crate::common;
 
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixListener;
