@@ -342,7 +342,7 @@ fn bell_of(shell: &Entity<Shell>, id: &str, cx: &mut VisualTestContext) -> Vec<(
         s.snapshot()
             .bell
             .iter()
-            .filter(|item| item.session == id)
+            .filter(|item| item.session.as_deref() == Some(id))
             .map(|item| (item.label.clone(), item.detail.clone()))
             .collect()
     })

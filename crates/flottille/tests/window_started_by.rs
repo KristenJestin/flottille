@@ -194,7 +194,7 @@ fn the_bell_item_of_a_session_an_agent_started_says_who_started_it(cx: &mut Test
     });
 
     let session = shell.read_with(cx, |s, _| s.snapshot().bell[0].session.clone());
-    assert_eq!(session, launched);
+    assert_eq!(session.as_deref(), Some(launched.as_str()));
     assert_eq!(
         shell.read_with(cx, |s, cx| s.bell_sessions(cx)),
         ["Write the docs · started by begin the docs session"]

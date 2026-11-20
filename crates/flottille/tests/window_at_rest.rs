@@ -686,6 +686,64 @@ fn the_window_draws_no_frame_at_rest_on_a_project_feature_s_page_with_a_value_se
 }
 
 #[gpui_kit::test]
+fn the_window_draws_no_frame_at_rest_with_the_notification_centre_open_and_closed(
+    cx: &mut TestAppContext,
+) {
+    let user = User::with_fake_agent();
+    // The agent asks a question and ends its turn: one notification that needs the user.
+    user.fake_script(json!({"turns": [{"when": "hello", "do": [
+        {"mcp": {"tool": "ask_user", "arguments": {"question": "Which database?"}}},
+        {"say": "Waiting."}]}]}));
+    idle_session(&user);
+    let (shell, cx) = window(&user, cx);
+    let unread = |shell: &Entity<Shell>, cx: &mut VisualTestContext| {
+        shell.read_with(cx, |s, cx| s.top().read(cx).count())
+    };
+    until(&shell, cx, "the bell counts the question", |cx| {
+        unread(&shell, cx) == 1
+    });
+    settle(&shell, cx);
+    past_the_pulse(&shell, cx);
+    assert_eq!(
+        frames_at_rest(&shell, cx),
+        (0, 0),
+        "closed: (frames drawn, frames asked)"
+    );
+
+    cx.update(|window, cx| window.click("bell", cx));
+    until(&shell, cx, "the panel lists the notification", |cx| {
+        cx.update(|window, _| window.try_find("bell-list").is_some())
+    });
+    settle(&shell, cx);
+    past_the_pulse(&shell, cx);
+    assert_eq!(
+        frames_at_rest(&shell, cx),
+        (0, 0),
+        "open, one unread: (frames drawn, frames asked)"
+    );
+
+    // Read, the row's fade ends and the panel stays still.
+    cx.update(|window, cx| window.click("bell-mark-all", cx));
+    until(&shell, cx, "nothing is unread", |cx| {
+        unread(&shell, cx) == 0
+    });
+    settle(&shell, cx);
+    assert_eq!(
+        frames_at_rest(&shell, cx),
+        (0, 0),
+        "open, all read: (frames drawn, frames asked)"
+    );
+
+    cx.update(|window, cx| window.click("bell", cx));
+    settle(&shell, cx);
+    assert_eq!(
+        frames_at_rest(&shell, cx),
+        (0, 0),
+        "closed again: (frames drawn, frames asked)"
+    );
+}
+
+#[gpui_kit::test]
 fn the_window_draws_no_frame_at_rest_on_settings(cx: &mut TestAppContext) {
     let user = User::with_fake_agent();
     idle_session(&user);
