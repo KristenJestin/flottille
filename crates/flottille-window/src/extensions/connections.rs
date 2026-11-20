@@ -2309,7 +2309,7 @@ impl ConnectionsSection {
                     menu.entry(
                         format!("sign-in-connection-{name}-on-{machine}"),
                         format!("Sign in on {machine}"),
-                        Some(Icon::Lucide("log-in")),
+                        Some(Icon::Service),
                         move |_, cx| {
                             sign.update(cx, |this, cx| this.sign_in_on(&to_sign, &machine, cx))
                                 .ok();
