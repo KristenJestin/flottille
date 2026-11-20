@@ -258,14 +258,19 @@ async fn filters_off(folder: &Path) -> Vec<(String, String)> {
         .collect();
     drivers.sort_unstable();
     drivers.dedup();
-    filter_env(&drivers, 0)
+    // A count of ours would drop the `GIT_CONFIG_KEY_n` the daemon was started with.
+    let inherited = std::env::var("GIT_CONFIG_COUNT")
+        .ok()
+        .and_then(|count| count.trim().parse().ok())
+        .unwrap_or(0);
+    filter_env(&drivers, inherited)
 }
 
 /// The environment `filters_off` gives git for `drivers`: `inherited` is the number of
 /// `GIT_CONFIG_KEY_n` the daemon's own environment already holds, which a count of ours would drop.
-fn filter_env(drivers: &[&str], _inherited: usize) -> Vec<(String, String)> {
+fn filter_env(drivers: &[&str], inherited: usize) -> Vec<(String, String)> {
     let mut env = vec![("GIT_LFS_SKIP_SMUDGE".to_owned(), "1".to_owned())];
-    let mut count = 0;
+    let mut count = inherited;
     for driver in drivers {
         for (key, value) in [
             ("smudge", ""),
@@ -362,6 +367,11 @@ pub(super) async fn sweep(daemon: &Daemon, keep: &[String]) {
 /// Deletes the refs of a fetch a daemon that died left in the projects' repositories. They carry a
 /// fetch to its place only, and no review is fetching at the daemon's start: none is held.
 pub(super) async fn sweep_refs(daemon: &Daemon) {
+    // A review makes its folder before it fetches: where none was ever made, no fetch of one left
+    // a ref, and the user's repositories are not read for nothing at every start.
+    if !daemon.paths.reviews().is_dir() {
+        return;
+    }
     for project in crate::projects::all(daemon) {
         for repository in &project.repositories {
             let folder = match repository.path.as_str() {
@@ -381,11 +391,6 @@ pub(super) async fn sweep_refs(daemon: &Daemon) {
                 continue;
             };
             for name in refs.lines().filter(|name| name.starts_with(REFS)) {
-    // A review makes its folder before it fetches: where none was ever made, no fetch of one left
-    // a ref, and the user's repositories are not read for nothing at every start.
-    if !daemon.paths.reviews().is_dir() {
-        return;
-    }
                 let _ = git::output(
                     &folder,
                     &["update-ref", "-d", "--end-of-options", name],
