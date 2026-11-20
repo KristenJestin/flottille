@@ -4,13 +4,14 @@
 //! machine; the browser is played by the test. The keyrings are the daemons' memory; no window
 //! opens on a screen.
 
-mod common;
-mod remote;
+use crate::common;
+use crate::remote;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
+use crate::remote::{Machine, NoKeyring, pc_and_server};
 use common::User;
 use flottille_link::{DeviceKey, Request};
 use flottille_window::Shell;
@@ -18,7 +19,6 @@ use flottille_window::extensions::connections::ConnectionsSection;
 use flottille_window::link::{Connect, Sign};
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{Entity, TestAppContext, VisualTestContext, px, size};
-use remote::{Machine, NoKeyring, pc_and_server};
 use serde_json::json;
 
 const SECRET: &str = "w1ndow-n0tes-k3y-secret";
@@ -252,8 +252,9 @@ fn share_and_sign_in_a_connection_of_another_machine(cx: &mut TestAppContext) {
             json!({"name": "connections", "enabled": true}),
         )
         .unwrap();
-    flottille_window::link::sign_with(signing(&pc));
     let (shell, cx) = window(&pc, cx);
+    // This window's own signer: another test of the process may have set the process's.
+    shell.update(cx, |s, _| s.sign_with(signing(&pc)));
     let opened = Arc::new(Mutex::new(Vec::<String>::new()));
     {
         let opened = opened.clone();

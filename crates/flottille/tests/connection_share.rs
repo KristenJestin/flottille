@@ -7,16 +7,16 @@
 //! (`FLOTTILLE_TEST_SIGN_IN_LOOPBACK`), so that the client's tunnel can take the very port of the
 //! redirect on `127.0.0.1`, as it does on two machines.
 
-mod common;
-mod remote;
+use crate::common;
+use crate::remote;
 
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
+use crate::remote::{Machine, eventually, pc_and_server, signed};
 use common::User;
-use remote::{Machine, eventually, pc_and_server, signed};
 use serde_json::{Value, json};
 
 /// The secret of the entry the connection sends: what never shows but in a keyring.
