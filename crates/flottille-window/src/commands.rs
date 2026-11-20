@@ -109,6 +109,28 @@ pub(crate) fn problem_line(
     .space(above)
 }
 
+/// The line of a long form that says once what is above it is required and what is below can stay
+/// empty: "Optional", its words, a rule to the end. It is drawn with what is there, and says the
+/// same in its label.
+pub(crate) fn optional_line(id: &'static str, cx: &App) -> impl IntoElement {
+    let p = palette(cx);
+    div()
+        .id(id)
+        .aria_label("Optional: everything below can stay empty")
+        .flex()
+        .items_center()
+        .gap(space::SM)
+        .child(div().mono(11.).text_color(p.faint).child("Optional"))
+        .child(
+            div()
+                .text_size(px(12.5))
+                .text_color(p.mute)
+                .child("everything below can stay empty"),
+        )
+        .child(div().flex_1().h(px(1.)).bg(p.line))
+        .test_support()
+}
+
 /// A column whose children each hold the space above them themselves: a block with
 /// `.space(gap)`, a child that is always there through [`spaced`]. It is pulled up by `gap`, so
 /// its first child lands where the column's own parent put it (a `Section`'s gap under its
