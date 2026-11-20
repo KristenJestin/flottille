@@ -198,6 +198,8 @@ fn clicking_the_mark_opens_what_is_new_and_clears_its_dot(cx: &mut TestAppContex
     until(&shell, cx, "the mark appears", |cx| {
         visible(cx, "sidebar-whats-new")
     });
+    // Unfolded: a click on a mark still folding in lands on nothing.
+    settle(cx);
 
     click(cx, "sidebar-whats-new");
 
@@ -226,6 +228,8 @@ fn what_is_new_spans_every_beta_since_the_version_last_run(cx: &mut TestAppConte
     until(&shell, cx, "the mark appears", |cx| {
         visible(cx, "sidebar-whats-new")
     });
+    // Unfolded: a click on a mark still folding in lands on nothing.
+    settle(cx);
     let opened = opened_links(&shell, cx);
     click(cx, "sidebar-whats-new");
     until(&shell, cx, "the changes are listed", |cx| {
@@ -343,6 +347,8 @@ fn notes_that_cannot_be_fetched_are_said(cx: &mut TestAppContext) {
     until(&shell, cx, "the mark appears", |cx| {
         visible(cx, "sidebar-whats-new")
     });
+    // Unfolded: a click on a mark still folding in lands on nothing.
+    settle(cx);
 
     click(cx, "sidebar-whats-new");
 
