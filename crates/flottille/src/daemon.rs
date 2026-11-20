@@ -138,13 +138,20 @@ pub fn run(paths: &Paths) -> Result<()> {
             return Err(start_again(&binary));
         }
     }
+    // This build is the one that runs now: what ran before it is what is new since.
+    crate::whatsnew::record(paths);
     // What a daemon that died left: the display folders it made, which only a daemon holding the
     // lock makes, so none is this daemon's; it makes its own again.
     crate::display::clean(paths);
     // Before anything runs: where the SSH agent's socket is, which every run is kept from.
     crate::ssh_agent::find();
+    crate::mounts::find_bus();
+    if crate::mounts::namespaces() == crate::mounts::Namespaces::Refused {
+        eprintln!("flottille daemon: {}", crate::mounts::REFUSED_GAP);
+    }
     // Before any repository is read: the user's own credential helpers, the only ones it runs.
     crate::git::find_helpers();
+    crate::git::find_own_ssh();
     let machine_key = crate::remote::machine_key(paths)?;
     children::say_sessions_in(paths.sessions())?;
     let _store_lock = hold_store(paths)?;
@@ -248,6 +255,9 @@ pub struct Daemon {
     /// Held while a removal decides which branches to delete and deletes them, one removal at a
     /// time: two removals each counting its branch as kept in the other's would delete both.
     pub landing: tokio::sync::Mutex<()>,
+    /// Held while the notification centre is kept: the keeper and the sweep each read the events
+    /// after the cursor, and two at once would each write what the other did not see.
+    pub notifying: std::sync::Mutex<()>,
     /// The projects being removed: no agent, workspace or command run starts in them until they
     /// are forgotten or the removal stopped (`projects::refuse_removing`).
     pub removing_projects: Lock<HashSet<String>>,
@@ -300,6 +310,8 @@ pub struct Daemon {
     pub remote: std::sync::OnceLock<std::result::Result<Arc<crate::link::Remote>, String>>,
     /// What the daemon knows of an update of Flottille (`updates`).
     pub updates: crate::updates::Live,
+    /// What is new since the version last run (`whatsnew`).
+    pub whatsnew: crate::whatsnew::Live,
     /// Becomes true when the daemon stops.
     stopping: watch::Sender<bool>,
 }
@@ -343,6 +355,7 @@ impl Daemon {
             preparing: Lock::named("preparing", HashSet::new()),
             removing_workspaces: Lock::named("removing_workspaces", HashSet::new()),
             landing: tokio::sync::Mutex::new(()),
+            notifying: std::sync::Mutex::new(()),
             removing_projects: Lock::named("removing_projects", HashSet::new()),
             removing: Lock::named("removing", HashMap::new()),
             step_outputs: Lock::named("step_outputs", HashMap::new()),
@@ -366,6 +379,7 @@ impl Daemon {
             watch: Arc::default(),
             remote: std::sync::OnceLock::new(),
             updates: crate::updates::Live::default(),
+            whatsnew: crate::whatsnew::Live::default(),
             stopping: watch::Sender::new(false),
         }
     }
@@ -686,10 +700,15 @@ async fn serve(
         daemon.stopping.subscribe(),
     ));
     tokio::spawn(sweep::run(daemon.clone(), daemon.stopping.subscribe()));
+    tokio::spawn(crate::notifications::run(
+        daemon.clone(),
+        daemon.stopping.subscribe(),
+    ));
     tokio::spawn(crate::updates::watch(
         daemon.clone(),
         daemon.stopping.subscribe(),
     ));
+    tokio::spawn(crate::whatsnew::watch(daemon.clone()));
     crate::models::check(&daemon);
     crate::inactive::check(&daemon);
     crate::quota::check(&daemon);
@@ -920,6 +939,7 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
             "vault.",
             "remote.",
             "tunnel.",
+            "whatsnew.",
         ]
         .iter()
         .any(|prefix| request.method.starts_with(prefix))
@@ -960,6 +980,8 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
                     crate::link::call(daemon, &request.method, request.params).await
                 } else if request.method.starts_with("tunnel.") {
                     crate::tunnel::call(daemon, &request.method, request.params).await
+                } else if request.method.starts_with("whatsnew.") {
+                    crate::whatsnew::call(daemon, &request.method, request.params).await
                 } else if request.method.starts_with("items.") {
                     items::call(daemon, &request.method, request.params).await
                 } else if request.method.starts_with("provider.") {
@@ -1079,6 +1101,13 @@ fn handle(daemon: &Arc<Daemon>, request: Request) -> (Message, Option<Subscripti
         ),
         method if method.starts_with("leave.") => (
             match crate::leaves::call(daemon, method, request.params) {
+                Ok(result) => Message::result(id, result),
+                Err(failure) => failure.answer(Some(id)),
+            },
+            None,
+        ),
+        method if method.starts_with("notifications.") => (
+            match crate::notifications::call(daemon, method, request.params) {
                 Ok(result) => Message::result(id, result),
                 Err(failure) => failure.answer(Some(id)),
             },
@@ -1235,6 +1264,7 @@ fn status(daemon: &Daemon) -> flottille_core::Result<Value> {
             "waiting_for_user": approvals::waiting_for_user(daemon)?,
             "failed": count(&[AgentState::Failed]),
         },
+        "sandbox": crate::mounts::sandbox(),
     }))
 }
 

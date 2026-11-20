@@ -76,6 +76,9 @@ pub enum Update {
     /// What the daemon says of an update of Flottille (`update.show`, `update.changed`): read at
     /// each connection, so that a daemon started again from another build is seen.
     UpdateShown(Value),
+    /// What the daemon says is new since the version last run (`whatsnew.show`,
+    /// `whatsnew.changed`).
+    WhatsNewShown(Value),
     /// The developer mode was switched, from any client: the settings page reads it again.
     DeveloperChanged,
     /// The window's appearance was chosen, from any client: the window reads it again.
@@ -348,6 +351,13 @@ fn follow(
     {
         return Ok(());
     }
+    if let Ok(shown) = conn.request("whatsnew.show", json!({}))
+        && updates
+            .unbounded_send(Update::WhatsNewShown(shown))
+            .is_err()
+    {
+        return Ok(());
+    }
     // When what the shell shows, and the providers, were first known to be stale.
     let mut stale = Some(Instant::now());
     let mut providers = Some(Instant::now());
@@ -364,6 +374,9 @@ fn follow(
         }
         if event.name == "update.changed" {
             let _ = updates.unbounded_send(Update::UpdateShown(event.data.clone()));
+        }
+        if event.name == "whatsnew.changed" {
+            let _ = updates.unbounded_send(Update::WhatsNewShown(event.data.clone()));
         }
         if event.name == "developer.changed" {
             let _ = updates.unbounded_send(Update::DeveloperChanged);
@@ -611,6 +624,8 @@ fn matters(event: &Event) -> bool {
     match name.split_once('.').map(|(subject, _)| subject) {
         // A workspace's preparation shows in its place, step by step.
         Some("project" | "approval" | "daemon" | "workspace") => true,
+        // The notification centre: a notification came, was read or was answered, in any client.
+        Some("notifications") => true,
         // A request for a vault entry marks its session and rings the bell until it is answered.
         Some("vault") => matches!(name, "vault.asked" | "vault.ask_answered"),
         // A subscription opening or ending moves the session from waiting to rest.
@@ -704,6 +719,7 @@ fn read(conn: &mut Conn, briefs: &mut Briefs, seen: &Seen) -> Result<Snapshot> {
     let vault_asks = conn.request("vault.asks", json!({}))?;
     let commands = conn.request("run.list", json!({}))?;
     let subscriptions = conn.request("subscription.list", json!({}))?;
+    let notifications = conn.request("notifications.list", json!({"limit": 1000}))?;
     let (needs_user, questions) = needing_the_user(conn)?;
     let roots: Vec<&str> = agents["agents"]
         .as_array()
@@ -736,6 +752,7 @@ fn read(conn: &mut Conn, briefs: &mut Briefs, seen: &Seen) -> Result<Snapshot> {
         commands: &commands,
         subscriptions: &subscriptions,
     });
+    snapshot.set_notifications(&notifications);
     snapshot.project_changes = seen.project_changes.load(Ordering::Relaxed);
     Ok(snapshot)
 }

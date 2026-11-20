@@ -1257,3 +1257,24 @@ pub fn landlock_abi() -> i64 {
     }
     .max(0)
 }
+
+/// Whether the kernel gives this user a user namespace in which it may mount: what the private
+/// mount namespace of a confined command needs (`mounts.rs`). A distribution may refuse either
+/// (Ubuntu's AppArmor lets the namespace be made, then refuses its mounts).
+pub fn user_namespaces() -> bool {
+    const PROBE: &str = "import ctypes, os, sys\n\
+        libc = ctypes.CDLL(None, use_errno=True)\n\
+        uid, gid = os.getuid(), os.getgid()\n\
+        if libc.unshare(0x10000000 | 0x00020000) != 0: sys.exit(1)\n\
+        open('/proc/self/setgroups', 'w').write('deny')\n\
+        open('/proc/self/uid_map', 'w').write(f'{uid} {uid} 1')\n\
+        open('/proc/self/gid_map', 'w').write(f'{gid} {gid} 1')\n\
+        sys.exit(0 if libc.mount(b'tmpfs', b'/', b'tmpfs', 0, None) == 0 else 1)\n";
+    Command::new("python3")
+        .args(["-c", PROBE])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}

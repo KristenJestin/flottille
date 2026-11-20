@@ -29,6 +29,8 @@ mod families;
 mod images;
 #[path = "../no_leftovers.rs"]
 mod no_leftovers;
+#[path = "../notifications.rs"]
+mod notifications;
 #[path = "../programs.rs"]
 mod programs;
 #[path = "../protocol.rs"]
@@ -49,3 +51,5 @@ mod subscriptions;
 mod tool_list_cost;
 #[path = "../update_staged.rs"]
 mod update_staged;
+#[path = "../whats_new.rs"]
+mod whats_new;

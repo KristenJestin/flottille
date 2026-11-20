@@ -1836,6 +1836,40 @@ fn a_connection_server_gets_no_session_bus_address() {
 }
 
 #[test]
+fn a_connection_server_cannot_connect_to_the_session_bus_by_its_path() {
+    if !common::user_namespaces() {
+        eprintln!("skipped: this kernel refuses user namespaces to this user");
+        return;
+    }
+    let user = user();
+    project(&user, "app");
+    let bus = user.path("runtime/bus");
+    std::fs::create_dir_all(user.path("runtime")).unwrap();
+    let _listening = std::os::unix::net::UnixListener::bind(&bus).unwrap();
+    let mut script = almanac();
+    script["answers"]["search"] = json!({"connect": bus});
+    turn_on(&user);
+    declare(&user, "almanac", &script, json!({}));
+    user.call("connection.review", json!({"name": "almanac"}))
+        .unwrap();
+    user.call(
+        "connection.accept",
+        json!({"name": "almanac", "actions": {"search": "passes"}}),
+    )
+    .unwrap();
+    let (_, mcp) = session(&user, "app");
+
+    done(mcp.call(
+        "conn_almanac",
+        json!({"action": "search", "arguments": {"query": "a"}}),
+    ));
+
+    // Not there at all in its namespace, whatever Landlock's ABI.
+    let calls = logged(&user, "almanac", "call");
+    assert_eq!(calls[0]["answered"], "NotFound", "{calls:?}");
+}
+
+#[test]
 fn an_ordinary_connection_server_gets_no_display() {
     let user = User::with_fake_agent()
         .with_env("WAYLAND_DISPLAY", "wayland-test")

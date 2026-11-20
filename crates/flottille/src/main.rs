@@ -12,6 +12,7 @@ mod appearance;
 mod approval_command;
 mod approvals;
 mod bridge;
+mod changes_command;
 mod chat;
 mod children;
 mod claude;
@@ -50,7 +51,10 @@ mod locks;
 mod mcp;
 mod message_checks;
 mod models;
+mod mounts;
 mod nofollow;
+mod notifications;
+mod notifications_command;
 mod opencode;
 mod people;
 mod pictures;
@@ -100,6 +104,7 @@ mod vault;
 mod vault_command;
 mod watchdog;
 mod web;
+mod whatsnew;
 mod workspace_command;
 mod workspaces;
 mod workspaces_folder;
@@ -244,6 +249,16 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// The notifications Flottille keeps for you, read and unread (`read` marks them read)
+    Notifications {
+        /// Only the unread ones
+        #[arg(long)]
+        unread: bool,
+        #[arg(long)]
+        json: bool,
+        #[command(subcommand)]
+        action: Option<NotificationsAction>,
+    },
     /// Serve the pilot MCP door on standard input and output, for an agent outside Flottille
     Mcp,
     /// Speak ACP on standard input and output in front of an agent CLI: what the daemon starts
@@ -285,6 +300,14 @@ enum Command {
         #[arg(long)]
         stage: bool,
     },
+    /// What changed since the version you last ran, or since one you name
+    Changes {
+        /// Count from this version instead of the one last run
+        #[arg(long, value_name = "X.Y.Z[-PRE]")]
+        since: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
     /// Print the daemon's events, one JSON object per line
     Watch {
         /// Print the stored events numbered after this one first
@@ -297,6 +320,19 @@ enum Command {
     },
     #[command(flatten)]
     Extensions(extensions::Command),
+}
+
+#[derive(Subcommand)]
+enum NotificationsAction {
+    /// Mark a notification read, or all of them
+    Read {
+        /// The notification's number, as `flottille notifications` gives it
+        #[arg(required_unless_present = "all", conflicts_with = "all")]
+        id: Option<u64>,
+        /// Mark every notification read
+        #[arg(long)]
+        all: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -551,8 +587,19 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         Command::Approve { number, discard } => approval_command::approve(&paths, number, discard)?,
         Command::Deny { number } => approval_command::deny(&paths, number)?,
         Command::Inbox { after, limit, json } => inbox_command::inbox(&paths, after, limit, json)?,
+        Command::Notifications {
+            unread,
+            json,
+            action,
+        } => match action {
+            Some(NotificationsAction::Read { id, all }) => {
+                notifications_command::read(&paths, id, all)?
+            }
+            None => notifications_command::list(&paths, unread, json)?,
+        },
         Command::Mcp => pilot::run(&paths)?,
         Command::Extensions(command) => return extensions::run(&paths, command),
+        Command::Changes { since, json } => changes_command::run(&paths, since, json)?,
         Command::Update {
             channel,
             branch,

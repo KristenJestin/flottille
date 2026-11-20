@@ -146,6 +146,12 @@ progressed, ended or failed, the check was switched, or a restart was asked once
 (`docs/releases.md`, "Updating"). Its fields are what `update.show` answers (`docs/protocol.md`,
 "The update methods").
 
+### `whatsnew.changed`
+
+What is new since the version last run changed: the notes were read (or could not be), or the
+user opened the page (`docs/releases.md`, "What's new"). Its fields are what `whatsnew.show`
+answers (`docs/protocol.md`, "The what's new methods").
+
 ### `appearance.changed`
 
 The user chose the window's appearance (`appearance.set`): every window takes it.
@@ -367,6 +373,18 @@ goes, the daemon's reading of `url` as a connection's login reads it, in ASCII; 
 agent's ask while it is open: `agent`, `ask` (the request's number), `project`, `name`, `why`.
 `vault.ask_answered`, an event of the agent that opened it, closes it: `ask`, `project`, `name`,
 `outcome` (`set` or `dismissed`). Never a secret.
+
+### `notifications.changed`
+
+The notification centre changed (`docs/protocol.md`, `notifications.list`): a notification was
+added, resolved or marked read, or the old ones were forgotten. A client reads the list again, or
+reads on after the last number it saw.
+
+| Field | |
+|---|---|
+| `ids` | The numbers of the notifications added, resolved or marked read, sorted; empty when only the old ones went. |
+| `pruned` | `true` when notifications older than 30 days, or beyond the newest 1,000, were forgotten. |
+| `how` | `read` when a client marked them read (`notifications.read`), `kept` when the daemon added or resolved them from the events, or forgot the old. |
 
 ### `remote.join_requested`
 

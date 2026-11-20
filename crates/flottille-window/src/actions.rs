@@ -663,6 +663,9 @@ pub enum Command {
         writer: String,
         leave_session: String,
     },
+    /// Marks notifications of the centre read (`notifications.read`): the window follows the
+    /// daemon's `notifications.changed`, not this command's answer.
+    ReadNotifications(Reading),
     /// Resumes a paused following of the session's agents, as a message of the user's does.
     ResumeFollowing {
         session: String,
@@ -783,6 +786,25 @@ pub enum CommandWrite {
     Remove {
         name: String,
     },
+}
+
+/// Which notifications of the centre are marked read.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Reading {
+    Ids(Vec<u64>),
+    /// Those of a session, by its root.
+    Session(String),
+    All,
+}
+
+impl Reading {
+    fn params(&self) -> Value {
+        match self {
+            Reading::Ids(ids) => json!({"ids": ids}),
+            Reading::Session(session) => json!({"session": session}),
+            Reading::All => json!({"all": true}),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1335,6 +1357,11 @@ pub enum Outcome {
     RunAnswered {
         session: String,
         answer: RunAnswer,
+    },
+    /// Notifications were marked read, or the daemon could not: the centre's own event says
+    /// what changed; a failure lets the window ask again.
+    NotificationsRead {
+        failed: bool,
     },
     /// A subscription was cancelled, or a following resumed, as asked, or the daemon refused with
     /// why.
@@ -3332,6 +3359,17 @@ fn perform(connect: &Connect, sign: Option<Sign>, command: Command, bounds: Boun
                 Ok(Err(why)) | Err(why) => Some(why),
             };
             Outcome::LeaveWithdrawn { session, refused }
+        }
+        Command::ReadNotifications(reading) => {
+            let answer = ask_alone(
+                connect,
+                "notifications.read",
+                reading.params(),
+                bounds.quick,
+            );
+            Outcome::NotificationsRead {
+                failed: !matches!(answer, Ok(Ok(_))),
+            }
         }
         Command::ResumeFollowing {
             session,

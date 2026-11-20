@@ -1556,8 +1556,9 @@ way in:
   the session has no Wayland, and `DBUS_SESSION_BUS_ADDRESS` never. That folder is the one part of
   the user's runtime folder Landlock leaves within the server's and its login's reach
   (`docs/vault.md`, "The runtime folder"); the bus's address is not given, and the rest of the
-  runtime folder is denied where Landlock allows it. Below Landlock's ninth ABI a process that
-  guesses the bus's path can still connect to it, a gap of every run's (#976). When the folder cannot be made
+  runtime folder is denied where Landlock allows it, and is an empty folder in the server's
+  private mount namespace, with its display folder alone put back in it, so no process of its
+  connects to the bus by its path (`docs/vault.md`, "The runtime folder"). When the folder cannot be made
   (the filesystem refuses the hard link, the socket is not there) the browser runs headless and the
   daemon says why, in its log and in the form, under the switch (kept there while a call runs),
   never with the real folder. Off, the server gets no display variable of the daemon's; **whether

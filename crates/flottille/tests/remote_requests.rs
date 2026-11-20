@@ -426,7 +426,11 @@ fn machine_as_device(folder: &Path, apart: &Path) -> DeviceKey {
 
 #[test]
 fn a_client_started_by_an_agent_is_still_refused_with_machine() {
-    let pc_user = User::with_fake_agent().with_allowing_judge();
+    // The daemon's refusal by the client's ancestry is what is tested: the run's private mount
+    // namespace, which hides the daemon's socket before that, is left out.
+    let pc_user = User::with_fake_agent()
+        .with_allowing_judge()
+        .with_env("FLOTTILLE_TEST_NO_USER_NAMESPACES", "1");
     let (_hub, pc, server) = pc_and_server_on(Machine::of(pc_user), User::new());
     let repository = repository(&pc.user);
     pc.user

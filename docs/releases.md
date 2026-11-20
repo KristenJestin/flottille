@@ -557,6 +557,47 @@ is the old one or the new one, never half of one.
 - `install.sh` and `flottille update` stay as they are; `flottille update` while a build is
   staged installs the channel's latest and removes the staged one.
 
+### What's new
+
+After an update, what changed since the version last run is a page of the window, never one that
+opens by itself: a page that opens at start is a nuisance.
+
+- **The version last run is kept**, in `$XDG_STATE_HOME/flottille/whats-new.json` (Flottille's
+  own memory, like the update channel; `~/.local/state/flottille/` without `XDG_STATE_HOME`): the
+  daemon, at each start, notes that this build is the one that runs and which ran before it, the
+  changes since it (the release notes of every version between, oldest first), and whether the page
+  was opened. A start of the same version changes nothing; a build older than the one that ran
+  (`--force`) or the first start with no memory shows nothing new. A jump over several versions
+  without opening the page counts from the first of them: the page shows the changes once, not
+  beta by beta.
+- **The notes come from the release bodies** (`tools/changelog.sh`: `### Features`, then `- **scope**:
+  text (#123)`), of every release of the channel's kind between the two versions, as the update
+  of the window reads them (`notes`: the staged build keeps them in `staged.json`, `updated.json`
+  once applied, and the daemon's next start takes them from there, so the page needs no network
+  at start). A build installed by `install.sh` or `flottille update` has none: the daemon reads
+  them once, at its first start, with the update's own `curl` (no `curlrc`, `https` only), and
+  keeps them. With the check for updates off the daemon makes no request, and the page says the
+  notes were not read, with **Check again** (also for a read that failed: offline, GitHub); a
+  user's `flottille changes --since` reads them whatever the setting.
+- **The mark**: at the first start of a newer version, the foot of the sidebar, above the
+  update's place, says **What's new** with a dot. It appears and folds away with a fade, and is
+  the only thing that happens: the page opens when the mark is clicked, and opening it records it
+  for good (the dot and the mark go). Nothing else opens it.
+- **The page** is a page of the window, left by going elsewhere: **What's new since 0.4.0-beta.103**,
+  under it this build's version, channel and commit, then the changes, a group each (breaking
+  changes, features, fixes, performance, other changes), each a fold that opens and closes, the
+  changes under it by scope (the ones with no scope under General), each with its pull request's
+  number as a link opened by the system's handler. A change that several betas list is said once
+  per group; one that is both breaking and a feature, as the changelog says it, is in both.
+- **Found again**: Settings, General, Version has a **What's new** line, **Since 0.4.0-beta.103**,
+  for the last update's, as long as there is one.
+- `flottille changes [--since <version>]` prints the same list (`docs/cli.md`), and the daemon
+  answers `whatsnew.show` (`docs/protocol.md`).
+
+Defaults taken, to confirm: the mark goes once the page was opened (the page stays reachable from
+Settings); the notes are the first page of the releases (the 100 latest), as the update's; a
+failure to read them is not retried by itself, only by **Check again** or the next start.
+
 ## For tests
 
 `FLOTTILLE_RELEASES` names another base of the releases' API than

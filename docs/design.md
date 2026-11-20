@@ -1033,15 +1033,31 @@ becomes the child's record, the report is a tool, waiting is deliveries, closing
 
 GPUI Fast with gpui-kit, English only (no translation layer). Screens of the milestone "The window":
 
-- a top bar with a search field and a bell counting what waits for the user (each request, each
-  question) and what a session did to a ticket or a pull request (opened, merged, edited or
-  commented a pull request; created, edited, commented, closed or reopened a ticket, as
-  `agent.tool_served` says a write of `forge` or `tickets` was done), until that session is
-  opened; each item says why it is there (`Request #3 waits for you`, `Asks you a question`,
-  `Opened a pull request`), a short excerpt (what is asked, the question, the title or the start
-  of the text posted) and its session, each on one line cut with an ellipsis. What a session
-  changes while its page is open is in sight, and rings nothing; what is changed lives as long
-  as the window;
+- a top bar with a search field and a bell, which opens the **notification centre**: one list of
+  what the user is told, **kept by the daemon** (`docs/protocol.md`, `notifications.list`), so that
+  a notification seen on one client is seen on every client and closing the window forgets nothing.
+  A notification is a request that waits (`Request #3 waits for you`), a question (`Asks you a
+  question`), a vault entry asked for, what a session did to a ticket or a pull request (opened,
+  merged, edited or commented a pull request; created, edited, commented, closed or reopened a
+  ticket, as `agent.tool_served` says a write of `forge` or `tickets` was done), a report, a
+  failure, a pause and what the daemon says of a run's agent folders or a dropped message. Each
+  says why it is there, a short excerpt (what is asked, the question, the title or the start of the
+  text posted) and when, each on one line cut with an ellipsis. The bell opens a panel of the kit
+  (not a page), which rises and fades in and out: the notifications **grouped by session**, the
+  session's title and project once and its notifications under it, the sessions with something
+  unread first and under each its unread notifications first; a click opens the session and marks
+  its notifications read; **Mark all read** marks every one; an empty state says "No
+  notifications." The bell's badge counts what is unread, and the panel says it apart, what needs
+  the user (a request, a question, a vault entry) and the rest: `2 need you · 5 new`. Opening a
+  session marks its notifications read; what arrives in the session that is open stays unread
+  until the user opens it again, clicks the row or marks all read, the window being perhaps open
+  with nobody looking. A row answered says so (`Request #3 answered`), its glyph cross-fading to a
+  check; a request or a question answered anywhere (the window, the command line,
+  an agent that holds it) is resolved, and so read. A row read or unread fades between its two
+  looks, a row arriving unfolds and one forgotten folds away. The centre keeps 30 days, or 1,000,
+  whichever is less; a second window shows the same list and the same marks, following
+  `notifications.changed`. What a session changes while its page is open is in sight, and rings
+  nothing;
   the search field, "Search  Ctrl K", is a **quick switcher**: Ctrl K anywhere in the window or a
   click on the field opens it over the page (the modal layer, near the top), its own text field
   focused; Escape, a click outside, the mouse's back button or choosing a result closes it, and

@@ -543,9 +543,9 @@ pending requests.
   - no `XDG_RUNTIME_DIR`, which says where the daemon's socket is (a client a run starts is
     refused anyway), and no display (`WAYLAND_DISPLAY`, `DISPLAY`, X11's key `XAUTHORITY`),
     unless the project lets its runs open windows (below); Landlock keeps X11's abstract
-    sockets out of reach too from its sixth ABI, but not its sockets by their path, which a run
-    that names them itself may still reach until #976 (`docs/vault.md`, "The runtime folder" and
-    "The gaps");
+    sockets out of reach too from its sixth ABI, and the run's private mount namespace empties
+    X11's socket folder, so its sockets by their path are not there either (`docs/vault.md`,
+    "The runtime folder" and "The gaps");
   - no `DBUS_SESSION_BUS_ADDRESS`: the session bus leads to the keyring (`docs/vault.md`, "The
     runtime folder", which also says how the runtime folder itself is denied);
   - no `SSH_AUTH_SOCK`, and from Landlock's ninth ABI no connecting to the user's SSH agent's
@@ -603,8 +603,10 @@ pending requests.
   cannot push from a script the gate never read. A run that is itself a `git push` (its own
   line, no wrapper) the user, the judge, a rule or Full mode let through does not get the
   environment above: it runs outside the sandbox (no Landlock), with the daemon's own
-  environment and `core.hooksPath=/dev/null`, and none of the place's variables, as if the user
-  had typed it (`docs/commands.md`, "The environment"). Its task's `ready` and `url` commands
+  environment and `core.hooksPath=/dev/null`, the user's own `ssh` command (never a
+  repository's `core.sshCommand`) and git's own transports alone (never an `ext::` URL), and
+  none of the place's variables, as if the user had typed it (`docs/commands.md`, "The
+  environment"; `docs/vault.md`, "The runtime folder"). Its task's `ready` and `url` commands
   still run in the sandbox. A push goes where the repository's remote leads now: the remote is
   the user's to change (`docs/commands.md`, "Where the remote leads").
 - **The daemon's own git is walled like a run's**: what it runs for itself on a repository (its
