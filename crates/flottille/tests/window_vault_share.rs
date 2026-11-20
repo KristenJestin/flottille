@@ -7,20 +7,26 @@
 use crate::common;
 use crate::remote;
 
-use std::sync::Arc;
+use std::io::{BufRead, BufReader, Write};
+use std::net::{SocketAddr, TcpListener};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
+use common::mcp::{Mcp, server_of};
 use flottille_link::{DeviceKey, Request};
 use flottille_window::Shell;
+use flottille_window::device::Device;
 use flottille_window::link::{Connect, Sign};
+use flottille_window::tree::SWITCHER;
 use flottille_window::vault::{NO_MACHINE, VaultSection};
+use gpui_design_system::omarchy::Environment;
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{Entity, TestAppContext, VisualTestContext, px, size};
-use remote::{Machine, NoKeyring, pair, pc_and_server};
+use remote::{Machine, NoKeyring, pair, pc_and_server, pc_and_server_on};
 use serde_json::json;
 
 const SECRET: &str = "w1ndow-sh4re-secret";
-/// The secret the server sets by hand over its copy.
+/// The server's own secret: set by hand over its copy, or an entry only it holds.
 const SECOND: &str = "s3rver-0wn-secret";
 
 fn window<'a>(
@@ -130,8 +136,8 @@ fn share_with_lists_the_online_machines_and_says_the_result(cx: &mut TestAppCont
     pc.user
         .call("vault.set", json!({"name": "tracker", "secret": SECRET}))
         .unwrap();
-    flottille_window::link::sign_with(signing(&pc));
     let (shell, cx) = window(&pc, cx);
+    shell.update(cx, |s, _| s.sign_with(signing(&pc)));
     let section = open_vault(&shell, cx);
 
     click("vault-more-tracker", cx);
@@ -305,5 +311,165 @@ fn the_row_of_a_shared_entry_says_where_it_came_from(cx: &mut TestAppContext) {
     assert!(
         !shown("vault-shared-tracker", cx),
         "its own entry says nothing"
+    );
+}
+
+/// A local API that answers every request, the `Authorization` each one carried kept in order:
+/// what tells which secret a machine's tools hold, without reading a keyring.
+struct Site {
+    addr: SocketAddr,
+    authorizations: Arc<Mutex<Vec<String>>>,
+}
+
+impl Site {
+    fn start() -> Site {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let authorizations = Arc::new(Mutex::new(Vec::new()));
+        let kept = authorizations.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { return };
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut authorization = String::new();
+                loop {
+                    let mut header = String::new();
+                    if reader.read_line(&mut header).unwrap_or(0) == 0 || header == "\r\n" {
+                        break;
+                    }
+                    if let Some((name, value)) = header.trim_end().split_once(':')
+                        && name.eq_ignore_ascii_case("authorization")
+                    {
+                        authorization = value.trim().to_owned();
+                    }
+                }
+                kept.lock().unwrap().push(authorization);
+                let body = "{\"fields\":[]}";
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\
+                     connection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+        });
+        Site {
+            addr,
+            authorizations,
+        }
+    }
+
+    fn url(&self, path: &str) -> String {
+        format!("http://{}{path}", self.addr)
+    }
+}
+
+/// The project `name` on `user`'s machine, a throwaway repository.
+fn project(user: &common::User, name: &str) {
+    let folder = user.path(&format!("work/{name}"));
+    user.git_init(&folder);
+    std::fs::write(folder.join("README.md"), "app\n").unwrap();
+    user.git(&folder, &["add", "."]);
+    user.git(&folder, &["commit", "--quiet", "-m", "start"]);
+    user.call("project.add", json!({"folder": folder, "name": name}))
+        .unwrap();
+}
+
+#[gpui_kit::test]
+fn share_with_shares_the_entry_of_the_machine_shown(cx: &mut TestAppContext) {
+    let site = Site::start();
+    let pc = Machine::of(
+        common::User::with_fake_agent().with_env("FLOTTILLE_TEST_WEB_OPEN", &site.addr.to_string()),
+    );
+    let (_hub, pc, server) = pc_and_server_on(pc, common::User::new());
+    project(&pc.user, "app");
+    project(&server.user, "app");
+    // An entry only the server holds: the row the user clicks while the server is shown.
+    server
+        .user
+        .call(
+            "vault.set",
+            json!({"name": "tracker", "secret": SECOND, "description": "The server's own",
+                "url": site.url("/"), "project": "app"}),
+        )
+        .unwrap();
+    std::fs::write(pc.user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
+    let env = Environment {
+        os_release: pc.user.path("os-release"),
+        state_home: pc.user.path("state"),
+    };
+    cx.update(|cx| flottille_window::init_with(env, cx));
+    let connect: Connect = Arc::new(pc.user.connector());
+    let device = Some(Device::in_folder(pc.folder()));
+    let (shell, cx) = cx.add_window_view(|window, cx| {
+        Shell::new_polled_with(connect.clone(), device.clone(), window, cx)
+    });
+    cx.simulate_resize(size(px(1280.), px(1600.)));
+    // Its block unfolds as the clock moves.
+    until(&shell, cx, "the switcher shows", |cx| {
+        cx.executor().advance_clock(Duration::from_millis(16));
+        shown(SWITCHER, cx)
+    });
+    settle(cx);
+    click(SWITCHER, cx);
+    settle(cx);
+    click(&format!("{SWITCHER}-server"), cx);
+    until(&shell, cx, "the server is shown", |cx| {
+        shell.read_with(cx, |s, _| s.machine_shown()) == Some("server".to_owned())
+    });
+    let section = open_vault(&shell, cx);
+
+    click("vault-more-tracker", cx);
+    settle(cx);
+    click("share-vault-tracker", cx);
+    until(&shell, cx, "the machines online are listed", |cx| {
+        section.read_with(cx, |s, _| s.machines().is_some())
+    });
+    // The shown machine's runners: its vault is what is shared.
+    assert_eq!(
+        section.read_with(cx, |s, _| s.machines().cloned()),
+        Some(Ok(vec!["pc".to_owned()]))
+    );
+    settle(cx);
+    click("share-to-pc", cx);
+    until(&shell, cx, "the toast says it is shared", |cx| {
+        toasts(&shell, cx).contains(&"Entry tracker shared with pc".to_owned())
+    });
+    assert!(
+        !toasts(&shell, cx).contains(&"Entry tracker was not shared".to_owned()),
+        "{:?}",
+        toasts(&shell, cx)
+    );
+    let copy = pc.user.call("vault.list", json!({})).unwrap()["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["name"] == "tracker")
+        .cloned()
+        .expect("the copy on this machine");
+    assert_eq!(copy["shared_from"], "server", "{copy}");
+    assert_eq!(copy["description"], "The server's own", "{copy}");
+
+    // The server's secret is what this machine's tools now sign in with.
+    let fields = site.url("/rest/api/3/field");
+    let opened = pc.user.received_requests("session/new").len();
+    pc.user
+        .call(
+            "agent.run",
+            json!({"project": "app", "message": format!("read the tracker's fields: {fields}")}),
+        )
+        .unwrap();
+    let (url, authorization) = server_of(&pc.user, opened);
+    let mcp = Mcp::initialize(&url, &authorization);
+    let answer = mcp.call(
+        "web",
+        json!({"action": "read", "url": fields, "entry": "tracker"}),
+    );
+    assert!(!answer.error, "{}", answer.text);
+    let sent = site.authorizations.lock().unwrap().clone();
+    assert!(
+        sent == [format!("Bearer {SECOND}")],
+        "the server's secret did not reach the API ({} requests)",
+        sent.len()
     );
 }

@@ -251,6 +251,8 @@ pub const DEVELOPER_HINT: &str = "Why each call was allowed, held or refused, on
 
 pub struct SettingsPage {
     shell: WeakEntity<Shell>,
+    /// The user's machines: the hub, its devices, this machine's addresses.
+    machines: Entity<crate::machines_page::MachinesSection>,
     providers: Providers,
     /// A switch flipped, until the daemon lists the provider so: what it was asked to become.
     pending: HashMap<String, bool>,
@@ -359,6 +361,7 @@ pub const JUDGE_USAGE: &str = "Used by sessions in **Auto**, chosen in each sess
 pub const JUDGE_QUOTA: &str = "Each decision is a turn of this model, on your own quota.";
 
 impl SettingsPage {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         shell: WeakEntity<Shell>,
         rules: Entity<RulesEditor>,
@@ -367,8 +370,10 @@ impl SettingsPage {
         workspaces: Entity<WorkspacesFolder>,
         vault: Entity<VaultSection>,
         connections: Entity<ConnectionsSection>,
+        machines: Entity<crate::machines_page::MachinesSection>,
     ) -> Self {
         Self {
+            machines,
             rules,
             judge_guidance,
             compaction_guidance,
@@ -924,6 +929,10 @@ impl SettingsPage {
 
     pub fn connections(&self) -> &Entity<ConnectionsSection> {
         &self.connections
+    }
+
+    pub fn machines(&self) -> &Entity<crate::machines_page::MachinesSection> {
+        &self.machines
     }
 
     pub fn providers(&self) -> &Providers {
@@ -2315,6 +2324,8 @@ impl Render for SettingsPage {
                 ("appearance", self.appearance_section(cx).into_any_element()),
                 ("workspaces", self.workspaces.clone().into_any_element()),
                 ("developer", self.developer_section(cx).into_any_element()),
+                // The user's machines (#814): Set up a hub, Devices, Add a device, Addresses.
+                ("machines", self.machines.clone().into_any_element()),
             ],
         };
         let vault = self.vault.read(cx).entries().map(<[_]>::len);
