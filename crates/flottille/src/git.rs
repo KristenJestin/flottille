@@ -140,6 +140,51 @@ pub fn find_helpers() {
     });
 }
 
+/// The `ssh` command of the user's own: the daemon's `GIT_SSH_COMMAND`, else their global
+/// `core.sshCommand` (several accounts of one forge), read at the daemon's start, before a run
+/// could write the file.
+static OWN_SSH: OnceLock<Option<OsString>> = OnceLock::new();
+
+/// Reads the user's own `ssh` command, before anything runs.
+pub fn find_own_ssh() {
+    OWN_SSH.get_or_init(|| {
+        if let Some(command) = std::env::var_os("GIT_SSH_COMMAND").filter(|c| !c.is_empty()) {
+            return Some(command);
+        }
+        let output = crate::children::spawn_std(
+            std::process::Command::new("git")
+                .args([
+                    "config",
+                    "--global",
+                    "--includes",
+                    "--get",
+                    "core.sshCommand",
+                ])
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null()),
+        )
+        .and_then(std::process::Child::wait_with_output)
+        .ok()?;
+        let command = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        (output.status.success() && !command.is_empty()).then(|| command.into())
+    });
+}
+
+/// The `ssh` a push the gate let through signs in with: the user's own (`find_own_ssh`), else
+/// the one found at the daemon's start; never a `core.sshCommand` of the repository, which a run
+/// may have written.
+pub fn push_ssh_command() -> OsString {
+    OWN_SSH.get().cloned().flatten().unwrap_or_else(ssh_command)
+}
+
+/// The protocols a push the gate let through may use (`GIT_ALLOW_PROTOCOL`): git's own
+/// transports, as for the daemon's fetch, never `ext::` nor a remote helper a run's settings
+/// name.
+pub fn push_protocols() -> String {
+    FETCHED.join(":")
+}
+
 /// `-c` options that leave git the user's own credential helpers alone: an empty
 /// `credential.helper` empties the list read so far, and the command's scope is read last.
 fn helpers() -> Vec<String> {
@@ -180,7 +225,7 @@ fn protocol(url: &str) -> &str {
 
 /// The `ssh` git runs: the one found at the daemon's start, quoted for the shell git reads
 /// `GIT_SSH_COMMAND` with.
-pub fn ssh_command() -> OsString {
+fn ssh_command() -> OsString {
     match crate::ssh_agent::ssh() {
         Some(ssh) => {
             let quoted = ssh.as_os_str().to_string_lossy().replace('\'', "'\\''");

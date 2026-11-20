@@ -32,24 +32,43 @@ pub const REFUSED_GAP: &str = "the kernel gives no user namespace to the command
 
 /// The session bus's socket, where the daemon's `DBUS_SESSION_BUS_ADDRESS` names one by its path
 /// (`unix:path=…`, as a `dbus-launch` outside the runtime folders makes): read at the daemon's
-/// start, for every confined command's namespace to hide. A bus on an abstract socket is no path:
-/// Landlock's scope keeps it out (`landlock.rs`).
-static BUS: OnceLock<Option<PathBuf>> = OnceLock::new();
+/// start, with its device and inode, for every confined command's namespace to hide. A bus on an
+/// abstract socket is no path: Landlock's scope keeps it out (`landlock.rs`).
+static BUS: OnceLock<Option<(PathBuf, u64, u64)>> = OnceLock::new();
 
 /// Finds the session bus's socket at the daemon's start, before anything runs.
 pub fn find_bus() {
     BUS.get_or_init(|| {
-        use std::os::unix::fs::FileTypeExt;
         let address = std::env::var("DBUS_SESSION_BUS_ADDRESS").ok()?;
         let path = bus_path(&address)?.canonicalize().ok()?;
-        let socket = std::fs::symlink_metadata(&path).ok()?;
-        socket.file_type().is_socket().then_some(path)
+        let (dev, ino) = socket_at(&path)?;
+        Some((path, dev, ino))
     });
 }
 
-/// The session bus's socket found at the start.
+/// The device and inode of the socket at `path`, if a socket is there.
+fn socket_at(path: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    let found = std::fs::symlink_metadata(path).ok()?;
+    found
+        .file_type()
+        .is_socket()
+        .then(|| (found.dev(), found.ino()))
+}
+
+/// The session bus's socket found at the start, while it is still the one found: a folder or a
+/// socket a confined command made in its place is neither hidden (a mount over a folder would
+/// fail every start) nor the bus.
 pub fn bus() -> Option<&'static Path> {
-    BUS.get()?.as_deref()
+    let (path, dev, ino) = BUS.get()?.as_ref()?;
+    (socket_at(path) == Some((*dev, *ino))).then_some(path.as_path())
+}
+
+/// Whether the session bus the daemon found at its start is gone from its path, or something
+/// else is there now, which a confined command may have made: no push it lets through is given
+/// the bus's address then.
+pub fn bus_replaced() -> bool {
+    BUS.get().is_some_and(Option::is_some) && bus().is_none()
 }
 
 /// The path of the first `unix:path=` of a D-Bus address, its `%xx` escapes undone.
@@ -206,7 +225,8 @@ fn probe() -> Option<bool> {
 }
 
 /// The namespace that empties the `emptied` folders, puts the `kept` paths in them back, hides
-/// each `masked` socket under `/dev/null`, and goes back to `cwd` in it. None where a path cannot be a C string.
+/// each `masked` socket under `/dev/null`, and goes back to `cwd` in it. None where a path cannot
+/// be a C string.
 pub fn plan(
     emptied: &[PathBuf],
     kept: &[PathBuf],
@@ -248,13 +268,7 @@ pub fn plan(
     Some(Plan {
         uid_map: format!("{uid} {uid} 1").into_bytes(),
         gid_map: format!("{gid} {gid} 1").into_bytes(),
-        // A socket gone since the start (its bus ended) is no path to hide: one mounted over
-        // would fail every start.
-        masked: masked
-            .iter()
-            .filter(|p| std::fs::symlink_metadata(p).is_ok())
-            .map(|p| c(p))
-            .collect::<Option<_>>()?,
+        masked: masked.iter().map(|p| c(p)).collect::<Option<_>>()?,
         emptied: folders.into_iter().map(|f| c(f)).collect::<Option<_>>()?,
         trees: vec![-1; put_back.len()],
         kept: put_back,

@@ -494,7 +494,12 @@ pub async fn run(
     };
     // Only a push the gate read, and that the user or the judge let through, goes out: outside
     // the sandbox, as the user's own.
-    let lifted = (approved && gate::is_push(&words)).then(|| lifted(crate::git::ssh_command()));
+    let lifted = (approved && gate::is_push(&words)).then(|| {
+        lifted(
+            crate::git::push_ssh_command(),
+            crate::mounts::bus_replaced(),
+        )
+    });
     let env = match environment(daemon, place, &repository) {
         Ok(env) => env,
         Err(why) => return Outcome::Failed(why),
@@ -837,12 +842,21 @@ fn defend(env: &mut BTreeMap<OsString, OsString>, empty: &Path) {
 /// SSH agent, forge command line's sign-in), and no hook: the hooks are files the agent writes.
 /// The project's and the workspace's variables are not applied: they are a file a run may write,
 /// and one of them (`GIT_CONFIG_PARAMETERS`) would undo the hooks setting. It runs outside the
-/// sandbox (`start`). `ssh` is the one found at the daemon's start, over a `core.sshCommand` a run
-/// may have written in the repository.
-fn lifted(ssh: OsString) -> BTreeMap<OsString, OsString> {
+/// sandbox (`start`). `ssh` signs in (`git::push_ssh_command`), over a `core.sshCommand` a run may
+/// have written in the repository, and only git's own transports are allowed, never an `ext::`
+/// URL it may have set. No session bus where the one found at the daemon's start was replaced
+/// (`mounts::bus_replaced`): what is at its path now may be a run's.
+fn lifted(ssh: OsString, bus_replaced: bool) -> BTreeMap<OsString, OsString> {
     let mut env: BTreeMap<OsString, OsString> = std::env::vars_os().collect();
     configure(&mut env, "core.hooksPath", "/dev/null");
     env.insert("GIT_SSH_COMMAND".into(), ssh);
+    env.insert(
+        "GIT_ALLOW_PROTOCOL".into(),
+        crate::git::push_protocols().into(),
+    );
+    if bus_replaced {
+        env.remove(&OsString::from("DBUS_SESSION_BUS_ADDRESS"));
+    }
     env
 }
 
@@ -2633,14 +2647,16 @@ mod tests {
 
     #[test]
     fn a_lifted_push_keeps_the_daemon_s_environment_but_its_hooks() {
-        let env = lifted("'/usr/bin/ssh'".into());
+        let env = lifted("'/usr/bin/ssh'".into(), false);
         let daemon: BTreeMap<OsString, OsString> = std::env::vars_os().collect();
         let count: usize = daemon
             .get(&OsString::from("GIT_CONFIG_COUNT"))
             .map_or(0, |count| count.to_str().unwrap().parse().unwrap());
         for (name, value) in &daemon {
             let name_text = name.to_str().unwrap_or_default();
-            if !name_text.starts_with("GIT_CONFIG_") && name_text != "GIT_SSH_COMMAND" {
+            if !name_text.starts_with("GIT_CONFIG_")
+                && !["GIT_SSH_COMMAND", "GIT_ALLOW_PROTOCOL"].contains(&name_text)
+            {
                 assert_eq!(env.get(name), Some(value), "{name:?}");
             }
         }
@@ -2648,6 +2664,9 @@ mod tests {
         assert_eq!(get(format!("GIT_CONFIG_KEY_{count}")), "core.hooksPath");
         assert_eq!(get(format!("GIT_CONFIG_VALUE_{count}")), "/dev/null");
         assert_eq!(get("GIT_SSH_COMMAND".into()), "'/usr/bin/ssh'");
+        assert_eq!(get("GIT_ALLOW_PROTOCOL".into()), "ssh:https:http:git:file");
+        let replaced = lifted("ssh".into(), true);
+        assert!(!replaced.contains_key(&OsString::from("DBUS_SESSION_BUS_ADDRESS")));
     }
 
     #[test]
