@@ -429,7 +429,7 @@ const SERVED: [Definition; 33] = [
                 "started": {"type": "string", "description": "log_time: when the work started, RFC 3339 with its offset (2026-11-06T09:00:00+01:00); the duration before now when left out. worklog_edit: the new start."},
                 "worklog": {"type": "string", "description": "worklog_edit, worklog_delete (Jira): the id of a worklog of the user's own account on that ticket, as worklogs gives it (worklog 10234); another author's is refused. worklog_edit needs one of duration, started, comment."},
                 "workspace": {"type": "string"},
-                "query": {"type": "string", "description": "search: words. people: lists who can be assigned (assignee takes their name) and gives each one's account id, for a mention; these words narrow it, and on Jira are searched on the site too (with ticket: only among who can see it)."},
+                "query": {"type": "string", "description": "search: words. people: lists who can be assigned or mentioned and gives each one's account id, for a mention (on Jira assignee takes an account id or e-mail, a display name only for the newest work items' assignees); these words narrow it, and on Jira are searched on the site too (with ticket: only among who can see it)."},
                 "updated_within": {"type": "integer", "minimum": 1, "maximum": 365, "description": "list, search: updated in the last that many days."},
                 "in_comments": {"type": "string", "description": "search on Jira: words of the comments (not by author). Not for list."},
                 "jql": {"type": "string", "description": "search on Jira: a JQL query, answered only within the tracker's projects (what it may refer to is not checked); ORDER BY allowed. Not for list."},
