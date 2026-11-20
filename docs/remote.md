@@ -645,7 +645,23 @@ local child's work; nothing moves your branch.*
 - **The mode** is the caller's tree's, as for any session an agent starts, **except Full**, which a
   machine alone cannot raise: a session on another machine is in Full only when the caller's tree
   was put in Full by the user from a device, whose signed switch the caller's daemon keeps and sends
-  with the launch. Otherwise it starts in Auto.
+  with the launch, and that switch is less than 12 hours old on the receiving machine's clock.
+  Otherwise it starts in Auto. A switch out of Full forgets the kept switch.
+- **What the sender says is bounded** before a card or the judge reads it: a title of one line, 200
+  characters at most; the caller and its tree named by agents' ids (1 to 64 letters, digits,
+  dashes or underscores); the branch a name git takes, 255 bytes at most. Otherwise refused.
+- **The code taken is the launch's own**: a `has`, an `offer` or a `place` for a recorded launch
+  must name its project and its repositories, and the `place` its branch and all its repositories;
+  anything else is refused, and nothing of it is taken.
+- **A workspace made of another machine's code runs its setup only once its launch is allowed**
+  (by the gate at once, or by the user's answer): held otherwise, by default, whatever becomes of
+  the launch, a restart of the daemon included. A launch the user refuses ends its agent and
+  removes its workspace; a launch forgotten while it waited (below) removes the workspace made of
+  it, if any; a launch whose agent could not be made removes its workspace too.
+- **A held agent can be written to by the user**, directly, on the receiving machine: it is visible
+  there before the user answers, and writing to it is the user's own act. Its turn then runs, in
+  its workspace, whose setup still waits; the launch's brief is not sent until the user allows the
+  launch, and never if they refuse it.
 - **The provider** is the caller's if it is enabled and signed in on that machine; otherwise
   refused, naming it. The judge and the compactor are that machine's own settings.
 - **Caps**: the child counts in its parent's project cap on the parent's machine and in the
@@ -867,10 +883,18 @@ on a real phone, by hand, and reported.
   launcher's tree; otherwise Auto.
 - That signed switch is the `agent.mode` request a device signed, kept whole by the caller's
   machine while the tree stays in Full, checked by the receiving machine for its signature, its
-  signer's role, the caller's machine, the tree and Full, never for its time or its nonce.
+  signer's role, the caller's machine, the tree and Full, and its time: it counts for **12 hours**
+  from when it was signed (one night's work), by the receiving machine's clock; past that, the
+  launch starts in Auto, and the user switches the tree to Full again. Its nonce is not checked: it
+  goes with every launch of those hours.
+- The switch is kept on the tree's root and may name any agent of the tree (the user switched it
+  from a child): the launch names the tree by that agent, which the receiving machine checks the
+  switch against.
 - A launch held for the user on the receiving machine makes its agent and its workspace there once
   its code came, the agent sent nothing and the setup waiting until the user allows it; the code
   of a launch is taken when the gate accepted it or held it for the user, never when it refused it.
+- A machine may leave 4 launches, of any kind, waiting for the user's answer on another: its next
+  is refused until the user answered one.
 - A child on another machine counts in its parent's cap on the parent's machine while its parent
   lives, until its end is told back (#817); a launch whose code never came holds a slot of the
   receiving machine's cap until it is forgotten, an hour after it was asked.
