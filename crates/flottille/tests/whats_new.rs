@@ -8,6 +8,8 @@ use crate::release::{Releases, this_version};
 
 use std::time::{Duration, Instant};
 
+use std::os::unix::fs::DirBuilderExt as _;
+
 use common::User;
 use serde_json::{Value, json};
 
@@ -16,7 +18,11 @@ const BODY: &str = "### Features\n\n- **gui**: the sidebar says what is new (#11
 /// The state the daemon of an older build left: it ran `version`, and nothing was new.
 fn ran(user: &User, version: &str) {
     let folder = user.path("state/flottille");
-    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&folder)
+        .unwrap();
     std::fs::write(
         folder.join("whats-new.json"),
         json!({"version": version, "since": null, "seen": true, "notes": null}).to_string(),

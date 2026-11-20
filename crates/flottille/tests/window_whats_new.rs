@@ -103,6 +103,8 @@ fn until(
     let deadline = Instant::now() + Duration::from_secs(25);
     loop {
         shell.update_in(cx, |shell, window, cx| shell.poll(window, cx));
+        // Its clock moves, or what folds in (the mark) never gets a height.
+        cx.executor().advance_clock(Duration::from_millis(16));
         cx.run_until_parked();
         cx.update(|window, cx| window.simulate_next_frame(cx));
         cx.run_until_parked();

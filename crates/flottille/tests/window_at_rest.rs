@@ -2501,7 +2501,9 @@ fn what_is_new_and_its_mark_are_still_at_rest(cx: &mut TestAppContext) {
         .unwrap()
         .to_owned();
     let folder = user.path("state/flottille");
-    std::fs::create_dir_all(&folder).unwrap();
+    std::os::unix::fs::DirBuilderExt::mode(std::fs::DirBuilder::new().recursive(true), 0o700)
+        .create(&folder)
+        .unwrap();
     std::fs::write(
         folder.join("whats-new.json"),
         json!({"version": this, "since": "0.4.0-beta.103", "seen": false, "notes": [{
