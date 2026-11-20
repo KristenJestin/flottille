@@ -298,6 +298,11 @@ impl Conn {
         key_of(shown.first()?)
     }
 
+    /// The address of the other side: the one that was dialled, or the one the link came from.
+    pub(crate) fn remote(&self) -> SocketAddr {
+        self.0.remote_address()
+    }
+
     /// The protocol name both sides agreed on.
     pub(crate) fn alpn(&self) -> Option<Vec<u8>> {
         let data = self.0.handshake_data()?;
