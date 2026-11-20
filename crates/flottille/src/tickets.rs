@@ -155,9 +155,15 @@ impl Comment {
             .map_or(String::new(), |at| format!(", {at}"));
         // The id of every comment: what `reply` takes, and `comment_edit` and `comment_delete`
         // for one an agent posted.
+        // Jira's account id of its author goes with it: what a mention of them is written with.
+        let account = self.account.as_deref().map_or(String::new(), |account| {
+            format!(", author account {account}")
+        });
         let id = match (&self.id, answers) {
-            (Some(id), Some(parent)) => format!(" [comment {id}, a reply to {parent}]"),
-            (Some(id), None) => format!(" [comment {id}]"),
+            (Some(id), Some(parent)) => {
+                format!(" [comment {id}{account}, a reply to {parent}]")
+            }
+            (Some(id), None) => format!(" [comment {id}{account}]"),
             (None, _) => String::new(),
         };
         format!(
@@ -4182,7 +4188,7 @@ mod tests {
 
         assert_eq!(
             document_text(&document),
-            "## Goal\n\nLet users **log in**\n@alice\n\n- form\n- session\n\n1. ship\n\n\
+            "## Goal\n\nLet users **log in**\n[@alice](mention:1)\n\n- form\n- session\n\n1. ship\n\n\
              [file: unnamed, not shown]"
         );
         assert_eq!(

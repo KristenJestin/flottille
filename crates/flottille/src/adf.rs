@@ -594,6 +594,17 @@ fn inline(nodes: &[Value], hard: &str) -> String {
                 runs.push((hard.to_owned(), vec![&Value::Null]));
                 continue;
             }
+            // The form an agent writes back, so a mention read can be repeated: a name alone
+            // would notify no one.
+            "mention" if !node["attrs"]["id"].as_str().unwrap_or_default().is_empty() => {
+                let name = node["attrs"]["text"].as_str().unwrap_or("@");
+                let id = node["attrs"]["id"].as_str().unwrap_or_default();
+                runs.push((
+                    format!("[{}]({MENTION}{id})", escaped(name)),
+                    vec![&Value::Null],
+                ));
+                continue;
+            }
             "mention" | "emoji" => node["attrs"]["text"]
                 .as_str()
                 .or(node["attrs"]["shortName"].as_str())

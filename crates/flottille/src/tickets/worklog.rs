@@ -407,7 +407,7 @@ pub(super) fn no_entry_to(to: &str, never: &str) -> String {
     format!(
         "refused: this project names no vault entry to {to}: the user chooses one \
          in the project's Settings, Tracker (the window offers the way), or creates one \
-         (flottille vault set <name> --username <their Jira account e-mail>, the secret \
+         (vault ask, or flottille vault set <name> --username <their Jira account e-mail>, the secret \
          being a Jira API token) and writes its name in the project's file, [tracker] \
          worklog_token = \"<name>\"; Flottille never {never} with a sign-in it was not \
          given"

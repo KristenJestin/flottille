@@ -2364,7 +2364,7 @@ fn tickets_people_lists_the_assignable_users() {
         lines,
         [
             "- Ben Sample (557058:bbbb-0002)",
-            "- Anne Example (anne@example.org)"
+            "- Anne Example (anne@example.org), account id 557058:aaaa-0001"
         ],
         "{listed}"
     );
@@ -2373,7 +2373,11 @@ fn tickets_people_lists_the_assignable_users() {
         mcp.call("tickets", json!({"action": "people", "query": "anne"})),
     );
     let lines: Vec<&str> = narrowed.lines().filter(|l| l.starts_with("- ")).collect();
-    assert_eq!(lines, ["- Anne Example (anne@example.org)"], "{narrowed}");
+    assert_eq!(
+        lines,
+        ["- Anne Example (anne@example.org), account id 557058:aaaa-0001"],
+        "{narrowed}"
+    );
     let search = words(user.acli_received())
         .into_iter()
         .find(|call| call.starts_with("jira workitem search"))

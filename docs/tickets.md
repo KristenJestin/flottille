@@ -527,8 +527,14 @@ ticket itself.
   - **What the agent posted is recorded by the id Jira answers** (a comment, a reply, an edited
     comment), so it is still the agent's when read back, whatever Jira shows for the mention. A
     description is recorded by its words, the names being Jira's own, as a read gives them.
-  - A mention reads back as `@Display Name`; to keep a mention while editing a text, the agent
-    writes it again. GitHub is unchanged: an `@login` notifies, and a `mention:` link is left as
+  - **The agent is told, and can find the account id** (#1127): the `body` field's description
+    gives the form (and `@login` for GitHub), and `people`'s (`query`) says it gives each person's
+    account id. `people` says the account id of every person (`Ana Example (ana@example.org),
+    account id 5b10…`, once when it is already how they are named), and `show` with `detail
+    full` says the author's account id on each Jira comment's line (`[comment 20000, author
+    account 5b10…]`), so an agent answering someone can mention them.
+  - A mention reads back as `[@Display Name](mention:<accountId>)`, the form the agent writes, so
+    one read can be repeated (a mention with no account id reads as its text). GitHub is unchanged: an `@login` notifies, and a `mention:` link is left as
     a link. A raw ADF given in `fields` is the agent's own document: its mention nodes are not
     looked up, except those of `fields.description`.
   - Not confirmed against a real site (the fake follows the shapes above): that a `mention` node

@@ -1148,8 +1148,8 @@ Jira: their account id, else their e-mail). The card shows the names as given.
   notifies, and is left as written. **On Jira an `@Name` in the text stays text and notifies no
   one** (Jira rewrites nothing): only a mention node with the account id does, so in a Jira
   `comment`, `comment_edit`, `reply`, `log_time` comment, `create` or `edit` description the agent
-  writes `[@Display Name](mention:<accountId>)` (`people` gives the account ids), which becomes the
-  node. Each account is looked up on the site with the project's tracker entry: an id the site
+  writes `[@Display Name](mention:<accountId>)` (`people` gives the account ids, and `show` each
+  comment author's; the `body` field's description says so), which becomes the node. Each account is looked up on the site with the project's tracker entry: an id the site
   does not know, or one that holds no account id, is refused before the user is asked, and the
   card says who is notified by the name Jira returns and the id, whatever the text says. Every
   such text goes through Jira's API with the entry (never `acli`), so it is refused without one

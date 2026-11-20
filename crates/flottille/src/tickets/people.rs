@@ -144,6 +144,22 @@ async fn jira_people(site: &str, projects: &[String]) -> Result<Vec<Person>, Str
         .collect())
 }
 
+/// A Jira person as `people` says them: the e-mail or account id `assignee` takes, and always
+/// their account id, which a mention is written with.
+fn with_account(person: &Person) -> String {
+    let said = person.said();
+    // An e-mail holds an `@`, an account id never does.
+    let account = std::iter::once(&person.send)
+        .chain(&person.keys)
+        .find(|id| !id.is_empty() && !id.contains('@'));
+    match account {
+        Some(account) if !said.contains(account.as_str()) => {
+            format!("{said}, account id {account}")
+        }
+        _ => said,
+    }
+}
+
 /// `tickets people {query?}`: who can be named as an assignee on the project's tracker.
 pub(super) async fn people(project: &Project, asked: &TicketsCall) -> Outcome {
     let listing = match read(project).await {
@@ -171,7 +187,11 @@ pub(super) async fn people(project: &Project, asked: &TicketsCall) -> Outcome {
         None => listing.people.all().iter().collect(),
     };
     text.push_str(&format!("\n{} in {}:\n", found.len(), listing.looked));
-    text.push_str(&crate::people::lines(&found));
+    let jira = matches!(project.tracker, Some(ProjectTracker::Jira { .. }));
+    text.push_str(&match jira {
+        true => crate::people::lines_saying(&found, with_account),
+        false => crate::people::lines(&found),
+    });
     if let Some(why) = listing.why {
         text.push_str(&format!("Some of them could not be read: {why}.\n"));
     }
@@ -179,6 +199,11 @@ pub(super) async fn people(project: &Project, asked: &TicketsCall) -> Outcome {
         "\nAn assignee is named by display name, e-mail or account id: tickets {\"action\": \
          \"edit\", \"ticket\": …, \"assignee\": \"Jane Doe\"}.",
     );
+    if jira {
+        text.push_str(
+            " A mention in a text is [@Display Name](mention:<accountId>), with the account id.",
+        );
+    }
     Outcome::Done(text)
 }
 
