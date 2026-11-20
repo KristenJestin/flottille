@@ -20,7 +20,7 @@ use flottille_window::link::Connect;
 use flottille_window::model::elsewhere_id;
 use flottille_window::project::{SessionLine, session_end_id, session_menu_id, session_row_id};
 use flottille_window::session_link::SessionUpdate;
-use flottille_window::shell::{Selection, bell_session_id};
+use flottille_window::shell::{Selection, bell_group_title_id};
 use flottille_window::tree::{session_id, session_machine_id};
 use gpui_design_system::omarchy::Environment;
 use gpui_design_system::tie_id;
@@ -595,24 +595,16 @@ fn the_inbox_and_question_cards_name_the_other_machine(cx: &mut TestAppContext) 
     until(&shell, cx, "server's question in the inbox", |cx| {
         shell.read_with(cx, |s, _| {
             s.machine_shown().as_deref() == Some("server")
-                && s.snapshot()
-                    .bell
-                    .iter()
-                    .any(|item| item.session == id && item.key.starts_with("question-"))
+                && s.snapshot().bell.iter().any(|item| {
+                    item.session.as_deref() == Some(id.as_str())
+                        && item.key.starts_with("question-")
+                })
         })
-    });
-    let key = shell.read_with(cx, |s, _| {
-        s.snapshot()
-            .bell
-            .iter()
-            .find(|item| item.session == id)
-            .unwrap()
-            .key
-            .clone()
     });
     cx.update(|window, cx| window.click("bell", cx));
     settle(&shell, cx);
-    let said = label(cx, bell_session_id(&key)).unwrap_or_default();
+    // The panel groups a session's rows under its title, which says the machine.
+    let said = label(cx, bell_group_title_id(&id)).unwrap_or_default();
     assert!(said.ends_with(" · on server"), "{said:?}");
     cx.update(|window, cx| window.click("bell", cx));
     settle(&shell, cx);
