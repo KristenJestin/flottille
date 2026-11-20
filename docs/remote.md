@@ -15,10 +15,11 @@ session every machine keeps to it and the first member's setup (`crates/flottill
 `crates/flottille-link/src/control.rs`, `crates/flottille/src/hub_session.rs`), and pairing
 through the hub: invitations, joining, the four words, adding, renaming and removing members
 from the command line (#812), and the user's requests to another machine, signed by the client,
-carried by its daemon and checked by the machine they are for (`--machine`, #813), and a place's
+carried by its daemon and checked by the machine they are for (`--machine`, #813), a place's
 code sent to another machine over the link and its new commits brought back (#815; `agent_launch`
-does not send it yet, #816). What is decided is said as such; the defaults taken are in "Defaults taken, to
-confirm"; what is open is in "Open questions". It replaces the proposal of 2026-11-03 (a relay
+does not send it yet, #816), and the roles bounding what each device may do, with what each
+runner offers its peers (#862). What is decided is said as such; the defaults taken are in
+"Defaults taken, to confirm"; what is open is in "Open questions". It replaces the proposal of 2026-11-03 (a relay
 every device connects to, on a private network) and the review that put Tailscale and SSH at the
 centre: Flottille stays generic (`AGENTS.md`), and depends on no one network and no account of a
 third party. The user runs one small program of Flottille's, the hub; the data between their
@@ -527,8 +528,9 @@ cannot change it.
   and signed in (their login files checked for presence only, never read: `AGENTS.md`), and its
   free slots (the project caps minus what runs). It sends it again when it changes.
 - **Starting a session on a machine** (from a client, or by an agent: "A tree across machines")
-  offers only the runners that have that project, that agent signed in, and a free slot. A
-  `controller` or a `viewer` runs no agent: a launch aimed at one is refused, naming it.
+  offers only the runners that have that project and that agent signed in; a child launched there
+  needs a free slot too (a session for the user counts in no children cap). A `controller` or a
+  `viewer` runs no agent: a launch aimed at one is refused, naming it.
 - **Every method is `read` or `drive`**: a `controller` may call every `drive` method on a runner,
   a `viewer` only `read`.
 - **`workspace.show`, `workspace.forge` and `spec.list` are `read`, though they write**: the branch a
@@ -1082,6 +1084,35 @@ on a real phone, by hand, and reported.
   them. A machine set up again (`remote.setup` while `hub.json` is there) is refused unless asked
   to replace the hub (`--replace`), which replaces what it pinned. An ask the hub does not answer
   in 10 s, or refuses, is asked again at the next round; the session goes on meanwhile.
+- A refusal of a role names what was asked in the user's words for what they do most (`answer a
+  request`, `send a message`, `start a session`, `invite a device`, `add, remove or rename a
+  device`, …), the method otherwise (`may call project.add`). Each method's class is said beside
+  it in the table of `protocol.md`, "The classes", which a test holds to the catalogue.
+- A launch is a method that may start an agent's process, marked in the catalogue
+  (`flottille_protocol::LAUNCHES`): `agent.start` (and its old name `agent.run`), `agent.resume`,
+  `agent.quota_resume`, `spec.new` (which starts a writer when given an idea), `spec.from_ticket`,
+  `spec.develop` and `review.start`. Aimed at a machine whose member is a `controller` or a
+  `viewer`, it is refused by the machine that would carry it and by that machine itself
+  (`refused: tablet is a controller: it runs no agent, a runner does`), in one check of
+  `flottille-link` (`runs_agents`). A launch by an agent on another machine (`agent_launch
+  {machine}`) is #816's, and is to take the same check. `task.run` is no launch: it runs a
+  command of the project, not an agent.
+- What a runner offers (`capabilities`, `crates/flottille-link/src/offers.rs`) is looked at only
+  while a machine is linked to this one: when a link is made, after an event that may change it (a
+  project added, edited or removed, a provider changed, a session that starts or ends), and every
+  30 s for what no event says (a login file); `remote.machines` looks at this machine's at once. It
+  is sent on each link when it changed, in order, and again, waiting longer each time (1 s doubled
+  up to a minute), when the other machine did not take it: its projects, each with its children cap minus the children that run or are being launched (the cap a
+  `child` from another machine counts in), and each provider enabled, installed (on `PATH`, or a
+  test's override) and signed in where Flottille can see it, as `doctor` says it (its login file
+  present by its metadata, never opened, or its sign-in variable set, never read). It names 1024
+  projects and 64 agents at most, each name 1 to 64 characters with no control or invisible one.
+  It is taken only from a runner's machine, and only from the link kept for it (one replaced says
+  nothing any more), and forgotten when its link ends: an offline runner offers nothing. The slots
+  bound the children launched from another machine (#816), not a session for the user. No event
+  says it changed yet: a client reads `remote.machines` again.
+- A watch (`events.watch`) carried for a device ends when the device leaves the member list: each
+  list taken, the machine that serves it looks again whether the device is still a member.
 - The git work of "What travels" is `crates/flottille/src/git/bundle.rs`. The snapshot is made
   from a copy of the repository's index (a linked worktree's own), under Flottille's name
   (`Flottille <flottille@localhost>`), never signed: it is never kept as a commit. The bundle

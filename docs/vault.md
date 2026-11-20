@@ -53,7 +53,7 @@ An entry made for one precise feature is that feature's alone. `for` names it:
 
 | `for` | The use |
 |---|---|
-| `worklog:<project>` | The token the project's tracker logs time with (`docs/tickets.md`, "Logging time"), and reads worklogs and fields with, edits work items with (their fields, parent and fix version, `docs/tools.md`), posts a reply under a comment, and posts or changes a text that mentions someone, and looks the mentioned accounts up, with (`docs/tickets.md`, "Replies"). |
+| `worklog:<project>` | The token the project's tracker logs time with (`docs/tickets.md`, "Logging time"), corrects and deletes worklogs with ("Correcting a worklog"), and reads worklogs and fields with, edits work items with (their fields, parent and fix version, `docs/tools.md`), posts a reply under a comment, and posts or changes a text that mentions someone, and looks the mentioned accounts up, with (`docs/tickets.md`, "Replies"). |
 | `connection:<name>` | What the server of a connection is given (`docs/extensions.md`, "Connections"), and the logins its adapter signs in with (agent-browser's `login`, "Adapters"). |
 
 - **Only its use reads it.** A feature reads an entry bound to it or an unbound one it names. An
@@ -221,8 +221,8 @@ daemon puts the secret where it goes itself (an HTTP header, a command's standar
 field), with `vault::secret`, which only a tool's own code calls and whose value never leaves that
 use. It never waits for the user: an item of a locked keyring is answered at once that the keyring
 is locked and the user must unlock it, and a keyring that does not answer within 3 seconds is
-answered the same. Its users: `tickets log_time` (`docs/tickets.md`, "Logging time"), with `worklogs` and `fields`
-that read Jira's REST API with the same entry and `edit` with `fields`, `parent` or a milestone that
+answered the same. Its users: `tickets log_time` (`docs/tickets.md`, "Logging time"), with `worklog_edit` and `worklog_delete` ("Correcting a
+worklog"), `worklogs` and `fields` that read Jira's REST API with the same entry and `edit` with `fields`, `parent` or a milestone that
 writes through it (#1067), `web`'s calls of an API (`docs/tools.md`, "The web": `entry` names the entry, the daemon signs in with
 HTTP Basic when it has a username, else as a bearer token, and only on the origin of its `url`
 (its scheme, host and port), `https` or `http` on this machine; an entry without a `url`, of another project or bound to

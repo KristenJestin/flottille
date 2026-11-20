@@ -13,6 +13,7 @@ mod hello;
 mod invitation;
 mod link;
 mod members;
+mod offers;
 mod request;
 mod serial;
 mod transport;
@@ -45,8 +46,10 @@ pub use members::{
     Action, Change, ChangeHash, ListError, MANAGING_HEADROOM, MOST_CHANGES, Member, MemberList,
     Members, Role, Signature,
 };
+pub use offers::{Capabilities, MOST_AGENTS, MOST_PROJECTS, Offered};
 pub use request::{
     Accepted, NONCES_PER_DEVICE, Nonce, REQUEST_WINDOW, Request, RequestError, Requests, Signed,
+    runs_agents,
 };
 pub use transport::TlsServer;
 pub use words::verification_words;

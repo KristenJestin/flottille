@@ -121,8 +121,19 @@ pub(super) fn mention_use(action: &str) -> Option<(&'static str, &'static str)> 
         "comment" | "comment_edit" => Some(("mention someone in a comment with", "comments")),
         "reply" => Some(("reply under a Jira comment with", "replies")),
         "create" | "edit" => Some(("mention someone in a description with", "descriptions")),
-        "log_time" => Some(("mention someone in a worklog's comment with", "logs time")),
+        "log_time" | "worklog_edit" => {
+            Some(("mention someone in a worklog's comment with", "logs time"))
+        }
         _ => None,
+    }
+}
+
+/// The argument holding the text of `action`: a worklog's new comment is `comment`, the others'
+/// is `body`.
+fn text_key(action: &str) -> &'static str {
+    match action {
+        "worklog_edit" => "comment",
+        _ => "body",
     }
 }
 
@@ -139,7 +150,7 @@ pub(super) fn unwritable(tracker: &ProjectTracker, action: &str, args: &Value) -
         ));
     }
     let (to, never) = mention_use(action)?;
-    let body = args["body"]
+    let body = args[text_key(action)]
         .as_str()
         .map(str::trim)
         .filter(|b| !b.is_empty())?;
@@ -218,7 +229,7 @@ async fn mentions_say(
     else {
         return Ok(Vec::new());
     };
-    let Some(body) = args["body"]
+    let Some(body) = args[text_key(action)]
         .as_str()
         .map(str::trim)
         .filter(|b| !b.is_empty())
