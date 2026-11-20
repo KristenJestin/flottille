@@ -369,6 +369,8 @@ pub struct Pairing {
 /// What a device asks the hub, once in a session.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+// A few asks a session, each sent at once: their size costs nothing worth a box.
+#[allow(clippy::large_enum_variant)]
 pub enum Ask {
     /// A member's change of the list.
     Submit { change: Change },
