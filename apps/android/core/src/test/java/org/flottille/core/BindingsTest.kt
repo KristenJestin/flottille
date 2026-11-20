@@ -38,10 +38,10 @@ class BindingsTest {
     }
 
     @Test
-    fun a_code_that_is_not_an_invitation_is_refused_with_its_sentence() = runBlocking {
+    fun a_code_that_is_not_a_pair_code_is_refused_with_its_sentence() = runBlocking {
         FlottilleCore(folder(), Plain).use { core ->
             try {
-                core.join("not a code")
+                core.join("not a code", "phone")
                 fail("a code that is not one is refused")
             } catch (refused: MobileException.Refused) {
                 assertTrue(refused.why, refused.why.isNotEmpty())

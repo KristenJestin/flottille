@@ -40,7 +40,7 @@ class OnThePhoneTest {
         FlottilleCore(folder, KeystoreSealer("flottille-test")).use { core ->
             assertNull(core.fingerprint)
             try {
-                core.join("not a code")
+                core.join("not a code", "phone")
                 fail("a code that is not one is refused")
             } catch (refused: MobileException.Refused) {
                 assertTrue(refused.why.isNotEmpty())

@@ -9,7 +9,6 @@ import kotlinx.coroutines.flow.callbackFlow
 import org.flottille.core.ffi.Batch
 import org.flottille.core.ffi.Core
 import org.flottille.core.ffi.Listener
-import org.flottille.core.ffi.Pairing
 import org.flottille.core.ffi.Sealer
 import org.flottille.core.ffi.ViewState
 import org.flottille.core.ffi.keepPanics as keepPanicsIn
@@ -31,8 +30,11 @@ class FlottilleCore(folder: File, sealer: Sealer = KeystoreSealer()) : AutoClose
     /** The view state as it is now; each batch carries it too. */
     val view: ViewState get() = core.view()
 
-    /** Starts joining from the QR's code: the pairing's words, then its `accepted()`. */
-    suspend fun join(code: String): Pairing = core.join(code)
+    /**
+     * Pairs with the hub whose pair code the QR holds (`flottille-hub pair`), as `name` with `role`
+     * (`controller` or `viewer`), which the app proposes and the user confirms.
+     */
+    suspend fun join(code: String, name: String, role: String = "controller") = core.join(code, name, role)
 
     /**
      * Connected while collected: the control session to the hub, a link to each runner, and their
