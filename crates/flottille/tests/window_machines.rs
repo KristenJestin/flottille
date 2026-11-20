@@ -363,6 +363,8 @@ fn toasts(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Vec<String> {
 
 /// Settings, General, Machines: the last section of the General tab.
 fn machines_tab(shell: &Entity<Shell>, cx: &mut VisualTestContext) {
+    // Tall enough for the whole of General: what is clicked must be in view.
+    cx.simulate_resize(size(px(1280.), px(3000.)));
     click(shell, cx, "settings");
     until(shell, cx, "the settings page is shown", |cx| {
         present(cx, "settings-tabs-general")
@@ -724,8 +726,8 @@ fn every_change_of_the_machines_page_is_animated(cx: &mut TestAppContext) {
     set_up(&hub, &pc);
     pair(&pc, &laptop, "laptop", "controller");
     let (shell, cx) = window(&pc, cx);
-    // Tall enough for the invitation's QR and the rows under it.
-    cx.simulate_resize(size(px(1280.), px(1400.)));
+    // Tall enough for the whole of General, the invitation's QR and the rows under it.
+    cx.simulate_resize(size(px(1280.), px(3000.)));
     until(&shell, cx, "the project is read", |cx| {
         shell.read_with(cx, |s, cx| {
             s.machines().read(cx).machines().is_some_and(|m| m.member())
