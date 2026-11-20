@@ -770,8 +770,10 @@ fn a_device_paired_again_keeps_its_key_and_its_card() {
     // Its hub forgotten on the machine, it pairs again with a new code, proposing another name and
     // role: its key, its name and its role are those it had, and the list did not grow.
     let changes = hub.served().with_hub(|hub| hub.list().changes().len());
+    // Stopped first: a daemon that runs writes the list it takes into the file.
+    assert!(server.user.run(&["daemon", "stop"]).status.success());
     std::fs::remove_file(server.folder().join("hub.json")).unwrap();
-    server.restart();
+    server.user.status();
     let again = pair(&hub, &server, "renamed", "viewer");
     assert!(
         again.contains("server is paired with the hub at"),
@@ -1078,8 +1080,9 @@ fn a_removed_device_is_cut_at_once_and_comes_back_only_paired_on_the_hub() {
         seen["hub"]["state"] == "refused"
     });
     // Paired again on the hub, with its own key: a member again, and the two link.
+    assert!(server.user.run(&["daemon", "stop"]).status.success());
     std::fs::remove_file(server.folder().join("hub.json")).unwrap();
-    server.restart();
+    server.user.status();
     pair(&hub, &server, "server", "runner");
     pc.wait_for("server", "online");
 }
