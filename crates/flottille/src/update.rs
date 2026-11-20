@@ -489,11 +489,25 @@ fn fetch(url: &str) -> Result<Vec<u8>> {
     curl(url, &["--fail"])
 }
 
+/// The user's `curl`, reading no `curlrc`: an agent can write the user's (`~/.curlrc`,
+/// `$XDG_CONFIG_HOME/curlrc`), and a `proxy`, `resolve` or `insecure` there would serve another
+/// build with a matching sum. GitHub's releases are read over HTTPS only, redirections
+/// included; the tests' server (`FLOTTILLE_RELEASES`) is plain HTTP on loopback.
+fn curl_command() -> Command {
+    let mut command = Command::new("curl");
+    // curl honours `-q` only as its very first argument.
+    command.arg("-q");
+    if std::env::var_os("FLOTTILLE_RELEASES").is_none() {
+        command.args(["--proto", "=https", "--proto-redir", "=https"]);
+    }
+    command
+}
+
 /// What the user's `curl` reads at `url`.
 fn curl(url: &str, options: &[&str]) -> Result<Vec<u8>> {
     // Recorded as the daemon's own, which runs this too: its sweep of strays leaves it alone.
     let output = crate::children::spawn_std(
-        Command::new("curl")
+        curl_command()
             .args(options)
             .args(["--silent", "--show-error", "--location", "--", url])
             .stdin(Stdio::null())
@@ -719,7 +733,7 @@ fn forget_staged(binary: &Path) {
 fn download(url: &str, to: &Path, progress: &dyn Fn(u64, Option<u64>)) -> Result<()> {
     let total = size_of(url);
     let mut child = crate::children::spawn_std(
-        Command::new("curl")
+        curl_command()
             .args(["--fail", "--silent", "--show-error", "--location"])
             .arg("--output")
             .arg(to)
