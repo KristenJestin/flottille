@@ -2215,8 +2215,10 @@ never by a path (`docs/remote.md`, "A file an agent showed"): `{"mime", "size", 
 link's frame) of the file from `offset` (0 by
 default), in base64; nothing past its end. `not-found` when `shown` is no file the agent showed;
 `refused` when the file is no picture or video (by its extension), is larger than 2 GiB, or is no
-longer the file shown (a link, a folder made a link, a program). The machine serves 2 MiB a
-second, all askers together: a chunk past that waits its turn.
+longer the file shown (a link, a folder made a link, another file at its path, a file with
+several hard links, a program). The machine serves 2 MiB a second, all askers together: a chunk
+waits its turn up to 3 seconds, and past that, or when 8 calls are in flight, the call is `refused`
+at once with a sentence starting `busy:`: ask again.
 
 #### `agent.cancel`
 
