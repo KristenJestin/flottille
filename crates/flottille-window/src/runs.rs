@@ -38,6 +38,7 @@ use crate::services::ServicesPage;
 use crate::session::{SessionPage, THE_CONVERSATION, seconds};
 use crate::shell::now_ms;
 use crate::tasks::ProjectTasks;
+use crate::tunnels::TunnelLines;
 
 /// Where a list of commands and its panel are: a session's rail, a project page, which lists
 /// the tasks the user ran there, or the services page, which shows a service's run.
@@ -67,27 +68,6 @@ impl From<WeakEntity<ProjectTasks>> for Owner {
 }
 
 impl Owner {
-    /// Opens a run's address with the system's default handler.
-    fn open_link(&self, url: &str, cx: &mut App) {
-        match self {
-            Owner::Session(page) => {
-                if let Some(page) = page.upgrade() {
-                    page.read(cx).open_link(url);
-                }
-            }
-            Owner::Project(tasks) => {
-                if let Some(tasks) = tasks.upgrade() {
-                    tasks.read(cx).open_link(url, cx);
-                }
-            }
-            Owner::Services(page) => {
-                if let Some(page) = page.upgrade() {
-                    page.read(cx).open_link(url, cx);
-                }
-            }
-        }
-    }
-
     fn open(&self, run: &str, cx: &mut App) {
         match self {
             Owner::Session(page) => page.update(cx, |page, cx| page.open_command(run, cx)).ok(),
@@ -795,6 +775,8 @@ pub struct CommandList {
     tasks: Vec<String>,
     /// Run a task's button and the list it opens, made again when the tasks change.
     picker: Option<Entity<Menu>>,
+    /// The tunnels held to the runs, each said under its run.
+    tunnels: TunnelLines,
     renders: usize,
 }
 
@@ -816,6 +798,7 @@ impl CommandList {
             ticker: None,
             tasks: Vec::new(),
             picker: None,
+            tunnels: TunnelLines::default(),
             renders: 0,
         }
     }
@@ -976,12 +959,12 @@ impl CommandList {
         let address = row.address().map(str::to_owned);
         let link = match &row.url {
             Some(url) => {
-                let owner = self.page.clone();
+                let run = run.clone();
                 address_link(
                     id("link"),
                     url,
                     11.,
-                    move |url, cx| owner.open_link(url, cx),
+                    move |url, cx| crate::tunnels::open_address(Some(&run), url, cx),
                     window,
                     cx,
                 )
@@ -1007,6 +990,7 @@ impl CommandList {
                 cx,
             )
         };
+        let tunnels = self.tunnels.of_run(&row.run, p);
         let stop = (!ended).then(|| {
             let (page, run) = (self.page.clone(), run.clone());
             Button::icon(id("stop"), glyphs::STOP, "Stop").on_click(move |_, _, cx| {
@@ -1117,7 +1101,9 @@ impl CommandList {
                         id("last-presence"),
                         address.is_none() && !last.is_empty(),
                         line(id("last"), last, window, cx),
-                    )),
+                    ))
+                    // The tunnels held to it, one line each, unfolding as one opens.
+                    .children(tunnels),
             )
             .children(stop)
             .opacity(if ended { 0.75 } else { 1.0 });
@@ -1139,6 +1125,7 @@ impl Render for CommandList {
         let reduce = cx.reduce_motion();
         self.running.sync(running, at, reduce);
         self.ended.sync(ended, at, reduce);
+        self.tunnels.sync(cx);
         let ended_count = self.ended.len();
         if ended_count > 0 {
             self.ended_said = ended_count;
@@ -1810,12 +1797,12 @@ impl Render for CommandPanel {
             row.url
                 .as_deref()
                 .map(|url| {
-                    let owner = owner.clone();
+                    let run = row.run.clone();
                     address_link(
                         ElementId::Name(id.to_owned().into()),
                         url,
                         size,
-                        move |url, cx| owner.open_link(url, cx),
+                        move |url, cx| crate::tunnels::open_address(Some(&run), url, cx),
                         window,
                         cx,
                     )

@@ -199,6 +199,15 @@ pub enum Command {
         name: String,
         machine: String,
     },
+    /// A tunnel to a run of another machine, signed by this device and held by a connection of
+    /// its own for as long as the tunnel lives (`docs/remote.md`, "Tunnels"). Answered once it is
+    /// open or refused, and again when it ends.
+    TunnelOpen(crate::tunnels::Ask),
+    /// Closes a tunnel this window holds (`tunnel.close`); the connection that holds it says it
+    /// ended.
+    TunnelClose {
+        tunnel: String,
+    },
     /// The limit above which a tool result is cut (`tool_results.show`).
     ToolResultsRead,
     /// Chooses it (`tool_results.set`): `None` is Off.
@@ -1053,6 +1062,8 @@ pub enum Outcome {
         method: &'static str,
         answer: Result<Value, String>,
     },
+    /// What a connection that holds a tunnel says of it.
+    Tunnel(crate::tunnels::News),
     /// The daemon's answer to an [`Command::Ask`], or why there is none.
     Asked {
         then: crate::extensions::Then,
@@ -1485,6 +1496,39 @@ impl Actions {
         let sign = self.sign.clone().or_else(crate::link::signer);
         // Its tunnel ends at this machine's `127.0.0.1`, where the browser is: asked of this
         // machine's daemon, signed here for the machine that signs in, whichever one is shown.
+        // Its connection stays open as long as the tunnel does: a thread of its own. It goes to
+        // this machine's daemon, whichever machine is shown, which carries the request signed
+        // for the machine of the run and listens on `127.0.0.1` here.
+        if let Command::TunnelOpen(ask) = command {
+            let (connect, updates, bounds) =
+                (self.local.clone(), self.updates.clone(), self.bounds);
+            std::thread::Builder::new()
+                .name("flottille-tunnel".into())
+                .spawn(move || hold_tunnel(&connect, sign, ask, bounds, &updates))
+                .expect("a thread for a tunnel");
+            return;
+        }
+        if let Command::TunnelClose { tunnel } = command {
+            let (connect, updates, bounds) =
+                (self.local.clone(), self.updates.clone(), self.bounds);
+            std::thread::Builder::new()
+                .name("flottille-tunnel-close".into())
+                .spawn(move || {
+                    let refused = match ask_alone(
+                        &connect,
+                        "tunnel.close",
+                        json!({"tunnel": tunnel}),
+                        bounds.quick,
+                    ) {
+                        Ok(Ok(_)) => return,
+                        Ok(Err(why)) | Err(why) => why,
+                    };
+                    let news = crate::tunnels::News::NotClosed { why: refused };
+                    let _ = updates.unbounded_send(Update::Done(Outcome::Tunnel(news)));
+                })
+                .expect("a thread for closing a tunnel");
+            return;
+        }
         if let Command::SignInOn { name, machine } = command {
             let (connect, updates, bounds) =
                 (self.local.clone(), self.updates.clone(), self.bounds);
@@ -1894,6 +1938,79 @@ fn sign_in_on(
     said(ended, answer);
 }
 
+/// A tunnel to a run of `ask.machine` ([`Command::TunnelOpen`]): `tunnel.open` signed for it, on
+/// a connection that stays open, so that the tunnel lives as long as it does. Said when it is
+/// open (or why not), and when it ends: the daemon says why on that connection, which also ends
+/// with the window.
+fn hold_tunnel(
+    connect: &Connect,
+    sign: Option<Sign>,
+    ask: crate::tunnels::Ask,
+    bounds: Bounds,
+    updates: &UnboundedSender<Update>,
+) {
+    use crate::tunnels::{News, Tunnel, run_for_port};
+    let said = |news: News| {
+        updates
+            .unbounded_send(Update::Done(Outcome::Tunnel(news)))
+            .is_ok()
+    };
+    let begun = (|| {
+        let sign =
+            sign.ok_or("this window cannot sign with this device's key: use the command line")?;
+        let mut tunnel = connected(connect)?.signing(sign, ask.machine.clone());
+        // A link names a port, not a run: the machine says which of its runs are running.
+        let run = match (&ask.run, ask.port) {
+            (Some(run), _) => run.clone(),
+            (None, Some(port)) => {
+                let listed = tunnel.ask_within("run.list", json!({}), bounds.quick)??;
+                run_for_port(&listed, port, &ask.machine)?
+            }
+            (None, None) => return Err("nothing to reach".to_owned()),
+        };
+        let answer = tunnel.ask_within(
+            "tunnel.open",
+            json!({"run": run, "port": ask.port}),
+            bounds.quick,
+        )??;
+        let opened = Tunnel::of(&ask, &run, &answer)?;
+        Ok::<_, String>((opened, tunnel))
+    })();
+    let (opened, mut held) = match begun {
+        Ok(begun) => begun,
+        Err(why) => {
+            said(News::Refused { ask, why });
+            return;
+        }
+    };
+    let id = opened.id.clone();
+    if !said(News::Opened {
+        ask,
+        tunnel: opened,
+    }) {
+        return;
+    }
+    let reason = loop {
+        match held.next_event(Some(TUNNEL_LISTEN)) {
+            Ok(Some(event)) if event.name == "tunnel.closed" && event.data["tunnel"] == id => {
+                break event.data["reason"]
+                    .as_str()
+                    .unwrap_or("it ended")
+                    .to_owned();
+            }
+            Ok(Some(_)) => {}
+            // Nothing came: the window may have gone, which closes the tunnel with this thread.
+            Ok(None) if updates.is_closed() => return,
+            Ok(None) => {}
+            Err(why) => break why,
+        }
+    };
+    said(News::Closed { tunnel: id, reason });
+}
+
+/// How often a connection that holds a tunnel looks whether the window is still there.
+const TUNNEL_LISTEN: Duration = Duration::from_secs(1);
+
 /// One request on a connection of its own.
 fn ask_alone(
     connect: &Connect,
@@ -2136,6 +2253,9 @@ fn perform(connect: &Connect, sign: Option<Sign>, command: Command, bounds: Boun
             Outcome::Asked { then, answer }
         }
         Command::SignInOn { .. } => unreachable!("a sign-in on another machine has its thread"),
+        Command::TunnelOpen(_) | Command::TunnelClose { .. } => {
+            unreachable!("a tunnel has its thread")
+        }
         Command::ToolResultsRead
         | Command::ToolResultsSet { .. }
         | Command::UnchangedSet { .. } => {

@@ -95,8 +95,12 @@ fn read(path: PathBuf) -> Option<Arc<gpui_kit::Image>> {
 impl LinksCard {
     /// The card shows these links: the pictures among them are read, once each.
     pub fn show<T: 'static>(&mut self, links: &[ShownLink], cx: &mut Context<T>, of: Of<T>) {
+        // A file of another machine is that machine's: a path of the same name here is none of
+        // its picture, and nothing of it is read.
+        let elsewhere = crate::machines::shown_machine(cx).is_some();
         for link in links {
             if !is_file(&link.target)
+                || elsewhere
                 || picture_type(&link.target).is_none()
                 || self.pictures.contains_key(&link.target)
             {
@@ -147,13 +151,23 @@ impl LinksCard {
             cx.background_executor().now(),
             cx.reduce_motion(),
         );
+        let machine = crate::machines::shown_machine(cx);
         let lines: Vec<AnyElement> = self
             .lines
             .rows()
             .map(|row| {
                 let n: usize = row.key.parse().unwrap_or_default();
                 let link = row.value;
-                let said = format!("Link shared by the agent: {}, {}", link.name(), link.whence);
+                // A file of the machine shown is said where it is, and not opened here.
+                let elsewhere = machine.as_ref().filter(|_| is_file(&link.target));
+                let said = match elsewhere {
+                    Some(machine) => format!(
+                        "File of {machine} shared by the agent: {}, {}",
+                        link.name(),
+                        link.target
+                    ),
+                    None => format!("Link shared by the agent: {}, {}", link.name(), link.whence),
+                };
                 let picture = match self.pictures.get(&link.target) {
                     Some(Picture::Ready(image)) => Some(image.clone()),
                     _ => None,
@@ -170,13 +184,17 @@ impl LinksCard {
                             .truncate()
                             .child(SharedString::from(link.name().to_owned())),
                     )
-                    .when(link.title.is_some(), |d| {
+                    .when(link.title.is_some() || elsewhere.is_some(), |d| {
+                        let whence = match elsewhere {
+                            Some(machine) => format!("{machine}: {}", link.target),
+                            None => link.whence.clone(),
+                        };
                         d.child(
                             div()
                                 .mono(12.)
                                 .text_color(p.faint)
                                 .truncate()
-                                .child(SharedString::from(link.whence.clone())),
+                                .child(SharedString::from(whence)),
                         )
                     });
                 let target = link.target.clone();
@@ -232,12 +250,14 @@ impl LinksCard {
                     )
                     .child(thumb)
                     .child(words)
-                    .child(
-                        div().flex_none().ml(space::MD).child(
-                            Button::secondary(card(&format!("link-{n}-open")), "Open")
-                                .on_click(move |_, _, cx| opens(&target, cx)),
-                        ),
-                    )
+                    .when(elsewhere.is_none(), |d| {
+                        d.child(
+                            div().flex_none().ml(space::MD).child(
+                                Button::secondary(card(&format!("link-{n}-open")), "Open")
+                                    .on_click(move |_, _, cx| opens(&target, cx)),
+                            ),
+                        )
+                    })
                     .test_support();
                 Item::new(card(&format!("link-{n}-item")), row.placement, line).into_any_element()
             })

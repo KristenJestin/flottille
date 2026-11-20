@@ -880,13 +880,6 @@ impl ServicesPage {
         }
     }
 
-    /// Opens an address with the system's default handler.
-    pub fn open_link(&self, url: &str, cx: &App) {
-        if let Some(shell) = self.shell.upgrade() {
-            shell.read(cx).open_link(url);
-        }
-    }
-
     fn menu(&mut self, name: &str, cx: &mut Context<Self>) -> Entity<Menu> {
         let this = cx.entity().downgrade();
         menu_of(&mut self.menus, "service", name, cx, move |name, menu| {
@@ -1030,10 +1023,9 @@ impl ServicesPage {
             );
         }
         // What comes and goes with its state unfolds and folds away.
-        let page = cx.entity().downgrade();
         let link_id = id("link");
         let address = info.address.as_ref().map(|url| {
-            let page = page.clone();
+            let run = info.run.clone();
             LabelledLine::new(
                 id("address"),
                 Icon::OpenInEditor,
@@ -1044,11 +1036,7 @@ impl ServicesPage {
                 link_id.clone(),
                 url,
                 12.,
-                move |url, cx| {
-                    if let Some(page) = page.upgrade() {
-                        page.read(cx).open_link(url, cx);
-                    }
-                },
+                move |url, cx| crate::tunnels::open_address(run.as_deref(), url, cx),
                 window,
                 cx,
             ))

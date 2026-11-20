@@ -63,6 +63,7 @@ pub mod text_viewer;
 pub mod to_end;
 pub mod tokens;
 pub mod tree;
+pub mod tunnels;
 pub mod vault;
 pub mod vault_ask;
 pub mod version;

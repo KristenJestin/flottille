@@ -1437,13 +1437,6 @@ impl ProjectTasks {
         self.problem.as_deref()
     }
 
-    /// Opens a run's address with the system's default handler.
-    pub fn open_link(&self, url: &str, cx: &App) {
-        if let Some(shell) = self.shell.upgrade() {
-            shell.read(cx).open_link(url);
-        }
-    }
-
     pub fn commands(&self) -> &Entity<CommandList> {
         &self.commands
     }
