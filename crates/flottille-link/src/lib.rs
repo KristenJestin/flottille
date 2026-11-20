@@ -16,6 +16,7 @@ mod members;
 mod offers;
 mod request;
 mod serial;
+mod sessions;
 mod transport;
 mod tunnel;
 mod words;
@@ -50,9 +51,10 @@ pub use members::{
 };
 pub use offers::{Capabilities, MOST_AGENTS, MOST_PROJECTS, Offered};
 pub use request::{
-    Accepted, FULL_SWITCH_LASTS, NONCES_PER_DEVICE, Nonce, REQUEST_WINDOW, Request, RequestError,
-    Requests, Signed, full_switch, runs_agents,
+    Accepted, CLOSE_LASTS, FULL_SWITCH_LASTS, NONCES_PER_DEVICE, Nonce, REQUEST_WINDOW, Request,
+    RequestError, Requests, Signed, full_switch, kept_close, runs_agents,
 };
+pub use sessions::{LightSession, MOST_SESSIONS, STATES, SessionList, TITLE_LIMIT};
 pub use transport::TlsServer;
 pub use tunnel::TunnelStream;
 pub use words::verification_words;

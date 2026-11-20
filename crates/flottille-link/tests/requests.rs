@@ -6,7 +6,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use flottille_link::{
     Action, DeviceKey, Keyring, KeyringError, MemberList, Members, NONCES_PER_DEVICE, Request,
-    Requests, Role, Signature, full_switch, runs_agents,
+    Requests, Role, Signature, full_switch, kept_close, runs_agents,
 };
 use flottille_protocol::{Class, METHODS};
 use serde_json::{Value, json};
@@ -723,4 +723,44 @@ fn a_switch_to_full_counts_for_twelve_hours_from_its_signing() {
         refused.contains("ahead of this machine's clock"),
         "{refused}"
     );
+}
+
+/// `text` as the request it is.
+fn request_of(text: &str) -> Request {
+    serde_json::from_str(text).unwrap()
+}
+
+#[test]
+fn a_close_kept_while_its_machine_was_off_is_taken_from_a_member_that_may_stop() {
+    let (pc, pixel, tablet, list) = three();
+    let members = members(&list);
+    let close = |key: &DeviceKey| request_of(&signed(key, "agent.stop", json!({"agent": "a1"}), 0));
+    let day = 24 * 60 * MINUTE;
+
+    // Hours later, its nonce unchecked: played again, it closes a session closed already.
+    let (member, agent) = kept_close(&close(&pixel), "pc", &members, time(2 * day)).unwrap();
+    assert_eq!((member.name.as_str(), agent.as_str()), ("pixel", "a1"));
+    assert!(kept_close(&close(&pixel), "pc", &members, time(2 * day)).is_ok());
+    assert!(kept_close(&close(&pc), "pc", &members, time(MINUTE)).is_ok());
+
+    let refusal = |request: &Request, machine: &str, at: u64| {
+        kept_close(request, machine, &members, time(at))
+            .unwrap_err()
+            .to_string()
+    };
+    assert!(refusal(&close(&tablet), "pc", MINUTE).contains("may only view"));
+    assert!(refusal(&close(&pixel), "server", MINUTE).contains("not for server"));
+    let send = request_of(&signed(&pixel, "agent.send", json!({"agent": "a1"}), 0));
+    assert!(refusal(&send, "pc", MINUTE).contains("not agent.stop"));
+    let none = request_of(&signed(&pixel, "agent.stop", json!({}), 0));
+    assert!(refusal(&none, "pc", MINUTE).contains("names no session"));
+    assert!(refusal(&close(&key(9)), "pc", MINUTE).contains("not signed by a member"));
+    assert!(refusal(&close(&pixel), "pc", 30 * day + MINUTE).contains("older than thirty days"));
+    let ahead = request_of(&signed(
+        &pixel,
+        "agent.stop",
+        json!({"agent": "a1"}),
+        10 * MINUTE,
+    ));
+    assert!(refusal(&ahead, "pc", 0).contains("ahead"));
 }

@@ -113,6 +113,15 @@ pub enum MachineMessage {
     /// receiver (`docs/remote.md`, "What a machine may send"). Answered `{"text"}`,
     /// `{"later": why}` when the receiver cannot take it now, or refused.
     Call(Box<Call>),
+    /// The sender's live root sessions, light (`docs/remote.md`, "One list of every machine"):
+    /// sent by a runner when a link is made and again when the list changes, kept by the
+    /// receiver for its clients. Answered `{}`, or refused.
+    Sessions(crate::SessionList),
+    /// The user's close of a session of the receiver, signed by their device (`agent.stop`) and
+    /// kept by the sender while the receiver was off: sent once it links again, kept until it is
+    /// answered, and idempotent (a session ended already is answered as closed). Answered `{}`,
+    /// `{"later": why}`, or refused.
+    Close(Box<crate::Request>),
 }
 
 /// A delivery one machine sends another for one of the receiver's agents: taken only for the
