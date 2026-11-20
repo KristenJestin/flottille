@@ -132,6 +132,7 @@ pub const METHODS: &[(&str, Class)] = &[
     ("remote.address.remove", Drive),
     ("remote.members", Read),
     ("remote.launches", Read),
+    ("remote.sessions", Read),
     ("remote.requests", Read),
     ("remote.invite", Drive),
     ("remote.refuse", Drive),
@@ -141,6 +142,7 @@ pub const METHODS: &[(&str, Class)] = &[
     // As `remote.setup`: a join, then the declaration of this machine by the device that joined.
     ("remote.join", Local),
     ("remote.declare", Local),
+    ("remote.close", Local),
     // It opens a port on the client's machine for a run's port on this one: a user's act.
     ("tunnel.open", Drive),
     // What a machine's daemon carries is its own: the listeners are here, never over a link.

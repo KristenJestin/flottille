@@ -496,6 +496,67 @@ fn keep(
     Ok(())
 }
 
+/// The id under which the close of `agent` of the machine of key `machine` is kept: one close
+/// of a session is kept once, however often it is asked.
+fn close_id(machine: &str, agent: &str) -> String {
+    format!("close-{}-{agent}", &machine[..machine.len().min(16)])
+}
+
+/// Keeps the user's close of the session `agent` of the machine of key `machine`, named `name`
+/// (`docs/remote.md`, "One list of every machine"), and sends it when it can; refused when as many
+/// messages wait for that machine as may.
+pub(crate) fn keep_close(
+    daemon: &Arc<Daemon>,
+    machine: &str,
+    name: &str,
+    agent: &str,
+    request: flottille_link::Request,
+) -> Result<(), String> {
+    let id = close_id(machine, agent);
+    let kept = daemon
+        .read(|store| store.outgoing(Some(machine)))
+        .map_err(|error| format!("it cannot be kept: {error}"))?;
+    if kept.iter().any(|outgoing| outgoing.id == id) {
+        return Ok(());
+    }
+    if kept.len() >= MOST_KEPT {
+        return Err(format!("{MOST_KEPT} messages wait for {name} already"));
+    }
+    let outgoing = Outgoing {
+        seq: 0,
+        id,
+        machine: machine.to_owned(),
+        name: name.to_owned(),
+        launch: String::new(),
+        message: serde_json::to_value(MachineMessage::Close(Box::new(request))).unwrap_or_default(),
+        back: false,
+        at: now_ms(),
+    };
+    daemon
+        .write(|store| store.keep_outgoing(&outgoing).map(|()| ((), None)))
+        .map_err(|error| format!("it cannot be kept: {error}"))?;
+    send_kept(daemon, machine);
+    Ok(())
+}
+
+/// The sessions whose close waits to be sent, each by its machine's key and its id there.
+pub(crate) fn closing(daemon: &Daemon) -> std::collections::HashSet<(String, String)> {
+    daemon
+        .read(|store| store.outgoing(None))
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|outgoing| {
+            match serde_json::from_value::<MachineMessage>(outgoing.message).ok()? {
+                MachineMessage::Close(request) => {
+                    let params: Value = serde_json::from_str(&request.signed.params).ok()?;
+                    Some((outgoing.machine, params["agent"].as_str()?.to_owned()))
+                }
+                _ => None,
+            }
+        })
+        .collect()
+}
+
 /// Sends what is kept for `machine` again in a while: it could not take it now.
 fn retry(daemon: &Arc<Daemon>, machine: &str) {
     let (daemon, machine) = (Arc::downgrade(daemon), machine.to_owned());
