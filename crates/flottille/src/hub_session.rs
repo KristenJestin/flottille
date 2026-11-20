@@ -140,7 +140,8 @@ impl Control {
     /// The hub's state, said once in the log when it changes.
     fn set(&self, state: &'static str, reason: Option<String>) {
         let mut seen = self.seen.lock().unwrap();
-        if seen.state != state || seen.reason != reason {
+        let changed = seen.state != state || seen.reason != reason;
+        if changed {
             match &reason {
                 Some(reason) => eprintln!("flottille daemon: {reason}"),
                 None => eprintln!("flottille daemon: the hub is {state}"),
@@ -151,6 +152,11 @@ impl Control {
         }
         seen.state = state;
         seen.reason = reason;
+        drop(seen);
+        // The clients that watch read it again at once.
+        if changed {
+            (self.emit)("remote.hub", json!({"state": state}));
+        }
     }
 
     /// The hub as `remote.machines` says it; `null` when this machine is not set up.
