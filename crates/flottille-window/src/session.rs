@@ -4055,17 +4055,11 @@ impl Render for ConversationView {
     }
 }
 
-/// The refs a delivery names its commits came back into from another machine (`Its commits came
-/// back to you on <ref> of <path>: …`, the daemon's words).
+/// The refs a delivery names its commits came back into from another machine: the daemon's own
+/// lines (`flottille_core::prompt::came_back`), never an agent's words.
 fn returned_refs(text: &str) -> impl Iterator<Item = &str> {
-    const CAME_BACK: &str = "Its commits came back to you on ";
-    text.lines().filter_map(|line| {
-        let rest = &line[line.find(CAME_BACK)? + CAME_BACK.len()..];
-        let reference = rest.split(' ').next()?;
-        reference
-            .starts_with("refs/flottille/machines/")
-            .then_some(reference)
-    })
+    text.lines()
+        .filter_map(flottille_core::prompt::returned_ref)
 }
 
 /// A child in the sub-agents list.
