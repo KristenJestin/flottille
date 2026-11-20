@@ -809,7 +809,7 @@ impl Snapshot {
                         .get(id.as_str())
                         .map(|(said, _)| said.clone())
                         .unwrap_or_else(|| "Waiting".to_owned()),
-                    Some(_) => match asks.iter().find(|(session, _)| session == id) {
+                    Some(_) => match asks.iter().find(|(session, _)| *session == id) {
                         Some((_, what)) => format!("Needs you: {what}"),
                         None => "Needs you".to_owned(),
                     },
