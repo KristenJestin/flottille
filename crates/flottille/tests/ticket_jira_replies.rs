@@ -620,7 +620,7 @@ fn show_full_draws_each_reply_under_its_comment() {
     let at = |id: &str| {
         lines
             .iter()
-            .position(|line| line.contains(&format!("[comment {id}]")))
+            .position(|line| line.contains(&format!("[comment {id},")))
             .unwrap_or_else(|| panic!("{id}: {shown}"))
     };
     let indent = |id: &str| lines[at(id)].len() - lines[at(id)].trim_start().len();
