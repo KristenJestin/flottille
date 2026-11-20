@@ -326,12 +326,13 @@ push the gate let through, and its checks' dry run, are the exception (below):
   The daemon's own socket is not among them. X11's socket folder (`/tmp/.X11-unix`) is emptied
   the same way, unless the process is given X11's display. A session bus the daemon's
   `DBUS_SESSION_BUS_ADDRESS` names by a path outside the runtime folders (`unix:path=/tmp/dbus-…`,
-  as `dbus-launch` makes one), found at the daemon's start, is hidden there under `/dev/null`,
-  while the socket at that path is still the one found (its device, inode and change time,
-  checked before each process starts: an inode freed is often given to the next file made): a
-  folder or a socket a confined command made in its place is not hidden (a mount over a folder
-  would fail every start), and no push the gate lets through is given the
-  bus's address from then on (below). The mounts are made by the process before it runs its
+  as `dbus-launch` makes one), found at the daemon's start, has its path hidden in every
+  confined process, whatever is there now: a socket or a file under `/dev/null`, a folder under
+  an empty read-only one, and nothing at all where nothing is there (nothing is reached by that
+  path then). The daemon also keeps what tells the socket found from another (its device, inode
+  and change time: an inode freed is often given to the next file made); once the socket at the
+  path is no longer that one, gone or replaced, no push the gate lets through is given the bus's
+  address (below), and `flottille doctor` says so in its warnings. The mounts are made by the process before it runs its
   program, which runs as the user, not as root of the namespace, with `no_new_privs` set first
   (a program with file capabilities gains none in the namespace): it holds no capability to
   unmount or remount them, and a namespace it makes inside gets them locked. Landlock's rules
@@ -451,11 +452,14 @@ The gaps, where the platform does not allow more:
   below Landlock's ninth ABI it connects to the bus and the other sockets of the runtime folder
   by their path, and it reaches X11's by theirs. The daemon's log says so at its start, and `flottille doctor` in its warnings
   (`sandbox.private_mounts` false in `--json`);
-- a session bus whose socket the daemon found at its start and that is gone or replaced since is
-  no longer hidden: a confined command could make a socket at its path, which a later confined
-  command may reach, and which the daemon's own keyring use would reach too, since its
-  environment still names it. The check of the socket is made before a process starts, so one
-  replaced in between fails that start (the mount is made over what is there then);
+- a session bus outside the runtime folders is hidden at its path only: where its socket is in
+  a folder a confined command can write (`/tmp/dbus-…/bus`, say), the command can move that
+  folder (only the masked socket itself is a mount point), and the bus found at the start is then
+  reached at its new path, which nothing hides. A socket a confined command made at the bus's
+  path is hidden from the others, but the daemon's own keyring use would reach it, since its
+  environment still names the path. Any change of the socket's change time (a `chmod`, a new
+  link, a bus started there again) counts as replaced: the push loses the bus's address while
+  the path stays hidden;
 - `/proc/<pid>/root` leads to the mounts of another process: Landlock keeps a confined process
   from every process outside its domain, so it is closed wherever Landlock is used (its second
   ABI or later), and open without it;
