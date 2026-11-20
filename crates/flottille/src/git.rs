@@ -185,7 +185,9 @@ fn helpers() -> Vec<String> {
 static GIT: OnceLock<Option<PathBuf>> = OnceLock::new();
 
 /// Why a push the gate let through is refused where no such `git` was found.
-pub const UNFOUND: &str = "no git of the daemon's PATH is owned by root in a folder owned by      root, and a push goes outside the sandbox only through one: install git from the system's      packages, then restart the daemon";
+pub const UNFOUND: &str = "no git of the daemon's PATH is owned by root in a folder owned by \
+     root, and a push goes outside the sandbox only through one: install git from the system's \
+     packages, then restart the daemon";
 
 /// Finds the `git` of [`GIT`], at the daemon's start, before anything runs.
 pub fn find_git() {

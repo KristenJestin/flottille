@@ -407,7 +407,7 @@ fails on the path. Outside the sandbox, only these are added:
 
 - the `git` of the daemon's `PATH` that root owns in a folder root owns, found at the daemon's
   start, its links followed, never one a run put first in the `PATH` since; without one, the
-  push is refused, saying why (and `flottille doctor` says it);
+  push is refused, saying why (and the daemon's log says it at its start);
 - `core.hooksPath=/dev/null`;
 - `credential.helper=` and then the user's own credential helpers (the system's and the user's
   settings, read at the daemon's start), as for the daemon's own git (above): a helper a run wrote
