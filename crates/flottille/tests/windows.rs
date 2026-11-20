@@ -335,22 +335,38 @@ fn the_shared_display_folder_is_still_reachable_in_the_namespace() {
     let _wayland = wayland_socket(&user);
     let (_, mcp, place) = session(&user);
     windows(&user, "on");
+    // One run: its display folder goes when it ends.
+    std::fs::write(
+        place.join("shown.py"),
+        format!(
+            "import json, os, socket\n\
+             out = {{'files': sorted(os.listdir(os.environ['XDG_RUNTIME_DIR']))}}\n\
+             for name, path in [('shown', os.environ['XDG_RUNTIME_DIR'] + '/wayland-0'),\n\
+             \x20   ('session', {session:?})]:\n\
+             \x20   s = socket.socket(socket.AF_UNIX)\n\
+             \x20   try:\n\
+             \x20       s.connect(path)\n\
+             \x20       out[name] = 'connected'\n\
+             \x20   except OSError as e:\n\
+             \x20       out[name] = type(e).__name__\n\
+             print(json.dumps({{'shown': out}}))\n",
+            session = user.path("runtime/wayland-0").to_str().unwrap(),
+        ),
+    )
+    .unwrap();
 
-    let seen = seen(&mcp, &place);
-    let folder = PathBuf::from(seen["env"]["XDG_RUNTIME_DIR"].as_str().unwrap());
-    let reached = reached(&mcp, &place, &folder.join("wayland-0"), "none");
-    let the_session_s = reached_path(&mcp, &place, &user.path("runtime/wayland-0"));
+    let ran = done(mcp.call("run", json!({"line": "python3 shown.py"})));
+    let line = ran
+        .lines()
+        .find(|line| line.trim_start().starts_with("{\"shown\""))
+        .unwrap_or_else(|| panic!("{ran}"));
+    let out = serde_json::from_str::<Value>(line.trim()).unwrap()["shown"].clone();
 
     // Its own folder, under the runtime folder the namespace empties, put back in it.
-    assert_eq!(seen["files"], json!(["wayland-0"]), "{seen}");
-    assert_eq!(reached["path"], "connected", "{reached}");
+    assert_eq!(out["files"], json!(["wayland-0"]), "{out}");
+    assert_eq!(out["shown"], "connected", "{out}");
     // Beside it, the session's own socket is not there.
-    assert_eq!(the_session_s, "FileNotFoundError");
-}
-
-/// [`reached`] by the path alone.
-fn reached_path(mcp: &Mcp, place: &Path, path: &Path) -> Value {
-    reached(mcp, place, path, "none")["path"].clone()
+    assert_eq!(out["session"], "FileNotFoundError", "{out}");
 }
 
 #[test]
