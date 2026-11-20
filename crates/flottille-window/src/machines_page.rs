@@ -1070,6 +1070,7 @@ impl Render for MachinesSection {
         self.fields(window, cx);
         let blocks = self.blocks(window, cx);
         div()
+            .id("machines-blocks")
             .flex()
             .flex_col()
             .children(blocks.into_iter().enumerate().map(|(n, (part, block))| {
@@ -1079,6 +1080,7 @@ impl Render for MachinesSection {
                     block,
                 ))
             }))
+            .test_support()
     }
 }
 

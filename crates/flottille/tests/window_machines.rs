@@ -762,9 +762,11 @@ fn every_change_of_the_machines_page_is_animated(cx: &mut TestAppContext) {
     for _ in 0..60 {
         step(&shell, Duration::from_millis(16), cx);
         if present(cx, "enter-machines-hub") && present(cx, "enter-machines-devices") {
-            let first = top(cx, "enter-machines-hub");
+            // From the column's own top: what is above the machines moves as the page loads.
+            let column = top(cx, "machines-blocks");
+            let first = top(cx, "enter-machines-hub") - column;
             let below = first + height(cx, "enter-machines-hub");
-            offsets.push((first, top(cx, "enter-machines-devices") - below));
+            offsets.push((first, top(cx, "enter-machines-devices") - column - below));
         }
     }
     let (first, gap) = *offsets.last().unwrap();
