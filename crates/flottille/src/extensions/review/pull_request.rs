@@ -98,7 +98,7 @@ pub(super) async fn prepare(
         let _ = git::output(
             &target.folder,
             &["update-ref", "-d", "--end-of-options", name],
-            Class::Read,
+            Class::Work,
         )
         .await;
     }
@@ -381,10 +381,15 @@ pub(super) async fn sweep_refs(daemon: &Daemon) {
                 continue;
             };
             for name in refs.lines().filter(|name| name.starts_with(REFS)) {
+    // A review makes its folder before it fetches: where none was ever made, no fetch of one left
+    // a ref, and the user's repositories are not read for nothing at every start.
+    if !daemon.paths.reviews().is_dir() {
+        return;
+    }
                 let _ = git::output(
                     &folder,
                     &["update-ref", "-d", "--end-of-options", name],
-                    Class::Read,
+                    Class::Work,
                 )
                 .await;
             }
