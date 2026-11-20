@@ -61,9 +61,17 @@ fn reader_time() -> Duration {
     crate::test_time::tuned("FLOTTILLE_TEST_READER_MS", Duration::from_secs(25))
 }
 
+/// The CPU seconds of a reader in production; a test's shorter time only lowers it.
+const READER_CPU_SECONDS: u64 = 20;
+
 fn reader_cpu_seconds() -> u64 {
-    match reader_time() {
-        time if time == Duration::from_secs(25) => 20,
+    cpu_seconds_for(reader_time())
+}
+
+/// Never more than `READER_CPU_SECONDS`: the sandbox does not widen with the clock.
+fn cpu_seconds_for(time: Duration) -> u64 {
+    match time {
+        time if time == Duration::from_secs(25) => READER_CPU_SECONDS,
         time => time.as_secs().saturating_sub(1).max(1),
     }
 }
@@ -2248,6 +2256,19 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::io::{BufRead, BufReader, Write};
+
+    #[test]
+    fn a_long_reader_time_never_widens_the_reader_cpu_limit() {
+        for seconds in [25, 26, 60, 3600] {
+            assert_eq!(
+                cpu_seconds_for(Duration::from_secs(seconds)),
+                20,
+                "{seconds}"
+            );
+        }
+        assert_eq!(cpu_seconds_for(Duration::from_secs(6)), 5);
+        assert_eq!(cpu_seconds_for(Duration::from_millis(500)), 1);
+    }
     use std::net::TcpListener;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
