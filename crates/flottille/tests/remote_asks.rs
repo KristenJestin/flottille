@@ -13,6 +13,7 @@ use crate::remote_launch::{
 };
 
 use common::mcp::Mcp;
+use flottille_core::store::Store;
 use flottille_link::{Call, MachineMessage};
 use serde_json::{Value, json};
 
@@ -486,4 +487,41 @@ fn an_approval_answer_aimed_at_another_tree_or_a_local_request_is_refused() {
     a_while();
     assert!(users_request(&server, theirs).is_none());
     assert_eq!(users_request(&server, local).unwrap()["state"], "pending");
+}
+
+#[test]
+fn a_pilot_s_answer_still_queued_when_its_machine_goes_off_answers_the_question() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    script(
+        &server,
+        json!([{"when": "Finish the export.", "times": 1, "do": [
+            {"mcp": {"tool": "ask", "arguments": {"question": QUESTION}}},
+            {"hold": "release"}
+        ]}]),
+    );
+    let (session, mcp) = led_on_server(&pc, &server, "Finish the export.", "full");
+    tool_answer(&server, "Your question went to agent");
+    // The pilot answers while the session's turn goes on: its answer waits there, queued.
+    done(&mcp.call(
+        "session_send",
+        json!({"session": session, "text": "CSV first, JSON next."}),
+    ));
+    eventually("the pilot's answer queued on server", || {
+        Store::open_read_only(&server.user.path("state/flottille/flottille.db"))
+            .unwrap()
+            .deliveries(&session, "queued")
+            .unwrap()
+            .iter()
+            .any(|delivery| delivery.kind == "session")
+    });
+
+    off(&pc);
+    offline(&server, "pc");
+
+    a_while();
+    assert!(questions(&server).is_empty(), "{:#?}", questions(&server));
+    release(&server);
+    prompted(&server, "CSV first, JSON next.");
+    a_while();
+    assert!(questions(&server).is_empty(), "{:#?}", questions(&server));
 }
