@@ -53,7 +53,7 @@ An entry made for one precise feature is that feature's alone. `for` names it:
 
 | `for` | The use |
 |---|---|
-| `worklog:<project>` | The token the project's tracker logs time with (`docs/tickets.md`, "Logging time"), corrects and deletes worklogs with ("Correcting a worklog"), and reads worklogs and fields with, edits work items with (their fields, parent and fix version, `docs/tools.md`), posts a reply under a comment, and posts or changes a text that mentions someone, and looks the mentioned accounts up, with (`docs/tickets.md`, "Replies"). |
+| `worklog:<project>` | The token the project's tracker logs time with (`docs/tickets.md`, "Logging time"), corrects and deletes worklogs with ("Correcting a worklog"), and reads worklogs and fields with, edits work items with (their fields, parent and fix version, `docs/tools.md`), posts a reply under a comment, and posts or changes a text that mentions someone, and looks the mentioned accounts up, with (`docs/tickets.md`, "Replies"), and searches the site's people with, for `people` (`docs/tickets.md`, "Mentions"). |
 | `connection:<name>` | What the server of a connection is given (`docs/extensions.md`, "Connections"), and the logins its adapter signs in with (agent-browser's `login`, "Adapters"). |
 
 - **Only its use reads it.** A feature reads an entry bound to it or an unbound one it names. An
@@ -61,7 +61,7 @@ An entry made for one precise feature is that feature's alone. `for` names it:
   secret is read, with a sentence naming its use (`the vault entry jira-time is bound to the
   worklog of the project app and serves no other use`), never its value. A connection naming
   another use's entry is refused when it is declared, and its server does not start; the
-  worklog's `Log time with` does not offer it, and `tickets log_time` refuses it before any card.
+  worklog's `Jira API access with` does not offer it, and `tickets log_time` refuses it before any card.
 - **Made from a feature, bound to it from the start**: the entry set from a request's card (the
   worklog's need), from a project's Settings, Tracker, "New entry in the vault", or from a feature's
   own screen, which says `for`. An entry set from Settings, Vault (or `flottille vault set`)
@@ -130,10 +130,10 @@ most for a keyring that asks to be unlocked, then goes on), and a new secret is 
 it is set. A secret replaced or removed stays masked until the daemon restarts: another entry may
 hold the same value.
 
-## Choosing the entry for time logging
+## Choosing the entry for Jira API access
 
 A Jira project's Settings, Repositories tab, Tracker, names the entry (`docs/projects.md`, "Forges
-and tracker"): the select `Log time with` lists the entries the project sees by name and username,
+and tracker"): the select `Jira API access with` lists the entries the project sees by name and username,
 but those bound to another use, and its link opens the vault's new-entry dialog from there, the
 entry it makes bound to the project's worklog.
 

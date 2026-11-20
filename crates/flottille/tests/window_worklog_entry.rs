@@ -1,5 +1,5 @@
 //! The vault entry a Jira project logs time with (#638): the Tracker dialog of the project's
-//! Settings shows `Log time with`, a select of the entries the project sees, saved as
+//! Settings shows `Jira API access with`, a select of the entries the project sees, saved as
 //! `worklog_token`, and a link that adds one in the vault's own form, over the Tracker; a `log_time`
 //! refused for want of an entry says so in the conversation, with a button to the Tracker. On
 //! GPUI's test platform in front of a real daemon, with the fake ACP agent, the in-memory keyring,
@@ -179,11 +179,14 @@ fn the_jira_tracker_shows_the_worklog_entry_and_saves_it(cx: &mut TestAppContext
     // A visible label, and under it what the entry is: no secret is anywhere.
     assert_eq!(
         label("tracker-worklog-field-label", cx).as_deref(),
-        Some("Log time with")
+        Some("Jira API access with")
     );
     assert_eq!(
         label("tracker-worklog-field-hint", cx).as_deref(),
-        Some("A Jira API token in the vault, its username your Jira e-mail.")
+        Some(
+            "A Jira API token in the vault, its username your Jira e-mail: it logs time, \
+             replies, mentions and finds people."
+        )
     );
     assert_eq!(
         label("tracker-worklog-add", cx).as_deref(),
@@ -415,7 +418,7 @@ fn a_log_time_refused_for_want_of_a_token_offers_set_up_time_logging(cx: &mut Te
     );
     assert_eq!(
         label(format!("row-{at}-time-logging-setup"), cx).as_deref(),
-        Some("Set up time logging")
+        Some("Set up Jira API access")
     );
     assert_eq!(
         cx.update(|window, cx| window.simulate_next_frame(cx)),

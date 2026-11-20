@@ -53,6 +53,7 @@ pub use replies::says as reply_says;
 pub use worklog::change_says as worklog_change_says;
 pub use worklog::says as worklog_says;
 pub use worklog::unset as worklog_unset;
+pub(crate) use worklogs::is_account;
 
 /// A call of `acli` is cut after this.
 const ACLI_TIME: Duration = Duration::from_secs(30);
@@ -155,9 +156,15 @@ impl Comment {
             .map_or(String::new(), |at| format!(", {at}"));
         // The id of every comment: what `reply` takes, and `comment_edit` and `comment_delete`
         // for one an agent posted.
+        // Jira's account id of its author goes with it: what a mention of them is written with.
+        let account = self.account.as_deref().map_or(String::new(), |account| {
+            format!(", author account {account}")
+        });
         let id = match (&self.id, answers) {
-            (Some(id), Some(parent)) => format!(" [comment {id}, a reply to {parent}]"),
-            (Some(id), None) => format!(" [comment {id}]"),
+            (Some(id), Some(parent)) => {
+                format!(" [comment {id}{account}, a reply to {parent}]")
+            }
+            (Some(id), None) => format!(" [comment {id}{account}]"),
             (None, _) => String::new(),
         };
         format!(
@@ -1505,7 +1512,7 @@ pub async fn tickets(daemon: &Arc<Daemon>, agent: &str, place: &Place, args: Val
         }
     }
     let outcome = match asked.action.as_str() {
-        "people" => people::people(&project, &asked).await,
+        "people" => people::people(daemon, &project, &asked).await,
         "list" | "search" => listed(daemon, &project, &asked).await,
         "show" => match show(daemon, place, &project, &asked).await {
             Outcome::Done(text) => Outcome::Done(text + &events::subscriptions_text(daemon, agent)),

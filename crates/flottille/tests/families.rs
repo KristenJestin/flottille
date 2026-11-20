@@ -2364,7 +2364,7 @@ fn tickets_people_lists_the_assignable_users() {
         lines,
         [
             "- Ben Sample (557058:bbbb-0002)",
-            "- Anne Example (anne@example.org)"
+            "- Anne Example (anne@example.org), account id 557058:aaaa-0001"
         ],
         "{listed}"
     );
@@ -2373,7 +2373,11 @@ fn tickets_people_lists_the_assignable_users() {
         mcp.call("tickets", json!({"action": "people", "query": "anne"})),
     );
     let lines: Vec<&str> = narrowed.lines().filter(|l| l.starts_with("- ")).collect();
-    assert_eq!(lines, ["- Anne Example (anne@example.org)"], "{narrowed}");
+    assert_eq!(
+        lines,
+        ["- Anne Example (anne@example.org), account id 557058:aaaa-0001"],
+        "{narrowed}"
+    );
     let search = words(user.acli_received())
         .into_iter()
         .find(|call| call.starts_with("jira workitem search"))
@@ -2388,6 +2392,56 @@ fn tickets_people_lists_the_assignable_users() {
     let listed = read(&user, mcp.call("tickets", json!({"action": "people"})));
     let lines: Vec<&str> = listed.lines().filter(|l| l.starts_with("- ")).collect();
     assert_eq!(lines, ["- Ana Example (ana)", "- bob"], "{listed}");
+}
+
+#[test]
+fn the_tickets_tool_says_how_to_mention_on_jira() {
+    let user = user();
+    on_jira(&user);
+    let (_, mcp) = root_in(&user, None);
+    let tools = mcp.tools();
+    let tickets = tools.iter().find(|tool| tool["name"] == "tickets").unwrap();
+    let field = |name: &str| {
+        tickets["inputSchema"]["properties"][name]["description"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned()
+    };
+    // Where the agent reads what a text may hold: the Jira form, that a bare @Name does not
+    // notify, where the ids are, and GitHub's own form.
+    let body = field("body");
+    assert!(
+        body.contains("[@Display Name](mention:<accountId>)"),
+        "{body}"
+    );
+    assert!(body.contains("people"), "{body}");
+    assert!(body.contains("@Name"), "{body}");
+    assert!(body.contains("@login"), "{body}");
+    let query = field("query");
+    assert!(query.contains("account id"), "{query}");
+    // The tool's own description stays short: the details are the fields'.
+    let description = tickets["description"].as_str().unwrap();
+    assert!(description.len() < 1_000, "{}", description.len());
+}
+
+#[test]
+fn people_gives_the_account_id_for_a_mention() {
+    let user = user();
+    on_jira(&user);
+    jira_with_people(&user);
+    let (_, mcp) = root_in(&user, None);
+    let listed = read(&user, mcp.call("tickets", json!({"action": "people"})));
+    // Anne is named by her e-mail for an assignee: her account id is said beside it.
+    assert!(
+        listed.contains("- Anne Example (anne@example.org), account id 557058:aaaa-0001"),
+        "{listed}"
+    );
+    // Ben has no e-mail: his account id is already how he is named.
+    assert!(
+        listed.contains("- Ben Sample (557058:bbbb-0002)\n"),
+        "{listed}"
+    );
+    assert!(listed.contains("mention:<accountId>"), "{listed}");
 }
 
 /// GitHub's `acme/app`: Ana Example (whose name `gh` says on the issue she wrote) and Bob can be

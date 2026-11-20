@@ -1199,7 +1199,7 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   time the window takes the focus back while the tab is shown, in silence (only a line that changes
   moves). Under them, its **Tracker** ("Where the project's tickets come from."): **Tickets from**,
   `Nowhere`, `GitHub issues` or `Jira`, its fields, the state of `gh` or `acli` said as a
-  repository's forge says it, and Log time with (`projects.md`). **Workspaces** holds its
+  repository's forge says it, and Jira API access with (`projects.md`). **Workspaces** holds its
   **Folder**, with no sentence: **Where**, `As in Settings` (its line the folder it gives, relative
   to `~`) or `A folder for this project`, whose field unfolds under it; its **Branches** ("How new
   workspaces name their branch."): **Prefix** (its line `New workspaces get feat/<name>.`) and
@@ -1471,7 +1471,7 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   the vault's form for the entry it names) has it stacked over it, Escape and Cancel close the
   one on top and the focus returns to the one below, which reads again what changed (the request
   reads itself again once the entry is saved). A page that really is a destination (a project's
-  settings from "Set up time logging", Settings from a notice) is a navigation, and opens no
+  settings from "Set up Jira API access", Settings from a notice) is a navigation, and opens no
   dialog;
 - narrow and portrait windows: the rail, then the left tree, become drawers.
 - a history of the pages shown (project pages, sessions with the agent shown in them, settings),
