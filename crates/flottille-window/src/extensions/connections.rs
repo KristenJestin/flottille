@@ -28,7 +28,7 @@ use serde_json::{Map, Value, json};
 
 use crate::actions::Command;
 use crate::commands::{
-    boxed, line_field, perform_later, problem_line, section_blocks, spaced, stack,
+    boxed, line_field, optional_line, perform_later, problem_line, section_blocks, spaced, stack,
 };
 use crate::modals::Modals;
 use crate::shell::Shell;
@@ -2629,7 +2629,7 @@ impl ConnectionsSection {
     }
 
     /// The server's form, open or closing: the window's host draws it over the page shown.
-    pub fn form_dialog(&mut self, window: &Window, cx: &mut Context<Self>) -> Modal {
+    pub fn form_dialog(&mut self, cx: &mut Context<Self>) -> Modal {
         let p = palette(cx);
         let this = cx.entity().downgrade();
         let title = match &self.form {
@@ -2836,7 +2836,6 @@ impl ConnectionsSection {
                 .child(div().w_full().child(variables))
                 .child(div().pt(space::SM).child(new_variable)),
         )
-        .optional()
         .hint(VARIABLES_HINT);
         let secrets_field = Field::new(
             "connection-secrets-field",
@@ -2848,7 +2847,6 @@ impl ConnectionsSection {
                 .child(div().w_full().child(secrets))
                 .child(div().pt(space::SM).child(new_secret)),
         )
-        .optional()
         .hint(SECRETS_HINT);
         let limits_field = Field::new(
             "connection-limits-field",
@@ -2860,13 +2858,10 @@ impl ConnectionsSection {
                 .child(div().w_full().child(limits))
                 .child(div().pt(space::SM).child(new_limit)),
         )
-        .optional()
         .hint(LIMITS_HINT);
         let why_headless = self.headless_said().map(SharedString::from);
         let body = div()
             .id("connection-form")
-            .max_h(window.viewport_size().height - px(240.))
-            .overflow_y_scroll()
             .flex()
             .flex_col()
             .child(
@@ -2875,30 +2870,46 @@ impl ConnectionsSection {
                     .flex_col()
                     .gap(space::LG)
                     .child(
-                        Field::new("connection-name-field", "Name", name).hint(
-                            "Lower-case letters, digits and _; its tool is conn_ and this name.",
+                        Section::new("connection-section-what", "What it is")
+                            .tag("required")
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap(space::LG)
+                                    .child(Field::new("connection-name-field", "Name", name).hint(
+                                        "Lower-case letters, digits and _; its tool is conn_ \
+                                             and this name.",
+                                    ))
+                                    .child(Field::new(
+                                        "connection-about-field",
+                                        "What it is for",
+                                        boxed("connection-about", Input::new(&fields.about), cx),
+                                    )),
+                            ),
+                    )
+                    .child(
+                        Section::new("connection-section-reach", "How it is reached").child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .child(reach)
+                                .child(
+                                    presence(
+                                        "connection-command-block",
+                                        self.reach == Reach::Command,
+                                        command,
+                                    )
+                                    .space(space::LG),
+                                )
+                                .child(
+                                    presence("connection-url-block", self.reach == Reach::Url, url)
+                                        .space(space::LG),
+                                ),
                         ),
                     )
-                    .child(Field::new(
-                        "connection-about-field",
-                        "What it is for",
-                        boxed("connection-about", Input::new(&fields.about), cx),
-                    ))
-                    .child(Field::new(
-                        "connection-reach-field",
-                        "How it is reached",
-                        reach,
-                    )),
+                    .child(optional_line("connection-optional", cx)),
             )
-            .child(
-                presence(
-                    "connection-command-block",
-                    self.reach == Reach::Command,
-                    command,
-                )
-                .space(space::LG),
-            )
-            .child(presence("connection-url-block", self.reach == Reach::Url, url).space(space::LG))
             .child(
                 presence(
                     "connection-variables-block",

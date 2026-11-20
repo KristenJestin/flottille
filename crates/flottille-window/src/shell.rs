@@ -477,7 +477,7 @@ impl Shell {
             modals.add(
                 crate::extensions::connections::FORM_MODAL,
                 &connections,
-                |section, window, cx| section.form_dialog(window, cx),
+                |section, _, cx| section.form_dialog(cx),
                 ConnectionsSection::form_is_open,
                 ConnectionsSection::form_focus,
                 cx,
