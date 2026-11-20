@@ -629,10 +629,9 @@ fn with_commits(message: Value, name: &str, came: Result<Value, String>) -> Valu
             for repository in came["repositories"].as_array().into_iter().flatten() {
                 let path = repository["path"].as_str().unwrap_or(".");
                 match repository["ref"].as_str() {
-                    Some(reference) => lines.push(format!(
-                        "Its commits came back to you on {reference} of {path}: review and merge \
-                         them as a local child's work; nothing moved your branch."
-                    )),
+                    Some(reference) => {
+                        lines.push(flottille_core::prompt::came_back(reference, path))
+                    }
                     None => lines.push(format!("It made no new commit in {path}.")),
                 }
             }
