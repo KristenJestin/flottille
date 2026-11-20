@@ -102,7 +102,7 @@ select_test_file() {
     name=${rest%.rs}
     # In a crate with groups, a file no group declares is no test binary.
     if [ -d "crates/$crate/tests/group" ] && [ -z "$(group_of "$crate" "$name")" ]; then
-      echo "::notice::$path is declared by no group: no test is selected for it." >&2
+      echo "::warning::$path is declared by no group, so it is never built nor run: add \`#[path = \"../$name.rs\"]\` and \`mod $name;\` to a group in crates/$crate/tests/group/." >&2
       return 0
     fi
     add_file "$crate" "$name"
