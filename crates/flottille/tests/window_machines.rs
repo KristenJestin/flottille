@@ -1703,7 +1703,8 @@ fn turning_remote_off_closes_the_links_and_keeps_the_hub(cx: &mut TestAppContext
         false
     );
     server.wait_for("pc", "offline");
-    // Turned on again, the hub's setup is the same.
+    // Turned on again, the hub's setup is the same. The notice has unfolded before it is pressed.
+    settle(&shell, cx);
     click(&shell, cx, "turn-on-remote");
     let deadline = Instant::now() + WAIT;
     while !(present(cx, "member-server") && present(cx, "member-pc")) {

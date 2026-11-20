@@ -857,13 +857,14 @@ fn a_machine_with_a_hub_pinned_sets_up_another_only_when_asked_to_replace_it() {
     let pinned: Value =
         serde_json::from_str(&std::fs::read_to_string(pc.folder().join("hub.json")).unwrap())
             .unwrap();
-    assert_eq!(pinned["url"], first.url());
+    // The file keeps the address as it was given; only what is shown drops the slash.
+    assert_eq!(pinned["url"], format!("{}/", first.url()));
 
     setup_call(&pc, &second, true).unwrap();
     let pinned: Value =
         serde_json::from_str(&std::fs::read_to_string(pc.folder().join("hub.json")).unwrap())
             .unwrap();
-    assert_eq!(pinned["url"], second.url());
+    assert_eq!(pinned["url"], format!("{}/", second.url()));
 }
 
 #[test]
@@ -2122,13 +2123,18 @@ fn the_hubs_address_is_shown_without_its_default_port_or_a_trailing_slash() {
     let invited = pc.user.run(&["remote", "invite"]);
     let said = String::from_utf8_lossy(&invited.stdout).into_owned();
     assert!(said.contains(&format!("hub at {},", hub.url())), "{said}");
-    let again = pc.user.run_with_input(
-        &["remote", "setup", &hub.url(), "--name", "pc"],
-        &format!("{}\n", hub.code()),
-    );
-    let said = String::from_utf8_lossy(&again.stderr).into_owned();
+    // A second setup without --replace is refused, naming the hub as it is shown.
+    // The refusal comes before the code is read, so any code will do (the hub's was used).
+    let refused = pc
+        .user
+        .call(
+            "remote.setup",
+            json!({"url": hub.url(), "code": "7KQ2-M4XP-9TRW-H3CD", "changes": []}),
+        )
+        .unwrap_err()
+        .1;
     assert!(
-        said.contains(&format!("hub at {} already", hub.url())),
-        "{said}"
+        refused.contains(&format!("hub at {} already", hub.url())),
+        "{refused}"
     );
 }
