@@ -319,6 +319,9 @@ pub async fn prepared(
     tool: &str,
     args: &Value,
 ) -> Result<Vec<String>, Outcome> {
+    if let Some(says) = crate::across::says(daemon, grant, tool, args) {
+        return Ok(says);
+    }
     if tool == "agent_launch" {
         return launch_says(daemon, grant, args).await;
     }

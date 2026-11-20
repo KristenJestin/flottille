@@ -283,8 +283,10 @@ fn answer(asked: &Asked, machine: &str, launch: &str, placed: &Value) -> String 
     }
     match asked.kind {
         LaunchKind::Child => format!(
-            "Launched {named} on {machine}, {place}. {back} It works on its own there; \
-             agent_status and agent_send do not reach a child on another machine."
+            "Launched {named} on {machine}, {place}. {back} Its report, questions and failure \
+             come to you as a local child's; agent_send, agent_status and agent_stop reach it \
+             while {machine} is on, and a message sent while it is off is kept and delivered \
+             when it is back."
         ),
         LaunchKind::Led => format!(
             "Started a session led by you, {named}, on {machine}, {place}. It is a real session \
