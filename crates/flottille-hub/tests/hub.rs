@@ -164,7 +164,10 @@ fn pair_mode_pairs_one_device_with_its_code_once() {
     let paired = pair_with(&mut hub, &code, &pc, "pc", Role::Runner).unwrap();
     assert_eq!(paired.name, "pc");
     assert!(!paired.again);
-    assert_eq!(hub.pairing_ended(number), Some(PairEnd::Paired(paired)));
+    assert_eq!(
+        hub.pairing_ended(number),
+        Some(PairEnd::Paired(Box::new(paired)))
+    );
 
     // The list is the hub's: its root names the hub's key, and the entry is signed with it.
     assert_eq!(hub.list().root(), Some(hub.key()));

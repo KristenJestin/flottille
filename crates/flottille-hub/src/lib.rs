@@ -119,7 +119,7 @@ pub struct PairedDevice {
 /// How a pair mode ended.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PairEnd {
-    Paired(PairedDevice),
+    Paired(Box<PairedDevice>),
     /// Its minutes passed, or it was closed: why, in a sentence.
     Over(String),
 }
@@ -404,7 +404,7 @@ impl<C: Clock> Hub<C> {
         facts.version = Some(version.to_owned());
         facts.last_seen = Some(now);
         self.write_facts()?;
-        self.end_pairing(PairEnd::Paired(paired.clone()));
+        self.end_pairing(PairEnd::Paired(Box::new(paired.clone())));
         Ok(paired)
     }
 
