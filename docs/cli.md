@@ -495,6 +495,33 @@ Opening https://auth.example.com/authorize?… in your browser to sign in to the
 Signed in to the connection notes.
 ```
 
+With `--machine`, it signs in a connection of that machine (`docs/remote.md`, "Connections"): that
+machine's daemon runs the sign-in and keeps the tokens; this machine opens a tunnel on the port of
+its redirect on `127.0.0.1`, which carries the browser's redirect there, for as long as the sign-in
+waits.
+
+```
+$ flottille --machine server connection login notes
+Opening https://auth.example.com/authorize?… in your browser to sign in to the connection notes on server.
+Signed in to the connection notes on server.
+```
+
+### `flottille connection share <name> --machine <machine> [--entry <entry>]... [--json]`
+
+Shares an `https://` connection with another machine of the user's, a runner (`docs/remote.md`,
+"Connections"): here `--machine` names where it goes, not a machine this command drives. The
+request is this machine's, signed with this device's key. Each `--entry` is a vault entry the
+connection names, shared with it as `vault share` shares one; its sign-in's tokens never go, and
+that machine signs in for itself (`flottille --machine <machine> connection login <name>`). Refused
+for a command or a URL of this machine, an entry the connection does not name, a machine that is
+off or runs no agent, or one that has a connection of that name already. `--json` prints
+`connection.share`.
+
+```
+$ flottille connection share notes --machine server --entry notes-key
+Shared the connection notes with server, with notes-key; it signs in there for itself (`flottille --machine server connection login notes`).
+```
+
 ### `flottille connection accept <name> [--set ACTION=SETTING]...`
 
 Accepts what the last review showed: the actions that did not change keep their settings, new

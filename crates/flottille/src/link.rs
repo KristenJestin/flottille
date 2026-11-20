@@ -20,8 +20,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use flottille_core::paths::Paths;
 use flottille_link::{
-    Address, Capabilities, Endpoint, Hello, Link, LinkError, MachineKey, MachineMessage, Message,
-    Offered, PeerState, PublicKey, Role, Share, Traffic,
+    Address, Capabilities, ConnectionShare, Endpoint, Hello, Link, LinkError, MachineKey,
+    MachineMessage, Message, Offered, PeerState, PublicKey, Role, Share, Traffic,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -1181,6 +1181,13 @@ async fn serve(remote: Arc<Remote>, link: Link, name: String, generation: u64) {
                     received.answer(answered);
                 });
             }
+            Message::Machine(MachineMessage::ShareConnection(share)) => {
+                let (remote, share, peer) = (remote.clone(), share.clone(), link.peer());
+                tokio::spawn(async move {
+                    let answered = remote.shared_connection(&peer, share).await;
+                    received.answer(answered);
+                });
+            }
             // In a task of its own: the judge may take seconds.
             Message::Machine(MachineMessage::Launch(asked)) => {
                 let asked = asked.clone();
@@ -1423,7 +1430,7 @@ impl Remote {
     }
 
     /// The checked member list this machine keeps, and its own member's name.
-    fn listed(&self) -> Result<(flottille_link::Members, String), String> {
+    pub(crate) fn listed(&self) -> Result<(flottille_link::Members, String), String> {
         let control = self
             .control
             .get()
@@ -1500,18 +1507,19 @@ impl Remote {
             "flottille daemon: {} asked by {} from {from}",
             accepted.method, accepted.device.name
         );
+        // The key of the member that signed it, its public half: never the device's own key.
+        let flottille_link::Member { key: signer, .. } = accepted.device;
         tokio::spawn(crate::daemon::served_for(
             daemon,
             theirs,
             crate::daemon::Asked {
                 device: accepted.device.name.clone(),
+                key: signer,
                 signed,
             },
         ));
         let (read, mut write) = ours.into_split();
         let once = accepted.method != "events.watch";
-        // The key of the member that signed it, its public half: never the device's own key.
-        let flottille_link::Member { key: signer, .. } = accepted.device;
         let mut line = serde_json::to_vec(&flottille_core::protocol::Request {
             id: accepted.id,
             method: accepted.method,
@@ -1585,7 +1593,17 @@ impl Remote {
     /// own request, which this machine checks itself as it checks any request of a device (a
     /// machine alone shares nothing): `vault.share` of that very entry with this machine, signed
     /// for the machine that sent it, within its time, and never twice.
-    async fn shared(&self, peer: &PublicKey, share: Share) -> Result<Value, String> {
+    /// The user's request `request` a share from the machine `peer` carries, checked as any
+    /// request of a device: signed by a member's device for the machine that sent it, within its
+    /// time, never seen, its role allowing it; `method`, aimed at this machine; and from a
+    /// runner's or a controller's machine. The sender's name, this machine's, and the request.
+    fn share_checked(
+        &self,
+        peer: &PublicKey,
+        request: &Value,
+        method: &str,
+        what: &str,
+    ) -> Result<(String, String, flottille_link::Accepted), String> {
         let (members, name) = self.listed().map_err(|why| format!("refused: {why}"))?;
         let sender = members
             .by_machine(peer)
@@ -1595,26 +1613,47 @@ impl Remote {
         if sender.role == Role::Viewer {
             return Err(format!(
                 "refused: {from} is a viewer's machine: only a runner's or a controller's \
-                 machine shares a vault entry"
+                 machine shares {what}"
             ));
         }
         let accepted = self
             .requests
             .lock()
             .unwrap()
-            .check(
-                &share.request.to_string(),
-                &from,
-                &members,
-                SystemTime::now(),
-            )
+            .check(&request.to_string(), &from, &members, SystemTime::now())
             .map_err(|error| error.to_string())?;
-        if accepted.method != "vault.share" {
+        if accepted.method != method {
             return Err(format!(
-                "refused: {} is not the user's share of a vault entry",
+                "refused: {} is not the user's share of {what}",
                 accepted.method
             ));
         }
+        if accepted.params["machine"].as_str() != Some(name.as_str()) {
+            return Err(format!(
+                "refused: the user shared it with {}, not with {name}",
+                accepted.params["machine"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .chars()
+                    .take(64)
+                    .collect::<String>()
+                    .escape_debug()
+            ));
+        }
+        Ok((from, name, accepted))
+    }
+
+    /// A connection the user shared, as the machine `peer` sent it: taken only with the user's
+    /// own request, checked here as `shared` checks a vault entry's: `connection.share` of that
+    /// very connection with this machine, and with these entries, signed for the machine that
+    /// sent it, within its time, and never twice.
+    async fn shared_connection(
+        &self,
+        peer: &PublicKey,
+        share: ConnectionShare,
+    ) -> Result<Value, String> {
+        let (from, name, accepted) =
+            self.share_checked(peer, &share.request, "connection.share", "a connection")?;
         let shown = |value: &Value| {
             value
                 .as_str()
@@ -1625,12 +1664,60 @@ impl Remote {
                 .escape_debug()
                 .to_string()
         };
-        if accepted.params["machine"].as_str() != Some(name.as_str()) {
+        if accepted.params["name"] != share.connection["name"]
+            || !share.connection["name"].is_string()
+        {
             return Err(format!(
-                "refused: the user shared it with {}, not with {name}",
-                shown(&accepted.params["machine"])
+                "refused: the user shared {}, not {}",
+                shown(&accepted.params["name"]),
+                shown(&share.connection["name"])
             ));
         }
+        let consented: Vec<&str> = accepted.params["entries"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .collect();
+        let sent: Vec<&str> = share
+            .entries
+            .iter()
+            .map(|copy| copy.entry["name"].as_str().unwrap_or_default())
+            .collect();
+        if consented != sent {
+            return Err(
+                "refused: the vault entries sent are not the ones the user shared".to_owned(),
+            );
+        }
+        let daemon = self
+            .daemon
+            .get()
+            .and_then(std::sync::Weak::upgrade)
+            .ok_or_else(|| "the daemon is stopping".to_owned())?;
+        crate::extensions::receive_connection(
+            &daemon,
+            &share.connection,
+            &share.entries,
+            &from,
+            &name,
+        )
+        .await?;
+        Ok(json!({"name": share.connection["name"]}))
+    }
+
+    async fn shared(&self, peer: &PublicKey, share: Share) -> Result<Value, String> {
+        let (from, _, accepted) =
+            self.share_checked(peer, &share.request, "vault.share", "a vault entry")?;
+        let shown = |value: &Value| {
+            value
+                .as_str()
+                .unwrap_or_default()
+                .chars()
+                .take(64)
+                .collect::<String>()
+                .escape_debug()
+                .to_string()
+        };
         if accepted.params["name"] != share.entry["name"] || !share.entry["name"].is_string() {
             return Err(format!(
                 "refused: the user shared {}, not {}",
@@ -1651,6 +1738,15 @@ impl Remote {
 /// Sends the vault entry the user shared, `share`, to their machine `machine`, a runner, which
 /// checks the user's signature it carries and keeps it: what it answered, or why it is refused.
 pub(crate) async fn share(daemon: &Daemon, machine: &str, share: Share) -> Result<(), String> {
+    let link = runner_link(daemon, machine, "a vault entry")?;
+    link.send(&Message::Machine(MachineMessage::Share(share)))
+        .await
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+/// The machine link to the user's runner `machine`, which `what` is shared with.
+fn runner_link(daemon: &Daemon, machine: &str, what: &str) -> Result<Link, String> {
     let remote = remote_of(daemon).map_err(|failure| failure.message)?;
     let (members, _) = remote.listed()?;
     let Some(peer) = remote
@@ -1669,11 +1765,21 @@ pub(crate) async fn share(daemon: &Daemon, machine: &str, share: Share) -> Resul
         .is_none_or(|member| member.role != flottille_link::Role::Runner)
     {
         return Err(format!(
-            "{machine} runs no agent: a vault entry is shared with a runner"
+            "{machine} runs no agent: {what} is shared with a runner"
         ));
     }
-    let link = remote.machine_link(&peer)?;
-    link.send(&Message::Machine(MachineMessage::Share(share)))
+    remote.machine_link(&peer)
+}
+
+/// Sends the connection the user shared, `share`, to their machine `machine`, a runner, which
+/// checks the user's signature it carries and declares it: why it is refused, otherwise nothing.
+pub(crate) async fn share_connection(
+    daemon: &Daemon,
+    machine: &str,
+    share: ConnectionShare,
+) -> Result<(), String> {
+    let link = runner_link(daemon, machine, "a connection")?;
+    link.send(&Message::Machine(MachineMessage::ShareConnection(share)))
         .await
         .map(|_| ())
         .map_err(|error| error.to_string())

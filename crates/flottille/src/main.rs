@@ -379,16 +379,20 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         _ => None,
     };
     let flagged = cli.machine.clone().filter(|name| !name.is_empty());
-    // `vault share` is this machine's request: its --machine names where the entry goes.
+    // `vault share` and `connection share` are this machine's requests: their --machine names
+    // where the entry or the connection goes.
     let mut cli = cli;
-    let sharing = if let Command::Vault {
-        action: VaultAction::Share { machine, .. },
-    } = &mut cli.command
-    {
-        *machine = flagged.clone();
-        true
-    } else {
-        false
+    let sharing = match &mut cli.command {
+        Command::Vault {
+            action: VaultAction::Share { machine, .. },
+        }
+        | Command::Extensions(extensions::Command::Connection {
+            action: extensions::ConnectionAction::Share { machine, .. },
+        }) => {
+            *machine = flagged.clone();
+            true
+        }
+        _ => false,
     };
     if let (Some(command), Some(_)) = (here, &flagged) {
         return Err(format!(

@@ -1388,6 +1388,18 @@ browser is opened by the client the user asked from, with the system's default h
 - Not signed in, the server's `401` makes a review or a call fail saying to sign in.
   `client_id` is not part of what trust is given to: changing it asks for no review.
 
+**Shared with another machine** (#833, `docs/remote.md`, "Connections"). An `https://` connection
+goes to another machine of the user's, a runner, with **Share with…** in its row's menu (or
+`flottille connection share <name> --machine <m>`): its declaration, and the vault entries it names
+when the user turns on **Share its vault entries too** in the dialog, which lists the runners
+online. A command, an `http://` URL and an `https://` URL of this machine are this machine's own and
+are not offered (`refused` by the daemon). The tokens of a sign-in never go: each machine signs in
+for itself. The toast of a share offers **Sign in on <machine>**, and so does the row's menu while
+the window runs; it signs in the copy there, its redirect carried back through a tunnel, and a
+line under the row says the copy's state (`On server: not signed in yet`, `signing in, finish it in
+your browser`, `signed in`): it unfolds when the connection is shared, and its words fade from one
+state to the next. The dialog rises and fades as every dialog does.
+
 **As built (#560, the daemon).** The frame gained `Scope::Global` (no switch nor setting of a
 project: a project's `[extensions.connections]` is refused), `declared` (the extension's own
 list of tables, `[[connections.server]]`, checked by it, written through the frame's `rewrite`),
