@@ -621,15 +621,11 @@ fn the_inbox_and_question_cards_name_the_other_machine(cx: &mut TestAppContext) 
     until(&shell, cx, "the question's card", |cx| {
         page.read_with(cx, |p, cx| p.ask_dock().read(cx).shown().is_some())
     });
-    let seq = page.read_with(cx, |p, cx| {
-        p.ask_dock().read(cx).shown().unwrap().read(cx).seq()
-    });
     settle(&shell, cx);
-    let meta = label(
-        cx,
-        gpui_kit::ElementId::Name(format!("ask-{seq}-card-meta").into()),
-    )
-    .unwrap_or_default();
+    let meta = page.read_with(cx, |p, cx| {
+        let card = p.ask_dock().read(cx).shown().unwrap().clone();
+        card.read(cx).meta(cx).to_string()
+    });
     assert!(meta.ends_with(" · on server"), "{meta:?}");
 }
 

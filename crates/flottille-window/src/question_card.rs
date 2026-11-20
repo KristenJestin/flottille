@@ -276,6 +276,16 @@ impl QuestionCard {
         format!("ask-{}", self.seq)
     }
 
+    /// What its header says on the right: when it was asked, and on which machine when the window
+    /// shows another.
+    pub fn meta(&self, cx: &App) -> SharedString {
+        match crate::machines::shown_on(cx) {
+            // A question of a session on another machine says which.
+            Some(there) => SharedString::from(format!("{} · {there}", self.when)),
+            None => self.when.clone(),
+        }
+    }
+
     /// The ask's number in the history.
     pub fn seq(&self) -> u64 {
         self.seq
@@ -760,9 +770,7 @@ impl Render for QuestionCard {
             .child(self.count(cx))
             .child(self.fold_control(window, cx))
             .into_any_element();
-        // Named: its meta, which says the machine, can be read by its id.
         let mut card = Card::new()
-            .id(ElementId::Name(format!("{prefix}-card").into()))
             .title(head(
                 &prefix,
                 "question",
@@ -771,11 +779,7 @@ impl Render for QuestionCard {
                 (p.wait, p.wait_bg),
                 Some(trailing),
             ))
-            .meta(match crate::machines::shown_on(cx) {
-                // A question of a session on another machine says which.
-                Some(there) => SharedString::from(format!("{} · {there}", self.when)),
-                None => self.when.clone(),
-            });
+            .meta(self.meta(cx));
         let current = self.current;
         let question = self.block(current, !sent, cx);
         // Questions differ in height: the card eases to the one shown.
