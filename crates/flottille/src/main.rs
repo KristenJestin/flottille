@@ -538,6 +538,7 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
                     None
                 }
             };
+            let device = remote_command::window_device(&paths);
             let paths = paths.clone();
             flottille_window::run(
                 std::sync::Arc::new(move || {
@@ -545,6 +546,7 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
                         .map(Client::into_stream)
                         .map_err(|error| std::io::Error::other(error.to_string()))
                 }),
+                Some(device),
                 instance,
             );
         }

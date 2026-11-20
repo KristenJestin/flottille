@@ -97,6 +97,8 @@ pub enum Update {
         name: String,
         why: Option<String>,
     },
+    /// What this machine's daemon says of the user's machines (`machines`).
+    Machines(Box<crate::machines::News>),
     /// What the open session page's link read or saw, with the link's token.
     Session {
         token: u64,

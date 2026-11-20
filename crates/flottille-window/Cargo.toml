@@ -15,6 +15,9 @@ frames = ["gpui-kit/profiler"]
 base64 = "0.22.1"
 flottille-client = { version = "0.1.0", path = "../flottille-client" }
 flottille-core = { version = "0.1.0", path = "../flottille-core" }
+# The device key that signs what the user does to the hub's list and each request to another
+# machine (`docs/remote.md`), as `flottille remote` signs it: already built for the binary.
+flottille-link = { version = "0.1.0", path = "../flottille-link" }
 flottille-protocol = { version = "0.1.0", path = "../flottille-protocol" }
 # The components, tokens and motion of the window, shared with other GPUI applications; on GPUI
 # Fast, with Omarchy as a desktop theme source (its default `omarchy` feature).
@@ -27,6 +30,8 @@ libc = "0.2.191"
 # Already built for GPUI's paths; only its `LineJoin` and `LineCap`, which the mark's strokes round.
 lyon_tessellation = "1.0.23"
 serde_json = "1.0.154"
+# The setup code, wiped when dropped; already built under flottille-link.
+zeroize = "1.9.1"
 
 [dev-dependencies]
 # Already built for the derive macros; the scan of `presence` gaps reads the window's sources

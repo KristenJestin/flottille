@@ -11,8 +11,9 @@ use gpui_design_system::color::mix;
 use gpui_design_system::motion::{ENTER, PANEL};
 use gpui_design_system::rows::TWO_LINES;
 use gpui_design_system::{
-    Button, Fold, Icon, Item, Listing, Menu, Modal, Tie, TreeRow, changing, fade, hoverable, meta,
-    palette, presence, presence_of, section_label, space, tipped, tree_children, tree_tie,
+    Button, Field, Fold, Icon, Item, Listing, Menu, Modal, Select, SelectOption, Tie, TreeRow,
+    changing, fade, hoverable, meta, palette, presence, presence_of, section_label, space, tipped,
+    tree_children, tree_tie,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -252,6 +253,11 @@ impl Mark {
 /// The side panel: the primary button, the `PROJECTS` label, the projects and, pinned at the
 /// panel's bottom under a line whatever the tree's length, the "Ended" group, which unfolds upward
 /// over the tree.
+/// The machine switcher at the top of the sidebar; each option is `machine-switcher-<name>`.
+pub const SWITCHER: &str = "machine-switcher";
+/// This machine's option in the switcher.
+pub const SWITCHER_THIS: &str = "this-machine";
+
 pub struct Sidebar {
     shell: WeakEntity<Shell>,
     projects: Vec<Entity<ProjectNode>>,
@@ -273,6 +279,9 @@ pub struct Sidebar {
     refused: Option<SharedString>,
     /// Whether the daemon has not told yet what the tree shows: its rows are skeletons until then.
     loading: bool,
+    /// The user's machines as this machine last said them, and the one shown (`None`: this one).
+    machines: Option<crate::machines::Machines>,
+    shown: Option<String>,
 }
 
 impl Sidebar {
@@ -288,7 +297,62 @@ impl Sidebar {
             asked: HashSet::new(),
             refused: None,
             loading: true,
+            machines: None,
+            shown: None,
         }
+    }
+
+    /// The machines the switcher offers, and the one shown.
+    pub fn set_machines(
+        &mut self,
+        machines: crate::machines::Machines,
+        shown: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.machines.as_ref() != Some(&machines) || self.shown != shown {
+            self.machines = Some(machines);
+            self.shown = shown;
+            cx.notify();
+        }
+    }
+
+    /// The machine switcher: this machine first, then each runner with its state. Shown once
+    /// there is another machine to show.
+    fn switcher(&self) -> impl IntoElement + use<> {
+        let read = self.machines.clone().unwrap_or_default();
+        let runners: Vec<crate::machines::Machine> = read.runners().cloned().collect();
+        let this_name = read
+            .this
+            .clone()
+            .unwrap_or_else(|| "This machine".to_owned());
+        let options =
+            std::iter::once(SelectOption::new(SWITCHER_THIS, this_name).line("This machine"))
+                .chain(runners.iter().map(|machine| {
+                    SelectOption::new(machine.name.clone(), machine.name.clone())
+                        .line(machine.state_words())
+                }));
+        let chosen = self
+            .shown
+            .as_ref()
+            .and_then(|shown| runners.iter().position(|m| &m.name == shown))
+            .map_or(0, |at| at + 1);
+        let names: Vec<String> = runners.iter().map(|m| m.name.clone()).collect();
+        let shell = self.shell.clone();
+        let select = Select::new(SWITCHER, options, chosen).on_choose(move |at, _, cx| {
+            let name = at.checked_sub(1).and_then(|at| names.get(at)).cloned();
+            shell
+                .update(cx, |shell, cx| shell.choose_machine(name, cx))
+                .ok();
+        });
+        presence(
+            "machine-switcher-block",
+            !runners.is_empty(),
+            div().pt(space::MD).px(space::MD).child(Field::new(
+                "machine-switcher-field",
+                "Machine",
+                select,
+            )),
+        )
     }
 
     pub fn projects(&self) -> &[Entity<ProjectNode>] {
@@ -469,12 +533,14 @@ impl Render for Sidebar {
                 Button::danger("sidebar-end-confirm", end_led::end_label(count, &self.led))
                     .on_click(cx.listener(|this, _, _, cx| this.confirm_end(cx))),
             );
+        let switcher = self.switcher();
         div()
             .id("sidebar")
             .size_full()
             .bg(p.side)
             .flex()
             .flex_col()
+            .child(switcher)
             .child(
                 div()
                     .flex_none()

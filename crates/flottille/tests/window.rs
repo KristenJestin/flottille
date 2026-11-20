@@ -4188,6 +4188,7 @@ fn choosing_each_settings_tab_shows_its_section_alone(cx: &mut TestAppContext) {
             "approvals" => &["judge", "guidance"],
             "features" => &[],
             "vault" => &["vault"],
+            "machines" => &[],
             _ => &["appearance", "workspaces", "developer"],
         };
         assert_eq!(settings_shown(cx), wanted, "{key} alone");

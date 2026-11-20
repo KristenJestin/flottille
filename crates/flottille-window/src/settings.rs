@@ -40,11 +40,12 @@ use crate::workspaces_folder::WorkspacesFolder;
 
 /// The tabs of the page, in order: each one's key and label. A new part of Flottille adds none
 /// (rule 13): it is a row of Features.
-pub const SECTIONS: [(&str, &str); 5] = [
+pub const SECTIONS: [(&str, &str); 6] = [
     ("agents", "Agents"),
     ("approvals", "Approvals"),
     ("features", "Features"),
     ("vault", "Vault"),
+    ("machines", "Machines"),
     ("general", "General"),
 ];
 
@@ -251,6 +252,8 @@ pub const DEVELOPER_HINT: &str = "Why each call was allowed, held or refused, on
 
 pub struct SettingsPage {
     shell: WeakEntity<Shell>,
+    /// The user's machines: the hub, its devices, this machine's addresses.
+    machines: Entity<crate::machines_page::MachinesSection>,
     providers: Providers,
     /// A switch flipped, until the daemon lists the provider so: what it was asked to become.
     pending: HashMap<String, bool>,
@@ -367,8 +370,10 @@ impl SettingsPage {
         workspaces: Entity<WorkspacesFolder>,
         vault: Entity<VaultSection>,
         connections: Entity<ConnectionsSection>,
+        machines: Entity<crate::machines_page::MachinesSection>,
     ) -> Self {
         Self {
+            machines,
             rules,
             judge_guidance,
             compaction_guidance,
@@ -924,6 +929,10 @@ impl SettingsPage {
 
     pub fn connections(&self) -> &Entity<ConnectionsSection> {
         &self.connections
+    }
+
+    pub fn machines(&self) -> &Entity<crate::machines_page::MachinesSection> {
+        &self.machines
     }
 
     pub fn providers(&self) -> &Providers {
@@ -2311,6 +2320,7 @@ impl Render for SettingsPage {
             ],
             "features" => vec![("features", self.features_tab(cx))],
             "vault" => vec![("vault", self.vault.clone().into_any_element())],
+            "machines" => vec![("machines", self.machines.clone().into_any_element())],
             _ => vec![
                 ("appearance", self.appearance_section(cx).into_any_element()),
                 ("workspaces", self.workspaces.clone().into_any_element()),

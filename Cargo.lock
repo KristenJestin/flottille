@@ -2417,6 +2417,7 @@ dependencies = [
  "base64 0.22.1",
  "flottille-client",
  "flottille-core",
+ "flottille-link",
  "flottille-protocol",
  "futures",
  "gpui-design-system",
@@ -2426,6 +2427,7 @@ dependencies = [
  "lyon_tessellation",
  "serde_json",
  "syn 2.0.119",
+ "zeroize",
 ]
 
 [[package]]

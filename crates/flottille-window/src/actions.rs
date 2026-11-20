@@ -1337,8 +1337,27 @@ impl Actions {
         Self::spawn_bounded(connect, updates, BOUNDS)
     }
 
+    /// The actions on `connect`, which goes to the machine the window shows; what the window
+    /// keeps (its folds, the drafts) and its appearance are this machine's, asked on `local`.
+    pub fn spawn_aimed(
+        connect: Connect,
+        local: Connect,
+        updates: UnboundedSender<Update>,
+    ) -> Actions {
+        Self::spawn_on(connect, local, updates, BOUNDS)
+    }
+
     pub(crate) fn spawn_bounded(
         connect: Connect,
+        updates: UnboundedSender<Update>,
+        bounds: Bounds,
+    ) -> Actions {
+        Self::spawn_on(connect.clone(), connect, updates, bounds)
+    }
+
+    fn spawn_on(
+        connect: Connect,
+        local: Connect,
         updates: UnboundedSender<Update>,
         bounds: Bounds,
     ) -> Actions {
@@ -1351,7 +1370,7 @@ impl Actions {
         // The appearance is asked one request at a time, in the order of the clicks: on threads of
         // their own, two quick choices could reach the daemon in the other order.
         let (appearance, chosen) = channel();
-        let (to, updates_to) = (connect.clone(), updates.clone());
+        let (to, updates_to) = (local.clone(), updates.clone());
         std::thread::Builder::new()
             .name("flottille-appearance".into())
             .spawn(move || {
@@ -1366,7 +1385,7 @@ impl Actions {
         // What the window keeps is written one request at a time, in the order it was asked: a
         // draft written, then forgotten, must not reach the daemon the other way round.
         let (keeper, kept) = channel();
-        let (to, updates_to) = (connect.clone(), updates.clone());
+        let (to, updates_to) = (local, updates.clone());
         std::thread::Builder::new()
             .name("flottille-keeper".into())
             .spawn(move || keep(to, kept, updates_to, bounds))
