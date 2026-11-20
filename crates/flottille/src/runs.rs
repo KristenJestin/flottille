@@ -493,13 +493,30 @@ pub async fn run(
         false => format!("started the services it needs: {}\n", started.join(", ")),
     };
     // Only a push the gate read, and that the user or the judge let through, goes out: outside
-    // the sandbox, as the user's own.
-    let lifted = (approved && gate::is_push(&words)).then(|| {
+    // the sandbox, as the user's own, judged from what its `ssh` reads now.
+    let judged = match approved && gate::is_push(&words) {
+        true => Some(crate::pushed::judged(&folder.path).await),
+        false => None,
+    };
+    let unlent_said = match judged.as_ref().and_then(|judged| judged.unlent.as_deref()) {
+        Some(why) => format!("{}\n", crate::pushed::said(why)),
+        None => String::new(),
+    };
+    let lifted = judged.map(|judged| {
         lifted(
-            crate::git::push_ssh_command(),
+            judged.ssh,
             crate::mounts::bus_replaced(),
+            judged.unlent.is_none(),
         )
     });
+    // The remote's program that receives it is git's own, over a `remote.<name>.receivepack` a
+    // run may have written: git takes the first it reads, the repository's, so only the line's
+    // own option wins over it (the gate refuses the agent's).
+    let pushed_words = match &lifted {
+        Some(_) => receiving(&words),
+        None => words.clone(),
+    };
+    let services_said = format!("{unlent_said}{services_said}");
     let env = match environment(daemon, place, &repository) {
         Ok(env) => env,
         Err(why) => return Outcome::Failed(why),
@@ -509,7 +526,7 @@ pub async fn run(
     // commit time read or not.
     if let Some(lifted) = &lifted {
         tokio::select! {
-            checked = crate::message_checks::push(&at, &words, lifted) => {
+            checked = crate::message_checks::push(&at, &pushed_words, lifted) => {
                 if let Err(refusal) = checked {
                     return Outcome::Refused(refusal);
                 }
@@ -571,7 +588,7 @@ pub async fn run(
     if let Err(why) = start(
         daemon,
         run,
-        words,
+        pushed_words,
         env,
         lifted,
         secret_values,
@@ -842,22 +859,40 @@ fn defend(env: &mut BTreeMap<OsString, OsString>, empty: &Path) {
 /// SSH agent, forge command line's sign-in), and no hook: the hooks are files the agent writes.
 /// The project's and the workspace's variables are not applied: they are a file a run may write,
 /// and one of them (`GIT_CONFIG_PARAMETERS`) would undo the hooks setting. It runs outside the
-/// sandbox (`start`). `ssh` signs in (`git::push_ssh_command`), over a `core.sshCommand` a run may
+/// sandbox (`start`). `ssh` signs in (`pushed::judged`), over a `core.sshCommand` a run may
 /// have written in the repository, and only git's own transports are allowed, never an `ext::`
-/// URL it may have set. No session bus where the one found at the daemon's start was replaced
-/// (`mounts::bus_replaced`): what is at its path now may be a run's.
-fn lifted(ssh: OsString, bus_replaced: bool) -> BTreeMap<OsString, OsString> {
+/// URL it may have set; not SSH, and not the user's agent, where it is `lent` to no push. The
+/// programs the repository's settings may name for a transport are not run either: an empty
+/// `GIT_PROXY_COMMAND` and `GIT_ASKPASS` win over `core.gitProxy` and `core.askPass`, and no
+/// negotiation fetches first with the remote's `uploadpack`. No session bus where the one found at
+/// the daemon's start was replaced (`mounts::bus_replaced`): what is at its path now may be a
+/// run's.
+fn lifted(ssh: OsString, bus_replaced: bool, lent: bool) -> BTreeMap<OsString, OsString> {
     let mut env: BTreeMap<OsString, OsString> = std::env::vars_os().collect();
     configure(&mut env, "core.hooksPath", "/dev/null");
+    configure(&mut env, "push.negotiate", "false");
     env.insert("GIT_SSH_COMMAND".into(), ssh);
     env.insert(
         "GIT_ALLOW_PROTOCOL".into(),
-        crate::git::push_protocols().into(),
+        crate::git::push_protocols(lent).into(),
     );
+    env.insert("GIT_PROXY_COMMAND".into(), "".into());
+    env.insert("GIT_ASKPASS".into(), "".into());
+    if !lent {
+        env.remove(&OsString::from(crate::ssh_agent::VARIABLE));
+    }
     if bus_replaced {
         env.remove(&OsString::from("DBUS_SESSION_BUS_ADDRESS"));
     }
     env
+}
+
+/// The push's `words`, git's own program to receive it named on its line, right after `push`.
+fn receiving(words: &[String]) -> Vec<String> {
+    let at = gate::git_globals(&words[1..]).0 + 2;
+    let mut words = words.to_vec();
+    words.insert(at, "--receive-pack=git-receive-pack".into());
+    words
 }
 
 /// One more git setting through the environment, after those it already has: it wins over the
@@ -2646,8 +2681,27 @@ mod tests {
     }
 
     #[test]
+    fn a_lifted_push_names_git_s_own_receiving_program() {
+        let words: Vec<String> = ["git", "-C", "app", "push", "origin", "HEAD"]
+            .map(String::from)
+            .to_vec();
+        assert_eq!(
+            receiving(&words),
+            [
+                "git",
+                "-C",
+                "app",
+                "push",
+                "--receive-pack=git-receive-pack",
+                "origin",
+                "HEAD"
+            ]
+        );
+    }
+
+    #[test]
     fn a_lifted_push_keeps_the_daemon_s_environment_but_its_hooks() {
-        let env = lifted("'/usr/bin/ssh'".into(), false);
+        let env = lifted("'/usr/bin/ssh'".into(), false, true);
         let daemon: BTreeMap<OsString, OsString> = std::env::vars_os().collect();
         let count: usize = daemon
             .get(&OsString::from("GIT_CONFIG_COUNT"))
@@ -2655,7 +2709,13 @@ mod tests {
         for (name, value) in &daemon {
             let name_text = name.to_str().unwrap_or_default();
             if !name_text.starts_with("GIT_CONFIG_")
-                && !["GIT_SSH_COMMAND", "GIT_ALLOW_PROTOCOL"].contains(&name_text)
+                && ![
+                    "GIT_SSH_COMMAND",
+                    "GIT_ALLOW_PROTOCOL",
+                    "GIT_PROXY_COMMAND",
+                    "GIT_ASKPASS",
+                ]
+                .contains(&name_text)
             {
                 assert_eq!(env.get(name), Some(value), "{name:?}");
             }
@@ -2664,9 +2724,22 @@ mod tests {
         assert_eq!(get(format!("GIT_CONFIG_KEY_{count}")), "core.hooksPath");
         assert_eq!(get(format!("GIT_CONFIG_VALUE_{count}")), "/dev/null");
         assert_eq!(get("GIT_SSH_COMMAND".into()), "'/usr/bin/ssh'");
+        assert_eq!(
+            get(format!("GIT_CONFIG_KEY_{}", count + 1)),
+            "push.negotiate"
+        );
+        assert_eq!(get(format!("GIT_CONFIG_VALUE_{}", count + 1)), "false");
         assert_eq!(get("GIT_ALLOW_PROTOCOL".into()), "ssh:https:http:git:file");
-        let replaced = lifted("ssh".into(), true);
+        assert_eq!(get("GIT_PROXY_COMMAND".into()), "");
+        assert_eq!(get("GIT_ASKPASS".into()), "");
+        let replaced = lifted("ssh".into(), true, true);
         assert!(!replaced.contains_key(&OsString::from("DBUS_SESSION_BUS_ADDRESS")));
+        let unlent = lifted("ssh".into(), false, false);
+        assert_eq!(
+            unlent[&OsString::from("GIT_ALLOW_PROTOCOL")],
+            OsString::from("https:http:git:file")
+        );
+        assert!(!unlent.contains_key(&OsString::from(crate::ssh_agent::VARIABLE)));
     }
 
     #[test]

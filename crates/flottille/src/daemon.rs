@@ -151,7 +151,8 @@ pub fn run(paths: &Paths) -> Result<()> {
     }
     // Before any repository is read: the user's own credential helpers, the only ones it runs.
     crate::git::find_helpers();
-    crate::git::find_own_ssh();
+    // Before anything runs: what a push reads, which every run has read-only.
+    crate::pushed::find(true);
     let machine_key = crate::remote::machine_key(paths)?;
     children::say_sessions_in(paths.sessions())?;
     let _store_lock = hold_store(paths)?;

@@ -101,7 +101,10 @@ pub async fn output_remote(
     .collect();
     let mut git = command(dir, &args);
     git.env("GIT_ALLOW_PROTOCOL", protocol);
-    match crate::ssh_agent::socket().filter(|_| protocol == "ssh") {
+    // Not lent while what its `ssh` reads could have been written by a confined command.
+    let lent = crate::ssh_agent::socket()
+        .filter(|_| protocol == "ssh" && crate::pushed::ssh_unlent().is_none());
+    match lent {
         Some(socket) => crate::landlock::confined_lent(git.env(crate::ssh_agent::VARIABLE, socket)),
         None => crate::landlock::confined(&mut git),
     };
@@ -140,49 +143,15 @@ pub fn find_helpers() {
     });
 }
 
-/// The `ssh` command of the user's own: the daemon's `GIT_SSH_COMMAND`, else their global
-/// `core.sshCommand` (several accounts of one forge), read at the daemon's start, before a run
-/// could write the file.
-static OWN_SSH: OnceLock<Option<OsString>> = OnceLock::new();
-
-/// Reads the user's own `ssh` command, before anything runs.
-pub fn find_own_ssh() {
-    OWN_SSH.get_or_init(|| {
-        if let Some(command) = std::env::var_os("GIT_SSH_COMMAND").filter(|c| !c.is_empty()) {
-            return Some(command);
-        }
-        let output = crate::children::spawn_std(
-            std::process::Command::new("git")
-                .args([
-                    "config",
-                    "--global",
-                    "--includes",
-                    "--get",
-                    "core.sshCommand",
-                ])
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::null()),
-        )
-        .and_then(std::process::Child::wait_with_output)
-        .ok()?;
-        let command = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-        (output.status.success() && !command.is_empty()).then(|| command.into())
-    });
-}
-
-/// The `ssh` a push the gate let through signs in with: the user's own (`find_own_ssh`), else
-/// the one found at the daemon's start; never a `core.sshCommand` of the repository, which a run
-/// may have written.
-pub fn push_ssh_command() -> OsString {
-    OWN_SSH.get().cloned().flatten().unwrap_or_else(ssh_command)
-}
-
 /// The protocols a push the gate let through may use (`GIT_ALLOW_PROTOCOL`): git's own
 /// transports, as for the daemon's fetch, never `ext::` nor a remote helper a run's settings
-/// name.
-pub fn push_protocols() -> String {
-    FETCHED.join(":")
+/// name; and not SSH where the user's agent is `lent` to no push (`pushed::unlent`).
+pub fn push_protocols(lent: bool) -> String {
+    let allowed: Vec<&str> = FETCHED
+        .into_iter()
+        .filter(|protocol| lent || *protocol != "ssh")
+        .collect();
+    allowed.join(":")
 }
 
 /// `-c` options that leave git the user's own credential helpers alone: an empty
@@ -225,7 +194,7 @@ fn protocol(url: &str) -> &str {
 
 /// The `ssh` git runs: the one found at the daemon's start, quoted for the shell git reads
 /// `GIT_SSH_COMMAND` with.
-fn ssh_command() -> OsString {
+pub fn ssh_command() -> OsString {
     match crate::ssh_agent::ssh() {
         Some(ssh) => {
             let quoted = ssh.as_os_str().to_string_lossy().replace('\'', "'\\''");
