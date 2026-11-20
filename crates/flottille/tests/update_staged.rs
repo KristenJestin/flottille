@@ -578,6 +578,58 @@ fn restart_when_idle_restarts_once_no_agent_runs() {
 }
 
 #[test]
+fn update_show_lists_every_session_a_restart_stops() {
+    let releases = Releases::serve();
+    let user = with_a_long_turn(&releases);
+    user.call(
+        "project.add",
+        json!({"folder": user.path("work/app"), "name": "app"}),
+    )
+    .unwrap();
+    assert_eq!(
+        user.call("update.show", json!({})).unwrap()["stops"],
+        json!([])
+    );
+    let started = |message: &str| {
+        user.call("agent.start", json!({"project": "app", "message": message}))
+            .unwrap()["agent"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let working = started("work long");
+    // Its turn ends at once, but its process lives on until it is released: a restart stops it.
+    let idle = started("hello");
+    let state = |agent: &str| {
+        user.call("agent.show", json!({"agent": agent})).unwrap()["agent"]["state"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while state(&idle) != "idle" || state(&working) != "working" {
+        assert!(
+            Instant::now() < deadline,
+            "the turns never went as scripted"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    let shown = user.call("update.show", json!({})).unwrap();
+
+    let mut stops: Vec<&str> = shown["stops"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{shown}"))
+        .iter()
+        .map(|session| session["id"].as_str().unwrap())
+        .collect();
+    stops.sort_unstable();
+    let mut expected = vec![working.as_str(), idle.as_str()];
+    expected.sort_unstable();
+    assert_eq!(stops, expected, "{shown}");
+}
+
+#[test]
 fn restart_to_update_with_no_agent_restarts_at_once() {
     let releases = Releases::serve();
     let programs = tempfile::tempdir().unwrap();
