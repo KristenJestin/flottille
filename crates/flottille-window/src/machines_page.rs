@@ -762,61 +762,65 @@ impl MachinesSection {
             .unwrap_or_default();
         let shown = self.invitation.is_some();
         let copied = code.clone();
-        let panel = div()
-            .id("invitation-panel")
-            .flex()
-            .gap(space::LG)
-            .p(space::LG)
-            .rounded(px(12.))
-            .border_1()
-            .border_color(p.line)
-            .child(QrCode::new("invitation-qr", code.clone(), "Invitation code").shown(shown))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .gap(space::SM)
-                    .child(
-                        div()
-                            .text_size(px(12.5))
-                            .text_color(p.mute)
-                            .child("On the new device, scan the code, or give it this code:"),
-                    )
-                    .child(
-                        div()
-                            .id("invitation-code")
-                            .aria_label(code.clone())
-                            .text_size(px(12.5))
-                            .text_color(p.text)
-                            .child(code)
-                            .test_support(),
-                    )
-                    .child({
-                        let said: SharedString = format!("Valid once, until {until}.").into();
-                        div()
-                            .id("invitation-expiry")
-                            .aria_label(said.clone())
-                            .text_size(px(12.5))
-                            .text_color(p.mute)
-                            .child(said)
-                            .test_support()
-                    })
-                    .child(
-                        div().child(
-                            Button::quiet("copy-invitation", "Copy code")
-                                .leading(Icon::Copy)
-                                .on_click(move |_, _, cx| {
-                                    cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(
-                                        copied.to_string(),
-                                    ));
-                                    toast(Toast::success("Code copied"), cx);
-                                }),
+        let panel =
+            div()
+                .id("invitation-panel")
+                .flex()
+                .gap(space::LG)
+                .p(space::LG)
+                .rounded(px(12.))
+                .border_1()
+                .border_color(p.line)
+                // As wide as its plate: the code's column takes the rest.
+                .child(div().flex_none().child(
+                    QrCode::new("invitation-qr", code.clone(), "Invitation code").shown(shown),
+                ))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap(space::SM)
+                        .child(
+                            div()
+                                .text_size(px(12.5))
+                                .text_color(p.mute)
+                                .child("On the new device, scan the code, or give it this code:"),
+                        )
+                        .child(
+                            div()
+                                .id("invitation-code")
+                                .aria_label(code.clone())
+                                .text_size(px(12.5))
+                                .text_color(p.text)
+                                .child(code)
+                                .test_support(),
+                        )
+                        .child({
+                            let said: SharedString = format!("Valid once, until {until}.").into();
+                            div()
+                                .id("invitation-expiry")
+                                .aria_label(said.clone())
+                                .text_size(px(12.5))
+                                .text_color(p.mute)
+                                .child(said)
+                                .test_support()
+                        })
+                        .child(
+                            div().child(
+                                Button::quiet("copy-invitation", "Copy code")
+                                    .leading(Icon::Copy)
+                                    .on_click(move |_, _, cx| {
+                                        cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(
+                                            copied.to_string(),
+                                        ));
+                                        toast(Toast::success("Code copied"), cx);
+                                    }),
+                            ),
                         ),
-                    ),
-            )
-            .test_support();
+                )
+                .test_support();
         let count = self.members.len();
         Section::new("devices", "Devices")
             .count(count.to_string())
