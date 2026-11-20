@@ -48,8 +48,8 @@ pub use members::{
 };
 pub use offers::{Capabilities, MOST_AGENTS, MOST_PROJECTS, Offered};
 pub use request::{
-    Accepted, NONCES_PER_DEVICE, Nonce, REQUEST_WINDOW, Request, RequestError, Requests, Signed,
-    full_switch, runs_agents,
+    Accepted, FULL_SWITCH_LASTS, NONCES_PER_DEVICE, Nonce, REQUEST_WINDOW, Request, RequestError,
+    Requests, Signed, full_switch, runs_agents,
 };
 pub use transport::TlsServer;
 pub use words::verification_words;
