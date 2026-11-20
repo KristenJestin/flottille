@@ -1549,16 +1549,19 @@ fn a_negotiation_a_run_asked_for_runs_no_upload_pack() {
     project(&user, remote.to_str().unwrap());
     let planted = planted(&user, "uploadpack");
     let folder = user.path("work/app");
-    // A push that negotiates first fetches, with the remote's upload command.
+    // A push that negotiates first fetches from the remote's URL, with the upload command of a
+    // remote of that name, or of its own.
     user.git(&folder, &["config", "push.negotiate", "true"]);
-    user.git(
-        &folder,
-        &[
-            "config",
-            "remote.origin.uploadpack",
-            planted.to_str().unwrap(),
-        ],
-    );
+    for remote in ["origin", remote.to_str().unwrap()] {
+        user.git(
+            &folder,
+            &[
+                "config",
+                &format!("remote.{remote}.uploadpack"),
+                planted.to_str().unwrap(),
+            ],
+        );
+    }
     let mcp = agent(&user);
 
     let pushed = line(&user, &mcp, "git push origin HEAD:refs/heads/negotiated");
@@ -1624,7 +1627,14 @@ fn a_push_lent_to_nothing_runs_no_ssh() {
         json!({"line": "git push origin HEAD:refs/heads/unlent"}),
     );
 
-    assert!(ssh_said(&user).is_empty(), "{:?}", ssh_said(&user));
+    // No `ssh` ran for the push (the daemon's own reads may have run the one it found).
+    assert!(
+        !ssh_said(&user)
+            .iter()
+            .any(|said| said.contains("git-receive-pack")),
+        "{:?}",
+        ssh_said(&user)
+    );
     assert!(!remote_has(&user, "unlent"));
     assert!(pushed.text.contains("lent to no push"), "{}", pushed.text);
     assert!(pushed.text.contains("dots/forge.conf"), "{}", pushed.text);

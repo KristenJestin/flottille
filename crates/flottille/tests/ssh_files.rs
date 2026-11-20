@@ -213,10 +213,8 @@ fn a_run_cannot_rename_a_folder_on_the_way_to_the_git_settings() {
         "[user]\n\tname = Test\n",
     )
     .unwrap();
-    let user = user.with_env(
-        "GIT_CONFIG_GLOBAL",
-        user.path(&format!("home/{settings}")).to_str().unwrap(),
-    );
+    let settings = user.path(&format!("home/{settings}"));
+    let user = user.with_env("GIT_CONFIG_GLOBAL", settings.to_str().unwrap());
     let (mcp, place) = session(&user);
     let home = user.path("home");
 
@@ -254,10 +252,8 @@ fn a_run_cannot_write_the_user_s_git_settings_nor_what_they_include() {
     )
     .unwrap();
     std::fs::write(user.path("home/.gitconfig-work"), "[user]\n\tname = Work\n").unwrap();
-    let user = user.with_env(
-        "GIT_CONFIG_GLOBAL",
-        user.path("home/.gitconfig").to_str().unwrap(),
-    );
+    let settings = user.path("home/.gitconfig");
+    let user = user.with_env("GIT_CONFIG_GLOBAL", settings.to_str().unwrap());
     let (mcp, place) = session(&user);
     let home = user.path("home");
 
@@ -306,6 +302,9 @@ fn the_ssh_of_the_account_is_read_only_when_home_is_another_folder() {
 
 #[test]
 fn a_tilde_in_an_include_is_the_account_s_home() {
+    if skipped_without_user_namespaces() {
+        return;
+    }
     // `~/.ssh/more` is in the `.ssh` ssh reads, the account's: lent.
     let user = User::with_fake_agent();
     std::fs::create_dir_all(user.path("account/.ssh")).unwrap();
@@ -426,10 +425,8 @@ fn a_missing_include_of_the_git_settings_lends_no_push() {
         "[includeIf \"gitdir:~/work/\"]\n\tpath = ~/.gitconfig-work\n",
     )
     .unwrap();
-    let user = user.with_env(
-        "GIT_CONFIG_GLOBAL",
-        user.path("home/.gitconfig").to_str().unwrap(),
-    );
+    let settings = user.path("home/.gitconfig");
+    let user = user.with_env("GIT_CONFIG_GLOBAL", settings.to_str().unwrap());
     started(&user);
 
     let (lent, warnings) = lent(&user);
@@ -440,6 +437,9 @@ fn a_missing_include_of_the_git_settings_lends_no_push() {
 
 #[test]
 fn a_change_after_the_start_is_judged_at_the_push() {
+    if skipped_without_user_namespaces() {
+        return;
+    }
     let user = User::with_fake_agent();
     ssh_config(&user, "Host forge.invalid\n");
     started(&user);
@@ -499,6 +499,9 @@ fn a_run_started_before_a_change_cannot_write_ssh() {
 
 #[test]
 fn the_daemon_makes_a_missing_ssh_folder_at_its_start() {
+    if skipped_without_user_namespaces() {
+        return;
+    }
     let user = User::with_fake_agent();
     assert!(!user.path("home/.ssh").exists());
 
