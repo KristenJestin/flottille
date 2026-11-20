@@ -3089,7 +3089,12 @@ pub fn unanswered_to(daemon: &Daemon, id: &str, to: &str) -> Result<Vec<Value>, 
     let taken: Vec<_> = daemon
         .read(|store| store.last_deliveries_of(id, answers, 64))?
         .into_iter()
-        .filter(|delivery| matches!(delivery.state.as_str(), "sending" | "sent"))
+        // A pilot's answer still queued, the session busy, answers too: it reaches the session
+        // whatever becomes of the pilot's machine.
+        .filter(|delivery| {
+            matches!(delivery.state.as_str(), "sending" | "sent")
+                || (to == "pilot" && delivery.state == "queued")
+        })
         .collect();
     // When the newest answer the root took was written: a message of the user's, or for a
     // question to its pilot, a `session_send` of that pilot, whose key names it. An answer from
