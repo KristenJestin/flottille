@@ -395,9 +395,12 @@ impl Inner {
                 }
                 self.link_runners();
             }
-            Err(error) => state.view.say(format!(
-                "the hub sent a member list that does not check, refused: {error}"
-            )),
+            Err(error) => {
+                state.view.say(format!(
+                    "the hub sent a member list that does not check, refused: {error}"
+                ));
+                drop(state);
+            }
         }
         self.note(Note::Changed);
     }
