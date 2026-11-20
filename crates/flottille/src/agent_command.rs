@@ -680,6 +680,7 @@ pub fn doctor(paths: &Paths, json: bool) -> Result<ExitCode> {
             .map(|status| status["sandbox"].clone()),
         Ok(None) => {
             crate::ssh_agent::find();
+            crate::pushed::find(false);
             let mut sandbox = crate::mounts::sandbox();
             sandbox["probed"] = "no daemon running: probed by doctor".into();
             Ok(sandbox)

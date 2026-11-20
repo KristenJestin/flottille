@@ -182,9 +182,14 @@ pub(crate) type Env = BTreeMap<OsString, OsString>;
 /// checks, run on each commit it sends, and its branch format, which each branch it makes on a
 /// remote must match (`docs/projects.md`). Git's dry run is read once for both. The refusal of the
 /// first that fails, naming it, or of a push that cannot be read; nothing when the project
-/// declares neither. `env` is the push's own (`runs::lifted`): its dry run runs outside the
-/// sandbox, as the push does, and signs in the same way.
-pub async fn push(at: &Where<'_>, words: &[String], env: &Env) -> Result<(), String> {
+/// declares neither. `env` is the push's own (`runs::lifted`): its dry run runs where the push
+/// does, outside the sandbox where `outside`, and signs in the same way.
+pub async fn push(
+    at: &Where<'_>,
+    words: &[String],
+    env: &Env,
+    outside: bool,
+) -> Result<(), String> {
     let nothing = Checked::Pushed.nothing();
     let project = crate::projects::load_project(at.daemon, &at.place.project).map_err(|failure| {
         format!(
@@ -222,7 +227,7 @@ pub async fn push(at: &Where<'_>, words: &[String], env: &Env) -> Result<(), Str
             .await
             .map_err(unknown)?;
     }
-    let tried = dry_run(git, rest, end, at.folder, env)
+    let tried = dry_run(git, rest, end, at.folder, env, outside)
         .await
         .map_err(unknown)?;
     format_kept(at, &project, &tried)?;
@@ -277,6 +282,23 @@ async fn recursion(
     }
 }
 
+/// Refuses a push whose options cannot be read as git reads them: an option given a word the
+/// daemon adds as its value (`--repo` before `--dry-run`) would change what that word does.
+pub fn push_options(words: &[String]) -> Result<(), String> {
+    let at_push = gate::git_globals(&words[1..]).0 + 1;
+    let rest = &words[at_push + 1..];
+    let end = rest
+        .iter()
+        .position(|word| word == "--" || word == "--end-of-options")
+        .unwrap_or(rest.len());
+    read(&rest[..end], &PUSH).map(|_| ()).map_err(|why| {
+        format!(
+            "refused: the push's options cannot be read ({why}); {}",
+            Checked::Pushed.nothing()
+        )
+    })
+}
+
 /// A ref a push sends, as git's dry run says it: its flag (`*` a new one), its source and its
 /// destination.
 type Pushed = (String, String, String);
@@ -289,14 +311,27 @@ async fn dry_run(
     end: usize,
     folder: &Path,
     env: &Env,
+    outside: bool,
 ) -> Result<Vec<(String, Vec<Pushed>)>, String> {
     let mut dry: Vec<String> = git.to_vec();
     dry.push("push".into());
     dry.extend_from_slice(&rest[..end]);
-    dry.extend(["--dry-run", "--porcelain", "--no-quiet"].map(String::from));
+    // No submodule's own push either: the push itself makes none (`runs::unrecursed`).
+    dry.extend(
+        [
+            "--dry-run",
+            "--porcelain",
+            "--no-quiet",
+            "--no-recurse-submodules",
+        ]
+        .map(String::from),
+    );
     dry.extend_from_slice(&rest[end..]);
-    // Outside the sandbox, as the push: it signs in to the remote the same way.
-    let tried = crate::git::run_outside(folder, &dry, env).await?;
+    // Where the push runs: outside the sandbox, it signs in to the remote the same way.
+    let tried = match outside {
+        true => crate::git::run_outside(folder, &dry, env).await?,
+        false => crate::git::run_in(folder, &dry, env, None).await?,
+    };
     let mut remotes: Vec<(String, Vec<Pushed>)> = Vec::new();
     for line in tried.stdout.lines() {
         if let Some(url) = line.strip_prefix("To ") {
