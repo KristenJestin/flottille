@@ -387,6 +387,14 @@ impl Shell {
                 |_, _| None,
                 cx,
             );
+            modals.add(
+                crate::extensions::connections::SHARE_MODAL,
+                &connections,
+                |section, window, cx| section.share_dialog(window, cx),
+                ConnectionsSection::is_sharing,
+                |_, _| None,
+                cx,
+            );
             modals.add_view(
                 crate::extensions::connection_request::MODAL,
                 &connection_request,
