@@ -719,16 +719,16 @@ const SERVED: [Definition; 33] = [
     Definition {
         name: "agent_launch",
         title: "Launch a child, or start a session",
-        description: "kind (required): child, a part of your own task, in your place, that you \
-            direct and that reports to you (no workspace; refused above the children cap); led, an \
+        description: "kind (required): child, a part of your own task, in your place, that \
+            reports to you (no workspace; refused above the children cap); led, an \
             autonomous job of its own that you pilot, a real session the user sees under you, \
-            which asks you its questions and wakes you when it asks, reports or ends; \
+            which asks you and wakes you when it asks, reports or ends; \
             handed, a session you start for the user and let go, of which you hear nothing more \
             unless it writes to you. led and handed: a root only, judged, in workspace or \
             new_workspace; you and it write with session_send. Answered at \
             once with its id; never poll. The brief is all it knows: the task, what to read, the \
-            checks, the deliverable. {\"kind\": \"child\", \"title\": \"Write the tests\", \
-            \"brief\": \"...\"}. \
+            checks, the deliverable. {\"kind\": \"handed\", \"title\": \"Add API\", \
+            \"brief\": \"...\", \"new_workspace\": \"api\", \"repositories\": [\"api\"]}. \
             machine starts it on another of the user's machines, judged there, on a copy of \
             your place (your branch and uncommitted changes go with it); its commits come back \
             on refs/flottille/machines/<machine>/<launch>/<branch>, for you to merge; \
