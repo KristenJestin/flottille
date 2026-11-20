@@ -1663,13 +1663,12 @@ fn choosing_where_this_machine_is_reached_listens_there(cx: &mut TestAppContext)
             .is_some_and(|at| at.starts_with("127.0.0.1:"))
     });
     assert_eq!(pc.user.status()["pid"], pid, "no restart");
-    assert!(
+    // The answer reaches the window after the daemon has applied the change.
+    until(&shell, cx, "the toast says where it is reached", |cx| {
         toasts(&shell, cx)
             .iter()
-            .any(|t| t.starts_with("This machine is reached at 127.0.0.1")),
-        "{:?}",
-        toasts(&shell, cx)
-    );
+            .any(|t| t.starts_with("This machine is reached at 127.0.0.1"))
+    });
     // Back to nowhere.
     click(&shell, cx, "reach");
     click(&shell, cx, "reach-nowhere");
@@ -1715,7 +1714,9 @@ fn turning_remote_off_closes_the_links_and_keeps_the_hub(cx: &mut TestAppContext
         step(&shell, Duration::from_millis(16), cx);
         assert!(
             Instant::now() < deadline,
-            "its devices are not listed again: settings {:?}, switch {}, no hub {}, rest {}, read {:?}\n{}",
+            "its devices are not listed again: toasts {:?}, notice {}, settings {:?}, switch {}, no hub {}, rest {}, read {:?}\n{}",
+            toasts(&shell, cx),
+            present(cx, "turn-on-remote"),
             pc.user.call("remote.settings", json!({})),
             present(cx, "remote-switch"),
             present(cx, "no-hub-title"),
