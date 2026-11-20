@@ -573,6 +573,7 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
                     None
                 }
             };
+            let device = remote_command::window_device(&paths);
             // What only the user's device may ask (`vault.share`) is signed with its key, read
             // when it is asked, as the command line reads it.
             let signing = paths.clone();
@@ -597,6 +598,7 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
                         .map(Client::into_stream)
                         .map_err(|error| std::io::Error::other(error.to_string()))
                 }),
+                Some(device),
                 instance,
             );
         }

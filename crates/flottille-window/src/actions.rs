@@ -1360,6 +1360,10 @@ pub struct Actions {
     appearance: Sender<Command>,
     keeper: Sender<Keep>,
     connect: Connect,
+    /// This machine's daemon, whichever machine the window shows.
+    local: Connect,
+    /// The machine `connect` goes to, when the window may show another.
+    aim: Option<crate::machines::Aim>,
     updates: UnboundedSender<Update>,
     bounds: Bounds,
     /// How this window signs what only the user's device may ask, when it was given its own
@@ -1378,8 +1382,30 @@ impl Actions {
         Self::spawn_bounded(connect, updates, BOUNDS)
     }
 
+    /// The actions on `aim`'s connections, which go to the machine the window shows; what the
+    /// window keeps (its folds, the drafts) and its appearance are this machine's, asked on
+    /// `local`.
+    pub fn spawn_aimed(
+        aim: crate::machines::Aim,
+        local: Connect,
+        updates: UnboundedSender<Update>,
+    ) -> Actions {
+        let mut actions = Self::spawn_on(aim.connect(local.clone()), local, updates, BOUNDS);
+        actions.aim = Some(aim);
+        actions
+    }
+
     pub(crate) fn spawn_bounded(
         connect: Connect,
+        updates: UnboundedSender<Update>,
+        bounds: Bounds,
+    ) -> Actions {
+        Self::spawn_on(connect.clone(), connect, updates, bounds)
+    }
+
+    fn spawn_on(
+        connect: Connect,
+        local: Connect,
         updates: UnboundedSender<Update>,
         bounds: Bounds,
     ) -> Actions {
@@ -1392,7 +1418,7 @@ impl Actions {
         // The appearance is asked one request at a time, in the order of the clicks: on threads of
         // their own, two quick choices could reach the daemon in the other order.
         let (appearance, chosen) = channel();
-        let (to, updates_to) = (connect.clone(), updates.clone());
+        let (to, updates_to) = (local.clone(), updates.clone());
         std::thread::Builder::new()
             .name("flottille-appearance".into())
             .spawn(move || {
@@ -1407,7 +1433,7 @@ impl Actions {
         // What the window keeps is written one request at a time, in the order it was asked: a
         // draft written, then forgotten, must not reach the daemon the other way round.
         let (keeper, kept) = channel();
-        let (to, updates_to) = (connect.clone(), updates.clone());
+        let (to, updates_to) = (local.clone(), updates.clone());
         std::thread::Builder::new()
             .name("flottille-keeper".into())
             .spawn(move || keep(to, kept, updates_to, bounds))
@@ -1417,6 +1443,8 @@ impl Actions {
             appearance,
             keeper,
             connect,
+            local,
+            aim: None,
             updates,
             bounds,
             sign: None,
@@ -1445,9 +1473,11 @@ impl Actions {
             return;
         }
         let sign = self.sign.clone().or_else(crate::link::signer);
+        // Its tunnel ends at this machine's `127.0.0.1`, where the browser is: asked of this
+        // machine's daemon, signed here for the machine that signs in, whichever one is shown.
         if let Command::SignInOn { name, machine } = command {
             let (connect, updates, bounds) =
-                (self.connect.clone(), self.updates.clone(), self.bounds);
+                (self.local.clone(), self.updates.clone(), self.bounds);
             std::thread::Builder::new()
                 .name("flottille-sign-in".into())
                 .spawn(move || sign_in_on(&connect, sign, &name, &machine, bounds, &updates))
@@ -1461,7 +1491,56 @@ impl Actions {
             let _ = self.appearance.send(command);
             return;
         }
-        let (connect, updates, bounds) = (self.connect.clone(), self.updates.clone(), self.bounds);
+        // A share is the shown machine's entry or connection going to another machine, on the
+        // user's consent: the device's signature, which that machine checks and sends on with
+        // it. Shown, another machine is asked through the aim, which signs each request for it
+        // with the device key; this one is asked on its own connection, signed here.
+        let shown = self.aim.as_ref().and_then(crate::machines::Aim::machine);
+        let command = match command {
+            Command::Signed {
+                machine: None,
+                method,
+                params,
+                then,
+            } if shown.is_some() => Command::Ask {
+                method,
+                params,
+                then,
+            },
+            command => command,
+        };
+        let (updates, bounds) = (self.updates.clone(), self.bounds);
+        if let (Some(_), Command::VaultShare { name, machine }) = (&shown, &command) {
+            let (connect, name, machine) = (self.connect.clone(), name.clone(), machine.clone());
+            std::thread::Builder::new()
+                .name("flottille-action".into())
+                .spawn(move || {
+                    let params = json!({"name": name, "machine": machine});
+                    let refused = match ask_alone(&connect, "vault.share", params, bounds.quick) {
+                        Ok(Ok(_)) => None,
+                        Ok(Err(why)) | Err(why) => Some(why),
+                    };
+                    let outcome = Outcome::VaultShared {
+                        name,
+                        machine,
+                        refused,
+                    };
+                    let _ = updates.unbounded_send(Update::Done(outcome));
+                })
+                .expect("a thread for a window's action");
+            return;
+        }
+        let connect = match &command {
+            Command::Signed {
+                machine: Some(_), ..
+            } => self.local.clone(),
+            Command::VaultShare { .. } | Command::Signed { .. } | Command::ShareMachines
+                if shown.is_none() =>
+            {
+                self.local.clone()
+            }
+            _ => self.connect.clone(),
+        };
         std::thread::Builder::new()
             .name("flottille-action".into())
             .spawn(move || {
