@@ -4366,6 +4366,12 @@ impl Store {
         Ok(())
     }
 
+    /// How many rows were written since the store was opened: what a reader at rest checks
+    /// it leaves alone.
+    pub fn changes_made(&self) -> u64 {
+        self.connection.total_changes()
+    }
+
     /// The number of the last event, 0 when there is none.
     pub fn last_seq(&self) -> Result<u64> {
         let seq: Option<u64> = self
@@ -5196,6 +5202,14 @@ mod tests {
         assert_eq!(store.notification_cursor().unwrap(), Some(0));
         store.set_notification_cursor(7).unwrap();
         store.set_notification_cursor(9).unwrap();
+        assert_eq!(store.notification_cursor().unwrap(), Some(9));
+    }
+
+    #[test]
+    fn the_notification_cursor_never_goes_back() {
+        let store = Store::open_in_memory().unwrap();
+        store.set_notification_cursor(9).unwrap();
+        store.set_notification_cursor(7).unwrap();
         assert_eq!(store.notification_cursor().unwrap(), Some(9));
     }
 

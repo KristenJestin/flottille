@@ -174,6 +174,7 @@ pub fn keep(daemon: &Arc<Daemon>) {
     let Ok(events) = daemon.read(|store| store.events_named(&names, cursor)) else {
         return;
     };
+    at(Point::Read);
     let mut changed = Vec::new();
     for event in events.iter().filter(|event| event.seq <= upto) {
         changed.extend(note(daemon, event, &extensions));
@@ -238,7 +239,10 @@ fn add(
         excerpt: excerpt.into(),
     };
     daemon
-        .read(|store| store.add_notification(&new))
+        .read(|store| match at(Point::Add) {
+            true => Err(flottille_core::Error::Refused("the store failed".into())),
+            false => store.add_notification(&new),
+        })
         .ok()
         .flatten()
         .into_iter()
@@ -295,6 +299,7 @@ fn note(
                     if request.held_by == approval::USER
                         && request.state == approval::RequestState::Pending =>
                 {
+                    at(Point::SeenPending);
                     add(
                         daemon,
                         event,
@@ -494,10 +499,346 @@ fn reconcile_questions(daemon: &Arc<Daemon>, agent: &str, at: u64) -> Vec<u64> {
         .collect()
 }
 
+/// The points of the keeper a test stops at, or makes fail (`tests::at`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Point {
+    /// The events after the cursor are read, none noted yet.
+    Read,
+    /// A request was seen waiting for the user, its row not kept yet.
+    SeenPending,
+    /// A row is about to be kept: `true` makes the store fail.
+    Add,
+}
+
+#[cfg(not(test))]
+fn at(_: Point) -> bool {
+    false
+}
+
+#[cfg(test)]
+fn at(point: Point) -> bool {
+    tests::at(point)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use flottille_core::approval::{Decision, Kind, Request, RequestState};
     use serde_json::json;
+    use std::cell::RefCell;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    type Hook = Box<dyn FnMut() -> bool>;
+
+    thread_local! {
+        /// What the keeper does at each point, on the thread that keeps: each test sets its own.
+        static SEAMS: RefCell<Vec<(Point, Hook)>> = const { RefCell::new(Vec::new()) };
+    }
+
+    pub(super) fn at(point: Point) -> bool {
+        SEAMS.with(|seams| {
+            let mut seams = seams.borrow_mut();
+            let mut fails = false;
+            for (at, hook) in seams.iter_mut() {
+                if *at == point {
+                    fails |= hook();
+                }
+            }
+            fails
+        })
+    }
+
+    fn on(point: Point, hook: impl FnMut() -> bool + 'static) {
+        SEAMS.with(|seams| seams.borrow_mut().push((point, Box::new(hook))));
+    }
+
+    /// A daemon on a throwaway store with the root agent `a`, no bus.
+    fn a_daemon(dir: &std::path::Path) -> Arc<Daemon> {
+        let paths = flottille_core::paths::Paths {
+            runtime: dir.join("runtime"),
+            state: dir.join("state"),
+            config: dir.join("config"),
+            data: dir.join("data"),
+        };
+        // The keyring is the daemon's memory, never the user's.
+        std::fs::create_dir_all(&paths.config).unwrap();
+        std::fs::write(paths.config.join("keyring.toml"), "backend = \"memory\"\n").unwrap();
+        let mut store = flottille_core::store::Store::open_in_memory().unwrap();
+        store
+            .create_agent(
+                &crate::daemon::tests::an_agent("a"),
+                ("agent.created", json!({})),
+            )
+            .unwrap();
+        let projects = crate::projects::Projects::open(&paths).unwrap();
+        Arc::new(Daemon::new(&paths, store, projects, 0, None))
+    }
+
+    /// A request of `a` held for the user: its number.
+    fn held(daemon: &Daemon) -> u64 {
+        daemon
+            .write(|store| {
+                let (request, event) = store.ask(&Request {
+                    number: 0,
+                    agent: "a".into(),
+                    call_key: None,
+                    tool: "fs_read".into(),
+                    arguments: json!({"path": ".env"}),
+                    shown: json!({"path": ".env"}),
+                    reasons: Vec::new(),
+                    base: true,
+                    kind: Kind::Call,
+                    says: Vec::new(),
+                    judgement: None,
+                    held_by: approval::USER.into(),
+                    forwards: Vec::new(),
+                    state: RequestState::Pending,
+                    decision: None,
+                    created_at: 0,
+                    decided_at: None,
+                    place: None,
+                    digest: None,
+                })?;
+                Ok((request.number, event))
+            })
+            .unwrap()
+    }
+
+    fn deny(daemon: &Daemon, number: u64) {
+        daemon
+            .write(|store| {
+                let (_, event) = store
+                    .decide(number, Decision::Deny, approval::USER)?
+                    .unwrap();
+                Ok(((), Some(event)))
+            })
+            .unwrap();
+    }
+
+    fn cursor(daemon: &Daemon) -> u64 {
+        daemon
+            .read(|store| store.notification_cursor())
+            .unwrap()
+            .unwrap()
+    }
+
+    fn last(daemon: &Daemon) -> u64 {
+        daemon.read(|store| store.last_seq()).unwrap()
+    }
+
+    fn rows(daemon: &Daemon) -> Vec<notification::Notification> {
+        daemon
+            .read(|store| store.notifications(None, 100, false))
+            .unwrap()
+    }
+
+    /// A keep on a thread of its own that stops at `point` until it is let go: the keep, the
+    /// word that it stopped, and what lets it go.
+    fn stopped_at(
+        daemon: &Arc<Daemon>,
+        point: Point,
+    ) -> (std::thread::JoinHandle<()>, mpsc::Sender<()>) {
+        let (stopped, stop) = mpsc::channel();
+        let (go, going) = mpsc::channel::<()>();
+        let kept = daemon.clone();
+        let keeping = std::thread::spawn(move || {
+            let mut once = Some((stopped, going));
+            on(point, move || {
+                if let Some((stopped, going)) = once.take() {
+                    stopped.send(()).unwrap();
+                    let _ = going.recv();
+                }
+                false
+            });
+            keep(&kept);
+        });
+        stop.recv_timeout(Duration::from_secs(10))
+            .expect("the keep stopped where it was asked to");
+        (keeping, go)
+    }
+
+    /// Another keep while the first is stopped: it is given time to run, or to wait for the
+    /// first.
+    fn another_keep(daemon: &Arc<Daemon>) -> (std::thread::JoinHandle<()>, mpsc::Receiver<()>) {
+        let (done, finished) = mpsc::channel();
+        let kept = daemon.clone();
+        let keeping = std::thread::spawn(move || {
+            keep(&kept);
+            let _ = done.send(());
+        });
+        let _ = finished.recv_timeout(Duration::from_millis(300));
+        (keeping, finished)
+    }
+
+    #[test]
+    fn two_keeps_at_once_never_take_the_cursor_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = a_daemon(dir.path());
+        keep(&daemon);
+        daemon.emit("remote.delivery_dropped", json!({})).unwrap();
+        let (first, go) = stopped_at(&daemon, Point::Read);
+
+        daemon.emit("remote.delivery_dropped", json!({})).unwrap();
+        let (second, _) = another_keep(&daemon);
+        go.send(()).unwrap();
+        first.join().unwrap();
+        second.join().unwrap();
+
+        assert_eq!(cursor(&daemon), last(&daemon), "the cursor went back");
+        assert_eq!(rows(&daemon).len(), 2);
+    }
+
+    #[test]
+    fn a_request_decided_while_the_keeper_looks_waits_for_nobody() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = a_daemon(dir.path());
+        keep(&daemon);
+        let number = held(&daemon);
+        let (first, go) = stopped_at(&daemon, Point::SeenPending);
+
+        // Answered between the keeper's look and its row.
+        deny(&daemon, number);
+        let (second, _) = another_keep(&daemon);
+        go.send(()).unwrap();
+        first.join().unwrap();
+        second.join().unwrap();
+
+        assert!(
+            daemon
+                .read(|store| store.unresolved_notifications("request"))
+                .unwrap()
+                .is_empty(),
+            "a row waits for an answered request: {:?}",
+            rows(&daemon)
+        );
+    }
+
+    #[test]
+    fn a_keep_with_nothing_new_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = a_daemon(dir.path());
+        daemon.emit("remote.delivery_dropped", json!({})).unwrap();
+        keep(&daemon);
+        let before = daemon.read(|store| Ok(store.changes_made())).unwrap();
+
+        keep(&daemon);
+
+        assert_eq!(
+            daemon.read(|store| Ok(store.changes_made())).unwrap(),
+            before
+        );
+    }
+
+    #[test]
+    fn what_waits_at_the_upgrade_is_in_the_centre_after_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = a_daemon(dir.path());
+        let waiting = held(&daemon);
+        let answered = held(&daemon);
+        deny(&daemon, answered);
+        let asked = daemon
+            .emit(
+                "vault.asked",
+                json!({"agent": "a", "project": "app", "name": "DEPLOY_TOKEN"}),
+            )
+            .unwrap();
+        let given = daemon
+            .emit(
+                "vault.asked",
+                json!({"agent": "a", "project": "app", "name": "OTHER_TOKEN"}),
+            )
+            .unwrap();
+        daemon
+            .emit("vault.ask_answered", json!({"ask": given.seq}))
+            .unwrap();
+        daemon
+            .write(|store| {
+                let event = store.append_agent_event(
+                    "a",
+                    "agent.asked",
+                    json!({"agent": "a", "to": "user", "question": "Which branch?"}),
+                    false,
+                )?;
+                Ok(((), Some(event)))
+            })
+            .unwrap();
+        // As the migration leaves it: at the last event there was.
+        let upto = last(&daemon);
+        daemon
+            .read(|store| store.set_notification_cursor(upto))
+            .unwrap();
+
+        keep(&daemon);
+
+        let mut kept: Vec<(String, String, bool)> = rows(&daemon)
+            .into_iter()
+            .map(|row| (row.kind, row.title, row.resolved))
+            .collect();
+        kept.sort();
+        assert_eq!(
+            kept,
+            [
+                (
+                    "question".to_owned(),
+                    "Asks you a question".to_owned(),
+                    false
+                ),
+                (
+                    "request".to_owned(),
+                    format!("Request #{waiting} waits for you"),
+                    false
+                ),
+                (
+                    "vault".to_owned(),
+                    "Asks you for a vault entry".to_owned(),
+                    false
+                ),
+            ],
+            "{asked:?}"
+        );
+    }
+
+    #[test]
+    fn a_failed_write_keeps_its_event_for_the_next_keep() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = a_daemon(dir.path());
+        keep(&daemon);
+        let dropped = daemon.emit("remote.delivery_dropped", json!({})).unwrap();
+        on(Point::Add, || true);
+        keep(&daemon);
+        SEAMS.with(|seams| seams.borrow_mut().clear());
+        assert!(rows(&daemon).is_empty());
+        assert!(cursor(&daemon) < dropped.seq, "the cursor passed the event");
+
+        keep(&daemon);
+
+        assert_eq!(rows(&daemon).len(), 1);
+    }
+
+    #[test]
+    fn what_an_extension_says_does_not_claim_to_need_the_user() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = a_daemon(dir.path());
+        keep(&daemon);
+        daemon
+            .emit(
+                "connection.signed_out",
+                json!({"name": "tracker", "why": "its token expired"}),
+            )
+            .unwrap();
+
+        keep(&daemon);
+
+        let kept = rows(&daemon);
+        assert_eq!(kept.len(), 1);
+        assert_ne!(kept[0].title, "Needs you");
+        assert!(!kept[0].needs_you);
+        assert_eq!(
+            daemon.read(|store| store.unread_notifications()).unwrap(),
+            (0, 1)
+        );
+    }
 
     #[test]
     fn a_session_message_piece_wakes_nothing_and_a_request_does() {
