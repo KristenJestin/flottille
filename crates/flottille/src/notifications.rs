@@ -289,16 +289,22 @@ fn note(
             };
             let held = daemon.read(|store| store.request(number)).ok().flatten();
             match held {
-                // It waits for the user as long as the user holds it.
-                Some(request) if request.held_by == approval::USER => add(
-                    daemon,
-                    event,
-                    "request",
-                    format!("request:{number}"),
-                    Some(request.agent.as_str()),
-                    format!("Request #{number} waits for you"),
-                    notification::excerpt(&notification::asked(&request.tool, &request.shown)),
-                ),
+                // It waits for the user as long as the user holds it and nothing answered it: one
+                // the judge or the user answered before the keeper looked never waited.
+                Some(request)
+                    if request.held_by == approval::USER
+                        && request.state == approval::RequestState::Pending =>
+                {
+                    add(
+                        daemon,
+                        event,
+                        "request",
+                        format!("request:{number}"),
+                        Some(request.agent.as_str()),
+                        format!("Request #{number} waits for you"),
+                        notification::excerpt(&notification::asked(&request.tool, &request.shown)),
+                    )
+                }
                 _ => Vec::new(),
             }
         }
