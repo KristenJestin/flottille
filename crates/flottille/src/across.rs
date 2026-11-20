@@ -241,6 +241,11 @@ pub(crate) fn asks_parent(daemon: &Arc<Daemon>, request: &Request) -> bool {
         false,
         false,
     );
+    // The link may have ended since it was checked, `unlinked` reading the requests before this
+    // one: checked again, and it goes to the user too.
+    if let Some(Err(name)) = starter(daemon, &child, "child") {
+        to_user(daemon, request.number, &request.held_by, &name);
+    }
     true
 }
 

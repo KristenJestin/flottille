@@ -1955,7 +1955,7 @@ fn ask(daemon: &Arc<Daemon>, caller: &Agent, tool: &str, args: Value) -> Done {
     let pilot = pilot_of(daemon, caller);
     // The machine of the agent of another machine that started it, while it is off: the question
     // goes to the user instead.
-    let offline = ["child", "led"]
+    let mut offline = ["child", "led"]
         .into_iter()
         .find_map(|kind| crate::across::starter(daemon, caller, kind))
         .and_then(Result::err);
@@ -1984,7 +1984,18 @@ fn ask(daemon: &Arc<Daemon>, caller: &Agent, tool: &str, args: Value) -> Done {
             Ok(((), event))
         })
         .map_err(failed)?;
-    if let Some(pilot) = pilot {
+    // The pilot's machine may have gone off between the check and the write, its questions moved
+    // before this one was written: checked again, and moved too.
+    let gone = pilot
+        .as_ref()
+        .and_then(|_| crate::across::starter(daemon, caller, "led"))
+        .and_then(Result::err);
+    if let (Some(pilot), Some(machine)) = (&pilot, gone) {
+        if let Ok(Some(session)) = daemon.read(|store| store.agent(&caller.id)) {
+            questions_to_user(daemon, &session, pilot, Some(&machine));
+        }
+        offline = Some(machine);
+    } else if let Some(pilot) = pilot {
         return Ok(Outcome::Done(format!(
             "Your question went to agent {pilot}, which leads this session: it is told when your \
              turn ends, and its answer comes later as [flottille:session]. Go on with what does \
