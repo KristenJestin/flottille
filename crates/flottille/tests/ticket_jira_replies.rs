@@ -849,7 +849,7 @@ fn people_on_a_ticket_lists_only_who_can_see_it() {
 #[test]
 fn people_found_on_the_site_are_said_to_be_named_by_account_id() {
     let jira = people_site();
-    let (_, mcp) = signed_in(&jira, json!([]));
+    let (_user, mcp) = signed_in(&jira, json!([]));
 
     let said = people_said(&mcp, json!({"action": "people", "query": "ben"}));
 
@@ -872,7 +872,7 @@ fn a_full_page_of_the_site_is_said_to_be_cut() {
         })
         .collect();
     let jira = Jira::with_users(Value::Array(users));
-    let (_, mcp) = signed_in(&jira, json!([]));
+    let (_user, mcp) = signed_in(&jira, json!([]));
 
     let said = people_said(&mcp, json!({"action": "people", "query": "sam"}));
 
@@ -896,7 +896,7 @@ fn two_people_of_the_same_name_are_both_listed() {
          "active": true},
         {"accountId": BEN, "displayName": "Sam Smith", "active": true},
     ]));
-    let (_, mcp) = signed_in(&jira, json!([]));
+    let (_user, mcp) = signed_in(&jira, json!([]));
 
     let said = people_said(&mcp, json!({"action": "people", "query": "sam smith"}));
 
