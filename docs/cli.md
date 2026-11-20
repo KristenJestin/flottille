@@ -122,9 +122,8 @@ nothing is wrong), the warnings also being in `"warnings"`.
 
 The sandbox's state is the daemon's, asked of it; doctor starts no daemon (one that will not start
 is what it may be run to find out about). `--json` adds `"sandbox"`, as `daemon.status` gives it
-(`docs/protocol.md`), and each gap it says (no private mount namespace, a kernel without
-`mount_setattr`, an SSH agent lent to nothing and why, a restart of the daemon to lend it again)
-is a warning. With no daemon running, doctor's own process probes what one would find, and
+(`docs/protocol.md`), and each gap it says (no private mount namespace, or a probe of it that
+concluded nothing) is a warning. With no daemon running, doctor's own process probes what one would find, and
 `"sandbox"` says so: `"probed": "no daemon running: probed by doctor"`.
 
 ```

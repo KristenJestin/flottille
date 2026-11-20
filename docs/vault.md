@@ -324,10 +324,13 @@ push the gate let through, and its checks' dry run, are the exception (below):
   process is put back in them, at the same path: the display folder of a run or a connection's
   browser shown on the screen, and the SSH agent's socket lent to the daemon's own fetch (below).
   The daemon's own socket is not among them. X11's socket folder (`/tmp/.X11-unix`) is emptied
-  the same way, unless the process is given X11's display; and `~/.ssh` is read-only there
-  (below). A session bus the daemon's `DBUS_SESSION_BUS_ADDRESS` names by a path outside the
-  runtime folders (`unix:path=/tmp/dbus-…`, as `dbus-launch` makes one), found at the daemon's
-  start, is hidden there under `/dev/null`. The mounts are made by the process before it runs its
+  the same way, unless the process is given X11's display. A session bus the daemon's
+  `DBUS_SESSION_BUS_ADDRESS` names by a path outside the runtime folders (`unix:path=/tmp/dbus-…`,
+  as `dbus-launch` makes one), found at the daemon's start, is hidden there under `/dev/null`,
+  while the socket at that path is still the one found (its device and inode, checked before
+  each process starts): a folder or a socket a confined command made in its place is not hidden
+  (a mount over a folder would fail every start), and no push the gate lets through is given the
+  bus's address from then on (below). The mounts are made by the process before it runs its
   program, which runs as the user, not as root of the namespace, with `no_new_privs` set first
   (a program with file capabilities gains none in the namespace): it holds no capability to
   unmount or remount them, and a namespace it makes inside gets them locked. Landlock's rules
@@ -337,42 +340,6 @@ push the gate let through, and its checks' dry run, are the exception (below):
   has it) say so. The daemon probes it once, by a child that makes one: a probe that concludes
   nothing (no process could be made, the user's namespaces are all taken) is not kept, and the
   process still starts in its namespace, or fails to start.
-
-**`~/.ssh` is read-only** in that namespace: the user's `$HOME/.ssh` and the account's own (the
-password database's home) when they differ, where each leads when it is a link, where every link
-inside it leads, the folder of every pattern its `config` includes (`Include`, through the files
-they include in turn: the last folder above the pattern's first part with a `*`, `?` or `[`, so
-that no file is added to a glob's folder and none is made where an included file is missing), and
-where each included file leads, and where each link inside an included folder leads (a pattern's
-part may go through one). Read-only reaches the mounts below each of them too (`mount_setattr`,
-from Linux 5.12; before it the folder's own mount alone, and `flottille doctor` says so). Creating, changing, renaming, removing a file there and `chmod`
-are refused; reading stays allowed (ssh reads its config and `known_hosts`). A read-only mount
-keeps the file, not the way to it, so the way is kept too: every folder between the home and one
-of them that the user could rename or remove (one they can write, or one of theirs they could
-give themselves the right to write) is bound onto itself (a mount point can be neither),
-and so is every link on the way (`~/.ssh` itself when it is a link): it still leads where it did,
-and cannot be removed, renamed or replaced. What `~/.ssh/config` runs (`ProxyCommand`,
-`Match exec`) runs with the user's credentials when a push the gate let through signs in, so no
-confined command may write it, nor what it reads.
-
-The daemon makes a home's missing `~/.ssh` (0700) at its start: a run could make it, and a
-`config` in it. Where the rest cannot be kept, **the SSH agent is lent to nothing**: no push the
-gate let through gets `SSH_AUTH_SOCK`, and the daemon's own fetch of an SSH remote is not lent it.
-That is when the kernel gives no user namespace (nothing `ssh` reads is read-only then), when a
-home's `~/.ssh` is missing still, when an `Include`'s folder does not exist, or holds the home
-(`Include ~/forge.conf`: the home cannot be read-only; the homes are compared where their links
-lead), or holds a folder Flottille's commands work in (Flottille's own folders, a project's, the
-folder its workspaces go in: `Include ~/Projects/*.conf`), or is shared (everyone's or sticky, as
-`/tmp`, or another's that the user may write: read-only, it would be taken from them in every
-command), and when a file `ssh` reads is not a regular file of at most 1 MiB (a FIFO would hang
-`ssh`, or feed it what a run writes into it). Once the daemon found one of them, the agent stays
-lent to nothing for its life, even when it is mended: a run may have written what `ssh` reads
-while it was open, and what the next walk protects is what it wrote. A restart of the daemon
-lends it again. `flottille doctor` says why (`sandbox.ssh_agent` in `--json`), and makes it a
-warning when the daemon found an agent at its start. The configuration is read by the daemon
-without waiting (a FIFO is opened and refused at once), each file at most 1 MiB, and read again
-only when a path it looked at changed (an `lstat` of each per confined command, the files read
-among them, and the projects' files).
 
 **The SSH agent stays out of every run.** What the daemon runs gets no `SSH_AUTH_SOCK`. The socket
 the daemon's own environment named when it started (resolved then, links followed) is also kept out
@@ -423,12 +390,26 @@ that reaches a remote also gets:
 **A push the gate let through runs outside the sandbox.** A run that is itself a `git push` (its own
 line, no wrapper) the user, the judge, a rule or Full mode let through, and the dry run the
 project's commit checks make of it, run with no Landlock and the daemon's own environment, as if
-the user had typed the push: the session bus (so the keyring), the SSH agent (unless it is lent to
-nothing, above), the credential helper and the forge command line's sign-in are theirs. Only
-`core.hooksPath=/dev/null` is added, and `GIT_SSH_COMMAND` naming the `ssh` found at the daemon's
-start, as for its own fetch (below), so that a `core.sshCommand` a run wrote in the repository is
-not what signs in,
-and the project's and the workspace's variables are not applied (`docs/commands.md`, "The
+the user had typed the push: the session bus (so the keyring), the SSH agent, the credential
+helper and the forge command line's sign-in are theirs. Only these are added:
+
+- `core.hooksPath=/dev/null`;
+- `GIT_SSH_COMMAND`, so that a `core.sshCommand` a run wrote in the repository is not what signs
+  in: the user's own when they have one (the daemon's `GIT_SSH_COMMAND`, else their global
+  `core.sshCommand`, read at the daemon's start, for several accounts of one forge), else the
+  `ssh` found at the daemon's start, as for its own fetch (above);
+- `GIT_ALLOW_PROTOCOL` set to git's own transports (`ssh:https:http:git:file`), which wins over
+  the `protocol.*.allow` settings: a URL a run set through a helper (`ext::<command>`, a
+  `git-remote-<name>`) is not run. The push's remote is git's to resolve (the line's options, the
+  branch's `pushRemote`, `remote.pushDefault`), and its URL a setting a run can write, so the
+  transports allowed are git's own five rather than the one protocol of a remote. A push through
+  a remote helper of the user's own is refused too;
+- no `DBUS_SESSION_BUS_ADDRESS` once the bus the daemon found at its start by a path outside the
+  runtime folders is gone or replaced (above): what is at that path now may be a run's. The
+  daemon's own use of the keyring (the vault) is unchanged: it still reaches the bus its
+  environment names.
+
+The project's and the workspace's variables are not applied (`docs/commands.md`, "The
 environment"). The other git reads made for a push, and the probes of a push's task (its `ready`
 and `url` commands), run in the sandbox.
 
@@ -467,28 +448,23 @@ The gaps, where the platform does not allow more:
   runtime folders alone;
 - where the kernel refuses user namespaces, a confined process has no private mount namespace:
   below Landlock's ninth ABI it connects to the bus and the other sockets of the runtime folder
-  by their path, it reaches X11's by theirs, and it can write `~/.ssh`, so the SSH agent is lent
-  to nothing. The daemon's log says so at its start, and `flottille doctor` in its warnings
+  by their path, and it reaches X11's by theirs. The daemon's log says so at its start, and `flottille doctor` in its warnings
   (`sandbox.private_mounts` false in `--json`);
-- a session bus whose socket the daemon found at its start and that is gone since is no longer
-  hidden: a confined command could make a socket at its path, which no client of the user's
-  reaches unless a new bus is started there (then hidden again);
+- a session bus whose socket the daemon found at its start and that is gone or replaced since is
+  no longer hidden: a confined command could make a socket at its path, which a later confined
+  command may reach, and which the daemon's own keyring use would reach too, since its
+  environment still names it. The check of the socket is made before a process starts, so one
+  replaced in between fails that start (the mount is made over what is there then);
 - `/proc/<pid>/root` leads to the mounts of another process: Landlock keeps a confined process
   from every process outside its domain, so it is closed wherever Landlock is used (its second
   ABI or later), and open without it;
-- what `~/.ssh/config` reads beyond its `Include`s and its links is not kept: an
-  `IdentityFile`, a `UserKnownHostsFile` or a `CertificateFile` outside `~/.ssh`, the links found
-  inside a folder a link of `~/.ssh` leads to, and the tokens `ssh` expands in an `Include`
-  (`%d`, `${HOME}`), read as written;
-- the home itself, and the folders above it, are not pinned: where the user may rename the home
-  (its parent is theirs), a run could move it away and make another;
 - a push the gate let through runs with what the repository's settings say, as the user's own
   push from that folder would: a script the gate never read may have changed them before
-  (`credential.helper`, `core.fsmonitor`, `url.*.insteadOf`; not `core.sshCommand`, above), and
-  that applies
-  to the push, outside the sandbox, with the user's credentials. So does what the user's
-  `~/.ssh/config` runs (`ProxyCommand`, `Match exec`), which a confined command cannot write
-  where it has its private mount namespace (above). The gate judges the push's
+  (`credential.helper`, `core.fsmonitor`, `url.*.insteadOf`; not `core.sshCommand` nor a helper
+  URL, above), and that applies to the push, outside the sandbox, with the user's credentials. So
+  does what the user's `~/.ssh/config` runs (`ProxyCommand`, `Match exec`, an `Include`d file),
+  which **a confined command can still write**: `~/.ssh` is not read-only to it, and protecting
+  every file `ssh` reads against a hostile run is left to #1138. The gate judges the push's
   line, not the repository it runs in: an accepted risk, decided so that a push the user allowed
   signs in as theirs does;
 - the daemon's own fetch or listing of an SSH remote runs the user's `~/.ssh/config` with the

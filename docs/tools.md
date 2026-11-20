@@ -603,8 +603,10 @@ pending requests.
   cannot push from a script the gate never read. A run that is itself a `git push` (its own
   line, no wrapper) the user, the judge, a rule or Full mode let through does not get the
   environment above: it runs outside the sandbox (no Landlock), with the daemon's own
-  environment and `core.hooksPath=/dev/null`, and none of the place's variables, as if the user
-  had typed it (`docs/commands.md`, "The environment"). Its task's `ready` and `url` commands
+  environment and `core.hooksPath=/dev/null`, the user's own `ssh` command (never a
+  repository's `core.sshCommand`) and git's own transports alone (never an `ext::` URL), and
+  none of the place's variables, as if the user had typed it (`docs/commands.md`, "The
+  environment"; `docs/vault.md`, "The runtime folder"). Its task's `ready` and `url` commands
   still run in the sandbox. A push goes where the repository's remote leads now: the remote is
   the user's to change (`docs/commands.md`, "Where the remote leads").
 - **The daemon's own git is walled like a run's**: what it runs for itself on a repository (its
