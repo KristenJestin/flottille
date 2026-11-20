@@ -106,6 +106,8 @@ pub enum Selection {
     },
     /// The services of the machine.
     Services,
+    /// What is new since the version last run.
+    WhatsNew,
 }
 
 /// The links an agent shares in a row: the toast that says them is named by the agent and the
@@ -147,6 +149,7 @@ fn page_named(name: &str) -> Option<(Selection, Option<usize>)> {
             )
         }
         "services" => (Selection::Services, None),
+        "whats-new" => (Selection::WhatsNew, None),
         _ => return None,
     })
 }
@@ -257,6 +260,8 @@ pub struct Shell {
     settings: Entity<SettingsPage>,
     /// The services page, one for the window's life.
     services: Entity<crate::services::ServicesPage>,
+    /// What's new, one page for the window's life.
+    whats_new: Entity<crate::whats_new::WhatsNewPage>,
     /// The editor of the user's rules, on the settings page.
     rules: Entity<RulesEditor>,
     /// The notice of the Auto judge Flottille picked was dismissed here, before the daemon says
@@ -437,9 +442,14 @@ impl Shell {
             let this = this.clone();
             cx.new(|cx| crate::services::ServicesPage::new(this, cx))
         };
+        let whats_new = {
+            let this = this.clone();
+            cx.new(|_| crate::whats_new::WhatsNewPage::new(this))
+        };
         let main = {
             let (this, settings, services) = (this.clone(), settings.clone(), services.clone());
-            cx.new(|cx| MainArea::new(this, settings, services, cx))
+            let whats_new = whats_new.clone();
+            cx.new(|cx| MainArea::new(this, settings, services, whats_new, cx))
         };
         let left = cx.new(|_| Drawer::new("tree-drawer", Side::Left, px(SIDEBAR), sidebar.clone()));
         let bell = cx.new(|_| BellList::new(this.clone()));
@@ -615,6 +625,7 @@ impl Shell {
             last_pick: None,
             settings,
             services,
+            whats_new,
             rules,
             judge_noticed: false,
             compaction_picked: false,
@@ -1526,6 +1537,7 @@ impl Shell {
             Update::TextChanged { judge: true, .. } => self.actions.send(Command::JudgeRead),
             Update::DeveloperChanged => self.actions.send(Command::DeveloperRead),
             Update::UpdateShown(shown) => self.update_shown(&shown, cx),
+            Update::WhatsNewShown(shown) => self.whats_new_shown(&shown, cx),
             Update::ToolResultsChanged => self.actions.send(Command::ToolResultsRead),
             Update::CompactionChanged => self.actions.send(Command::CompactionRead),
             Update::SessionsChanged => self.actions.send(Command::SessionsRead),
@@ -2116,6 +2128,13 @@ impl Shell {
                 if let Some(number) = section.update(cx, |section, _| section.take_request_return())
                 {
                     self.open_connection_request(number, cx);
+                }
+            }
+            Outcome::Update { method, answer } if method.starts_with("whatsnew.") => {
+                // What is new is asked through the update's command: it is the same kind of
+                // request, answered by what `whatsnew.show` says.
+                if let Ok(shown) = &answer {
+                    self.whats_new_shown(shown, cx);
                 }
             }
             Outcome::Update { method, answer } => {
@@ -2878,6 +2897,7 @@ impl Shell {
             Selection::ProjectSettings(name) => format!("project-settings:{name}"),
             Selection::Spec { project, spec } => format!("spec:{spec}:{project}"),
             Selection::Services => "services".to_owned(),
+            Selection::WhatsNew => "whats-new".to_owned(),
         })
     }
 
@@ -2891,11 +2911,14 @@ impl Shell {
     fn update_shown(&mut self, value: &serde_json::Value, cx: &mut Context<Self>) {
         let shown = crate::version::Shown::of(value);
         let foot = shown.foot_line();
+        let build = shown.build_line();
         let full = shown.full.clone();
         self.version
             .update(cx, |section, cx| section.set_shown(shown, cx));
         self.sidebar
             .update(cx, |sidebar, cx| sidebar.set_version_line(foot, cx));
+        self.whats_new
+            .update(cx, |page, cx| page.set_build(Some(build), cx));
         let Some((own, reexec)) = self.build.clone() else {
             return;
         };
@@ -2910,6 +2933,19 @@ impl Shell {
             // No newer file at the binary's path: this window goes on as it is.
             self.closed = false;
         }
+    }
+
+    /// What the daemon says is new since the version last run: the page, the sidebar's mark and
+    /// the Version section follow it. Never opens the page: the user does.
+    fn whats_new_shown(&mut self, value: &serde_json::Value, cx: &mut Context<Self>) {
+        let notes = crate::whats_new::Notes::of(value);
+        let (mark, since) = (notes.mark(), notes.since.clone());
+        self.whats_new
+            .update(cx, |page, cx| page.set_notes(notes, cx));
+        self.sidebar
+            .update(cx, |sidebar, cx| sidebar.set_whats_new(mark, cx));
+        self.version
+            .update(cx, |section, cx| section.set_whats_new(since, cx));
     }
 
     /// What "Restart Flottille" runs, in place of `flottille daemon stop`.
@@ -3721,6 +3757,14 @@ impl Shell {
         if self.selected == Some(Selection::Services) && selection != Selection::Services {
             self.services.update(cx, |page, cx| page.close_output(cx));
         }
+        // Opened, what is new is seen for good: the daemon keeps it, and the mark goes.
+        if selection == Selection::WhatsNew && self.selected != Some(Selection::WhatsNew) {
+            self.whats_new.update(cx, |page, cx| page.opened(cx));
+            self.perform(Command::Update {
+                method: "whatsnew.seen",
+                params: serde_json::json!({}),
+            });
+        }
         // Opened, the services are read again: what runs changes outside the window too.
         if selection == Selection::Services && self.selected != Some(Selection::Services) {
             self.services.update(cx, |page, cx| page.opened(cx));
@@ -3761,6 +3805,7 @@ impl Shell {
         match selection {
             Selection::Settings => Page::Settings,
             Selection::Services => Page::Services,
+            Selection::WhatsNew => Page::WhatsNew,
             // A project just added is not in the daemon's last read yet: its page, open, stays.
             Selection::ProjectSettings(name) => {
                 let open = self
@@ -3830,7 +3875,7 @@ impl Shell {
             Some(Selection::Session(id)) => self.snapshot.session(id).map(|s| s.project.clone()),
             Some(Selection::ProjectSettings(name)) => Some(name.clone()),
             Some(Selection::Spec { project, .. }) => Some(project.clone()),
-            Some(Selection::Settings | Selection::Services) | None => None,
+            Some(Selection::Settings | Selection::Services | Selection::WhatsNew) | None => None,
         }
         .or_else(|| self.snapshot.projects.first().map(|p| p.name.clone()));
         if let Some(project) = project {

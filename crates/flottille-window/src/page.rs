@@ -18,6 +18,7 @@ use crate::services::ServicesPage;
 use crate::session::SessionPage;
 use crate::settings::SettingsPage;
 use crate::shell::{Layout, Shell};
+use crate::whats_new::WhatsNewPage;
 
 /// What the main area says while Flottille does not answer.
 const TITLE: &str = "Flottille is not answering";
@@ -47,6 +48,8 @@ pub enum Page {
     },
     /// The services of the machine.
     Services,
+    /// What is new since the version last run.
+    WhatsNew,
 }
 
 pub struct MainArea {
@@ -65,6 +68,8 @@ pub struct MainArea {
     spec: Option<Entity<SpecPage>>,
     /// The services page, one for the window's life.
     services: Entity<ServicesPage>,
+    /// What's new, one page for the window's life: it follows the daemon while closed too.
+    whats_new: Entity<WhatsNewPage>,
     /// Since when Flottille has not answered the window, in ms after the epoch: said in a banner
     /// above the page while it lasts.
     not_answering: Option<u64>,
@@ -84,6 +89,7 @@ impl MainArea {
         shell: WeakEntity<Shell>,
         settings: Entity<SettingsPage>,
         services: Entity<ServicesPage>,
+        whats_new: Entity<WhatsNewPage>,
         _: &mut Context<Self>,
     ) -> Self {
         Self {
@@ -96,6 +102,7 @@ impl MainArea {
             project_settings: None,
             spec: None,
             services,
+            whats_new,
             not_answering: None,
             restarting: false,
             restarted: false,
@@ -261,6 +268,8 @@ impl MainArea {
                 .update(cx, |page, cx| page.set_narrow(layout == Layout::Narrow, cx));
             self.services
                 .update(cx, |page, cx| page.set_narrow(layout == Layout::Narrow, cx));
+            self.whats_new
+                .update(cx, |page, cx| page.set_narrow(layout == Layout::Narrow, cx));
             if let Some(page) = &self.project_settings {
                 page.update(cx, |page, cx| page.set_narrow(layout == Layout::Narrow, cx));
             }
@@ -314,6 +323,7 @@ impl Render for MainArea {
             Page::Session { .. } => page.children(self.session.clone()),
             Page::Settings => page.child(self.settings.clone()),
             Page::Services => page.child(self.services.clone()),
+            Page::WhatsNew => page.child(self.whats_new.clone()),
             Page::ProjectSettings { .. } => page.children(self.project_settings.clone()),
             Page::Spec { .. } => page.children(self.spec.clone()),
         };

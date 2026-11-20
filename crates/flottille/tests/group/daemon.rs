@@ -49,3 +49,5 @@ mod subscriptions;
 mod tool_list_cost;
 #[path = "../update_staged.rs"]
 mod update_staged;
+#[path = "../whats_new.rs"]
+mod whats_new;

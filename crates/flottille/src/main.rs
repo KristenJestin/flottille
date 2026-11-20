@@ -12,6 +12,7 @@ mod appearance;
 mod approval_command;
 mod approvals;
 mod bridge;
+mod changes_command;
 mod chat;
 mod children;
 mod claude;
@@ -100,6 +101,7 @@ mod vault;
 mod vault_command;
 mod watchdog;
 mod web;
+mod whatsnew;
 mod workspace_command;
 mod workspaces;
 mod workspaces_folder;
@@ -284,6 +286,14 @@ enum Command {
         /// what runs
         #[arg(long)]
         stage: bool,
+    },
+    /// What changed since the version you last ran, or since one you name
+    Changes {
+        /// Count from this version instead of the one last run
+        #[arg(long, value_name = "X.Y.Z[-PRE]")]
+        since: Option<String>,
+        #[arg(long)]
+        json: bool,
     },
     /// Print the daemon's events, one JSON object per line
     Watch {
@@ -553,6 +563,7 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         Command::Inbox { after, limit, json } => inbox_command::inbox(&paths, after, limit, json)?,
         Command::Mcp => pilot::run(&paths)?,
         Command::Extensions(command) => return extensions::run(&paths, command),
+        Command::Changes { since, json } => changes_command::run(&paths, since, json)?,
         Command::Update {
             channel,
             branch,

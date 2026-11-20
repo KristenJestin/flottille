@@ -92,6 +92,14 @@ impl Shown {
         }
     }
 
+    /// This build as the window says it: its version, channel and commit.
+    pub fn build_line(&self) -> String {
+        match &self.commit {
+            Some(commit) => format!("{} · {} · {commit}", self.version, self.build_channel),
+            None => format!("{} · {}", self.version, self.build_channel),
+        }
+    }
+
     /// The line of the update's state, with the amount downloaded.
     pub fn state_line(&self) -> String {
         if self.when_idle {
@@ -154,6 +162,9 @@ pub struct VersionSection {
     /// The sessions the restart stops, while its confirmation is open (kept while it fades out).
     stopping: Vec<String>,
     confirming: bool,
+    /// The version last run, once the daemon says something is new since it: the section then
+    /// offers its page.
+    whats_new: Option<String>,
 }
 
 impl VersionSection {
@@ -165,6 +176,7 @@ impl VersionSection {
             restarting: false,
             stopping: Vec::new(),
             confirming: false,
+            whats_new: None,
         }
     }
 
@@ -187,6 +199,23 @@ impl VersionSection {
             self.shown = Some(shown);
             cx.notify();
         }
+    }
+
+    /// What the daemon says is new since `since`, the version last run; none when nothing is.
+    pub fn set_whats_new(&mut self, since: Option<String>, cx: &mut Context<Self>) {
+        if self.whats_new != since {
+            self.whats_new = since;
+            cx.notify();
+        }
+    }
+
+    /// The page of what is new since the version last run.
+    fn open_whats_new(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.shell
+            .update(cx, |shell, cx| {
+                shell.open(crate::shell::Selection::WhatsNew, window, cx)
+            })
+            .ok();
     }
 
     fn ask(&mut self, method: &'static str, params: Value, cx: &mut Context<Self>) {
@@ -369,7 +398,15 @@ impl VersionSection {
         value: AnyElement,
         cx: &Context<Self>,
     ) -> AnyElement {
-        let p = palette(cx);
+        Self::line_in(palette(cx), id, label, value)
+    }
+
+    fn line_in(
+        p: gpui_design_system::Palette,
+        id: &'static str,
+        label: &'static str,
+        value: AnyElement,
+    ) -> AnyElement {
         div()
             .id(id)
             .flex()
@@ -391,11 +428,7 @@ impl Render for VersionSection {
                 .child(awaiting("version-awaiting", true, skeleton, div()))
                 .into_any_element();
         };
-        let build = match &shown.commit {
-            Some(commit) => format!("{} · {} · {commit}", shown.version, shown.build_channel),
-            None => format!("{} · {}", shown.version, shown.build_channel),
-        };
-        let this_build = changing("version-build", build, |text| {
+        let this_build = changing("version-build", shown.build_line(), |text| {
             div()
                 .id("version-build-text")
                 .aria_label(text.clone())
@@ -476,6 +509,32 @@ impl Render for VersionSection {
                 div()
                     .pt(space::SM)
                     .child(Self::line("version-latest", "Update", state, cx)),
+            )
+            .child(
+                presence_of(
+                    "version-whats-new-line",
+                    self.whats_new
+                        .clone()
+                        .map(|since| SharedString::from(format!("Since {since}"))),
+                    {
+                        let this = cx.entity().downgrade();
+                        move |since| {
+                            let open = Button::quiet("version-whats-new-open", since).on_click(
+                                move |_, window, cx| {
+                                    this.update(cx, |this, cx| this.open_whats_new(window, cx))
+                                        .ok();
+                                },
+                            );
+                            Self::line_in(
+                                p,
+                                "version-whats-new",
+                                "What's new",
+                                open.into_any_element(),
+                            )
+                        }
+                    },
+                )
+                .space(space::SM),
             )
             .child(
                 presence_of("version-message-line", message, move |why| {
