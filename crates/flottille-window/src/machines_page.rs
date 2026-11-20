@@ -1,17 +1,20 @@
-//! Settings, General, Machines (`docs/remote.md`, "The hub", "Pairing", "Roles"): **Set up a hub** while
-//! this machine is in no member list; then the devices of the list, each renamed or removed from
-//! its "⋯", **Add a device** with the invitation's QR and its code until it expires, and the
-//! addresses this machine is reached at. A join request is the window's dialog wherever the user
-//! is, and every new member a toast. What is asked goes to this machine's daemon, signed with the
+//! Settings, Machines (`docs/remote.md`, "Identity and keys", "The hub", "Pairing", "Roles"):
+//! whether remote is on (a **Turn on** button while it is off, a **Remote** switch once it is),
+//! where this machine is reached, **Set up a hub** while this machine is in no member list; then
+//! the devices of the list, each renamed or removed from its "⋯", **Add a device**, and the
+//! addresses this machine is reached at. The page says the state and holds the buttons: what is
+//! typed, and what a request shows (the hub's setup, the invitation's QR and its code), is a
+//! dialog of the window's host, and a join request is one wherever the user is. Every new member
+//! and every result is a toast. What is asked goes to this machine's daemon, signed with the
 //! device key ([`crate::machines::Remote`]); what it answers comes back as news.
 
 use std::collections::HashMap;
 use std::time::Duration;
 
 use gpui_design_system::{
-    Button, Card, Confirm, EmptyLine, Field, Icon, ListCard, ListRow, Listing, Menu, Modal, QrCode,
-    RadioChoices, Section, Toast, changed, changing, enter, palette, presence, presence_of, space,
-    tipped_when_cut, toast,
+    Button, Confirm, EmptyLine, Field, Icon, ListCard, ListRow, Listing, Menu, Modal, QrCode,
+    RadioChoices, Section, Select, SelectOption, Switch, Toast, changed, changing, enter, palette,
+    presence, presence_of, space, tipped_when_cut, toast,
 };
 use gpui_kit::base::input::{Input, InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -25,8 +28,8 @@ use zeroize::Zeroizing;
 
 use crate::commands::{boxed, line_field, menu_of, problem_line, spaced, stack};
 use crate::machines::{
-    Ask, Asked, Hub, Invitation, JoinRequest, Machines, Member, News, ROLES, Remote, how_it_failed,
-    role_words,
+    Ask, Asked, Hub, Invitation, JoinRequest, Machines, Member, News, PORT, ROLES, Reach, Remote,
+    how_it_failed, role_words,
 };
 use crate::modals::Modals;
 
@@ -38,7 +41,16 @@ pub const RENAME_MODAL: &str = "member-rename";
 pub const REMOVAL_DIALOG: &str = "member-removal-dialog";
 /// The dialog that declares an address.
 pub const ADDRESS_MODAL: &str = "address-new";
+/// The dialog of the hub's setup: its address and its setup code.
+pub const SETUP_MODAL: &str = "hub-setup";
+/// The dialog that shows an invitation: its QR, its code, Copy code and its expiry.
+pub const INVITE_MODAL: &str = "invitation";
 
+const REMOTE_OFF: &str = "Remote is off. This machine can join a hub and link to your other \
+                          machines; nothing is opened until you say where it is reached.";
+const REMOTE_HINT: &str = "Turn it off and the links close; the hub's setup is kept.";
+const REACH_SENTENCE: &str = "Where your other machines reach this one. Nowhere is enough when it \
+                              dials them.";
 const SETUP_SENTENCE: &str = "Your machines find each other through a hub you run on a host that \
                               is always on. Give its address and the setup code it printed: this \
                               machine becomes its first device.";
@@ -56,6 +68,8 @@ const ADDRESSES_SENTENCE: &str = "Where your other machines reach this one: foun
 pub enum Removal {
     Member(String),
     Address(String),
+    /// Turning remote off: the links close.
+    Remote,
 }
 
 pub struct MachinesSection {
@@ -65,11 +79,20 @@ pub struct MachinesSection {
     url: Option<Entity<InputState>>,
     code: Option<Entity<InputState>>,
     setting_up: bool,
+    setup_open: bool,
     setup_error: Option<SharedString>,
     inviting: bool,
     invitation: Option<Invitation>,
-    /// The last invitation's code, drawn while its panel folds away.
+    /// The last invitation's code and expiry, drawn while its dialog fades out.
     shown_code: SharedString,
+    shown_until: SharedString,
+    /// What was read while remote was on: drawn while the settings fold away as it is turned off.
+    kept: Option<Machines>,
+    /// "Another address…" was chosen: its field is unfolded under the choice.
+    reach_other: bool,
+    listen: Option<Entity<InputState>>,
+    /// A change of remote was asked and not answered yet.
+    configuring: bool,
     expiry: Option<Task<()>>,
     members: Listing<Member>,
     addresses: Listing<crate::machines::Address>,
@@ -100,10 +123,16 @@ impl MachinesSection {
             url: None,
             code: None,
             setting_up: false,
+            setup_open: false,
             setup_error: None,
             inviting: false,
             invitation: None,
             shown_code: SharedString::default(),
+            shown_until: SharedString::default(),
+            kept: None,
+            reach_other: false,
+            listen: None,
+            configuring: false,
             expiry: None,
             members: Listing::default(),
             addresses: Listing::default(),
@@ -143,6 +172,18 @@ impl MachinesSection {
 
     pub fn removal(&self) -> Option<&Removal> {
         self.removal.as_ref()
+    }
+
+    pub fn setup_is_open(&self) -> bool {
+        self.setup_open
+    }
+
+    pub fn invitation_is_open(&self) -> bool {
+        self.invitation.is_some()
+    }
+
+    pub fn setup_focus(&self, cx: &App) -> Option<FocusHandle> {
+        self.url.as_ref().map(|field| field.focus_handle(cx))
     }
 
     pub fn join_is_open(&self) -> bool {
@@ -193,6 +234,12 @@ impl MachinesSection {
         self.join_name = Some(line_field("pixel", window, cx));
         self.rename = Some(line_field("laptop", window, cx));
         self.address = Some(line_field("100.64.0.7", window, cx));
+        self.listen = Some(line_field("100.64.0.7:7447", window, cx));
+    }
+
+    /// The field of "Another address…": an address and its port.
+    pub fn listen_field(&self) -> Option<&Entity<InputState>> {
+        self.listen.as_ref()
     }
 
     pub fn url_field(&self) -> Option<&Entity<InputState>> {
@@ -234,12 +281,20 @@ impl MachinesSection {
                 {
                     self.join = None;
                 }
+                // A device asked to join with the invitation: it is used, its dialog closes.
+                if !read.requests.is_empty() {
+                    self.close_invitation(cx);
+                }
+                if read.off.is_none() {
+                    self.kept = Some((*read).clone());
+                }
                 if self.read.as_ref() != Some(&*read) {
                     self.read = Some(*read);
                     cx.notify();
                 }
             }
             News::JoinRequested(request) => {
+                self.close_invitation(cx);
                 if self.join.is_none() && !self.set_aside.contains(&request.request) {
                     self.ask_join(request, window, cx);
                 }
@@ -281,18 +336,36 @@ impl MachinesSection {
         match (asked, done) {
             (Asked::Setup, Ok(_)) => {
                 self.setting_up = false;
+                self.setup_open = false;
                 if let Some(code) = &self.code {
                     code.update(cx, |field, cx| field.set_value("", window, cx));
                 }
                 toast(Toast::success("This machine set up the hub"), cx);
             }
+            // A refusal stays in the dialog, under its fields.
             (Asked::Setup, Err(why)) => {
                 self.setting_up = false;
-                toast(Toast::failure("The hub was not set up").detail(why), cx);
+                self.setup_error = Some(why.into());
             }
             (Asked::Invite, Ok(Some(invitation))) => {
                 self.inviting = false;
                 self.show_invitation(invitation, cx);
+            }
+            (Asked::Configure { on, listen }, done) => {
+                self.configuring = false;
+                match done {
+                    Ok(_) => {
+                        let said = match (on, listen.as_deref()) {
+                            (Some(true), _) => "Remote is on".to_owned(),
+                            (Some(false), _) => "Remote is off".to_owned(),
+                            (None, Some("nowhere")) => "This machine is reached nowhere".to_owned(),
+                            (None, Some(at)) => format!("This machine is reached at {at}"),
+                            (None, None) => "Remote is set".to_owned(),
+                        };
+                        toast(Toast::success(said), cx);
+                    }
+                    Err(why) => toast(Toast::failure("Remote was not changed").detail(why), cx),
+                }
             }
             (Asked::Invite, Ok(None)) => self.inviting = false,
             (Asked::Invite, Err(why)) => {
@@ -343,19 +416,30 @@ impl MachinesSection {
     fn show_invitation(&mut self, invitation: Invitation, cx: &mut Context<Self>) {
         let left = invitation.expires.saturating_sub(crate::shell::now_ms());
         self.shown_code = invitation.code.clone().into();
+        self.shown_until = format!(
+            "Valid once, until {}.",
+            crate::session::clock(invitation.expires)
+        )
+        .into();
         self.invitation = Some(invitation);
-        // It folds away when it expires: on the window's clock, which a test moves.
+        self.modals
+            .update(cx, |modals, cx| modals.open(INVITE_MODAL, cx));
+        // Its dialog closes when it expires: on the window's clock, which a test moves.
         self.expiry = Some(cx.spawn(async move |this: WeakEntity<Self>, cx| {
             cx.background_executor()
                 .timer(Duration::from_millis(left))
                 .await;
-            this.update(cx, |this, cx| {
-                this.invitation = None;
-                cx.notify();
-            })
-            .ok();
+            this.update(cx, |this, cx| this.close_invitation(cx)).ok();
         }));
         cx.notify();
+    }
+
+    /// The invitation's dialog closes: the user closed it, it expired, or it was used.
+    fn close_invitation(&mut self, cx: &mut Context<Self>) {
+        if self.invitation.take().is_some() {
+            self.expiry = None;
+            cx.notify();
+        }
     }
 
     // ── What the user does ────────────────────────────────────────────────────────────────
@@ -381,7 +465,59 @@ impl MachinesSection {
         cx.notify();
     }
 
-    /// Add a device: an invitation from the hub, its QR and its code.
+    /// Set up a hub opens its dialog: the fields are typed there, never on the page.
+    pub fn open_setup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        for field in [&self.url, &self.code].into_iter().flatten() {
+            field.update(cx, |field, cx| field.set_value("", window, cx));
+        }
+        self.setup_error = None;
+        self.setup_open = true;
+        self.modals
+            .update(cx, |modals, cx| modals.open(SETUP_MODAL, cx));
+        cx.notify();
+    }
+
+    /// Turns remote on or off, or says where this machine is reached.
+    fn configure(&mut self, on: Option<bool>, listen: Option<String>, cx: &mut Context<Self>) {
+        self.configuring = true;
+        self.remote.ask(Ask::Configure { on, listen });
+        cx.notify();
+    }
+
+    /// An option of "Where this machine is reached" was chosen.
+    fn choose_reach(&mut self, key: &str, cx: &mut Context<Self>) {
+        match key {
+            "other" => {
+                self.reach_other = true;
+                cx.notify();
+            }
+            "nowhere" => {
+                self.reach_other = false;
+                self.configure(None, Some("nowhere".into()), cx);
+            }
+            "every" => {
+                self.reach_other = false;
+                self.configure(None, Some(format!("0.0.0.0:{PORT}")), cx);
+            }
+            address => {
+                self.reach_other = false;
+                self.configure(None, Some(format!("{address}:{PORT}")), cx);
+            }
+        }
+    }
+
+    fn use_other_address(&mut self, cx: &mut Context<Self>) {
+        let address = self
+            .listen
+            .as_ref()
+            .map(|field| field.read(cx).value().trim().to_owned())
+            .unwrap_or_default();
+        if !address.is_empty() {
+            self.configure(None, Some(address), cx);
+        }
+    }
+
+    /// Add a device: an invitation from the hub, shown in its dialog.
     pub fn invite(&mut self, cx: &mut Context<Self>) {
         // The hub makes the invitation: out of reach, there is nothing to ask.
         if self.inviting
@@ -469,6 +605,7 @@ impl MachinesSection {
         match self.removal.take() {
             Some(Removal::Member(name)) => self.remote.ask(Ask::Remove { name }),
             Some(Removal::Address(address)) => self.remote.ask(Ask::AddressRemove(address)),
+            Some(Removal::Remote) => self.configure(Some(false), None, cx),
             None => {}
         }
         cx.notify();
@@ -652,7 +789,9 @@ impl MachinesSection {
 
     // ── The page ──────────────────────────────────────────────────────────────────────────
 
-    fn setup_section(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    /// The hub's setup dialog: its address and its setup code. A refusal stays under its fields.
+    pub fn setup_dialog(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> Modal {
+        let this = cx.entity().downgrade();
         let url = self.url.clone().map(|field| {
             spaced(
                 space::LG,
@@ -674,8 +813,17 @@ impl MachinesSection {
                 .hint("Printed once in the hub's log at its first start."),
             )
         });
-        Section::new("hub-setup", "Set up a hub")
+        Modal::new(SETUP_MODAL, "Set up a hub")
             .sentence(SETUP_SENTENCE)
+            .open(self.setup_open)
+            .takes_focus()
+            .on_close(move |_, cx| {
+                this.update(cx, |this, cx| {
+                    this.setup_open = false;
+                    cx.notify();
+                })
+                .ok();
+            })
             .child(
                 stack(space::LG)
                     .children(url)
@@ -685,14 +833,260 @@ impl MachinesSection {
                         self.setup_error.clone(),
                         space::MD,
                         cx,
-                    ))
-                    .child(spaced(
-                        space::LG,
-                        Button::primary("set-up-hub", "Set up")
-                            .disabled(self.setting_up)
-                            .on_click(cx.listener(|this, _, _, cx| this.set_up(cx))),
                     )),
             )
+            .action(
+                Button::primary("set-up-hub", "Set up")
+                    .disabled(self.setting_up)
+                    .on_click(cx.listener(|this, _, _, cx| this.set_up(cx))),
+            )
+    }
+
+    /// The invitation's dialog: its QR, its code, Copy code and its expiry. It closes when the
+    /// invitation is used or expires.
+    pub fn invitation_dialog(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> Modal {
+        let p = palette(cx);
+        let code = self.shown_code.clone();
+        let until = self.shown_until.clone();
+        let copied = code.clone();
+        let this = cx.entity().downgrade();
+        let content = div()
+            .flex()
+            .gap(space::LG)
+            // As wide as its plate: the code's column takes the rest.
+            .child(div().flex_none().child(QrCode::new(
+                "invitation-qr",
+                code.clone(),
+                "Invitation code",
+            )))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(space::SM)
+                    .child(
+                        div()
+                            .text_size(px(12.5))
+                            .text_color(p.mute)
+                            .child("On the new device, scan the code, or give it this code:"),
+                    )
+                    .child(
+                        div()
+                            .id("invitation-code")
+                            .aria_label(code.clone())
+                            .text_size(px(12.5))
+                            .text_color(p.text)
+                            .child(code)
+                            .test_support(),
+                    )
+                    .child(
+                        div()
+                            .id("invitation-expiry")
+                            .aria_label(until.clone())
+                            .text_size(px(12.5))
+                            .text_color(p.mute)
+                            .child(until)
+                            .test_support(),
+                    )
+                    .child(
+                        div().child(
+                            Button::quiet("copy-invitation", "Copy code")
+                                .leading(Icon::Copy)
+                                .on_click(move |_, _, cx| {
+                                    cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(
+                                        copied.to_string(),
+                                    ));
+                                    toast(Toast::success("Code copied"), cx);
+                                }),
+                        ),
+                    ),
+            );
+        Modal::new(INVITE_MODAL, "Add a device")
+            .sentence("Check the four words on both screens before you accept the new device.")
+            .open(self.invitation.is_some())
+            .cancel_label("Close")
+            .on_close(move |_, cx| {
+                this.update(cx, |this, cx| this.close_invitation(cx)).ok();
+            })
+            .child(content)
+    }
+
+    /// Whether remote is on: its notice and **Turn on** while it is off, the **Remote** switch once
+    /// it is. Each folds away as the other unfolds.
+    fn remote_section(&mut self, off: bool, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let p = palette(cx);
+        let notice = div()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .id("remote-notice")
+                    .aria_label(REMOTE_OFF)
+                    .text_size(px(13.))
+                    .text_color(p.mute)
+                    .child(REMOTE_OFF)
+                    .test_support(),
+            )
+            .child(spaced(
+                space::MD,
+                div().child(
+                    Button::primary("turn-on-remote", "Turn on")
+                        .disabled(self.configuring)
+                        .on_click(
+                            cx.listener(|this, _, _, cx| this.configure(Some(true), None, cx)),
+                        ),
+                ),
+            ));
+        let switch = Switch::new("remote-switch", true, "Remote")
+            .hint(REMOTE_HINT)
+            .disabled(self.configuring)
+            .on_click(cx.listener(|this, _, _, cx| this.ask_removal(Removal::Remote, cx)));
+        div()
+            .id("remote")
+            .flex()
+            .flex_col()
+            .child(presence("remote-off-block", off, notice))
+            .child(presence("remote-on-block", !off, switch))
+            .test_support()
+    }
+
+    /// Where this machine is reached: nowhere, an address of its own (a tailnet's first), every
+    /// network, or one typed, which unfolds under its choice.
+    fn reach_section(&mut self, reach: &Reach, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let p = palette(cx);
+        let mut keys: Vec<String> = vec!["nowhere".into()];
+        let mut options = vec![
+            SelectOption::new("nowhere", "Nowhere")
+                .line("It dials your other machines; none of them dials it."),
+        ];
+        for interface in &reach.interfaces {
+            keys.push(interface.address.clone());
+            options.push(
+                SelectOption::new(
+                    interface.address.clone(),
+                    format!("{} · {}", interface.name, interface.address),
+                )
+                .line(if interface.tailnet {
+                    "Only your tailnet"
+                } else {
+                    "Your local network"
+                }),
+            );
+        }
+        keys.push("every".into());
+        options.push(
+            SelectOption::new("every", "Every network")
+                .line("Opens a port on any network this machine joins."),
+        );
+        keys.push("other".into());
+        options.push(
+            SelectOption::new("other", "Another address…").line("An IP address and its port."),
+        );
+        let wanted = reach.listen.as_deref();
+        let chosen = if self.reach_other {
+            keys.len() - 1
+        } else {
+            match wanted {
+                None => 0,
+                Some(at) if at == format!("0.0.0.0:{PORT}") => keys.len() - 2,
+                Some(at) => keys
+                    .iter()
+                    .position(|key| at == format!("{key}:{PORT}"))
+                    .unwrap_or(keys.len() - 1),
+            }
+        };
+        let other = chosen == keys.len() - 1;
+        let every = chosen == keys.len() - 2;
+        let this = cx.entity().downgrade();
+        let picked = keys.clone();
+        let select = Select::new("reach", options, chosen)
+            .disabled(self.configuring)
+            .on_choose(move |index, _, cx| {
+                this.update(cx, |this, cx| this.choose_reach(&picked[index], cx))
+                    .ok();
+            });
+        let field = self.listen.clone().map(|field| {
+            stack(space::MD)
+                .child(spaced(
+                    space::MD,
+                    Field::new(
+                        "reach-other-field",
+                        "Address and port",
+                        boxed("reach-other-value", Input::new(&field), cx),
+                    )
+                    .hint("An IP address and its port: 100.64.0.7:7447."),
+                ))
+                .child(spaced(
+                    space::MD,
+                    div().child(
+                        Button::secondary("reach-other-use", "Use this address")
+                            .disabled(self.configuring)
+                            .on_click(cx.listener(|this, _, _, cx| this.use_other_address(cx))),
+                    ),
+                ))
+        });
+        let field = field.unwrap_or_else(div);
+        let warning = every.then(|| {
+            SharedString::from(
+                "Every network opens a port on any network this machine joins, a café's included.",
+            )
+        });
+        let waits = reach.waits.then(|| {
+            SharedString::from(
+                "The change waits for the next start: an agent runs, and its links are not cut.",
+            )
+        });
+        let line = move |id: &'static str, said: SharedString| {
+            div()
+                .id(id)
+                .aria_label(said.clone())
+                .text_size(px(12.5))
+                .text_color(p.mute)
+                .child(said)
+                .test_support()
+                .into_any_element()
+        };
+        Section::new("reached", "Where this machine is reached")
+            .sentence(REACH_SENTENCE)
+            .child(
+                stack(space::MD)
+                    .child(spaced(
+                        space::MD,
+                        Field::new("reach-field", "Reached at", select),
+                    ))
+                    .child(presence("reach-other-block", other, field).space(space::MD))
+                    .child(
+                        presence_of("reach-warning-block", warning, move |said| {
+                            line("reach-warning", said)
+                        })
+                        .space(space::MD),
+                    )
+                    .child(
+                        presence_of("reach-waits-block", waits, move |said| {
+                            line("reach-waits", said)
+                        })
+                        .space(space::MD),
+                    ),
+            )
+    }
+
+    /// While this machine is in no hub: what the hub is for, and **Set up a hub**, which opens its
+    /// dialog.
+    fn no_hub_section(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        Section::new("no-hub", "Hub")
+            .sentence(SETUP_SENTENCE)
+            .action(
+                Button::secondary("open-hub-setup", "Set up a hub")
+                    .leading(Icon::Plus)
+                    .on_click(cx.listener(|this, _, window, cx| this.open_setup(window, cx))),
+            )
+            .child(EmptyLine::new(
+                "no-hub-line",
+                Icon::Service,
+                "This machine is in no hub yet.",
+            ))
     }
 
     /// The hub: its address, whether it answers, and when it does not, which address was tried
@@ -828,71 +1222,6 @@ impl MachinesSection {
                 row,
             );
         }
-        let code = self.shown_code.clone();
-        let until = self
-            .invitation
-            .as_ref()
-            .map(|invitation| crate::session::clock(invitation.expires))
-            .unwrap_or_default();
-        let shown = self.invitation.is_some();
-        let copied = code.clone();
-        let content =
-            div()
-                .id("invitation-panel")
-                .flex()
-                .gap(space::LG)
-                .p(space::LG)
-                // As wide as its plate: the code's column takes the rest.
-                .child(div().flex_none().child(
-                    QrCode::new("invitation-qr", code.clone(), "Invitation code").shown(shown),
-                ))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .flex()
-                        .flex_col()
-                        .gap(space::SM)
-                        .child(
-                            div()
-                                .text_size(px(12.5))
-                                .text_color(p.mute)
-                                .child("On the new device, scan the code, or give it this code:"),
-                        )
-                        .child(
-                            div()
-                                .id("invitation-code")
-                                .aria_label(code.clone())
-                                .text_size(px(12.5))
-                                .text_color(p.text)
-                                .child(code)
-                                .test_support(),
-                        )
-                        .child({
-                            let said: SharedString = format!("Valid once, until {until}.").into();
-                            div()
-                                .id("invitation-expiry")
-                                .aria_label(said.clone())
-                                .text_size(px(12.5))
-                                .text_color(p.mute)
-                                .child(said)
-                                .test_support()
-                        })
-                        .child(
-                            div().child(
-                                Button::quiet("copy-invitation", "Copy code")
-                                    .leading(Icon::Copy)
-                                    .on_click(move |_, _, cx| {
-                                        cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(
-                                            copied.to_string(),
-                                        ));
-                                        toast(Toast::success("Code copied"), cx);
-                                    }),
-                            ),
-                        ),
-                )
-                .test_support();
-        let panel = Card::new().id("invitation-card").child(content);
         let count = self.members.len();
         let hub_down = self
             .read
@@ -931,7 +1260,6 @@ impl MachinesSection {
                         )
                         .space(space::MD),
                     )
-                    .child(presence("invitation", shown, panel).space(space::MD))
                     .child(presence("member-list-block", count > 0, list).space(space::MD)),
             )
     }
@@ -1034,6 +1362,11 @@ impl MachinesSection {
                 "Your other machines no longer try this machine there.",
                 "Remove address",
             ),
+            Removal::Remote => (
+                "Turn remote off?".to_owned(),
+                "The links close; the hub's setup is kept.",
+                "Turn off",
+            ),
         };
         let (this, again) = (cx.entity().downgrade(), cx.entity().downgrade());
         Confirm::new("member-removal", question)
@@ -1048,7 +1381,9 @@ impl MachinesSection {
             })
     }
 
-    /// The sections of the tab, top to bottom, each entering on its own.
+    /// The sections of the tab, top to bottom, each entering on its own: whether remote is on, then
+    /// (while it is) where this machine is reached, the hub, the devices and the addresses. They
+    /// fold away, as they were, when remote is turned off.
     pub fn blocks(
         &mut self,
         window: &mut Window,
@@ -1058,19 +1393,49 @@ impl MachinesSection {
             let waiting = gpui_design_system::Skeleton::new("machines-skeleton").h(px(120.));
             return vec![("machines-loading", waiting.into_any_element())];
         };
-        if let Some(off) = read.off {
-            let line = EmptyLine::new(
-                "machines-off",
-                Icon::Service,
-                format!("Your other machines are not reached from this one: {off}"),
-            );
-            return vec![("machines-off", line.into_any_element())];
+        let off = read.off.is_some();
+        let mut blocks = vec![("remote", self.remote_section(off, cx).into_any_element())];
+        let shown = if off { self.kept.clone() } else { Some(read) };
+        if let Some(shown) = shown {
+            let live = std::mem::replace(&mut self.read, Some(shown));
+            let rest = self.rest(window, cx);
+            self.read = live;
+            let column = div()
+                .flex()
+                .flex_col()
+                .children(rest.into_iter().enumerate().map(|(n, (part, block))| {
+                    div().when(n > 0, |d| d.mt(space::XXL)).child(enter(
+                        ElementId::Name(format!("enter-machines-{part}").into()),
+                        n,
+                        block,
+                    ))
+                }));
+            blocks.push((
+                "machines-rest",
+                presence("machines-rest", !off, column)
+                    .space(space::XXL)
+                    .into_any_element(),
+            ));
+        }
+        blocks
+    }
+
+    /// What remote on shows under its switch.
+    fn rest(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<(&'static str, gpui_kit::AnyElement)> {
+        let read = self.read.clone().unwrap_or_default();
+        let mut blocks = Vec::new();
+        if let Some(reach) = &read.reach {
+            blocks.push(("reached", self.reach_section(reach, cx).into_any_element()));
         }
         if !read.member() {
-            return vec![("hub-setup", self.setup_section(cx).into_any_element())];
+            blocks.push(("no-hub", self.no_hub_section(cx).into_any_element()));
+            return blocks;
         }
         let hub = read.hub.as_ref().map(|hub| self.hub_section(hub, cx));
-        let mut blocks = Vec::new();
         blocks.extend(hub.map(|hub| ("hub", hub.into_any_element())));
         blocks.push((
             "devices",
@@ -1090,6 +1455,10 @@ impl Render for MachinesSection {
             .flex()
             .flex_col()
             .children(blocks.into_iter().enumerate().map(|(n, (part, block))| {
+                // The settings under the switch hold their own space and enter section by section.
+                if part == "machines-rest" {
+                    return div().child(block);
+                }
                 div().when(n > 0, |d| d.mt(space::XXL)).child(enter(
                     ElementId::Name(format!("enter-machines-{part}").into()),
                     n,

@@ -290,9 +290,57 @@ fn host_of(address: &str) -> String {
         .map_or_else(|_| address.to_owned(), |socket| socket.ip().to_string())
 }
 
+/// An address of this machine a link may listen on, named by its interface.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Interface {
+    pub name: String,
+    pub address: String,
+    /// A Tailscale or WireGuard address: only the user's own network reaches it.
+    pub tailnet: bool,
+}
+
+/// Whether remote is on and where this machine is reached (`remote.settings`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Reach {
+    pub on: bool,
+    /// Where the configuration says the link listens (`ip:port`); none: nowhere.
+    pub listen: Option<String>,
+    /// Where it listens now.
+    pub listening: Option<String>,
+    /// A change of `listen` that waits for the next start: an agent runs.
+    pub waits: bool,
+    pub interfaces: Vec<Interface>,
+}
+
+impl Reach {
+    fn of(value: &Value) -> Reach {
+        Reach {
+            on: value["on"].as_bool().unwrap_or(false),
+            listen: value["listen"].as_str().map(str::to_owned),
+            listening: value["listening"].as_str().map(str::to_owned),
+            waits: value["waits"].as_bool().unwrap_or(false),
+            interfaces: value["interfaces"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|interface| Interface {
+                    name: text(&interface["name"]),
+                    address: text(&interface["address"]),
+                    tailnet: interface["tailnet"].as_bool().unwrap_or(false),
+                })
+                .collect(),
+        }
+    }
+}
+
+/// The port a link listens on unless the user gives another (`docs/remote.md`).
+pub const PORT: u16 = 7447;
+
 /// Everything the window shows of the user's machines.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Machines {
+    /// Whether remote is on and where this machine is reached, when it was read.
+    pub reach: Option<Reach>,
     /// Why the machines cannot be read (remote is off), when they cannot.
     pub off: Option<String>,
     /// This machine's member's name, when it is one.
@@ -364,6 +412,11 @@ pub enum Ask {
     },
     AddressAdd(String),
     AddressRemove(String),
+    /// Turns remote on or off, and says where this machine is reached (`remote.configure`).
+    Configure {
+        on: Option<bool>,
+        listen: Option<String>,
+    },
 }
 
 impl Ask {
@@ -377,6 +430,10 @@ impl Ask {
             Ask::Remove { name } => Asked::Remove(name.clone()),
             Ask::AddressAdd(address) => Asked::AddressAdd(address.clone()),
             Ask::AddressRemove(address) => Asked::AddressRemove(address.clone()),
+            Ask::Configure { on, listen } => Asked::Configure {
+                on: *on,
+                listen: listen.clone(),
+            },
         }
     }
 }
@@ -392,6 +449,10 @@ pub enum Asked {
     Remove(String),
     AddressAdd(String),
     AddressRemove(String),
+    Configure {
+        on: Option<bool>,
+        listen: Option<String>,
+    },
 }
 
 /// An invitation the hub gave: the code (the QR's text) and when it expires.
@@ -650,16 +711,32 @@ impl Remote {
                 request("remote.address.remove", json!({"address": address}))?;
                 Ok(None)
             }
+            Ask::Configure { on, listen } => {
+                let mut params = json!({});
+                if let Some(on) = on {
+                    params["on"] = json!(on);
+                }
+                if let Some(listen) = listen {
+                    params["listen"] = json!(listen);
+                }
+                request("remote.configure", params)?;
+                Ok(None)
+            }
         }
     }
 }
 
 /// Everything the window shows of the machines, on one connection to this machine.
 fn read(conn: &mut Conn) -> Result<Machines> {
+    let reach = conn
+        .ask_within("remote.settings", json!({}), BOUND)?
+        .ok()
+        .map(|settings| Reach::of(&settings));
     let machines = match conn.ask_within("remote.machines", json!({}), BOUND)? {
         Ok(machines) => machines,
         Err(why) => {
             return Ok(Machines {
+                reach,
                 off: Some(why),
                 ..Machines::default()
             });
@@ -672,6 +749,7 @@ fn read(conn: &mut Conn) -> Result<Machines> {
         reason: machines["hub"]["reason"].as_str().map(str::to_owned),
     });
     let mut read = Machines {
+        reach,
         off: None,
         this: None,
         addresses: machines["this"]["addresses"]

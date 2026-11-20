@@ -527,6 +527,22 @@ impl Shell {
                 MachinesSection::address_focus,
                 cx,
             );
+            modals.add(
+                crate::machines_page::SETUP_MODAL,
+                &machines,
+                MachinesSection::setup_dialog,
+                MachinesSection::setup_is_open,
+                MachinesSection::setup_focus,
+                cx,
+            );
+            modals.add(
+                crate::machines_page::INVITE_MODAL,
+                &machines,
+                MachinesSection::invitation_dialog,
+                MachinesSection::invitation_is_open,
+                |_, _| None,
+                cx,
+            );
             modals.add_view(
                 crate::machines_page::REMOVAL_DIALOG,
                 &removal,
