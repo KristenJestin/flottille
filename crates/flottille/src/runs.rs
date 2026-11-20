@@ -924,8 +924,12 @@ async fn to_paths(folder: &Path, words: &[String], env: &BTreeMap<OsString, OsSt
         .iter()
         .position(|word| word == "--" || word == "--end-of-options")
         .map_or(words.len(), |at| at_push + 1 + at);
-    // Last among its options, so that none of the line's turns them off.
+    // Last among its options, so that none of the line's turns them off. The `git` found at the
+    // start says it, not one a run put first in the `PATH`.
     let mut dry = words.to_vec();
+    if let Some(git) = crate::git::program() {
+        dry[0] = git.to_string_lossy().into_owned();
+    }
     dry.splice(
         end..end,
         ["--dry-run", "--porcelain", "--no-recurse-submodules"].map(String::from),
