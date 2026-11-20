@@ -35,6 +35,8 @@ mod remote_launch;
 mod remote_link;
 #[path = "../remote_requests.rs"]
 mod remote_requests;
+#[path = "../remote_sessions.rs"]
+mod remote_sessions;
 #[path = "../remote_tunnels.rs"]
 mod remote_tunnels;
 #[path = "../ssh_agent.rs"]
