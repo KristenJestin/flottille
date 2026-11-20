@@ -4762,6 +4762,22 @@ pub fn forbidden(
                 path.shown
             ));
         }
+        // What is staged beside it becomes the program at the daemon's next start.
+        let staging: Vec<PathBuf> = program
+            .iter()
+            .flatten()
+            .map(|program| crate::update::staging_of(program))
+            .collect();
+        if seen(path)
+            .iter()
+            .any(|path| staging.iter().any(|staging| path.starts_with(staging)))
+        {
+            return Some(format!(
+                "refused: {} is where a build of Flottille is staged, which becomes its program at \
+                 the next start: an agent never writes there, in any mode; nothing was done",
+                path.shown
+            ));
+        }
     }
     // A project's workspaces may sit in Flottille's data folder, the first of its own: they are
     // the project's, not Flottille's.
@@ -8552,6 +8568,11 @@ mod tests {
         let exe = std::env::current_exe().unwrap().display().to_string();
         assert!(denied(&workspace.file("fs_write", &exe)));
         assert!(denied(&workspace.run(&format!("cp README.md {exe}"))));
+        // And the build staged beside it, which the next start makes the program.
+        let staged = format!("{exe}.next/flottille");
+        assert!(denied(&workspace.file("fs_write", &staged)));
+        assert!(denied(&workspace.file("fs_write", &format!("{exe}.next"))));
+        assert!(denied(&workspace.run(&format!("cp README.md {staged}"))));
     }
 
     #[test]
