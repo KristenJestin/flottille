@@ -176,10 +176,12 @@ fn present(cx: &mut VisualTestContext, id: &str) -> bool {
     cx.update(|window, _| window.try_find(id.to_owned()).is_some())
 }
 
-/// Waits for the element to be drawn, then clicks it and lets the window settle: a click on an
-/// element not drawn yet is lost, or panics.
+/// Waits for the element to be drawn and for its entrance to end, then clicks it and lets the
+/// window settle: a click on an element not drawn yet is lost, or panics, and so is one on an
+/// element still unfolding (an optimised build draws it before the entrance is shown).
 fn click_when_drawn(shell: &Entity<Shell>, cx: &mut VisualTestContext, id: &str) {
     until(shell, cx, &format!("{id} is drawn"), |cx| present(cx, id));
+    settle(cx);
     let id = id.to_owned();
     cx.update(|window, cx| window.click(id, cx));
     settle(cx);
@@ -1373,6 +1375,8 @@ fn instructions_for_this_check_fold_under_each_check(cx: &mut TestAppContext) {
     field.update_in(cx, |field, window, cx| {
         field.set_value("Look at the retries of the login first.", window, cx)
     });
+    // What the edit set going is run before the frame that is counted, not after it.
+    cx.run_until_parked();
     assert!(step(cx) > 0, "Save unfolds");
     settle(cx);
     cx.update(|window, cx| window.click("review-bugs-guidance-save", cx));

@@ -384,6 +384,15 @@ A link to another machine of the user's was made, or ended (`docs/remote.md`, "T
 `name` and `fingerprint` of the machine, and, when it ended, `reason` (`it was removed from the
 member list`, for a machine whose member was removed: its link is cut at once).
 
+### `remote.delivery_dropped`
+
+A message this machine kept for another was dropped (`docs/remote.md`, "Deliveries across
+machines"): that machine did not link for 30 days, or it refused the message, or this machine did
+not keep it. `machine` (its name), `launch`, `kind` (the delivery's kind, or the tool of a call),
+`agent` (the agent there it was for), `kept_at`, `refused` (that machine's reason, or `null`) and
+`unkept` (why this machine did not keep it: as many messages wait for that machine as may, or the
+delivery is too long; `null` otherwise). The inbox lists it, of kind `dropped`.
+
 ### `tunnel.opened`, `tunnel.closed`
 
 A tunnel to a run's port of another machine opened, or ended (`docs/remote.md`, "Tunnels"). Said by
@@ -398,7 +407,9 @@ serves it with `device`, the name of the member whose client asked.
 | `machine` | The carrying machine's side: the machine of the run. |
 | `local_port` | The carrying machine's side: the port it listens on, on `127.0.0.1`. |
 | `device` | The serving machine's side: the member that opened it. |
-| `reason` | `tunnel.closed` only: why (`run r1 ended`, `closed by the user`, `the link to server was lost`, `its client left`). |
+| `sign_in` | The carrying machine's side: the connection whose sign-in's redirect it carries, instead of a run's port (`run` is empty then). |
+| `reason` | `tunnel.closed` only: why (`run r1 ended`, `closed by the user`, `the link to server was lost`, `its client left`, `the sign-in of notes ended: signed in`). |
+| `signed_in` | `tunnel.closed` of a sign-in's tunnel only, on the carrying machine: whether the sign-in it carried signed in. |
 
 ### `workspace.created`
 

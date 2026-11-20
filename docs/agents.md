@@ -1138,6 +1138,13 @@ Every 5 seconds, the daemon looks at what only time decides:
 - `FLOTTILLE_TEST_CLOCK`: set (to anything), the daemon answers `test.advance {"ms"}` on its
   socket: its clock moves that far ahead, and the sweep runs at once. The tests see minutes pass
   this way without waiting for them. Without it, `test.advance` is an unknown method.
+- `FLOTTILLE_TEST_RELEASE_WAIT_MS`, `FLOTTILLE_TEST_SITE_WAIT_MS`, `FLOTTILLE_TEST_RUN_GRACE_MS`,
+  `FLOTTILLE_TEST_READER_MS`: in a test build (`debug_assertions`), the waits a test would
+  otherwise sit through, in milliseconds: the wait for the processes of a removed project's agents
+  (15 s), what a call to a ticket site may take (30 s), the grace a run asked to stop has before
+  its group is killed (5 s), and a page reader's time on the clock (25 s, with a second less of
+  CPU). A release build reads none of them (`src/test_time.rs`). The tests' wall clock for an
+  invitation's five minutes moves by `FLOTTILLE_TEST_WALL_AHEAD_FILE` (`docs/remote.md`).
 
 All of them are read by the daemon (or the bridge it starts) from its environment, which is the environment of the command that
 started it.

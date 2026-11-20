@@ -434,6 +434,14 @@ impl Shell {
                 |_, _| None,
                 cx,
             );
+            modals.add(
+                crate::extensions::connections::SHARE_MODAL,
+                &connections,
+                |section, window, cx| section.share_dialog(window, cx),
+                ConnectionsSection::is_sharing,
+                |_, _| None,
+                cx,
+            );
             modals.add_view(
                 crate::extensions::connection_request::MODAL,
                 &connection_request,
@@ -906,6 +914,12 @@ impl Shell {
     pub fn open_settings_tab(&mut self, tab: usize, window: &mut Window, cx: &mut Context<Self>) {
         self.open(Selection::Settings, window, cx);
         self.settings.update(cx, |page, cx| page.choose(tab, cx));
+    }
+
+    /// How this window signs what only the user's device may ask, rather than with the process's
+    /// signer (`link::sign_with`): a window of its own device, as a test's two machines have.
+    pub fn sign_with(&mut self, sign: crate::link::Sign) {
+        self.actions.sign_with(sign);
     }
 
     /// What opens a folder in the user's editor, for the session pages opened from now on.

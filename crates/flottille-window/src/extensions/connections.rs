@@ -41,6 +41,35 @@ pub const NAME: &str = "connections";
 /// the review of a connection.
 pub const FORM_MODAL: &str = "connection-modal";
 pub const REVIEW_MODAL: &str = "connection-review";
+/// The dialog that shares a connection with another machine of the user's.
+pub const SHARE_MODAL: &str = "connection-share-modal";
+
+/// What the sharing dialog says under its title.
+pub const SHARE_SENTENCE: &str = "Its declaration goes to the machine you choose, which signs in \
+                                  for itself: the tokens of a sign-in here stay here.";
+
+/// What the sharing dialog says when no runner of the user's is online.
+pub const NO_RUNNER: &str = "No other machine of yours that runs agents is online.";
+
+/// How the copy of a connection shared from this window is on the machine it went to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Elsewhere {
+    SignedOut,
+    SigningIn,
+    SignedIn,
+}
+
+impl Elsewhere {
+    fn said(self, machine: &str) -> String {
+        match self {
+            Elsewhere::SignedOut => format!("On {machine}: not signed in yet"),
+            Elsewhere::SigningIn => {
+                format!("On {machine}: signing in, finish it in your browser")
+            }
+            Elsewhere::SignedIn => format!("On {machine}: signed in"),
+        }
+    }
+}
 
 /// What the list of servers is for.
 pub const SENTENCE: &str = "Each server is one tool of every agent once you have reviewed what \
@@ -570,7 +599,7 @@ pub enum Writing {
 /// Whether the window opens `url` to sign in: the daemon gives an `https` address, or an `http`
 /// one on this machine, and the system's handler is never handed anything else (a `file:` path, a
 /// program's own scheme), whatever the answer says.
-fn sign_in_address(url: &str) -> Result<(), &'static str> {
+pub fn sign_in_address(url: &str) -> Result<(), &'static str> {
     if url.trim().is_empty() {
         return Err("there is no address to open");
     }
@@ -623,6 +652,23 @@ pub enum Then {
     /// `connection.login` of `name`: the address to open in the browser.
     SignIn {
         name: String,
+    },
+    /// `remote.machines`, for the sharing dialog.
+    ShareMachines,
+    /// `connection.share` of `name` with `machine`.
+    Shared {
+        name: String,
+        machine: String,
+    },
+    /// The sign-in of `name` on `machine` begun there: the address to open in the browser.
+    SignInOpened {
+        name: String,
+        machine: String,
+    },
+    /// How the sign-in of `name` on `machine` ended.
+    SignedInOn {
+        name: String,
+        machine: String,
     },
 }
 
@@ -910,8 +956,9 @@ pub struct ConnectionsSection {
     vault: Entity<VaultSection>,
     listed: Option<Vec<Server>>,
     rows: Listing<Server>,
-    /// Each row's menu, and whether the server was on when it was made: its entries follow.
-    menus: HashMap<String, ((bool, bool), Entity<Menu>)>,
+    /// Each row's menu, and what its entries follow: whether the server was on, whether it is a
+    /// URL and an `https://` one, and the machine its copy is on.
+    menus: HashMap<String, (MenuMade, Entity<Menu>)>,
     problem: Option<SharedString>,
     asked: u64,
     listed_at: u64,
@@ -944,8 +991,22 @@ pub struct ConnectionsSection {
     asked_name: String,
     /// The agent's request the form answers, when it was opened from its dialog's Edit.
     request: Option<u64>,
+    /// The connection the sharing dialog shares, while it is open.
+    sharing: Option<String>,
+    /// Its name, kept while the dialog fades away.
+    shared_name: String,
+    /// The runners online the dialog offers, once read.
+    share_machines: Option<Result<Vec<String>, String>>,
+    share_rows: Listing<String>,
+    /// Whether the vault entries the connection names go with it.
+    share_entries: bool,
+    share_busy: bool,
+    /// The connections this window shared, by name: the machine and the copy's state there.
+    elsewhere: HashMap<String, (String, Elsewhere)>,
     _subscriptions: Vec<Subscription>,
 }
+
+type MenuMade = (bool, bool, bool, Option<String>);
 
 impl ConnectionsSection {
     pub fn new(
@@ -984,8 +1045,205 @@ impl ConnectionsSection {
             signing: Default::default(),
             asked_name: String::new(),
             request: None,
+            sharing: None,
+            shared_name: String::new(),
+            share_machines: None,
+            share_rows: Listing::default(),
+            share_entries: false,
+            share_busy: false,
+            elsewhere: HashMap::new(),
             _subscriptions: Vec::new(),
         }
+    }
+
+    pub fn is_sharing(&self) -> bool {
+        self.sharing.is_some()
+    }
+
+    /// The runners the sharing dialog offers, once read.
+    pub fn share_machines(&self) -> Option<&Result<Vec<String>, String>> {
+        self.share_machines.as_ref()
+    }
+
+    /// Opens the dialog that shares `name` with another machine, and reads which runners are
+    /// online.
+    pub fn share_with(&mut self, name: &str, cx: &mut Context<Self>) {
+        self.sharing = Some(name.to_owned());
+        self.shared_name = name.to_owned();
+        self.share_machines = None;
+        self.share_entries = false;
+        self.share_busy = false;
+        self.ask("remote.machines", json!({}), Then::ShareMachines, cx);
+        self.modals
+            .update(cx, |modals, cx| modals.open(SHARE_MODAL, cx));
+        cx.notify();
+    }
+
+    fn close_share(&mut self, cx: &mut Context<Self>) {
+        self.sharing = None;
+        self.share_busy = false;
+        cx.notify();
+    }
+
+    /// The vault entries the server `name` names, in the order of its declaration.
+    fn named_entries(&self, name: &str) -> Vec<String> {
+        let mut named: Vec<String> = Vec::new();
+        if let Some(server) = self.server(name) {
+            let all = server
+                .env
+                .values()
+                .chain(server.headers.values())
+                .chain(server.secrets.iter().map(|secret| &secret.entry));
+            for entry in all {
+                if !named.contains(entry) {
+                    named.push(entry.clone());
+                }
+            }
+        }
+        named
+    }
+
+    fn share_to(&mut self, machine: &str, cx: &mut Context<Self>) {
+        let Some(name) = self.sharing.clone() else {
+            return;
+        };
+        if self.share_busy {
+            return;
+        }
+        self.share_busy = true;
+        let entries = match self.share_entries {
+            true => self.named_entries(&name),
+            false => Vec::new(),
+        };
+        let command = Command::Signed {
+            machine: None,
+            method: "connection.share".into(),
+            params: json!({"name": name, "machine": machine, "entries": entries}),
+            then: super::Then::Connections(Then::Shared {
+                name: name.clone(),
+                machine: machine.to_owned(),
+            }),
+        };
+        perform_later(&self.shell, command, cx);
+        cx.notify();
+    }
+
+    /// Begins the sign-in of `name`'s copy on `machine`: that machine runs it, and its redirect
+    /// comes back through a tunnel to this one.
+    pub fn sign_in_on(&mut self, name: &str, machine: &str, cx: &mut Context<Self>) {
+        self.elsewhere
+            .insert(name.to_owned(), (machine.to_owned(), Elsewhere::SigningIn));
+        perform_later(
+            &self.shell,
+            Command::SignInOn {
+                name: name.to_owned(),
+                machine: machine.to_owned(),
+            },
+            cx,
+        );
+        cx.notify();
+    }
+
+    /// The dialog that shares a connection: its entries' switch, and the user's runners that are
+    /// online, one row each; choosing one shares the connection with it.
+    pub fn share_dialog(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> Modal {
+        let this = cx.entity().downgrade();
+        let modal = Modal::new(
+            SHARE_MODAL,
+            format!("Share the connection {} with…", self.shared_name),
+        )
+        .open(self.sharing.is_some())
+        .on_close(move |_, cx| {
+            this.update(cx, |this, cx| this.close_share(cx)).ok();
+        })
+        .sentence(SHARE_SENTENCE);
+        let names = match &self.share_machines {
+            Some(Ok(names)) => names.clone(),
+            _ => Vec::new(),
+        };
+        let now = cx.background_executor().now();
+        let reduce = cx.reduce_motion();
+        self.share_rows.sync(
+            names.into_iter().map(|name| (name.clone(), name)),
+            now,
+            reduce,
+        );
+        let drawn: Vec<_> = self
+            .share_rows
+            .rows()
+            .map(|row| (row.key.to_owned(), row.placement, row.value.clone()))
+            .collect();
+        let faint = palette(cx).faint;
+        let mut list = ListCard::new("connection-share-machines");
+        for (key, placement, machine) in drawn {
+            let to = machine.clone();
+            let row = ListRow::new(
+                ElementId::Name(format!("connection-share-to-{machine}").into()),
+                SharedString::from(machine.clone()),
+            )
+            .leading(icon(Icon::Service).size(px(14.)).text_color(faint))
+            .line("Online")
+            .on_click(cx.listener(move |this, _, _, cx| this.share_to(&to, cx)));
+            list = list.item(
+                ElementId::Name(format!("connection-share-item-{key}").into()),
+                placement,
+                row,
+            );
+        }
+        let entries = self.named_entries(&self.shared_name);
+        let switch = Switch::new(
+            "connection-share-entries",
+            self.share_entries,
+            "Share its vault entries too",
+        )
+        .hint(match entries.len() {
+            1 => format!(
+                "{}: its secret goes into the keyring of the machine you choose.",
+                entries[0]
+            ),
+            _ => format!(
+                "{}: their secrets go into the keyring of the machine you choose.",
+                entries.join(", ")
+            ),
+        })
+        .on_click(cx.listener(|this, _, _, cx| {
+            this.share_entries = !this.share_entries;
+            cx.notify();
+        }));
+        let none = matches!(&self.share_machines, Some(Ok(names)) if names.is_empty());
+        let problem = match &self.share_machines {
+            Some(Err(why)) => Some(SharedString::from(why.clone())),
+            _ => None,
+        };
+        modal.cancel_label("Close").child(
+            div()
+                .flex()
+                .flex_col()
+                .child(presence(
+                    "connection-share-entries-block",
+                    !entries.is_empty(),
+                    div().pb(space::MD).child(switch),
+                ))
+                .child(presence(
+                    "connection-share-list-block",
+                    !self.share_rows.is_empty(),
+                    list,
+                ))
+                .child(
+                    presence(
+                        "connection-share-none-block",
+                        none,
+                        EmptyLine::new("connection-share-none", Icon::Service, NO_RUNNER),
+                    )
+                    .space(space::MD),
+                )
+                .child(problem_line(
+                    "connection-share-problem",
+                    problem,
+                    space::MD,
+                    cx,
+                )),
+        )
     }
 
     /// The servers as last listed; `None` until the daemon has said.
@@ -1121,6 +1379,94 @@ impl ConnectionsSection {
                     review.answer = Some(answer);
                     review.found.query = None;
                 }
+            }
+            Then::ShareMachines => {
+                if self.sharing.is_some() {
+                    self.share_machines = Some(answer.map(|listed| {
+                        listed["machines"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter(|machine| machine["state"] == "online")
+                            // A connection is shared with a runner: another would refuse it.
+                            .filter(|machine| machine["role"] == "runner")
+                            .filter_map(|machine| machine["name"].as_str().map(str::to_owned))
+                            .collect()
+                    }));
+                }
+            }
+            Then::Shared { name, machine } => {
+                self.share_busy = false;
+                self.sharing = None;
+                match answer {
+                    Ok(_) => {
+                        self.elsewhere
+                            .insert(name.clone(), (machine.clone(), Elsewhere::SignedOut));
+                        let this = cx.entity().downgrade();
+                        let (to_sign, on) = (name.clone(), machine.clone());
+                        toast(
+                            Toast::success(format!("Connection {name} shared with {machine}"))
+                                .detail(format!("It signs in on {machine} for itself."))
+                                .action(format!("Sign in on {machine}"), move |_, cx| {
+                                    this.update(cx, |this, cx| this.sign_in_on(&to_sign, &on, cx))
+                                        .ok();
+                                }),
+                            cx,
+                        );
+                    }
+                    Err(why) => toast(
+                        Toast::failure(format!("Connection {name} was not shared")).detail(why),
+                        cx,
+                    ),
+                }
+            }
+            Then::SignInOpened { name, machine } => match answer {
+                Ok(begun) => {
+                    let url = begun["url"].as_str().unwrap_or_default().to_owned();
+                    match sign_in_address(&url) {
+                        Ok(()) => {
+                            let shell = self.shell.clone();
+                            cx.defer(move |cx| {
+                                shell.update(cx, |shell, _| shell.open_link(&url)).ok();
+                            });
+                        }
+                        // The tunnel ends with the sign-in, which nobody can finish now.
+                        Err(why) => {
+                            self.elsewhere
+                                .insert(name.clone(), (machine.clone(), Elsewhere::SignedOut));
+                            toast(
+                                Toast::failure(format!("{name} was not signed in on {machine}"))
+                                    .detail(why),
+                                cx,
+                            );
+                        }
+                    }
+                }
+                Err(why) => {
+                    self.elsewhere
+                        .insert(name.clone(), (machine.clone(), Elsewhere::SignedOut));
+                    toast(
+                        Toast::failure(format!("{name} was not signed in on {machine}"))
+                            .detail(why),
+                        cx,
+                    );
+                }
+            },
+            Then::SignedInOn { name, machine } => {
+                let (state, said) = match answer {
+                    Ok(_) => (
+                        Elsewhere::SignedIn,
+                        Toast::success(format!("Signed in to {name} on {machine}"))
+                            .detail(format!("{machine} reaches its server with your account.")),
+                    ),
+                    Err(why) => (
+                        Elsewhere::SignedOut,
+                        Toast::failure(format!("{name} was not signed in on {machine}"))
+                            .detail(why),
+                    ),
+                };
+                self.elsewhere.insert(name, (machine, state));
+                toast(said, cx);
             }
             Then::SignIn { name } => match answer {
                 Ok(begun) => {
@@ -1871,8 +2217,18 @@ impl ConnectionsSection {
 
     fn menu(&mut self, server: &Server, cx: &mut Context<Self>) -> Entity<Menu> {
         let url = server.url.is_some();
-        if let Some((made, menu)) = self.menus.get(&server.name)
-            && *made == (server.enabled, url)
+        // Only an `https://` connection goes to another machine: the others are this one's own.
+        let remote = server
+            .url
+            .as_deref()
+            .is_some_and(|url| url.to_ascii_lowercase().starts_with("https://"));
+        let elsewhere = self
+            .elsewhere
+            .get(&server.name)
+            .map(|(machine, _)| machine.clone());
+        let made = (server.enabled, url, remote, elsewhere.clone());
+        if let Some((was, menu)) = self.menus.get(&server.name)
+            && *was == made
         {
             return menu.clone();
         }
@@ -1930,6 +2286,38 @@ impl ConnectionsSection {
                 }
                 false => menu,
             };
+            let menu = match remote {
+                true => {
+                    let (share, to_share) = (this.clone(), name.clone());
+                    menu.entry(
+                        format!("share-connection-{name}"),
+                        "Share with…",
+                        Some(Icon::Lucide("share-2")),
+                        move |_, cx| {
+                            share
+                                .update(cx, |this, cx| this.share_with(&to_share, cx))
+                                .ok();
+                        },
+                    )
+                }
+                false => menu,
+            };
+            // The copy this window shared: signed in from here, on its machine.
+            let menu = match elsewhere {
+                Some(machine) => {
+                    let (sign, to_sign) = (this.clone(), name.clone());
+                    menu.entry(
+                        format!("sign-in-connection-{name}-on-{machine}"),
+                        format!("Sign in on {machine}"),
+                        Some(Icon::Service),
+                        move |_, cx| {
+                            sign.update(cx, |this, cx| this.sign_in_on(&to_sign, &machine, cx))
+                                .ok();
+                        },
+                    )
+                }
+                None => menu,
+            };
             menu.danger(
                 format!("remove-connection-{name}"),
                 "Remove…",
@@ -1940,7 +2328,7 @@ impl ConnectionsSection {
                 },
             )
         });
-        self.menus.insert(name, ((on, url), menu.clone()));
+        self.menus.insert(name, (made, menu.clone()));
         menu
     }
 
@@ -1961,7 +2349,37 @@ impl ConnectionsSection {
             true => "Signing in: finish it in your browser".to_owned(),
             false => server.line(),
         };
+        // The copy of it on another machine, once this window shared it: its state there unfolds
+        // under the row, and its words fade from one state to the next.
+        let mute = p.mute;
+        let elsewhere = presence_of(
+            SharedString::from(format!("connection-elsewhere-block-{name}")),
+            self.elsewhere
+                .get(&name)
+                .map(|(machine, state)| SharedString::from(state.said(machine))),
+            {
+                let name = name.clone();
+                move |said| {
+                    changing(
+                        SharedString::from(format!("connection-elsewhere-fade-{name}")),
+                        said,
+                        move |said| {
+                            div()
+                                .id(SharedString::from(format!("connection-elsewhere-{name}")))
+                                .aria_label(said.clone())
+                                .text_size(px(12.5))
+                                .text_color(mute)
+                                .child(said)
+                                .test_support()
+                                .into_any_element()
+                        },
+                    )
+                    .into_any_element()
+                }
+            },
+        );
         row.line(SharedString::from(line))
+            .below(elsewhere)
             .more(menu)
             .on_click(cx.listener(move |this, _, window, cx| {
                 if !this.saving {

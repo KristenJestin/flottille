@@ -149,10 +149,14 @@ impl Keyring {
     /// the user to unlock it and wait.
     async fn read(&self, name: &str) -> Result<Option<String>, String> {
         match self {
-            Keyring::Memory { kept, file } => Ok(Self::memory(kept, file)?
-                .get(name)
-                .cloned()
-                .or_else(|| held_before(file, name))),
+            Keyring::Memory { kept, file } => {
+                // An await, as the system's keyring's search over D-Bus is.
+                tokio::task::yield_now().await;
+                Ok(Self::memory(kept, file)?
+                    .get(name)
+                    .cloned()
+                    .or_else(|| held_before(file, name)))
+            }
             Keyring::Os => {
                 let keyring = os().await?;
                 let items = keyring
@@ -537,6 +541,30 @@ async fn share(daemon: &Daemon, name: &str, machine: &str) -> Result<Value, Fail
                 .is_ok_and(|request| request["signed"]["method"] == "vault.share")
         })
         .ok_or_else(|| Failure::refused(NOT_SIGNED))?;
+    let (metadata, secret) = copy_of(daemon, name).await?;
+    let message = flottille_link::Share {
+        request: serde_json::from_str(&asked.signed)?,
+        entry: metadata,
+        secret: flottille_link::Secret(secret.clone()),
+    };
+    crate::link::share(daemon, machine, message)
+        .await
+        .map_err(|why| Failure::refused(masked_of(&why, &secret)))?;
+    eprintln!(
+        "flottille daemon: the vault entry {name} was shared with {machine}, asked by {}",
+        asked.device
+    );
+    Ok(json!({"name": name, "machine": machine}))
+}
+
+/// The entry `name` as it goes to another machine: its metadata, less where this machine's copy
+/// came from (the receiver's to say), and its secret.
+pub(crate) async fn copy_of(
+    daemon: &Daemon,
+    name: &str,
+) -> Result<(Value, zeroize::Zeroizing<String>), Failure> {
+    // Its metadata and its secret of one moment: a Save of it in progress ends first.
+    let _writing = writing(name).await;
     let Some(entry) = daemon
         .read(|store| store.vault_entries())?
         .into_iter()
@@ -563,19 +591,7 @@ async fn share(daemon: &Daemon, name: &str, machine: &str) -> Result<Value, Fail
     if let Some(object) = metadata.as_object_mut() {
         object.remove("shared_from");
     }
-    let message = flottille_link::Share {
-        request: serde_json::from_str(&asked.signed)?,
-        entry: metadata,
-        secret: flottille_link::Secret(secret.clone()),
-    };
-    crate::link::share(daemon, machine, message)
-        .await
-        .map_err(|why| Failure::refused(masked_of(&why, &secret)))?;
-    eprintln!(
-        "flottille daemon: the vault entry {name} was shared with {machine}, asked by {}",
-        asked.device
-    );
-    Ok(json!({"name": name, "machine": machine}))
+    Ok((metadata, secret))
 }
 
 /// The entry `entry` another machine of the user's, `from`, shared with this one, its user's
@@ -714,9 +730,36 @@ pub async fn receive(
     Ok(())
 }
 
+/// Removes the copy of the entry `name` that `from` shared, if it is still that copy: a share
+/// that kept it and then failed leaves nothing behind (`extensions::receive_connection`).
+pub(crate) async fn forget_copy(daemon: &Daemon, name: &str, from: &str) {
+    let _writing = writing(name).await;
+    let is_copy = daemon
+        .read(|store| store.vault_entries())
+        .is_ok_and(|entries| {
+            entries
+                .iter()
+                .any(|entry| entry.name == name && entry.shared_from.as_deref() == Some(from))
+        });
+    if !is_copy {
+        return;
+    }
+    // The secret first, as a removal does: a keyring that refuses leaves the entry whole.
+    if let Err(why) = daemon.vault.delete(name).await {
+        eprintln!("flottille daemon: the vault entry {name} shared from {from} stays: {why}");
+        return;
+    }
+    let removed =
+        crate::extensions::between_writes(|| daemon.write(|store| store.remove_vault_entry(name)));
+    if let Err(error) = removed {
+        eprintln!("flottille daemon: the vault entry {name} shared from {from} stays: {error}");
+    }
+    retool(daemon);
+}
+
 /// The user's Share of the entry `name` from an agent's connection request: every project's from
 /// now on, the rest of it as it was. A worklog's entry stays its project's alone.
-pub fn shared(daemon: &Daemon, name: &str) -> Result<Value, Failure> {
+pub async fn shared(daemon: &Daemon, name: &str) -> Result<Value, Failure> {
     rewritten(daemon, name, |entry| {
         if let Some(bound) = entry.bound.as_deref().filter(|b| b.starts_with("worklog:")) {
             return Err(Failure::refused(format!(
@@ -728,24 +771,29 @@ pub fn shared(daemon: &Daemon, name: &str) -> Result<Value, Failure> {
         entry.project = None;
         Ok(())
     })
+    .await
 }
 
 /// The user's Bind of the entry `name` from an agent's connection request: its `url` becomes
 /// `origin`, the address the request's connection sends it to, read by the daemon; the rest of
 /// it as it was.
-pub fn bound_to(daemon: &Daemon, name: &str, origin: &str) -> Result<Value, Failure> {
+pub async fn bound_to(daemon: &Daemon, name: &str, origin: &str) -> Result<Value, Failure> {
     rewritten(daemon, name, |entry| {
         entry.url = Some(origin.to_owned());
         Ok(())
     })
+    .await
 }
 
-/// The entry `name`'s metadata changed by `change` and written, its secret untouched.
-fn rewritten(
+/// The entry `name`'s metadata changed by `change` and written, its secret untouched; after a
+/// Save of the same entry in progress, never between its read and its write (which would undo
+/// this change).
+async fn rewritten(
     daemon: &Daemon,
     name: &str,
     change: impl FnOnce(&mut Entry) -> Result<(), Failure>,
 ) -> Result<Value, Failure> {
+    let _writing = writing(name).await;
     let mut entry = daemon
         .read(|store| store.vault_entries())?
         .into_iter()
@@ -1934,6 +1982,66 @@ mod tests {
         assert_eq!(
             daemon.vault.read("tracker").await.unwrap().as_deref(),
             Some("own-t0ken-Zr81")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_bind_at_the_moment_of_a_save_keeps_the_user_s_bind() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = a_daemon(dir.path());
+        ok(call(
+            daemon.clone(),
+            "vault.set",
+            json!({"name": "tracker", "secret": "own-t0ken-Zr81"}),
+        )
+        .await);
+        // The user saves a new secret while they bind the entry from a connection's request.
+        let mut set = std::pin::pin!(call(
+            daemon.clone(),
+            "vault.set",
+            json!({"name": "tracker", "secret": "new-t0ken-Qd52"}),
+        ));
+        assert!(futures::poll!(set.as_mut()).is_pending());
+        let mut bound = std::pin::pin!(bound_to(&daemon, "tracker", "https://notes.example.com"));
+        assert!(futures::poll!(bound.as_mut()).is_pending());
+        ok(set.await);
+        ok(bound.await);
+
+        let entries = listed(&daemon).await;
+        assert_eq!(
+            entries[0].url.as_deref(),
+            Some("https://notes.example.com"),
+            "the Save did not undo the bind"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_share_sent_at_the_moment_of_a_save_is_one_entry_s_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = a_daemon(dir.path());
+        ok(call(
+            daemon.clone(),
+            "vault.set",
+            json!({"name": "tracker", "secret": "old-t0ken-Zr81", "url": "https://old.example.com"}),
+        )
+        .await);
+        let mut set = std::pin::pin!(call(
+            daemon.clone(),
+            "vault.set",
+            json!({"name": "tracker", "secret": "new-t0ken-Qd52", "url": "https://new.example.com"}),
+        ));
+        let mut copy = std::pin::pin!(copy_of(&daemon, "tracker"));
+        assert!(futures::poll!(set.as_mut()).is_pending());
+        assert!(futures::poll!(copy.as_mut()).is_pending());
+        ok(set.await);
+        let (metadata, secret) = ok(copy.await);
+
+        let pair = (metadata["url"].as_str().unwrap(), secret.as_str());
+        assert!(
+            pair == ("https://new.example.com", "new-t0ken-Qd52")
+                || pair == ("https://old.example.com", "old-t0ken-Zr81"),
+            "the metadata and the secret of one entry: {}",
+            pair.0
         );
     }
 

@@ -13,12 +13,16 @@ mod remote;
 mod connection_requests;
 #[path = "../connection_secrets.rs"]
 mod connection_secrets;
+#[path = "../connection_share.rs"]
+mod connection_share;
 #[path = "../connections.rs"]
 mod connections;
 #[path = "../mcp.rs"]
 mod mcp;
 #[path = "../remote_code.rs"]
 mod remote_code;
+#[path = "../remote_deliveries.rs"]
+mod remote_deliveries;
 #[path = "../remote_hub.rs"]
 mod remote_hub;
 #[path = "../remote_keys.rs"]

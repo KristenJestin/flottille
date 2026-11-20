@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 
 use crate::commands::CommandInfo;
 use crate::kept::{Draft, DraftKey, Written};
-use crate::link::{Conn, Connect, Update};
+use crate::link::{Conn, Connect, Sign, Update};
 use crate::rules::Shown;
 use crate::runs::{CommandOutput, CommandRow, Watch};
 use crate::session_link::{PullRequest, TICKET_FRESH, TicketFacts, pull_requests, ticket_facts};
@@ -177,6 +177,22 @@ pub enum Command {
         method: String,
         params: Value,
         then: crate::extensions::Then,
+    },
+    /// A request only the user's device may ask, signed with its key for the machine `machine`
+    /// (this one's own name when `None`): what to do with the answer is said by `then`.
+    Signed {
+        machine: Option<String>,
+        method: String,
+        params: Value,
+        then: crate::extensions::Then,
+    },
+    /// The sign-in of the connection `name` of the machine `machine`: begun there, its redirect
+    /// carried by a tunnel to this machine's `127.0.0.1` for as long as it waits
+    /// (`docs/remote.md`, "Connections"). Answered twice: the address to open, then how it
+    /// ended.
+    SignInOn {
+        name: String,
+        machine: String,
     },
     /// The limit above which a tool result is cut (`tool_results.show`).
     ToolResultsRead,
@@ -1348,9 +1364,17 @@ pub struct Actions {
     local: Connect,
     updates: UnboundedSender<Update>,
     bounds: Bounds,
+    /// How this window signs what only the user's device may ask, when it was given its own
+    /// (`Shell::sign_with`); the process's (`link::sign_with`) otherwise.
+    sign: Option<Sign>,
 }
 
 impl Actions {
+    /// Signs with `sign` from now on, rather than with the process's signer.
+    pub fn sign_with(&mut self, sign: Sign) {
+        self.sign = Some(sign);
+    }
+
     /// Starts the details' thread; it ends when every `Actions` is dropped.
     pub fn spawn(connect: Connect, updates: UnboundedSender<Update>) -> Actions {
         Self::spawn_bounded(connect, updates, BOUNDS)
@@ -1394,7 +1418,7 @@ impl Actions {
             .name("flottille-appearance".into())
             .spawn(move || {
                 while let Ok(command) = chosen.recv() {
-                    let outcome = perform(&to, command, bounds);
+                    let outcome = perform(&to, None, command, bounds);
                     if updates_to.unbounded_send(Update::Done(outcome)).is_err() {
                         return;
                     }
@@ -1417,6 +1441,7 @@ impl Actions {
             local,
             updates,
             bounds,
+            sign: None,
         }
     }
 
@@ -1441,6 +1466,16 @@ impl Actions {
             let _ = self.details.send(project);
             return;
         }
+        let sign = self.sign.clone().or_else(crate::link::signer);
+        if let Command::SignInOn { name, machine } = command {
+            let (connect, updates, bounds) =
+                (self.connect.clone(), self.updates.clone(), self.bounds);
+            std::thread::Builder::new()
+                .name("flottille-sign-in".into())
+                .spawn(move || sign_in_on(&connect, sign, &name, &machine, bounds, &updates))
+                .expect("a thread for a sign-in on another machine");
+            return;
+        }
         if matches!(
             command,
             Command::AppearanceRead { .. } | Command::AppearanceSet { .. }
@@ -1458,7 +1493,7 @@ impl Actions {
         std::thread::Builder::new()
             .name("flottille-action".into())
             .spawn(move || {
-                let outcome = perform(&connect, command, bounds);
+                let outcome = perform(&connect, sign, command, bounds);
                 let _ = updates.unbounded_send(Update::Done(outcome));
             })
             .expect("a thread for a window's action");
@@ -1673,8 +1708,14 @@ fn of_part(part: &Option<String>, mut params: Value) -> Value {
 
 /// `vault.share` of the entry `name` with `machine`: a request of this machine's, signed with this
 /// device's key, whose signature goes with the secret for that machine to check.
-fn share(connect: &Connect, name: &str, machine: &str, bound: Duration) -> Result<(), String> {
-    let sign = crate::link::signer().ok_or(
+fn share(
+    connect: &Connect,
+    sign: Option<Sign>,
+    name: &str,
+    machine: &str,
+    bound: Duration,
+) -> Result<(), String> {
+    let sign = sign.ok_or(
         "this window cannot sign with this device's key: share it with flottille vault share",
     )?;
     let this = ask_alone(connect, "remote.machines", json!({}), bound)??["this"]["name"]
@@ -1689,6 +1730,107 @@ fn share(connect: &Connect, name: &str, machine: &str, bound: Duration) -> Resul
             bound,
         )?
         .map(|_| ())
+}
+
+/// `method` on a connection of its own, signed with this device's key for the machine `machine`,
+/// this one when `None` (a request that carries the user's consent further: `connection.share`).
+fn signed_by_device(
+    connect: &Connect,
+    sign: Option<Sign>,
+    machine: Option<String>,
+    method: &str,
+    params: Value,
+    bound: Duration,
+) -> Result<Value, String> {
+    let sign =
+        sign.ok_or("this window cannot sign with this device's key: use the command line")?;
+    let machine = match machine {
+        Some(machine) => machine,
+        None => ask_alone(connect, "remote.machines", json!({}), bound)??["this"]["name"]
+            .as_str()
+            .map(str::to_owned)
+            .ok_or("this machine is no member of the user's yet")?,
+    };
+    connected(connect)?
+        .signing(sign, machine)
+        .ask_within(method, params, bound)?
+}
+
+/// How long the window waits for a sign-in on another machine: the daemon's own wait, and a
+/// little more.
+const SIGN_IN_WAIT: Duration = Duration::from_secs(310);
+
+/// The sign-in of `name` on `machine` ([`Command::SignInOn`]): `connection.login` there, then
+/// `tunnel.open {sign_in}` held on a connection of its own, whose end is the sign-in's. Says the
+/// address to open, then how it ended.
+fn sign_in_on(
+    connect: &Connect,
+    sign: Option<Sign>,
+    name: &str,
+    machine: &str,
+    bounds: Bounds,
+    updates: &UnboundedSender<Update>,
+) {
+    let said = |then: crate::extensions::connections::Then, answer: Result<Value, String>| {
+        updates
+            .unbounded_send(Update::Done(Outcome::Asked {
+                then: crate::extensions::Then::Connections(then),
+                answer,
+            }))
+            .is_ok()
+    };
+    let opened = crate::extensions::connections::Then::SignInOpened {
+        name: name.to_owned(),
+        machine: machine.to_owned(),
+    };
+    let ended = crate::extensions::connections::Then::SignedInOn {
+        name: name.to_owned(),
+        machine: machine.to_owned(),
+    };
+    let begun = (|| {
+        let url = signed_by_device(
+            connect,
+            sign.clone(),
+            Some(machine.to_owned()),
+            "connection.login",
+            json!({"name": name}),
+            bounds.quick.max(Duration::from_secs(40)),
+        )?;
+        let sign =
+            sign.ok_or("this window cannot sign with this device's key: use the command line")?;
+        let mut tunnel = connected(connect)?.signing(sign, machine.to_owned());
+        tunnel.ask_within("tunnel.open", json!({"sign_in": name}), bounds.quick)??;
+        Ok::<_, String>((url, tunnel))
+    })();
+    let (url, mut tunnel) = match begun {
+        Ok(begun) => begun,
+        Err(why) => {
+            said(opened, Err(why));
+            return;
+        }
+    };
+    if !said(opened, Ok(url)) {
+        return;
+    }
+    let deadline = Instant::now() + SIGN_IN_WAIT;
+    let answer = loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        match tunnel.next_event(Some(left)) {
+            Ok(Some(event)) if event.name == "tunnel.closed" => {
+                break match event.data["signed_in"] == true {
+                    true => Ok(Value::Null),
+                    false => Err(event.data["reason"]
+                        .as_str()
+                        .unwrap_or("it ended without signing in")
+                        .to_owned()),
+                };
+            }
+            Ok(Some(_)) => {}
+            Ok(None) => break Err("the browser did not come back in time".to_owned()),
+            Err(why) => break Err(why),
+        }
+    };
+    said(ended, answer);
 }
 
 /// One request on a connection of its own.
@@ -1741,7 +1883,7 @@ fn run_answer(
     }
 }
 
-fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
+fn perform(connect: &Connect, sign: Option<Sign>, command: Command, bounds: Bounds) -> Outcome {
     match command {
         Command::Details(_) => unreachable!("the details have their own thread"),
         Command::DraftRead { .. } | Command::DraftWrite { .. } | Command::WindowSet { .. } => {
@@ -1919,6 +2061,16 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
             let answer = answer(ask_alone(connect, &method, params, bounds.quick));
             Outcome::Asked { then, answer }
         }
+        Command::Signed {
+            machine,
+            method,
+            params,
+            then,
+        } => {
+            let answer = signed_by_device(connect, sign, machine, &method, params, bounds.quick);
+            Outcome::Asked { then, answer }
+        }
+        Command::SignInOn { .. } => unreachable!("a sign-in on another machine has its thread"),
         Command::ToolResultsRead
         | Command::ToolResultsSet { .. }
         | Command::UnchangedSet { .. } => {
@@ -2294,7 +2446,7 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
             Outcome::ShareMachines { listed }
         }
         Command::VaultShare { name, machine } => {
-            let refused = share(connect, &name, &machine, bounds.quick).err();
+            let refused = share(connect, sign, &name, &machine, bounds.quick).err();
             Outcome::VaultShared {
                 name,
                 machine,

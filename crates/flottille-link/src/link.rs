@@ -95,11 +95,64 @@ pub enum MachineMessage {
     Git(Git),
     /// A vault entry the user shared with the receiver (`docs/remote.md`, "Vault entries").
     Share(Share),
+    /// A connection the user shared with the receiver, and the vault entries it names they chose
+    /// to share with it (`docs/remote.md`, "Connections").
+    ShareConnection(ConnectionShare),
     /// A session or a child started for an agent of the sender's (`agent_launch` with
     /// `machine`), judged by the receiving machine's gate (`docs/remote.md`, "Starting a session
     /// on another machine"). Answered `{"state": "accepted" | "held"}`, or refused; its code
     /// follows as `git` messages of the same launch.
     Launch(Box<LaunchAsk>),
+    /// A delivery for an agent of the receiver, of a session it started on the sender
+    /// (`docs/remote.md`, "Deliveries across machines"): a child's report, question or failure, a
+    /// led session's end of turn. Kept by the sender until it is answered, sent again in order
+    /// and once (its `id` is idempotent). Answered `{}`, `{"later": why}` when the receiver
+    /// cannot take it now (the sender keeps it), or refused.
+    Deliver(Box<Deliver>),
+    /// One of the tree's tools aimed by an agent of the sender at a session it started on the
+    /// receiver (`docs/remote.md`, "What a machine may send"). Answered `{"text"}`,
+    /// `{"later": why}` when the receiver cannot take it now, or refused.
+    Call(Box<Call>),
+}
+
+/// A delivery one machine sends another for one of the receiver's agents: taken only for the
+/// agent that launched `launch` on the sender.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Deliver {
+    /// Its id on the sender: the receiver stores it once, however often it comes.
+    pub id: String,
+    /// The launch it is of, as the receiver named it.
+    pub launch: String,
+    /// The receiver's agent it is for: the launch's caller.
+    pub agent: String,
+    /// The delivery's kind (`child-report`, `session-turn-ended`…).
+    pub kind: String,
+    pub body: String,
+    /// `between-turns` or `urgent`.
+    pub urgency: String,
+    /// Whether the session it is of has ended with it: the launch counts no more.
+    #[serde(default)]
+    pub ended: bool,
+}
+
+/// A tool of the tree an agent of the sender called on a session it started on the receiver:
+/// taken only from that agent, for that session.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Call {
+    /// Its id on the sender: a message is delivered once, however often it comes.
+    pub id: String,
+    /// The launch that started the session, as the sender named it.
+    pub launch: String,
+    /// The sender's agent that calls: the launch's caller.
+    pub caller: String,
+    /// The receiver's agent it is aimed at: the one the launch started.
+    pub agent: String,
+    /// `agent_send`, `agent_status`, `agent_stop`, `session_send` or `session_read`.
+    pub tool: String,
+    /// The tool's arguments, as JSON.
+    pub arguments: String,
 }
 
 /// A launch another machine asks for one of its agents.
@@ -210,6 +263,28 @@ pub struct Share {
     /// The user's request, as their device signed it for the machine that holds the entry.
     pub request: Value,
     /// The entry's metadata, as the holder's vault lists it.
+    pub entry: Value,
+    pub secret: Secret,
+}
+
+/// A connection the user shared: their device's signed `connection.share`, which the receiver
+/// checks itself (a machine alone shares nothing), the connection's declaration, and the vault
+/// entries it names that the user chose to share with it, each with its secret.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConnectionShare {
+    /// The user's request, as their device signed it for the machine that holds the connection.
+    pub request: Value,
+    /// The connection's declaration, as the holder's configuration has it.
+    pub connection: Value,
+    pub entries: Vec<SharedEntry>,
+}
+
+/// A vault entry going with a connection: its metadata, as the holder's vault lists it, and its
+/// secret.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SharedEntry {
     pub entry: Value,
     pub secret: Secret,
 }

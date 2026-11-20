@@ -66,6 +66,10 @@ pub async fn call(daemon: &Arc<Daemon>, grant: &Arc<Grant>, tool: &str, args: Va
         Ok(None) => return Outcome::Failed(format!("there is no agent {}", grant.agent)),
         Err(error) => return Outcome::Failed(error.to_string()),
     };
+    // A session it started on another machine is reached through its daemon.
+    if let Some(outcome) = crate::across::call(daemon, &caller, tool, &args).await {
+        return outcome;
+    }
     let done = match tool {
         "agent_launch" => launch(daemon, &caller, args).await,
         "agent_send" => send(daemon, &caller, args),
@@ -1137,6 +1141,8 @@ pub fn grant_leave(daemon: &Daemon, writer: &str, session: &str, request: u64) {
 
 /// What follows the sender's name on the first line of a message `session_send` delivers.
 pub const SESSION_WROTE: &str = " wrote to this session:";
+/// How the reason of a session its pilot ended starts.
+pub const ENDED_BY_ITS_PILOT: &str = "ended by the session that led it";
 
 /// `session_send`: a message to another session of the caller's project, once the gate let it
 /// through (`Relation`), delivered as `session` under a line naming the sender: an agent's words, never the user's.
@@ -1379,7 +1385,7 @@ pub(crate) fn ago(ms: u64) -> String {
     }
 }
 
-fn cut(text: &str, limit: usize) -> String {
+pub(crate) fn cut(text: &str, limit: usize) -> String {
     let count = text.chars().count();
     if count <= limit {
         return text.to_owned();
@@ -1846,7 +1852,9 @@ async fn report(daemon: &Arc<Daemon>, grant: &Grant, caller: &Agent, args: Value
              the report names"
         )));
     }
-    if caller.reported_at.is_some() && caller.parent.is_some() {
+    // A child of an agent of another machine reports to it as to a parent here.
+    let parented = caller.parent.is_some() || crate::across::remote_child(daemon, caller);
+    if caller.reported_at.is_some() && parented {
         return Err(refused(
             "refused: you reported already: your session ends with this turn, end it now",
         ));
@@ -1858,7 +1866,7 @@ async fn report(daemon: &Arc<Daemon>, grant: &Grant, caller: &Agent, args: Value
             let (_, event) = store.change_agent(
                 &caller.id,
                 AgentChange {
-                    reported_at: caller.parent.is_some().then_some(Some(now_ms())),
+                    reported_at: parented.then_some(Some(now_ms())),
                     ..AgentChange::default()
                 },
                 Some(("agent.reported", json!({"agent": caller.id, "text": text}))),
@@ -1866,7 +1874,7 @@ async fn report(daemon: &Arc<Daemon>, grant: &Grant, caller: &Agent, args: Value
             Ok(((), event))
         })
         .map_err(failed)?;
-    if caller.parent.is_none() {
+    if !parented {
         return Ok(Outcome::Done("Your report was shown to the user.".into()));
     }
     let mut body = format!("reported:\n\n{text}\n\n");
@@ -1945,10 +1953,11 @@ fn ask(daemon: &Arc<Daemon>, caller: &Agent, tool: &str, args: Value) -> Done {
         .collect();
     let question = question::text(&questions);
     let pilot = pilot_of(daemon, caller);
-    let to = match (&caller.parent, &pilot) {
-        (Some(_), _) => "parent",
-        (None, Some(_)) => "pilot",
-        (None, None) => "user",
+    let parented = caller.parent.is_some() || crate::across::remote_child(daemon, caller);
+    let to = match (parented, &pilot) {
+        (true, _) => "parent",
+        (false, Some(_)) => "pilot",
+        (false, None) => "user",
     };
     daemon
         .write(|store| {
@@ -1974,7 +1983,7 @@ fn ask(daemon: &Arc<Daemon>, caller: &Agent, tool: &str, args: Value) -> Done {
              not depend on it, or end your turn saying what you wait for."
         )));
     }
-    if caller.parent.is_none() {
+    if !parented {
         return Ok(Outcome::Done(
             "Your question was given to the user; the answer comes later as a message. Go on \
              with what does not depend on it, or end your turn saying what you wait for."
@@ -2376,6 +2385,19 @@ pub fn asks_parent(daemon: &Arc<Daemon>, request: &Request) {
 /// A delivery to the agent's parent about it: `text` follows its name. Nothing for a root.
 pub fn tell_parent(daemon: &Arc<Daemon>, child: &Agent, kind: &str, text: &str, urgency: &str) {
     let Some(parent) = &child.parent else {
+        // A child an agent of another machine launched: told there, its commits going back
+        // with its report.
+        if crate::across::remote_child(daemon, child) {
+            crate::across::tell(
+                daemon,
+                &child.id,
+                kind,
+                &format!("Your child {} {text}", named(child)),
+                urgency,
+                kind == "child-report",
+                matches!(kind, "child-report" | "child-failed"),
+            );
+        }
         return;
     };
     // The agents an extension launched under a session are the extension's: it tells the
@@ -2506,6 +2528,21 @@ fn end(daemon: &Arc<Daemon>, id: &str, state: AgentState, reason: &str) -> bool 
         _ => format!("ended: {reason}"),
     };
     crate::subscriptions::followed_ended(daemon, &agent, &why);
+    // Its pilot on another machine is told, unless it ended it.
+    if crate::across::remote_led(daemon, &agent) && !reason.starts_with(ENDED_BY_ITS_PILOT) {
+        crate::across::tell(
+            daemon,
+            id,
+            crate::subscriptions::TURN_ENDED,
+            &format!(
+                "Session {} {why}. Your following of it is over.",
+                named(&agent)
+            ),
+            approval::BETWEEN_TURNS,
+            false,
+            true,
+        );
+    }
     if state == AgentState::Ended {
         end_led(daemon, &agent);
     }
@@ -2654,7 +2691,7 @@ pub fn after_turn(daemon: &Arc<Daemon>, id: &str, stop_reason: &str) {
     if agent.state.is_final() {
         return;
     }
-    if agent.parent.is_none() {
+    if agent.parent.is_none() && !crate::across::remote_child(daemon, &agent) {
         crate::subscriptions::turn_ended(daemon, &agent);
         remind_integrated(daemon, &agent);
         return;

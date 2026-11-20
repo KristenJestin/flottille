@@ -63,6 +63,20 @@ pub enum ConnectionAction {
         #[arg(long)]
         json: bool,
     },
+    /// Share an https:// connection with another machine of yours (--machine), and the vault
+    /// entries it names that you choose: signed by this device; it signs in for itself there
+    Share {
+        name: String,
+        /// A vault entry the connection names, to share with it: again for each
+        #[arg(long = "entry", value_name = "ENTRY")]
+        entries: Vec<String>,
+        /// The machine it goes to: the command's --machine, which here names the machine the
+        /// connection is shared with, not one this command drives.
+        #[arg(skip)]
+        machine: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
     /// Sign a URL connection in with OAuth, in your default browser; its tokens go to the vault
     Login {
         name: String,
@@ -196,7 +210,19 @@ fn declared(params: &mut Map<String, Value>, reach: Reach, given: Given) -> Resu
 
 pub fn run(paths: &Paths, action: ConnectionAction) -> Result<ExitCode> {
     if let ConnectionAction::Login { name, no_browser } = action {
+        if let Some(machine) = crate::client::aimed() {
+            return login_on(paths, &name, no_browser, machine);
+        }
         return login(paths, &name, no_browser);
+    }
+    if let ConnectionAction::Share {
+        name,
+        entries,
+        machine,
+        json,
+    } = action
+    {
+        return share(paths, &name, &entries, machine, json);
     }
     let mut client = Client::connect_or_start(paths)?;
     let (answer, json) = match action {
@@ -283,6 +309,7 @@ pub fn run(paths: &Paths, action: ConnectionAction) -> Result<ExitCode> {
             (answer, json)
         }
         ConnectionAction::Login { .. } => unreachable!("signed in above"),
+        ConnectionAction::Share { .. } => unreachable!("shared above"),
         ConnectionAction::Accept { name, set, json } => {
             let actions: Map<String, Value> = pairs(&set, "setting")?
                 .into_iter()
@@ -350,6 +377,99 @@ fn login(paths: &Paths, name: &str, no_browser: bool) -> Result<ExitCode> {
             _ => {}
         }
     }
+}
+
+/// `flottille connection share <name> --machine <machine> [--entry <entry>]…`: a request of this
+/// machine's, signed with this device's key, which the daemon never holds, and which goes with
+/// the declaration and the entries for the other machine to check (`docs/remote.md`,
+/// "Connections").
+fn share(
+    paths: &Paths,
+    name: &str,
+    entries: &[String],
+    machine: Option<String>,
+    json: bool,
+) -> Result<ExitCode> {
+    let Some(machine) = machine else {
+        return Err(
+            "name the machine to share it with: flottille connection share <name> --machine \
+             <machine>"
+                .into(),
+        );
+    };
+    let this =
+        Client::connect_or_start(paths)?.request("remote.machines", json!({}))?["this"]["name"]
+            .as_str()
+            .map(str::to_owned)
+            .ok_or(
+                "this machine is no member of the user's yet: flottille remote setup, or join",
+            )?;
+    crate::client::aim(this);
+    let shared = Client::connect_or_start(paths)?.request(
+        "connection.share",
+        json!({"name": name, "machine": machine, "entries": entries}),
+    )?;
+    if json {
+        println!("{shared}");
+    } else if entries.is_empty() {
+        println!(
+            "Shared the connection {name} with {machine}; it signs in there for itself \
+             (`flottille --machine {machine} connection login {name}`)."
+        );
+    } else {
+        println!(
+            "Shared the connection {name} with {machine}, with {}; it signs in there for itself \
+             (`flottille --machine {machine} connection login {name}`).",
+            entries.join(", ")
+        );
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// The sign-in of a connection of another machine, `machine`: its daemon runs it; a tunnel from
+/// this machine's `127.0.0.1`, on the port its redirect names, carries the browser's redirect to
+/// it, and its end is the sign-in's (`docs/remote.md`, "Connections").
+fn login_on(paths: &Paths, name: &str, no_browser: bool, machine: &str) -> Result<ExitCode> {
+    let answer =
+        Client::connect_or_start(paths)?.request("connection.login", json!({"name": name}))?;
+    let url = answer["url"].as_str().ok_or("the daemon gave no address")?;
+    sign_in_opened(url)?;
+    // Held open while the sign-in waits: the browser comes back through it.
+    let mut tunnel = Client::connect_or_start(paths)?;
+    tunnel.request("tunnel.open", json!({"sign_in": name}))?;
+    if no_browser {
+        println!("Open {url} in your browser to sign in to the connection {name} on {machine}.");
+    } else {
+        println!("Opening {url} in your browser to sign in to the connection {name} on {machine}.");
+        flottille_window::open::system()(std::path::Path::new(url));
+    }
+    loop {
+        match tunnel.next_event()? {
+            Some(event) if event.name == "tunnel.closed" => {
+                if event.data["signed_in"] == true {
+                    println!("Signed in to the connection {name} on {machine}.");
+                    return Ok(ExitCode::SUCCESS);
+                }
+                eprintln!(
+                    "The sign-in of {name} on {machine} did not end well: {}",
+                    event.data["reason"].as_str().unwrap_or("no reason given")
+                );
+                return Ok(ExitCode::FAILURE);
+            }
+            Some(_) => {}
+            None => {
+                eprintln!("The daemon closed the connection before the sign-in of {name} ended.");
+                return Ok(ExitCode::FAILURE);
+            }
+        }
+    }
+}
+
+/// Whether the address of a sign-in another machine's daemon sent may be printed and opened: the
+/// window's own check (`sign_in_address`), that machine's word being no more trusted here.
+fn sign_in_opened(url: &str) -> std::result::Result<(), String> {
+    flottille_window::extensions::connections::sign_in_address(url)
+        .map_err(|why| format!("the sign-in address the other machine sent is not opened: {why}"))
 }
 
 fn list_text(answer: &Value) -> String {
@@ -501,6 +621,23 @@ mod tests {
         }
         for wrong in ["header=notes-token", "notes-token", "query:userToken"] {
             assert!(secret_line(wrong).is_err(), "{wrong}");
+        }
+    }
+
+    #[test]
+    fn an_address_another_machine_sent_is_checked_before_it_is_shown_or_opened() {
+        assert!(sign_in_opened("https://auth.example.com/authorize?state=x").is_ok());
+        for wrong in [
+            // Control characters would rewrite the terminal the address is printed to.
+            "https://auth.example.com/\u{1b}]8;;https://elsewhere.example.com\u{7}",
+            "https://auth.example.com/\nOpen this instead",
+            // Only an https address is opened, or a plain http one on this machine.
+            "file:///home/someone/.ssh/id_ed25519",
+            "http://auth.example.com/authorize",
+            "javascript:alert(1)",
+            "",
+        ] {
+            assert!(sign_in_opened(wrong).is_err(), "{wrong:?}");
         }
     }
 }

@@ -52,7 +52,9 @@ const SHOWN_BUDGET: usize = 30_000;
 pub(crate) const OUTPUT_KEPT: usize = 64 * 1024;
 const OUTPUT_MARGIN: usize = 16 * 1024;
 /// A run asked to stop has this long before its group is killed.
-const STOP_GRACE: Duration = Duration::from_secs(5);
+fn stop_grace() -> Duration {
+    crate::test_time::tuned("FLOTTILLE_TEST_RUN_GRACE_MS", Duration::from_secs(5))
+}
 /// The lines of output a `command-ended` delivery holds.
 const ENDED_TAIL_LINES: usize = 20;
 
@@ -1211,7 +1213,7 @@ async fn follow(
             },
             () = going.stop.notified() => {
                 signal_group(pid, libc::SIGTERM);
-                if tokio::time::timeout(STOP_GRACE, child.wait()).await.is_err() {
+                if tokio::time::timeout(stop_grace(), child.wait()).await.is_err() {
                     signal_group(pid, libc::SIGKILL);
                     let _ = child.wait().await;
                 }

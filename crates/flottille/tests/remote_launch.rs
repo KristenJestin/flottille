@@ -26,7 +26,7 @@ use serde_json::{Value, json};
 const WAIT: Duration = Duration::from_secs(40);
 
 /// The hub, served from a temporary state folder in a runtime of the test's own.
-struct TestHub {
+pub(crate) struct TestHub {
     _runtime: tokio::runtime::Runtime,
     _folder: tempfile::TempDir,
     served: Served<SystemClock>,
@@ -65,28 +65,30 @@ impl TestHub {
     }
 }
 
-struct Machine {
-    user: User,
+pub(crate) struct Machine {
+    pub(crate) user: User,
 }
 
 /// A user whose agents are the fake agent, Claude enabled and signed in (its login file only
 /// there), offers looked at often, the fake escalation programs first in its `PATH`.
-fn runner_user() -> User {
+pub(crate) fn runner_user() -> User {
     let user = User::with_fake_agent()
         .with_env("FLOTTILLE_TEST_OFFER_MS", "300")
         .with_env("ANTHROPIC_API_KEY", "")
         .with_env("CLAUDE_CODE_OAUTH_TOKEN", "")
         .with_env("ANTHROPIC_AUTH_TOKEN", "");
     let claude = user.path("home/.claude");
+    let stopping = user.path("stopping");
     let user = user
         .with_env("CLAUDE_CONFIG_DIR", claude.to_str().unwrap())
+        .with_env("FLOTTILLE_TEST_STOPPING_FILE", stopping.to_str().unwrap())
         .with_fake_escalation();
     user.write_providers("[claude]\nenabled = true\n");
     user
 }
 
 /// Claude's login file on `user`'s machine: its presence is all that is looked at.
-fn sign_in(user: &User) {
+pub(crate) fn sign_in(user: &User) {
     let folder = user.path("home/.claude");
     std::fs::create_dir_all(&folder).unwrap();
     std::fs::write(folder.join(".credentials.json"), "{}").unwrap();
@@ -94,7 +96,7 @@ fn sign_in(user: &User) {
 
 impl Machine {
     /// `user`'s machine, with remote on, its link on loopback.
-    fn of(user: User) -> Machine {
+    pub(crate) fn of(user: User) -> Machine {
         std::fs::write(
             user.path("config/flottille/daemon.toml"),
             "[remote]\non = true\nlisten = \"127.0.0.1:0\"\n",
@@ -104,15 +106,15 @@ impl Machine {
         Machine { user }
     }
 
-    fn this(&self) -> Value {
+    pub(crate) fn this(&self) -> Value {
         self.user.call("remote.machines", json!({})).unwrap()["this"].clone()
     }
 
-    fn key(&self) -> PublicKey {
+    pub(crate) fn key(&self) -> PublicKey {
         serde_json::from_value(self.this()["key"].clone()).unwrap()
     }
 
-    fn addresses(&self) -> Vec<SocketAddr> {
+    pub(crate) fn addresses(&self) -> Vec<SocketAddr> {
         self.this()["addresses"]
             .as_array()
             .unwrap()
@@ -123,13 +125,13 @@ impl Machine {
 
     /// The key this machine's daemon holds, as a test that stands in for it reads it; its
     /// daemon stopped, so that the other machines take a link of that key again.
-    fn stand_in(&self) -> MachineKey {
+    pub(crate) fn stand_in(&self) -> MachineKey {
         let stopped = self.user.run(&["daemon", "stop"]);
         assert!(stopped.status.success(), "{}", self.log());
         MachineKey::load_or_make(&self.user.path("state/flottille/remote")).unwrap()
     }
 
-    fn seen(&self, name: &str) -> Value {
+    pub(crate) fn seen(&self, name: &str) -> Value {
         let machines = self.user.call("remote.machines", json!({})).unwrap();
         machines["machines"]
             .as_array()
@@ -140,14 +142,14 @@ impl Machine {
             .unwrap_or(Value::Null)
     }
 
-    fn wait_for(&self, name: &str) {
+    pub(crate) fn wait_for(&self, name: &str) {
         eventually(&format!("{name} online"), || {
             self.seen(name)["state"] == "online"
         });
     }
 
     /// Waits until `name` offers the project `app` with `slots` free, Claude signed in.
-    fn wait_for_offer(&self, name: &str, slots: u64) {
+    pub(crate) fn wait_for_offer(&self, name: &str, slots: u64) {
         eventually(&format!("{name} offering {slots} slots"), || {
             let offers = &self.seen(name)["offers"];
             offers["agents"]
@@ -161,13 +163,13 @@ impl Machine {
         });
     }
 
-    fn log(&self) -> String {
+    pub(crate) fn log(&self) -> String {
         std::fs::read_to_string(self.user.path("state/flottille/daemon.log")).unwrap_or_default()
     }
 
     /// The project `app` of this machine, its one repository at `work/app`, which need not be
     /// there; `more` the more lines of its file.
-    fn register(&self, more: &str) {
+    pub(crate) fn register(&self, more: &str) {
         let text = format!(
             "folder = \"{}\"\nworkspaces_root = \"{}\"\nbranch_prefix = \"\"\n{more}\n\
              [[repositories]]\npath = \".\"\nbase = [\"main\"]\n",
@@ -179,28 +181,28 @@ impl Machine {
         self.user.call("project.list", json!({})).unwrap();
     }
 
-    fn folder(&self) -> PathBuf {
+    pub(crate) fn folder(&self) -> PathBuf {
         self.user.path("work/app")
     }
 
-    fn git(&self, dir: &Path, args: &[&str]) -> String {
+    pub(crate) fn git(&self, dir: &Path, args: &[&str]) -> String {
         self.user.git_output(dir, args).trim().to_owned()
     }
 
-    fn agents(&self) -> Vec<Value> {
+    pub(crate) fn agents(&self) -> Vec<Value> {
         self.user.call("agent.list", json!({})).unwrap()["agents"]
             .as_array()
             .unwrap()
             .clone()
     }
 
-    fn agent(&self, id: &str) -> Value {
+    pub(crate) fn agent(&self, id: &str) -> Value {
         self.user.call("agent.show", json!({"agent": id})).unwrap()["agent"].clone()
     }
 
     /// A session the user starts in `app`'s folder, its first turn ended, in `mode`: its id and
     /// its MCP session.
-    fn root(&self, mode: &str) -> (String, Mcp) {
+    pub(crate) fn root(&self, mode: &str) -> (String, Mcp) {
         let opened = self.user.received_requests("session/new").len();
         let started = self
             .user
@@ -218,7 +220,7 @@ impl Machine {
     }
 
     /// What this machine's fake agents were sent as prompts, each prompt's text.
-    fn prompts(&self) -> Vec<String> {
+    pub(crate) fn prompts(&self) -> Vec<String> {
         self.user
             .received_requests("session/prompt")
             .iter()
@@ -227,7 +229,7 @@ impl Machine {
     }
 
     /// The pending requests of this machine's user.
-    fn requests(&self) -> Vec<Value> {
+    pub(crate) fn requests(&self) -> Vec<Value> {
         self.user.call("approval.list", json!({})).unwrap()["requests"]
             .as_array()
             .unwrap()
@@ -235,7 +237,7 @@ impl Machine {
     }
 }
 
-fn eventually(what: &str, check: impl Fn() -> bool) {
+pub(crate) fn eventually(what: &str, check: impl Fn() -> bool) {
     let deadline = Instant::now() + WAIT;
     while !check() {
         assert!(Instant::now() < deadline, "{what} never happened");
@@ -258,7 +260,7 @@ fn set_up(hub: &TestHub, pc: &Machine) {
 }
 
 /// `joiner` joins the hub of `inviter` as the user pairs them, as `name` with `role`.
-fn pair(inviter: &Machine, joiner: &Machine, name: &str, role: &str) {
+pub(crate) fn pair(inviter: &Machine, joiner: &Machine, name: &str, role: &str) {
     let invited = inviter.user.run(&["remote", "invite", "--json"]);
     assert!(invited.status.success(), "{}", inviter.log());
     let invited: Value = serde_json::from_slice(&invited.stdout).unwrap();
@@ -311,7 +313,10 @@ fn pair(inviter: &Machine, joiner: &Machine, name: &str, role: &str) {
 /// runner, the two linked; `pc` has the project `app`, its repository on `feat/export` with two
 /// commits, an ignore rule and uncommitted work; `server` has `app` registered with
 /// `server_project` as its more lines, or not at all when it is `None`.
-fn pc_and_server(server_user: User, server_project: Option<&str>) -> (TestHub, Machine, Machine) {
+pub(crate) fn pc_and_server(
+    server_user: User,
+    server_project: Option<&str>,
+) -> (TestHub, Machine, Machine) {
     let hub = TestHub::new();
     let pc_user = runner_user();
     sign_in(&pc_user);
@@ -342,7 +347,7 @@ fn pc_and_server(server_user: User, server_project: Option<&str>) -> (TestHub, M
 }
 
 /// A server running agents, Claude signed in, with `judge` its judge's steps when it has one.
-fn server_user(judge: Option<Value>) -> User {
+pub(crate) fn server_user(judge: Option<Value>) -> User {
     let user = runner_user();
     sign_in(&user);
     match judge {
@@ -351,20 +356,20 @@ fn server_user(judge: Option<Value>) -> User {
     }
 }
 
-fn allowing() -> Option<Value> {
+pub(crate) fn allowing() -> Option<Value> {
     Some(json!([{"say": "{\"verdict\": \"allow\", \"reason\": \"It fits the task.\"}"}]))
 }
 
-fn launched(mcp: &Mcp, args: Value) -> Answer {
+pub(crate) fn launched(mcp: &Mcp, args: Value) -> Answer {
     mcp.call("agent_launch", args)
 }
 
-fn done(answer: &Answer) -> &str {
+pub(crate) fn done(answer: &Answer) -> &str {
     assert!(!answer.error, "an error: {}", answer.text);
     &answer.text
 }
 
-fn refused(answer: &Answer) -> &str {
+pub(crate) fn refused(answer: &Answer) -> &str {
     assert!(
         answer.text.starts_with("refused"),
         "not refused: {}",
@@ -374,7 +379,7 @@ fn refused(answer: &Answer) -> &str {
 }
 
 /// The agent the answer of a launch on another machine names: `(agent <id>)`.
-fn id_in(text: &str) -> String {
+pub(crate) fn id_in(text: &str) -> String {
     let at = text
         .find("(agent ")
         .unwrap_or_else(|| panic!("no agent in {text}"));
@@ -382,7 +387,7 @@ fn id_in(text: &str) -> String {
 }
 
 /// The one agent of `machine` whose title is `title`, once there.
-fn titled(machine: &Machine, title: &str) -> Value {
+pub(crate) fn titled(machine: &Machine, title: &str) -> Value {
     let find = || {
         machine
             .agents()
@@ -395,12 +400,12 @@ fn titled(machine: &Machine, title: &str) -> Value {
 }
 
 /// The folder of the agent's place on its machine.
-fn folder_of(agent: &Value) -> PathBuf {
+pub(crate) fn folder_of(agent: &Value) -> PathBuf {
     PathBuf::from(agent["folder"].as_str().unwrap())
 }
 
 /// Waits until the agent `id` of `machine` was sent a prompt holding `text`.
-fn prompted(machine: &Machine, text: &str) {
+pub(crate) fn prompted(machine: &Machine, text: &str) {
     eventually(&format!("a prompt with {text}"), || {
         machine.prompts().iter().any(|prompt| prompt.contains(text))
     });
@@ -816,7 +821,12 @@ fn full_needs_the_user_s_signed_switch_otherwise_auto() {
 }
 
 /// A link to `to` dialled with `key`, as the daemon holding that key would dial it.
-async fn dial(key: &MachineKey, to: &Machine, to_key: PublicKey, addresses: &[SocketAddr]) -> Link {
+pub(crate) async fn dial(
+    key: &MachineKey,
+    to: &Machine,
+    to_key: PublicKey,
+    addresses: &[SocketAddr],
+) -> Link {
     let endpoint = Endpoint::dialler(key).unwrap();
     let deadline = Instant::now() + WAIT;
     loop {
@@ -833,7 +843,7 @@ async fn dial(key: &MachineKey, to: &Machine, to_key: PublicKey, addresses: &[So
 }
 
 /// What `machine` answers each of `messages`, sent in turn on one link dialled with `key`.
-fn sent_with(
+pub(crate) fn sent_with(
     key: &MachineKey,
     machine: &Machine,
     messages: Vec<MachineMessage>,
@@ -858,7 +868,7 @@ fn sent_with(
 }
 
 /// A launch as a machine's daemon sends it, for `caller`.
-fn launch_ask(launch: &str, caller: &str) -> LaunchAsk {
+pub(crate) fn launch_ask(launch: &str, caller: &str) -> LaunchAsk {
     LaunchAsk {
         launch: launch.into(),
         caller: caller.into(),
@@ -1043,14 +1053,14 @@ fn workspaces(machine: &Machine) -> Vec<String> {
 }
 
 /// `machine`'s daemon stopped and started again.
-fn restarted(machine: &Machine) {
+pub(crate) fn restarted(machine: &Machine) {
     let stopped = machine.user.run(&["daemon", "stop"]);
     assert!(stopped.status.success(), "{}", machine.log());
     machine.user.status();
 }
 
 /// Waits long enough for a setup that would run to have run.
-fn a_while() {
+pub(crate) fn a_while() {
     std::thread::sleep(Duration::from_secs(2));
 }
 

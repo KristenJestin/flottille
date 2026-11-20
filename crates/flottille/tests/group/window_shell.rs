@@ -19,6 +19,8 @@ mod window_code_copy;
 mod window_composer_tokens;
 #[path = "../window_connection_requests.rs"]
 mod window_connection_requests;
+#[path = "../window_connection_share.rs"]
+mod window_connection_share;
 #[path = "../window_connections.rs"]
 mod window_connections;
 #[path = "../window_drafts.rs"]

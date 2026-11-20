@@ -2036,7 +2036,8 @@ mod removal {
 
     #[test]
     fn a_retry_after_a_timeout_waits_for_a_process_still_alive() {
-        let user = User::with_fake_agent();
+        // The wait for a process to be gone is two seconds, not fifteen.
+        let user = User::with_fake_agent().with_env("FLOTTILLE_TEST_RELEASE_WAIT_MS", "2000");
         // Stuck while it opens its session, it never sees the order to stop: its process
         // outlives the wait.
         user.fake_script(json!({"stall": true}));
@@ -2077,7 +2078,7 @@ mod removal {
         assert_eq!(code, "refused", "{again}");
         assert!(again.contains(&agent) && again.contains("still"), "{again}");
         assert!(
-            started.elapsed() > Duration::from_secs(10),
+            started.elapsed() > Duration::from_millis(1300),
             "it waited for the process again"
         );
         assert!(w.exists(), "nothing is removed under a running process");

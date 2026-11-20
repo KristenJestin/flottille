@@ -163,6 +163,7 @@ no device calls a `local` one over a link (`docs/remote.md`, "Roles").
 | `connection.proposed` | read |
 | `connection.share_entry` | drive |
 | `connection.bind_entry` | drive |
+| `connection.share` | drive |
 | `spec.new` | drive |
 | `spec.from_ticket` | drive |
 | `spec.answer` | drive |
@@ -821,6 +822,16 @@ setting}]`, `setting` being `judged`, `passes`, `asked` or `off`).
   one that waited. `unavailable` when the server asks for no sign-in, publishes no metadata, or
   its authorization server cannot be used (no PKCE `S256`, no way to get a client id); `refused`
   for a command.
+- `connection.share {name, machine, entries?}` sends the `https://` connection `name` to the user's
+  machine `machine`, a runner, with the vault entries `entries` it names (`docs/remote.md`,
+  "Connections"): served only as a request the user's device signed for this machine, as
+  `vault.share`; answers `{"name", "machine", "entries"}` once that machine declared it. `refused`
+  for a client that did not sign, a command or a URL of this machine (`the connection notes is
+  this machine's own: only an https:// connection is shared`), an entry the connection does not
+  name, its sign-in's tokens (`OAuth tokens are never shared: server signs in for itself`), a
+  machine that runs no agent, or what the other machine refused in its words (`server has its own
+  connection notes: …`); `unavailable` for a machine that is off; `not-found` for an unknown
+  connection or entry.
 - `connection.review {name}` starts its server as declared and answers what it announces against
   what was accepted: `{"name", "first", "declaration_changed", "cut_off", "changes", "server":
   {"pinned", "now"}, "instructions": {"pinned", "now"}, "actions": [{"name", "change" (added,
@@ -1320,7 +1331,15 @@ Each is `refused` with it off, as the remote methods are.
   ending closes the tunnel. It is a `drive` method: a `viewer` is refused (`laptop may only view: a
   controller or a runner may open a tunnel`). Never without `machine`: a tunnel is to another
   machine (`refused`).
-- `tunnel.list {}` answers `{"tunnels": [{"tunnel", "machine", "run", "port", "local_port",
+- `tunnel.open {sign_in}` aimed at a machine: the redirect of the sign-in of the connection
+  `sign_in` that waits there (`docs/remote.md`, "Connections"), instead of a run's port. Only while
+  that sign-in waits, only for the device whose client began it (`connection.login` signed for that
+  machine), only to its one-shot loopback listener; `refused` otherwise (`no sign-in of the
+  connection notes waits on server`, `the sign-in of notes was not begun by laptop`). The answer is
+  `{"tunnel", "machine", "sign_in", "port", "local_port", "address"}`, `local_port` being the very
+  port the redirect names (no other: `unavailable` when it is taken here), and the tunnel ends with
+  the sign-in: its `tunnel.closed` says `signed_in`.
+- `tunnel.list {}` answers `{"tunnels": [{"tunnel", "machine", "run", "sign_in", "port", "local_port",
   "address", "connections", "since"}]}`: the tunnels this machine's daemon carries, `connections`
   being the TCP connections open on them now and `since` when it opened (milliseconds since the
   Unix epoch). `Local`.
@@ -2562,7 +2581,9 @@ entry, its project and the agent's reason) or `unchecked` (`run.agent_folders_un
 the agent, a child's too, ended in a place too large for the daemon to check all its agent folders
 after it, `text` says which and where) or `put_back` (`run.agent_folders_put_back`: the put-back
 of a run's place, a child's too, put back or could not put back what was written in its agent
-folders, `text` says which and where they are kept). The daemon's own `unchecked` and `put_back`
+folders, `text` says which and where they are kept) or `dropped` (`remote.delivery_dropped`: a
+message kept for another machine was dropped, `text` says for whom and why; `agent`, `project` and
+`workspace` `null`). The daemon's own `unchecked` and `put_back`
 come with `agent` and `workspace` `null` when no agent of the store ran it. A pause that resumed since is `"resolved": true`, its
 `text` ending `It has resumed since.`; a request for a vault entry the user answered is
 `"resolved": true` too.

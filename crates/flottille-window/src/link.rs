@@ -144,6 +144,30 @@ pub struct Seen {
 
 /// How long a request of the link may wait before the window says Flottille is not answering.
 pub const NOT_ANSWERING: Duration = Duration::from_secs(30);
+
+/// [`NOT_ANSWERING`], or what a scenario of the window set for the window it opens on its thread.
+fn not_answering() -> Duration {
+    #[cfg(feature = "test-support")]
+    if let Some(limit) = NOT_ANSWERING_HERE.with(std::cell::Cell::get) {
+        return limit;
+    }
+    NOT_ANSWERING
+}
+
+#[cfg(feature = "test-support")]
+thread_local! {
+    static NOT_ANSWERING_HERE: std::cell::Cell<Option<Duration>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// For a scenario of the window: the windows opened on this thread say Flottille is not
+/// answering after `limit`, not [`NOT_ANSWERING`]. A thread of its own, so that the scenarios
+/// that run beside it keep the production's.
+#[cfg(feature = "test-support")]
+pub fn not_answering_after_on_this_thread(limit: Duration) {
+    NOT_ANSWERING_HERE.with(|here| here.set(Some(limit)));
+}
+
 /// How long the link waits for nothing before it asks Flottille whether it still answers.
 const PING: Duration = Duration::from_secs(15);
 
@@ -172,13 +196,14 @@ pub fn spawn_into(connect: Connect, sender: UnboundedSender<Update>) -> Arc<Seen
     let seen = Arc::new(Seen::default());
     let shared = seen.clone();
     let watched = (seen.asking.clone(), sender.clone());
+    let limit = not_answering();
     std::thread::Builder::new()
         .name("flottille-link".into())
         .spawn(move || run(connect, sender, shared))
         .expect("a thread for the link to Flottille");
     std::thread::Builder::new()
         .name("flottille-link-watch".into())
-        .spawn(move || watch(&watched.0, &watched.1, NOT_ANSWERING))
+        .spawn(move || watch(&watched.0, &watched.1, limit))
         .expect("a thread watching the link to Flottille");
     seen
 }

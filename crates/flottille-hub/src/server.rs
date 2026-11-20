@@ -60,12 +60,31 @@ const ARRIVAL_WAIT: Duration = Duration::from_secs(5);
 const MOST_ADDRESSES: usize = 64;
 const LONGEST_ADDRESS: usize = 300;
 
+/// The waits of the server: how long a connection may take to arrive, and how long a session
+/// opened to set the hub up lasts. The production's are the default; a test serves with shorter
+/// ones (`serve_with`).
+#[derive(Clone, Copy, Debug)]
+pub struct Waits {
+    pub arrival: Duration,
+    pub setup_idle: Duration,
+}
+
+impl Default for Waits {
+    fn default() -> Waits {
+        Waits {
+            arrival: ARRIVAL_WAIT,
+            setup_idle: SETUP_IDLE,
+        }
+    }
+}
+
 /// What the sessions share: the hub, and a number raised at each change they must send.
 struct Shared<C: Clock> {
     hub: Mutex<Hub<C>>,
     key: Arc<flottille_link::HubKey>,
     changed: watch::Sender<u64>,
     hello: Hello,
+    waits: Waits,
 }
 
 /// A hub serving on the network, until `stop`.
@@ -83,12 +102,24 @@ pub fn serve<C: Clock + Send + 'static>(
     tls: Option<flottille_link::TlsServer>,
     hello: Hello,
 ) -> std::io::Result<Served<C>> {
+    serve_with(hub, listener, tls, hello, Waits::default())
+}
+
+/// [`serve`], with the waits `waits` says.
+pub fn serve_with<C: Clock + Send + 'static>(
+    hub: Hub<C>,
+    listener: TcpListener,
+    tls: Option<flottille_link::TlsServer>,
+    hello: Hello,
+    waits: Waits,
+) -> std::io::Result<Served<C>> {
     let address = listener.local_addr()?;
     let shared = Arc::new(Shared {
         key: hub.key.clone(),
         hub: Mutex::new(hub),
         changed: watch::channel(0).0,
         hello,
+        waits,
     });
     let (stop, stopping) = watch::channel(false);
     let accepting = tokio::spawn(accept(listener, tls, shared.clone(), stopping));
@@ -183,7 +214,7 @@ async fn accept<C: Clock + Send + 'static>(
                 };
                 arrive(stream, &shared.key, &shared.hello).await
             };
-            let arriving = match tokio::time::timeout(ARRIVAL_WAIT, arrival).await {
+            let arriving = match tokio::time::timeout(shared.waits.arrival, arrival).await {
                 Ok(Ok(arriving)) => arriving,
                 Ok(Err(why)) => {
                     eprintln!("flottille-hub: a connection from {from} was not taken: {why}");
@@ -304,7 +335,7 @@ async fn run<C: Clock + Send + 'static>(
     let mut changed = shared.changed.subscribe();
     let mut sent = Sent::default();
     // Set once: a session that keeps asking is closed as one that asks nothing.
-    let setup_ends = tokio::time::Instant::now() + SETUP_IDLE;
+    let setup_ends = tokio::time::Instant::now() + shared.waits.setup_idle;
     loop {
         let frames = {
             let mut hub = shared.hub.lock().unwrap();
@@ -376,7 +407,7 @@ async fn run<C: Clock + Send + 'static>(
             _ = idle => {
                 let reason = format!(
                     "no setup came within {} s of this session",
-                    SETUP_IDLE.as_secs()
+                    shared.waits.setup_idle.as_secs()
                 );
                 let _ = session.send(&ToDevice::Refused { reason: reason.clone(), reset: false }).await;
                 session.close().await;
