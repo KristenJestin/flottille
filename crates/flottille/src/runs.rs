@@ -863,14 +863,12 @@ fn defend(env: &mut BTreeMap<OsString, OsString>, empty: &Path) {
 /// have written in the repository, and only git's own transports are allowed, never an `ext::`
 /// URL it may have set; not SSH, and not the user's agent, where it is `lent` to no push. The
 /// programs the repository's settings may name for a transport are not run either: an empty
-/// `GIT_PROXY_COMMAND` and `GIT_ASKPASS` win over `core.gitProxy` and `core.askPass`, and no
-/// negotiation fetches first with the remote's `uploadpack`. No session bus where the one found at
+/// `GIT_PROXY_COMMAND` and `GIT_ASKPASS` win over `core.gitProxy` and `core.askPass`. No session bus where the one found at
 /// the daemon's start was replaced (`mounts::bus_replaced`): what is at its path now may be a
 /// run's.
 fn lifted(ssh: OsString, bus_replaced: bool, lent: bool) -> BTreeMap<OsString, OsString> {
     let mut env: BTreeMap<OsString, OsString> = std::env::vars_os().collect();
     configure(&mut env, "core.hooksPath", "/dev/null");
-    configure(&mut env, "push.negotiate", "false");
     env.insert("GIT_SSH_COMMAND".into(), ssh);
     env.insert(
         "GIT_ALLOW_PROTOCOL".into(),
@@ -2724,11 +2722,6 @@ mod tests {
         assert_eq!(get(format!("GIT_CONFIG_KEY_{count}")), "core.hooksPath");
         assert_eq!(get(format!("GIT_CONFIG_VALUE_{count}")), "/dev/null");
         assert_eq!(get("GIT_SSH_COMMAND".into()), "'/usr/bin/ssh'");
-        assert_eq!(
-            get(format!("GIT_CONFIG_KEY_{}", count + 1)),
-            "push.negotiate"
-        );
-        assert_eq!(get(format!("GIT_CONFIG_VALUE_{}", count + 1)), "false");
         assert_eq!(get("GIT_ALLOW_PROTOCOL".into()), "ssh:https:http:git:file");
         assert_eq!(get("GIT_PROXY_COMMAND".into()), "");
         assert_eq!(get("GIT_ASKPASS".into()), "");

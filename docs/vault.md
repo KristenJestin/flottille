@@ -417,9 +417,8 @@ helper and the forge command line's sign-in are theirs. Only these are added:
   `core.askPass` (an HTTPS sign-in with no helper), `--receive-pack=git-receive-pack` on the
   push's line, right after `push` (git takes the first `remote.<name>.receivepack` it reads, the
   repository's, and runs it on this machine for a remote reached by its path; the gate refuses
-  the option on the agent's own line), and `push.negotiate=false`, so that no fetch runs the
-  remote's `uploadpack` first. The user's own `core.gitProxy` and `core.askPass` are not used by
-  such a push either;
+  the option on the agent's own line). The user's own `core.gitProxy` and `core.askPass` are not
+  used by such a push either;
 - no `DBUS_SESSION_BUS_ADDRESS` once the bus the daemon found at its start by a path outside the
   runtime folders is gone or replaced (above): what is at that path now may be a run's. The
   daemon's own use of the keyring (the vault) is unchanged: it still reaches the bus its
