@@ -844,7 +844,6 @@ fn frames_at_rest(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> (u64, us
     while gone < Duration::from_secs(10) {
         asked += step(shell, Duration::from_millis(16), cx);
         gone += Duration::from_millis(16);
-        std::thread::sleep(Duration::from_millis(5));
     }
     let drawn = cx.update(|window, _| window.layout_stats().frames);
     (drawn, asked)
