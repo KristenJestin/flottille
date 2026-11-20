@@ -210,6 +210,7 @@ no device calls a `local` one over a link (`docs/remote.md`, "Roles").
 | `remote.address.add` | drive |
 | `remote.address.remove` | drive |
 | `remote.members` | read |
+| `remote.launches` | read |
 | `remote.requests` | read |
 | `remote.invite` | drive |
 | `remote.refuse` | drive |
@@ -1283,6 +1284,14 @@ with the reason. No method answers a private key.
   of the member whose machine this is (`null` when none is), `added_by` the name of the member
   whose signature added it, `machine` the fingerprint of the machine it declared, or `null`.
   `refused` when this machine is not set up with a hub.
+- `remote.launches` answers the sessions and children this machine's agents started on other
+  machines (`docs/remote.md`, "A tree across machines"), each but those refused there: `{"launches":
+  [{"machine", "launch", "caller", "kind", "project", "title", "agent", "state", "request", "heard",
+  "heard_at", "at"}]}`, `machine` its name, `caller` the agent of this machine that started it,
+  `kind` `child`, `led` or `handed`, `agent` its id there, `state` `held` (waiting for the user
+  there, `request` its number), `started`, or `ended` once its end came back; `heard` the kind of
+  the last delivery it sent here (`child-report`, `session-turn-ended`, `child-question`…) and
+  `heard_at` when, `null` before any: what the window shows as its state as last known.
 - `remote.invite {ask}` carries a member's signed ask for an invitation
   (`flottille_link::InvitationAsk`, signed by the client with the device key) to the hub, and
   answers `{"code", "url", "hub", "inviter", "fingerprint", "expires"}`: the invitation's code,

@@ -2551,6 +2551,21 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// The kind and the time of the last delivery `agent` was sent for its launch `launch` on
+    /// another machine (stored under `<launch>-…`): what that session last said of itself.
+    pub fn launch_heard(&self, agent: &str, launch: &str) -> Result<Option<(String, u64)>> {
+        let prefix = format!("{launch}-");
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT kind, created_at FROM deliveries WHERE agent = ?1 \
+                 AND substr(id, 1, length(?2)) = ?2 ORDER BY created_at DESC, rowid DESC LIMIT 1",
+                params![agent, prefix],
+                |row| Ok((row.get(0)?, row.get::<_, i64>(1)? as u64)),
+            )
+            .optional()?)
+    }
+
     /// The agent's last deliveries, the newest first, whatever their state.
     pub fn last_deliveries(&self, agent: &str, limit: usize) -> Result<Vec<Delivery>> {
         let mut statement = self.connection.prepare_cached(&format!(
