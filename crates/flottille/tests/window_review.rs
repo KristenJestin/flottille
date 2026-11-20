@@ -1375,6 +1375,8 @@ fn instructions_for_this_check_fold_under_each_check(cx: &mut TestAppContext) {
     field.update_in(cx, |field, window, cx| {
         field.set_value("Look at the retries of the login first.", window, cx)
     });
+    // What the edit set going is run before the frame that is counted, not after it.
+    cx.run_until_parked();
     assert!(step(cx) > 0, "Save unfolds");
     settle(cx);
     cx.update(|window, cx| window.click("review-bugs-guidance-save", cx));
