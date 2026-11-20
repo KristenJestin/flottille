@@ -19,7 +19,8 @@ and an agent running outside Flottille drives it through [`flottille mcp`](#the-
   `flottille: server is offline since 22:14`; nothing is kept for it. `flottille daemon`,
   `window`, `update`, `mcp`, `bridge`, `remote`, `doctor`, `vault provide` and `read-page` are this
   machine's own and refuse the flag; they ignore the variable, which a shell may have exported for
-  the commands it aims, and the daemon a command starts never reads it.
+  the commands it aims, and the daemon a command starts never reads it. `vault share` is this
+  machine's too, and takes the flag as the machine the entry is shared with.
 - **Agents are named by their id**, twelve hexadecimal digits, as `agent list` shows them.
 - **The program answers to `flottille` and to `flot`** (see [The `flot` name](#the-flot-name)).
   The examples below write `flottille`.
@@ -383,6 +384,31 @@ machines linked to this one. `remote.address.add`.
 
 Removes an address declared by hand, and tells the machines linked to this one.
 `remote.address.remove`.
+
+## Tunnels
+
+### `flottille tunnel open <run> [--port <port>] [--json]`
+
+Reaches a run's port on another machine on a local port, so it takes `--machine <name>`
+(`docs/remote.md`, "Tunnels"). The machine checks that the run is one it started and still runs, and that the port is the one the run
+reports as its address or one its processes listen on (`--port` says which when it listens on
+several); any other port is refused. This machine listens on `127.0.0.1` (the run's port when it is
+free, another otherwise), prints where, and keeps the tunnel open until the run ends or you press
+Ctrl+C. A viewer is refused. `tunnel.open`.
+
+```
+$ flottille --machine server tunnel open 3f9a1c0b7d2e
+Run 3f9a1c0b7d2e of server, port 3000, is on 127.0.0.1:41873. It stays open until the run ends or you press Ctrl+C.
+```
+
+### `flottille tunnel list [--machine <name>] [--json]`
+
+The tunnels this machine carries, with their local address and connections; with `--machine`, the
+ones to that machine only (the flag is a filter here, no request is carried). `tunnel.list`.
+
+### `flottille tunnel close <tunnel>`
+
+Closes one of them: the command that opened it says it is closed. `tunnel.close`.
 
 ## Extensions and specs
 
@@ -869,6 +895,20 @@ Changed jira; its secret is kept as it was.
 Removes the entry and its secret from the keyring. An entry bound to a feature that names it is
 refused, naming the feature and what stops working, unless `--confirmed`. `--json` prints
 `vault.remove`.
+
+### `flottille vault share <name> --machine <machine>`
+
+Shares the entry with another machine of the user's, a runner (`docs/vault.md`, "Shared with
+another machine"): here `--machine` names where the entry goes, not a machine this command drives.
+The request is this machine's, signed with this device's key; the secret goes from this machine's
+keyring into that machine's, with the entry's metadata, and never into a file. Sharing again
+replaces the copy. Refused for a machine that is off, runs no agent, has no keyring, or lacks the
+project of a worklog's entry, saying so. `--json` prints `vault.share`.
+
+```
+$ flottille vault share jira --machine server
+Shared jira with server: its keyring holds it now.
+```
 
 ### `flottille vault provide <socket>`
 

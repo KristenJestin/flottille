@@ -17,6 +17,7 @@ mod offers;
 mod request;
 mod serial;
 mod transport;
+mod tunnel;
 mod words;
 
 use std::fmt;
@@ -40,7 +41,8 @@ pub use hello::{Hello, NeedsUpdate, PeerState, choose};
 pub use invitation::{Invitation, InvitationAsk, InvitationError, Token};
 pub use link::{
     Accepting, Answers, Endpoint, FRAME_LIMIT, Git, GitFetch, GitOffer, GitPlace, GitRepository,
-    LaunchAsk, Link, LinkError, MachineMessage, Message, Received, Streamed, Traffic,
+    LaunchAsk, Link, LinkError, MachineMessage, Message, Received, Secret, Share, Streamed,
+    Traffic,
 };
 pub use members::{
     Action, Change, ChangeHash, ListError, MANAGING_HEADROOM, MOST_CHANGES, Member, MemberList,
@@ -52,6 +54,7 @@ pub use request::{
     Requests, Signed, full_switch, runs_agents,
 };
 pub use transport::TlsServer;
+pub use tunnel::TunnelStream;
 pub use words::verification_words;
 
 /// The machine key's file in the key folder: the daemon's alone.

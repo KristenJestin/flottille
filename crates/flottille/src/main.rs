@@ -89,6 +89,8 @@ mod tickets;
 mod titles;
 mod travel;
 mod tree;
+mod tunnel;
+mod tunnel_command;
 mod turn_failures;
 mod update;
 mod vault;
@@ -115,6 +117,7 @@ use crate::remote_command::RemoteAction;
 use crate::runs_command::RunsAction;
 use crate::service_command::ServiceAction;
 use crate::skill_command::SkillAction;
+use crate::tunnel_command::TunnelAction;
 use crate::vault_command::VaultAction;
 use crate::workspace_command::WorkspaceAction;
 
@@ -191,6 +194,12 @@ enum Command {
     Runs {
         #[command(subcommand)]
         action: RunsAction,
+    },
+    /// A run's port on another machine reached on a local port (`--machine`): opened, listed,
+    /// closed
+    Tunnel {
+        #[command(subcommand)]
+        action: TunnelAction,
     },
     /// The services of the machine, shared by every project: listed, written, started, stopped
     Service {
@@ -369,6 +378,17 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         _ => None,
     };
     let flagged = cli.machine.clone().filter(|name| !name.is_empty());
+    // `vault share` is this machine's request: its --machine names where the entry goes.
+    let mut cli = cli;
+    let sharing = if let Command::Vault {
+        action: VaultAction::Share { machine, .. },
+    } = &mut cli.command
+    {
+        *machine = flagged.clone();
+        true
+    } else {
+        false
+    };
     if let (Some(command), Some(_)) = (here, &flagged) {
         return Err(format!(
             "flottille {command} is this machine's own: it drives no other (leave out --machine)"
@@ -388,12 +408,18 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         return Ok(extensions::vault_provide(socket));
     }
     let paths = Paths::from_env()?;
+    let machine = flagged.or_else(|| {
+        std::env::var("FLOTTILLE_MACHINE")
+            .ok()
+            .filter(|name| !name.is_empty())
+    });
+    // A tunnel's list and closing are this machine's own: the flag only filters them.
+    let own_tunnels =
+        matches!(&cli.command, Command::Tunnel { action } if tunnel_command::is_local(action));
     if here.is_none()
-        && let Some(machine) = flagged.or_else(|| {
-            std::env::var("FLOTTILLE_MACHINE")
-                .ok()
-                .filter(|name| !name.is_empty())
-        })
+        && !sharing
+        && !own_tunnels
+        && let Some(machine) = machine.clone()
     {
         client::aim(machine);
     }
@@ -504,6 +530,7 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
             }
         }
         Command::Runs { action } => runs_command::run(&paths, action)?,
+        Command::Tunnel { action } => tunnel_command::run(&paths, action, machine)?,
         Command::Service { action } => service_command::run(&paths, action)?,
         Command::Approvals { json } => approval_command::approvals(&paths, json)?,
         Command::Approve { number, discard } => approval_command::approve(&paths, number, discard)?,
@@ -539,6 +566,23 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
                     None
                 }
             };
+            // What only the user's device may ask (`vault.share`) is signed with its key, read
+            // when it is asked, as the command line reads it.
+            let signing = paths.clone();
+            flottille_window::link::sign_with(std::sync::Arc::new(move |machine, request| {
+                let key = remote_command::device_key(&signing)
+                    .map_err(|error| std::io::Error::other(error.to_string()))?;
+                let signed = flottille_link::Request::sign(
+                    &key,
+                    &request.id,
+                    machine,
+                    &request.method,
+                    &request.params,
+                    std::time::SystemTime::now(),
+                )
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
+                serde_json::to_value(signed).map_err(std::io::Error::other)
+            }));
             let paths = paths.clone();
             flottille_window::run(
                 std::sync::Arc::new(move || {

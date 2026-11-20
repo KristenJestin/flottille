@@ -32,6 +32,7 @@ fn prefilled(ask: &VaultAsk) -> VaultEntry {
         bound: ask.bound.clone(),
         // The form is told by `connection`, which `add_asked` hands it.
         every_project_only: false,
+        shared_from: None,
     }
 }
 

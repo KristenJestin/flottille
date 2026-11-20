@@ -71,26 +71,29 @@ tokio::task_local! {
     /// The member whose device signed the request being served, for a client of another
     /// machine: the events its serving emits name it (`docs/remote.md`, "Requests from another
     /// machine's clients").
-    static ASKED_BY: Arc<str>;
-    /// That request whole, as the device signed it: `agent.mode` keeps a switch to Full signed by
-    /// the user, which a launch on another machine needs to start in Full there.
-    static SIGNED: Arc<str>;
+    static ASKED_BY: Arc<Asked>;
 }
 
-/// `future` run as the member `asked_by` asked, when one did, with the request as it signed it.
-async fn as_asked_by<F: std::future::Future>(
-    asked_by: Option<(Arc<str>, Arc<str>)>,
-    future: F,
-) -> F::Output {
+/// A request a device of the user's signed, being served.
+pub(crate) struct Asked {
+    /// The member whose device signed it.
+    pub device: String,
+    /// The request as the device signed it, checked already: what a method that carries the
+    /// user's consent further sends on (`vault.share`), for the next machine to check it again.
+    pub signed: String,
+}
+
+/// The request a device signed that is being served, when it is one.
+pub(crate) fn asked() -> Option<Arc<Asked>> {
+    ASKED_BY.try_with(Arc::clone).ok()
+}
+
+/// `future` run as the member `asked_by` asked, when one did.
+async fn as_asked_by<F: std::future::Future>(asked_by: Option<Arc<Asked>>, future: F) -> F::Output {
     match asked_by {
-        Some((device, signed)) => ASKED_BY.scope(device, SIGNED.scope(signed, future)).await,
+        Some(device) => ASKED_BY.scope(device, future).await,
         None => future.await,
     }
-}
-
-/// The request being served as its device signed it, when it came from another machine's client.
-pub(crate) fn signed_request() -> Option<Arc<str>> {
-    SIGNED.try_with(Arc::clone).ok()
 }
 
 /// `data` naming `device` (`device`), unless it names one already.
@@ -332,7 +335,7 @@ impl Daemon {
     #[track_caller]
     pub fn emit(&self, name: &str, data: Value) -> Result<Event> {
         let data = match ASKED_BY.try_with(Arc::clone) {
-            Ok(device) => naming(data, &device),
+            Ok(asked) => naming(data, &asked.device),
             Err(_) => data,
         };
         let events = self.stored();
@@ -739,26 +742,19 @@ async fn refuse(stream: UnixStream) {
     .await;
 }
 
-/// A request of another machine's client, checked, served on `stream` as one of a local
-/// client's: what its serving emits names `device`.
+/// A request a device signed, checked, served on `stream` as one of a local client's: what its
+/// serving emits names its member, `asked.device`.
 /// Boxed, its type named: a connection carries requests that end up here.
 pub(crate) fn served_for(
     daemon: Arc<Daemon>,
     stream: UnixStream,
-    device: String,
-    signed: String,
+    asked: Asked,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
-    Box::pin(as_asked_by(
-        Some((Arc::from(device), Arc::from(signed))),
-        connection(daemon, stream),
-    ))
+    Box::pin(ASKED_BY.scope(Arc::new(asked), connection(daemon, stream)))
 }
 
 async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
-    let asked_by = ASKED_BY
-        .try_with(Arc::clone)
-        .ok()
-        .zip(SIGNED.try_with(Arc::clone).ok());
+    let asked_by = ASKED_BY.try_with(Arc::clone).ok();
     // A watch carried to another machine whose link dropped ends the connection: its client
     // resumes it after the last event it saw.
     let (dropped, mut watch_dropped) = mpsc::channel::<()>(1);
@@ -869,6 +865,7 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
             "items.",
             "vault.",
             "remote.",
+            "tunnel.",
         ]
         .iter()
         .any(|prefix| request.method.starts_with(prefix))
@@ -907,6 +904,8 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
                     crate::vault::call(daemon, &request.method, request.params).await
                 } else if request.method.starts_with("remote.") {
                     crate::link::call(daemon, &request.method, request.params).await
+                } else if request.method.starts_with("tunnel.") {
+                    crate::tunnel::call(daemon, &request.method, request.params).await
                 } else if request.method.starts_with("items.") {
                     items::call(daemon, &request.method, request.params).await
                 } else if request.method.starts_with("provider.") {
@@ -1216,7 +1215,7 @@ async fn forward(daemon: Arc<Daemon>, mut subscription: Subscription, out: mpsc:
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use flottille_core::agent::{Agent, AgentState, Choices, GateMode};
 
     use super::*;
@@ -1290,7 +1289,7 @@ mod tests {
         assert_eq!(judge(error(ErrorKind::Interrupted), OURS), Socket::Unknown);
     }
 
-    fn an_agent(id: &str) -> Agent {
+    pub(crate) fn an_agent(id: &str) -> Agent {
         Agent {
             id: id.into(),
             provider: "claude".into(),

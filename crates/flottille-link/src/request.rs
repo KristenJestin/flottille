@@ -382,6 +382,7 @@ fn deed(method: &str) -> String {
         "remote.invite" => "invite a device",
         "remote.refuse" => "refuse a device",
         "remote.change" => "add, remove or rename a device",
+        "tunnel.open" => "open a tunnel",
         _ => return format!("call {method}"),
     };
     words.to_owned()

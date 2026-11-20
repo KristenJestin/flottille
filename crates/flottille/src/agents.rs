@@ -400,7 +400,7 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
             // A switch to Full the user signed from a device is kept, for a launch on another
             // machine to start in Full there; any other switch forgets it.
             let signed = match mode {
-                GateMode::Full => crate::daemon::signed_request(),
+                GateMode::Full => crate::daemon::asked().map(|asked| asked.signed.clone()),
                 _ => None,
             };
             // Only the user's door reaches this method: no tool of an agent changes a mode.

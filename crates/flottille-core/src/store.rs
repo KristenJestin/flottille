@@ -877,6 +877,11 @@ const MIGRATIONS: &[&str] = &[
     ) STRICT;
 ",
     "
+    -- The machine a vault entry was shared from (`docs/remote.md`, \"Vault entries\"): a copy
+    -- of that machine's entry, NULL for an entry of this machine's own.
+    ALTER TABLE vault_entries ADD COLUMN shared_from TEXT;
+",
+    "
     -- A session or a child started on another machine by an agent (`docs/remote.md`, \"Starting
     -- a session on another machine\"): `out` on the caller's machine, `in` on the machine it runs
     -- on. `machine` is the other machine's key; `caller` the agent that launched it (of this
@@ -2844,7 +2849,7 @@ impl Store {
     /// The vault's entries, by name.
     pub fn vault_entries(&self) -> Result<Vec<crate::vault::Entry>> {
         let mut statement = self.connection.prepare_cached(
-            "SELECT name, description, url, username, project, updated_at, bound \
+            "SELECT name, description, url, username, project, updated_at, bound, shared_from \
              FROM vault_entries ORDER BY name",
         )?;
         let rows = statement.query_map([], |row| {
@@ -2856,6 +2861,7 @@ impl Store {
                 project: row.get(4)?,
                 updated_at: row.get(5)?,
                 bound: row.get(6)?,
+                shared_from: row.get(7)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -2867,9 +2873,10 @@ impl Store {
         let transaction = self.connection.transaction()?;
         transaction.execute(
             "INSERT INTO vault_entries \
-             (name, description, url, username, project, updated_at, bound) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) ON CONFLICT (name) DO UPDATE SET \
-             description = ?2, url = ?3, username = ?4, project = ?5, updated_at = ?6, bound = ?7",
+             (name, description, url, username, project, updated_at, bound, shared_from) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) ON CONFLICT (name) DO UPDATE SET \
+             description = ?2, url = ?3, username = ?4, project = ?5, updated_at = ?6, \
+             bound = ?7, shared_from = ?8",
             params![
                 entry.name,
                 entry.description,
@@ -2877,7 +2884,8 @@ impl Store {
                 entry.username,
                 entry.project,
                 entry.updated_at,
-                entry.bound
+                entry.bound,
+                entry.shared_from
             ],
         )?;
         let event = append_event(
@@ -2898,7 +2906,7 @@ impl Store {
         let removed = transaction
             .query_row(
                 "DELETE FROM vault_entries WHERE name = ?1 \
-                 RETURNING description, url, username, project, updated_at, bound",
+                 RETURNING description, url, username, project, updated_at, bound, shared_from",
                 params![name],
                 |row| {
                     Ok(crate::vault::Entry {
@@ -2909,6 +2917,7 @@ impl Store {
                         project: row.get(3)?,
                         updated_at: row.get(4)?,
                         bound: row.get(5)?,
+                        shared_from: row.get(6)?,
                     })
                 },
             )
