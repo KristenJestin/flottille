@@ -207,7 +207,7 @@ fn clicking_the_mark_opens_what_is_new_and_clears_its_dot(cx: &mut TestAppContex
     });
     settle(cx);
     assert_eq!(
-        label(cx, "whats-new-header").as_deref(),
+        label(cx, "whats-new-header-title").as_deref(),
         Some(format!("What's new since {SINCE}").as_str())
     );
     assert!(!visible(cx, "sidebar-whats-new-dot"));
