@@ -340,6 +340,7 @@ No parameters. The result:
   "sandbox": {
     "landlock_abi": 6,
     "private_mounts": true,
+    "ssh_lent": true,
     "warnings": []
   }
 }
@@ -352,7 +353,9 @@ that an older client would misread (`docs/remote.md`, "The version").
 (with a request the user holds, `approval.list`, or a question not answered yet), and the agents
 that failed (`docs/agents.md`).
 `sandbox` is what confines the daemon's commands (`docs/vault.md`, "The runtime folder"):
-Landlock's ABI (0 without it), whether they start in their private mount namespace, and a sentence
+Landlock's ABI (0 without it), whether they start in their private mount namespace, whether the
+user's SSH agent is lent to a push the gate lets through (`ssh_lent`: false when what its `ssh`
+reads could be written by a confined command, the reason then among the warnings), and a sentence
 for each gap, which `flottille doctor` adds to its warnings.
 
 ### `daemon.stop`
