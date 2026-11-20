@@ -181,6 +181,31 @@ fn turning_the_check_off_makes_no_request() {
 }
 
 #[test]
+fn a_broken_updates_toml_means_never_and_is_said() {
+    let releases = Releases::serve();
+    let programs = tempfile::tempdir().unwrap();
+    stable_at(&releases, programs.path(), NEWER);
+    let user = checking(&releases);
+    let file = user.path("config/flottille/updates.toml");
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, "check = [\n").unwrap();
+
+    user.status();
+    std::thread::sleep(Duration::from_secs(2));
+
+    let shown = user.call("update.show", json!({})).unwrap();
+    assert!(requests(&releases).is_empty(), "{:?}", requests(&releases));
+    assert_eq!(shown["check"], "never", "{shown}");
+    assert_eq!(shown["latest"], Value::Null);
+    assert!(
+        shown["failed"]
+            .as_str()
+            .is_some_and(|failed| failed.contains("updates.toml")),
+        "{shown}"
+    );
+}
+
+#[test]
 fn check_now_checks_once_with_the_check_off() {
     let releases = Releases::serve();
     let programs = tempfile::tempdir().unwrap();
