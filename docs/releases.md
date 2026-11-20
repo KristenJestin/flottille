@@ -291,9 +291,9 @@ list in a state folder (`--state`): that folder is what to back up.
   with `/var/lib/flottille-hub` as its state, and no capability, a filtered set of system calls,
   and IP and Unix sockets only. The unit's `ExecStart` gives `--public-url`, the address the devices
   reach the hub at through the proxy (edit it): a hub on the loopback has no address of its own to
-  put in a code, and `pair` refuses to print one without. A device pairs with `sudo flottille-hub
-  --state /var/lib/flottille-hub pair`, beside the service; its log is in `journalctl -u
-  flottille-hub`.
+  put in a code, and `pair` refuses to print one without. A device pairs with
+  `sudo flottille-hub --state /var/lib/flottille-hub pair`, beside the service; its log is in
+  `journalctl -u flottille-hub`.
 - To reach the hub without a proxy, give it a certificate (`--tls-cert`, `--tls-key`) and open its
   port; the image and the unit are plain on the loopback by default.
 

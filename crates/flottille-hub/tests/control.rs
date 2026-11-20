@@ -1665,7 +1665,7 @@ async fn an_old_device_is_told_to_update_by_the_hub() {
     let place = Place::new();
     let served = place.serve("127.0.0.1:0").await;
     let code = code_at(&served, served.address());
-    let refused = Device::pair(
+    let Err(refused) = Device::pair(
         &code,
         proposed(&device_key(1), "pc", Role::Runner),
         &place.machine("pc"),
@@ -1673,8 +1673,9 @@ async fn an_old_device_is_told_to_update_by_the_hub() {
         &Tls::System,
     )
     .await
-    .err()
-    .expect("an old device is refused");
+    else {
+        panic!("an old device is refused");
+    };
     assert!(
         refused.to_string().contains("update one of them"),
         "{refused}"
