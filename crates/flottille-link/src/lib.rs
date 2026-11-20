@@ -34,8 +34,9 @@ use zeroize::Zeroizing;
 pub use address::Address;
 pub use control::{
     Arriving, Ask, Asked, Asker, ControlError, Device, HANDSHAKE_LIMIT, HUB_PORT, HubSession,
-    HubUrl, Joined, Joining, LINE_LIMIT, PresenceOf, Pushed, Requested, Session, SetupCode,
-    SetupProof, Stream, Tls, ToDevice, Told, Transcript, arrive,
+    HubUrl, Joined, Joining, KEEPALIVE, LINE_LIMIT, LinkPacket, PresenceOf, Pushed, RELAY_PACKET,
+    RelayPort, Relays, Requested, Session, SetupCode, SetupProof, Stream, Tls, ToDevice, Told,
+    Transcript, arrive,
 };
 pub use hello::{Hello, NeedsUpdate, PeerState, choose};
 pub use invitation::{Invitation, InvitationAsk, InvitationError, Token};

@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use zeroize::Zeroizing;
 
-use crate::transport::{Conn, Failure, Frames, Inbound, Raw, Reply, Transport};
+use crate::transport::{Conn, Failure, Frames, Inbound, Raw, RelaySocket, Reply, Transport};
 use crate::{Hello, MachineKey, NeedsUpdate, PeerState, PublicKey, choose};
 
 /// The longest frame a link takes. Bigger transfers (a git bundle) will have streams of their
@@ -44,6 +44,7 @@ const KEPT_FOR_KNOWN: usize = 8;
 const CLOSE_REFUSED: u32 = 1;
 const CLOSE_NEEDS_UPDATE: u32 = 2;
 const CLOSE_DONE: u32 = 3;
+const CLOSE_HUB_GONE: u32 = 4;
 
 /// The two kinds of traffic on a link, kept apart by the link's protocol name: the user's
 /// requests (`client`), and the closed set of messages one machine sends another (`machine`).
@@ -327,8 +328,10 @@ enum Answered {
 pub enum LinkError {
     /// The endpoint cannot listen where it is told to.
     Listen(String),
-    /// No address to dial.
+    /// No address to dial, and no session to the hub to go through.
     NoAddress(String),
+    /// The other device has no session open to the hub, which links go through.
+    Offline(String),
     Unreachable {
         peer: String,
         why: String,
@@ -362,6 +365,9 @@ impl fmt::Display for LinkError {
         match self {
             LinkError::Listen(why) => f.write_str(why),
             LinkError::NoAddress(peer) => write!(f, "{peer} has no address this machine knows"),
+            LinkError::Offline(peer) => {
+                write!(f, "{peer} is offline: it is not connected to the hub")
+            }
             LinkError::Unreachable { peer, why } => write!(f, "{peer} is unreachable: {why}"),
             LinkError::Refused { peer, reason } => write!(f, "{peer} refused the link: {reason}"),
             LinkError::NeedsUpdate(refusal) => refusal.fmt(f),
@@ -384,6 +390,18 @@ pub struct Endpoint {
     known: Known,
     /// This machine's name, as a failure to reach another says where it was tried from.
     name: Arc<std::sync::RwLock<String>>,
+    /// What hands the links that came in to `accept`, for each transport through the hub; let go
+    /// when the endpoint closes.
+    taking: Arc<std::sync::Mutex<Option<tokio::sync::mpsc::Sender<Accepting>>>>,
+    /// The transport through the hub, while a session to it is open.
+    relayed: Arc<std::sync::Mutex<Option<Relayed>>>,
+}
+
+/// The links of one session to the hub: its transport, and the members it says are online.
+#[derive(Clone)]
+struct Relayed {
+    transport: Arc<Transport>,
+    online: tokio::sync::watch::Receiver<Vec<PublicKey>>,
 }
 
 /// The addresses of the machines an endpoint trusts, which may take the places kept for them.
@@ -414,14 +432,81 @@ impl Endpoint {
         let transport = Arc::new(transport);
         let (sender, accepted) = tokio::sync::mpsc::channel(HANDSHAKES);
         let known = Known::default();
-        tokio::spawn(take_in(transport.clone(), sender, known.clone()));
+        tokio::spawn(take_in(transport.clone(), sender.clone(), known.clone()));
         Endpoint {
             transport,
             key,
             accepted: Arc::new(tokio::sync::Mutex::new(accepted)),
             known,
             name: Arc::new(std::sync::RwLock::new(key.fingerprint())),
+            taking: Arc::new(std::sync::Mutex::new(Some(sender))),
+            relayed: Arc::default(),
         }
+    }
+
+    /// Carries links through the hub, over the session whose relay port is `port`
+    /// (`Session::relay`), in place of any before: dialled by key, taken in as any other, until
+    /// the session ends. Then every link through it ends, said so to this machine's side
+    /// (`the hub is unreachable`), and a dial through the hub waits for the next session.
+    pub fn through(&self, port: crate::RelayPort) {
+        let (out, incoming, mut online) = port.split();
+        let socket = Arc::new(RelaySocket::new(out, incoming));
+        let alpns = [Traffic::Machine.alpn(), Traffic::Client.alpn()];
+        let transport = match self.transport.relayed(socket, &alpns) {
+            Ok(transport) => Arc::new(transport),
+            Err(why) => {
+                eprintln!("flottille: {why}");
+                return;
+            }
+        };
+        let taking = self.taking.lock().unwrap().clone();
+        if let Some(taking) = taking {
+            tokio::spawn(take_in(transport.clone(), taking, self.known.clone()));
+        }
+        let before = self.relayed.lock().unwrap().replace(Relayed {
+            transport: transport.clone(),
+            online: online.clone(),
+        });
+        if let Some(before) = before {
+            tokio::spawn(async move {
+                before
+                    .transport
+                    .close_saying(CLOSE_HUB_GONE, "the session to the hub was opened again")
+                    .await;
+            });
+        }
+        let relayed = self.relayed.clone();
+        tokio::spawn(async move {
+            // The members online change until the session ends.
+            while online.changed().await.is_ok() {}
+            {
+                let mut current = relayed.lock().unwrap();
+                if current
+                    .as_ref()
+                    .is_some_and(|current| Arc::ptr_eq(&current.transport, &transport))
+                {
+                    *current = None;
+                }
+            }
+            transport
+                .close_saying(CLOSE_HUB_GONE, "the hub is unreachable")
+                .await;
+        });
+    }
+
+    /// Whether the links go through the hub now: a session to it is open.
+    pub fn through_hub(&self) -> bool {
+        self.relayed.lock().unwrap().is_some()
+    }
+
+    /// The members' keys the hub says are online now; none without a session to it.
+    pub fn online(&self) -> Vec<PublicKey> {
+        self.relayed
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|relayed| relayed.online.borrow().clone())
+            .unwrap_or_default()
     }
 
     /// The name this machine has among the user's: a failure to reach another says it
@@ -494,6 +579,37 @@ impl Endpoint {
                 )),
             }
         }
+        // Through the hub, when a session to it is open: the direct path was tried first, for a
+        // machine whose addresses the user gave.
+        let relayed = self.relayed.lock().unwrap().clone();
+        if let Some(relayed) = relayed {
+            if !relayed.online.borrow().contains(&peer) {
+                if tried.is_empty() {
+                    return Err(LinkError::Offline(name.to_owned()));
+                }
+                tried.push(format!("{name} is not connected to the hub"));
+            } else if let Some(address) = relayed.transport.address_for(peer.as_bytes()) {
+                let dialled = tokio::time::timeout(
+                    WAIT,
+                    relayed
+                        .transport
+                        .connect(peer.as_bytes(), address, traffic.alpn()),
+                )
+                .await;
+                match dialled {
+                    Ok(Ok(conn)) => {
+                        return dialler_handshake(conn, peer, traffic, ours, name).await;
+                    }
+                    Ok(Err(Failure::Closed(reason) | Failure::Lost(reason))) => {
+                        tried.push(format!("tried through the hub from {from}: {reason}"));
+                    }
+                    Err(_) => tried.push(format!(
+                        "tried through the hub from {from}, no answer in {} s",
+                        WAIT.as_secs()
+                    )),
+                }
+            }
+        }
         if tried.is_empty() {
             return Err(LinkError::NoAddress(name.to_owned()));
         }
@@ -511,6 +627,11 @@ impl Endpoint {
 
     /// Closes every link, telling the other sides.
     pub async fn close(&self) {
+        self.taking.lock().unwrap().take();
+        let relayed = self.relayed.lock().unwrap().take();
+        if let Some(relayed) = relayed {
+            relayed.transport.close().await;
+        }
         self.transport.close().await;
     }
 }
@@ -814,6 +935,11 @@ impl Link {
     /// The other side's address: the one this machine dialled, or the one the link came from.
     pub fn remote(&self) -> SocketAddr {
         self.conn.remote()
+    }
+
+    /// Whether the link goes through the hub, not to an address.
+    pub fn through_hub(&self) -> bool {
+        crate::transport::is_relayed(&self.conn.remote())
     }
 
     /// What the other side said in its hello.

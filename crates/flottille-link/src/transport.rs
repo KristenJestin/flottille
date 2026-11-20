@@ -3,9 +3,11 @@
 //! only module that names the libraries it is made of: the rest of the crate, and everything
 //! above it, sees Flottille's types, so that changing the transport changes this file.
 //!
-//! It reaches what it is given: an endpoint listens on the address it is configured with, and
-//! dials the addresses its caller names for a key. No relay, no NAT traversal, no discovery: how
-//! two machines reach each other (a LAN, a VPN, a public address, a tunnel) is the user's.
+//! Two ways under QUIC: a UDP socket, which listens on the address it is configured with and
+//! dials the addresses its caller names for a key (the direct path, kept, unused by default); and
+//! the relay (`RelaySocket`), whose packets travel in the control session to the user's hub, each
+//! tagged with the key of the device it is for. QUIC's TLS runs end to end over either: the hub
+//! forwards packets it can neither read nor change. No NAT traversal, no discovery.
 
 use std::net::SocketAddr;
 use std::pin::Pin;
@@ -62,6 +64,8 @@ pub(crate) struct Transport {
     listens: bool,
     key: Arc<CertifiedKey>,
     provider: Arc<CryptoProvider>,
+    /// The relay its packets go through, for a transport through the hub.
+    relay: Option<Arc<RelaySocket>>,
 }
 
 impl Transport {
@@ -74,6 +78,7 @@ impl Transport {
             listens: false,
             key,
             provider,
+            relay: None,
         })
     }
 
@@ -87,20 +92,7 @@ impl Transport {
     ) -> Result<Transport, String> {
         let provider = Arc::new(rustls::crypto::ring::default_provider());
         let key = certified(seed, public, &provider)?;
-        let mut tls = rustls::ServerConfig::builder_with_provider(provider.clone())
-            .with_protocol_versions(&[&rustls::version::TLS13])
-            .map_err(|error| error.to_string())?
-            .with_client_cert_verifier(Arc::new(AnyKey(provider.signature_verification_algorithms)))
-            .with_cert_resolver(Arc::new(
-                rustls::server::AlwaysResolvesServerRawPublicKeys::new(key.clone()),
-            ));
-        tls.alpn_protocols = alpns.iter().map(|alpn| alpn.to_vec()).collect();
-        let quic = QuicServerConfig::try_from(tls).map_err(|error| error.to_string())?;
-        let mut server = quinn::ServerConfig::with_crypto(Arc::new(quic));
-        server.transport_config(Arc::new(transport_config()));
-        server
-            .max_incoming(MOST_INCOMING)
-            .incoming_buffer_size_total(INCOMING_BUFFERED);
+        let server = server_config(&key, &provider, alpns)?;
         let endpoint = quinn::Endpoint::server(server, listen)
             .map_err(|error| format!("cannot listen on {listen}: {error}"))?;
         Ok(Transport {
@@ -108,7 +100,38 @@ impl Transport {
             listens: true,
             key,
             provider,
+            relay: None,
         })
+    }
+
+    /// A transport with this one's key whose packets go through `socket`, the relay of one
+    /// session to the hub: it accepts links for `alpns` and dials keys, never addresses.
+    pub(crate) fn relayed(
+        &self,
+        socket: Arc<RelaySocket>,
+        alpns: &[&[u8]],
+    ) -> Result<Transport, String> {
+        let server = server_config(&self.key, &self.provider, alpns)?;
+        let endpoint = quinn::Endpoint::new_with_abstract_socket(
+            quinn::EndpointConfig::default(),
+            Some(server),
+            socket.clone(),
+            Arc::new(quinn::TokioRuntime),
+        )
+        .map_err(|error| format!("cannot carry links through the hub: {error}"))?;
+        Ok(Transport {
+            endpoint: std::sync::Mutex::new(Some(endpoint)),
+            listens: true,
+            key: self.key.clone(),
+            provider: self.provider.clone(),
+            relay: Some(socket),
+        })
+    }
+
+    /// The address a relayed transport dials the key `peer` at: one of its own making, which the
+    /// relay knows the key of. `None` for a transport on a socket, or past the relay's bound.
+    pub(crate) fn address_for(&self, peer: &[u8; 32]) -> Option<SocketAddr> {
+        self.relay.as_ref()?.address_of(peer)
     }
 
     /// The socket it listens on.
@@ -188,11 +211,184 @@ impl Transport {
 
     /// Closes every connection, and waits a little for the other sides to be told.
     pub(crate) async fn close(&self) {
+        self.close_saying(0, "this machine stops").await;
+    }
+
+    /// Closes every connection with `code` and `reason`, and waits a little for the other sides
+    /// to be told.
+    pub(crate) async fn close_saying(&self, code: u32, reason: &str) {
         let Some(endpoint) = self.endpoint.lock().unwrap().clone() else {
             return;
         };
-        endpoint.close(0u32.into(), b"this machine stops");
+        endpoint.close(code.into(), reason.as_bytes());
         let _ = tokio::time::timeout(Duration::from_secs(1), endpoint.wait_idle()).await;
+    }
+}
+
+/// The TLS and QUIC settings of a transport that takes links for `alpns` with `key`.
+fn server_config(
+    key: &Arc<CertifiedKey>,
+    provider: &Arc<CryptoProvider>,
+    alpns: &[&[u8]],
+) -> Result<quinn::ServerConfig, String> {
+    let mut tls = rustls::ServerConfig::builder_with_provider(provider.clone())
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .map_err(|error| error.to_string())?
+        .with_client_cert_verifier(Arc::new(AnyKey(provider.signature_verification_algorithms)))
+        .with_cert_resolver(Arc::new(
+            rustls::server::AlwaysResolvesServerRawPublicKeys::new(key.clone()),
+        ));
+    tls.alpn_protocols = alpns.iter().map(|alpn| alpn.to_vec()).collect();
+    let quic = QuicServerConfig::try_from(tls).map_err(|error| error.to_string())?;
+    let mut server = quinn::ServerConfig::with_crypto(Arc::new(quic));
+    server.transport_config(Arc::new(transport_config()));
+    server
+        .max_incoming(MOST_INCOMING)
+        .incoming_buffer_size_total(INCOMING_BUFFERED);
+    Ok(server)
+}
+
+/// The most devices a relay names an address for: the hub forwards only between the user's
+/// members, so it never comes near.
+const MOST_NAMED: usize = 4096;
+
+/// A packet of a link and the key of the other device: sent for it, or received from it.
+pub(crate) type Packet = ([u8; 32], Vec<u8>);
+
+/// The socket under QUIC whose packets travel through the hub, in the control session of this
+/// device (`control.rs`): what QUIC sends to an address goes out tagged with the key that address
+/// stands for, and what the hub brings from a key comes in from its address. QUIC knows no keys,
+/// only addresses: each key is given one of the relay's own making, in a range of unique local
+/// IPv6 addresses no network reaches through this socket. A packet that finds no room on its way
+/// is dropped, as a network drops one, and QUIC sends it again.
+pub(crate) struct RelaySocket {
+    out: mpsc::Sender<Packet>,
+    incoming: std::sync::Mutex<mpsc::Receiver<Packet>>,
+    names: std::sync::Mutex<Names>,
+}
+
+#[derive(Default)]
+struct Names {
+    by_key: std::collections::HashMap<[u8; 32], SocketAddr>,
+    by_address: std::collections::HashMap<SocketAddr, [u8; 32]>,
+    made: u32,
+}
+
+/// What the relay's own addresses start with: `fd46:6c74::/32`, unique local, `Fl` and `t`.
+const RELAY_PREFIX: [u16; 2] = [0xfd46, 0x6c74];
+
+/// Whether `address` is one a relay made for a key.
+pub(crate) fn is_relayed(address: &SocketAddr) -> bool {
+    match address.ip() {
+        std::net::IpAddr::V6(ip) => ip.segments()[..2] == RELAY_PREFIX,
+        std::net::IpAddr::V4(_) => false,
+    }
+}
+
+impl RelaySocket {
+    pub(crate) fn new(out: mpsc::Sender<Packet>, incoming: mpsc::Receiver<Packet>) -> RelaySocket {
+        RelaySocket {
+            out,
+            incoming: std::sync::Mutex::new(incoming),
+            names: std::sync::Mutex::new(Names::default()),
+        }
+    }
+
+    fn address_of(&self, key: &[u8; 32]) -> Option<SocketAddr> {
+        let mut names = self.names.lock().unwrap();
+        if let Some(address) = names.by_key.get(key) {
+            return Some(*address);
+        }
+        if names.by_key.len() >= MOST_NAMED {
+            return None;
+        }
+        names.made += 1;
+        let made = names.made;
+        let ip = std::net::Ipv6Addr::new(
+            RELAY_PREFIX[0],
+            RELAY_PREFIX[1],
+            0,
+            0,
+            0,
+            0,
+            (made >> 16) as u16,
+            made as u16,
+        );
+        let address = SocketAddr::new(ip.into(), 1);
+        names.by_key.insert(*key, address);
+        names.by_address.insert(address, *key);
+        Some(address)
+    }
+}
+
+impl std::fmt::Debug for RelaySocket {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RelaySocket")
+    }
+}
+
+/// Always writable: a packet with no room is dropped, not waited for.
+#[derive(Debug)]
+struct Writable;
+
+impl quinn::UdpPoller for Writable {
+    fn poll_writable(self: Pin<&mut Self>, _cx: &mut Context) -> Poll<std::io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+}
+
+impl quinn::AsyncUdpSocket for RelaySocket {
+    fn create_io_poller(self: Arc<Self>) -> Pin<Box<dyn quinn::UdpPoller>> {
+        Box::pin(Writable)
+    }
+
+    fn try_send(&self, transmit: &quinn::udp::Transmit) -> std::io::Result<()> {
+        let key = self
+            .names
+            .lock()
+            .unwrap()
+            .by_address
+            .get(&transmit.destination)
+            .copied();
+        if let Some(key) = key {
+            let _ = self.out.try_send((key, transmit.contents.to_vec()));
+        }
+        Ok(())
+    }
+
+    fn poll_recv(
+        &self,
+        cx: &mut Context,
+        bufs: &mut [std::io::IoSliceMut<'_>],
+        meta: &mut [quinn::udp::RecvMeta],
+    ) -> Poll<std::io::Result<usize>> {
+        let mut incoming = self.incoming.lock().unwrap();
+        loop {
+            // Once the session is gone nothing comes again: the transport is closed then.
+            let Poll::Ready(Some((key, packet))) = incoming.poll_recv(cx) else {
+                return Poll::Pending;
+            };
+            let (Some(buffer), Some(address)) = (bufs.first_mut(), self.address_of(&key)) else {
+                continue;
+            };
+            if packet.len() > buffer.len() {
+                continue;
+            }
+            buffer[..packet.len()].copy_from_slice(&packet);
+            meta[0] = quinn::udp::RecvMeta {
+                addr: address,
+                len: packet.len(),
+                stride: packet.len(),
+                ecn: None,
+                dst_ip: None,
+            };
+            return Poll::Ready(Ok(1));
+        }
+    }
+
+    fn local_addr(&self) -> std::io::Result<SocketAddr> {
+        let ip = std::net::Ipv6Addr::new(RELAY_PREFIX[0], RELAY_PREFIX[1], 0, 0, 0, 0, 0, 0);
+        Ok(SocketAddr::new(ip.into(), 1))
     }
 }
 
