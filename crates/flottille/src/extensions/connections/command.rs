@@ -615,4 +615,21 @@ mod tests {
             assert!(secret_line(wrong).is_err(), "{wrong}");
         }
     }
+
+    #[test]
+    fn an_address_another_machine_sent_is_checked_before_it_is_shown_or_opened() {
+        assert!(sign_in_opened("https://auth.example.com/authorize?state=x").is_ok());
+        for wrong in [
+            // Control characters would rewrite the terminal the address is printed to.
+            "https://auth.example.com/\u{1b}]8;;https://elsewhere.example.com\u{7}",
+            "https://auth.example.com/\nOpen this instead",
+            // Only an https address is opened, or a plain http one on this machine.
+            "file:///home/someone/.ssh/id_ed25519",
+            "http://auth.example.com/authorize",
+            "javascript:alert(1)",
+            "",
+        ] {
+            assert!(sign_in_opened(wrong).is_err(), "{wrong:?}");
+        }
+    }
 }

@@ -24,6 +24,17 @@ const SECRET: &str = "sh4red-notes-k3y-secret";
 /// The OAuth tokens of the connection on pc, kept as its sign-in keeps them.
 const TOKENS: &str = "pc-0wn-oauth-t0kens-never-travel";
 
+/// `https://` addresses that are the machine's own however they are written: each connection's
+/// name, and its URL.
+const LOCAL_URLS: [(&str, &str); 6] = [
+    ("any4", "https://0.0.0.0:9443/mcp"),
+    ("any6", "https://[::]:9443/mcp"),
+    ("mapped", "https://[::ffff:127.0.0.1]:9443/mcp"),
+    ("dotted", "https://localhost.:9443/mcp"),
+    ("subdotted", "https://notes.localhost.:9443/mcp"),
+    ("upper", "https://LOCALHOST.:9443/mcp"),
+];
+
 fn server_user() -> User {
     User::new().with_env("FLOTTILLE_TEST_SIGN_IN_LOOPBACK", "127.0.0.2")
 }
@@ -204,7 +215,19 @@ fn a_local_connection_is_refused_for_sharing() {
                 "url": "https://localhost:9443/mcp"}),
         )
         .unwrap();
-    for name in ["desk", "memo", "loop"] {
+    // So is one of an address any of its interfaces answers, a loopback written as an IPv6
+    // mapping, or `localhost` written with its final dot.
+    let mut names = vec!["desk", "memo", "loop"];
+    for (name, url) in LOCAL_URLS {
+        pc.user
+            .call(
+                "connection.add",
+                json!({"name": name, "about": "A server here.", "enabled": false, "url": url}),
+            )
+            .unwrap();
+        names.push(name);
+    }
+    for name in names {
         let output = pc
             .user
             .run(&["connection", "share", name, "--machine", "server"]);
@@ -560,5 +583,247 @@ fn a_sign_in_tunnel_reaches_only_a_sign_in_its_device_began() {
     assert!(
         remote::error_of(&answer).contains("the sign-in of notes was not begun by pc"),
         "{answer}"
+    );
+}
+
+// ── A share as another machine sends it ──────────────────────────────────────────────────────
+
+/// The `notes` connection as pc declares it, at `url`, its requests carrying `entry`.
+fn notes_at(url: &str, entry: &str) -> Value {
+    json!({"name": "notes", "about": "The user's notes.", "url": url,
+        "secrets": [{"in": "header", "name": "Authorization", "prefix": "Bearer ",
+            "entry": entry}]})
+}
+
+/// `connection.share` of `name` with the server and `entries`, signed by `key` for pc now.
+fn share_request(key: &flottille_link::DeviceKey, id: &str, name: &str, entries: &[&str]) -> Value {
+    serde_json::to_value(
+        flottille_link::Request::sign(
+            key,
+            id,
+            "pc",
+            "connection.share",
+            &json!({"name": name, "machine": "server", "entries": entries}),
+            std::time::SystemTime::now(),
+        )
+        .unwrap(),
+    )
+    .unwrap()
+}
+
+/// A `share_connection` message carrying `request`, `connection` and the entries `entries` (each
+/// one's metadata), each with the secret.
+fn share_message(request: Value, connection: Value, entries: &[Value]) -> Value {
+    let entries: Vec<Value> = entries
+        .iter()
+        .map(|entry| json!({"entry": entry, "secret": SECRET}))
+        .collect();
+    json!({"machine": {"share_connection": {
+        "request": request, "connection": connection, "entries": entries,
+    }}})
+}
+
+/// `frames` sent, one after the other, on a machine link opened with the machine key kept in
+/// `folder` to `to`: what each was answered.
+fn sent_as(folder: &Path, to: &Machine, frames: &[Value]) -> Vec<Result<(), String>> {
+    use flottille_link::{Endpoint, Hello, MachineKey, PublicKey, Traffic};
+    let machine_key = MachineKey::load_or_make(folder).unwrap();
+    let key: PublicKey = serde_json::from_value(to.remote()["this"]["key"].clone()).unwrap();
+    let address: std::net::SocketAddr = to.remote()["this"]["listening"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let endpoint = Endpoint::dialler(&machine_key).unwrap();
+        let link = tokio::time::timeout(
+            remote::WAIT,
+            endpoint.connect(
+                key,
+                &[address],
+                Traffic::Machine,
+                &Hello::ours("0.4.1"),
+                "server",
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let mut answers = Vec::new();
+        for frame in frames {
+            answers.push(
+                link.send_raw(frame.to_string().as_bytes())
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| error.to_string()),
+            );
+        }
+        endpoint.close().await;
+        answers
+    })
+}
+
+/// pc's daemon stopped, so that no link of its own takes the test's: pc's machine key is only
+/// what the test holds, as code that read it would hold it.
+fn pc_stopped(pc: &Machine, server: &Machine) {
+    assert!(pc.user.run(&["daemon", "stop"]).status.success());
+    server.wait_for("pc", "offline");
+}
+
+fn nothing_kept(server: &Machine) {
+    assert!(
+        connections(&server.user).is_empty(),
+        "{:?}",
+        connections(&server.user)
+    );
+    assert!(
+        entries(&server.user).is_empty(),
+        "{:?}",
+        entries(&server.user)
+    );
+    assert!(!every_file(&server.user).contains(SECRET));
+}
+
+#[test]
+fn a_crafted_share_is_refused_by_the_receiver_and_keeps_nothing() {
+    let (_hub, pc, server) = pc_and_server(server_user());
+    pc_stopped(&pc, &server);
+    let device = pc.device();
+    let key = json!({"name": "notes-key", "description": "The notes server's key."});
+    let remote_url = "https://notes.example.com/mcp";
+    let mut frames = vec![
+        // The user shared notes; another connection is carried.
+        share_message(
+            share_request(&device, "c1", "notes", &["notes-key"]),
+            json!({"name": "mail", "about": "Mail.", "url": "https://mail.example.com/mcp"}),
+            &[],
+        ),
+        // The entries carried are not the ones the user shared.
+        share_message(
+            share_request(&device, "c2", "notes", &[]),
+            notes_at(remote_url, "notes-key"),
+            std::slice::from_ref(&key),
+        ),
+        share_message(
+            share_request(&device, "c3", "notes", &["notes-key"]),
+            notes_at(remote_url, "notes-key"),
+            &[],
+        ),
+        // OAuth tokens, its own or another connection's, named by the declaration and the request.
+        share_message(
+            share_request(&device, "c4", "notes", &["notes.oauth"]),
+            notes_at(remote_url, "notes.oauth"),
+            &[json!({"name": "notes.oauth", "for": "connection:notes"})],
+        ),
+        share_message(
+            share_request(&device, "c5", "notes", &["mail.oauth"]),
+            notes_at(remote_url, "mail.oauth"),
+            &[json!({"name": "mail.oauth"})],
+        ),
+        // An entry bound to another connection, which this one could then use.
+        share_message(
+            share_request(&device, "c6", "notes", &["notes-key"]),
+            notes_at(remote_url, "notes-key"),
+            &[json!({"name": "notes-key", "for": "connection:mail"})],
+        ),
+    ];
+    // A connection whose URL is the receiver's own machine, however it is written.
+    for (at, (_, url)) in LOCAL_URLS.iter().enumerate() {
+        frames.push(share_message(
+            share_request(&device, &format!("l{at}"), "notes", &["notes-key"]),
+            notes_at(url, "notes-key"),
+            std::slice::from_ref(&key),
+        ));
+    }
+    let answers = sent_as(&pc.folder(), &server, &frames);
+
+    let refusal = |at: usize| answers[at].clone().unwrap_err();
+    assert!(
+        refusal(0).contains("the user shared notes, not mail"),
+        "{answers:?}"
+    );
+    for at in [1, 2] {
+        assert!(
+            refusal(at).contains("the vault entries sent are not the ones the user shared"),
+            "{at}: {answers:?}"
+        );
+    }
+    for at in [3, 4] {
+        assert!(
+            refusal(at).contains("OAuth tokens are never shared"),
+            "{at}: {answers:?}"
+        );
+    }
+    assert!(
+        refusal(5).contains("the vault entry notes-key is bound to"),
+        "{answers:?}"
+    );
+    for at in 6..frames.len() {
+        assert!(
+            refusal(at).contains("is this machine's own: only an https:// connection is shared"),
+            "{at}: {answers:?}"
+        );
+    }
+    for answer in &answers {
+        assert!(!format!("{answer:?}").contains(SECRET), "{answer:?}");
+    }
+    nothing_kept(&server);
+}
+
+#[test]
+fn a_share_signed_by_a_viewer_is_refused_by_the_receiver() {
+    let (_hub, pc, server) = pc_and_server(server_user());
+    let phone = Machine::new();
+    remote::pair(&pc, &phone, "phone", "viewer");
+    server.wait_for_member("phone", true);
+    pc_stopped(&pc, &server);
+
+    let frame = share_message(
+        share_request(&phone.device(), "v1", "notes", &["notes-key"]),
+        notes_at("https://notes.example.com/mcp", "notes-key"),
+        &[json!({"name": "notes-key"})],
+    );
+    let answers = sent_as(&pc.folder(), &server, &[frame]);
+
+    assert!(
+        answers[0]
+            .clone()
+            .unwrap_err()
+            .contains("phone may only view"),
+        "{answers:?}"
+    );
+    nothing_kept(&server);
+}
+
+#[test]
+fn a_share_the_receiver_cannot_declare_leaves_no_entry_behind() {
+    let (_hub, pc, server) = pc_and_server(server_user());
+    pc_stopped(&pc, &server);
+    // The server's file of extensions cannot be written: the declaration fails after the checks.
+    std::fs::write(
+        server.user.path("config/flottille/extensions.toml"),
+        "[[[ not toml",
+    )
+    .unwrap();
+
+    let answers = sent_as(
+        &pc.folder(),
+        &server,
+        &[share_message(
+            share_request(&pc.device(), "d1", "notes", &["notes-key"]),
+            notes_at("https://notes.example.com/mcp", "notes-key"),
+            &[json!({"name": "notes-key", "description": "The notes server's key."})],
+        )],
+    );
+
+    assert!(answers[0].is_err(), "{answers:?}");
+    assert!(
+        entries(&server.user).is_empty(),
+        "{:?}",
+        entries(&server.user)
     );
 }
