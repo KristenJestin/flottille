@@ -128,20 +128,20 @@ pub async fn run(daemon: Arc<Daemon>, mut stopping: watch::Receiver<bool>) {
     let kept = daemon.clone();
     let _ = tokio::task::spawn_blocking(move || keep(&kept)).await;
     loop {
-        tokio::select! {
-            received = live.recv() => {
-                let wakes = match received {
-                    Ok(event) => relevant(&event),
-                    // Events were missed: the store has them.
-                    Err(broadcast::error::RecvError::Lagged(_)) => true,
-                    Err(broadcast::error::RecvError::Closed) => return,
-                };
-                if wakes {
-                    let kept = daemon.clone();
-                    let _ = tokio::task::spawn_blocking(move || keep(&kept)).await;
-                }
-            }
-            _ = stopping.wait_for(|stopping| *stopping) => return,
+        // What is awaited is not held across the `spawn_blocking` below: the guard of the watch
+        // is not `Send`.
+        let wakes = tokio::select! {
+            received = live.recv() => match received {
+                Ok(event) => relevant(&event),
+                // Events were missed: the store has them.
+                Err(broadcast::error::RecvError::Lagged(_)) => true,
+                Err(broadcast::error::RecvError::Closed) => return,
+            },
+            _ = async { let _ = stopping.wait_for(|stopping| *stopping).await; } => return,
+        };
+        if wakes {
+            let kept = daemon.clone();
+            let _ = tokio::task::spawn_blocking(move || keep(&kept)).await;
         }
     }
 }
