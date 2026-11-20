@@ -501,7 +501,8 @@ async fn the_core_pins_the_hub_its_pair_code_names() {
     let place = Place::new().await;
     let phone = place.phone();
     // A code whose hub key is not the hub's: another hub answers at its address.
-    let code = PairCode::from_code(&place.pair_code()).unwrap();
+    let good = place.pair_code();
+    let code = PairCode::from_code(&good).unwrap();
     let other = PairCode {
         hub_key: device_key(9).public(),
         ..code
@@ -520,8 +521,12 @@ async fn the_core_pins_the_hub_its_pair_code_names() {
     );
     assert!(!phone.joined());
 
-    // The hub's own code pairs, and the hub's key is the one the phone kept.
-    place.joined(&phone).await;
+    // The hub's own code, still open, pairs; the hub's key is the one the phone kept.
+    phone
+        .join(good, "phone".to_owned(), "controller".to_owned())
+        .await
+        .unwrap();
+    assert!(phone.joined());
     let file = Path::new(&place.phone_folder()).join("hub.json");
     let kept: Device = serde_json::from_slice(&std::fs::read(file).unwrap()).unwrap();
     assert_eq!(kept.hub, place.served.with_hub(|hub| hub.key()));
