@@ -657,7 +657,9 @@ local child's work; nothing moves your branch.*
   (by the gate at once, or by the user's answer): held otherwise, by default, whatever becomes of
   the launch, a restart of the daemon included. A launch the user refuses ends its agent and
   removes its workspace; a launch forgotten while it waited (below) removes the workspace made of
-  it, if any; a launch whose agent could not be made removes its workspace too.
+  it, if any; a launch whose agent could not be made removes its workspace too. A launch held
+  whose agent the user stopped is refused the same way: it counts against no cap and keeps no
+  place.
 - **A held agent can be written to by the user**, directly, on the receiving machine: it is visible
   there before the user answers, and writing to it is the user's own act. Its turn then runs, in
   its workspace, whose setup still waits; the launch's brief is not sent until the user allows the

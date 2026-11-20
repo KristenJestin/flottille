@@ -892,8 +892,6 @@ async fn with_agent(
     )
     .map_err(|failure| failure.message)?;
     launch.agent = Some(agent.id.clone());
-    launch.workspace = Some(workspace.clone());
-    launch.workspace_id = workspace_id;
     if launch.state == "held" {
         let says: Vec<String> =
             serde_json::from_value(launch.asked["says"].clone()).unwrap_or_default();
@@ -936,7 +934,17 @@ async fn with_agent(
     } else {
         launch.state = "started".into();
     }
-    write(daemon, &launch)?;
+    // The workspace is recorded as it is in this very write: one removed since `placed` read it
+    // is none, never an id a later workspace may take.
+    let recorded = daemon
+        .write(|store| {
+            store
+                .place_launch(&launch, workspace_id)
+                .map(|recorded| (recorded, None))
+        })
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("launch {} was forgotten meanwhile", launch.launch))?;
+    launch.workspace_id = recorded;
     if launch.state == "started" {
         go_on(daemon, &launch, &agent.id);
     }
@@ -974,15 +982,33 @@ pub(crate) fn decided(daemon: &Arc<Daemon>, mut launch: Launch, request: &Reques
     let Some(agent) = launch.agent.clone() else {
         return;
     };
-    launch.state = match allowed {
-        true => "started".into(),
-        false => "refused".into(),
+    let state = match allowed {
+        true => "started",
+        false => "refused",
     };
-    if let Err(why) = write(daemon, &launch) {
-        eprintln!(
-            "flottille daemon: launch {}: its answer cannot be kept: {why}",
-            launch.launch
-        );
+    // Only the launch's state is written, and only while it is held: its workspace is read as it
+    // is now, never as `launch` was read.
+    let settled = match daemon.write(|store| {
+        store
+            .settle_launch(&launch.machine, &launch.launch, state)
+            .map(|settled| (settled, None))
+    }) {
+        Ok(Some(workspace_id)) => {
+            launch.state = state.into();
+            launch.workspace_id = workspace_id;
+            true
+        }
+        // Settled meanwhile: its agent ended (`cancelled`).
+        Ok(None) => false,
+        Err(why) => {
+            eprintln!(
+                "flottille daemon: launch {}: its answer cannot be kept: {why}",
+                launch.launch
+            );
+            false
+        }
+    };
+    if !settled {
         return;
     }
     let outcome = match allowed {
@@ -1004,6 +1030,28 @@ pub(crate) fn decided(daemon: &Arc<Daemon>, mut launch: Launch, request: &Reques
         return;
     }
     go_on(daemon, &launch, &agent);
+}
+
+/// The agent `agent` ended, its requests cancelled: a launch it was held for the user's answer
+/// is refused, as if the user had refused it, and its workspace goes, so that it counts against
+/// no cap and keeps no place.
+pub(crate) fn cancelled(daemon: &Arc<Daemon>, agent: &str) {
+    let held = daemon
+        .read(|store| store.launches("in", None, LaunchFilter::Agent(agent)))
+        .unwrap_or_default()
+        .into_iter()
+        .find(|launch| launch.state == "held");
+    let Some(launch) = held else {
+        return;
+    };
+    let settled = daemon.write(|store| {
+        store
+            .settle_launch(&launch.machine, &launch.launch, "refused")
+            .map(|settled| (settled, None))
+    });
+    if let Ok(Some(Some(workspace))) = settled {
+        remove_workspace(daemon, workspace, Some(agent.to_owned()));
+    }
 }
 
 /// For an agent started here for an agent of another machine: that agent, its machine's name,

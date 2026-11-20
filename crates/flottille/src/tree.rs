@@ -2492,6 +2492,8 @@ fn end(daemon: &Arc<Daemon>, id: &str, state: AgentState, reason: &str) -> bool 
         let events = store.cancel_requests(id, &format!("agent {id} {}", state.as_str()))?;
         Ok(((), events))
     });
+    // A launch of another machine's agent held for the user, whose request just went with it.
+    crate::launches::cancelled(daemon, id);
     deliveries::forget(daemon, id);
     crate::subscriptions::ended(daemon, id);
     let why = match state {
