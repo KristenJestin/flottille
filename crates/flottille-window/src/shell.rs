@@ -1697,7 +1697,12 @@ impl Shell {
                     page.update(cx, |page, cx| page.command_answered(answer, cx));
                 }
             }
-            Outcome::NotificationsRead => {}
+            // Asked once for each, unless the daemon could not: the next look asks again.
+            Outcome::NotificationsRead { failed } => {
+                if failed {
+                    self.marked.clear();
+                }
+            }
             Outcome::SubscriptionCancelled { session, refused } => {
                 if let Some(page) = self.session_page.clone()
                     && page.read(cx).id() == session
@@ -3119,10 +3124,8 @@ impl Shell {
         } else if self.bell.read(cx).counts != counts {
             self.bell.update(cx, |bell, cx| bell.set_counts(counts, cx));
         }
-        // What arrives in the session that is open is in sight: read at once.
-        if let Some(Selection::Session(open)) = self.selected.clone() {
-            self.read_session(&open);
-        }
+        // What arrives in the session that is open stays unread: the window may be open with
+        // nobody looking. Opening the session, its row or "Mark all read" reads it.
     }
 
     /// Asks the daemon to mark a session's unread notifications read, once for each.
@@ -4224,7 +4227,7 @@ impl BellList {
             .iter()
             .map(|row| {
                 (
-                    row.item.label.clone(),
+                    label_of(&row.item),
                     row.item.detail.clone(),
                     row.title.clone(),
                 )
@@ -4238,6 +4241,24 @@ impl BellList {
             .into_iter()
             .map(|(key, _)| key)
             .collect()
+    }
+}
+
+/// Why a notification is there: once what it waited for was answered, it says so rather than
+/// that it still waits.
+fn label_of(item: &BellItem) -> String {
+    if !item.resolved {
+        return item.label.clone();
+    }
+    match item.kind.as_str() {
+        "request" => match item.label.strip_suffix(" waits for you") {
+            Some(request) => format!("{request} answered"),
+            None => "Request answered".to_owned(),
+        },
+        "question" => "Question answered".to_owned(),
+        "vault" => "Vault entry answered".to_owned(),
+        "paused" => "The session wakes again".to_owned(),
+        _ => item.label.clone(),
     }
 }
 
@@ -4301,128 +4322,147 @@ impl Render for BellList {
                         header_shell.update(cx, |shell, _| shell.read_all()).ok();
                     }),
             );
-        let rows: Vec<AnyElement> = self
-            .list
-            .rows()
-            .map(|row| {
-                let content = match row.value {
-                    Entry::Group {
-                        session,
-                        title,
-                        project,
-                        unread,
-                    } => {
-                        let key = session.as_deref().unwrap_or("flottille");
-                        let faded = fade(
-                            ElementId::Name(format!("bell-group-{key}-unread").into()),
-                            *unread > 0,
-                            HOVER,
-                            window,
-                            cx,
-                        );
-                        div()
-                            .id(bell_group_id(key))
-                            .px(space::SM)
-                            .pt(space::MD)
-                            .pb(space::XS)
-                            .flex()
-                            .items_baseline()
-                            .gap(space::SM)
-                            .min_w_0()
-                            .child(
+        let rows: Vec<AnyElement> =
+            self.list
+                .rows()
+                .map(|row| {
+                    let content = match row.value {
+                        Entry::Group {
+                            session,
+                            title,
+                            project,
+                            unread,
+                        } => {
+                            let key = session.as_deref().unwrap_or("flottille");
+                            let faded = fade(
+                                ElementId::Name(format!("bell-group-{key}-unread").into()),
+                                *unread > 0,
+                                HOVER,
+                                window,
+                                cx,
+                            );
+                            div()
+                                .id(bell_group_id(key))
+                                .px(space::SM)
+                                .pt(space::MD)
+                                .pb(space::XS)
+                                .flex()
+                                .items_baseline()
+                                .gap(space::SM)
+                                .min_w_0()
+                                .child(
+                                    div()
+                                        .id(bell_group_title_id(key))
+                                        .min_w_0()
+                                        .overflow_hidden()
+                                        .whitespace_nowrap()
+                                        .text_ellipsis()
+                                        .text_size(px(12.5))
+                                        .font_weight(gpui_kit::FontWeight::MEDIUM)
+                                        .text_color(mix(p.mute, p.text, faded))
+                                        .aria_label(SharedString::from(title.clone()))
+                                        .child(SharedString::from(title.clone()))
+                                        .test_support(),
+                                )
+                                .when(!project.is_empty(), |d| {
+                                    d.child(
+                                        div()
+                                            .flex_none()
+                                            .text_size(px(11.))
+                                            .text_color(p.faint)
+                                            .child(SharedString::from(project.clone())),
+                                    )
+                                })
+                                .test_support()
+                                .into_any_element()
+                        }
+                        Entry::Row(BellRow { item, .. }) => {
+                            let shell = self.shell.clone();
+                            let key = item.key.clone();
+                            // Read or unread moves: the ink and the fill fade over `HOVER`.
+                            let unread = fade(
+                                ElementId::Name(format!("bell-{}-unread", item.key).into()),
+                                !item.read,
+                                HOVER,
+                                window,
+                                cx,
+                            );
+                            // Answered, its glyph gives way to a check: the two cross-fade.
+                            let done = fade(
+                                ElementId::Name(format!("bell-{}-resolved", item.key).into()),
+                                item.resolved,
+                                HOVER,
+                                window,
+                                cx,
+                            );
+                            let ink = mix(p.faint, p.acc, unread);
+                            let leading = div()
+                                .relative()
+                                .size(px(14.))
+                                .child(div().absolute().inset_0().opacity(1. - done).child(
+                                    icon(glyph_of(&item.kind)).size(px(14.)).text_color(ink),
+                                ))
+                                .child(
+                                    div()
+                                        .absolute()
+                                        .inset_0()
+                                        .opacity(done)
+                                        .child(icon(Icon::Check).size(px(14.)).text_color(ink)),
+                                )
+                                .into_any_element();
+                            let line = |id: ElementId, text: &str, ink| {
                                 div()
-                                    .id(bell_group_title_id(key))
+                                    .id(id)
                                     .min_w_0()
                                     .overflow_hidden()
                                     .whitespace_nowrap()
                                     .text_ellipsis()
-                                    .text_size(px(12.5))
-                                    .font_weight(gpui_kit::FontWeight::MEDIUM)
-                                    .text_color(mix(p.mute, p.text, faded))
-                                    .aria_label(SharedString::from(title.clone()))
-                                    .child(SharedString::from(title.clone()))
+                                    .text_size(px(12.))
+                                    .text_color(ink)
+                                    .aria_label(SharedString::from(text.to_owned()))
+                                    .child(SharedString::from(text.to_owned()))
+                                    .test_support()
+                            };
+                            let below = div()
+                                .min_w_0()
+                                .flex()
+                                .flex_col()
+                                .when(!item.detail.is_empty(), |d| {
+                                    d.child(line(bell_line_id(&item.key), &item.detail, p.mute))
+                                });
+                            let when = crate::model::ago(now, item.at);
+                            ListRow::new(
+                                ElementId::Name(format!("bell-{}", item.key).into()),
+                                SharedString::from(label_of(item)),
+                            )
+                            .leading(leading)
+                            .below(below)
+                            .trailing(
+                                div()
+                                    .id(ElementId::Name(format!("bell-{}-time", item.key).into()))
+                                    .text_size(px(11.))
+                                    .text_color(p.faint)
+                                    .aria_label(SharedString::from(when.clone()))
+                                    .child(SharedString::from(when))
                                     .test_support(),
                             )
-                            .when(!project.is_empty(), |d| {
-                                d.child(
-                                    div()
-                                        .flex_none()
-                                        .text_size(px(11.))
-                                        .text_color(p.faint)
-                                        .child(SharedString::from(project.clone())),
-                                )
+                            .decorate(move |row| row.opacity(0.6 + 0.4 * unread))
+                            .on_click(move |_, window, cx| {
+                                shell
+                                    .update(cx, |shell, cx| shell.choose(&key, window, cx))
+                                    .ok();
                             })
-                            .test_support()
                             .into_any_element()
-                    }
-                    Entry::Row(BellRow { item, .. }) => {
-                        let shell = self.shell.clone();
-                        let key = item.key.clone();
-                        // Read or unread moves: the ink and the fill fade over `HOVER`.
-                        let unread = fade(
-                            ElementId::Name(format!("bell-{}-unread", item.key).into()),
-                            !item.read,
-                            HOVER,
-                            window,
-                            cx,
-                        );
-                        let leading = icon(glyph_of(&item.kind))
-                            .size(px(14.))
-                            .text_color(mix(p.faint, p.acc, unread))
-                            .into_any_element();
-                        let line = |id: ElementId, text: &str, ink| {
-                            div()
-                                .id(id)
-                                .min_w_0()
-                                .overflow_hidden()
-                                .whitespace_nowrap()
-                                .text_ellipsis()
-                                .text_size(px(12.))
-                                .text_color(ink)
-                                .aria_label(SharedString::from(text.to_owned()))
-                                .child(SharedString::from(text.to_owned()))
-                                .test_support()
-                        };
-                        let below = div()
-                            .min_w_0()
-                            .flex()
-                            .flex_col()
-                            .when(!item.detail.is_empty(), |d| {
-                                d.child(line(bell_line_id(&item.key), &item.detail, p.mute))
-                            });
-                        let when = crate::model::ago(now, item.at);
-                        ListRow::new(
-                            ElementId::Name(format!("bell-{}", item.key).into()),
-                            SharedString::from(item.label.clone()),
-                        )
-                        .leading(leading)
-                        .below(below)
-                        .trailing(
-                            div()
-                                .id(ElementId::Name(format!("bell-{}-time", item.key).into()))
-                                .text_size(px(11.))
-                                .text_color(p.faint)
-                                .aria_label(SharedString::from(when.clone()))
-                                .child(SharedString::from(when))
-                                .test_support(),
-                        )
-                        .decorate(move |row| row.opacity(0.6 + 0.4 * unread))
-                        .on_click(move |_, window, cx| {
-                            shell
-                                .update(cx, |shell, cx| shell.choose(&key, window, cx))
-                                .ok();
-                        })
-                        .into_any_element()
-                    }
-                };
-                Item::new(
-                    ElementId::Name(format!("bell-item-{}", row.key).into()),
-                    row.placement,
-                    content,
-                )
-                .into_any_element()
-            })
-            .collect();
+                        }
+                    };
+                    Item::new(
+                        ElementId::Name(format!("bell-item-{}", row.key).into()),
+                        row.placement,
+                        content,
+                    )
+                    .into_any_element()
+                })
+                .collect();
         list.child(header)
             .child(presence(
                 "bell-empty",

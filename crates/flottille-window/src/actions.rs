@@ -1337,8 +1337,11 @@ pub enum Outcome {
         session: String,
         answer: RunAnswer,
     },
-    /// Notifications were marked read: nothing to draw, the centre's own event says it.
-    NotificationsRead,
+    /// Notifications were marked read, or the daemon could not: the centre's own event says
+    /// what changed; a failure lets the window ask again.
+    NotificationsRead {
+        failed: bool,
+    },
     /// A subscription was cancelled, or a following resumed, as asked, or the daemon refused with
     /// why.
     SubscriptionCancelled {
@@ -3224,13 +3227,15 @@ fn perform(connect: &Connect, sign: Option<Sign>, command: Command, bounds: Boun
             Outcome::LeaveWithdrawn { session, refused }
         }
         Command::ReadNotifications(reading) => {
-            let _ = ask_alone(
+            let answer = ask_alone(
                 connect,
                 "notifications.read",
                 reading.params(),
                 bounds.quick,
             );
-            Outcome::NotificationsRead
+            Outcome::NotificationsRead {
+                failed: !matches!(answer, Ok(Ok(_))),
+            }
         }
         Command::ResumeFollowing {
             session,
