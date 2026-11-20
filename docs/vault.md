@@ -327,9 +327,10 @@ push the gate let through, and its checks' dry run, are the exception (below):
   the same way, unless the process is given X11's display. A session bus the daemon's
   `DBUS_SESSION_BUS_ADDRESS` names by a path outside the runtime folders (`unix:path=/tmp/dbus-…`,
   as `dbus-launch` makes one), found at the daemon's start, is hidden there under `/dev/null`,
-  while the socket at that path is still the one found (its device and inode, checked before
-  each process starts): a folder or a socket a confined command made in its place is not hidden
-  (a mount over a folder would fail every start), and no push the gate lets through is given the
+  while the socket at that path is still the one found (its device, inode and change time,
+  checked before each process starts: an inode freed is often given to the next file made): a
+  folder or a socket a confined command made in its place is not hidden (a mount over a folder
+  would fail every start), and no push the gate lets through is given the
   bus's address from then on (below). The mounts are made by the process before it runs its
   program, which runs as the user, not as root of the namespace, with `no_new_privs` set first
   (a program with file capabilities gains none in the namespace): it holds no capability to
