@@ -1899,6 +1899,9 @@ mod tests {
                 naming(&text, &words)
                     .into_iter()
                     .chain(pathing(&text, CORE_WORDS))
+                    // `sample_spec` is a field of the sound server's protocol (`sounds.rs`), not
+                    // the specs extension.
+                    .filter(|(_, line)| !line.starts_with("sample_spec:"))
                     .map(|(at, line)| format!("{}:{at}: {line}", file.display()))
                     .collect::<Vec<_>>()
             })
