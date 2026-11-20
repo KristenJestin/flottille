@@ -110,13 +110,18 @@ fn installed() -> Installed {
     }
 }
 
-/// The daemon of `user` started through `binary`: the window's connections then reach it.
+/// The daemon of `user` started through `binary`: the window's connections then reach it. It
+/// runs from that copy, never from the shared test binary, beside which it would stage.
 fn start_through(user: &User, binary: &Path) {
     let output = user
         .command_through(binary, &["status", "--json"])
         .output()
         .unwrap();
     assert!(output.status.success(), "{output:?}");
+    let status: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let pid = status["pid"].as_u64().unwrap_or_else(|| panic!("{status}"));
+    let exe = std::fs::read_link(format!("/proc/{pid}/exe")).unwrap();
+    assert_eq!(exe, binary.canonicalize().unwrap());
 }
 
 /// A build at `NEWER` staged beside `binary`, as a download leaves it.

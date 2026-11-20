@@ -39,6 +39,18 @@ fn start_through(user: &User, binary: &Path) -> Value {
     serde_json::from_slice(&output.stdout).unwrap()
 }
 
+/// The daemon whose status is `status` runs from `binary`, the copy in a folder of its own: a
+/// daemon of the shared test binary would download or restart beside it.
+fn runs_from(status: &Value, binary: &Path) {
+    let pid = status["pid"].as_u64().unwrap_or_else(|| panic!("{status}"));
+    let exe = std::fs::read_link(format!("/proc/{pid}/exe")).unwrap();
+    assert_eq!(
+        exe,
+        binary.canonicalize().unwrap(),
+        "the daemon runs from the installed copy, not the shared test binary"
+    );
+}
+
 /// `update.show` until `check` holds of it, 20 s at most.
 fn shown_until(user: &User, what: &str, check: impl Fn(&Value) -> bool) -> Value {
     let deadline = Instant::now() + Duration::from_secs(20);
@@ -244,7 +256,7 @@ fn a_build_downloaded_from_the_window_waits_staged() {
     let user = checking(&releases);
     let binary = installed();
     let before = sha256(&binary);
-    start_through(&user, &binary);
+    runs_from(&start_through(&user, &binary), &binary);
     shown_until(&user, "the check", |shown| shown["latest"] == NEWER);
 
     user.call("update.download", json!({})).unwrap();
@@ -538,7 +550,7 @@ fn restart_when_idle_restarts_once_no_agent_runs() {
     let marker = user.path("started");
     newer_stable(&releases, &runs_the_daemon(programs.path(), &marker));
     let binary = installed();
-    start_through(&user, &binary);
+    runs_from(&start_through(&user, &binary), &binary);
     user.call(
         "project.add",
         json!({"folder": user.path("work/app"), "name": "app"}),
@@ -637,7 +649,7 @@ fn restart_to_update_with_no_agent_restarts_at_once() {
     let marker = user.path("started");
     newer_stable(&releases, &runs_the_daemon(programs.path(), &marker));
     let binary = installed();
-    start_through(&user, &binary);
+    runs_from(&start_through(&user, &binary), &binary);
     assert!(stage(&user, &binary).status.success());
 
     user.call("update.restart", json!({"when": "now"})).unwrap();
