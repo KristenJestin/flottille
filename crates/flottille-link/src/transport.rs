@@ -304,15 +304,16 @@ impl RelaySocket {
         }
         names.made += 1;
         let made = names.made;
+        // Each key a site and a host of its own (`link.rs` bounds the handshakes by /48 and /64).
         let ip = std::net::Ipv6Addr::new(
             RELAY_PREFIX[0],
             RELAY_PREFIX[1],
-            0,
-            0,
-            0,
-            0,
-            (made >> 16) as u16,
             made as u16,
+            (made >> 16) as u16,
+            0,
+            0,
+            0,
+            1,
         );
         let address = SocketAddr::new(ip.into(), 1);
         names.by_key.insert(*key, address);
