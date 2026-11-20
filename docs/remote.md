@@ -792,7 +792,8 @@ and removes its workspace as today, through `call`.
   signature, time, nonce, and the role: `tunnel.open` is a `drive` method, a `viewer` is
   refused). Then the run must be one the daemon started and that still runs, and the port one a
   process of the run's session listens on: the sockets of those processes, read from `/proc`
-  (Linux), matched to `/proc/net/tcp` and `tcp6`, listening on the loopback or on every address.
+  (Linux; on a system with no `/proc` no port is reachable until another way to read them is
+  built), matched to `/proc/net/tcp` and `tcp6`, listening on the loopback or on every address.
   The address the run reports (`localhost`, `127.0.0.1`, `[::1]`, `0.0.0.0` or a name under
   `.localhost`, with a port written) only chooses the port taken when none is asked for: an
   address is a line the run printed, which a script of the workspace may write, so it reaches
