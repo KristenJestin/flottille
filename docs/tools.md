@@ -543,9 +543,9 @@ pending requests.
   - no `XDG_RUNTIME_DIR`, which says where the daemon's socket is (a client a run starts is
     refused anyway), and no display (`WAYLAND_DISPLAY`, `DISPLAY`, X11's key `XAUTHORITY`),
     unless the project lets its runs open windows (below); Landlock keeps X11's abstract
-    sockets out of reach too from its sixth ABI, but not its sockets by their path, which a run
-    that names them itself may still reach until #976 (`docs/vault.md`, "The runtime folder" and
-    "The gaps");
+    sockets out of reach too from its sixth ABI, and the run's private mount namespace empties
+    X11's socket folder, so its sockets by their path are not there either (`docs/vault.md`,
+    "The runtime folder" and "The gaps");
   - no `DBUS_SESSION_BUS_ADDRESS`: the session bus leads to the keyring (`docs/vault.md`, "The
     runtime folder", which also says how the runtime folder itself is denied);
   - no `SSH_AUTH_SOCK`, and from Landlock's ninth ABI no connecting to the user's SSH agent's

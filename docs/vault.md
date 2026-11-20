@@ -315,7 +315,30 @@ push the gate let through, and its checks' dry run, are the exception (below):
   login (and its reload of the page), are also granted their display folder,
   `$XDG_RUNTIME_DIR/flottille/display/<connection>`, which holds a hard link of the Wayland socket
   alone (`docs/extensions.md`, "Adapters"), without the right to link or move a file out of it.
-  The folder is the one the daemon made, never one a variable of the connection names.
+  The folder is the one the daemon made, never one a variable of the connection names;
+- Landlock's rules do not govern connecting to a socket by its path before its ninth ABI, so the
+  process also starts in a **private mount namespace** of its own, where the kernel lets a user
+  make one (an unprivileged user namespace): the user's runtime folders are empty folders there
+  (a `tmpfs`), so the bus, the user's systemd, the portal, the sound server and an SSH agent
+  that lives there are not found by their path at all. Only what the daemon itself gives the
+  process is put back in them, at the same path: the display folder of a run or a connection's
+  browser shown on the screen, and the SSH agent's socket lent to the daemon's own fetch (below).
+  The daemon's own socket is not among them. X11's socket folder (`/tmp/.X11-unix`) is emptied
+  the same way, unless the process is given X11's display; and `~/.ssh` is read-only there
+  (below). The mounts are made by the process before it runs its program, which runs as the
+  user, not as root of the namespace: it holds no capability to unmount or remount them, and a
+  namespace it makes inside gets them locked. Landlock's rules apply after it, unchanged. Where
+  the kernel refuses (a kernel built without user namespaces, a distribution that forbids them to
+  unprivileged users), the process starts without it, and the daemon's log and
+  `flottille doctor` (its `sandbox` part, with Landlock's ABI) say so.
+
+**`~/.ssh` is read-only** in that namespace: the user's `$HOME/.ssh` and the account's own (the
+password database's home) when they differ, where each leads when it is a link, every link inside
+it that leads out of it, and every file its `config` includes (`Include`, through the files they
+include in turn) that lies outside it. Creating, changing, renaming, removing a file there and
+`chmod` are refused; reading stays allowed (ssh reads its config and `known_hosts`). What
+`~/.ssh/config` runs (`ProxyCommand`, `Match exec`) runs with the user's credentials when a push
+the gate let through signs in, so no confined command may write it.
 
 **The SSH agent stays out of every run.** What the daemon runs gets no `SSH_AUTH_SOCK`. The socket
 the daemon's own environment named when it started (resolved then, links followed) is also kept out
@@ -383,7 +406,7 @@ server, has no `DISPLAY` and no `XAUTHORITY`, and Landlock keeps X11's abstract 
 sixth ABI, Linux 6.12). Its sockets by their path, under `/tmp/.X11-unix`, are not denied: a rule
 on `/tmp` takes from a process what is made there after it started (a file made there could no
 longer be moved or linked into its worktree, a socket made there by another process could not be
-reached), so the private mount namespace of #976 masks the folder instead (below, "The gaps").
+reached), so the private mount namespace empties the folder instead (above).
 Only a run of a project that lets its runs open windows, and a connection's browser that is
 shown, in a session without Wayland, are given X11 (`docs/tools.md`, `docs/extensions.md`): their
 display folder says so, and their process is not bound to the scope. The scope keeps out every
@@ -396,17 +419,32 @@ The gaps, where the platform does not allow more:
 
 - Landlock denies **connecting** to a socket by its path from its ninth ABI only (the right
   `LANDLOCK_ACCESS_FS_RESOLVE_UNIX`). Before it, the runtime folder cannot be listed and its files
-  cannot be opened, but a process that guesses the bus's path can still connect to it;
-- from the ninth ABI on, connecting is denied to every socket of the runtime folder, not only the
-  bus: a gpg-agent socket there cannot be reached, so a commit signed through gpg-agent fails;
+  cannot be opened, but a process that guesses the bus's path could still connect to it: the
+  private mount namespace is what keeps it out there, where the kernel gives one (below);
+- the runtime folder is emptied whole, and from the ninth ABI connecting is denied to every
+  socket of it, not only the bus: a gpg-agent socket there cannot be reached, so a commit signed
+  through gpg-agent fails;
 - below the ninth ABI, connecting is not governed: a run gets no `SSH_AUTH_SOCK`, but one that
-  guesses the agent's path can still connect to it, as to the bus;
+  guesses the path of an agent outside the runtime folders (`/tmp/ssh-…/agent.…`, a password
+  manager's under the home) can still connect to it: the private mount namespace empties the
+  runtime folders alone;
+- where the kernel refuses user namespaces, a confined process has no private mount namespace:
+  below Landlock's ninth ABI it connects to the bus and the other sockets of the runtime folder
+  by their path, it reaches X11's by theirs, and it can write `~/.ssh`. The daemon's log says so
+  at its start, and `flottille doctor` in its warnings (`sandbox.private_mounts` false in
+  `--json`);
+- `/proc/<pid>/root` leads to the mounts of another process: Landlock keeps a confined process
+  from every process outside its domain, so it is closed wherever Landlock is used (its second
+  ABI or later), and open without it;
+- when `~/.ssh` is a link, where it leads is read-only, but the link itself lies in the home,
+  which a run writes: a run can replace it with a folder of its own, which the next push outside
+  the sandbox then reads;
 - a push the gate let through runs with what the repository's settings say, as the user's own
   push from that folder would: a script the gate never read may have changed them before
   (`credential.helper`, `core.sshCommand`, `core.fsmonitor`, `url.*.insteadOf`), and that applies
   to the push, outside the sandbox, with the user's credentials. So does what the user's
-  `~/.ssh/config` runs (`ProxyCommand`, `Match exec`), which a confined command can still write
-  until the private mount namespace (#976) mounts `~/.ssh` read-only. The gate judges the push's
+  `~/.ssh/config` runs (`ProxyCommand`, `Match exec`), which a confined command cannot write
+  where it has its private mount namespace (above). The gate judges the push's
   line, not the repository it runs in: an accepted risk, decided so that a push the user allowed
   signs in as theirs does;
 - the daemon's own fetch or listing of an SSH remote runs the user's `~/.ssh/config` with the
@@ -431,11 +469,12 @@ The gaps, where the platform does not allow more:
   with only the environment kept from it;
 - a bus listening on an abstract socket (`unix:abstract=…`, older setups) is not a path, and is
   kept out only from Landlock's sixth ABI on (its abstract scope, above);
-- X11 by its socket's path, until the private mount namespace (#976) gives a run that is not
-  given X11 an empty `/tmp/.X11-unix`: at every ABI, a process can connect to
+- X11 by its socket's path where the kernel refuses the private mount namespace, which gives a
+  process that is not given X11 an empty `/tmp/.X11-unix`: at every ABI, a process can connect to
   `/tmp/.X11-unix/X0` itself (a program of its own, or an X11 library given that path as its
-  display), and below the sixth ABI `DISPLAY=:0` set by itself is enough. The folder is not denied, since a rule on `/tmp` would
-  hold for what is made there (above). And the missing `XAUTHORITY` does not keep it out: an X11
+  display), and below the sixth ABI `DISPLAY=:0` set by itself is enough. The folder is not
+  denied by Landlock, since a rule on `/tmp` would
+hold for what is made there (above). And the missing `XAUTHORITY` does not keep it out: an X11
   client without it reads `~/.Xauthority`, which a run can read, and a display manager's own key
   file (SDDM's `/tmp/xauth_…`) is readable too; a server that lets the user's local connections in
   without a key (`xhost +si:localuser:…`) needs none;
