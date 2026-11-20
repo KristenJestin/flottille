@@ -1036,6 +1036,20 @@ closed by it.
 | `to` | `user`, `parent` or `pilot`. |
 | `pilot` | With `to` `pilot`: the pilot's id; `null` otherwise. |
 | `moved_from` | Present on a question to the pilot moved to the user: the pilot's id. |
+| `offline` | Present on a question that went to the user because the machine of the agent of another machine that started the session (its parent or its pilot) was not linked: that machine's name (`docs/remote.md`, "Where a question goes when the parent is off"). |
+
+#### `agent.pilot_told`
+
+A led session an agent of another machine leads told that pilot, once its machine linked again,
+what it asked the user while that machine was off and what the user answered
+(`session-meanwhile`, `docs/remote.md`, "Where a question goes when the parent is off"): the
+questions up to `upto` are not told again.
+
+| Field | |
+|---|---|
+| `agent` | The session. |
+| `pilot` | The pilot's id, on its machine. |
+| `upto` | The number of the last `agent.asked` event told. |
 
 #### `agent.titled`
 

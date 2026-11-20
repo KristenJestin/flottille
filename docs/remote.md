@@ -20,7 +20,8 @@ code sent to another machine over the link and its new commits brought back (#81
 bounding what each device may do, with what each runner offers its peers (#862), `agent_launch`
 starting a child or a led or handed session on another machine, judged by that machine's gate,
 its code sent by itself (#816), the deliveries and calls between a session and the agent that
-started it on another machine, kept for a machine that is off, with the commits coming back (#817), the tunnels
+started it on another machine, kept for a machine that is off, with the commits coming back (#817),
+where a question and a held request go while the parent's machine is off (#818), the tunnels
 to the ports of a run's server (#829) and a vault entry shared with another machine (#832). What
 is decided is said as such; the defaults taken are in "Defaults taken, to confirm"; what is open
 is in "Open questions". It replaces the proposal of 2026-11-03 (a relay
@@ -739,6 +740,29 @@ and removes its workspace as today, through `call`.
 - The user answers them from any client whose role allows it: they are in the inbox of the machine
   the session runs on.
 
+As built (#818):
+
+- "Linked" is the link to that machine being up now: a question is routed when it is asked, and
+  the link ending (the machine stopped, slept or unreachable) moves at once the questions open to
+  a pilot of that machine to the user (`agent.asked` again, `moved_from` the pilot, `offline` the
+  machine) and each request one of its agents holds, as if that agent forwarded it, with the
+  reason `its parent's machine pc is offline`. A child's `ask` answered `Your question was given to
+  the user, as pc is offline, …`; a held request the same, `Waiting for the user's approval`.
+- A child's request held for its parent on another machine is told there as `child-asks`, naming
+  the machine it waits on: the parent answers with `approval_answer {request_id, machine, decision,
+  why}`, a `call` checked there against the launch (the parent that started that child, a request
+  of that child's tree it holds, pending). `deny` refuses it, the child told why; `forward` gives
+  it to the user of that machine. A decision other than `deny` or `forward` is refused on both
+  machines: no agent, and no machine, allows a request.
+- A led session's pilot of another machine answers with `session_send`, as here: the message is
+  stored under an id naming the pilot (`session-<pilot>-<launch>-<call>`), which answers the
+  questions asked of it. It is woken at the turn's end (`session-turn-ended`, `it asked you a
+  question`), its questions said whole.
+- When the pilot's machine links again, each led session it leads here sends it one
+  `session-meanwhile` delivery: each question it asked the user while that machine was off, with
+  the user's answer or `not answered yet`; kept, ordered and sent once as every delivery
+  (`agent.pilot_told` marks what was told).
+
 ## The Android app
 
 - **Native**: Kotlin and Jetpack Compose for every screen. The colours, durations and easing curves
@@ -1011,10 +1035,18 @@ on a real phone, by hand, and reported.
 - What crosses machines (#817): a child's report, question, failure, idle and stuck notices, the
   notice that its process died and it goes on (`child-replaced`), and a led session's
   `session-turn-ended` (when a turn reported or asked, and when it ends or fails
-  unless its pilot ended it). Not yet: a child's held request (`child-asks`, with
-  `approval_answer` across machines) and `led-integrated`, whose check reads the forge and the
-  base on the session's machine; a remote led session's `ask` still goes to that machine's user
-  (#818), and its pilot is told at the turn's end that it asked the user.
+  unless its pilot ended it), and since #818 a child's held request (`child-asks`) and what a led
+  session asked the user while its pilot's machine was off (`session-meanwhile`). Not yet:
+  `led-integrated`, whose check reads the forge and the base on the session's machine.
+- Where a question goes when the parent is off (#818): a parent of another machine that forwards
+  a request of its child gives it to the user of the child's machine, never to its own parent on
+  its machine (the request lives where the call was held). A request goes to the user when the
+  link to the parent's machine ends, and stays there when that machine links again. A session
+  whose machine starts again while the pilot's is off routes on the link it has then: in the
+  seconds before the links are made, a question goes to the user. Questions a child asked its
+  parent before the parent's machine went off stay its parent's, kept for it with the other
+  deliveries; only a pilot's are moved, as the specification says. The session is not told that
+  its questions moved.
 - `agent_send` and `session_send` to a session on another machine are kept and sent in the
   background even while that machine is on: the caller is answered at once (`Sent to agent … on
   server`), and a refusal there is not told back to it; it is dropped with an inbox entry of the
