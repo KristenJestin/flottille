@@ -40,12 +40,11 @@ use crate::workspaces_folder::WorkspacesFolder;
 
 /// The tabs of the page, in order: each one's key and label. A new part of Flottille adds none
 /// (rule 13): it is a row of Features.
-pub const SECTIONS: [(&str, &str); 6] = [
+pub const SECTIONS: [(&str, &str); 5] = [
     ("agents", "Agents"),
     ("approvals", "Approvals"),
     ("features", "Features"),
     ("vault", "Vault"),
-    ("machines", "Machines"),
     ("general", "General"),
 ];
 
@@ -2321,11 +2320,12 @@ impl Render for SettingsPage {
             ],
             "features" => vec![("features", self.features_tab(cx))],
             "vault" => vec![("vault", self.vault.clone().into_any_element())],
-            "machines" => vec![("machines", self.machines.clone().into_any_element())],
             _ => vec![
                 ("appearance", self.appearance_section(cx).into_any_element()),
                 ("workspaces", self.workspaces.clone().into_any_element()),
                 ("developer", self.developer_section(cx).into_any_element()),
+                // The user's machines (#814): Set up a hub, Devices, Add a device, Addresses.
+                ("machines", self.machines.clone().into_any_element()),
             ],
         };
         let vault = self.vault.read(cx).entries().map(<[_]>::len);
