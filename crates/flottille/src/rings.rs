@@ -73,7 +73,7 @@ impl Rings {
     }
 
     /// What `notifications.status` says: whether the desktop shows Flottille's notifications.
-    pub fn status(&self) -> Value {
+    pub fn desktop(&self) -> Value {
         let why = self.desktop.why_not();
         json!({"shows": why.is_none(), "why": why, "sound": self.sounds.why_not()})
     }
@@ -300,14 +300,18 @@ pub fn open_session(paths: &flottille_core::paths::Paths, session: &str) {
         return;
     };
     let program = crate::client::program_to_start(exe);
-    let started = std::process::Command::new(&program)
+    let mut command = std::process::Command::new(&program);
+    command
         .args(["window", "--open", &format!("session:{session}")])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn();
-    if let Err(error) = started {
-        eprintln!("flottille daemon: the window cannot be started: {error}");
+        .stderr(std::process::Stdio::null());
+    match crate::children::spawn_std(&mut command) {
+        // Waited for on a thread of its own, so that the window leaves no zombie behind it.
+        Ok(mut window) => {
+            std::thread::spawn(move || window.wait());
+        }
+        Err(error) => eprintln!("flottille daemon: the window cannot be started: {error}"),
     }
 }
 

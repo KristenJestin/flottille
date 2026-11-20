@@ -87,7 +87,7 @@ pub fn call(daemon: &Daemon, method: &str, params: Value) -> Result<Value, Failu
 /// Whether the desktop shows Flottille's notifications, and what the daemon knows of the window
 /// (#1002).
 fn status(daemon: &Daemon) -> Value {
-    let mut status = daemon.rings.status();
+    let mut status = daemon.rings.desktop();
     let desktop = status.take();
     let window = daemon
         .presence
