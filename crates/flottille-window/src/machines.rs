@@ -157,6 +157,43 @@ pub struct Hub {
     pub reason: Option<String>,
 }
 
+/// A session or a child an agent of this machine started on another (`remote.launches`): what
+/// its row under its pilot shows.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Launched {
+    /// The machine it runs on, by name.
+    pub machine: String,
+    /// The agent of this machine that started it.
+    pub caller: String,
+    /// `child`, `led` or `handed`.
+    pub kind: String,
+    pub title: String,
+    /// Its id on its machine.
+    pub agent: String,
+    /// `held`, `started` or `ended`.
+    pub state: String,
+    /// The kind of the last delivery it sent here, and when.
+    pub heard: Option<String>,
+    pub heard_at: Option<u64>,
+    pub at: u64,
+}
+
+impl Launched {
+    fn of(value: &Value) -> Launched {
+        Launched {
+            machine: text(&value["machine"]),
+            caller: text(&value["caller"]),
+            kind: text(&value["kind"]),
+            title: text(&value["title"]),
+            agent: text(&value["agent"]),
+            state: text(&value["state"]),
+            heard: value["heard"].as_str().map(str::to_owned),
+            heard_at: value["heard_at"].as_u64(),
+            at: value["at"].as_u64().unwrap_or_default(),
+        }
+    }
+}
+
 /// Everything the window shows of the user's machines.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Machines {
@@ -171,6 +208,8 @@ pub struct Machines {
     /// The hash of the list's last change, which the next one is signed after.
     pub head: Value,
     pub requests: Vec<JoinRequest>,
+    /// The sessions this machine's agents started on the others.
+    pub launches: Vec<Launched>,
 }
 
 impl Machines {
@@ -557,7 +596,16 @@ fn read(conn: &mut Conn) -> Result<Machines> {
         members: Vec::new(),
         head: Value::Null,
         requests: Vec::new(),
+        launches: Vec::new(),
     };
+    if let Ok(launched) = conn.ask_within("remote.launches", json!({}), BOUND)? {
+        read.launches = launched["launches"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(Launched::of)
+            .collect();
+    }
     if read.hub.is_some()
         && let Ok(members) = conn.ask_within("remote.members", json!({}), BOUND)?
     {
@@ -632,6 +680,20 @@ pub fn host_name() -> String {
         name if name.is_empty() => "this-machine".to_owned(),
         name => name,
     }
+}
+
+/// The machine the window shows, when it is not this one: what the cards of a session there say
+/// of where it runs.
+#[derive(Default)]
+pub struct Shown(pub Option<String>);
+
+impl gpui_kit::Global for Shown {}
+
+/// Where a card of the machine shown says it runs: `on server`, nothing on this machine.
+pub fn shown_on(cx: &gpui_kit::App) -> Option<String> {
+    cx.try_global::<Shown>()
+        .and_then(|shown| shown.0.clone())
+        .map(|machine| format!("on {machine}"))
 }
 
 // ── The machine shown ─────────────────────────────────────────────────────────────────────────

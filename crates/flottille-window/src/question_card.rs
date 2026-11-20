@@ -769,7 +769,11 @@ impl Render for QuestionCard {
                 (p.wait, p.wait_bg),
                 Some(trailing),
             ))
-            .meta(self.when.clone());
+            .meta(match crate::machines::shown_on(cx) {
+                // A question of a session on another machine says which.
+                Some(there) => SharedString::from(format!("{} · {there}", self.when)),
+                None => self.when.clone(),
+            });
         let current = self.current;
         let question = self.block(current, !sent, cx);
         // Questions differ in height: the card eases to the one shown.
