@@ -425,70 +425,26 @@ fn the_hub_s_state_is_said_as_an_event_when_it_changes() {
 }
 
 #[test]
-fn two_machines_that_cannot_reach_each_other_say_which_address_failed() {
+fn two_machines_whose_addresses_answer_nothing_link_through_the_hub() {
     let hub = TestHub::new();
-    // Neither listens; each declares an address nobody listens on, which the hub tells the other.
+    // Neither listens; each declares an address nobody listens on, which the hub tells the other:
+    // the direct path fails, and the link goes through the hub (`docs/remote.md`, "The transport").
     let (pc, server) = (Machine::new(None), Machine::new(None));
-    let (pc_dead, server_dead) = (free_port(), free_port());
-    for (machine, port) in [(&pc, pc_dead), (&server, server_dead)] {
+    for machine in [&pc, &server] {
         machine
             .user
             .call(
                 "remote.address.add",
-                json!({"address": format!("127.0.0.1:{port}")}),
+                json!({"address": format!("127.0.0.1:{}", free_port())}),
             )
             .unwrap();
     }
     members(&hub, &pc, &server);
 
-    let seen = pc.wait_until("pc does not say the server is unreachable", |seen| {
-        seen["machines"].as_array().unwrap().iter().any(|machine| {
-            machine["name"] == "server"
-                && machine["reason"]
-                    .as_str()
-                    .is_some_and(|reason| reason.contains("is unreachable"))
-        })
-    });
-    let server_seen = seen["machines"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|machine| machine["name"] == "server")
-        .unwrap()
-        .clone();
-    assert_eq!(server_seen["state"], "offline");
-    assert_eq!(
-        server_seen["reason"],
-        format!("server is unreachable: tried 127.0.0.1:{server_dead} from pc, no answer in 10 s")
-    );
-    assert!(
-        pc.log().contains(&format!(
-            "no link to server: server is unreachable: tried 127.0.0.1:{server_dead} from pc"
-        )),
-        "{}",
-        pc.log()
-    );
-
-    // And on the other side, the other way.
-    let seen = server.wait_until("the server does not say pc is unreachable", |seen| {
-        seen["machines"].as_array().unwrap().iter().any(|machine| {
-            machine["name"] == "pc"
-                && machine["reason"]
-                    .as_str()
-                    .is_some_and(|reason| reason.contains("is unreachable"))
-        })
-    });
-    let pc_seen = seen["machines"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|machine| machine["name"] == "pc")
-        .unwrap()
-        .clone();
-    assert_eq!(
-        pc_seen["reason"],
-        format!("pc is unreachable: tried 127.0.0.1:{pc_dead} from server, no answer in 10 s")
-    );
+    for (machine, other) in [(&pc, "server"), (&server, "pc")] {
+        let seen = machine.wait_for(other, "online");
+        assert_eq!(seen["reached"]["address"], "the hub", "{seen}");
+    }
 }
 
 #[test]
