@@ -321,10 +321,9 @@ fn last_known(
     if let Some(machine) = machine.filter(|machine| !machine.online()) {
         return (machine.state_words(), None);
     }
-    if launched.state == "held" {
-        return ("waiting".to_owned(), Some(AgentState::Waiting));
-    }
+    // Allowed there, a held launch is told nothing more here: what it sent since says it runs.
     match launched.heard.as_deref() {
+        None if launched.state == "held" => ("waiting".to_owned(), Some(AgentState::Waiting)),
         None => ("running".to_owned(), Some(AgentState::Running)),
         Some("child-report") => ("reported".to_owned(), None),
         Some("child-failed") => ("failed".to_owned(), None),
