@@ -3,7 +3,7 @@
 //! session reads as waiting on it, and the delivery says the timer woke the agent. No window opens
 //! on a screen; the daemon's clock is moved by the test.
 
-mod common;
+use crate::common;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};

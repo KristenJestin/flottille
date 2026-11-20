@@ -3,7 +3,7 @@
 //! throwaway repository whose `origin` says where its forge is. No test ever calls a forge or a
 //! tracker.
 
-mod common;
+use crate::common;
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;

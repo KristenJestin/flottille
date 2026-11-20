@@ -4,7 +4,7 @@
 //! come and go with the `item.*` events, and the detail that `items.show` fills. No window opens
 //! on a screen, no forge is read.
 
-mod common;
+use crate::common;
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};

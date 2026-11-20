@@ -3,7 +3,7 @@
 //! `flottille skill`. Throwaway repositories and temporary XDG folders; no real
 //! agent ever runs here.
 
-mod common;
+use crate::common;
 
 use std::path::PathBuf;
 

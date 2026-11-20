@@ -2,7 +2,7 @@
 //! talk to each other"): the pilot of a led session is woken when a turn of it asks or reports,
 //! and when it ends, and two sessions that write to each other without the user pause. The fake
 //! ACP agent, temporary folders, no real agent.
-mod common;
+use crate::common;
 
 use std::time::{Duration, Instant};
 

@@ -3,7 +3,7 @@
 //! a subscription with no `minutes` has no deadline, whatever CI takes. Read through the fake `gh` and the
 //! fake `bkt`; no test ever calls GitHub nor Bitbucket.
 
-mod common;
+use crate::common;
 
 use common::mcp::{Mcp, server_of};
 use common::{User, bkt_pipeline, gh_run};

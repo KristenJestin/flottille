@@ -9,7 +9,7 @@
 //! When `FLOTTILLE_TOOL_LISTS_OUT` names a file, the lists and the answers are written to it as
 //! JSON, for `tools/tool-list-cost` to count.
 
-mod common;
+use crate::common;
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};

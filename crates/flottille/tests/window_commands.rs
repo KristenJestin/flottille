@@ -2,7 +2,7 @@
 //! daemon whose agents are the fake ACP agent: the rail's Commands, the tree's icon, the output
 //! panel, and the card a command's result is in the conversation. No window opens on a screen.
 
-mod common;
+use crate::common;
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;

@@ -1,6 +1,6 @@
 //! `flottille doctor`, with a fake PATH: no real `claude`, `opencode` nor `codex` is ever run.
 
-mod common;
+use crate::common;
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;

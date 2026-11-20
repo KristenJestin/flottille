@@ -3,7 +3,7 @@
 //! clipboard and says it in a toast. On GPUI's test platform in front of a real daemon whose agent
 //! is the fake ACP agent, with a throwaway user. No window opens on a screen.
 
-mod common;
+use crate::common;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};

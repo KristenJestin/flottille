@@ -3,7 +3,7 @@
 //! former tab opening the new place. On GPUI's test platform in front of a real daemon in
 //! temporary folders, its providers the fake ones. No window opens on a screen.
 
-mod common;
+use crate::common;
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;

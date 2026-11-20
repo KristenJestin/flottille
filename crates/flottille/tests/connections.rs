@@ -4,7 +4,7 @@
 //! fake MCP server (`crates/flottille-fake-mcp`) with scripted behaviour: no real server, the
 //! in-memory keyring, temporary folders.
 
-mod common;
+use crate::common;
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};

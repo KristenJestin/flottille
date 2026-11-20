@@ -4,7 +4,7 @@
 //! fake `claude` (`crates/flottille-fake-claude`), whose list of models the script gives. No real
 //! agent ever runs here.
 
-mod common;
+use crate::common;
 
 use std::path::PathBuf;
 

@@ -4,7 +4,7 @@
 //! agents (`crates/flottille-fake-agent`) recording every prompt, in throwaway repositories and
 //! temporary XDG folders.
 
-mod common;
+use crate::common;
 
 use std::time::{Duration, Instant};
 

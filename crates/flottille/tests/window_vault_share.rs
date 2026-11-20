@@ -4,8 +4,8 @@
 //! window's machine, and a toast says the result; on the other machine the entry's row says where
 //! it was shared from. The keyrings are the daemons' memory; no window opens on a screen.
 
-mod common;
-mod remote;
+use crate::common;
+use crate::remote;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};

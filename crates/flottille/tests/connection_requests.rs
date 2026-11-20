@@ -4,7 +4,7 @@
 //! own Save, exactly as the card showed it. Against the real daemon with the fake ACP agent and
 //! the fake MCP server: no real server, the in-memory keyring, temporary folders.
 
-mod common;
+use crate::common;
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};

@@ -3,7 +3,7 @@
 //! the rail lists what the agent waits for and Cancel ends it through the daemon, and the
 //! delivery that wakes the agent says what woke it. No window opens on a screen, no forge is read.
 
-mod common;
+use crate::common;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};

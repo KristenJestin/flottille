@@ -3,7 +3,7 @@
 //! large one is scaled down first; any other file is read as it always was. The agents are fake
 //! ACP agents, in a throwaway repository and temporary XDG folders.
 
-mod common;
+use crate::common;
 
 use std::io::Cursor;
 use std::path::PathBuf;

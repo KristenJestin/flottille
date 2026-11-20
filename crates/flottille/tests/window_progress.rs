@@ -4,7 +4,7 @@
 //! chips of what Flottille knows of a ticket, a ticket that changes group, and the closed
 //! milestones behind their fold. No window opens on a screen, no forge nor tracker is read.
 
-mod common;
+use crate::common;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};

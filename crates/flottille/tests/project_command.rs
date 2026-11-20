@@ -1,7 +1,7 @@
 //! The `flottille project` commands, against the real binary, with throwaway repositories and
 //! temporary XDG folders. No test waits on a terminal: the standard input is closed or piped.
 
-mod common;
+use crate::common;
 
 use std::path::Path;
 use std::process::Output;

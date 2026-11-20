@@ -5,7 +5,7 @@
 //! tools are called through the MCP server the daemon gave its session, temporary XDG folders,
 //! throwaway projects, a fake `acli` for the ticket.
 
-mod common;
+use crate::common;
 
 use std::time::{Duration, Instant};
 

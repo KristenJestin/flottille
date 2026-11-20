@@ -2,7 +2,7 @@
 //! (`docs/reference/acp.md`, "What a turn used"), from the fake ACP agent and the fake `claude` and
 //! `codex` behind Flottille's bridges. No real agent ever runs here.
 
-mod common;
+use crate::common;
 
 use common::User;
 use flottille_core::agent::{TurnUsage, Used};

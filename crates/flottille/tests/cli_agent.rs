@@ -2,7 +2,7 @@
 //! pilot door (`tests/pilot.rs`) through `flottille agent start|send|show|read|stop|list|tree` and
 //! `flottille inbox`, all with `--json`. Against the real daemon with the fake ACP agent.
 
-mod common;
+use crate::common;
 
 use std::io::{BufRead, BufReader, ErrorKind, Write};
 use std::process::{Child, ChildStdin, ExitStatus, Output, Stdio};

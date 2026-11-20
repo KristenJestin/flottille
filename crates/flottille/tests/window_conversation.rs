@@ -5,8 +5,8 @@
 //! the fake ACP agent and whose `gh` is the fake one, with a throwaway user. No window opens on a
 //! screen.
 
-mod common;
-mod guard;
+use crate::common;
+use crate::guard;
 
 use std::path::PathBuf;
 use std::sync::Arc;
