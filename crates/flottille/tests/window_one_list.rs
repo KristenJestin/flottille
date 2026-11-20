@@ -26,10 +26,16 @@ use serde_json::json;
 /// How long a link, a session or a read of the machines may take.
 const WAIT: Duration = Duration::from_secs(60);
 
-/// A machine whose agents are the fake agent, with the project `app` over a throwaway repository.
-fn machine_with(projects: &[&str]) -> User {
+/// A machine whose agents are the fake agent.
+fn fake_user() -> User {
     let user = User::with_fake_agent();
     std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
+    user
+}
+
+/// The projects `projects` on `machine`, each over a throwaway repository.
+fn add(machine: &Machine, projects: &[&str]) {
+    let user = &machine.user;
     for name in projects {
         let folder = user.path(&format!("work/{name}"));
         user.git_init(&folder);
@@ -39,15 +45,14 @@ fn machine_with(projects: &[&str]) -> User {
         user.call("project.add", json!({"folder": folder, "name": name}))
             .unwrap();
     }
-    user
 }
 
 /// `pc` with the project `app`, `server` a runner with `app` and `site`, the two linked.
 fn pc_and_server() -> (TestHub, Machine, Machine) {
-    pc_and_server_on(
-        Machine::of(machine_with(&["app"])),
-        machine_with(&["app", "site"]),
-    )
+    let (hub, pc, server) = pc_and_server_on(Machine::of(fake_user()), fake_user());
+    add(&pc, &["app"]);
+    add(&server, &["app", "site"]);
+    (hub, pc, server)
 }
 
 fn eventually(what: &str, check: impl Fn() -> bool) {

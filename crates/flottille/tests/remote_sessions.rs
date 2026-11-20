@@ -13,13 +13,6 @@ use crate::remote::{Machine, eventually, pc_and_server_on, signed};
 use common::User;
 use serde_json::{Value, json};
 
-/// A machine whose agents are the fake agent, with the project `app` over a throwaway repository.
-fn machine_with_app() -> User {
-    let user = User::with_fake_agent();
-    add_app(&user);
-    user
-}
-
 fn add_app(user: &User) {
     let folder = user.path("work/app");
     user.git_init(&folder);
@@ -82,8 +75,14 @@ fn on(machine: &Machine) {
     machine.user.status();
 }
 
+/// A hub, `pc` its first member and `server` a runner, linked, each with the project `app`.
 fn pc_and_server() -> (crate::remote::TestHub, Machine, Machine) {
-    let (hub, pc, server) = pc_and_server_on(Machine::of(machine_with_app()), machine_with_app());
+    let (hub, pc, server) = pc_and_server_on(
+        Machine::of(User::with_fake_agent()),
+        User::with_fake_agent(),
+    );
+    add_app(&pc.user);
+    add_app(&server.user);
     (hub, pc, server)
 }
 
