@@ -515,12 +515,13 @@ remote refuse <request>`; `flottille remote members`, `rename <name> <new name>`
 the daemon carries what they signed (`remote.*`, `protocol.md`) and says what changed as events
 (`remote.*`, `events.md`). The phone's part is not built.
 
-**Built (#814), in the window**: Settings, Machines offers **Set up a hub** while this machine is
-in no member list (the hub's address, and its setup code in a field that hides what is typed);
-then the devices of the list (each row its name, its machine's state, its role and who added
-it; Rename and Remove… in its "⋯", Remove asking once), **Add a device** (the invitation's QR
-and its code, with the time it expires, folding away then), and this machine's addresses, found
-or declared (New address, Remove…). A join request opens its dialog over any page: the four
+**Built (#814, #1144), in the window**: Settings, Machines offers **Set up a hub** while this
+machine is in no member list: a dialog (the hub's address, and its setup code in a field that
+hides what is typed; a refusal stays in it, a toast says it is done); then the devices of the list
+(each row its name, its machine's state, its role and who added it; Rename and Remove… in its "⋯",
+Remove asking once), **Add a device** (the invitation's QR and its code, with the time it expires,
+in a dialog that closes when the invitation is used or expires), and this machine's addresses,
+found or declared (New address, Remove…). A join request opens its dialog over any page: the four
 words, the device's name, **This device can: Run agents / Control only / View only**, Accept
 and Refuse. Every new member is a toast, `New device: pixel (control only), added at 18:42 from
 pc`, with Remove. The machine switcher at the top of the sidebar shows this machine first, then
