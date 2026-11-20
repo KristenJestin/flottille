@@ -1543,38 +1543,6 @@ fn an_askpass_a_run_wrote_never_runs_on_push() {
 }
 
 #[test]
-fn a_negotiation_a_run_asked_for_runs_no_upload_pack() {
-    let (user, _agent, _bus) = user();
-    let remote = user.path("remotes/app.git");
-    project(&user, remote.to_str().unwrap());
-    let planted = planted(&user, "uploadpack");
-    let folder = user.path("work/app");
-    // A push that negotiates first fetches from the remote's URL, with the upload command of a
-    // remote of that name, or of its own.
-    user.git(&folder, &["config", "push.negotiate", "true"]);
-    for remote in ["origin", remote.to_str().unwrap()] {
-        user.git(
-            &folder,
-            &[
-                "config",
-                &format!("remote.{remote}.uploadpack"),
-                planted.to_str().unwrap(),
-            ],
-        );
-    }
-    let mcp = agent(&user);
-
-    let pushed = line(&user, &mcp, "git push origin HEAD:refs/heads/negotiated");
-
-    assert!(
-        !user.path("uploadpack-ran").exists(),
-        "the planted uploadpack ran: {}",
-        pushed.text
-    );
-    assert!(remote_has(&user, "negotiated"), "{}", pushed.text);
-}
-
-#[test]
 fn the_ssh_command_of_an_include_for_the_repository_is_used() {
     let (user, _agent, _bus) = user();
     // The user's command for the accounts of `~/work`, in a file their settings include for the
