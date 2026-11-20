@@ -302,7 +302,7 @@ serves one user.
   signed change, to every member. It signs the entries of the devices it pairs, a role changed and
   a removal made on its host; it checks each member's change before storing it, as every device
   does after it.
-- **Pair mode**, while its command runs: one secret, its minutes, how many wrong proofs it took.
+- **Pair mode**, while its command runs: one secret and its minutes.
 - **What it knows of each device** (its card's part that is no signed entry, "A device's card"):
   what the device says of itself, when it was paired and last seen.
 - **The presence**: which of the user's clients is active ("Notifications"), as each client tells
@@ -1097,8 +1097,10 @@ on a real phone, by hand, and reported.
   on the next link or message kept.
 - Pair mode (#1146) lasts 5 minutes unless `--minutes` says 1 to 15, works once, and one is open
   at a time: a second `flottille-hub pair` is refused while one is open, rather than closing it. A
-  wrong proof is counted, not ending pair mode at once (a device holding a damaged code tries
-  again): 5 of them close it, said by the command. The secret is 128 bits.
+  wrong proof pairs nothing, ends its own session and leaves pair mode open, whatever their number
+  (the hub's log names the key that sent each): a limit that closed pair mode would let anyone who
+  reaches the hub with a throwaway key keep the user from ever pairing, and guessing a 128-bit
+  secret is out of reach with or without one.
 - The hub signs the devices' entries with its own key, the one every device pins from its code,
   rather than a key of the user's kept apart: the maintainer accepted that the hub's host can pair
   a device ("What a compromised hub can do"), and a second key on the same host would protect

@@ -46,8 +46,6 @@ pub use server::{
 /// How long a pair mode lasts unless told otherwise, and the longest it may last, in minutes.
 pub const PAIR_MINUTES: u64 = 5;
 pub const LONGEST_PAIR_MINUTES: u64 = 15;
-/// The wrong proofs a pair mode takes before it closes: someone tries codes, or holds a damaged one.
-pub const WRONG_PROOFS: u32 = 5;
 
 /// The most changes of the list one member makes within an hour: a member's device, a viewer's
 /// too, cannot fill the list (`flottille_link::MOST_CHANGES`) in an afternoon.
@@ -130,7 +128,6 @@ struct PairMode {
     number: u64,
     secret: PairSecret,
     until: u64,
-    wrong: u32,
 }
 
 /// What `hub.json` holds.
@@ -287,7 +284,6 @@ impl<C: Clock> Hub<C> {
             number: self.pairings,
             secret: code.secret,
             until: now + minutes * 60,
-            wrong: 0,
         });
         Ok((self.pairings, code))
     }
@@ -330,7 +326,10 @@ impl<C: Clock> Hub<C> {
     /// A device pairs: `proves` says whether its proof is good for a secret, the pair mode's. Once
     /// the proof checks, pair mode ends: the device proposed is paired, its entry signed with the
     /// hub's key, as it proposed it; one that is a member already keeps its entry and its card.
-    /// A wrong proof is counted: `WRONG_PROOFS` of them close pair mode.
+    /// A wrong proof is refused and leaves pair mode as it was: anyone who reaches the hub can
+    /// send one with a key of their own, and closing pair mode on them would let a stranger keep
+    /// the user from ever pairing. The secret holds 128 bits, so the tries protect nothing; the
+    /// session says whose they are (its log names the key) and ends.
     pub fn pair(
         &mut self,
         proposed: &Proposed,
@@ -338,20 +337,13 @@ impl<C: Clock> Hub<C> {
         version: &str,
     ) -> Result<PairedDevice, HubError> {
         let now = self.sweep();
-        let Some(open) = &mut self.pairing else {
+        let Some(open) = &self.pairing else {
             return Err(refused(
                 "pair mode is not open on this hub, or this code's minutes passed, or it served \
                  already: run flottille-hub pair on the hub's host for a new code",
             ));
         };
         if !proves(&open.secret) {
-            open.wrong += 1;
-            if open.wrong >= WRONG_PROOFS {
-                self.end_pairing(PairEnd::Over(format!(
-                    "pair mode was closed after {WRONG_PROOFS} wrong proofs: a device holds a \
-                     damaged code, or someone tries codes"
-                )));
-            }
             return Err(refused(
                 "this device did not prove it holds the pair code: copy the code again, whole, \
                  from what flottille-hub pair printed",
