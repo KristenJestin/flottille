@@ -256,8 +256,9 @@ the wrong code first).
     controls, and animates in, so that nothing moves; a short row (under 740 px) gives the chips
     their icons, never an overflow. **[test]** `window_compaction.rs`, `window_quota.rs` (a 1280
     px window), `window_rules.rs`.
-13. **Tabs by subject; a feature is a row, never a tab.** Settings has five tabs (Agents,
-    Approvals, Features, Vault, General) and six at most, Usage the last; a project's settings
+13. **Tabs by subject; a feature is a row, never a tab.** Settings has six tabs (Agents,
+    Approvals, Features, Vault, Machines, General) and seven at most, Usage the last (Machines,
+    #814: the user's machines are a subject of their own, to confirm); a project's settings
     have six (Repositories, Workspaces, Tasks, Instructions, Features, Vault); the project page
     four at most and room for a fifth (Progress, for a project with a tracker). A new part of Flottille adds no tab: a part the user turns on or
     off (Specs, Review, the compaction, Connections, later the handbook) is a row of the

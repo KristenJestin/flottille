@@ -497,7 +497,22 @@ that wait for this machine's member with their words; `flottille remote accept <
 remote refuse <request>`; `flottille remote members`, `rename <name> <new name>` and `remove
 <name>`. A request is named by the new device's fingerprint. The clients sign, with the device key;
 the daemon carries what they signed (`remote.*`, `protocol.md`) and says what changed as events
-(`remote.*`, `events.md`). The window's and the phone's parts are not built.
+(`remote.*`, `events.md`). The phone's part is not built.
+
+**Built (#814), in the window**: Settings, Machines offers **Set up a hub** while this machine is
+in no member list (the hub's address, and its setup code in a field that hides what is typed);
+then the devices of the list (each row its name, its machine's state, its role and who added
+it; Rename and Remove… in its "⋯", Remove asking once), **Add a device** (the invitation's QR
+and its code, with the time it expires, folding away then), and this machine's addresses, found
+or declared (New address, Remove…). A join request opens its dialog over any page: the four
+words, the device's name, **This device can: Run agents / Control only / View only**, Accept
+and Refuse. Every new member is a toast, `New device: pixel (control only), added at 18:42 from
+pc`, with Remove. The machine switcher at the top of the sidebar shows this machine first, then
+each runner with its state; choosing one shows its projects and sessions, every request of the
+window signed with the device key, as the command line signs it, and carried by this machine's
+daemon. Choosing a machine that is off or needs an update is a failure toast that says why, and
+the window stays on the machine it shows. The window reads the device key from the same keyring
+item, or the same file, as the command line.
 
 A machine that joins is no member yet: it reaches the hub with its machine key, pinning the hub's
 key the code holds, and says in its proof the invitation's token and the new device's key. The hub
@@ -1177,6 +1192,16 @@ on a real phone, by hand, and reported.
   back is taken only for a repository of a launch this machine sent to that very machine, into the
   repository it was sent from, under the name this machine gives that machine; the way back sends
   the commits past the sender's tip, its snapshot, and what came back already.
+- The window's Machines are a tab of Settings, its sixth, before General. Its switcher offers the
+  runners, and the machines whose role is not known yet (linked with no hub's list), never a
+  controller or a viewer. The device a window sets a hub up from is named by the host's name, as
+  `flottille remote setup` names it without `--name`. A join request whose dialog the user closed
+  without answering is not opened again by that window until it is restarted; it waits until it
+  expires, and `flottille remote requests` still lists it. While the window shows another machine,
+  what it keeps of itself (its folds, the drafts, its appearance) stays with this machine. A
+  member's row says its role, who added it and its machine's state: `remote.members` says neither
+  when it was added nor when it was last seen, which the toast of a new member says from its
+  event.
 - Until `agent_launch` sends code (#816), a test build run with `FLOTTILLE_TEST_TRAVEL` set
   answers `test.travel {machine, project, launch, workspace?, corrupt?, hold_ms?}` and
   `test.travel_back {launch}`, so that two daemons can be made to send code to each other.
