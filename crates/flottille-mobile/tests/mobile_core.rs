@@ -1,10 +1,11 @@
 //! The mobile core against a hub and a runner on loopback (`docs/remote.md`, "The Android app"):
-//! the hub served in this process from a temporary state folder, the root `server` set up on it,
+//! the hub served in this process from a temporary state folder, the runner `server` paired on it,
 //! and the runner `server`'s endpoint, which stands for its daemon: it takes the phone's client
 //! link as a daemon does (the peer a member's machine), checks each request as a daemon does
 //! (`Requests::check`: a member, its signature, its time, its nonce, its role) and answers it,
 //! `events.watch` with its stored events after the number asked, then the new ones. The phone is a
-//! `Core` over a temporary folder, its device key sealed by a test sealer.
+//! `Core` over a temporary folder, its device key sealed by a test sealer, paired from the code of
+//! the hub's pair mode (#1146).
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -15,9 +16,9 @@ use std::time::{Duration, SystemTime};
 
 use flottille_hub::{Hub, Served, SystemClock};
 use flottille_link::{
-    Accepted, Action, Ask, Change, Device, DeviceKey, Endpoint, Hello, HubKey, Invitation,
-    InvitationAsk, Keyring, KeyringError, Link, MachineKey, MemberList, Members, Message, Pushed,
-    Requested, Requests, Role, Session, Tls, ToDevice, arrive, verification_words,
+    Accepted, Action, Ask, Change, Colour, Device, DeviceKey, Endpoint, Hello, HubKey, Icon,
+    Keyring, KeyringError, Link, MachineKey, Members, Message, PairCode, Proposed, Pushed,
+    Requests, Role, Tls, ToDevice, arrive,
 };
 use flottille_mobile::{Batch, Core, Listener, MobileError, Sealer, ViewState};
 use serde_json::{Value, json};
@@ -314,13 +315,10 @@ impl Runner {
     }
 }
 
-/// A test's folders, its hub, the root `server` set up on it, and its runner.
+/// A test's folders, its hub, the runner `server` paired on it, and the runner's endpoint.
 struct Place {
     dir: tempfile::TempDir,
     served: Served<SystemClock>,
-    server: DeviceKey,
-    server_device: Device,
-    server_session: Option<Session>,
     runner: Runner,
 }
 
@@ -330,100 +328,51 @@ impl Place {
         let hub = Hub::open(&dir.path().join("hub"), SystemClock).unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let served = flottille_hub::serve(hub, listener, None, hello()).unwrap();
-        let code = served.with_hub(|hub| hub.setup_code().unwrap().to_owned());
+        // `server` pairs as a computer does: its machine's session, then its machine declared.
         let server = device_key(1);
         let machine = MachineKey::load_or_make(&dir.path().join("machines/server")).unwrap();
-        let mut list = MemberList::start("server", &server).unwrap();
-        list.declare(&server, &machine);
-        let (server_device, server_session) = Device::setup(
-            &format!("http://{}", served.address()),
+        let code = served.with_hub(|hub| hub.open_pairing(&url(served.address()), None).unwrap().1);
+        let mut paired = Device::pair(
             &code,
-            list.changes().to_vec(),
+            Proposed {
+                key: server.public(),
+                name: "server".to_owned(),
+                role: Role::Runner,
+                icon: Icon::Server,
+                colour: Colour::of(&server.public()),
+            },
             &machine,
             &hello(),
             &Tls::System,
         )
         .await
         .unwrap();
+        let (mut device, _) = paired.listed().await.unwrap();
+        let declared = Change::sign(
+            device.list.head(),
+            Action::Machine {
+                key: server.public(),
+                machine: machine.public(),
+            },
+            &server,
+        )
+        .claimed_by(&machine);
+        device.submit(&mut paired.session, declared).await.unwrap();
+        let mut session = paired.session;
+
         let runner = Runner::new();
-        *runner.members.lock().unwrap() = Some(server_device.members().unwrap());
+        *runner.members.lock().unwrap() = Some(device.members().unwrap());
         let endpoint = Endpoint::bind(&machine, "127.0.0.1:0".parse().unwrap()).unwrap();
         let at: SocketAddr = endpoint.listening().unwrap();
-        server_session
+        session
             .ask(Ask::Addresses {
                 addresses: vec![at.to_string()],
             })
             .await
             .unwrap();
         tokio::spawn(runner.clone().serve(endpoint));
-        Place {
-            dir,
-            served,
-            server,
-            server_device,
-            server_session: Some(server_session),
-            runner,
-        }
-    }
-
-    fn hub_key(&self) -> flottille_link::PublicKey {
-        self.served.with_hub(|hub| hub.key())
-    }
-
-    /// The invitation `server` shows, as the phone's camera reads its QR.
-    async fn invitation(&self) -> String {
-        let session = self.server_session.as_ref().unwrap();
-        let now = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        let ask = InvitationAsk::sign(&self.hub_key(), now, &self.server).unwrap();
-        let token = session.asker().invite(ask).await.unwrap();
-        Invitation {
-            hub_url: self.server_device.url.clone(),
-            hub_key: self.hub_key(),
-            token,
-            inviter: self.server.public(),
-        }
-        .code()
-        .unwrap()
-    }
-
-    /// The join request that waits for `server`, once it came.
-    async fn request(&mut self) -> Requested {
-        let session = self.server_session.as_mut().unwrap();
-        let waited = tokio::time::timeout(Duration::from_secs(10), async {
-            loop {
-                match session.next().await {
-                    Some(Pushed::Requests(requests)) if !requests.is_empty() => {
-                        return requests[0];
-                    }
-                    Some(_) => continue,
-                    None => panic!("the session ended: {}", session.ended()),
-                }
-            }
-        });
-        waited.await.expect("a join request within 10 s")
-    }
-
-    /// `server` adds the device of `request` as `phone`, a controller; from then on the runner
-    /// takes every list the hub sends.
-    async fn accept(&mut self, request: Requested) {
-        let added = Change::sign(
-            self.server_device.list.head(),
-            Action::Add {
-                key: request.key,
-                name: "phone".to_owned(),
-                role: Role::Controller,
-            },
-            &self.server,
-        );
-        let mut session = self.server_session.take().unwrap();
-        self.server_device
-            .submit(&mut session, added)
-            .await
-            .unwrap();
-        let (mut device, members) = (self.server_device.clone(), self.runner.members.clone());
+        // From then on the runner takes every list the hub sends, as its daemon does.
+        let members = runner.members.clone();
         tokio::spawn(async move {
             while let Some(pushed) = session.next().await {
                 if let Pushed::List(list) = pushed
@@ -433,6 +382,20 @@ impl Place {
                 }
             }
         });
+        Place {
+            dir,
+            served,
+            runner,
+        }
+    }
+
+    /// Pair mode opened on the hub, as `flottille-hub pair` opens it: the code its QR holds.
+    fn pair_code(&self) -> String {
+        let at = url(self.served.address());
+        let code = self
+            .served
+            .with_hub(|hub| hub.open_pairing(&at, None).unwrap().1);
+        code.code().unwrap()
     }
 
     fn phone_folder(&self) -> String {
@@ -443,27 +406,20 @@ impl Place {
         Core::new(self.phone_folder(), Arc::new(TestSealer)).unwrap()
     }
 
-    /// The phone joined from the invitation's QR: the words it showed and those `server` saw.
-    async fn joined(&mut self, phone: &Core) -> (Vec<String>, Vec<String>) {
-        let code = self.invitation().await;
-        let pairing = phone.join(code.clone()).await.unwrap();
-        let request = self.request().await;
-        let invitation = Invitation::from_code(&code).unwrap();
-        let seen_by_server: Vec<String> =
-            verification_words(&request.key, &self.server.public(), &invitation.token)
-                .iter()
-                .map(|word| (*word).to_owned())
-                .collect();
-        self.accept(request).await;
-        tokio::time::timeout(Duration::from_secs(10), pairing.accepted())
-            .await
-            .expect("accepted within 10 s")
-            .unwrap();
-        (pairing.words(), seen_by_server)
+    /// The phone paired from the QR of the hub's pair mode, as `phone`, a controller.
+    async fn joined(&self, phone: &Core) {
+        let code = self.pair_code();
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            phone.join(code, "phone".to_owned(), "controller".to_owned()),
+        )
+        .await
+        .expect("paired within 10 s")
+        .unwrap();
     }
 
     /// The phone joined, connected, and linked to `server`.
-    async fn linked(&mut self) -> (Arc<Core>, Arc<Taken>) {
+    async fn linked(&self) -> (Arc<Core>, Arc<Taken>) {
         let phone = self.phone();
         self.joined(&phone).await;
         let taken = Arc::new(Taken::default());
@@ -479,9 +435,12 @@ impl Place {
     }
 }
 
+fn url(address: SocketAddr) -> String {
+    format!("http://{address}")
+}
 #[tokio::test(flavor = "multi_thread")]
 async fn the_core_joins_through_the_hub_from_a_qr_and_links_to_the_runner() {
-    let mut place = Place::new().await;
+    let place = Place::new().await;
     let phone = place.phone();
     assert!(!phone.joined());
     place.joined(&phone).await;
@@ -538,12 +497,34 @@ async fn the_core_joins_through_the_hub_from_a_qr_and_links_to_the_runner() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn the_core_shows_the_same_four_words_as_the_inviting_member() {
-    let mut place = Place::new().await;
+async fn the_core_pins_the_hub_its_pair_code_names() {
+    let place = Place::new().await;
     let phone = place.phone();
-    let (shown_by_the_phone, seen_by_the_inviter) = place.joined(&phone).await;
-    assert_eq!(shown_by_the_phone.len(), 4);
-    assert_eq!(shown_by_the_phone, seen_by_the_inviter);
+    // A code whose hub key is not the hub's: another hub answers at its address.
+    let code = PairCode::from_code(&place.pair_code()).unwrap();
+    let other = PairCode {
+        hub_key: device_key(9).public(),
+        ..code
+    }
+    .code()
+    .unwrap();
+    let refused = phone
+        .join(other, "phone".to_owned(), "controller".to_owned())
+        .await
+        .unwrap_err();
+    assert!(
+        refused
+            .to_string()
+            .contains("another key than the one this device pinned"),
+        "{refused}"
+    );
+    assert!(!phone.joined());
+
+    // The hub's own code pairs, and the hub's key is the one the phone kept.
+    place.joined(&phone).await;
+    let file = Path::new(&place.phone_folder()).join("hub.json");
+    let kept: Device = serde_json::from_slice(&std::fs::read(file).unwrap()).unwrap();
+    assert_eq!(kept.hub, place.served.with_hub(|hub| hub.key()));
     place.served.stop().await;
 }
 
@@ -570,8 +551,6 @@ async fn lying_hub(folder: &Path, frames: Vec<ToDevice>) -> SocketAddr {
                     let answer = ToDevice::Answer {
                         id: asked.id,
                         refused: None,
-                        proof: None,
-                        token: None,
                     };
                     if session.send(&answer).await.is_err() {
                         return;
@@ -585,7 +564,7 @@ async fn lying_hub(folder: &Path, frames: Vec<ToDevice>) -> SocketAddr {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_list_change_no_member_signed_is_refused_by_the_core() {
-    let mut place = Place::new().await;
+    let place = Place::new().await;
     let phone = place.phone();
     place.joined(&phone).await;
     drop(phone);
@@ -617,7 +596,7 @@ async fn a_list_change_no_member_signed_is_refused_by_the_core() {
         .unwrap();
     let view = until(&phone, "the list refused", |view| !view.said.is_empty()).await;
     assert!(
-        view.said[0].contains("refused") && view.said[0].contains("not a member"),
+        view.said[0].contains("refused") && view.said[0].contains("neither a member nor the hub"),
         "{:?}",
         view.said
     );
@@ -634,7 +613,7 @@ async fn a_list_change_no_member_signed_is_refused_by_the_core() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn requests_are_signed_with_the_device_key() {
-    let mut place = Place::new().await;
+    let place = Place::new().await;
     let (phone, _taken) = place.linked().await;
     place
         .runner
@@ -701,7 +680,7 @@ async fn requests_are_signed_with_the_device_key() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn events_resume_after_the_last_seen_on_a_new_link() {
-    let mut place = Place::new().await;
+    let place = Place::new().await;
     let (phone, taken) = place.linked().await;
     for n in 1..=3 {
         place.runner.emit(
@@ -747,7 +726,7 @@ async fn events_resume_after_the_last_seen_on_a_new_link() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn the_view_state_follows_a_conversation_in_batches() {
-    let mut place = Place::new().await;
+    let place = Place::new().await;
     place.runner.answer(
         "agent.list",
         json!({"agents": [{"id": "a1", "project": "app", "title": "Fix the login", "state": "idle",
