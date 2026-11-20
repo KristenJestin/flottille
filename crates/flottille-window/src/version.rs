@@ -21,7 +21,6 @@ use serde_json::{Value, json};
 
 use crate::actions::Command;
 use crate::shell::Shell;
-use crate::state::AgentState;
 
 /// What the section says once a build is staged.
 pub const READY: &str = "Ready: applied at the next start";
@@ -54,6 +53,8 @@ pub struct Shown {
     pub when_idle: bool,
     /// What the daemon's start refused of a staged build.
     pub refused: Option<String>,
+    /// The sessions a restart stops, as the daemon said them: each `(id, title)`.
+    pub stops: Vec<(String, Option<String>)>,
 }
 
 impl Shown {
@@ -76,6 +77,15 @@ impl Shown {
             download_failed: text("download_failed"),
             when_idle: value["restart"] == "idle",
             refused: text("refused"),
+            stops: value["stops"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|session| {
+                    let id = session["id"].as_str()?.to_owned();
+                    Some((id, session["title"].as_str().map(str::to_owned)))
+                })
+                .collect(),
         }
     }
 
@@ -123,6 +133,9 @@ pub struct VersionSection {
     shown: Option<Shown>,
     /// A request sent, until the daemon answers: its buttons wait.
     asking: bool,
+    /// Restart to update was clicked: the daemon's answer to `update.show` says which sessions
+    /// it stops, read then rather than from the last event (an agent starting sends none).
+    restarting: bool,
     /// The sessions the restart stops, while its confirmation is open (kept while it fades out).
     stopping: Vec<String>,
     confirming: bool,
@@ -134,6 +147,7 @@ impl VersionSection {
             shell,
             shown: None,
             asking: false,
+            restarting: false,
             stopping: Vec::new(),
             confirming: false,
         }
@@ -181,6 +195,18 @@ impl VersionSection {
         cx: &mut Context<Self>,
     ) {
         self.asking = false;
+        if method == "update.show" && std::mem::take(&mut self.restarting) {
+            if let Ok(shown) = &answer {
+                self.set_shown(Shown::of(shown), cx);
+                // The shell is being updated while it hands the answer: read it after.
+                let this = cx.entity().downgrade();
+                cx.defer(move |cx| {
+                    this.update(cx, |this, cx| this.ask_restart(cx)).ok();
+                });
+            }
+            cx.notify();
+            return;
+        }
         match answer {
             Ok(shown) => self.set_shown(Shown::of(&shown), cx),
             Err(why) if method != "update.show" => {
@@ -214,30 +240,49 @@ impl VersionSection {
         self.ask("update.set", json!({"check": check}), cx);
     }
 
-    /// Restart to update: at once when no agent runs, else the confirmation says which sessions
-    /// stop and offers to wait until none runs.
+    /// Restart to update: the daemon says which sessions a restart stops, then it restarts at
+    /// once when none, else the confirmation lists them and offers to wait until no agent runs.
     pub fn restart(&mut self, cx: &mut Context<Self>) {
-        let running: Vec<String> = self
+        if self.asking {
+            return;
+        }
+        self.restarting = true;
+        self.ask("update.show", json!({}), cx);
+    }
+
+    fn ask_restart(&mut self, cx: &mut Context<Self>) {
+        let stops = self
+            .shown
+            .as_ref()
+            .map(|shown| shown.stops.clone())
+            .unwrap_or_default();
+        if stops.is_empty() {
+            self.ask("update.restart", json!({"when": "now"}), cx);
+            return;
+        }
+        // The window's title of each, as its sidebar says it, else the daemon's.
+        let titles = self
             .shell
             .upgrade()
             .map(|shell| {
-                shell
-                    .read(cx)
-                    .snapshot()
-                    .sessions
+                let shell = shell.read(cx);
+                let sessions = &shell.snapshot().sessions;
+                stops
                     .iter()
-                    .filter(|session| session.mark == Some(AgentState::Running))
-                    .map(|session| session.title.clone())
+                    .map(|(id, title)| {
+                        sessions
+                            .iter()
+                            .find(|session| &session.id == id)
+                            .map(|session| session.title.clone())
+                            .or_else(|| title.clone())
+                            .unwrap_or_else(|| id.clone())
+                    })
                     .collect()
             })
             .unwrap_or_default();
-        if running.is_empty() {
-            self.ask("update.restart", json!({"when": "now"}), cx);
-        } else {
-            self.stopping = running;
-            self.confirming = true;
-            cx.notify();
-        }
+        self.stopping = titles;
+        self.confirming = true;
+        cx.notify();
     }
 
     /// The confirmation's answer: now, stopping the sessions, or once no agent runs.

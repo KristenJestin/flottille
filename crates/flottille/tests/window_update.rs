@@ -232,7 +232,11 @@ fn restart_to_update_with_agents_running_asks_first(cx: &mut TestAppContext) {
     click(cx, "version-restart-button");
 
     let section = shell.read_with(cx, |s, _| s.version().clone());
-    assert!(section.read_with(cx, |section, _| section.is_confirming()));
+    // The daemon is asked which sessions a restart stops first.
+    until(&shell, cx, "the restart asks first", |cx| {
+        section.read_with(cx, |section, _| section.is_confirming())
+    });
+    settle(cx);
     assert!(
         visible(cx, "version-restart"),
         "the one confirmation dialog"
