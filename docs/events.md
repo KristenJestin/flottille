@@ -374,6 +374,18 @@ agent's ask while it is open: `agent`, `ask` (the request's number), `project`, 
 `vault.ask_answered`, an event of the agent that opened it, closes it: `ask`, `project`, `name`,
 `outcome` (`set` or `dismissed`). Never a secret.
 
+### `notifications.changed`
+
+The notification centre changed (`docs/protocol.md`, `notifications.list`): a notification was
+added, resolved or marked read, or the old ones were forgotten. A client reads the list again, or
+reads on after the last number it saw.
+
+| Field | |
+|---|---|
+| `ids` | The numbers of the notifications added, resolved or marked read, sorted; empty when only the old ones went. |
+| `pruned` | `true` when notifications older than 30 days, or beyond the newest 1,000, were forgotten. |
+| `how` | `read` when a client marked them read (`notifications.read`), `kept` when the daemon added or resolved them from the events, or forgot the old. |
+
 ### `remote.join_requested`
 
 A new device answered an invitation of this machine's member, and waits for it to accept or refuse

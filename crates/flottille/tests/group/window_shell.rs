@@ -13,6 +13,8 @@ mod remote;
 
 #[path = "../window_appearance.rs"]
 mod window_appearance;
+#[path = "../window_centre.rs"]
+mod window_centre;
 #[path = "../window_clicks.rs"]
 mod window_clicks;
 #[path = "../window_code_copy.rs"]

@@ -236,6 +236,8 @@ pub const METHODS: &[(&str, Class)] = &[
     ("leave.list", Read),
     ("leave.withdraw", Drive),
     ("inbox.list", Read),
+    ("notifications.list", Read),
+    ("notifications.read", Drive),
     ("provider.list", Read),
     ("provider.enable", Drive),
     ("provider.disable", Drive),

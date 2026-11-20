@@ -1333,7 +1333,11 @@ fn zombies_of(daemon: u64) -> Vec<u64> {
 
 #[test]
 fn a_client_started_through_run_is_refused_and_nothing_it_sent_is_done() {
-    let user = User::with_fake_agent().with_allowing_judge();
+    // The daemon's refusal by the client's ancestry is what is tested: the run's private mount
+    // namespace, which hides the daemon's socket before that, is left out.
+    let user = User::with_fake_agent()
+        .with_allowing_judge()
+        .with_env("FLOTTILLE_TEST_NO_USER_NAMESPACES", "1");
     let (mcp, folder) = session(&user);
     let pid = user.status()["pid"].as_u64().unwrap();
     std::fs::write(folder.join("client.sh"), stop_script(&user, "client.out")).unwrap();
@@ -1356,7 +1360,11 @@ fn a_client_started_through_run_is_refused_and_nothing_it_sent_is_done() {
 
 #[test]
 fn a_client_that_outlives_its_command_and_its_parent_is_still_refused() {
-    let user = User::with_fake_agent().with_allowing_judge();
+    // The daemon's refusal by the client's ancestry is what is tested: the run's private mount
+    // namespace, which hides the daemon's socket before that, is left out.
+    let user = User::with_fake_agent()
+        .with_allowing_judge()
+        .with_env("FLOTTILLE_TEST_NO_USER_NAMESPACES", "1");
     let (mcp, folder) = session(&user);
     let pid = user.status()["pid"].as_u64().unwrap();
     // A double fork out of the run's session: `setsid -f` starts `late.sh` in a session of its
@@ -1408,8 +1416,11 @@ fn a_client_that_outlives_its_command_and_its_parent_is_still_refused() {
 #[test]
 fn daemon_stop_from_a_run_never_ends_a_stuck_daemon() {
     // The test's own end asks the stuck daemon to stop too: it is not waited for 30 s to be ended.
+    // The daemon's refusal by the client's ancestry is what is tested: the run's private mount
+    // namespace, which hides the daemon's socket before that, is left out.
     let user = User::with_fake_agent()
         .with_allowing_judge()
+        .with_env("FLOTTILLE_TEST_NO_USER_NAMESPACES", "1")
         .with_env("FLOTTILLE_TEST_HOLD", "1")
         .with_env("FLOTTILLE_STOP_WAIT_MS", "1000");
     project(&user);

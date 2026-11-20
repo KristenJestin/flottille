@@ -306,8 +306,13 @@ fn a_run_without_windows_cannot_reach_x11() {
             windows(&user, state);
         }
         let reached = reached(&mcp, &place, &socket, &name);
-        // By its abstract name, from Landlock's sixth ABI. By its path it is still reached: the
-        // gap the private mount namespace (#976) closes.
+        // By its path, the folder is an empty one in the run's namespace.
+        if common::user_namespaces() {
+            assert_eq!(reached["path"], "FileNotFoundError", "{state:?}: {reached}");
+        } else {
+            eprintln!("skipped: this kernel refuses user namespaces to this user");
+        }
+        // By its abstract name, from Landlock's sixth ABI.
         match landlock_abi() {
             abi if abi >= 6 => {
                 assert_eq!(
@@ -318,6 +323,50 @@ fn a_run_without_windows_cannot_reach_x11() {
             abi => eprintln!("skipped: this kernel's Landlock (ABI {abi}) has no abstract scope"),
         }
     }
+}
+
+#[test]
+fn the_shared_display_folder_is_still_reachable_in_the_namespace() {
+    if !common::user_namespaces() {
+        eprintln!("skipped: this kernel refuses user namespaces to this user");
+        return;
+    }
+    let user = user_with_display();
+    let _wayland = wayland_socket(&user);
+    let (_, mcp, place) = session(&user);
+    windows(&user, "on");
+    // One run: its display folder goes when it ends.
+    std::fs::write(
+        place.join("shown.py"),
+        format!(
+            "import json, os, socket\n\
+             out = {{'files': sorted(os.listdir(os.environ['XDG_RUNTIME_DIR']))}}\n\
+             for name, path in [('shown', os.environ['XDG_RUNTIME_DIR'] + '/wayland-0'),\n\
+             \x20   ('session', {session:?})]:\n\
+             \x20   s = socket.socket(socket.AF_UNIX)\n\
+             \x20   try:\n\
+             \x20       s.connect(path)\n\
+             \x20       out[name] = 'connected'\n\
+             \x20   except OSError as e:\n\
+             \x20       out[name] = type(e).__name__\n\
+             print(json.dumps({{'shown': out}}))\n",
+            session = user.path("runtime/wayland-0").to_str().unwrap(),
+        ),
+    )
+    .unwrap();
+
+    let ran = done(mcp.call("run", json!({"line": "python3 shown.py"})));
+    let line = ran
+        .lines()
+        .find(|line| line.trim_start().starts_with("{\"shown\""))
+        .unwrap_or_else(|| panic!("{ran}"));
+    let out = serde_json::from_str::<Value>(line.trim()).unwrap()["shown"].clone();
+
+    // Its own folder, under the runtime folder the namespace empties, put back in it.
+    assert_eq!(out["files"], json!(["wayland-0"]), "{out}");
+    assert_eq!(out["shown"], "connected", "{out}");
+    // Beside it, the session's own socket is not there.
+    assert_eq!(out["session"], "FileNotFoundError", "{out}");
 }
 
 #[test]

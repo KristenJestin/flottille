@@ -35,6 +35,8 @@ mod judge;
 mod models_left;
 #[path = "../models_listing.rs"]
 mod models_listing;
+#[path = "../private_mounts.rs"]
+mod private_mounts;
 #[path = "../providers.rs"]
 mod providers;
 #[path = "../quota.rs"]

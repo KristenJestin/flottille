@@ -650,6 +650,35 @@ pub fn doctor(paths: &Paths, json: bool) -> Result<ExitCode> {
             .push(warning.into());
     }
     report["forges_and_trackers"] = programs.into();
+    // The sandbox as the daemon has it: what confines its commands is its own state, not this
+    // process's. Never a daemon started for it: one that will not start is what doctor may be run
+    // to find out about. With none running, this process probes what one would find.
+    let sandbox = match crate::client::Client::connect(paths) {
+        Ok(Some(mut client)) => client
+            .request("daemon.status", Value::Null)
+            .map(|status| status["sandbox"].clone()),
+        Ok(None) => {
+            crate::ssh_agent::find();
+            let mut sandbox = crate::mounts::sandbox();
+            sandbox["probed"] = "no daemon running: probed by doctor".into();
+            Ok(sandbox)
+        }
+        Err(error) => Err(error),
+    };
+    let warnings = report["warnings"]
+        .as_array_mut()
+        .expect("a list of warnings");
+    match &sandbox {
+        Ok(sandbox) => warnings.extend(
+            sandbox["warnings"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .cloned(),
+        ),
+        Err(error) => warnings.push(format!("the daemon did not say its sandbox: {error}").into()),
+    }
+    report["sandbox"] = sandbox.unwrap_or(Value::Null);
     if json {
         println!("{report}");
     } else {

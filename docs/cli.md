@@ -120,6 +120,12 @@ command), never a failure, and `ready` stays the providers'. `--json` adds `"for
 and trackers that use it (`"shop: api"`, `"shop: tracker"`) and its `warning` (`null` when
 nothing is wrong), the warnings also being in `"warnings"`.
 
+The sandbox's state is the daemon's, asked of it; doctor starts no daemon (one that will not start
+is what it may be run to find out about). `--json` adds `"sandbox"`, as `daemon.status` gives it
+(`docs/protocol.md`), and each gap it says (no private mount namespace, or a probe of it that
+concluded nothing) is a warning. With no daemon running, doctor's own process probes what one would find, and
+`"sandbox"` says so: `"probed": "no daemon running: probed by doctor"`.
+
 ```
 $ flottille doctor
 ok   claude: 2.1.300 (/usr/bin/claude)
@@ -1510,6 +1516,33 @@ $ flottille inbox
     2. Title of the pull request?
 Answer a question with `flottille agent answer <agent> --question <n> --answer "1=…"`, one --answer per question; `flottille inbox --after <n>` lists what came since.
 ```
+
+### `flottille notifications [--unread] [--json]`
+
+The notifications Flottille keeps for you, one list read and unread whichever client you read it
+from (`docs/protocol.md`, `notifications.list`): a request that waits, a question asked, what a
+session did to a ticket or a pull request, a report, a failure. Oldest first, each with its number,
+`new`, `read` or `done` (answered), its title, its project and its excerpt. The first line counts
+the unread: `1 need you · 4 new`, those that wait for you (a request, a question, a vault entry)
+and the others, apart. `--unread` lists only the unread ones; `--json` prints `notifications.list`:
+`{"notifications": [{"id", "at", "kind", "session", "project", "workspace", "title", "excerpt",
+"read_at", "resolved", "needs_you"}], "unread": {"needs_you", "new"}}`.
+
+```
+$ flottille notifications --unread
+1 need you · 1 new
+#12 new Request #3 waits for you (shop/login): Read .env
+#13 new Opened a pull request (shop/login): Add the login page
+Mark one read with `flottille notifications read <id>`, all with `--all`.
+```
+
+A request answered with `flottille approve` or `flottille deny`, or from the window, is `done` here
+at once. `flottille inbox` stays what it was: the agents' view of the stored events.
+
+### `flottille notifications read <id|--all>`
+
+Marks a notification read by its number, or all of them with `--all`, and says how many changed.
+The window's bell follows (`notifications.changed`). Reading a request does not answer it.
 
 ### `flottille runs list [project]`
 

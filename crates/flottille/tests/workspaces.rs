@@ -1223,7 +1223,11 @@ fn a_setup_line_cannot_read_the_user_s_runtime_folder() {
 
     assert_eq!(fixture.settled("login")["state"], "ready");
     let read = std::fs::read_to_string(&out).unwrap();
-    assert!(read.contains("Permission denied"), "{read}");
+    // Denied by Landlock, or not there at all where the setup's namespace empties the folder.
+    assert!(
+        read.contains("Permission denied") || read.contains("No such file or directory"),
+        "{read}"
+    );
     assert!(!read.contains("kept from setups"), "{read}");
     assert!(read.contains("open to setups"), "{read}");
 }

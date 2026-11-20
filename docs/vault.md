@@ -315,7 +315,33 @@ push the gate let through, and its checks' dry run, are the exception (below):
   login (and its reload of the page), are also granted their display folder,
   `$XDG_RUNTIME_DIR/flottille/display/<connection>`, which holds a hard link of the Wayland socket
   alone (`docs/extensions.md`, "Adapters"), without the right to link or move a file out of it.
-  The folder is the one the daemon made, never one a variable of the connection names.
+  The folder is the one the daemon made, never one a variable of the connection names;
+- Landlock's rules do not govern connecting to a socket by its path before its ninth ABI, so the
+  process also starts in a **private mount namespace** of its own, where the kernel lets a user
+  make one (an unprivileged user namespace): the user's runtime folders are empty folders there
+  (a `tmpfs`), so the bus, the user's systemd, the portal, the sound server and an SSH agent
+  that lives there are not found by their path at all. Only what the daemon itself gives the
+  process is put back in them, at the same path: the display folder of a run or a connection's
+  browser shown on the screen, and the SSH agent's socket lent to the daemon's own fetch (below).
+  The daemon's own socket is not among them. X11's socket folder (`/tmp/.X11-unix`) is emptied
+  the same way, unless the process is given X11's display. A session bus the daemon's
+  `DBUS_SESSION_BUS_ADDRESS` names by a path outside the runtime folders (`unix:path=/tmp/dbus-…`,
+  as `dbus-launch` makes one), found at the daemon's start, has its path hidden in every
+  confined process, whatever is there now: a socket or a file under `/dev/null`, a folder under
+  an empty read-only one, and nothing at all where nothing is there (nothing is reached by that
+  path then). The daemon also keeps what tells the socket found from another (its device, inode
+  and change time: an inode freed is often given to the next file made); once the socket at the
+  path is no longer that one, gone or replaced, no push the gate lets through is given the bus's
+  address (below), and `flottille doctor` says so in its warnings. The mounts are made by the process before it runs its
+  program, which runs as the user, not as root of the namespace, with `no_new_privs` set first
+  (a program with file capabilities gains none in the namespace): it holds no capability to
+  unmount or remount them, and a namespace it makes inside gets them locked. Landlock's rules
+  apply after it, unchanged. Where the kernel refuses (a kernel built without user namespaces, a
+  distribution that forbids them to unprivileged users), the process starts without it, and the
+  daemon's log and `flottille doctor` (its `sandbox` part, with Landlock's ABI, as the daemon
+  has it) say so. The daemon probes it once, by a child that makes one: a probe that concludes
+  nothing (no process could be made, the user's namespaces are all taken) is not kept, and the
+  process still starts in its namespace, or fails to start.
 
 **The SSH agent stays out of every run.** What the daemon runs gets no `SSH_AUTH_SOCK`. The socket
 the daemon's own environment named when it started (resolved then, links followed) is also kept out
@@ -367,8 +393,25 @@ that reaches a remote also gets:
 line, no wrapper) the user, the judge, a rule or Full mode let through, and the dry run the
 project's commit checks make of it, run with no Landlock and the daemon's own environment, as if
 the user had typed the push: the session bus (so the keyring), the SSH agent, the credential
-helper and the forge command line's sign-in are theirs. Only `core.hooksPath=/dev/null` is added,
-and the project's and the workspace's variables are not applied (`docs/commands.md`, "The
+helper and the forge command line's sign-in are theirs. Only these are added:
+
+- `core.hooksPath=/dev/null`;
+- `GIT_SSH_COMMAND`, so that a `core.sshCommand` a run wrote in the repository is not what signs
+  in: the user's own when they have one (the daemon's `GIT_SSH_COMMAND`, else their global
+  `core.sshCommand`, read at the daemon's start, for several accounts of one forge), else the
+  `ssh` found at the daemon's start, as for its own fetch (above);
+- `GIT_ALLOW_PROTOCOL` set to git's own transports (`ssh:https:http:git:file`), which wins over
+  the `protocol.*.allow` settings: a URL a run set through a helper (`ext::<command>`, a
+  `git-remote-<name>`) is not run. The push's remote is git's to resolve (the line's options, the
+  branch's `pushRemote`, `remote.pushDefault`), and its URL a setting a run can write, so the
+  transports allowed are git's own five rather than the one protocol of a remote. A push through
+  a remote helper of the user's own is refused too;
+- no `DBUS_SESSION_BUS_ADDRESS` once the bus the daemon found at its start by a path outside the
+  runtime folders is gone or replaced (above): what is at that path now may be a run's. The
+  daemon's own use of the keyring (the vault) is unchanged: it still reaches the bus its
+  environment names.
+
+The project's and the workspace's variables are not applied (`docs/commands.md`, "The
 environment"). The other git reads made for a push, and the probes of a push's task (its `ready`
 and `url` commands), run in the sandbox.
 
@@ -383,7 +426,7 @@ server, has no `DISPLAY` and no `XAUTHORITY`, and Landlock keeps X11's abstract 
 sixth ABI, Linux 6.12). Its sockets by their path, under `/tmp/.X11-unix`, are not denied: a rule
 on `/tmp` takes from a process what is made there after it started (a file made there could no
 longer be moved or linked into its worktree, a socket made there by another process could not be
-reached), so the private mount namespace of #976 masks the folder instead (below, "The gaps").
+reached), so the private mount namespace empties the folder instead (above).
 Only a run of a project that lets its runs open windows, and a connection's browser that is
 shown, in a session without Wayland, are given X11 (`docs/tools.md`, `docs/extensions.md`): their
 display folder says so, and their process is not bound to the scope. The scope keeps out every
@@ -396,17 +439,37 @@ The gaps, where the platform does not allow more:
 
 - Landlock denies **connecting** to a socket by its path from its ninth ABI only (the right
   `LANDLOCK_ACCESS_FS_RESOLVE_UNIX`). Before it, the runtime folder cannot be listed and its files
-  cannot be opened, but a process that guesses the bus's path can still connect to it;
-- from the ninth ABI on, connecting is denied to every socket of the runtime folder, not only the
-  bus: a gpg-agent socket there cannot be reached, so a commit signed through gpg-agent fails;
+  cannot be opened, but a process that guesses the bus's path could still connect to it: the
+  private mount namespace is what keeps it out there, where the kernel gives one (below);
+- the runtime folder is emptied whole, and from the ninth ABI connecting is denied to every
+  socket of it, not only the bus: a gpg-agent socket there cannot be reached, so a commit signed
+  through gpg-agent fails;
 - below the ninth ABI, connecting is not governed: a run gets no `SSH_AUTH_SOCK`, but one that
-  guesses the agent's path can still connect to it, as to the bus;
+  guesses the path of an agent outside the runtime folders (`/tmp/ssh-…/agent.…`, a password
+  manager's under the home) can still connect to it: the private mount namespace empties the
+  runtime folders alone;
+- where the kernel refuses user namespaces, a confined process has no private mount namespace:
+  below Landlock's ninth ABI it connects to the bus and the other sockets of the runtime folder
+  by their path, and it reaches X11's by theirs. The daemon's log says so at its start, and `flottille doctor` in its warnings
+  (`sandbox.private_mounts` false in `--json`);
+- a session bus outside the runtime folders is hidden at its path only: where its socket is in
+  a folder a confined command can write (`/tmp/dbus-…/bus`, say), the command can move that
+  folder (only the masked socket itself is a mount point), and the bus found at the start is then
+  reached at its new path, which nothing hides. A socket a confined command made at the bus's
+  path is hidden from the others, but the daemon's own keyring use would reach it, since its
+  environment still names the path. Any change of the socket's change time (a `chmod`, a new
+  link, a bus started there again) counts as replaced: the push loses the bus's address while
+  the path stays hidden;
+- `/proc/<pid>/root` leads to the mounts of another process: Landlock keeps a confined process
+  from every process outside its domain, so it is closed wherever Landlock is used (its second
+  ABI or later), and open without it;
 - a push the gate let through runs with what the repository's settings say, as the user's own
   push from that folder would: a script the gate never read may have changed them before
-  (`credential.helper`, `core.sshCommand`, `core.fsmonitor`, `url.*.insteadOf`), and that applies
-  to the push, outside the sandbox, with the user's credentials. So does what the user's
-  `~/.ssh/config` runs (`ProxyCommand`, `Match exec`), which a confined command can still write
-  until the private mount namespace (#976) mounts `~/.ssh` read-only. The gate judges the push's
+  (`credential.helper`, `core.fsmonitor`, `url.*.insteadOf`; not `core.sshCommand` nor a helper
+  URL, above), and that applies to the push, outside the sandbox, with the user's credentials. So
+  does what the user's `~/.ssh/config` runs (`ProxyCommand`, `Match exec`, an `Include`d file),
+  which **a confined command can still write**: `~/.ssh` is not read-only to it, and protecting
+  every file `ssh` reads against a hostile run is left to #1138. The gate judges the push's
   line, not the repository it runs in: an accepted risk, decided so that a push the user allowed
   signs in as theirs does;
 - the daemon's own fetch or listing of an SSH remote runs the user's `~/.ssh/config` with the
@@ -430,12 +493,16 @@ The gaps, where the platform does not allow more:
 - without Landlock (a kernel before 5.19, or one built without it), the process runs as before,
   with only the environment kept from it;
 - a bus listening on an abstract socket (`unix:abstract=…`, older setups) is not a path, and is
-  kept out only from Landlock's sixth ABI on (its abstract scope, above);
-- X11 by its socket's path, until the private mount namespace (#976) gives a run that is not
-  given X11 an empty `/tmp/.X11-unix`: at every ABI, a process can connect to
+  kept out only from Landlock's sixth ABI on (its abstract scope, above). A bus by its path
+  outside the runtime folders is hidden only when the daemon's own `DBUS_SESSION_BUS_ADDRESS`
+  named it at its start: one another program of the session uses, or one started later, is not
+  known, and below Landlock's ninth ABI it is reached by its path;
+- X11 by its socket's path where the kernel refuses the private mount namespace, which gives a
+  process that is not given X11 an empty `/tmp/.X11-unix`: at every ABI, a process can connect to
   `/tmp/.X11-unix/X0` itself (a program of its own, or an X11 library given that path as its
-  display), and below the sixth ABI `DISPLAY=:0` set by itself is enough. The folder is not denied, since a rule on `/tmp` would
-  hold for what is made there (above). And the missing `XAUTHORITY` does not keep it out: an X11
+  display), and below the sixth ABI `DISPLAY=:0` set by itself is enough. The folder is not
+  denied by Landlock, since a rule on `/tmp` would
+hold for what is made there (above). And the missing `XAUTHORITY` does not keep it out: an X11
   client without it reads `~/.Xauthority`, which a run can read, and a display manager's own key
   file (SDDM's `/tmp/xauth_…`) is readable too; a server that lets the user's local connections in
   without a key (`xhost +si:localuser:…`) needs none;
