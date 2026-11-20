@@ -259,6 +259,9 @@ pub struct Shell {
     /// Another machine was chosen, and its first read has not come yet: the connections cut
     /// for it are no broken link.
     switching: bool,
+    /// The wait for that first read: past [`link::NOT_ANSWERING`] the window is back on this
+    /// machine.
+    switch_wait: Option<Task<()>>,
     /// The link's updates, until a task takes them.
     updates: Option<UnboundedReceiver<Update>>,
     _link: Task<()>,
@@ -572,6 +575,7 @@ impl Shell {
             aim,
             machines,
             switching: false,
+            switch_wait: None,
             updates: Some(updates),
             _link: Task::ready(()),
             _clock,
@@ -646,11 +650,28 @@ impl Shell {
                 }
             }
         };
-        // The other machine's events start from its own first: none of this one's is resumed.
         self.switching = true;
+        self.aim_at(aimed, cx);
+        // A machine that went down before its first read would leave the window on a skeleton:
+        // the wait has the limit the window gives a daemon that does not answer.
+        self.switch_wait = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(link::NOT_ANSWERING).await;
+            this.update(cx, |shell, cx| shell.give_up_switching(cx))
+                .ok();
+        }));
+    }
+
+    /// Aims every connection of the window at `aimed` (`None`: this machine), and shows the tree
+    /// as waiting for its first read.
+    fn aim_at(
+        &mut self,
+        aimed: Option<(String, Arc<flottille_link::DeviceKey>)>,
+        cx: &mut Context<Self>,
+    ) {
+        // The other machine's events start from its own first: none of this one's is resumed.
+        let shown = aimed.as_ref().map(|(name, _)| name.clone());
         self.seen.last_seq.store(0, Ordering::SeqCst);
         self.seen.connections.store(0, Ordering::SeqCst);
-        let shown = aimed.as_ref().map(|(name, _)| name.clone());
         self.aim.set(aimed);
         self.seen.last_seq.store(0, Ordering::SeqCst);
         self.seen.connections.store(0, Ordering::SeqCst);
@@ -659,6 +680,32 @@ impl Shell {
             self.sidebar
                 .update(cx, |sidebar, cx| sidebar.set_machines(read, shown, cx));
         }
+    }
+
+    /// The machine chosen gave no first read in time: the window is on this machine again, and
+    /// says why.
+    fn give_up_switching(&mut self, cx: &mut Context<Self>) {
+        self.switch_wait = None;
+        if !std::mem::take(&mut self.switching) {
+            return;
+        }
+        // This machine itself gave no read: its own disconnections are said again from now on.
+        let Some(name) = self.aim.machine() else {
+            return;
+        };
+        let why = self
+            .machines
+            .read(cx)
+            .machines()
+            .and_then(|read| read.machine(&name))
+            .filter(|machine| !machine.online())
+            .map(|machine| format!("{} is {}", machine.name, machine.state_words()))
+            .unwrap_or_else(|| format!("{name} did not answer"));
+        self.aim_at(None, cx);
+        gpui_design_system::toast(
+            gpui_design_system::Toast::failure(format!("{name} cannot be shown")).detail(why),
+            cx,
+        );
     }
 
     /// Applies the updates the link sent since the last call.
@@ -1284,6 +1331,7 @@ impl Shell {
             // what the pages read, not in the events, so they read it again.
             Update::Snapshot(snapshot) => {
                 self.switching = false;
+                self.switch_wait = None;
                 self.set_online(true, cx);
                 self.waiting_for_the_daemon(false, cx);
                 self.main.update(cx, |main, cx| main.set_read(cx));
