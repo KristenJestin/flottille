@@ -599,7 +599,7 @@ pub enum Writing {
 /// Whether the window opens `url` to sign in: the daemon gives an `https` address, or an `http`
 /// one on this machine, and the system's handler is never handed anything else (a `file:` path, a
 /// program's own scheme), whatever the answer says.
-fn sign_in_address(url: &str) -> Result<(), &'static str> {
+pub fn sign_in_address(url: &str) -> Result<(), &'static str> {
     if url.trim().is_empty() {
         return Err("there is no address to open");
     }

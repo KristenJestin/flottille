@@ -433,6 +433,7 @@ fn login_on(paths: &Paths, name: &str, no_browser: bool, machine: &str) -> Resul
     let answer =
         Client::connect_or_start(paths)?.request("connection.login", json!({"name": name}))?;
     let url = answer["url"].as_str().ok_or("the daemon gave no address")?;
+    sign_in_opened(url)?;
     // Held open while the sign-in waits: the browser comes back through it.
     let mut tunnel = Client::connect_or_start(paths)?;
     tunnel.request("tunnel.open", json!({"sign_in": name}))?;
@@ -462,6 +463,13 @@ fn login_on(paths: &Paths, name: &str, no_browser: bool, machine: &str) -> Resul
             }
         }
     }
+}
+
+/// Whether the address of a sign-in another machine's daemon sent may be printed and opened: the
+/// window's own check (`sign_in_address`), that machine's word being no more trusted here.
+fn sign_in_opened(url: &str) -> std::result::Result<(), String> {
+    flottille_window::extensions::connections::sign_in_address(url)
+        .map_err(|why| format!("the sign-in address the other machine sent is not opened: {why}"))
 }
 
 fn list_text(answer: &Value) -> String {
