@@ -498,7 +498,8 @@ hub's change as one no member signed.
 **Built (#1146), from the command line**: `flottille-hub pair`, `role`, `remove`, `devices`,
 `reset`; `flottille remote pair`, `members`, `rename`, `icon`, `colour`, `remove`. The clients sign
 with the device key; the daemon carries what they signed (`remote.*`, `protocol.md`) and says what
-changed as events (`remote.*`, `events.md`). The phone's part is not built.
+changed as events (`remote.*`, `events.md`). The phone pairs through the mobile core ("The Android
+app"); its screens are #826.
 
 **Built (#814, #1146), in the window**: Settings, General, Machines offers **Connect to your hub**
 while this machine is in no member list: one button, which opens a dialog where the code is pasted
@@ -823,12 +824,14 @@ app's private storage:
   succeeded, as a computer's is. The endpoint's key, the phone's "machine" in the member list, is a
   key of its own in that folder with the machine key's care: a member's own key may not be its
   machine's.
-- **Joining** is one function of the core (`join`, then the pairing's `accepted`), today the
-  invitation of "Pairing" with its four words; the hub's pair mode (#1146) replaces it there alone.
-  Once accepted, the phone checks the list back to its root and its inviter, declares its endpoint
-  and keeps its key; every list after is checked against what it kept, and one that does not check
-  is refused and said in the view state, the list kept as it was.
-- **Connected** (`connect`, the Kotlin `Flow` of batches): the control session (presence told), a
+- **Joining** is the hub's pair mode: `join` takes the code of the QR `flottille-hub pair` printed,
+  with the name and role the app proposed and the user confirmed (`controller` or `viewer`; the
+  icon `phone`, the colour of its key). The phone pins the hub's key from the code, proves the
+  secret, checks the list the hub signed back to the hub's key and its root, declares its endpoint
+  and keeps its key. Every list after is checked against what it kept; one that does not check is
+  refused and said in the view state, the list kept as it was.
+- **Connected** (`connect`, the Kotlin `Flow` of batches): the control session (what it is and
+  its presence told), a
   link to each runner of the list, dialled by one function of the core (today the addresses the hub
   tells; through the hub with #1151), each request signed with the device key, and each runner's
   `events.watch` resumed after the last event seen of it, kept in the folder: a new link, or the
