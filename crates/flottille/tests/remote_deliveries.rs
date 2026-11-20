@@ -608,3 +608,32 @@ fn the_pilot_s_machine_lists_its_launches_with_what_it_last_heard() {
     assert_eq!(reported["state"], "ended", "{reported:#}");
     assert!(reported["heard_at"].as_u64().is_some(), "{reported:#}");
 }
+
+#[test]
+fn an_old_ended_launch_is_not_listed() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    script(
+        &server,
+        json!([{"when": "Write the tests of the export.", "times": 1, "do": [
+            {"mcp": {"tool": "report", "arguments": {"text": "The export tests are written."}}}
+        ]}]),
+    );
+    let (_child, launch, _mcp) = child_on_server(&pc, &server, "Write the tests of the export.");
+    prompted(&pc, "The export tests are written.");
+    // Ended with a report, it stays listed while the agent that started it lives.
+    eventually("its report is what was last heard", || {
+        launches(&pc)
+            .first()
+            .is_some_and(|listed| listed["heard"] == "child-report" && listed["state"] == "ended")
+    });
+    let caller = launches(&pc)[0]["caller"].as_str().unwrap().to_owned();
+
+    pc.user
+        .call("agent.stop", json!({"agent": caller}))
+        .unwrap();
+    eventually("the ended launch leaves the list", || {
+        launches(&pc)
+            .iter()
+            .all(|listed| listed["launch"] != launch.as_str())
+    });
+}

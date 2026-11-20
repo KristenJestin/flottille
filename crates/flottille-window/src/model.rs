@@ -1984,9 +1984,15 @@ mod tests {
         let words = |l, m| last_known(&l, m).0;
         assert_eq!(words(launched("started", None), Some(&online)), "running");
         assert_eq!(words(launched("held", None), Some(&online)), "waiting");
+        // Allowed there, it sends nothing back but what it does: what is heard wins over the hold.
+        let report = Some("child-report");
+        assert_eq!(words(launched("held", report), Some(&online)), "reported");
+        assert_eq!(
+            words(launched("held", Some("child-failed")), Some(&online)),
+            "failed"
+        );
         let turn = Some("session-turn-ended");
         assert_eq!(words(launched("started", turn), Some(&online)), "waiting");
-        let report = Some("child-report");
         assert_eq!(words(launched("ended", report), Some(&online)), "reported");
         let off = machine("offline");
         assert!(words(launched("started", None), Some(&off)).starts_with("offline since "));

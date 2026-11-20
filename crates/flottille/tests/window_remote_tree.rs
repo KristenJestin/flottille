@@ -18,7 +18,9 @@ use flottille_window::conversation::Block;
 use flottille_window::device::Device;
 use flottille_window::link::Connect;
 use flottille_window::model::elsewhere_id;
+use flottille_window::project::{SessionLine, session_end_id, session_menu_id, session_row_id};
 use flottille_window::session_link::SessionUpdate;
+use flottille_window::shell::{Selection, bell_session_id};
 use flottille_window::tree::{session_id, session_machine_id};
 use gpui_design_system::omarchy::Environment;
 use gpui_design_system::tie_id;
@@ -476,4 +478,185 @@ fn a_returned_branch_is_named_in_the_report_step(cx: &mut TestAppContext) {
     )
     .unwrap_or_default();
     assert!(said.contains(reference), "{said:?}");
+}
+
+#[gpui_kit::test]
+fn the_project_page_neither_lists_nor_ends_a_session_of_another_machine(cx: &mut TestAppContext) {
+    let (_hub, pc, server) = pc_and_server();
+    let (pilot, mcp) = root(&pc, "auto");
+    let agent = led_on_server(&mcp);
+    eventually("the session runs on server", || {
+        server
+            .user
+            .call("agent.show", json!({"agent": agent}))
+            .is_ok()
+    });
+    let (shell, cx, row) = the_led_row(&pc, &agent, cx);
+
+    // This machine's daemon does not know it: nothing but its row in the tree reads it.
+    shell.read_with(cx, |s, _| {
+        assert!(s.snapshot().session(&row).is_none(), "a session of pc's");
+        assert!(
+            s.snapshot().sessions.iter().all(|s| s.elsewhere.is_none()),
+            "among pc's sessions"
+        );
+    });
+
+    shell.update_in(cx, |s, window, cx| {
+        s.open(Selection::Project("app".into()), window, cx)
+    });
+    until(&shell, cx, "the project's page is shown", |cx| {
+        shell.read_with(cx, |s, cx| s.main().read(cx).project_page().is_some())
+    });
+    settle(&shell, cx);
+    let lines: Vec<SessionLine> = shell.read_with(cx, |s, cx| {
+        let page = s.main().read(cx).project_page().unwrap().clone();
+        let blocks = page.read(cx).blocks().to_vec();
+        blocks
+            .iter()
+            .flat_map(|block| block.read(cx).data().sessions.clone())
+            .collect()
+    });
+    assert!(
+        lines.iter().any(|line| line.id == pilot),
+        "the pilot is listed"
+    );
+    assert!(lines.iter().all(|line| line.id != row), "listed as pc's");
+    let leads: Vec<&String> = lines
+        .iter()
+        .flat_map(|l| l.leads.iter().map(|(id, _)| id))
+        .collect();
+    assert!(
+        !leads.contains(&&row),
+        "its pilot says it leads it here: {leads:?}"
+    );
+    assert!(
+        !present(cx, session_row_id(&row)),
+        "a line of the project page"
+    );
+    assert!(
+        !present(cx, session_menu_id(&row)),
+        "a menu that ends it here"
+    );
+    assert!(!present(cx, session_end_id(&row)), "an end asked of pc");
+}
+
+#[gpui_kit::test]
+fn the_inbox_and_question_cards_name_the_other_machine(cx: &mut TestAppContext) {
+    let (_hub, pc, server) = pc_and_server();
+    server.user.fake_script(json!({"turns": [
+        {"when": "ask me", "do": [
+            {"mcp": {"tool": "ask_user", "arguments": {"question": "Which region?"}}},
+            {"say": "Asked."}]}
+    ]}));
+    let started = server
+        .user
+        .call("agent.run", json!({"project": "app", "message": "ask me"}))
+        .unwrap();
+    let id = started["agent"]["id"].as_str().unwrap().to_owned();
+    let (shell, cx) = window(&pc, cx);
+    settle(&shell, cx);
+
+    shell.update(cx, |s, cx| s.choose_machine(Some("server".to_owned()), cx));
+    until(&shell, cx, "server's question in the inbox", |cx| {
+        shell.read_with(cx, |s, _| {
+            s.machine_shown().as_deref() == Some("server")
+                && s.snapshot()
+                    .bell
+                    .iter()
+                    .any(|item| item.session == id && item.key.starts_with("question-"))
+        })
+    });
+    let key = shell.read_with(cx, |s, _| {
+        s.snapshot()
+            .bell
+            .iter()
+            .find(|item| item.session == id)
+            .unwrap()
+            .key
+            .clone()
+    });
+    cx.update(|window, cx| window.click("bell", cx));
+    settle(&shell, cx);
+    let said = label(cx, bell_session_id(&key)).unwrap_or_default();
+    assert!(said.ends_with(" · on server"), "{said:?}");
+    cx.update(|window, cx| window.click("bell", cx));
+    settle(&shell, cx);
+
+    let page = open_page(&shell, &id, cx);
+    until(&shell, cx, "the question's card", |cx| {
+        page.read_with(cx, |p, cx| p.ask_dock().read(cx).shown().is_some())
+    });
+    let seq = page.read_with(cx, |p, cx| {
+        p.ask_dock().read(cx).shown().unwrap().read(cx).seq()
+    });
+    settle(&shell, cx);
+    let meta = label(
+        cx,
+        gpui_kit::ElementId::Name(format!("ask-{seq}-card-meta").into()),
+    )
+    .unwrap_or_default();
+    assert!(meta.ends_with(" · on server"), "{meta:?}");
+}
+
+/// Runs the window until it asked for no animation frame over a second of its clock and two of
+/// real time (`window_at_rest`'s wait): what the daemons answer late has come.
+fn quiet(shell: &Entity<Shell>, cx: &mut VisualTestContext) {
+    const STEP: Duration = Duration::from_millis(16);
+    let began = Instant::now();
+    let mut last_asked = began;
+    let mut still = Duration::ZERO;
+    while still < Duration::from_secs(1) || last_asked.elapsed() < Duration::from_secs(2) {
+        assert!(
+            began.elapsed() < WAIT,
+            "the window never stopped asking for animation frames"
+        );
+        shell.update_in(cx, |shell, window, cx| shell.poll(window, cx));
+        cx.executor().advance_clock(STEP);
+        cx.run_until_parked();
+        let asked = cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+        if asked == 0 {
+            still += STEP;
+        } else {
+            still = Duration::ZERO;
+            last_asked = Instant::now();
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[gpui_kit::test]
+fn a_row_of_another_machine_draws_no_frame_at_rest(cx: &mut TestAppContext) {
+    let (_hub, pc, server) = pc_and_server();
+    let (_pilot, mcp) = root(&pc, "auto");
+    let agent = led_on_server(&mcp);
+    eventually("the session's turn ended on server", || {
+        server
+            .user
+            .call("agent.show", json!({"agent": agent}))
+            .is_ok_and(|shown| shown["agent"]["state"] == "idle")
+    });
+    let (shell, cx, row) = the_led_row(&pc, &agent, cx);
+    until(&shell, cx, "the row says it waits", |cx| {
+        label(cx, session_machine_id(&row)).as_deref() == Some("server · waiting")
+    });
+    // The pulse of a new wait moves by design; past it, the dot is still.
+    cx.executor()
+        .advance_clock(flottille_window::state::PULSE_SPAN);
+    quiet(&shell, cx);
+
+    cx.update(|window, _| window.reset_layout_stats());
+    let mut asked = 0;
+    let mut gone = Duration::ZERO;
+    while gone < Duration::from_secs(10) {
+        shell.update_in(cx, |shell, window, cx| shell.poll(window, cx));
+        cx.executor().advance_clock(Duration::from_millis(16));
+        cx.run_until_parked();
+        asked += cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+        gone += Duration::from_millis(16);
+    }
+    let drawn = cx.update(|window, _| window.layout_stats().frames);
+    assert_eq!((drawn, asked), (0, 0), "(frames drawn, frames asked)");
 }

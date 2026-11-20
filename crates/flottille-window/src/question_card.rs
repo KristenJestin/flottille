@@ -760,7 +760,9 @@ impl Render for QuestionCard {
             .child(self.count(cx))
             .child(self.fold_control(window, cx))
             .into_any_element();
+        // Named: its meta, which says the machine, can be read by its id.
         let mut card = Card::new()
+            .id(ElementId::Name(format!("{prefix}-card").into()))
             .title(head(
                 &prefix,
                 "question",
