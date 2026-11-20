@@ -105,7 +105,8 @@ struct Shared<C: Clock> {
     hello: Hello,
     waits: Waits,
     /// The URL a pair code holds unless its command gives one: `--public-url`, else the address
-    /// the hub listens on; `None` when that one is no address a device dials (`0.0.0.0`).
+    /// the hub listens on; `None` when that one is no address another device dials (`0.0.0.0`, the
+    /// loopback): a code that holds it would pair nothing, and says so when it is asked for.
     url: Mutex<Option<String>>,
 }
 
@@ -137,7 +138,8 @@ pub fn serve_with<C: Clock + Send + 'static>(
 ) -> std::io::Result<Served<C>> {
     let address = listener.local_addr()?;
     let scheme = if tls.is_some() { "https" } else { "http" };
-    let url = (!address.ip().is_unspecified()).then(|| format!("{scheme}://{address}"));
+    let url = (!address.ip().is_unspecified() && !address.ip().is_loopback())
+        .then(|| format!("{scheme}://{address}"));
     let shared = Arc::new(Shared {
         key: hub.key.clone(),
         hub: Mutex::new(hub),
@@ -614,8 +616,10 @@ async fn command<C: Clock + Send + 'static>(
                 .or_else(|| shared.url.lock().unwrap().clone());
             match url {
                 None => Err(HubError(
-                    "the hub listens on every address, which no device dials: give the address \
-                     the devices reach it at, with --public-url"
+                    "the hub listens on a loopback or a wildcard address, which no other device \
+                     dials: give the address the devices reach it at, with --public-url (for \
+                     example flottille-hub pair --public-url https://hub.example.net, or on the \
+                     hub's own command line, to make it the default)"
                         .to_owned(),
                 )),
                 Some(url) => hub

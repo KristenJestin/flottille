@@ -25,7 +25,9 @@ struct Cli {
     #[arg(long, value_name = "DIR", global = true)]
     state: Option<PathBuf>,
     /// The address the devices reach the hub at, which a pair code holds: through a reverse
-    /// proxy mostly (https://hub.example.net) [default: the address the hub listens on]
+    /// proxy mostly (https://hub.example.net). Given to the hub, it is the default of `pair`;
+    /// without it, the address the hub listens on, unless that is a loopback or a wildcard
+    /// address, which no other device dials: then `pair` asks for one
     #[arg(long, value_name = "URL", global = true)]
     public_url: Option<String>,
     /// Where the hub listens: an IP address and a port. Another address than loopback takes TLS,

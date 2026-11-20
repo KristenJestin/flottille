@@ -10,6 +10,8 @@
 #
 # Its log: journalctl -u flottille-hub
 #
+# --public-url is the address the devices reach the hub at, through the proxy: the pair code holds
+# it (a hub on the loopback has none of its own, and `pair` refuses to print a code without one).
 # It listens on the loopback, for a reverse proxy on this host that holds the certificate and
 # passes HTTP upgrades on (open 443 for the proxy, nothing for the hub). To reach it directly,
 # give a certificate (--tls-cert, --tls-key) and another --listen address, and open its port.
@@ -19,7 +21,7 @@ Wants=network-online.target
 After=network-online.target
 
 [Service]
-ExecStart=/usr/local/bin/flottille-hub --listen 127.0.0.1:7448 --state /var/lib/flottille-hub
+ExecStart=/usr/local/bin/flottille-hub --listen 127.0.0.1:7448 --public-url https://hub.example.net --state /var/lib/flottille-hub
 # Its own user and its own state folder (/var/lib/flottille-hub), the key and the member list.
 # DynamicUser already implies NoNewPrivileges, ProtectSystem=strict and a private /tmp.
 DynamicUser=yes

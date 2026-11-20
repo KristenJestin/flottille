@@ -321,7 +321,8 @@ devices link to each other, nor what they say.
 **Its configuration**: a listen address (a device must be able to reach it, like any other), TLS (a certificate given, ACME, or plain behind a reverse
 proxy), a state folder. The hub URL is given to every device in its pair code: `--public-url
 <url>`, the address the devices reach it at (through a reverse proxy mostly), else the address it
-listens on (refused when that is every address, which no device dials). Built (#820): `--listen <address>` (`127.0.0.1:7448` by default: loopback, behind a reverse proxy on the
+listens on (`pair` refuses to print a code when that is every address or the loopback, which no
+other device dials, and says to give one: the systemd example gives it on the hub's command line). Built (#820): `--listen <address>` (`127.0.0.1:7448` by default: loopback, behind a reverse proxy on the
 same host), `--tls-cert <pem> --tls-key <pem>` for TLS on a certificate given, plain otherwise,
 and `--state <dir>`. Another address than loopback takes TLS, or `--plain` when a reverse proxy on
 another host holds the certificate; without either the start is refused, saying so. A plain hub
@@ -420,7 +421,7 @@ verification words.
    waits until a device paired or the minutes passed, then says which device paired and returns.
    Stopping the command closes pair mode. One pair mode is open at a time; the code works once.
 2. **The code holds everything the device needs** (`crates/flottille-link/src/pairing.rs`): the
-   hub's address (`--public-url`, else the address it listens on), the hub's key, which the device
+   hub's address (`--public-url`, else the address it listens on when another device can dial it), the hub's key, which the device
    pins, and a secret of 128 bits. The device types nothing else and knows it reaches the right
    hub: one that answers with another key is refused before anything is proved.
 3. **The device proposes its card and confirms it**: its name (the host's name), its icon (a
