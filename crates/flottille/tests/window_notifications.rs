@@ -467,10 +467,17 @@ fn a_pull_request_opened_by_a_session_marks_its_row_and_notifies(cx: &mut TestAp
         mark.origin.y >= row.origin.y && mark.bottom() <= row.bottom(),
         "on the session's own row: {mark:?} in {row:?}"
     );
-    assert_eq!(bell_count(&shell, cx), 1);
+    // The request the user just allowed is answered, and so no longer unread: what is left is
+    // the pull request.
+    until(&shell, cx, "the bell counts the pull request alone", |cx| {
+        bell_count(&shell, cx) == 1
+    });
     let said = bell_said(&shell, cx);
+    let said: Vec<_> = said
+        .into_iter()
+        .filter(|said| said.0 == "Opened a pull request")
+        .collect();
     assert_eq!(said.len(), 1);
-    assert_eq!(said[0].0, "Opened a pull request");
     assert_eq!(said[0].1, "Add the login page");
     assert_eq!(said[0].2, BRIEF);
     assert_eq!(
