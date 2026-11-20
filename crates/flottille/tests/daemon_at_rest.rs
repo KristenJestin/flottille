@@ -1,7 +1,7 @@
 //! The daemon at rest (#444): with its agents idle, no run and a client following its events (as
 //! the window does), it wakes no more than its own timers need.
 
-mod common;
+use crate::common;
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};

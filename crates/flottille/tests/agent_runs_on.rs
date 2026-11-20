@@ -3,7 +3,7 @@
 //! pilot reads of its led session, and `agent_send` when it changes the model or the effort. The
 //! fake ACP agent, temporary folders, no real agent.
 
-mod common;
+use crate::common;
 
 use std::time::{Duration, Instant};
 

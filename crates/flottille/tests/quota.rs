@@ -5,7 +5,7 @@
 //! (`agent.provider_limit`, Claude's words in it); the clock is the one the daemon's tests move (`FLOTTILLE_TEST_CLOCK`, `test.advance`), so no test
 //! waits for a reset.
 
-mod common;
+use crate::common;
 
 use std::time::{Duration, Instant};
 

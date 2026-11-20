@@ -5,7 +5,7 @@
 //! the secret. Against the real daemon with the fake ACP agent and the in-memory keyring the
 //! tests' configuration chooses; no real agent, keyring or site is reached.
 
-mod common;
+use crate::common;
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};

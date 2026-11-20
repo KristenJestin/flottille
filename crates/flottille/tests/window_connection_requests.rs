@@ -5,7 +5,7 @@
 //! platform in front of a real daemon with the fake ACP agent and the fake MCP server: no real
 //! server, the in-memory keyring, temporary folders, no window on a screen.
 
-mod common;
+use crate::common;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

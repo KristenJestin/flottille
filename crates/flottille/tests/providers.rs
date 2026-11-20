@@ -2,7 +2,7 @@
 //! standing on a fake ACP agent of its own, the provider, model and effort chosen per agent and
 //! checked against the providers enabled and ready and the models they offer. No real agent runs.
 
-mod common;
+use crate::common;
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};

@@ -3,7 +3,7 @@
 //! as the words of a row do. On GPUI's test platform in front of a real daemon whose agents are
 //! the fake ACP agent, with a throwaway user. No window opens on a screen.
 
-mod common;
+use crate::common;
 
 use std::path::PathBuf;
 use std::sync::Arc;

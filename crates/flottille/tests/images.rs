@@ -2,7 +2,7 @@
 //! (`crates/flottille-fake-agent`) and the fake Claude, with throwaway repositories and temporary
 //! XDG folders. No real agent ever runs here.
 
-mod common;
+use crate::common;
 
 use std::time::{Duration, Instant};
 

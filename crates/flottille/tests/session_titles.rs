@@ -3,7 +3,7 @@
 //! it, and the title is checked and masked. Against the real daemon with the fake ACP agent,
 //! throwaway repositories and temporary XDG folders.
 
-mod common;
+use crate::common;
 
 use std::process::Output;
 use std::time::{Duration, Instant};

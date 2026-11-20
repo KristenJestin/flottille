@@ -3,7 +3,7 @@
 //! before the pull request, the icons share one column, the labels start at one x, the values end
 //! at one right edge and are drawn at one text size. No window opens on a screen.
 
-mod common;
+use crate::common;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};

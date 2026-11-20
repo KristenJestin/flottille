@@ -3,7 +3,7 @@
 //! read by the daemon and never shown to an agent. Against the real daemon with the fake ACP agent
 //! and the fake MCP server over HTTP: no real server, the in-memory keyring, temporary folders.
 
-mod common;
+use crate::common;
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};

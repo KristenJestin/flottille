@@ -4,7 +4,7 @@
 //! imported is shown with why. Throwaway repositories and temporary XDG folders; no real agent
 //! ever runs here.
 
-mod common;
+use crate::common;
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};

@@ -4,7 +4,7 @@
 //! and an agent's stop held for the user every time. The services are the fake development
 //! server, run in temporary folders of a temporary home; the agents are the fake agent's sessions.
 
-mod common;
+use crate::common;
 
 use std::io::{BufRead, BufReader};
 use std::net::TcpStream;

@@ -4,8 +4,8 @@
 //! real daemon in temporary folders, its agents the fake ACP agent, its forge the fake `gh`, and
 //! rmcp's client in place of the writing session's own. No window opens on a screen.
 
-mod common;
-mod guard;
+use crate::common;
+use crate::guard;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};

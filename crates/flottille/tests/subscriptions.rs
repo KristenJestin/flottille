@@ -5,7 +5,7 @@
 //! nothing of its own. Read through the fake `gh` (`crates/flottille-fake-gh`), the clock moved
 //! by the test; no test ever calls GitHub.
 
-mod common;
+use crate::common;
 
 use std::time::{Duration, Instant};
 

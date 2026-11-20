@@ -2,7 +2,7 @@
 //! the user chose for it in `providers.toml`, below the project's own and above what the provider
 //! proposes. No real agent runs.
 
-mod common;
+use crate::common;
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
