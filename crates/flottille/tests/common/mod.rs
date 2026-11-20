@@ -1001,7 +1001,10 @@ fn command_for(program: &Path, dir: &Path, env: &[(String, String)], args: &[&st
         .env("FLOTTILLE_RELEASES", "http://127.0.0.1:9/repos/none")
         .env_remove("TMUX")
         // Never the machine's SSH agent: a test that lends one sets its own (`with_env`).
-        .env_remove("SSH_AUTH_SOCK");
+        .env_remove("SSH_AUTH_SOCK")
+        // The account's home, which `ssh` reads `~` as: the test's, never the machine's
+        // `~/.ssh` (a test of another sets its own).
+        .env("FLOTTILLE_TEST_ACCOUNT_HOME", dir.join("home"));
     // No display of the machine's: a test that wants one gives its own.
     for name in ["WAYLAND_DISPLAY", "DISPLAY", "XAUTHORITY"] {
         command.env_remove(name);
