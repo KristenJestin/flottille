@@ -25,7 +25,8 @@ use zeroize::Zeroizing;
 
 use crate::commands::{boxed, line_field, menu_of, problem_line, spaced, stack};
 use crate::machines::{
-    Ask, Asked, Hub, Invitation, JoinRequest, Machines, Member, News, ROLES, Remote, role_words,
+    Ask, Asked, Hub, Invitation, JoinRequest, Machines, Member, News, ROLES, Remote, how_it_failed,
+    role_words,
 };
 use crate::modals::Modals;
 
@@ -701,7 +702,10 @@ impl MachinesSection {
         let row = ListRow::new("hub-state", hub.url.clone())
             .mono()
             .tag(hub.state_words());
-        let reason = hub.reason.clone().map(SharedString::from);
+        let reason = hub
+            .reason
+            .as_deref()
+            .map(|reason| SharedString::from(how_it_failed(reason).to_owned()));
         Section::new("hub", "Hub").sentence(HUB_SENTENCE).child(
             stack(space::MD)
                 .child(spaced(space::MD, ListCard::new("hub-card").row(row)))

@@ -118,26 +118,26 @@ impl Machine {
         self.state == "online"
     }
 
-    /// How it is reached, in words: the address of its link, or why it is not linked; with the hub
-    /// out of reach, the address it was last known at, which only the hub could have told.
+    /// How it is reached, in words: the address of its link (the host only when it dialled this
+    /// machine: its port is the one it dialled from), or how it failed; with the hub out of
+    /// reach, the address it was last known at, which only the hub could have told.
     pub fn address_words(&self, hub_usable: bool) -> String {
         if let Some(reached) = &self.reached {
             return if reached.dialled {
                 format!("Reached at {}", reached.address)
             } else {
-                format!("Linked from {}", reached.address)
+                format!("Linked from {}", host_of(&reached.address))
             };
         }
+        let reason = self.reason.as_deref().map(how_it_failed);
         let last = self
             .addresses
             .first()
-            .filter(|address| {
-                !hub_usable && !self.reason.as_deref().is_some_and(|r| r.contains(*address))
-            })
+            .filter(|address| !hub_usable && !reason.is_some_and(|r| r.contains(*address)))
             .map(|address| format!("Last known address {address}."));
-        match (&self.reason, last) {
+        match (reason, last) {
             (Some(reason), Some(last)) => format!("{reason} {last}"),
-            (Some(reason), None) => reason.clone(),
+            (Some(reason), None) => reason.to_owned(),
             (None, Some(last)) => last,
             (None, None) => "Not reached yet".to_owned(),
         }
@@ -228,31 +228,29 @@ impl Hub {
         }
     }
 
-    /// What does not work while it is not usable, and why, as one sentence.
+    /// What does not work while it is not usable: its state is the tag's to say, not this line's.
     pub fn needs_words(&self) -> Option<String> {
-        if self.usable() {
-            return None;
-        }
-        let wait = "Adding a device and changing the list wait for it.";
-        Some(match (self.state.as_str(), self.since) {
-            ("unreachable", Some(since)) => format!(
-                "The hub is unreachable since {}: {}",
-                crate::session::clock(since),
-                wait.to_lowercase()
-            ),
-            ("unreachable", None) => format!("The hub is unreachable: {}", wait.to_lowercase()),
-            _ => format!(
-                "The hub cannot be used ({}): {}",
-                self.state_words(),
-                wait.to_lowercase()
-            ),
-        })
+        (!self.usable())
+            .then(|| "Adding a device and changing the list wait for the hub.".to_owned())
     }
 }
 
-/// How a failure to reach something went, without the state and the time the row's tag says.
+/// How a failure to reach something went, without the state and the time the row's tag already
+/// says: `server is unreachable: tried 192.0.2.10:7421 from pc, no answer in 10 s` and `the hub at
+/// hub.example:7420 is unreachable since 22:14: tried 192.0.2.5:7420: refused` keep what follows
+/// the colon after `is unreachable`. Any other reason is kept whole.
 pub fn how_it_failed(reason: &str) -> &str {
     reason
+        .split_once(" is unreachable")
+        .and_then(|(_, after)| after.split_once(": "))
+        .map_or(reason, |(_, how)| how)
+}
+
+/// The host of a socket address, without its port.
+fn host_of(address: &str) -> String {
+    address
+        .parse::<std::net::SocketAddr>()
+        .map_or_else(|_| address.to_owned(), |socket| socket.ip().to_string())
 }
 
 /// Everything the window shows of the user's machines.
