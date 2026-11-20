@@ -361,13 +361,13 @@ fn toasts(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Vec<String> {
     })
 }
 
-/// Settings, Machines.
+/// Settings, General, Machines: the last section of the General tab.
 fn machines_tab(shell: &Entity<Shell>, cx: &mut VisualTestContext) {
     click(shell, cx, "settings");
     until(shell, cx, "the settings page is shown", |cx| {
-        present(cx, "settings-tabs-machines")
+        present(cx, "settings-tabs-general")
     });
-    click(shell, cx, "settings-tabs-machines");
+    click(shell, cx, "settings-tabs-general");
 }
 
 fn option(name: &str) -> String {
@@ -452,13 +452,14 @@ fn choosing_a_machine_shows_its_sessions(cx: &mut TestAppContext) {
     assert_eq!(shell.read_with(cx, |s, _| s.machine_shown()), None);
 }
 
-#[gpui_kit::test]
-fn set_up_a_hub_joins_with_the_setup_code(cx: &mut TestAppContext) {
-    let hub = TestHub::new();
-    let pc = Machine::new();
-    let (shell, cx) = window(&pc, cx);
-    machines_tab(&shell, cx);
-    until(&shell, cx, "the setup is offered", |cx| {
+/// Settings, General, Machines: the hub's address and its setup code typed, and Set up a hub clicked.
+fn set_up_from_the_page(
+    hub: &TestHub,
+    shell: &Entity<Shell>,
+    cx: &mut VisualTestContext,
+) -> String {
+    machines_tab(shell, cx);
+    until(shell, cx, "the setup is offered", |cx| {
         present(cx, "set-up-hub")
     });
     let (url, code) = shell.read_with(cx, |s, cx| {
@@ -473,10 +474,19 @@ fn set_up_a_hub_joins_with_the_setup_code(cx: &mut TestAppContext) {
         url.update(cx, |f, cx| f.set_value(address.clone(), window, cx));
         code.update(cx, |f, cx| f.set_value(setup_code.clone(), window, cx));
     });
-    click(&shell, cx, "set-up-hub");
-    until(&shell, cx, "the devices are listed", |cx| {
+    click(shell, cx, "set-up-hub");
+    until(shell, cx, "the devices are listed", |cx| {
         present(cx, "add-device")
     });
+    setup_code
+}
+
+#[gpui_kit::test]
+fn set_up_a_hub_joins_with_the_setup_code(cx: &mut TestAppContext) {
+    let hub = TestHub::new();
+    let pc = Machine::new();
+    let (shell, cx) = window(&pc, cx);
+    let setup_code = set_up_from_the_page(&hub, &shell, cx);
     let members = pc.members();
     assert_eq!(members.len(), 1, "{members:#?}");
     assert_eq!(members[0]["role"], "runner");
@@ -723,12 +733,12 @@ fn every_change_of_the_machines_page_is_animated(cx: &mut TestAppContext) {
     });
     click(&shell, cx, "settings");
     until(&shell, cx, "the settings page is shown", |cx| {
-        present(cx, "settings-tabs-machines")
+        present(cx, "settings-tabs-general")
     });
 
     // The sections show up one after the other, each rising into place: the second measured
     // from the first's bottom, which moves as the first's rows unfold.
-    cx.update(|window, cx| window.click("settings-tabs-machines", cx));
+    cx.update(|window, cx| window.click("settings-tabs-general", cx));
     let mut offsets = Vec::new();
     for _ in 0..60 {
         step(&shell, Duration::from_millis(16), cx);
@@ -789,6 +799,200 @@ fn every_change_of_the_machines_page_is_animated(cx: &mut TestAppContext) {
     // Nothing moves once it all ended.
     let quiet = (0..200).find(|_| step(&shell, Duration::from_millis(16), cx) == 0);
     assert!(quiet.is_some(), "the page never came to rest");
+}
+
+#[gpui_kit::test]
+fn a_machine_that_goes_down_before_its_first_read_is_given_up(cx: &mut TestAppContext) {
+    let (_hub, pc, server) = pc_and_server(User::new());
+    let (shell, cx) = window(&pc, cx);
+    until(&shell, cx, "the switcher shows", |cx| visible(cx, SWITCHER));
+    settle(&shell, cx);
+
+    // This machine's daemon knows the server is gone; the window, which has not polled, still
+    // takes it for online.
+    assert!(server.user.run(&["daemon", "stop"]).status.success());
+    pc.wait_for("server", "offline");
+    shell.update(cx, |shell, cx| {
+        shell.choose_machine(Some("server".to_owned()), cx)
+    });
+    assert_eq!(
+        shell.read_with(cx, |s, _| s.machine_shown()),
+        Some("server".to_owned())
+    );
+
+    // No first read comes: it waits for the limit the window gives a daemon that does not answer.
+    for _ in 0..40 {
+        step(&shell, Duration::from_millis(16), cx);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(visible(cx, "sidebar-loading"), "the tree waits");
+    step(&shell, flottille_window::link::NOT_ANSWERING / 2, cx);
+    assert_eq!(
+        shell.read_with(cx, |s, _| s.machine_shown()),
+        Some("server".to_owned()),
+        "still within the limit"
+    );
+
+    // Past it, the window is on this machine again, and says why.
+    step(&shell, flottille_window::link::NOT_ANSWERING, cx);
+    assert_eq!(shell.read_with(cx, |s, _| s.machine_shown()), None);
+    until(&shell, cx, "this machine's tree is read", |cx| {
+        !visible(cx, "sidebar-loading")
+    });
+    let failed = shell.read_with(cx, |s, cx| {
+        s.toasts()
+            .read(cx)
+            .toasts()
+            .find(|t| t.is_failure())
+            .map(|t| (t.title().to_owned(), t.second_line().map(str::to_owned)))
+    });
+    let (title, why) = failed.expect("a failure toast");
+    assert_eq!(title, "server cannot be shown");
+    assert!(
+        why.as_deref()
+            .is_some_and(|why| why.starts_with("server is offline since ")),
+        "{why:?}"
+    );
+}
+
+#[test]
+fn switching_cuts_the_connections_made_for_the_machine_before() {
+    use std::io::Read;
+    use std::os::unix::net::UnixStream;
+    use std::sync::Mutex;
+
+    let daemons: Arc<Mutex<Vec<UnixStream>>> = Arc::default();
+    let local: Connect = {
+        let daemons = daemons.clone();
+        Arc::new(move || {
+            let (ours, theirs) = UnixStream::pair()?;
+            daemons.lock().unwrap().push(theirs);
+            Ok(ours)
+        })
+    };
+    let aim = flottille_window::machines::Aim::default();
+    let connect = aim.connect(local);
+    let key = Arc::new(flottille_link::DeviceKey::make().unwrap());
+
+    let mut watch = connect().unwrap();
+    watch
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    aim.set(Some(("server".to_owned(), key.clone())));
+    // The window's end of the old watch ends, and so does the daemon's.
+    assert_eq!(watch.read(&mut [0; 1]).unwrap(), 0, "the old watch is cut");
+    let mut daemon = daemons.lock().unwrap().remove(0);
+    daemon
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    assert_eq!(daemon.read(&mut [0; 1]).unwrap(), 0, "so is its end");
+
+    // What is opened for the machine now shown lives until the next choice.
+    let mut fresh = connect().unwrap();
+    fresh
+        .set_read_timeout(Some(Duration::from_millis(300)))
+        .unwrap();
+    let error = fresh.read(&mut [0; 1]).unwrap_err();
+    assert!(
+        matches!(
+            error.kind(),
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+        ),
+        "{error}"
+    );
+    aim.set(None);
+    fresh
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    assert_eq!(fresh.read(&mut [0; 1]).unwrap(), 0, "cut by the next one");
+}
+
+/// A key folder of this test's own: only its owner may enter it.
+fn key_folder() -> tempfile::TempDir {
+    use std::os::unix::fs::PermissionsExt;
+    let folder = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(folder.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    folder
+}
+
+/// What the hub says of `members` for a settle: a hub with the keys listed as its members.
+fn hub_says(members: Vec<Value>) -> impl FnMut(&str, Value) -> Result<Value, String> {
+    move |method, _| match method {
+        "remote.join" => Ok(Value::Null),
+        "remote.machines" => Ok(json!({"hub": {"url": "http://hub.example"}})),
+        "remote.members" => Ok(json!({"members": members})),
+        other => Err(format!("unexpected {other}")),
+    }
+}
+
+#[test]
+fn a_pending_key_the_hub_lists_is_kept() {
+    let folder = key_folder();
+    let device = Device::in_folder(folder.path().to_owned());
+    let (key, new) = device.key_to_join().unwrap();
+    assert!(new);
+    let public = key.public();
+    assert!(device.key().is_err(), "a pending key signs nothing yet");
+
+    device
+        .settle_pending(&mut hub_says(vec![json!({"key": public, "name": "pc"})]))
+        .unwrap();
+    assert_eq!(device.key().unwrap().public(), public);
+    assert!(
+        flottille_link::DeviceKey::load_pending(&NoKeyring, folder.path())
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn a_pending_key_no_member_list_holds_is_removed() {
+    let folder = key_folder();
+    let device = Device::in_folder(folder.path().to_owned());
+    let (key, _) = device.key_to_join().unwrap();
+    let other = flottille_link::DeviceKey::make().unwrap();
+
+    device
+        .settle_pending(&mut hub_says(vec![
+            json!({"key": other.public(), "name": "laptop"}),
+        ]))
+        .unwrap();
+    assert!(device.key().is_err(), "{:?}", key.public());
+    assert!(
+        flottille_link::DeviceKey::load_pending(&NoKeyring, folder.path())
+            .unwrap()
+            .is_none(),
+        "a key the hub saw in a setup that did not succeed is never sent again"
+    );
+}
+
+#[gpui_kit::test]
+fn a_setup_after_one_that_did_not_end_uses_a_new_key(cx: &mut TestAppContext) {
+    let hub = TestHub::new();
+    let pc = Machine::new();
+    // The window was closed in the middle of a setup: its key was kept as pending, the hub never
+    // saw it in a list.
+    let stale = flottille_link::DeviceKey::make().unwrap();
+    let stale_public = stale.public();
+    stale
+        .keep_pending(&NoKeyring, &pc.user.path("state/flottille/remote"))
+        .unwrap();
+    let (shell, cx) = window(&pc, cx);
+    set_up_from_the_page(&hub, &shell, cx);
+
+    let members = pc.members();
+    assert_eq!(members.len(), 1, "{members:#?}");
+    assert_ne!(members[0]["key"], json!(stale_public), "the stale key");
+    let folder = pc.user.path("state/flottille/remote");
+    let kept = flottille_link::DeviceKey::load(&NoKeyring, &folder)
+        .unwrap()
+        .expect("the device key kept");
+    assert_eq!(json!(kept.public()), members[0]["key"]);
+    assert!(
+        flottille_link::DeviceKey::load_pending(&NoKeyring, &folder)
+            .unwrap()
+            .is_none()
+    );
 }
 
 /// No keyring: the device key is the file of the key folder.

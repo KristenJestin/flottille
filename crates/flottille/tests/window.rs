@@ -4026,7 +4026,7 @@ fn opening_settings_shows_the_agents_tab_alone(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn settings_has_six_tabs_in_order(cx: &mut TestAppContext) {
+fn settings_has_five_tabs_in_order(cx: &mut TestAppContext) {
     assert_eq!(
         flottille_window::settings::SECTIONS[..],
         [
@@ -4034,7 +4034,6 @@ fn settings_has_six_tabs_in_order(cx: &mut TestAppContext) {
             ("approvals", "Approvals"),
             ("features", "Features"),
             ("vault", "Vault"),
-            ("machines", "Machines"),
             ("general", "General"),
         ]
     );
@@ -4050,7 +4049,7 @@ fn settings_has_six_tabs_in_order(cx: &mut TestAppContext) {
             .iter()
             .map(|key| window.find(format!("settings-tabs-{key}")).bounds().left())
             .collect();
-        assert_eq!(lefts.len(), 6);
+        assert_eq!(lefts.len(), 5);
         assert!(lefts.windows(2).all(|pair| pair[0] < pair[1]), "{lefts:?}");
         assert!(
             window.try_find("settings-tabs-guidance").is_none(),
@@ -4189,7 +4188,6 @@ fn choosing_each_settings_tab_shows_its_section_alone(cx: &mut TestAppContext) {
             "approvals" => &["judge", "guidance"],
             "features" => &[],
             "vault" => &["vault"],
-            "machines" => &[],
             _ => &["appearance", "workspaces", "developer"],
         };
         assert_eq!(settings_shown(cx), wanted, "{key} alone");

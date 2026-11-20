@@ -7,13 +7,17 @@
 use crate::common;
 use crate::remote;
 
-use std::sync::Arc;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime};
 
 use flottille_link::{DeviceKey, Request};
 use flottille_window::Shell;
+use flottille_window::device::Device;
 use flottille_window::link::{Connect, Sign};
+use flottille_window::tree::SWITCHER;
 use flottille_window::vault::{NO_MACHINE, VaultSection};
+use gpui_design_system::omarchy::Environment;
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{Entity, TestAppContext, VisualTestContext, px, size};
 use remote::{Machine, NoKeyring, pair, pc_and_server};
@@ -104,10 +108,22 @@ fn open_vault(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Entity<Vault
     section
 }
 
-/// Signs with the device key the clients of `machine` keep, as the binary's window does.
-fn signing(machine: &Machine) -> Sign {
-    let folder = machine.folder();
-    Arc::new(move |target, request| {
+/// The key folder of the machine whose test signs now: the window's signer is given once per
+/// process, so the tests that share take turns and say whose folder it reads.
+static SIGNING_FOR: Mutex<Option<PathBuf>> = Mutex::new(None);
+static TURN: Mutex<()> = Mutex::new(());
+
+/// Signs with the device key the clients of `machine` keep, as the binary's window does, until the
+/// returned turn is dropped.
+fn signing(machine: &Machine) -> MutexGuard<'static, ()> {
+    let turn = TURN.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    *SIGNING_FOR.lock().unwrap() = Some(machine.folder());
+    let sign: Sign = Arc::new(move |target, request| {
+        let folder = SIGNING_FOR
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| std::io::Error::other("no machine signs"))?;
         let key = DeviceKey::load(&NoKeyring, &folder)
             .map_err(|error| std::io::Error::other(error.to_string()))?
             .ok_or_else(|| std::io::Error::other("no device key"))?;
@@ -121,7 +137,9 @@ fn signing(machine: &Machine) -> Sign {
         )
         .map_err(|error| std::io::Error::other(error.to_string()))?;
         serde_json::to_value(signed).map_err(std::io::Error::other)
-    })
+    });
+    flottille_window::link::sign_with(sign);
+    turn
 }
 
 #[gpui_kit::test]
@@ -130,7 +148,7 @@ fn share_with_lists_the_online_machines_and_says_the_result(cx: &mut TestAppCont
     pc.user
         .call("vault.set", json!({"name": "tracker", "secret": SECRET}))
         .unwrap();
-    flottille_window::link::sign_with(signing(&pc));
+    let _turn = signing(&pc);
     let (shell, cx) = window(&pc, cx);
     let section = open_vault(&shell, cx);
 
@@ -305,5 +323,73 @@ fn the_row_of_a_shared_entry_says_where_it_came_from(cx: &mut TestAppContext) {
     assert!(
         !shown("vault-shared-tracker", cx),
         "its own entry says nothing"
+    );
+}
+
+#[gpui_kit::test]
+fn share_with_asks_this_machine_while_another_is_shown(cx: &mut TestAppContext) {
+    let (_hub, pc, _server) = pc_and_server(common::User::new());
+    // The server holds a copy of pc's entry, so that a share of it again is no refusal.
+    pc.user
+        .call("vault.set", json!({"name": "tracker", "secret": SECRET}))
+        .unwrap();
+    let shared = pc
+        .user
+        .run(&["vault", "share", "tracker", "--machine", "server"]);
+    assert!(
+        shared.status.success(),
+        "{}",
+        String::from_utf8_lossy(&shared.stderr)
+    );
+    pc.user
+        .call("vault.set", json!({"name": "tracker", "secret": SECOND}))
+        .unwrap();
+    let _turn = signing(&pc);
+    std::fs::write(pc.user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
+    let env = Environment {
+        os_release: pc.user.path("os-release"),
+        state_home: pc.user.path("state"),
+    };
+    cx.update(|cx| flottille_window::init_with(env, cx));
+    let connect: Connect = Arc::new(pc.user.connector());
+    let device = Some(Device::in_folder(pc.folder()));
+    let (shell, cx) = cx.add_window_view(|window, cx| {
+        Shell::new_polled_with(connect.clone(), device.clone(), window, cx)
+    });
+    cx.simulate_resize(size(px(1280.), px(1600.)));
+    // Its block unfolds as the clock moves.
+    until(&shell, cx, "the switcher shows", |cx| {
+        cx.executor().advance_clock(Duration::from_millis(16));
+        shown(SWITCHER, cx)
+    });
+    settle(cx);
+    click(SWITCHER, cx);
+    settle(cx);
+    click(&format!("{SWITCHER}-server"), cx);
+    until(&shell, cx, "the server is shown", |cx| {
+        shell.read_with(cx, |s, _| s.machine_shown()) == Some("server".to_owned())
+    });
+    let section = open_vault(&shell, cx);
+
+    click("vault-more-tracker", cx);
+    settle(cx);
+    click("share-vault-tracker", cx);
+    until(&shell, cx, "the machines online are listed", |cx| {
+        section.read_with(cx, |s, _| s.machines().is_some())
+    });
+    // This machine's runners, not the shown machine's: its vault is what is shared.
+    assert_eq!(
+        section.read_with(cx, |s, _| s.machines().cloned()),
+        Some(Ok(vec!["server".to_owned()]))
+    );
+    settle(cx);
+    click("share-to-server", cx);
+    until(&shell, cx, "the toast says it is shared", |cx| {
+        toasts(&shell, cx).contains(&"Entry tracker shared with server".to_owned())
+    });
+    assert!(
+        !toasts(&shell, cx).contains(&"Entry tracker was not shared".to_owned()),
+        "{:?}",
+        toasts(&shell, cx)
     );
 }
