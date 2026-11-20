@@ -118,6 +118,27 @@ fn the_daemon_finds_a_newer_build_of_its_channel() {
 }
 
 #[test]
+fn a_curlrc_of_the_user_does_not_change_the_check() {
+    let releases = Releases::serve();
+    let programs = tempfile::tempdir().unwrap();
+    stable_at(&releases, programs.path(), NEWER);
+    let user = checking(&releases);
+    // What an agent could have written: curl obeying either file fails every request.
+    let refused = "max-filesize = 1\nproxy = \"http://127.0.0.1:9\"\nnoproxy = \"\"\n";
+    std::fs::create_dir_all(user.path("home")).unwrap();
+    std::fs::write(user.path("home/.curlrc"), refused).unwrap();
+    std::fs::create_dir_all(user.path("config")).unwrap();
+    std::fs::write(user.path("config/curlrc"), refused).unwrap();
+
+    let shown = shown_until(&user, "the check", |shown| {
+        shown["latest"] == NEWER || shown["failed"].is_string()
+    });
+
+    assert_eq!(shown["latest"], NEWER, "{shown}");
+    assert_eq!(shown["failed"], Value::Null);
+}
+
+#[test]
 fn a_failed_check_is_said_once_in_the_update_s_place() {
     // Nothing listens on that port.
     let user = User::new()
