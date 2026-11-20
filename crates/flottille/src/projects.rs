@@ -185,7 +185,9 @@ pub fn call(daemon: &Daemon, method: &str, params: Value) -> std::result::Result
 
 /// How long a removal waits for the processes of the project's agents to be gone once they
 /// were stopped: each has its own grace, and they stop together.
-const RELEASE_WAIT: Duration = Duration::from_secs(15);
+fn release_wait() -> Duration {
+    crate::test_time::tuned("FLOTTILLE_TEST_RELEASE_WAIT_MS", Duration::from_secs(15))
+}
 
 /// The refusal of anything that would start in a project being removed (an agent, a workspace,
 /// a command run) or edit its file.
@@ -366,7 +368,7 @@ async fn remove_marked(
         .into_iter()
         .filter(|agent| agent.project == name)
         .collect();
-    let deadline = Instant::now() + RELEASE_WAIT;
+    let deadline = Instant::now() + release_wait();
     loop {
         let stopping: Vec<&str> = all
             .iter()

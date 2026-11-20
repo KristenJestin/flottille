@@ -179,7 +179,10 @@ fn entry(user: &User) {
 /// A Jira project ABC whose vault entry is set, over `jira`, its work item ABC-1 and its versions
 /// known to the fake `acli`.
 fn signed_in(jira: &Jira) -> (User, Mcp) {
-    let user = user(jira);
+    signed_in_as(user(jira))
+}
+
+fn signed_in_as(user: User) -> (User, Mcp) {
     jira_with(&user, Some("jira-time"));
     entry(&user);
     user.acli_script(json!({
@@ -501,8 +504,9 @@ fn a_site_that_hangs_up_after_the_request_is_not_said_to_have_written_nothing() 
 
 #[test]
 fn a_site_that_never_answers_is_said_not_confirmed() {
-    let jira = Jira::replying(Reply::Silent(Duration::from_secs(45)));
-    let (user, mcp) = signed_in(&jira);
+    // The daemon gives up on the site after three seconds, not thirty.
+    let jira = Jira::replying(Reply::Silent(Duration::from_secs(10)));
+    let (user, mcp) = signed_in_as(user(&jira).with_env("FLOTTILLE_TEST_SITE_WAIT_MS", "3000"));
 
     let number = held(&mcp.call(
         "tickets",
