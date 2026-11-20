@@ -557,11 +557,37 @@ fn the_inbox_and_question_cards_name_the_other_machine(cx: &mut TestAppContext) 
             {"mcp": {"tool": "ask_user", "arguments": {"question": "Which region?"}}},
             {"say": "Asked."}]}
     ]}));
+    let repo = server.user.path("work/app");
+    server.user.git_init(&repo);
+    std::fs::write(repo.join("a.txt"), "a\n").unwrap();
+    server.user.git(&repo, &["add", "."]);
+    server
+        .user
+        .git(&repo, &["commit", "--quiet", "-m", "first"]);
     let started = server
         .user
-        .call("agent.run", json!({"project": "app", "message": "ask me"}))
+        .call("agent.run", json!({"project": "app", "message": "hello"}))
         .unwrap();
     let id = started["agent"]["id"].as_str().unwrap().to_owned();
+    let shown = || {
+        server
+            .user
+            .call("agent.show", json!({"agent": id}))
+            .unwrap()["agent"]
+            .clone()
+    };
+    eventually("its first turn on server", || shown()["state"] == "idle");
+    server
+        .user
+        .call("agent.mode", json!({"agent": id, "mode": "auto"}))
+        .unwrap();
+    server
+        .user
+        .call("agent.send", json!({"agent": id, "message": "ask me"}))
+        .unwrap();
+    eventually("it asks the user on server", || {
+        shown()["waiting_on_answer"] == true
+    });
     let (shell, cx) = window(&pc, cx);
     settle(&shell, cx);
 
@@ -637,17 +663,26 @@ fn quiet(shell: &Entity<Shell>, cx: &mut VisualTestContext) {
 #[gpui_kit::test]
 fn a_row_of_another_machine_draws_no_frame_at_rest(cx: &mut TestAppContext) {
     let (_hub, pc, server) = pc_and_server();
+    // A running row's spinner turns by design: a child that reported is at rest.
+    server.user.fake_script(json!({"turns": [
+        {"when": "Write the tests of the export.", "do": [
+            {"mcp": {"tool": "report", "arguments": {"text": "The export tests are written."}}}]}
+    ]}));
     let (_pilot, mcp) = root(&pc, "auto");
-    let agent = led_on_server(&mcp);
-    eventually("the session's turn ended on server", || {
-        server
-            .user
-            .call("agent.show", json!({"agent": agent}))
-            .is_ok_and(|shown| shown["agent"]["state"] == "idle")
-    });
+    let answer = mcp.call(
+        "agent_launch",
+        json!({"kind": "child", "machine": "server", "title": "Write the tests",
+            "brief": "Write the tests of the export."}),
+    );
+    assert!(!answer.error, "{}", answer.text);
+    let at = answer
+        .text
+        .find("(agent ")
+        .unwrap_or_else(|| panic!("no agent in {}", answer.text));
+    let agent = answer.text[at + 7..at + 19].to_owned();
     let (shell, cx, row) = the_led_row(&pc, &agent, cx);
-    until(&shell, cx, "the row says it waits", |cx| {
-        label(cx, session_machine_id(&row)).as_deref() == Some("server · waiting")
+    until(&shell, cx, "the row says it reported", |cx| {
+        label(cx, session_machine_id(&row)).as_deref() == Some("server · reported")
     });
     // The pulse of a new wait moves by design; past it, the dot is still.
     cx.executor()
