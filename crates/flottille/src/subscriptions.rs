@@ -325,7 +325,12 @@ pub fn turn_ended(daemon: &Arc<Daemon>, session: &Agent) {
         return;
     }
     let reported = !asked;
-    let why = match (asked, remote) {
+    // A pilot of another machine was asked while its machine was linked; the user otherwise.
+    let pilot_asked = crate::tree::unanswered_to(daemon, &session.id, "pilot").is_ok_and(|open| {
+        open.iter()
+            .any(|q| q["seq"].as_u64().unwrap_or(0) > prompted)
+    });
+    let why = match (asked, remote && !pilot_asked) {
         (true, false) => "it asked you a question with ask",
         (true, true) => "it asked the user a question with ask",
         (false, _) => "it reported",

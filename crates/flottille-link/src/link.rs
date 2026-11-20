@@ -143,11 +143,13 @@ pub struct Deliver {
 pub struct Call {
     /// Its id on the sender: a message is delivered once, however often it comes.
     pub id: String,
-    /// The launch that started the session, as the sender named it.
+    /// The launch that started the session, as the sender named it; empty for an
+    /// `approval_answer`, whose request names the child's tree.
     pub launch: String,
     /// The sender's agent that calls: the launch's caller.
     pub caller: String,
-    /// The receiver's agent it is aimed at: the one the launch started.
+    /// The receiver's agent it is aimed at: the one the launch started; empty for an
+    /// `approval_answer`.
     pub agent: String,
     /// `agent_send`, `agent_status`, `agent_stop`, `session_send` or `session_read`.
     pub tool: String,

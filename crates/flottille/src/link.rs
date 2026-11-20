@@ -666,6 +666,8 @@ impl Remote {
         if let Some(daemon) = self.daemon() {
             let machine: String = key.iter().map(|byte| format!("{byte:02x}")).collect();
             crate::across::send_kept(&daemon, &machine);
+            // What its led sessions asked the user while it was off, told once.
+            crate::across::relinked(&daemon, &machine);
         }
         tokio::spawn(serve(self.clone(), link, name, generation));
     }
@@ -1224,15 +1226,36 @@ async fn serve(remote: Arc<Remote>, link: Link, name: String, generation: u64) {
         }
     }
     let why = link.closed().await;
-    let mut seen = remote.seen.lock().unwrap();
-    if let Some(seen) = seen.get_mut(link.peer().as_bytes())
-        && seen
+    if remote.lost(&link, &name, generation, why)
+        && let Some(daemon) = remote.daemon()
+    {
+        // What the sessions it started here asked of its agents goes to the user at once.
+        let machine: String = link
+            .peer()
+            .as_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        crate::across::unlinked(&daemon, &machine, &name);
+    }
+}
+
+impl Remote {
+    /// The link `link` of `generation` to `name` ended: whether it was the machine's link then.
+    fn lost(&self, link: &Link, name: &str, generation: u64, why: String) -> bool {
+        let mut seen = self.seen.lock().unwrap();
+        let Some(seen) = seen.get_mut(link.peer().as_bytes()) else {
+            return false;
+        };
+        if !seen
             .link
             .as_ref()
             .is_some_and(|(at, _, _)| *at == generation)
-    {
+        {
+            return false;
+        }
         eprintln!("flottille daemon: the link to {name} ended: {why}");
-        (remote.emit)(
+        (self.emit)(
             "remote.disconnected",
             json!({"name": name, "fingerprint": link.peer().fingerprint(), "reason": why}),
         );
@@ -1243,6 +1266,7 @@ async fn serve(remote: Arc<Remote>, link: Link, name: String, generation: u64) {
         }
         seen.set(PeerState::Offline, Some(why));
         seen.next_try = Instant::now();
+        true
     }
 }
 
