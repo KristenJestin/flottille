@@ -103,10 +103,12 @@ pub enum MachineMessage {
     /// A delivery for an agent of the receiver, of a session it started on the sender
     /// (`docs/remote.md`, "Deliveries across machines"): a child's report, question or failure, a
     /// led session's end of turn. Kept by the sender until it is answered, sent again in order
-    /// and once (its `id` is idempotent).
+    /// and once (its `id` is idempotent). Answered `{}`, `{"later": why}` when the receiver
+    /// cannot take it now (the sender keeps it), or refused.
     Deliver(Box<Deliver>),
     /// One of the tree's tools aimed by an agent of the sender at a session it started on the
-    /// receiver (`docs/remote.md`, "What a machine may send"). Answered `{"text"}`, or refused.
+    /// receiver (`docs/remote.md`, "What a machine may send"). Answered `{"text"}`,
+    /// `{"later": why}` when the receiver cannot take it now, or refused.
     Call(Box<Call>),
 }
 

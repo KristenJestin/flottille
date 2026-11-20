@@ -721,6 +721,10 @@ and removes its workspace as today, through `call`.
   same way; only the user's own requests are refused when the machine is off.
 - `agent_status`, `session_read` and `agent_stop` aimed at an offline machine are refused at once,
   saying since when; the agent is told it will be woken by what comes back.
+- A machine that cannot take a message now (it is stopping, or cannot store it) says so in its
+  answer (`{"later": why}`): the sender keeps it, in its place, and sends it again on the next
+  link, the next message kept, or 30 seconds later. Only a refusal is final: the message is then
+  dropped.
 
 ### Where a question goes when the parent is off
 
@@ -970,8 +974,9 @@ on a real phone, by hand, and reported.
   the user's branch.
 - Deliveries between machines are kept 30 days by the sender; the user's requests to an offline
   machine are refused.
-- What crosses machines (#817): a child's report, question, failure, idle and stuck notices, and
-  a led session's `session-turn-ended` (when a turn reported or asked, and when it ends or fails
+- What crosses machines (#817): a child's report, question, failure, idle and stuck notices, the
+  notice that its process died and it goes on (`child-replaced`), and a led session's
+  `session-turn-ended` (when a turn reported or asked, and when it ends or fails
   unless its pilot ended it). Not yet: a child's held request (`child-asks`, with
   `approval_answer` across machines) and `led-integrated`, whose check reads the forge and the
   base on the session's machine; a remote led session's `ask` still goes to that machine's user
@@ -985,6 +990,12 @@ on a real phone, by hand, and reported.
 - `agent_status` without `agent_id` lists the children of this machine only; a child on another
   machine is read by its id.
 - A delivery is stored there under `<launch>-<its id>`: sent again, it is stored once.
+- At most 100 messages wait for one machine: one more `agent_send` or `session_send` is refused at
+  once (`refused: 100 messages wait for server already`), and one more delivery is not kept, with
+  an inbox entry (`dropped`). A message of more than 64,000 characters is refused on the sender, as
+  the receiver would.
+- A message the other machine cannot take now (`later`) is sent again 30 seconds later, or sooner
+  on the next link or message kept.
 - An invitation lasts 5 minutes, works once; a request's signature is valid 5 minutes.
 - The verification words are four, from a fixed list of 2048 words.
 - The first member, the one that used the setup code, is the root every device pins; a reset of the
@@ -1313,6 +1324,8 @@ on a real phone, by hand, and reported.
   back is taken only for a repository of a launch this machine sent to that very machine, into the
   repository it was sent from, under the name this machine gives that machine; the way back sends
   the commits past the sender's tip, its snapshot, and what came back already.
+- A test build run with `FLOTTILLE_TEST_STOPPING_FILE` set answers every `deliver` and `call`, while
+  the file it names exists, as a daemon that is stopping does (`later`).
 - A test build run with `FLOTTILLE_TEST_TRAVEL` set answers `test.travel {machine, project,
   launch, workspace?, corrupt?, hold_ms?}` and `test.travel_back {launch}`, so that two daemons
   can be made to send code to each other without an agent. Otherwise the commits go back before a
