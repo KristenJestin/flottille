@@ -920,6 +920,43 @@ mod tests {
     }
 
     #[test]
+    fn a_question_of_a_session_that_ended_before_the_upgrade_is_not_in_the_centre() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = a_daemon(dir.path());
+        let mut gone = crate::daemon::tests::an_agent("gone");
+        gone.state = flottille_core::agent::AgentState::Ended;
+        daemon
+            .write(|store| {
+                let event = store.create_agent(&gone, ("agent.created", json!({})))?;
+                Ok(((), Some(event)))
+            })
+            .unwrap();
+        daemon
+            .write(|store| {
+                let event = store.append_agent_event(
+                    "gone",
+                    "agent.asked",
+                    json!({"agent": "gone", "to": "user", "question": "Which branch?"}),
+                    false,
+                )?;
+                Ok(((), Some(event)))
+            })
+            .unwrap();
+        let upto = last(&daemon);
+        daemon
+            .read(|store| store.set_notification_cursor(upto))
+            .unwrap();
+
+        keep(&daemon);
+
+        assert!(
+            rows(&daemon).is_empty(),
+            "a question of an ended session waits in the centre: {:?}",
+            rows(&daemon)
+        );
+    }
+
+    #[test]
     fn a_failed_write_keeps_its_event_for_the_next_keep() {
         let dir = tempfile::tempdir().unwrap();
         let daemon = a_daemon(dir.path());
