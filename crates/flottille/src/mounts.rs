@@ -32,36 +32,41 @@ pub const REFUSED_GAP: &str = "the kernel gives no user namespace to the command
 
 /// The session bus's socket, where the daemon's `DBUS_SESSION_BUS_ADDRESS` names one by its path
 /// (`unix:path=…`, as a `dbus-launch` outside the runtime folders makes): read at the daemon's
-/// start, with its device and inode, for every confined command's namespace to hide. A bus on an
-/// abstract socket is no path: Landlock's scope keeps it out (`landlock.rs`).
-static BUS: OnceLock<Option<(PathBuf, u64, u64)>> = OnceLock::new();
+/// start, with what tells that socket from another made at its path later, for every confined
+/// command's namespace to hide. A bus on an abstract socket is no path: Landlock's scope keeps it
+/// out (`landlock.rs`).
+static BUS: OnceLock<Option<(PathBuf, Socket)>> = OnceLock::new();
+
+/// A socket's device, inode and change time: an inode freed is often given again to the next
+/// file made, and the change time of a new one is its making, which no process sets.
+type Socket = (u64, u64, i64, i64);
 
 /// Finds the session bus's socket at the daemon's start, before anything runs.
 pub fn find_bus() {
     BUS.get_or_init(|| {
         let address = std::env::var("DBUS_SESSION_BUS_ADDRESS").ok()?;
         let path = bus_path(&address)?.canonicalize().ok()?;
-        let (dev, ino) = socket_at(&path)?;
-        Some((path, dev, ino))
+        let socket = socket_at(&path)?;
+        Some((path, socket))
     });
 }
 
-/// The device and inode of the socket at `path`, if a socket is there.
-fn socket_at(path: &Path) -> Option<(u64, u64)> {
+/// The socket at `path`, if a socket is there.
+fn socket_at(path: &Path) -> Option<Socket> {
     use std::os::unix::fs::{FileTypeExt, MetadataExt};
     let found = std::fs::symlink_metadata(path).ok()?;
     found
         .file_type()
         .is_socket()
-        .then(|| (found.dev(), found.ino()))
+        .then(|| (found.dev(), found.ino(), found.ctime(), found.ctime_nsec()))
 }
 
 /// The session bus's socket found at the start, while it is still the one found: a folder or a
 /// socket a confined command made in its place is neither hidden (a mount over a folder would
 /// fail every start) nor the bus.
 pub fn bus() -> Option<&'static Path> {
-    let (path, dev, ino) = BUS.get()?.as_ref()?;
-    (socket_at(path) == Some((*dev, *ino))).then_some(path.as_path())
+    let (path, socket) = BUS.get()?.as_ref()?;
+    (socket_at(path) == Some(*socket)).then_some(path.as_path())
 }
 
 /// Whether the session bus the daemon found at its start is gone from its path, or something
