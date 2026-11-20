@@ -150,6 +150,11 @@ no device calls a `local` one over a link (`docs/remote.md`, "Roles").
 | `compaction.noticed` | drive |
 | `developer.show` | read |
 | `developer.set` | drive |
+| `update.show` | read |
+| `update.set` | drive |
+| `update.check` | drive |
+| `update.download` | local |
+| `update.restart` | local |
 | `extension.list` | read |
 | `extension.set` | drive |
 | `extension.act` | drive |
@@ -713,6 +718,34 @@ configuration folder.
 
 `developer.set` emits `developer.changed`. The user's door alone reaches them: no tool of an agent
 does.
+
+### The update methods
+
+The update of Flottille from the window (`docs/releases.md`, "Updating"): the daemon checks the
+channel `flottille update` follows, at its start and every 6 hours while `check` of `updates.toml`
+in Flottille's configuration folder is `"automatically"` (the default; `"never"` makes no request
+at all), and downloads or applies nothing unless asked.
+
+- `update.show` answers `{"version", "full", "build_channel", "commit", "channel", "branch",
+  "check", "latest", "failed", "checking", "staged", "downloading", "download_failed", "restart",
+  "refused"}`: this build's version alone, its `--version` whole, the channel it was built on and
+  its commit; the channel checked (and an alpha's branch); `"automatically"` or `"never"`; the
+  channel's latest build when it is newer than this one; why the last check failed; whether a
+  check runs; the version staged beside the binary; the download's `{"done", "total"}` in bytes
+  (`total` null when the server does not say it); why the last download failed; `"idle"` while a
+  restart waits for no agent to run; what this daemon's start refused of a staged build.
+- `update.set {check}` writes `updates.toml` (`"automatically"` checks at once) and answers as
+  `update.show`.
+- `update.check` checks once now, whatever `check` says.
+- `update.download` downloads the latest build and stages it beside the binary; it answers at once
+  and says the rest in `update.changed`.
+- `update.restart {when}`: `"now"` stops the daemon (its agents stop, and are resumed as after
+  any restart) and starts it again from its binary, which applies the build staged; `"idle"` does
+  it once no agent runs. `nothing-staged` when no build is staged.
+
+Each change emits `update.changed` with what `update.show` answers. `update.download` and
+`update.restart` are `local`: they replace this machine's binary. The user's door alone reaches
+them: no tool of an agent does.
 
 ### The extension methods
 

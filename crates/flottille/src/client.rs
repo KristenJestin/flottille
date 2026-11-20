@@ -209,7 +209,7 @@ fn start_daemon(paths: &Paths) -> Result<Child> {
 /// The program a daemon is started from: this one, or, when it was replaced while it ran
 /// (`flottille update`, `install.sh`), the new file at its path. Linux then names the running
 /// one `<path> (deleted)`, which cannot be started.
-fn program_to_start(exe: PathBuf) -> PathBuf {
+pub(crate) fn program_to_start(exe: PathBuf) -> PathBuf {
     match exe
         .to_str()
         .and_then(|path| path.strip_suffix(" (deleted)"))

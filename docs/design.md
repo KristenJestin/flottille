@@ -864,7 +864,8 @@ line names, every program a wrapper or a runner runs included:
   (`agent-folders/.guarded`) tells the user's inbox at the daemon's next start; the files also
   exist while the run goes on;
 - **a write in or above Flottille's own folders** (its configuration, data, state and runtime:
-  the store, `providers.toml`, `developer.toml`, the socket), or of Flottille's own program.
+  the store, `providers.toml`, `developer.toml`, the socket), or of Flottille's own program and
+  the build staged beside it (`flottille.next/`, which the daemon's next start makes the program).
   Reading them stays base: a card in Ask and Auto, allowed in Full, since what they hold has its
   secrets masked and the user may want an agent to read a log;
 - **any write through a process's folder in `/proc`** that leads elsewhere (`/proc/<pid>/cwd`,

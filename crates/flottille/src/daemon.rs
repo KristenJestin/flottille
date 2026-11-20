@@ -122,6 +122,22 @@ pub fn run(paths: &Paths) -> Result<()> {
     ensure_private_dir(&paths.runtime)?;
     ensure_private_dir(&paths.state)?;
     let _lock = take_lock(paths)?;
+    // Before anything else, holding the lock: no other daemon runs from the binary it replaces.
+    match crate::update::apply_staged(paths) {
+        crate::update::Applied::Nothing => {}
+        crate::update::Applied::Refused(why) => {
+            eprintln!("flottille daemon: {why}");
+            crate::updates::refused_at_start(why);
+        }
+        crate::update::Applied::Applied(binary) => {
+            eprintln!(
+                "flottille daemon: the build staged is applied: starting again from {}",
+                binary.display()
+            );
+            drop(_lock);
+            return Err(start_again(&binary));
+        }
+    }
     // What a daemon that died left: the display folders it made, which only a daemon holding the
     // lock makes, so none is this daemon's; it makes its own again.
     crate::display::clean(paths);
@@ -142,7 +158,26 @@ pub fn run(paths: &Paths) -> Result<()> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
-    runtime.block_on(serve(paths, store, projects, machine_key))
+    let served = runtime.block_on(serve(paths, store, projects, machine_key));
+    // Everything it held is let go before another daemon takes its place.
+    drop(runtime);
+    if served.is_ok() && crate::updates::restart_asked() {
+        drop(_store_lock);
+        drop(_lock);
+        return Err(start_again(&crate::update::binary()?));
+    }
+    served
+}
+
+/// Becomes `<binary> daemon`, in this process: it never returns but with why it could not.
+fn start_again(binary: &std::path::Path) -> Box<dyn std::error::Error> {
+    use std::os::unix::process::CommandExt;
+    let error = std::process::Command::new(binary).arg("daemon").exec();
+    format!(
+        "cannot start the daemon again from {}: {error}",
+        binary.display()
+    )
+    .into()
 }
 
 /// The lock is held for the daemon's whole life: the kernel lets go of it when the process ends,
@@ -263,6 +298,8 @@ pub struct Daemon {
     /// The link to the user's other machines, with remote on: unset with remote off, the reason
     /// when it could not start.
     pub remote: std::sync::OnceLock<std::result::Result<Arc<crate::link::Remote>, String>>,
+    /// What the daemon knows of an update of Flottille (`updates`).
+    pub updates: crate::updates::Live,
     /// Becomes true when the daemon stops.
     stopping: watch::Sender<bool>,
 }
@@ -328,8 +365,19 @@ impl Daemon {
             extensions: extensions::Live::default(),
             watch: Arc::default(),
             remote: std::sync::OnceLock::new(),
+            updates: crate::updates::Live::default(),
             stopping: watch::Sender::new(false),
         }
+    }
+
+    /// Asks the daemon to stop, as `daemon.stop` does.
+    pub fn stop(&self) {
+        self.stopping.send_replace(true);
+    }
+
+    /// Becomes true when the daemon stops.
+    pub fn stopping(&self) -> watch::Receiver<bool> {
+        self.stopping.subscribe()
     }
 
     /// Stores the event and hands it to the subscribers under one lock, so that they see the
@@ -638,6 +686,10 @@ async fn serve(
         daemon.stopping.subscribe(),
     ));
     tokio::spawn(sweep::run(daemon.clone(), daemon.stopping.subscribe()));
+    tokio::spawn(crate::updates::watch(
+        daemon.clone(),
+        daemon.stopping.subscribe(),
+    ));
     crate::models::check(&daemon);
     crate::inactive::check(&daemon);
     crate::quota::check(&daemon);
@@ -1069,6 +1121,13 @@ fn handle(daemon: &Arc<Daemon>, request: Request) -> (Message, Option<Subscripti
         ),
         method if method.starts_with("workspaces_folder.") => (
             match crate::workspaces_folder::call(daemon, method, request.params) {
+                Ok(result) => Message::result(id, result),
+                Err(failure) => failure.answer(Some(id)),
+            },
+            None,
+        ),
+        method if method.starts_with("update.") => (
+            match crate::updates::call(daemon, method, request.params) {
                 Ok(result) => Message::result(id, result),
                 Err(failure) => failure.answer(Some(id)),
             },

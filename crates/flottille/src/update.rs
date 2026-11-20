@@ -32,7 +32,7 @@ fn api() -> String {
 pub const CHANNEL: &str = env!("FLOTTILLE_CHANNEL");
 const BRANCH: &str = env!("FLOTTILLE_BRANCH");
 /// This build's version alone, `0.3.0-beta.12`.
-const VERSION: &str = env!("FLOTTILLE_VERSION_NUMBER");
+pub const VERSION: &str = env!("FLOTTILLE_VERSION_NUMBER");
 
 /// What going down does to the store: no schema is read from a release, so this is the only guard.
 const NOT_DOWN: &str =
@@ -69,20 +69,13 @@ fn remember(paths: &Paths, choice: &Choice) -> Result<()> {
     Ok(())
 }
 
-pub fn run(
-    paths: &Paths,
+/// The channel a plain update follows, and its branch: `channel` and `branch` when given, else
+/// the channel last chosen (and its branch), else the build's own (a `local` build takes stable).
+fn followed(
+    kept: &Choice,
     channel: Option<String>,
     branch: Option<String>,
-    version: Option<String>,
-    force: bool,
-) -> Result<ExitCode> {
-    if branch.is_some() && channel.as_deref() != Some("alpha") {
-        return Err("--branch names an alpha: give it with --channel alpha".into());
-    }
-    let wanted = version.as_deref().map(exact).transpose()?;
-    // A version says nothing of the channel: it is neither read from nor written to the memory.
-    let chosen = channel.is_some();
-    let kept = remembered(paths);
+) -> (String, Option<String>) {
     let channel = channel
         .or(kept.channel.clone())
         .unwrap_or_else(|| match CHANNEL {
@@ -91,8 +84,33 @@ pub fn run(
         });
     let branch = branch.or_else(|| {
         kept.branch
+            .clone()
             .filter(|_| kept.channel.as_deref() == Some(&channel))
     });
+    (channel, branch)
+}
+
+/// The channel and the branch a plain update follows now.
+pub fn followed_now(paths: &Paths) -> (String, Option<String>) {
+    followed(&remembered(paths), None, None)
+}
+
+pub fn run(
+    paths: &Paths,
+    channel: Option<String>,
+    branch: Option<String>,
+    version: Option<String>,
+    force: bool,
+    stage: bool,
+) -> Result<ExitCode> {
+    if branch.is_some() && channel.as_deref() != Some("alpha") {
+        return Err("--branch names an alpha: give it with --channel alpha".into());
+    }
+    let wanted = version.as_deref().map(exact).transpose()?;
+    // A version says nothing of the channel: it is neither read from nor written to the memory.
+    let chosen = channel.is_some();
+    let kept = remembered(paths);
+    let (channel, branch) = followed(&kept, channel, branch);
     if !chosen && wanted.is_none() && kept.channel.is_some() {
         match (channel.as_str(), branch.as_deref()) {
             ("alpha", Some(branch)) => println!(
@@ -101,7 +119,8 @@ pub fn run(
             _ => println!("Following the channel last chosen: {channel}."),
         }
     }
-    if Client::connect(paths)?.is_some() {
+    // Staging touches nothing that runs: the daemon may run on.
+    if !stage && Client::connect(paths)?.is_some() {
         return Err(format!(
             "Flottille is running, and would go on from a binary that is gone: stop it first \
              with `{} daemon stop` (its agents stop with it), then update.",
@@ -121,13 +140,19 @@ pub fn run(
         None => &channel,
     };
     if let (Some(new), Ok(this)) = (&version, Version::parse(VERSION)) {
+        if stage && (*new == this || is_older(new, &this)) {
+            // The daemon applies a newer build only (`apply_staged`).
+            println!("{new} is not newer than this {this}: nothing to stage.");
+            return Ok(ExitCode::SUCCESS);
+        }
         if *new == this && !force {
             println!("Flottille is already {this}: nothing to update (--force installs it again).");
             // The binary may have moved since the entry was written.
-            let followed = std::env::current_exe()
-                .and_then(|binary| binary.canonicalize())
-                .and_then(|binary| desktop::follow(paths, &binary));
-            if let Err(error) = followed {
+            let binary = std::env::current_exe().and_then(|binary| binary.canonicalize());
+            if let Ok(binary) = &binary {
+                forget_staged(binary);
+            }
+            if let Err(error) = binary.and_then(|binary| desktop::follow(paths, &binary)) {
                 eprintln!("flottille: the launcher entry was not updated: {error}");
             }
             if chosen {
@@ -149,6 +174,18 @@ pub fn run(
             println!("{new} is older than this {this}: {NOT_DOWN}.");
         }
     }
+    if stage {
+        let binary = binary()?;
+        let staged = stage_from(&binary, &url, &|_, _| {})?;
+        println!(
+            "{staged} is staged beside {}: applied at the next start of the daemon.",
+            binary.display()
+        );
+        if chosen {
+            remember_choice(paths, &channel, branch.as_deref());
+        }
+        return Ok(ExitCode::SUCCESS);
+    }
     let archive = fetch(&url)?;
     let published = String::from_utf8(fetch(&format!("{url}.sha256"))?)?;
     let sum = published.split_whitespace().next().unwrap_or_default();
@@ -160,6 +197,8 @@ pub fn run(
     }
     let binary = std::env::current_exe()?.canonicalize()?;
     let version = replace(paths, &binary, &name, &archive)?;
+    // What was staged is older than what is installed now, or the same.
+    forget_staged(&binary);
     println!("{} is now {version}.", binary.display());
     if chosen {
         remember_choice(paths, &channel, branch.as_deref());
@@ -452,12 +491,17 @@ fn fetch(url: &str) -> Result<Vec<u8>> {
 
 /// What the user's `curl` reads at `url`.
 fn curl(url: &str, options: &[&str]) -> Result<Vec<u8>> {
-    let output = Command::new("curl")
-        .args(options)
-        .args(["--silent", "--show-error", "--location", "--", url])
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|e| format!("cannot run curl: {e}"))?;
+    // Recorded as the daemon's own, which runs this too: its sweep of strays leaves it alone.
+    let output = crate::children::spawn_std(
+        Command::new("curl")
+            .args(options)
+            .args(["--silent", "--show-error", "--location", "--", url])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .and_then(std::process::Child::wait_with_output)
+    .map_err(|e| format!("cannot run curl: {e}"))?;
     if !output.status.success() {
         return Err(format!(
             "cannot read {url}: {}",
@@ -477,26 +521,37 @@ fn replace(paths: &Paths, binary: &Path, name: &str, archive: &[u8]) -> Result<S
     let unpacked = (|| -> Result<String> {
         let file = work.join(name);
         std::fs::write(&file, archive)?;
-        let status = Command::new("tar")
-            .args(["-xzf"])
-            .arg(&file)
-            .arg("-C")
-            .arg(&work)
-            .stdin(Stdio::null())
-            .status()?;
-        if !status.success() {
-            return Err(format!("cannot unpack {name}").into());
-        }
-        let folder = name.trim_end_matches("-x86_64-linux.tar.gz");
-        std::fs::rename(work.join(folder).join("flottille"), binary)?;
+        let folder = unpack(&file, &work, name)?;
+        std::fs::rename(folder.join("flottille"), binary)?;
         // The binary is replaced: failing to write the launcher's files is said, not undone.
-        if let Err(error) = desktop::write(paths, &work.join(folder).join("share"), binary) {
+        if let Err(error) = desktop::write(paths, &folder.join("share"), binary) {
             eprintln!("flottille: the launcher entry was not updated: {error}");
         }
-        Ok(folder.trim_start_matches("flottille-").to_owned())
+        Ok(name
+            .trim_end_matches("-x86_64-linux.tar.gz")
+            .trim_start_matches("flottille-")
+            .to_owned())
     })();
     let _ = std::fs::remove_dir_all(&work);
     unpacked
+}
+
+/// Unpacks the archive `file`, named `name`, into `work` with the user's `tar`: the package's
+/// folder.
+fn unpack(file: &Path, work: &Path, name: &str) -> Result<PathBuf> {
+    let status = crate::children::spawn_std(
+        Command::new("tar")
+            .args(["-xzf"])
+            .arg(file)
+            .arg("-C")
+            .arg(work)
+            .stdin(Stdio::null()),
+    )?
+    .wait()?;
+    if !status.success() {
+        return Err(format!("cannot unpack {name}").into());
+    }
+    Ok(work.join(name.trim_end_matches("-x86_64-linux.tar.gz")))
 }
 
 /// A folder of its own beside the binary, so that the rename stays on one file system.
@@ -510,6 +565,348 @@ fn tempfile_dir(dir: &Path) -> Result<PathBuf> {
         }
     }
     Err("cannot make a folder beside the binary".into())
+}
+
+// A build staged beside the binary (`docs/releases.md`, "Updating"): downloaded while Flottille
+// runs, applied by the daemon's next start.
+
+/// The binary this process runs from, or, when it was replaced while it ran, the file now at its
+/// path: the one an update replaces and stages beside.
+pub fn binary() -> Result<PathBuf> {
+    Ok(crate::client::program_to_start(std::env::current_exe()?).canonicalize()?)
+}
+
+/// Where a build is staged: beside the binary, under its name and `.next`.
+pub fn staging_of(binary: &Path) -> PathBuf {
+    let mut name = binary.file_name().unwrap_or_default().to_owned();
+    name.push(".next");
+    binary.with_file_name(name)
+}
+
+/// The file of the staging that says what it holds: its version, the SHA-256 sum of its binary,
+/// and the notes of the releases between this build and it.
+const MANIFEST: &str = "staged.json";
+
+/// What a staging holds, as its manifest says it.
+#[derive(Serialize, Deserialize)]
+struct Manifest {
+    version: String,
+    sha256: String,
+    channel: String,
+    /// The notes of each release after this build up to the staged one, oldest first.
+    #[serde(default)]
+    notes: Vec<Value>,
+}
+
+/// The version staged beside `binary`, when a staging is there that looks whole; whether it is
+/// applied is decided at the daemon's start (`apply_staged`).
+pub fn staged(binary: &Path) -> Option<String> {
+    let staging = staging_of(binary);
+    if !std::fs::symlink_metadata(&staging).ok()?.is_dir() {
+        return None;
+    }
+    let manifest: Manifest =
+        serde_json::from_slice(&std::fs::read(staging.join(MANIFEST)).ok()?).ok()?;
+    Some(manifest.version)
+}
+
+/// The channel's latest build, when it is newer than this one: what the daemon checks.
+pub fn latest(paths: &Paths) -> Result<Option<Version>> {
+    let (channel, branch) = followed(&remembered(paths), None, None);
+    let url = archive_url(&channel, branch.as_deref())?;
+    let new = version_of(url.rsplit('/').next().unwrap_or_default())
+        .ok_or("the latest release holds no archive of Flottille")?;
+    let this = Version::parse(VERSION)?;
+    Ok((new != this && !is_older(&new, &this)).then_some(new))
+}
+
+/// Downloads the channel's latest build, when it is newer than this one, and stages it beside
+/// the binary: what the window's Download does. `progress` is told the bytes read, and of how
+/// many when the server says it. The version staged.
+pub fn stage(paths: &Paths, progress: &dyn Fn(u64, Option<u64>)) -> Result<Version> {
+    let (channel, branch) = followed(&remembered(paths), None, None);
+    let url = archive_url(&channel, branch.as_deref())?;
+    let this = Version::parse(VERSION)?;
+    match version_of(url.rsplit('/').next().unwrap_or_default()) {
+        Some(new) if new != this && !is_older(&new, &this) => {}
+        Some(new) => return Err(format!("{new} is not newer than this {this}").into()),
+        None => return Err("the latest release holds no archive of Flottille".into()),
+    }
+    stage_from(&binary()?, &url, progress)
+}
+
+/// Downloads the archive at `url` and its sum, checks the sum, and unpacks it into the staging of
+/// `binary`, with its manifest. Nothing that runs is touched; a wrong sum stages nothing, and
+/// nothing is left beside the binary but the staging.
+fn stage_from(binary: &Path, url: &str, progress: &dyn Fn(u64, Option<u64>)) -> Result<Version> {
+    let name = url.rsplit('/').next().unwrap_or_default().to_owned();
+    let version = version_of(&name).ok_or("the release holds no archive of Flottille")?;
+    let staging = staging_of(binary);
+    // Before anything is read: a link there is refused, and left for the user to see.
+    if is_link(&staging) {
+        return Err(not_followed(&staging));
+    }
+    let dir = binary.parent().ok_or("the binary has no folder")?;
+    let work = tempfile_dir(dir)?;
+    let staged = (|| -> Result<()> {
+        let file = work.join(&name);
+        download(url, &file, progress)?;
+        let published = String::from_utf8(fetch(&format!("{url}.sha256"))?)?;
+        let sum = published.split_whitespace().next().unwrap_or_default();
+        if sum != crate::files::sha256_of(&mut std::fs::File::open(&file)?)? {
+            return Err(format!(
+                "the SHA-256 sum of {name} is not the one published: nothing was staged"
+            )
+            .into());
+        }
+        let folder = unpack(&file, &work, &name)?;
+        let new = folder.join("flottille");
+        if !std::fs::symlink_metadata(&new).is_ok_and(|meta| meta.is_file()) {
+            return Err(format!("{name} holds no binary: nothing was staged").into());
+        }
+        let manifest = Manifest {
+            version: version.to_string(),
+            sha256: crate::files::sha256_of(&mut std::fs::File::open(&new)?)?,
+            channel: CHANNEL.to_owned(),
+            notes: notes(&Version::parse(VERSION)?, &version),
+        };
+        std::fs::write(folder.join(MANIFEST), serde_json::to_vec(&manifest)?)?;
+        // What an earlier download staged is replaced.
+        remove_staging(&staging)?;
+        std::fs::rename(&folder, &staging)?;
+        Ok(())
+    })();
+    let _ = std::fs::remove_dir_all(&work);
+    staged.map(|()| version)
+}
+
+fn is_link(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink())
+}
+
+fn not_followed(staging: &Path) -> Box<dyn std::error::Error> {
+    format!(
+        "{} is a link, not a staging of Flottille's: nothing was staged (remove it first)",
+        staging.display()
+    )
+    .into()
+}
+
+/// Removes what is at the staging name, a folder or a file; a link is refused, never followed.
+fn remove_staging(staging: &Path) -> Result<()> {
+    match std::fs::symlink_metadata(staging) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+        Ok(meta) if meta.file_type().is_symlink() => Err(not_followed(staging)),
+        Ok(meta) if meta.is_dir() => Ok(std::fs::remove_dir_all(staging)?),
+        Ok(_) => Ok(std::fs::remove_file(staging)?),
+    }
+}
+
+/// What a plain update does with a staged build: it installed the latest, so the staging goes. A
+/// link at its name is left alone.
+fn forget_staged(binary: &Path) {
+    let staging = staging_of(binary);
+    if !is_link(&staging) && std::fs::symlink_metadata(&staging).is_ok() {
+        match remove_staging(&staging) {
+            Ok(()) => println!("The build staged beside it was removed."),
+            Err(error) => eprintln!("flottille: the staged build was not removed: {error}"),
+        }
+    }
+}
+
+/// The file at `url` into `to` with the user's `curl`, its progress told every 200 ms.
+fn download(url: &str, to: &Path, progress: &dyn Fn(u64, Option<u64>)) -> Result<()> {
+    let total = size_of(url);
+    let mut child = crate::children::spawn_std(
+        Command::new("curl")
+            .args(["--fail", "--silent", "--show-error", "--location"])
+            .arg("--output")
+            .arg(to)
+            .args(["--", url])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped()),
+    )
+    .map_err(|e| format!("cannot run curl: {e}"))?;
+    let read = || std::fs::metadata(to).map_or(0, |meta| meta.len());
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        progress(read(), total);
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    };
+    if !status.success() {
+        let mut said = String::new();
+        if let Some(mut stderr) = child.stderr.take() {
+            let _ = std::io::Read::read_to_string(&mut stderr, &mut said);
+        }
+        return Err(format!("cannot read {url}: {}", said.trim()).into());
+    }
+    progress(read(), total);
+    Ok(())
+}
+
+/// The size the server says of the file at `url`, following its redirections; none when it does
+/// not say.
+fn size_of(url: &str) -> Option<u64> {
+    let headers = curl(url, &["--head", "--fail"]).ok()?;
+    String::from_utf8_lossy(&headers)
+        .lines()
+        .filter_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.trim()
+                .eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse().ok())?
+        })
+        .next_back()
+}
+
+/// The notes of the releases after `this` up to `new`, of `new`'s kind (stable, the betas, an
+/// rc's or a next's line, a branch's alphas), oldest first: what "What's new" says once it is
+/// applied. None when the releases cannot be read: they are not worth failing a download for.
+fn notes(this: &Version, new: &Version) -> Vec<Value> {
+    // The kind of a version: its pre-release's first word, an alpha's with its branch.
+    let kind = |version: &Version| -> String {
+        let pre = version.pre.as_str();
+        match pre.split('.').next() {
+            Some("alpha") => pre
+                .rsplit_once('.')
+                .map_or(pre, |(kind, _)| kind)
+                .to_owned(),
+            Some(first) => first.to_owned(),
+            None => String::new(),
+        }
+    };
+    let Ok(Some(releases)) = json(&format!("{}/releases?per_page=100", api())) else {
+        return Vec::new();
+    };
+    let mut found: Vec<(Version, Value)> = releases
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|release| {
+            let at = release["published_at"].as_str()?;
+            let version = Version::parse(release["tag_name"].as_str()?.strip_prefix('v')?).ok()?;
+            (version > *this && version <= *new && kind(&version) == kind(new)).then(|| {
+                let said = serde_json::json!({
+                    "version": version.to_string(),
+                    "published_at": at,
+                    "body": release["body"].as_str().unwrap_or_default(),
+                });
+                (version, said)
+            })
+        })
+        .collect();
+    found.sort_by(|a, b| a.0.cmp(&b.0));
+    found.into_iter().map(|(_, said)| said).collect()
+}
+
+/// What the daemon's start found staged.
+pub enum Applied {
+    /// No staging.
+    Nothing,
+    /// The staged build is now the binary, at that path: the daemon starts again from it.
+    Applied(PathBuf),
+    /// What was staged was removed, for the reason said.
+    Refused(String),
+}
+
+/// `$XDG_STATE_HOME/flottille/updated.json`: the last build applied, the version it replaced and
+/// the notes of the releases between them.
+pub fn updated_file(paths: &Paths) -> PathBuf {
+    paths.state.join("updated.json")
+}
+
+/// Applies the build staged beside the binary, when there is one that is whole, newer than this
+/// one and whose binary has the sum it was downloaded with: it is renamed over the binary, the
+/// launcher entry written as `flottille update` writes it. What is not is removed. Only the
+/// daemon's start calls it, holding the daemon's lock: no other daemon runs from the binary.
+pub fn apply_staged(paths: &Paths) -> Applied {
+    let Ok(binary) = binary() else {
+        return Applied::Nothing;
+    };
+    let staging = staging_of(&binary);
+    let meta = match std::fs::symlink_metadata(&staging) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Applied::Nothing,
+        Err(error) => {
+            return Applied::Refused(format!("{} cannot be read: {error}", staging.display()));
+        }
+        Ok(meta) => meta,
+    };
+    let refuse = |why: String| {
+        // A link is removed, never what it names.
+        let removed = if meta.is_dir() {
+            std::fs::remove_dir_all(&staging)
+        } else {
+            std::fs::remove_file(&staging)
+        };
+        let removed = match removed {
+            Ok(()) => "removed".to_owned(),
+            Err(error) => format!("not removed ({error})"),
+        };
+        Applied::Refused(format!(
+            "the build staged at {} was {removed}: {why}",
+            staging.display()
+        ))
+    };
+    use std::os::unix::fs::MetadataExt;
+    // SAFETY: getuid has no precondition and cannot fail.
+    let uid = unsafe { libc::getuid() };
+    if !meta.is_dir() || meta.uid() != uid {
+        return refuse("not a staged build (a link, a file, or another user's)".into());
+    }
+    let Some(manifest) = std::fs::read(staging.join(MANIFEST))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Manifest>(&bytes).ok())
+    else {
+        return refuse("not a staged build (its manifest is missing or unreadable)".into());
+    };
+    let new = staging.join("flottille");
+    if !std::fs::symlink_metadata(&new).is_ok_and(|meta| meta.is_file()) {
+        return refuse("not a staged build (its binary is missing or not a file)".into());
+    }
+    let this = Version::parse(VERSION);
+    match (Version::parse(&manifest.version), &this) {
+        (Ok(version), Ok(this)) if version != *this && !is_older(&version, this) => {}
+        (_, Ok(this)) => {
+            return refuse(format!(
+                "{} is not newer than this {this}",
+                manifest.version
+            ));
+        }
+        (_, Err(error)) => return refuse(format!("this build's version: {error}")),
+    }
+    let sum = std::fs::File::open(&new).and_then(|mut file| crate::files::sha256_of(&mut file));
+    if sum.ok().as_deref() != Some(manifest.sha256.as_str()) {
+        return refuse("its SHA-256 sum is not the one it was downloaded with".into());
+    }
+    if let Err(error) = std::fs::rename(&new, &binary) {
+        return refuse(format!(
+            "it could not replace {}: {error}",
+            binary.display()
+        ));
+    }
+    if let Err(error) = desktop::write(paths, &staging.join("share"), &binary) {
+        eprintln!("flottille daemon: the launcher entry was not updated: {error}");
+    }
+    let applied = serde_json::json!({
+        "version": manifest.version,
+        "from": VERSION,
+        "channel": manifest.channel,
+        "notes": manifest.notes,
+    });
+    let kept = flottille_core::paths::ensure_private_dir(&paths.state)
+        .map_err(|error| error.to_string())
+        .and_then(|()| {
+            std::fs::write(updated_file(paths), applied.to_string()).map_err(|e| e.to_string())
+        });
+    if let Err(error) = kept {
+        eprintln!("flottille daemon: what was applied was not kept: {error}");
+    }
+    let _ = std::fs::remove_dir_all(&staging);
+    Applied::Applied(binary)
 }
 
 #[cfg(test)]

@@ -139,6 +139,13 @@ The user switched the developer mode (`developer.set`, `docs/developer.md`).
 |---|---|
 | `log` | Whether the log is written now. |
 
+### `update.changed`
+
+What the daemon knows of an update of Flottille changed: a check began or ended, a download
+progressed, ended or failed, the check was switched, or a restart was asked once no agent runs
+(`docs/releases.md`, "Updating"). Its fields are what `update.show` answers (`docs/protocol.md`,
+"The update methods").
+
 ### `appearance.changed`
 
 The user chose the window's appearance (`appearance.set`): every window takes it.
