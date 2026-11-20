@@ -187,9 +187,9 @@ fn a_replayed_request_is_refused() {
 
 #[test]
 fn a_request_of_a_removed_device_is_refused() {
-    let (_hub, pc, server) = pc_and_server(User::new());
+    let (hub, pc, server) = pc_and_server(User::new());
     let laptop = Machine::new();
-    pair(&pc, &laptop, "laptop", "controller");
+    pair(&hub, &laptop, "laptop", "controller");
     server.wait_for_member("laptop", true);
     let device = laptop.device();
 
@@ -677,7 +677,7 @@ fn pc_server_and(
 ) -> (TestHub, Machine, Machine, Machine) {
     let (hub, pc, server) = pc_and_server(server_user);
     let third = Machine::of(third_user);
-    pair(&pc, &third, name, role);
+    pair(&hub, &third, name, role);
     pc.wait_for(name, "online");
     server.wait_for(name, "online");
     third.wait_for("server", "online");
@@ -851,17 +851,10 @@ fn a_controller_answers_a_request_and_starts_a_session_on_a_runner() {
 }
 
 #[test]
-fn a_viewer_cannot_invite_or_remove_a_device() {
+fn a_viewer_cannot_remove_a_device() {
     let (_hub, pc, server, laptop) = pc_server_and(User::new(), User::new(), "laptop", "viewer");
 
-    // On its own machine, the hub and the list refuse it.
-    let invited = laptop.user.run(&["remote", "invite"]);
-    assert!(!invited.status.success());
-    let said = String::from_utf8_lossy(&invited.stderr);
-    assert!(
-        said.contains("laptop may only view: a controller or a runner may invite a device"),
-        "{said}"
-    );
+    // On its own machine, the list refuses it.
     let removed = laptop.user.run(&["remote", "remove", "server"]);
     assert!(!removed.status.success());
     let said = String::from_utf8_lossy(&removed.stderr);
@@ -872,18 +865,12 @@ fn a_viewer_cannot_invite_or_remove_a_device() {
 
     // Aimed at the runner, its signed requests are refused before they are served.
     let device = laptop.device();
-    for (id, method, deed) in [
-        ("1", "remote.invite", "invite a device"),
-        ("2", "remote.change", "add, remove or rename a device"),
-        ("3", "remote.refuse", "refuse a device"),
-    ] {
-        let answer = laptop.raw(&signed(&device, id, "server", method, json!({})));
-        assert_eq!(
-            error_of(&answer),
-            format!("refused: laptop may only view: a controller or a runner may {deed}"),
-            "{method}"
-        );
-    }
+    let answer = laptop.raw(&signed(&device, "1", "server", "remote.change", json!({})));
+    assert_eq!(
+        error_of(&answer),
+        "refused: laptop may only view: a controller or a runner may remove, rename or restyle a \
+         device"
+    );
     assert!(!server.log().contains(SERVED), "{}", server.log());
     pc.wait_for_member("server", true);
     server.wait_for_member("laptop", true);
@@ -1113,7 +1100,7 @@ fn pc_and(name: &str, role: &str) -> (TestHub, Machine, Machine) {
     let hub = TestHub::new();
     let (pc, other) = (Machine::new(), Machine::new());
     set_up(&hub, &pc);
-    pair(&pc, &other, name, role);
+    pair(&hub, &other, name, role);
     pc.wait_for(name, "online");
     other.wait_for("pc", "online");
     (hub, pc, other)
@@ -1166,9 +1153,9 @@ fn a_review_aimed_at_a_controller_is_refused() {
 
 #[test]
 fn a_watch_carried_for_a_removed_device_ends() {
-    let (_hub, pc, server) = pc_and_server(User::new());
+    let (hub, pc, server) = pc_and_server(User::new());
     let laptop = Machine::new();
-    pair(&pc, &laptop, "laptop", "controller");
+    pair(&hub, &laptop, "laptop", "controller");
     server.wait_for_member("laptop", true);
     let device = laptop.device();
 
@@ -1307,7 +1294,7 @@ fn a_runner_looks_at_what_it_offers_only_when_it_changed() {
     let no_link = at_rest(&pc);
 
     let server = Machine::new();
-    pair(&pc, &server, "server", "runner");
+    pair(&hub, &server, "server", "runner");
     pc.wait_for("server", "online");
     // The offer was sent when the link was made.
     server.wait_until("pc offers its projects", |seen| {

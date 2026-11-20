@@ -65,11 +65,13 @@ impl TestHub {
         format!("http://{}", self.address)
     }
 
+    /// Pair mode opened, as `flottille-hub pair` opens it on the hub's host: its code.
     fn code(&self) -> String {
+        let url = self.url();
         self.served
             .as_ref()
             .unwrap()
-            .with_hub(|hub| hub.setup_code().unwrap().to_owned())
+            .with_hub(|hub| hub.open_pairing(&url, None).unwrap().1.code().unwrap())
     }
 
     /// The hub stops: down, as a host that is off.
@@ -202,18 +204,9 @@ impl Machine {
     }
 }
 
-/// `pc` set up as the hub's first member, from the command line.
+/// `pc` paired as the hub's first device, a runner, from the command line.
 fn set_up(hub: &TestHub, pc: &Machine) {
-    let output = pc.user.run_with_input(
-        &["remote", "setup", &hub.url(), "--name", "pc"],
-        &format!("{}\n", hub.code()),
-    );
-    assert!(
-        output.status.success(),
-        "{}\n{}",
-        String::from_utf8_lossy(&output.stderr),
-        pc.log()
-    );
+    pair(hub, pc, "pc", "runner");
 }
 
 /// `joiner` asks to join with an invitation of `inviter`'s: the command, waiting until the
@@ -240,35 +233,18 @@ fn ask_to_join(inviter: &Machine, joiner: &Machine) -> Child {
     joining
 }
 
-/// The join of `joiner` accepted from the command line, as `name` with `role`.
-fn pair(inviter: &Machine, joiner: &Machine, name: &str, role: &str) {
-    let mut joining = ask_to_join(inviter, joiner);
-    let mut out = BufReader::new(joining.stdout.take().unwrap());
-    let mut first = String::new();
-    out.read_line(&mut first).unwrap();
-    let deadline = Instant::now() + WAIT;
-    let request = loop {
-        if let Some(first) = inviter.requests().first() {
-            break first.clone();
-        }
-        assert!(Instant::now() < deadline, "no join request came");
-        std::thread::sleep(Duration::from_millis(200));
-    };
-    let id = request["request"].as_str().unwrap();
-    let accepted = inviter
-        .user
-        .run(&["remote", "accept", id, "--name", name, "--role", role]);
-    assert!(
-        accepted.status.success(),
-        "{}",
-        String::from_utf8_lossy(&accepted.stderr)
+/// `machine` paired with `hub` from the command line, as `name` with `role`: pair mode opened on
+/// the hub, its code given to `flottille remote pair`.
+fn pair(hub: &TestHub, machine: &Machine, name: &str, role: &str) {
+    let output = machine.user.run_with_input(
+        &["remote", "pair", "--name", name, "--role", role],
+        &format!("{}\n", hub.code()),
     );
-    let ended = joining.wait_with_output().unwrap();
     assert!(
-        ended.status.success(),
-        "the join failed: {}\n{}",
-        String::from_utf8_lossy(&ended.stderr),
-        joiner.log()
+        output.status.success(),
+        "the pairing failed: {}\n{}",
+        String::from_utf8_lossy(&output.stderr),
+        machine.log()
     );
 }
 
@@ -279,7 +255,7 @@ fn pc_and_server(server_user: User) -> (TestHub, Machine, Machine) {
     let pc = Machine::new();
     let server = Machine::of(server_user);
     set_up(&hub, &pc);
-    pair(&pc, &server, "server", "runner");
+    pair(&hub, &server, "server", "runner");
     pc.wait_for("server", "online");
     server.wait_for("pc", "online");
     (hub, pc, server)
@@ -639,7 +615,7 @@ fn a_new_member_is_a_toast_with_remove(cx: &mut TestAppContext) {
             s.machines().read(cx).machines().is_some_and(|m| m.member())
         })
     });
-    pair(&pc, &laptop, "laptop", "controller");
+    pair(&hub, &laptop, "laptop", "controller");
     until(&shell, cx, "the new member is said", |cx| {
         toasts(&shell, cx)
             .iter()
@@ -683,7 +659,7 @@ fn remove_asks_once_and_removes_the_row(cx: &mut TestAppContext) {
     let pc = Machine::new();
     let laptop = Machine::new();
     set_up(&hub, &pc);
-    pair(&pc, &laptop, "laptop", "controller");
+    pair(&hub, &laptop, "laptop", "controller");
     let (shell, cx) = window(&pc, cx);
     machines_tab(&shell, cx);
     until(&shell, cx, "laptop's row is listed", |cx| {
@@ -748,7 +724,7 @@ fn every_change_of_the_machines_page_is_animated(cx: &mut TestAppContext) {
     let pc = Machine::new();
     let laptop = Machine::new();
     set_up(&hub, &pc);
-    pair(&pc, &laptop, "laptop", "controller");
+    pair(&hub, &laptop, "laptop", "controller");
     let (shell, cx) = window(&pc, cx);
     // Tall enough for the whole of General, the invitation's QR and the rows under it.
     cx.simulate_resize(size(px(1280.), px(3000.)));
