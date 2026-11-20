@@ -408,7 +408,7 @@ fn a_root_s_question_marks_its_session_and_rings_the_bell_until_the_user_writes(
     });
     assert_eq!(shell.read_with(cx, |s, cx| s.top().read(cx).count()), 1);
     let item = shell.read_with(cx, |s, _| s.snapshot().bell[0].clone());
-    assert_eq!(item.session, id);
+    assert_eq!(item.session.as_deref(), Some(id.as_str()));
     assert_eq!(item.detail, "Which database?");
 
     send(&user, &id, "postgres");

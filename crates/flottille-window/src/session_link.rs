@@ -278,64 +278,10 @@ impl Request {
         }
     }
 
-    /// What is asked, in a few words: `Run npm test`, `Read .env`.
+    /// What is asked, in a few words: `Run npm test`, `Read .env`: the words the daemon's
+    /// notification says too.
     pub fn asked(&self) -> String {
-        let field = |name: &str| self.call[name].as_str().map(str::to_owned);
-        match (self.tool.as_str(), field("line"), field("path")) {
-            ("run", Some(line), _) => format!("Run {line}"),
-            ("run", None, _) => match field("task") {
-                Some(name) => format!("Run {name}"),
-                None => format!("run {}", one_line(&self.call)),
-            },
-            ("fs_read" | "fs_list" | "search", _, Some(path)) => format!("Read {path}"),
-            ("fs_write" | "fs_edit", _, Some(path)) => format!("Write {path}"),
-            ("tasks" | "skills" | "commands" | "setup" | "project", _, _) => {
-                let name = field("name").unwrap_or_default();
-                let what = match self.tool.as_str() {
-                    "skills" => "skill",
-                    "tasks" => "task",
-                    _ => "command",
-                };
-                let number = self.call["number"].as_u64().unwrap_or_default();
-                match field("action").as_deref() {
-                    Some("set_settings") => "Change the project's settings".into(),
-                    Some("add") if self.tool == "setup" => "Add a setup step".into(),
-                    Some("edit") if self.tool == "setup" => format!("Edit setup step {number}"),
-                    Some("remove") if self.tool == "setup" => {
-                        format!("Remove setup step {number}")
-                    }
-                    Some("move") => format!("Move setup step {number}"),
-                    Some("add") => format!("Add the {what} {name}"),
-                    Some("edit") => format!("Edit the {what} {name}"),
-                    Some("remove") => format!("Remove the {what} {name}"),
-                    _ => format!("{} {}", self.tool, one_line(&self.call)),
-                }
-            }
-            ("workspace", _, _) => {
-                let name = field("name").unwrap_or_else(|| "its own workspace".into());
-                match field("action").as_deref() {
-                    Some("create") => format!("Create the workspace {name}"),
-                    Some("prepare") => format!("Resume the preparation of {name}"),
-                    Some("link_ticket") => format!("Link {name} to a ticket"),
-                    _ => format!("workspace {}", one_line(&self.call)),
-                }
-            }
-            (tool, _, _) if tool.starts_with(CONNECTION) => {
-                let name = &tool[CONNECTION.len()..];
-                let action = field("action").unwrap_or_else(|| "an action".into());
-                format!("Call {action} on the connection {name}")
-            }
-            ("web", _, _) => match (field("url"), field("query")) {
-                (Some(url), _) => format!("Read {url}"),
-                (None, Some(query)) => format!("Search the web for {query}"),
-                _ => format!("web {}", one_line(&self.call)),
-            },
-            ("agent_launch", _, _) if field("new_workspace").is_some() => format!(
-                "Launch a child in a new workspace {}",
-                field("new_workspace").unwrap_or_default()
-            ),
-            (tool, _, _) => format!("{tool} {}", one_line(&self.call)),
-        }
+        flottille_core::notification::asked(&self.tool, &self.call)
     }
 }
 

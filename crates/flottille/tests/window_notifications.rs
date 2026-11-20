@@ -16,7 +16,7 @@ use flottille_window::Shell;
 use flottille_window::conversation::{Block, STARTED_SESSION_KIND};
 use flottille_window::link::Connect;
 use flottille_window::session::SessionPage;
-use flottille_window::shell::{bell_line_id, bell_session_id};
+use flottille_window::shell::{bell_group_title_id, bell_line_id};
 use flottille_window::state::AgentState;
 use flottille_window::tree::{Trailing, session_id, session_mark_id, session_unread_id};
 use gpui_design_system::omarchy::Environment;
@@ -29,9 +29,10 @@ const LONG: &str = "./deploy.sh --target staging-eu-west --tag release-2026-10-3
     --notify ops@example.invalid --confirm-every-step --keep-the-old-version-for-a-week";
 
 /// The title of the lead's session, longer than the bell is wide.
-const BRIEF: &str = "lead the work on the login page and the logout button, then the docs of both";
+pub(crate) const BRIEF: &str =
+    "lead the work on the login page and the logout button, then the docs of both";
 
-fn user() -> User {
+pub(crate) fn user() -> User {
     let user = User::with_fake_agent().with_fake_gh();
     user.fake_script(json!({"turns": [
         {"when": "lead the work", "do": [
@@ -45,7 +46,7 @@ fn user() -> User {
     user
 }
 
-fn eventually(what: &str, check: impl Fn() -> bool) {
+pub(crate) fn eventually(what: &str, check: impl Fn() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(20);
     while !check() {
         assert!(Instant::now() < deadline, "{what} never happened");
@@ -53,7 +54,7 @@ fn eventually(what: &str, check: impl Fn() -> bool) {
     }
 }
 
-fn state_of(user: &User, agent: &str) -> String {
+pub(crate) fn state_of(user: &User, agent: &str) -> String {
     user.call("agent.show", json!({"agent": agent})).unwrap()["agent"]["state"]
         .as_str()
         .unwrap()
@@ -62,7 +63,7 @@ fn state_of(user: &User, agent: &str) -> String {
 
 /// The project `app` over a throwaway repository whose `origin` says GitHub's `acme/app`, its
 /// forge declared, and its ready workspace `login`, made offline.
-fn project(user: &User) {
+pub(crate) fn project(user: &User) {
     let folder = user.path("work/app");
     user.git_init(&folder);
     std::fs::write(folder.join("README.md"), "app\n").unwrap();
@@ -109,7 +110,7 @@ fn project(user: &User) {
 }
 
 /// A session the user started in `login`, its first turn ended: its id and its MCP session.
-fn session(user: &User, message: &str) -> (String, Mcp) {
+pub(crate) fn session(user: &User, message: &str) -> (String, Mcp) {
     let opened = user.received_requests("session/new").len();
     let answer = user
         .call(
@@ -123,13 +124,13 @@ fn session(user: &User, message: &str) -> (String, Mcp) {
     (id, Mcp::initialize(&url, &authorization))
 }
 
-fn lead(user: &User) -> (String, Mcp) {
+pub(crate) fn lead(user: &User) -> (String, Mcp) {
     project(user);
     session(user, BRIEF)
 }
 
 /// The number of the request a held call answered with.
-fn held_number(answer: Answer) -> u64 {
+pub(crate) fn held_number(answer: Answer) -> u64 {
     assert!(!answer.error, "{}", answer.text);
     let rest = answer
         .text
@@ -151,7 +152,7 @@ fn pending(user: &User) -> Vec<Value> {
         .clone()
 }
 
-fn window<'a>(
+pub(crate) fn window<'a>(
     user: &User,
     cx: &'a mut TestAppContext,
 ) -> (Entity<Shell>, &'a mut VisualTestContext) {
@@ -167,7 +168,7 @@ fn window<'a>(
 }
 
 /// Runs the window until `check` holds: takes what the links sent, then draws what changed.
-fn until(
+pub(crate) fn until(
     shell: &Entity<Shell>,
     cx: &mut VisualTestContext,
     what: &str,
@@ -187,7 +188,7 @@ fn until(
     }
 }
 
-fn settle(cx: &mut VisualTestContext) {
+pub(crate) fn settle(cx: &mut VisualTestContext) {
     for _ in 0..40 {
         cx.executor().advance_clock(Duration::from_millis(16));
         cx.update(|window, cx| window.simulate_next_frame(cx));
@@ -195,17 +196,23 @@ fn settle(cx: &mut VisualTestContext) {
     }
 }
 
-fn has(id: impl Into<gpui_kit::ElementId>, cx: &mut VisualTestContext) -> bool {
+pub(crate) fn has(id: impl Into<gpui_kit::ElementId>, cx: &mut VisualTestContext) -> bool {
     let id = id.into();
     cx.update(|window, _| window.try_find(id).is_some())
 }
 
-fn rect(id: impl Into<gpui_kit::ElementId>, cx: &mut VisualTestContext) -> Bounds<Pixels> {
+pub(crate) fn rect(
+    id: impl Into<gpui_kit::ElementId>,
+    cx: &mut VisualTestContext,
+) -> Bounds<Pixels> {
     let id = id.into();
     cx.update(|window, _| window.find(id).bounds())
 }
 
-fn label(id: impl Into<gpui_kit::ElementId>, cx: &mut VisualTestContext) -> Option<String> {
+pub(crate) fn label(
+    id: impl Into<gpui_kit::ElementId>,
+    cx: &mut VisualTestContext,
+) -> Option<String> {
     let id = id.into();
     cx.update(|window, _| {
         window
@@ -231,7 +238,7 @@ fn session_page(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Entity<Ses
         .expect("a session's page is open")
 }
 
-fn open_session(shell: &Entity<Shell>, agent: &str, cx: &mut VisualTestContext) {
+pub(crate) fn open_session(shell: &Entity<Shell>, agent: &str, cx: &mut VisualTestContext) {
     until(shell, cx, "the session is in the tree", |cx| {
         has(session_id(agent), cx)
     });
@@ -266,11 +273,14 @@ fn blocks(page: &Entity<SessionPage>, cx: &mut VisualTestContext) -> Vec<Block> 
     })
 }
 
-fn bell_count(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> usize {
+pub(crate) fn bell_count(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> usize {
     shell.read_with(cx, |s, cx| s.top().read(cx).count())
 }
 
-fn bell_said(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Vec<(String, String, String)> {
+pub(crate) fn bell_said(
+    shell: &Entity<Shell>,
+    cx: &mut VisualTestContext,
+) -> Vec<(String, String, String)> {
     shell.read_with(cx, |s, cx| s.bell_list().read(cx).said())
 }
 
@@ -457,12 +467,21 @@ fn a_pull_request_opened_by_a_session_marks_its_row_and_notifies(cx: &mut TestAp
         mark.origin.y >= row.origin.y && mark.bottom() <= row.bottom(),
         "on the session's own row: {mark:?} in {row:?}"
     );
-    assert_eq!(bell_count(&shell, cx), 1);
+    // The request the user just allowed is answered, and so no longer unread: what is left is
+    // the pull request.
+    until(&shell, cx, "the bell counts the pull request alone", |cx| {
+        bell_count(&shell, cx) == 1
+    });
     let said = bell_said(&shell, cx);
+    let said: Vec<_> = said
+        .into_iter()
+        .filter(|said| said.0 == "Opened a pull request")
+        .collect();
     assert_eq!(said.len(), 1);
-    assert_eq!(said[0].0, "Opened a pull request");
     assert_eq!(said[0].1, "Add the login page");
     assert_eq!(said[0].2, BRIEF);
+    // The bell's count may have changed in the last look: its badge moves, then rests.
+    settle(cx);
     assert_eq!(
         cx.update(|window, cx| window.simulate_next_frame(cx)),
         0,
@@ -504,17 +523,19 @@ fn a_notification_says_why_and_is_cut_cleanly(cx: &mut TestAppContext) {
 
     cx.update(|window, cx| window.click("bell", cx));
     settle(cx);
-    let key = format!("request-{number}");
+    let key = shell.read_with(cx, |s, _| s.snapshot().bell[0].key.clone());
     let list = rect("bell-list", cx);
-    for id in [bell_line_id(&key), bell_session_id(&key)] {
+    for id in [bell_line_id(&key), bell_group_title_id(&lead)] {
         let line = rect(id.clone(), cx);
         assert!(
             line.right() <= list.right() && line.size.height < px(24.),
             "{id:?} is one line inside the bell's list: {line:?} in {list:?}"
         );
     }
-    assert_eq!(label(bell_session_id(&key), cx).as_deref(), Some(BRIEF));
-    let _ = lead;
+    assert_eq!(
+        label(bell_group_title_id(&lead), cx).as_deref(),
+        Some(BRIEF)
+    );
 }
 
 fn trailing_of(shell: &Entity<Shell>, id: &str, cx: &mut VisualTestContext) -> Option<Trailing> {
