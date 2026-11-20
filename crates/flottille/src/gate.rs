@@ -4751,10 +4751,10 @@ pub fn forbidden(
         ));
     }
     if let Ok(program) = std::env::current_exe() {
-        let program = [place::real_path(&program).ok(), Some(program)];
+        let program = programs(&program);
         if seen(path)
             .iter()
-            .any(|path| program.iter().flatten().any(|program| program == path))
+            .any(|path| program.iter().any(|program| program == path))
         {
             return Some(format!(
                 "refused: {} is Flottille's own program: an agent never writes it, in any mode; \
@@ -4765,7 +4765,6 @@ pub fn forbidden(
         // What is staged beside it becomes the program at the daemon's next start.
         let staging: Vec<PathBuf> = program
             .iter()
-            .flatten()
             .map(|program| crate::update::staging_of(program))
             .collect();
         if seen(path)
@@ -4808,6 +4807,14 @@ pub fn forbidden(
             path.shown
         )
     })
+}
+
+/// The paths of the daemon's program, which runs from `exe`.
+fn programs(exe: &Path) -> Vec<PathBuf> {
+    [place::real_path(exe).ok(), Some(exe.to_owned())]
+        .into_iter()
+        .flatten()
+        .collect()
 }
 
 /// A path as written and where it leads, each also without a leading `/proc/<process>/root`
@@ -8551,6 +8558,8 @@ mod tests {
             ".config/hypr/hyprland.conf",
             ".config/sway/config",
             ".config/niri/config.kdl",
+            // What every `curl` of the user reads, the update's included.
+            ".curlrc",
         ] {
             let path = home.join(entry).display().to_string();
             let verdict = workspace.file("fs_write", &path);
@@ -8573,6 +8582,33 @@ mod tests {
         assert!(denied(&workspace.file("fs_write", &staged)));
         assert!(denied(&workspace.file("fs_write", &format!("{exe}.next"))));
         assert!(denied(&workspace.run(&format!("cp README.md {staged}"))));
+        // And the folder a download is unpacked in beside it, before it is staged.
+        let dir = std::path::Path::new(&exe).parent().unwrap();
+        let work = dir.join(".flottille-update-4242-0/flottille-99.0.0/flottille");
+        let work = work.display().to_string();
+        assert!(denied(&workspace.file("fs_write", &work)));
+        assert!(denied(&workspace.run(&format!("cp README.md {work}"))));
+        // A folder of the same name elsewhere is not the program's.
+        let elsewhere = workspace.root.join(".flottille-update-4242-0/x");
+        assert!(!denied(
+            &workspace.file("fs_write", &elsewhere.display().to_string())
+        ));
+    }
+
+    #[test]
+    fn the_program_replaced_under_the_daemon_is_still_its_own() {
+        // After an update renamed a build over it, `/proc/self/exe` names the old file so.
+        let programs = programs(Path::new("/opt/x/flottille (deleted)"));
+        assert!(
+            programs.iter().any(|p| p == Path::new("/opt/x/flottille")),
+            "{programs:?}"
+        );
+        assert!(
+            !programs
+                .iter()
+                .any(|p| p.to_string_lossy().ends_with("(deleted)")),
+            "{programs:?}"
+        );
     }
 
     #[test]
