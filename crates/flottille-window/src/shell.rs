@@ -3583,6 +3583,9 @@ impl Render for Shell {
                     if dismiss_top_overlay(window, cx) {
                         // Whatever held the focus in it is going: the next key must still arrive.
                         window.focus(&this.focus, cx);
+                        // The overlays say again which are open as the shell is drawn: one that
+                        // closed must not be dismissed again by the next key.
+                        cx.notify();
                     } else {
                         this.go(way, window, cx);
                     }
