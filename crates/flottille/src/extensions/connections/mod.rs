@@ -2060,7 +2060,18 @@ fn own_to_this_machine(declaration: &Declaration) -> Option<String> {
     let remote = match &declaration.reach {
         Reach::Url(url) => {
             declaration.url_fault().is_none()
-                && url::Url::parse(url).is_ok_and(|url| url.scheme() == "https")
+                && url::Url::parse(url).is_ok_and(|url| {
+                    let here = match url.host() {
+                        Some(url::Host::Domain(name)) => {
+                            let name = name.to_ascii_lowercase();
+                            name == "localhost" || name.ends_with(".localhost")
+                        }
+                        Some(url::Host::Ipv4(address)) => address.is_loopback(),
+                        Some(url::Host::Ipv6(address)) => address.is_loopback(),
+                        None => true,
+                    };
+                    url.scheme() == "https" && !here
+                })
         }
         Reach::Command(_) => false,
     };
