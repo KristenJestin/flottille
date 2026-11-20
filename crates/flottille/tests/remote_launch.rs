@@ -1017,3 +1017,425 @@ fn a_machine_leaves_a_bounded_number_of_launches_waiting_for_their_code() {
     );
     assert!(server.agents().is_empty());
 }
+
+/// The project `app` of `server`, its setup a step that writes the file it gives: what shows the
+/// setup ran.
+fn with_marking_setup(server: &Machine) -> PathBuf {
+    let mark = server.user.path("setup-ran");
+    let script = server.user.path("setup.sh");
+    std::fs::write(&script, format!("touch {}\n", mark.display())).unwrap();
+    server.register(&format!("[[setup]]\nrun = \"sh {}\"\n", script.display()));
+    mark
+}
+
+/// The names of the workspaces of `machine`.
+fn workspaces(machine: &Machine) -> Vec<String> {
+    machine.user.call("workspace.list", json!({})).unwrap()["workspaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|workspace| workspace["name"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+/// `machine`'s daemon stopped and started again.
+fn restarted(machine: &Machine) {
+    let stopped = machine.user.run(&["daemon", "stop"]);
+    assert!(stopped.status.success(), "{}", machine.log());
+    machine.user.status();
+}
+
+/// Waits long enough for a setup that would run to have run.
+fn a_while() {
+    std::thread::sleep(Duration::from_secs(2));
+}
+
+/// A launch held for the server's user, its code placed there: the request's number.
+fn held_launch(pc: &Machine, server: &Machine, mcp: &Mcp, title: &str) -> u64 {
+    let before = server.requests().len();
+    done(&launched(
+        mcp,
+        json!({"kind": "led", "machine": "server", "title": title, "brief": "Do the work."}),
+    ));
+    let requests = server.requests();
+    assert_eq!(requests.len(), before + 1, "{requests:#?}\n{}", pc.log());
+    requests
+        .iter()
+        .filter_map(|request| request["number"].as_u64())
+        .max()
+        .unwrap()
+}
+
+#[test]
+fn a_held_launch_runs_no_setup_step_until_the_user_allows() {
+    let (_hub, pc, server) = pc_and_server(server_user(None), None);
+    let mark = with_marking_setup(&server);
+    pc.wait_for_offer("server", 12);
+    let (_root, mcp) = pc.root("ask");
+
+    let number = held_launch(&pc, &server, &mcp, "Held setup");
+
+    assert_eq!(workspaces(&server).len(), 1);
+    a_while();
+    assert!(
+        !mark.exists(),
+        "the setup ran before the user allowed the launch"
+    );
+    restarted(&server);
+    a_while();
+    assert!(
+        !mark.exists(),
+        "the setup ran at a restart before the user allowed it"
+    );
+
+    server
+        .user
+        .call("approval.approve", json!({"number": number}))
+        .unwrap();
+    eventually("the setup, once allowed", || mark.exists());
+    prompted(&server, "Do the work.");
+}
+
+#[test]
+fn a_refused_launch_never_runs_its_setup_even_after_a_restart() {
+    let (_hub, pc, server) = pc_and_server(server_user(None), None);
+    let mark = with_marking_setup(&server);
+    pc.wait_for_offer("server", 12);
+    let (_root, mcp) = pc.root("ask");
+    let number = held_launch(&pc, &server, &mcp, "Refused setup");
+
+    server
+        .user
+        .call("approval.deny", json!({"number": number}))
+        .unwrap();
+
+    // Its workspace goes with it, and nothing of its setup ever runs.
+    eventually("the refused launch's workspace removed", || {
+        workspaces(&server).is_empty()
+    });
+    restarted(&server);
+    a_while();
+    assert!(!mark.exists(), "the setup of a refused launch ran");
+    assert!(workspaces(&server).is_empty());
+    assert!(
+        !server
+            .prompts()
+            .iter()
+            .any(|prompt| prompt.contains("Do the work.")),
+        "a refused launch started"
+    );
+}
+
+#[test]
+fn a_swept_launch_leaves_no_workspace_to_set_up() {
+    let (_hub, pc, server) = pc_and_server(server_user(None), None);
+    let mark = with_marking_setup(&server);
+    pc.wait_for_offer("server", 12);
+    let (root, mcp) = pc.root("ask");
+    held_launch(&pc, &server, &mcp, "Swept setup");
+    let key = pc.stand_in();
+
+    // A launch whose agent was never made, its code placed more than an hour ago: what the sweep
+    // forgets the next time that machine asks for a launch.
+    let stopped = server.user.run(&["daemon", "stop"]);
+    assert!(stopped.status.success(), "{}", server.log());
+    {
+        let store =
+            rusqlite::Connection::open(server.user.path("state/flottille/flottille.db")).unwrap();
+        store
+            .execute(
+                "UPDATE agents SET state = 'ended' WHERE id IN \
+                 (SELECT agent FROM launches WHERE way = 'in')",
+                [],
+            )
+            .unwrap();
+        store
+            .execute(
+                "UPDATE launches SET agent = NULL, request = NULL, at = 0 WHERE way = 'in'",
+                [],
+            )
+            .unwrap();
+    }
+    server.user.status();
+    let answers = sent_with(
+        &key,
+        &server,
+        vec![MachineMessage::Launch(Box::new(launch_ask("next", &root)))],
+    );
+    assert!(answers[0].is_ok(), "{answers:?}");
+
+    eventually("the swept launch's workspace removed", || {
+        workspaces(&server).is_empty()
+    });
+    restarted(&server);
+    a_while();
+    assert!(!mark.exists(), "the setup of a swept launch ran");
+}
+
+#[test]
+fn code_sent_for_another_project_than_the_launch_s_is_refused() {
+    let (_hub, pc, server) = pc_and_server(server_user(None), Some(""));
+    // A second project on the server, `other`, its own repository.
+    let other = server.user.path("work/other");
+    server.user.git_init(&other);
+    std::fs::write(other.join("o.txt"), "o\n").unwrap();
+    server.git(&other, &["add", "."]);
+    server.git(&other, &["commit", "--quiet", "-m", "o"]);
+    server.user.write_project_file(
+        "other",
+        &format!(
+            "folder = \"{}\"\nworkspaces_root = \"{}\"\n\n[[repositories]]\npath = \".\"\n\
+             base = [\"main\"]\n",
+            other.display(),
+            server.user.path("work/other-work").display()
+        ),
+    );
+    server.user.call("project.list", json!({})).unwrap();
+    let workspaces_before = workspaces(&server);
+    let key = pc.stand_in();
+    let place = |project: &str, branch: &str, repositories: &[&str]| {
+        MachineMessage::Git(Git::Place(GitPlace {
+            launch: "l1".into(),
+            project: project.into(),
+            branch: branch.into(),
+            repositories: repositories.iter().map(|path| (*path).into()).collect(),
+        }))
+    };
+
+    let answers = sent_with(
+        &key,
+        &server,
+        vec![
+            // Held for the user: recorded, for app on feat/export.
+            MachineMessage::Launch(Box::new(launch_ask("l1", "0123456789ab"))),
+            MachineMessage::Git(Git::Has(flottille_link::GitRepository {
+                project: "other".into(),
+                repository: ".".into(),
+                launch: Some("l1".into()),
+            })),
+            MachineMessage::Git(Git::Offer(GitOffer {
+                transfer: "l1/0".into(),
+                launch: "l1".into(),
+                project: "other".into(),
+                repository: ".".into(),
+                branch: "feat/export".into(),
+                size: 1,
+                sha256: "00".into(),
+                back: false,
+            })),
+            place("other", "feat/export", &["."]),
+            place("app", "main", &["."]),
+            place("app", "feat/export", &[".", "lib"]),
+        ],
+    );
+
+    assert!(answers[0].is_ok(), "{answers:?}");
+    for answer in &answers[1..4] {
+        let refused = answer.clone().unwrap_err();
+        assert!(
+            refused.contains("launch l1 is for project app"),
+            "{refused}"
+        );
+    }
+    let refused = answers[4].clone().unwrap_err();
+    assert!(refused.contains("launch l1 is on feat/export"), "{refused}");
+    let refused = answers[5].clone().unwrap_err();
+    assert!(
+        refused.contains("launch l1 takes the repositories ."),
+        "{refused}"
+    );
+    assert_eq!(workspaces(&server), workspaces_before);
+    assert!(
+        !server.user.path("work/other/.git/refs/flottille").exists(),
+        "code came into the other project"
+    );
+}
+
+#[test]
+fn a_launch_the_judge_denies_is_held_for_the_user_and_never_started() {
+    let denying = json!([{"say":
+        "{\"verdict\": \"deny\", \"reason\": \"Not for tonight.\"}"}]);
+    let (_hub, pc, server) = pc_and_server(server_user(Some(denying)), Some(""));
+    pc.wait_for_offer("server", 12);
+    let (_root, mcp) = pc.root("auto");
+
+    let answer = launched(
+        &mcp,
+        json!({"kind": "led", "machine": "server", "title": "Denied", "brief": "Deny me."}),
+    );
+
+    let text = done(&answer);
+    assert!(text.contains("is waiting for the user"), "{text}");
+    assert!(
+        !server.user.judge_received().is_empty(),
+        "no judge was asked"
+    );
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1, "{requests:#?}");
+    assert!(requests[0].to_string().contains("Not for tonight."));
+    a_while();
+    assert!(
+        !server
+            .prompts()
+            .iter()
+            .any(|prompt| prompt.contains("Deny me.")),
+        "a launch the judge denied started"
+    );
+}
+
+#[test]
+fn a_launch_whose_judge_fails_is_held_for_the_user_and_never_started() {
+    let failing = json!([{"say": "Looks fine to me."}]);
+    let (_hub, pc, server) = pc_and_server(server_user(Some(failing)), Some(""));
+    pc.wait_for_offer("server", 12);
+    let (_root, mcp) = pc.root("auto");
+
+    let answer = launched(
+        &mcp,
+        json!({"kind": "led", "machine": "server", "title": "Unjudged", "brief": "Judge me."}),
+    );
+
+    let text = done(&answer);
+    assert!(text.contains("is waiting for the user"), "{text}");
+    assert!(
+        !server.user.judge_received().is_empty(),
+        "no judge was asked"
+    );
+    assert_eq!(server.requests().len(), 1);
+    a_while();
+    assert!(
+        !server
+            .prompts()
+            .iter()
+            .any(|prompt| prompt.contains("Judge me.")),
+        "a launch whose judge failed started"
+    );
+}
+
+#[test]
+fn a_machine_leaves_a_bounded_number_of_launches_held_for_the_user() {
+    let (_hub, pc, server) = pc_and_server(server_user(None), Some(""));
+    pc.wait_for_offer("server", 12);
+    let (_root, mcp) = pc.root("ask");
+    for n in 0..4 {
+        held_launch(&pc, &server, &mcp, &format!("Held {n}"));
+    }
+
+    let answer = launched(
+        &mcp,
+        json!({"kind": "led", "machine": "server", "title": "One more", "brief": "More."}),
+    );
+
+    let text = refused(&answer);
+    assert!(
+        text.contains("pc has 4 launches waiting for the user already"),
+        "{text}"
+    );
+    assert_eq!(server.requests().len(), 4);
+}
+
+#[test]
+fn a_launch_with_an_unfit_title_caller_or_branch_is_refused() {
+    let (_hub, pc, server) = pc_and_server(server_user(None), Some(""));
+    let key = pc.stand_in();
+    let unfit = |change: &dyn Fn(&mut LaunchAsk)| {
+        let mut ask = launch_ask("u", "0123456789ab");
+        change(&mut ask);
+        MachineMessage::Launch(Box::new(ask))
+    };
+
+    let answers = sent_with(
+        &key,
+        &server,
+        vec![
+            unfit(&|ask| ask.title = "Two\nlines".into()),
+            unfit(&|ask| ask.title = "t".repeat(201)),
+            unfit(&|ask| ask.caller = "../../etc".into()),
+            unfit(&|ask| ask.tree = "a b".into()),
+            unfit(&|ask| ask.branch = "feat/..x".into()),
+            unfit(&|ask| ask.branch = format!("feat/{}", "b".repeat(251))),
+        ],
+    );
+
+    let said: Vec<String> = answers
+        .into_iter()
+        .map(|answer| answer.unwrap_err())
+        .collect();
+    assert!(said[0].contains("a title is one line"), "{}", said[0]);
+    assert!(
+        said[1].contains("a title is at most 200 characters"),
+        "{}",
+        said[1]
+    );
+    assert!(said[2].contains("is not an agent's id"), "{}", said[2]);
+    assert!(said[3].contains("is not an agent's id"), "{}", said[3]);
+    assert!(said[4].contains("is not a branch name"), "{}", said[4]);
+    assert!(said[5].contains("is not a branch name"), "{}", said[5]);
+    assert!(server.agents().is_empty());
+    assert!(server.requests().is_empty());
+}
+
+#[test]
+fn a_switch_to_full_older_than_twelve_hours_starts_the_launch_in_auto() {
+    let ahead = tempfile::NamedTempFile::new().unwrap();
+    let user = server_user(allowing()).with_env(
+        "FLOTTILLE_TEST_WALL_AHEAD_FILE",
+        ahead.path().to_str().unwrap(),
+    );
+    let (_hub, pc, server) = pc_and_server(user, Some(""));
+    pc.wait_for_offer("server", 12);
+    let (root, mcp) = pc.root("auto");
+    let switched = server
+        .user
+        .run(&["--machine", "pc", "agent", "mode", &root, "full"]);
+    assert!(switched.status.success(), "{}", pc.log());
+    done(&launched(
+        &mcp,
+        json!({"kind": "led", "machine": "server", "title": "Fresh", "brief": "One."}),
+    ));
+    assert_eq!(titled(&server, "Fresh")["gate_mode"], "full");
+
+    // Thirteen hours later on the server's clock: the switch no longer counts there.
+    std::fs::write(ahead.path(), (13 * 60 * 60).to_string()).unwrap();
+    pc.wait_for_offer("server", 12);
+    done(&launched(
+        &mcp,
+        json!({"kind": "led", "machine": "server", "title": "Stale", "brief": "Two."}),
+    ));
+
+    assert_eq!(titled(&server, "Stale")["gate_mode"], "auto");
+}
+
+#[test]
+fn a_switch_to_full_made_on_a_child_counts_for_its_tree() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    pc.wait_for_offer("server", 12);
+    let (_root, mcp) = pc.root("full");
+    let child = done(&launched(
+        &mcp,
+        json!({"kind": "child", "title": "Local child", "brief": "Here."}),
+    ))
+    .to_owned();
+    let child = pc
+        .agents()
+        .into_iter()
+        .find(|agent| agent["title"] == "Local child")
+        .unwrap_or_else(|| panic!("no child: {child}"));
+
+    // The user switches the tree from its child, on a device: the switch names the child.
+    let switched = server.user.run(&[
+        "--machine",
+        "pc",
+        "agent",
+        "mode",
+        child["id"].as_str().unwrap(),
+        "full",
+    ]);
+    assert!(switched.status.success(), "{}", pc.log());
+    done(&launched(
+        &mcp,
+        json!({"kind": "led", "machine": "server", "title": "From the child", "brief": "One."}),
+    ));
+
+    assert_eq!(titled(&server, "From the child")["gate_mode"], "full");
+}
