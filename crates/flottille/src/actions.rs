@@ -2680,7 +2680,7 @@ fn settings_says(project: &Project, call: &ProjectCall) -> Result<Vec<String>, O
             says.push(format!("Set the tracker to {}", checked.said()));
             if let Some((entry, site)) = newly_sent(project, &checked) {
                 says.push(format!(
-                    "Log time with it: the secret of the vault entry `{entry}` will be sent to \
+                    "Jira API access with it: the secret of the vault entry `{entry}` will be sent to \
                      {site}"
                 ));
             }

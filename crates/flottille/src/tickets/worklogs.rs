@@ -48,7 +48,7 @@ static ACCOUNTS: LazyLock<Mutex<HashMap<AccountKey, (String, String)>>> =
     LazyLock::new(Mutex::default);
 
 /// Whether `text` is a Jira account id: 24 hexadecimal digits, or `<number>:<uuid>`.
-pub(super) fn is_account(text: &str) -> bool {
+pub(crate) fn is_account(text: &str) -> bool {
     let hex = |text: &str| text.chars().all(|c| c.is_ascii_hexdigit() || c == '-');
     (text.len() == 24 && text.chars().all(|c| c.is_ascii_hexdigit()))
         || text.split_once(':').is_some_and(|(number, id)| {
