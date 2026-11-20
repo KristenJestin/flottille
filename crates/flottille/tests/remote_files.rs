@@ -16,7 +16,7 @@ use remote::{Machine, WAIT, error_of, pc_and_server, signed};
 use serde_json::{Value, json};
 
 /// The most of a file one answer carries.
-const CHUNK: usize = 1024 * 1024;
+const CHUNK: usize = 512 * 1024;
 
 /// A picture, 1 pixel by 1.
 const PNG: [u8; 70] = [

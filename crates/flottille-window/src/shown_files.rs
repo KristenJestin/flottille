@@ -19,7 +19,7 @@ use crate::conversation::ShownLink;
 use crate::link::{Conn, Connect};
 use crate::shell::Shell;
 
-/// How long one chunk may take: a megabyte, paced by the machine that serves it.
+/// How long one chunk may take: half a megabyte, paced by the machine that serves it.
 const CHUNK_WITHIN: Duration = Duration::from_secs(30);
 /// The most of a picture read for its thumbnail, as for a picture of this machine.
 const MOST_PICTURE: u64 = 20 * 1024 * 1024;

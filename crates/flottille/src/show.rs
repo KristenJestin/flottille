@@ -163,14 +163,15 @@ pub fn show(daemon: &Arc<Daemon>, grant: &Grant, args: Value) -> Outcome {
 
 // ── A file shown, served to another device ───────────────────────────────────────────────────
 
-/// The most of a file one answer of `agent.file` carries.
-pub const CHUNK: u64 = 1024 * 1024;
+/// The most of a file one answer of `agent.file` carries: in base64, with its JSON, it stays
+/// within the frame a link takes (`flottille_link::FRAME_LIMIT`, 1 MiB).
+pub const CHUNK: u64 = 512 * 1024;
 /// The largest file served: a video of a session, not a disk.
 const MOST_SERVED: u64 = 2 * 1024 * 1024 * 1024;
 /// The bytes per second this machine serves, all devices together: a video plays at it, and a
-/// device that asks without end takes no more of the machine and no more than a quarter of the
+/// device that asks without end takes no more of the machine and less than a third of the
 /// requests its signature allows in five minutes (`flottille_link::NONCES_PER_DEVICE`).
-const RATE: u64 = 4 * 1024 * 1024;
+const RATE: u64 = 2 * 1024 * 1024;
 
 /// What `agent.file` serves, by the extension of the file: a picture or a video.
 pub fn media_type(path: &str) -> Option<&'static str> {

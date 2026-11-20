@@ -620,9 +620,9 @@ sends it in chunks.
   made a link since leads elsewhere and is refused.
 - `agent.file` is a `read` method: a `viewer` sees what a session showed as it sees the
   conversation.
-- **Bounds**: a chunk is at most 1 MiB, a file at most 2 GiB, and a machine serves 4 MiB a
-  second, all askers together (a chunk past that waits its turn; a quarter of the requests a
-  device's signature allows in five minutes at most).
+- **Bounds**: a chunk is at most 512 KiB (in base64 it fits a link's 1 MiB frame), a file at
+  most 2 GiB, and a machine serves 2 MiB a second, all askers together (a chunk past that waits
+  its turn; less than a third of the requests a device's signature allows in five minutes).
 - **Each chunk is one signed request**, on a stream of the link of its own; a seek asks for the
   range it needs (`offset`), with nothing before it read.
 - **In the window**, the line of a picture of another machine draws a placeholder that fades into
@@ -1248,7 +1248,7 @@ on a real phone, by hand, and reported.
   player reaches what has arrived. The machine serves any range (`agent.file {offset}`), so a
   player fed through a local range server could seek ahead; a temporary file was the simpler,
   reversible step, and needs no listener on this machine.
-- **The pace of `agent.file` is the machine's, not each device's (#1150)**: 4 MiB a second for
+- **The pace of `agent.file` is the machine's, not each device's (#1150)**: 2 MiB a second for
   every asker together, a chunk waiting its turn rather than being refused. Reversible: one budget
   per device is a map.
 - **The window's tunnels are not listed again after a restart (#830).** The listener is the
