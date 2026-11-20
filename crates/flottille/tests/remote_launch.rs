@@ -1335,6 +1335,173 @@ fn a_machine_leaves_a_bounded_number_of_launches_held_for_the_user() {
     assert_eq!(server.requests().len(), 4);
 }
 
+/// What `machine` answers each of `messages`, all sent at once on one link dialled with `key`.
+fn sent_together(
+    key: &MachineKey,
+    machine: &Machine,
+    messages: Vec<MachineMessage>,
+) -> Vec<Result<Value, String>> {
+    let (to_key, addresses) = (machine.key(), machine.addresses());
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let link = dial(key, machine, to_key, &addresses).await;
+        let sending: Vec<_> = messages
+            .into_iter()
+            .map(|message| {
+                let link = link.clone();
+                tokio::spawn(async move {
+                    link.send(&Message::Machine(message))
+                        .await
+                        .map_err(|error| error.to_string())
+                })
+            })
+            .collect();
+        let mut answers = Vec::new();
+        for sent in sending {
+            answers.push(sent.await.unwrap());
+        }
+        answers
+    })
+}
+
+/// The launches `server` holds for its user, as its store has them.
+fn held_in_store(server: &Machine) -> i64 {
+    let store =
+        rusqlite::Connection::open(server.user.path("state/flottille/flottille.db")).unwrap();
+    store
+        .query_row(
+            "SELECT COUNT(*) FROM launches WHERE way = 'in' AND state = 'held'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+#[test]
+fn launches_sent_at_once_never_leave_more_held_than_the_cap() {
+    let (_hub, pc, server) = pc_and_server(server_user(None), Some(""));
+    let key = pc.stand_in();
+
+    let answers = sent_together(
+        &key,
+        &server,
+        (0..12)
+            .map(|n| MachineMessage::Launch(Box::new(launch_ask(&format!("c{n}"), "0123456789ab"))))
+            .collect(),
+    );
+
+    let taken = answers.iter().filter(|answer| answer.is_ok()).count();
+    assert!(taken <= 4, "{taken} launches taken: {answers:?}");
+    assert!(held_in_store(&server) <= 4, "{answers:?}");
+}
+
+/// The user ends `agent` of `server`, keeps the work of its workspace on a remote of their own,
+/// then removes that workspace and its branch: the workspace's name.
+fn removed_by_the_user(server: &Machine, agent: &Value) -> String {
+    let id = agent["id"].as_str().unwrap();
+    let name = agent["workspace"].as_str().unwrap().to_owned();
+    server
+        .user
+        .call("agent.stop", json!({"agent": id}))
+        .unwrap();
+    eventually("the agent ended", || {
+        matches!(
+            server.agent(id)["state"].as_str(),
+            Some("ended" | "stopped" | "failed")
+        )
+    });
+    let folder = folder_of(agent);
+    let branch = server.git(&folder, &["branch", "--show-current"]);
+    let kept = server.user.path(&format!("kept-{name}.git"));
+    server.git(
+        &server.folder(),
+        &["init", "--quiet", "--bare", kept.to_str().unwrap()],
+    );
+    server.git(&folder, &["add", "-A"]);
+    server.git(&folder, &["commit", "--quiet", "-m", "kept"]);
+    server.git(&folder, &["remote", "add", "kept", kept.to_str().unwrap()]);
+    server.git(&folder, &["push", "--quiet", "kept", &branch]);
+    server
+        .user
+        .call("workspace.remove", json!({"project": "app", "name": name}))
+        .unwrap();
+    server.git(&server.folder(), &["branch", "-D", &branch]);
+    name
+}
+
+#[test]
+fn an_old_allowed_launch_lets_no_held_launch_of_the_same_name_set_up() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), None);
+    let mark = with_marking_setup(&server);
+    pc.wait_for_offer("server", 12);
+    // Allowed by the server's judge: its setup runs.
+    let (_allowing, mcp) = pc.root("auto");
+    done(&launched(
+        &mcp,
+        json!({"kind": "led", "machine": "server", "title": "Allowed", "brief": "First."}),
+    ));
+    eventually("the allowed launch's setup", || mark.exists());
+    let allowed = titled(&server, "Allowed");
+    let name = removed_by_the_user(&server, &allowed);
+    std::fs::remove_file(&mark).unwrap();
+
+    // Held for the user, on the same branch: its workspace takes the name that is free again.
+    let (_asking, mcp) = pc.root("ask");
+    held_launch(&pc, &server, &mcp, "Held");
+
+    assert_eq!(workspaces(&server), vec![name]);
+    a_while();
+    assert!(
+        !mark.exists(),
+        "the setup of a held launch ran on an old allowed launch's word"
+    );
+}
+
+#[test]
+fn refusing_a_launch_never_removes_a_workspace_of_the_user_s_of_the_same_name() {
+    let (_hub, pc, server) = pc_and_server(server_user(None), Some(""));
+    pc.wait_for_offer("server", 12);
+    let (_root, mcp) = pc.root("ask");
+    let number = held_launch(&pc, &server, &mcp, "Refused later");
+    let held = titled(&server, "Refused later");
+    // The user removes what the launch made, and makes a workspace of their own of that name.
+    let name = removed_by_the_user(&server, &held);
+    let kept = server.git(
+        &server.folder(),
+        &[
+            "for-each-ref",
+            "--format=%(objectname)",
+            "refs/remotes/kept",
+        ],
+    );
+    server.git(&server.folder(), &["branch", "main", &kept]);
+    let made = server
+        .user
+        .call(
+            "workspace.create",
+            json!({"project": "app", "name": name, "offline": true}),
+        )
+        .unwrap();
+    let mine = PathBuf::from(made["folder"].as_str().unwrap());
+    eventually("the user's workspace", || mine.join(".git").exists());
+    std::fs::write(mine.join("mine.txt"), "mine\n").unwrap();
+
+    server
+        .user
+        .call("approval.deny", json!({"number": number}))
+        .unwrap();
+
+    a_while();
+    assert_eq!(workspaces(&server), vec![name]);
+    assert_eq!(
+        std::fs::read_to_string(mine.join("mine.txt")).unwrap(),
+        "mine\n"
+    );
+}
+
 #[test]
 fn a_launch_with_an_unfit_title_caller_or_branch_is_refused() {
     let (_hub, pc, server) = pc_and_server(server_user(None), Some(""));
