@@ -392,6 +392,17 @@ fn window_showing<'a>(
     shown: &str,
     cx: &'a mut TestAppContext,
 ) -> (Entity<Shell>, &'a mut VisualTestContext) {
+    window_showing_after(machine, shown, false, cx)
+}
+
+/// `window_showing`, with the window's own machine's extensions read before it switches when
+/// `own_read_first` (otherwise that read races the switch, and goes to either machine).
+fn window_showing_after<'a>(
+    machine: &Machine,
+    shown: &str,
+    own_read_first: bool,
+    cx: &'a mut TestAppContext,
+) -> (Entity<Shell>, &'a mut VisualTestContext) {
     std::fs::write(machine.user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
     let env = Environment {
         os_release: machine.user.path("os-release"),
@@ -408,6 +419,11 @@ fn window_showing<'a>(
     until(&shell, cx, "this machine's tree is read", |cx| {
         shell.read_with(cx, |s, cx| s.machines().read(cx).machines().is_some())
     });
+    if own_read_first {
+        until(&shell, cx, "this machine's extensions are read", |cx| {
+            shell.read_with(cx, |s, cx| s.extensions().read(cx).is_known())
+        });
+    }
     let name = shown.to_owned();
     shell.update(cx, |s, cx| s.choose_machine(Some(name), cx));
     until(&shell, cx, "the machine is shown", |cx| {
@@ -513,6 +529,24 @@ fn share_a_connection_of_the_machine_shown(cx: &mut TestAppContext) {
     let entry = pc.user.call("vault.list", json!({})).unwrap()["entries"][0].clone();
     assert_eq!(entry["name"], "notes-key", "{entry}");
     assert_eq!(entry["shared_from"], "server", "{entry}");
+}
+
+#[gpui_kit::test]
+fn the_extensions_of_the_machine_shown_are_read_when_the_window_switches_to_it(
+    cx: &mut TestAppContext,
+) {
+    // Connections is on at the server and off here: what the window lists must be the server's.
+    let (_hub, pc, server) = pc_and_server(User::new());
+    notes_on(&server);
+    let (shell, cx) = window_showing_after(&pc, "server", true, cx);
+    until(&shell, cx, "the server's extensions are listed", |cx| {
+        shell.read_with(cx, |s, cx| {
+            s.extensions()
+                .read(cx)
+                .listed("connections")
+                .is_some_and(|listed| listed.enabled)
+        })
+    });
 }
 
 #[gpui_kit::test]
