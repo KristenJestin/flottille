@@ -478,7 +478,7 @@ impl Shell {
             modals.add(
                 crate::extensions::connections::FORM_MODAL,
                 &connections,
-                |section, window, cx| section.form_dialog(window, cx),
+                |section, _, cx| section.form_dialog(cx),
                 ConnectionsSection::form_is_open,
                 ConnectionsSection::form_focus,
                 cx,
@@ -2543,7 +2543,12 @@ impl Shell {
                 if let Some(page) = self.project_settings.clone() {
                     let names = listed
                         .as_ref()
-                        .map(|services| services.iter().map(|s| s.name.clone()).collect())
+                        .map(|services| {
+                            services
+                                .iter()
+                                .map(|s| (s.name.clone(), s.line.clone()))
+                                .collect()
+                        })
                         .map_err(Clone::clone);
                     let section = page.read(cx).tasks().clone();
                     section.update(cx, |section, cx| section.set_services(names, cx));
