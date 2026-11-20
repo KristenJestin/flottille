@@ -262,6 +262,49 @@ fn restart_to_update_with_agents_running_asks_first(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn restart_to_update_asks_while_a_session_only_waits(cx: &mut TestAppContext) {
+    let user = with_a_long_turn();
+    let binary = installed();
+    start_through(&user, &binary.path);
+    add_project(&user);
+    staged_beside(&binary.path);
+    // Its turn ended: no agent works, but its process lives on, and a restart stops it.
+    let agent = start(&user, "hello");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while user.call("agent.show", json!({"agent": agent})).unwrap()["agent"]["state"] != "idle" {
+        assert!(Instant::now() < deadline, "the turn never ended");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(user.status()["agents"]["running"], 0);
+    let pid = user.status()["pid"].clone();
+    let (shell, cx) = window(&user, cx);
+    shell.update_in(cx, |shell, window, cx| {
+        shell.open_settings_at(flottille_window::settings::Reveal::Version, window, cx)
+    });
+    until(&shell, cx, "Restart to update is offered", |cx| {
+        visible(cx, "version-restart-button")
+    });
+
+    click(cx, "version-restart-button");
+
+    let section = shell.read_with(cx, |s, _| s.version().clone());
+    until(&shell, cx, "the restart asks first", |cx| {
+        section.read_with(cx, |section, _| section.is_confirming())
+    });
+    assert_eq!(
+        section.read_with(cx, |section, _| section.stopping().len()),
+        1,
+        "it says which sessions stop"
+    );
+    assert_eq!(shown(&user)["restart"], Value::Null);
+    assert_eq!(
+        user.status()["pid"],
+        pid,
+        "nothing restarted before the answer"
+    );
+}
+
+#[gpui_kit::test]
 fn the_window_comes_back_on_its_page_after_the_update(
     cx: &mut TestAppContext,
     second: &mut TestAppContext,
