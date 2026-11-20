@@ -764,8 +764,6 @@ pub fn vault_provide(socket: &std::path::Path) -> std::process::ExitCode {
     connections::provide(socket)
 }
 
-/// Whether the use of an extension's feature a vault entry would be bound to (`bound`,
-/// `connection:<name>`) can exist: a connection's name is checked as connections check theirs.
 /// The sign-in of the connection `name` waiting for the browser on this machine, if one does: what
 /// a tunnel of another machine's client may reach (`tunnel.rs`).
 pub fn sign_in_waiting(daemon: &Daemon, name: &str) -> Option<connections::SignInWaiting> {
@@ -784,6 +782,8 @@ pub async fn receive_connection(
     connections::receive(daemon, connection, entries, from, here).await
 }
 
+/// Whether the use of an extension's feature a vault entry would be bound to (`bound`,
+/// `connection:<name>`) can exist: a connection's name is checked as connections check theirs.
 pub fn bound_possible(bound: &str) -> bool {
     match bound.split_once(':') {
         Some(("connection", name)) => connections::name_ok(name),
