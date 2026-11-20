@@ -115,6 +115,12 @@ impl Paths {
         self.data.join("images").join(agent)
     }
 
+    /// The places Review reads the pull requests it reviews in, one folder each: never a
+    /// workspace's, never the project's.
+    pub fn reviews(&self) -> PathBuf {
+        self.data.join("reviews")
+    }
+
     /// One TOML file per project.
     pub fn projects(&self) -> PathBuf {
         self.config.join("projects")

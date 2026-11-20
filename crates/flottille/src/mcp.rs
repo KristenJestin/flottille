@@ -1575,6 +1575,12 @@ pub fn grant_of(daemon: &Daemon, agent: &Agent) -> Result<Grant, String> {
                 .ok_or_else(|| format!("project {} has no workspace named {name}", project.name))?;
             Place::of_workspace(&workspace, agent.folder.clone())
         }
+        // A review's copy of a pull request is one repository, at its top: never the project's
+        // repositories, which are the user's own checkouts (`agents::made`).
+        None if agent.folder.starts_with(daemon.paths.reviews()) => Place {
+            repositories: vec![(".".to_owned(), agent.folder.clone())],
+            ..Place::main(&project, agent.folder.clone())
+        },
         None => Place::main(&project, agent.folder.clone()),
     };
     Ok(Grant {
@@ -2457,7 +2463,8 @@ async fn played_in(
                             // a session written to for the first time; so are a service stopped
                             // and a pull request approved or blocked, by `forge` or by a line,
                             // and the worklog's token sent to another site or entry, a
-                            // worklog deleted, and a connection written.
+                            // worklog deleted, a connection written, and a pull request's code
+                            // run by its review.
                             _ if mode == GateMode::Full
                                 && !removes_own_workspace(grant, tool, &args)
                                 && !gate::asks_leave(&ask)
@@ -2466,6 +2473,7 @@ async fn played_in(
                                 && !crate::services::stops(tool, &args)
                                 && !crate::extensions::held_for_the_user(tool, &args)
                                 && !gate::asks_review(&ask)
+                                && !gate::asks_pull_request_code(&ask)
                                 && !gate::asks_worklog_delete(&ask)
                                 && !crate::actions::sends_a_worklog_token(
                                     daemon, grant, tool, &args,

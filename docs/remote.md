@@ -780,6 +780,55 @@ and removes its workspace as today, through `call`.
 - **On the phone**, the page opens in an in-app browser by default (the tunnel lives with the app in
   the foreground). **Open in browser** hands it to the user's browser and keeps the tunnel alive
   with a foreground service and its notification, closed from that notification.
+- **Built (#829), from the command line**: `flottille --machine server tunnel open <run> [--port
+  <p>]` signs `tunnel.open {run, port?}` for the machine and carries on listening: the daemon of
+  the client's machine listens on `127.0.0.1` (never another address) on the run's port when it is
+  free there, another otherwise, says which (`address`, `local_port`) and holds the tunnel while
+  the command runs; Ctrl+C, or the command's end, closes it. `tunnel list [--machine m]` lists the
+  tunnels this machine carries (the flag filters, it is no request for another machine) and
+  `tunnel close <tunnel>` closes one. The window's rows are #830.
+- **The machine of the run decides, never the one that asks.** The request is checked as every
+  request of another machine's client ("Requests from another machine's clients": member,
+  signature, time, nonce, and the role: `tunnel.open` is a `drive` method, a `viewer` is
+  refused). Then the run must be one the daemon started and that still runs, and the port one a
+  process of the run's session listens on: the sockets of those processes, read from `/proc`
+  (Linux; on a system with no `/proc` no port is reachable until another way to read them is
+  built), matched to `/proc/net/tcp` and `tcp6`, listening on the loopback or on every address.
+  The address the run reports (`localhost`, `127.0.0.1`, `[::1]`, `0.0.0.0` or a name under
+  `.localhost`, with a port written) only chooses the port taken when none is asked for: an
+  address is a line the run printed, which a script of the workspace may write, so it reaches
+  nothing by itself, and a port no process of the run listens on is refused, whatever the run
+  reports. A port is also refused when **any other** socket listens on it, on any address and in
+  either table: Linux lets `[::1]:22` sit beside `0.0.0.0:22`, so a port the run shares with
+  another process may lead to the other one (`refused: port 22 is none of run r1's: ...another
+  process listens on 22 too`). Any other port of the machine is refused (`refused: port 22 is
+  none of run r1's`). Everything is checked again at each connection, so that a port the run
+  gave up and another process took is not reached.
+- **The machine connects to the address the run listens on**: `127.0.0.1` for a listener on
+  `127.0.0.1`, on `0.0.0.0` or an IPv4-mapped address, `[::1]` for a listener on `::1` or `::`,
+  and never another address. A connection is checked, then made: what remains is the instant
+  between the two, in which a process that is none of the run's could take the port the run just
+  gave up; it needs to bind the very port, on the loopback, in that instant, and the next
+  connection is refused. No agent has a tool to open a tunnel: the request is signed by the
+  user's device key, which no agent reads, and the user's command line refuses to run under an
+  agent.
+- **The local listener is open to every process of the carrying machine**, its agents' processes
+  included, as the listener of `ssh -L` is: it is on `127.0.0.1` for this reason and no other
+  address, but a program of the same machine that connects to it reaches the run's port. A
+  tunnel is a door to a port of the run for as long as it is open: close it when it is not in use
+  (`tunnel close`, or the command ending). The machine's own user is the one it opens for.
+- **A connection is a raw stream.** Each TCP connection is one stream of the `client` link, opened
+  by a line (`{"tunnel": "<id>"}`) and raw bytes either way after it; the end of each direction
+  ends the other side's reads. A tunnel's connections are not framed like a bundle's chunks
+  (base64 in JSON): the transport gives an ordered stream with flow control and a half-close,
+  which is all a TCP connection is, and framing would add a copy and a third more bytes to every
+  page. A connection for a tunnel the machine did not open for that link's machine is closed and
+  said in the log.
+- **Bounds and ends.** At most 8 tunnels open for a device on a machine, and 64 connections at
+  once on a tunnel (a ninth tunnel is refused; a connection past 64 is closed). The tunnel is held
+  by its request's stream: it ends when the run ends, `tunnel close`, the link to the machine is
+  lost, the device is removed from the member list, or the client's connection to its daemon ends.
+  The events `tunnel.opened` and `tunnel.closed` (`events.md`) are said by both machines.
 - Later: names on the desktop (portless) and `*.localhost` names on the phone.
 
 ## Sharing
@@ -949,6 +998,21 @@ on a real phone, by hand, and reported.
 - The client's link is dialled by the machine that carries the request: a machine that listens
   nowhere can be driven only by a machine it can be dialled by today. Carrying the user's
   requests over a link the other machine dialled is left for the phone.
+
+- A tunnel (#829) is held by the command that opened it, which stays in the foreground
+  (`flottille --machine server tunnel open r1`): Ctrl+C closes it. A tunnel that outlives its
+  command would need a name and a way to find it again; the window and the phone hold theirs for as
+  long as they are open. Reversible: a `--detach` is a later flag.
+- A tunnel carries at most 64 connections at once and a device has at most 8 tunnels open on a
+  machine: a small cap for one person's pages and APIs, said in the refusal; raising it is one
+  constant.
+- A raw stream of a link has 5 seconds to end its opening line (and 512 bytes): a member machine
+  that opens one and does not is given up on, and every other stream of the link is taken
+  meanwhile.
+- `tunnel.list` and `tunnel.close` are of the machine that carries the tunnel (the listener is
+  there), class `local`, never over a link; `--machine` filters them. `tunnel.open` is `drive`.
+- The local port is the run's own when it is free, so that a page that hard-codes its port still
+  works; another one otherwise, said in the answer.
 
 - A key file holds the 32 bytes of the private key, nothing else; it is made under a temporary
   name with `O_EXCL`, synced, then linked into place, so that two clients making the device key at

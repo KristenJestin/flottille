@@ -1412,6 +1412,36 @@ fn state_text(end: Option<End>, by_user: bool) -> String {
 
 // What the user's clients read and do (`commands.rs`).
 
+/// A run that still runs, as a tunnel reaches it (`docs/remote.md`, "Tunnels"): its session
+/// leader, the address it reports, and a way to wait for its end.
+pub(crate) struct Reachable {
+    pub(crate) pid: u32,
+    pub(crate) url: Option<String>,
+    ended: watch::Receiver<Option<End>>,
+}
+
+impl Reachable {
+    /// Returns once the run ended.
+    pub(crate) async fn ended(&mut self) {
+        let _ = self.ended.wait_for(Option::is_some).await;
+    }
+}
+
+/// The run `id` of this daemon, if it is going on: only a run Flottille started has a port a
+/// tunnel may reach.
+pub(crate) fn reachable(daemon: &Daemon, id: &str) -> Option<Reachable> {
+    let going = daemon.mcp.runs.runs.lock().unwrap().get(id).cloned()?;
+    let ended = going.end.subscribe();
+    if ended.borrow().is_some() {
+        return None;
+    }
+    Some(Reachable {
+        pid: going.pid,
+        url: current(&going).url,
+        ended,
+    })
+}
+
 /// A run as the user reads it: its record, and what it wrote so far, masked.
 pub struct View {
     pub run: Run,

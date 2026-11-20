@@ -2352,6 +2352,106 @@ async fn pull_numbered(forge: &Forge, number: u64) -> Result<Option<Pull>, Strin
     }
 }
 
+/// A pull request a review reads: the repository of the project it is on, the forge's name for
+/// it, the branch it merges into and the ref its head is fetched from.
+pub(crate) struct ToReview {
+    pub path: String,
+    pub folder: PathBuf,
+    pub remote: String,
+    pub slug: String,
+    pub base: String,
+    pub head_ref: String,
+}
+
+/// The pull request `number` of a repository of the project's own folder, read now from the
+/// forge declared for it: refused, in a sentence, when the repository has no forge or one its
+/// remote does not lead to, when the forge has no such pull request, or when its head cannot be
+/// fetched.
+pub(crate) async fn pull_to_review(
+    project: &Project,
+    repository: Option<&str>,
+    number: u64,
+) -> Result<ToReview, String> {
+    let names = || {
+        let names: Vec<&str> = project
+            .repositories
+            .iter()
+            .map(|r| r.path.as_str())
+            .collect();
+        names.join(", ")
+    };
+    let chosen = match repository {
+        Some(asked) => project.repositories.iter().find(|r| r.path == asked),
+        None if project.repositories.len() == 1 => project.repositories.first(),
+        None => {
+            return Err(format!(
+                "the project has several repositories: say which one holds pull request \
+                 #{number} with repository, one of {}",
+                names()
+            ));
+        }
+    };
+    let Some(chosen) = chosen else {
+        return Err(format!(
+            "{} is not a repository of the project: it has {}",
+            repository.unwrap_or_default(),
+            names()
+        ));
+    };
+    let checkout = Checkout {
+        path: chosen.path.clone(),
+        folder: match chosen.path.as_str() {
+            "." => project.folder.clone(),
+            path => project.folder.join(path),
+        },
+        remote: chosen.remote.clone(),
+        declared: chosen.forge.clone(),
+    };
+    let forge = match declared_forge(&checkout).await {
+        Ok(forge) => forge,
+        Err(None) => return Err(format!("{}: {NO_FORGE}", checkout.path)),
+        Err(Some(why)) => return Err(why.trim_start_matches("refused: ").to_owned()),
+    };
+    let pull = match pull_numbered(&forge, number).await {
+        Ok(Some(pull)) => pull,
+        Ok(None) => return Err(format!("{} has no pull request #{number}", forge.slug())),
+        Err(why) if not_found(&why) => {
+            return Err(format!("{} has no pull request #{number}", forge.slug()));
+        }
+        Err(why) => return Err(why),
+    };
+    if !branch_name(&pull.base) {
+        return Err(format!(
+            "pull request #{number} merges into {:?}, which is no branch name git takes",
+            pull.base
+        ));
+    }
+    let head_ref = match &forge {
+        Forge::GitHub { .. } => format!("refs/pull/{number}/head"),
+        Forge::Bitbucket { .. } if !bitbucket::cloud(&forge) => {
+            format!("refs/pull-requests/{number}/from")
+        }
+        // Bitbucket Cloud keeps no ref of a pull request: its source branch, unless that is in a
+        // fork the remote does not have.
+        Forge::Bitbucket { .. } if pull.cross || !branch_name(&pull.head) => {
+            return Err(format!(
+                "pull request #{number} comes from a branch Flottille cannot fetch from {}: a \
+                 fork's, or one with no branch name git takes",
+                checkout.remote
+            ));
+        }
+        Forge::Bitbucket { .. } => format!("refs/heads/{}", pull.head),
+    };
+    Ok(ToReview {
+        path: checkout.path,
+        folder: checkout.folder,
+        remote: checkout.remote,
+        slug: forge.slug(),
+        base: pull.base,
+        head_ref,
+    })
+}
+
 /// What `forge show` says of a pull request of one repository: read now, or `age` ms ago.
 fn shown_pull(
     checkout: &Checkout,
