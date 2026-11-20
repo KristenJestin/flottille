@@ -730,6 +730,33 @@ pub async fn receive(
     Ok(())
 }
 
+/// Removes the copy of the entry `name` that `from` shared, if it is still that copy: a share
+/// that kept it and then failed leaves nothing behind (`extensions::receive_connection`).
+pub(crate) async fn forget_copy(daemon: &Daemon, name: &str, from: &str) {
+    let _writing = writing(name).await;
+    let is_copy = daemon
+        .read(|store| store.vault_entries())
+        .is_ok_and(|entries| {
+            entries
+                .iter()
+                .any(|entry| entry.name == name && entry.shared_from.as_deref() == Some(from))
+        });
+    if !is_copy {
+        return;
+    }
+    // The secret first, as a removal does: a keyring that refuses leaves the entry whole.
+    if let Err(why) = daemon.vault.delete(name).await {
+        eprintln!("flottille daemon: the vault entry {name} shared from {from} stays: {why}");
+        return;
+    }
+    let removed =
+        crate::extensions::between_writes(|| daemon.write(|store| store.remove_vault_entry(name)));
+    if let Err(error) = removed {
+        eprintln!("flottille daemon: the vault entry {name} shared from {from} stays: {error}");
+    }
+    retool(daemon);
+}
+
 /// The user's Share of the entry `name` from an agent's connection request: every project's from
 /// now on, the rest of it as it was. A worklog's entry stays its project's alone.
 pub async fn shared(daemon: &Daemon, name: &str) -> Result<Value, Failure> {

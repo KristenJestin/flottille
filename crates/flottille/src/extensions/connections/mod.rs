@@ -2102,9 +2102,10 @@ fn entries_shareable(
     entries: &[String],
     machine: &str,
 ) -> std::result::Result<(), String> {
+    // Another connection's tokens too: the suffix is what marks an entry as a sign-in's.
     if entries
         .iter()
-        .any(|entry| *entry == oauth::entry(&declaration.name))
+        .any(|entry| *entry == oauth::entry(&declaration.name) || entry.ends_with(".oauth"))
     {
         return Err(format!(
             "OAuth tokens are never shared: {machine} signs in for itself"
@@ -2204,18 +2205,64 @@ pub async fn receive(
         .map(|copy| copy.entry["name"].as_str().unwrap_or_default().to_owned())
         .collect();
     entries_shareable(&declaration, &names, here).map_err(|why| format!("refused: {why}"))?;
+    // The entries as the declaration will find them, checked before any is kept: `add` would
+    // refuse them only once they are in the vault.
+    let this = flottille_core::vault::connection(&declaration.name);
+    for (copy, name) in entries.iter().zip(&names) {
+        let entry = flottille_core::vault::Entry {
+            name: name.clone(),
+            project: copy.entry["project"].as_str().map(str::to_owned),
+            bound: copy.entry["for"].as_str().map(str::to_owned),
+            description: None,
+            url: None,
+            username: None,
+            updated_at: 0,
+            shared_from: None,
+        };
+        entry_checked(&entry, &this).map_err(|why| format!("refused: {why}"))?;
+    }
     let name = declaration.name.clone();
+    // One share at a time: two of the same connection never both pass the check below and both
+    // keep entries, the one `add` refuses then removing what the other needs.
+    static RECEIVING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _receiving = RECEIVING.lock().await;
     if declaration_exists(daemon, &name) {
         return Err(format!(
             "refused: {here} has its own connection {name}: remove or rename it there first"
         ));
     }
-    for copy in entries {
-        crate::vault::receive(daemon, &copy.entry, &copy.secret.0, from).await?;
+    // The copies this share adds, removed if the connection is not declared after all; one that
+    // replaced a copy `from` shared before stays, as a share of that entry alone would leave it.
+    let kept_before: Vec<String> = daemon
+        .read(|store| store.vault_entries())
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .map(|entry| entry.name)
+        .collect();
+    let mut added = Vec::new();
+    let mut kept = Ok(());
+    for (copy, entry) in entries.iter().zip(&names) {
+        kept = crate::vault::receive(daemon, &copy.entry, &copy.secret.0, from).await;
+        if kept.is_err() {
+            break;
+        }
+        if !kept_before.contains(entry) {
+            added.push(entry.clone());
+        }
     }
-    add(daemon, connection.clone())
-        .await
-        .map_err(|failure| failure.message)?;
+    let declared = match kept {
+        Ok(()) => add(daemon, connection.clone())
+            .await
+            .map(|_| ())
+            .map_err(|failure| failure.message),
+        Err(why) => Err(why),
+    };
+    if let Err(why) = declared {
+        for entry in &added {
+            crate::vault::forget_copy(daemon, entry, from).await;
+        }
+        return Err(why);
+    }
     eprintln!("flottille daemon: the connection {name} was shared from {from}");
     Ok(())
 }
@@ -2340,15 +2387,25 @@ fn entries_checked(daemon: &Daemon, declaration: &Declaration) -> std::result::R
         let Some(entry) = entries.iter().find(|entry| &entry.name == name) else {
             continue;
         };
-        if let Some(project) = &entry.project {
-            return Err(Failure::refused(format!(
-                "the vault entry {name} is the project {project}'s alone: a connection is given to \
-                 every project, so the entries it names are every project's"
-            )));
-        }
-        entry.usable_for(&this).map_err(Failure::refused)?;
+        entry_checked(entry, &this).map_err(Failure::refused)?;
     }
     Ok(())
+}
+
+/// Refuses the vault entry `entry` for the connection whose use is `this` (`connection:<name>`):
+/// one project's alone, or bound to another use.
+fn entry_checked(
+    entry: &flottille_core::vault::Entry,
+    this: &str,
+) -> std::result::Result<(), String> {
+    if let Some(project) = &entry.project {
+        return Err(format!(
+            "the vault entry {} is the project {project}'s alone: a connection is given to every \
+             project, so the entries it names are every project's",
+            entry.name
+        ));
+    }
+    entry.usable_for(this)
 }
 
 /// Whether the connection `name` is declared; why it cannot be told when the declarations cannot
