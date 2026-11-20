@@ -531,7 +531,8 @@ fn the_tunnel_s_line_unfolds_and_folds_away(cx: &mut TestAppContext) {
         |cx| label(cx, &link).is_some(),
     );
     settle(&shell, cx);
-    click(&shell, cx, &link);
+    // A click and no settling: the line is looked at from its first frame.
+    cx.update(|window, cx| window.click(link.clone(), cx));
     until(&shell, cx, "the tunnel is open", |_| {
         !carried(&machines.pc).is_empty()
     });
