@@ -679,13 +679,13 @@ mod tests {
         daemon.emit("remote.delivery_dropped", json!({})).unwrap();
         let (first, go) = stopped_at(&daemon, Point::Read);
 
-        daemon.emit("remote.delivery_dropped", json!({})).unwrap();
+        let later = daemon.emit("remote.delivery_dropped", json!({})).unwrap();
         let (second, _) = another_keep(&daemon);
         go.send(()).unwrap();
         first.join().unwrap();
         second.join().unwrap();
 
-        assert_eq!(cursor(&daemon), last(&daemon), "the cursor went back");
+        assert!(cursor(&daemon) >= later.seq, "the cursor went back");
         assert_eq!(rows(&daemon).len(), 2);
     }
 
@@ -719,6 +719,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let daemon = a_daemon(dir.path());
         daemon.emit("remote.delivery_dropped", json!({})).unwrap();
+        keep(&daemon);
+        // The keep after a change passes the keeper's own `notifications.changed`.
         keep(&daemon);
         let before = daemon.read(|store| Ok(store.changes_made())).unwrap();
 
