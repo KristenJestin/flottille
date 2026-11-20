@@ -191,13 +191,17 @@ fn label(cx: &mut VisualTestContext, id: gpui_kit::ElementId) -> Option<String> 
     })
 }
 
-/// The height of the frame a session's row unfolds in, `None` once it is gone.
-fn frame_height(shell: &Entity<Shell>, id: &str, cx: &mut VisualTestContext) -> Option<f32> {
+/// The frame a session's row unfolds in, while the tree has the row.
+fn frame_of(shell: &Entity<Shell>, id: &str, cx: &mut VisualTestContext) -> Option<String> {
     let row = shell.read_with(cx, |s, _| s.session(id).map(|row| row.entity_id()))?;
-    let frame = gpui_kit::ElementId::Name(format!("tree-row-{}", row.as_u64()).into());
+    Some(format!("tree-row-{}", row.as_u64()))
+}
+
+/// The height of `frame`, `None` once it is gone.
+fn height(cx: &mut VisualTestContext, frame: &str) -> Option<f32> {
     cx.update(|window, _| {
         window
-            .try_find(frame)
+            .try_find(frame.to_owned())
             .map(|found| f32::from(found.bounds().size.height))
     })
 }
@@ -295,6 +299,11 @@ fn opening_it_switches_to_that_machine(cx: &mut TestAppContext) {
             })
         },
     );
+    // The page arrived by the switch: its header and its composer enter, one after the other.
+    for section in ["0", "2"] {
+        let id = gpui_kit::ElementId::Name(format!("session-section-{agent}-{section}").into());
+        assert!(present(cx, id), "section {section} enters");
+    }
     // Its own row now: the session as server lists it.
     until(&shell, cx, "its row on server", |cx| {
         present(cx, session_id(&agent))
@@ -343,11 +352,12 @@ fn rows_of_other_machines_unfold_and_fold_away(cx: &mut TestAppContext) {
     let agent = led_on_server(&mcp);
     let row = elsewhere_id("server", &agent);
     until(&shell, cx, "the row comes", |cx| {
-        frame_height(&shell, &row, cx).is_some()
+        frame_of(&shell, &row, cx).is_some_and(|frame| height(cx, &frame).is_some())
     });
-    let coming = frame_height(&shell, &row, cx).unwrap();
+    let frame = frame_of(&shell, &row, cx).unwrap();
+    let coming = height(cx, &frame).unwrap();
     settle(&shell, cx);
-    let full = frame_height(&shell, &row, cx).unwrap();
+    let full = height(cx, &frame).unwrap();
     assert!(full > 0., "{full}");
     assert!(
         coming < full,
@@ -364,9 +374,9 @@ fn rows_of_other_machines_unfold_and_fold_away(cx: &mut TestAppContext) {
             == "ended"
     });
     until(&shell, cx, "the row starts folding away", |cx| {
-        frame_height(&shell, &row, cx).is_none_or(|height| height < full)
+        height(cx, &frame).is_none_or(|height| height < full)
     });
-    let going = frame_height(&shell, &row, cx);
+    let going = height(cx, &frame);
     assert!(
         going.is_some_and(|height| height > 0.),
         "the row folds away, it does not vanish: {going:?}"
@@ -448,6 +458,17 @@ fn a_returned_branch_is_named_in_the_report_step(cx: &mut TestAppContext) {
             .position(|block| matches!(block, Block::Report { .. }))
             .expect("the report's step")
     });
+    // The group that holds it, when it is folded, is unfolded: its rows are drawn.
+    let groups = page.read_with(cx, |p, cx| p.conversation().read(cx).groups());
+    if let Some(group) = groups.into_iter().find(|group| group.contains(&at)) {
+        let line = page
+            .read_with(cx, |p, cx| p.conversation().read(cx).group_id(&group))
+            .expect("a group's line");
+        if cx.update(|window, _| window.find(line.clone()).expanded()) == Some(false) {
+            cx.update(|window, cx| window.click(line, cx));
+            settle(&shell, cx);
+        }
+    }
     // Folded, its step names the ref the branch came back into.
     let said = label(
         cx,
