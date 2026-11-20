@@ -446,7 +446,7 @@ pub(crate) fn tell(
         let outgoing = outgoing(&launch, &name, String::new(), &message, back);
         let _ = daemon.emit(
             "remote.delivery_dropped",
-            dropped(&outgoing, None, Some(&why)),
+            dropped(daemon, &outgoing, None, Some(&why)),
         );
     }
     true
@@ -665,7 +665,7 @@ async fn send_each(daemon: &Arc<Daemon>, machine: &str) {
                     forget(daemon, &outgoing.id);
                     let _ = daemon.emit(
                         "remote.delivery_dropped",
-                        dropped(&outgoing, Some(&reason), None),
+                        dropped(daemon, &outgoing, Some(&reason), None),
                     );
                 }
                 // The link went: what is left goes when it comes back.
@@ -711,14 +711,40 @@ fn with_commits(message: Value, name: &str, came: Result<Value, String>) -> Valu
 
 /// What the inbox says of a message dropped: for whom, what, since when, and why: refused by the
 /// other machine, or not kept by this one (`unkept`).
-fn dropped(outgoing: &Outgoing, refused: Option<&str>, unkept: Option<&str>) -> Value {
+fn dropped(
+    daemon: &Daemon,
+    outgoing: &Outgoing,
+    refused: Option<&str>,
+    unkept: Option<&str>,
+) -> Value {
+    let mut title = None;
     let (kind, agent) = match serde_json::from_value::<MachineMessage>(outgoing.message.clone()) {
         Ok(MachineMessage::Deliver(deliver)) => (deliver.kind, deliver.agent),
         Ok(MachineMessage::Call(call)) => (call.tool, call.agent),
+        Ok(MachineMessage::Close(request)) => {
+            let params: Value = serde_json::from_str(&request.signed.params).unwrap_or_default();
+            let agent = params["agent"].as_str().unwrap_or_default().to_owned();
+            title = session_title(daemon, &outgoing.machine, &agent);
+            ("close".to_owned(), agent)
+        }
         _ => (String::new(), String::new()),
     };
     json!({"machine": outgoing.name, "launch": outgoing.launch, "kind": kind, "agent": agent,
-        "kept_at": outgoing.at, "refused": refused, "unkept": unkept})
+        "title": title, "kept_at": outgoing.at, "refused": refused, "unkept": unkept})
+}
+
+/// The title of the session `agent` of the machine of key `machine`, as that machine last listed
+/// it, when it is known.
+fn session_title(daemon: &Daemon, machine: &str, agent: &str) -> Option<String> {
+    let lists = daemon.read(|store| store.machine_sessions()).ok()?;
+    let (_, _, list, _) = lists.into_iter().find(|(key, ..)| key == machine)?;
+    list["sessions"]
+        .as_array()?
+        .iter()
+        .find(|session| session["id"] == agent)
+        .and_then(|session| session["title"].as_str())
+        .filter(|title| !title.is_empty())
+        .map(str::to_owned)
 }
 
 /// Drops what waited for its machine for 30 days, each with an entry in the inbox.
@@ -732,28 +758,38 @@ pub(crate) fn drop_old(daemon: &Daemon) {
             "flottille daemon: a message kept 30 days for {} is dropped",
             outgoing.name
         );
-        let _ = daemon.emit("remote.delivery_dropped", dropped(&outgoing, None, None));
+        let _ = daemon.emit(
+            "remote.delivery_dropped",
+            dropped(daemon, &outgoing, None, None),
+        );
     }
 }
 
 /// The inbox's words of a message dropped (`remote.delivery_dropped`).
 pub(crate) fn dropped_text(data: &Value) -> String {
     let machine = data["machine"].as_str().unwrap_or("another machine");
-    let what = match data["kind"].as_str().unwrap_or_default() {
-        "" => "A message".to_owned(),
-        kind => format!("A {kind}"),
-    };
     let agent = data["agent"].as_str().unwrap_or_default();
+    let what = match data["kind"].as_str().unwrap_or_default() {
+        // The session is named as its owner knows it: its title, else its id.
+        "close" => {
+            let session = data["title"].as_str().filter(|title| !title.is_empty());
+            format!("The close of session {}", session.unwrap_or(agent))
+        }
+        kind => {
+            let what = match kind {
+                "" => "A message".to_owned(),
+                kind => format!("A {kind}"),
+            };
+            format!("{what} for agent {agent}")
+        }
+    };
     if let Some(why) = data["unkept"].as_str() {
-        return format!("{what} for agent {agent} of {machine} was not sent: {why}.");
+        return format!("{what} of {machine} was not sent: {why}.");
     }
     match data["refused"].as_str() {
-        Some(why) => format!(
-            "{what} for agent {agent} of {machine} was dropped: {machine} refused it ({why})."
-        ),
+        Some(why) => format!("{what} of {machine} was dropped: {machine} refused it ({why})."),
         None => format!(
-            "{what} for agent {agent} of {machine} was dropped: {machine} did not link to this \
-             machine for 30 days."
+            "{what} of {machine} was dropped: {machine} did not link to this machine for 30 days."
         ),
     }
 }
