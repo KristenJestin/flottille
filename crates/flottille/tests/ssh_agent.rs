@@ -1713,9 +1713,16 @@ fn a_push_runs_no_submodule_push_a_run_set_up() {
     std::fs::write(sub.join("a.txt"), "a\n").unwrap();
     user.git(&sub, &["add", "a.txt"]);
     user.git(&sub, &["commit", "--quiet", "-m", "a"]);
+    // Its `main` the branch a clone checks out.
     user.git(
         &user.path(""),
-        &["init", "--quiet", "--bare", target.to_str().unwrap()],
+        &[
+            "init",
+            "--quiet",
+            "--bare",
+            "--initial-branch=main",
+            target.to_str().unwrap(),
+        ],
     );
     user.git(
         &sub,
