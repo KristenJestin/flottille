@@ -59,6 +59,16 @@ struct Jira {
 
 impl Jira {
     fn with_comments(comments: Value) -> Jira {
+        Jira::serving(comments, json!([]))
+    }
+
+    /// A site that also knows `users`, as `GET /rest/api/3/user/search` and `.../viewissue/search`
+    /// answer them: each is `{accountId, displayName, emailAddress?, active?, canSee: [keys]}`.
+    fn with_users(users: Value) -> Jira {
+        Jira::serving(json!([]), users)
+    }
+
+    fn serving(comments: Value, users: Value) -> Jira {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         let received = Arc::new(Mutex::new(Vec::new()));
@@ -125,6 +135,43 @@ impl Jira {
                                 .to_string(),
                             ),
                         }
+                    }
+                    "GET" if path.starts_with("/rest/api/3/user/") => {
+                        let query = |name: &str| {
+                            path.split(['?', '&'])
+                                .find_map(|pair| pair.strip_prefix(&format!("{name}=")))
+                                .unwrap_or_default()
+                                .replace("%20", " ")
+                                .replace("%40", "@")
+                                .replace('+', " ")
+                                .to_lowercase()
+                        };
+                        let (words, issue) = (query("query"), query("issueKey").to_uppercase());
+                        let viewing = path.starts_with("/rest/api/3/user/viewissue/search?");
+                        let found: Vec<Value> = users
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter(|user| {
+                                let held = format!(
+                                    "{} {}",
+                                    user["displayName"].as_str().unwrap_or_default(),
+                                    user["emailAddress"].as_str().unwrap_or_default()
+                                )
+                                .to_lowercase();
+                                held.contains(&words)
+                                    && (!viewing
+                                        || user["canSee"]
+                                            .as_array()
+                                            .is_some_and(|keys| keys.iter().any(|k| *k == issue)))
+                            })
+                            .map(|user| {
+                                let mut user = user.clone();
+                                user.as_object_mut().unwrap().remove("canSee");
+                                user
+                            })
+                            .collect();
+                        ("200 OK", Value::Array(found).to_string())
                     }
                     "GET" => (
                         "200 OK",
@@ -695,6 +742,120 @@ fn the_refusal_without_a_tracker_entry_says_how_to_get_one() {
     );
 
     assert!(said.contains("vault ask"), "{said}");
+}
+
+/// The people of the fake site that the search finds, and the work item they can see.
+fn people_site() -> Jira {
+    Jira::with_users(json!([
+        {"accountId": ANA, "displayName": "Ana Example", "emailAddress": "ana@example.org",
+         "active": true, "canSee": ["ABC-1"]},
+        {"accountId": "5b10ac8d82e05b22cc7d4ef7", "displayName": "Ana Outsider",
+         "active": true, "canSee": []},
+        {"accountId": BEN, "displayName": "Ben Sample", "active": true, "canSee": ["ABC-1"]},
+        {"accountId": "5b10ac8d82e05b22cc7d4ef8", "displayName": "Ana Gone", "active": false,
+         "canSee": ["ABC-1"]},
+    ]))
+}
+
+/// What `people` answers, from the agent's side.
+fn people_said(mcp: &Mcp, args: Value) -> String {
+    let answer = mcp.call("tickets", args);
+    assert!(!answer.error, "{}", answer.text);
+    answer.text
+}
+
+#[test]
+fn people_finds_on_the_site_someone_never_seen() {
+    let jira = people_site();
+    // No work item of the project is assigned to anyone: only the site knows Ben.
+    let (user, mcp) = signed_in(&jira, json!([]));
+
+    let said = people_said(&mcp, json!({"action": "people", "query": "ben"}));
+
+    assert!(said.contains(&format!("- Ben Sample ({BEN})")), "{said}");
+    let asked = sent(&jira, "GET", "user/search?query=ben");
+    assert_eq!(asked.len(), 1, "{:?}", jira.received());
+    // Signed as the entry's account, and the secret is in nothing the agent reads or `acli` got.
+    assert_eq!(asked[0].authorization, basic());
+    assert!(!said.contains(SECRET), "{said}");
+    assert!(
+        !acli_calls(&user).iter().any(|call| call.contains(SECRET)),
+        "{:?}",
+        acli_calls(&user)
+    );
+    // The e-mail, when Jira shows it, beside the account id.
+    let said = people_said(&mcp, json!({"action": "people", "query": "ana"}));
+    assert!(
+        said.contains(&format!(
+            "- Ana Example (ana@example.org), account id {ANA}"
+        )),
+        "{said}"
+    );
+    // A deactivated account is no one to notify.
+    assert!(!said.contains("Ana Gone"), "{said}");
+}
+
+#[test]
+fn people_on_a_ticket_lists_only_who_can_see_it() {
+    let jira = people_site();
+    let (_, mcp) = signed_in(&jira, json!([]));
+
+    let said = people_said(
+        &mcp,
+        json!({"action": "people", "query": "ana", "ticket": "ABC-1"}),
+    );
+
+    assert!(said.contains("- Ana Example"), "{said}");
+    assert!(!said.contains("Ana Outsider"), "{said}");
+    assert_eq!(
+        sent(
+            &jira,
+            "GET",
+            "user/viewissue/search?issueKey=ABC-1&query=ana"
+        )
+        .len(),
+        1,
+        "{:?}",
+        jira.received()
+    );
+    // Without a ticket the site's whole search answers: the outsider is found.
+    let said = people_said(&mcp, json!({"action": "people", "query": "ana"}));
+    assert!(said.contains("- Ana Outsider"), "{said}");
+}
+
+#[test]
+fn two_people_of_the_same_name_are_both_listed() {
+    let jira = Jira::with_users(json!([
+        {"accountId": ANA, "displayName": "Sam Smith", "emailAddress": "sam@example.org",
+         "active": true},
+        {"accountId": BEN, "displayName": "Sam Smith", "active": true},
+    ]));
+    let (_, mcp) = signed_in(&jira, json!([]));
+
+    let said = people_said(&mcp, json!({"action": "people", "query": "sam smith"}));
+
+    assert!(said.contains("2 in "), "{said}");
+    assert!(said.contains(&format!("account id {ANA}")), "{said}");
+    assert!(
+        said.contains(&format!("(sam@example.org), account id {ANA}")),
+        "{said}"
+    );
+    assert!(said.contains(&format!("- Sam Smith ({BEN})")), "{said}");
+}
+
+#[test]
+fn people_without_the_entry_says_it_searched_the_assignees_only() {
+    let jira = people_site();
+    let user = user(&jira);
+    jira_with(&user, None);
+    script(&user, json!([]));
+    let mcp = root_in(&user);
+
+    let said = people_said(&mcp, json!({"action": "people", "query": "ben"}));
+
+    assert!(said.contains("Only the assignees were searched"), "{said}");
+    assert!(said.contains("no vault entry"), "{said}");
+    assert!(jira.received().is_empty(), "{:?}", jira.received());
 }
 
 /// The requests of the fake site that were `method`, on a path that ends with `end`.
