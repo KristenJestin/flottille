@@ -100,6 +100,54 @@ pub enum MachineMessage {
     /// on another machine"). Answered `{"state": "accepted" | "held"}`, or refused; its code
     /// follows as `git` messages of the same launch.
     Launch(Box<LaunchAsk>),
+    /// A delivery for an agent of the receiver, of a session it started on the sender
+    /// (`docs/remote.md`, "Deliveries across machines"): a child's report, question or failure, a
+    /// led session's end of turn. Kept by the sender until it is answered, sent again in order
+    /// and once (its `id` is idempotent).
+    Deliver(Box<Deliver>),
+    /// One of the tree's tools aimed by an agent of the sender at a session it started on the
+    /// receiver (`docs/remote.md`, "What a machine may send"). Answered `{"text"}`, or refused.
+    Call(Box<Call>),
+}
+
+/// A delivery one machine sends another for one of the receiver's agents: taken only for the
+/// agent that launched `launch` on the sender.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Deliver {
+    /// Its id on the sender: the receiver stores it once, however often it comes.
+    pub id: String,
+    /// The launch it is of, as the receiver named it.
+    pub launch: String,
+    /// The receiver's agent it is for: the launch's caller.
+    pub agent: String,
+    /// The delivery's kind (`child-report`, `session-turn-ended`…).
+    pub kind: String,
+    pub body: String,
+    /// `between-turns` or `urgent`.
+    pub urgency: String,
+    /// Whether the session it is of has ended with it: the launch counts no more.
+    #[serde(default)]
+    pub ended: bool,
+}
+
+/// A tool of the tree an agent of the sender called on a session it started on the receiver:
+/// taken only from that agent, for that session.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Call {
+    /// Its id on the sender: a message is delivered once, however often it comes.
+    pub id: String,
+    /// The launch that started the session, as the sender named it.
+    pub launch: String,
+    /// The sender's agent that calls: the launch's caller.
+    pub caller: String,
+    /// The receiver's agent it is aimed at: the one the launch started.
+    pub agent: String,
+    /// `agent_send`, `agent_status`, `agent_stop`, `session_send` or `session_read`.
+    pub tool: String,
+    /// The tool's arguments, as JSON.
+    pub arguments: String,
 }
 
 /// A launch another machine asks for one of its agents.

@@ -1186,6 +1186,9 @@ async fn serve(remote: Arc<Remote>, link: Link, name: String, generation: u64) {
                     asked,
                 ));
             }
+            Message::Machine(MachineMessage::Deliver(_) | MachineMessage::Call(_)) => {
+                received.answer(Err("deliveries across machines are not taken yet".into()))
+            }
             // Kept apart by the link's protocol name: a client's request on a machine link is
             // refused before it gets here (`Link::next`).
             Message::Client(_) => received.answer(Err(
