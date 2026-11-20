@@ -67,7 +67,7 @@ struct State {
 }
 
 /// `updates.toml`'s `check`: automatically (the default) or never.
-fn checks_automatically(paths: &Paths) -> Result<bool, String> {
+pub(crate) fn checks_automatically(paths: &Paths) -> Result<bool, String> {
     let file = paths.config.join("updates.toml");
     let text = match std::fs::read_to_string(&file) {
         Ok(text) => text,

@@ -403,7 +403,7 @@ fn along_line_paged(
 /// that next is above dev: a beta of `X.Y.0` or above is taken from a next build of `X.Y.0` without
 /// `--force`, because next only holds the version after dev's, so such a beta is that line merged
 /// into dev, not a step back.
-fn is_older(new: &Version, this: &Version) -> bool {
+pub(crate) fn is_older(new: &Version, this: &Version) -> bool {
     let merged = this.pre.as_str().starts_with("next.")
         && new.pre.as_str().starts_with("beta.")
         && (new.major, new.minor, new.patch) >= (this.major, this.minor, this.patch);
@@ -831,6 +831,12 @@ fn size_of(url: &str) -> Option<u64> {
 /// rc's or a next's line, a branch's alphas), oldest first: what "What's new" says once it is
 /// applied. None when the releases cannot be read: they are not worth failing a download for.
 fn notes(this: &Version, new: &Version) -> Vec<Value> {
+    notes_between(this, new).unwrap_or_default()
+}
+
+/// [`notes`], saying why the releases cannot be read: what "What's new" reads for a build that
+/// was installed by hand (`whatsnew.rs`).
+pub fn notes_between(this: &Version, new: &Version) -> Result<Vec<Value>> {
     // The kind of a version: its pre-release's first word, an alpha's with its branch.
     let kind = |version: &Version| -> String {
         let pre = version.pre.as_str();
@@ -843,9 +849,8 @@ fn notes(this: &Version, new: &Version) -> Vec<Value> {
             None => String::new(),
         }
     };
-    let Ok(Some(releases)) = json(&format!("{}/releases?per_page=100", api())) else {
-        return Vec::new();
-    };
+    let releases = json(&format!("{}/releases?per_page=100", api()))?
+        .ok_or("the releases cannot be read: GitHub has none")?;
     let mut found: Vec<(Version, Value)> = releases
         .as_array()
         .into_iter()
@@ -864,7 +869,7 @@ fn notes(this: &Version, new: &Version) -> Vec<Value> {
         })
         .collect();
     found.sort_by(|a, b| a.0.cmp(&b.0));
-    found.into_iter().map(|(_, said)| said).collect()
+    Ok(found.into_iter().map(|(_, said)| said).collect())
 }
 
 /// What the daemon's start found staged.

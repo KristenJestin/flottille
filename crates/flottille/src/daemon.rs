@@ -138,6 +138,8 @@ pub fn run(paths: &Paths) -> Result<()> {
             return Err(start_again(&binary));
         }
     }
+    // This build is the one that runs now: what ran before it is what is new since.
+    crate::whatsnew::record(paths);
     // What a daemon that died left: the display folders it made, which only a daemon holding the
     // lock makes, so none is this daemon's; it makes its own again.
     crate::display::clean(paths);
@@ -300,6 +302,8 @@ pub struct Daemon {
     pub remote: std::sync::OnceLock<std::result::Result<Arc<crate::link::Remote>, String>>,
     /// What the daemon knows of an update of Flottille (`updates`).
     pub updates: crate::updates::Live,
+    /// What is new since the version last run (`whatsnew`).
+    pub whatsnew: crate::whatsnew::Live,
     /// Becomes true when the daemon stops.
     stopping: watch::Sender<bool>,
 }
@@ -366,6 +370,7 @@ impl Daemon {
             watch: Arc::default(),
             remote: std::sync::OnceLock::new(),
             updates: crate::updates::Live::default(),
+            whatsnew: crate::whatsnew::Live::default(),
             stopping: watch::Sender::new(false),
         }
     }
@@ -690,6 +695,7 @@ async fn serve(
         daemon.clone(),
         daemon.stopping.subscribe(),
     ));
+    tokio::spawn(crate::whatsnew::watch(daemon.clone()));
     crate::models::check(&daemon);
     crate::inactive::check(&daemon);
     crate::quota::check(&daemon);
@@ -920,6 +926,7 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
             "vault.",
             "remote.",
             "tunnel.",
+            "whatsnew.",
         ]
         .iter()
         .any(|prefix| request.method.starts_with(prefix))
@@ -960,6 +967,8 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
                     crate::link::call(daemon, &request.method, request.params).await
                 } else if request.method.starts_with("tunnel.") {
                     crate::tunnel::call(daemon, &request.method, request.params).await
+                } else if request.method.starts_with("whatsnew.") {
+                    crate::whatsnew::call(daemon, &request.method, request.params).await
                 } else if request.method.starts_with("items.") {
                     items::call(daemon, &request.method, request.params).await
                 } else if request.method.starts_with("provider.") {
