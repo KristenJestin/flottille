@@ -198,7 +198,14 @@ static OWN: OnceLock<Option<PathBuf>> = OnceLock::new();
 /// of it. Never read by a release build, never the git of a push the gate let through.
 const TEST_GIT: &str = "FLOTTILLE_TEST_GIT";
 
-/// Finds the `git` of [`GIT`] and [`OWN`], at the daemon's start, before anything runs.
+/// The folders of the daemon's `PATH` that only root may change (each of them and every folder
+/// on the way is root's, and no one else may write it), found at its start: the `PATH` of a push
+/// the gate let through, so that a program the user's settings name by a bare name (a credential
+/// helper's `!gh auth git-credential`, `ssh` in a wrapper) is never one a run put first.
+static ROOTED_PATH: OnceLock<OsString> = OnceLock::new();
+
+/// Finds the `git` of [`GIT`] and [`OWN`], and [`ROOTED_PATH`], at the daemon's start, before
+/// anything runs.
 pub fn find_git() {
     let chosen = crate::ssh_agent::chosen(crate::ssh_agent::candidates("git"));
     GIT.get_or_init(|| {
@@ -219,6 +226,26 @@ pub fn find_git() {
         }
         chosen.map(|(git, _)| git)
     });
+    ROOTED_PATH.get_or_init(|| {
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let rooted: Vec<PathBuf> = std::env::split_paths(&path)
+            .filter_map(|folder| folder.canonicalize().ok())
+            .filter(|folder| folder.ancestors().all(root_s_alone))
+            .collect();
+        std::env::join_paths(rooted).unwrap_or_default()
+    });
+}
+
+/// Whether only root may change `folder`: it is root's, and neither its group nor others may
+/// write it.
+fn root_s_alone(folder: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(folder).is_ok_and(|m| m.uid() == 0 && m.mode() & 0o022 == 0)
+}
+
+/// The `PATH` of a push the gate let through: [`ROOTED_PATH`].
+pub fn rooted_path() -> OsString {
+    ROOTED_PATH.get().cloned().unwrap_or_default()
 }
 
 /// The `git` the daemon runs for itself: [`OWN`]'s, `git` of the `PATH` where nothing was

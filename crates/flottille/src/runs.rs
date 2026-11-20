@@ -974,6 +974,9 @@ fn unrecursed(words: &[String]) -> Vec<String> {
 /// run's.
 fn lifted(ssh: OsString, bus_replaced: bool, lent: bool) -> BTreeMap<OsString, OsString> {
     let mut env: BTreeMap<OsString, OsString> = std::env::vars_os().collect();
+    // A program the user's settings name by a bare name is found in the folders only root may
+    // change, never in one a run could put a program of its own in.
+    env.insert("PATH".into(), crate::git::rooted_path());
     configure(&mut env, "core.hooksPath", "/dev/null");
     env.insert("GIT_SSH_COMMAND".into(), ssh);
     env.insert(
@@ -2838,6 +2841,7 @@ mod tests {
                     "GIT_ALLOW_PROTOCOL",
                     "GIT_PROXY_COMMAND",
                     "GIT_ASKPASS",
+                    "PATH",
                 ]
                 .contains(&name_text)
             {
@@ -2858,6 +2862,8 @@ mod tests {
         assert_eq!(get(format!("GIT_CONFIG_VALUE_{}", count + 1)), "");
         assert_eq!(get("GIT_PROXY_COMMAND".into()), "");
         assert_eq!(get("GIT_ASKPASS".into()), "");
+        // The folders only root may change, found at the daemon's start: none in this test.
+        assert_eq!(env[&OsString::from("PATH")], crate::git::rooted_path());
         let replaced = lifted("ssh".into(), true, true);
         assert!(!replaced.contains_key(&OsString::from("DBUS_SESSION_BUS_ADDRESS")));
         let unlent = lifted("ssh".into(), false, false);
