@@ -890,11 +890,18 @@ on a real phone, by hand, and reported.
 - The switch is kept on the tree's root and may name any agent of the tree (the user switched it
   from a child): the launch names the tree by that agent, which the receiving machine checks the
   switch against.
+- The tree a launch names is the caller's machine's word: a machine holding the user's switch of
+  one tree to Full may name that tree for a launch of any of its agents within those 12 hours, and
+  that launch starts in Full. Accepted as a limit: the switch is the user's, for that machine, and
+  that machine runs the user's agents already.
 - A launch held for the user on the receiving machine makes its agent and its workspace there once
   its code came, the agent sent nothing and the setup waiting until the user allows it; the code
   of a launch is taken when the gate accepted it or held it for the user, never when it refused it.
 - A machine may leave 4 launches, of any kind, waiting for the user's answer on another: its next
-  is refused until the user answered one.
+  is refused until the user answered one, however many it sends at once.
+- The setup of a workspace made of a launch's code runs only as that launch's, by the workspace's
+  id: a launch whose workspace was removed names none, and a launch refused or forgotten removes
+  only the workspace made of its code, never one of the user's of the same name.
 - A child on another machine counts in its parent's cap on the parent's machine while its parent
   lives, until its end is told back (#817); a launch whose code never came holds a slot of the
   receiving machine's cap until it is forgotten, an hour after it was asked.
