@@ -617,19 +617,30 @@ sends it in chunks.
   `.gif`, `.webp`; `.mp4`, `.m4v`, `.webm`, `.mkv`, `.mov`, `.ogv`). It is opened again at each
   chunk on the checks Open makes (no link followed, a regular file, no execute bit), and the file
   opened must be the very path recorded when it was shown (`/proc/self/fd`): a folder of its path
-  made a link since leads elsewhere and is refused.
+  made a link since leads elsewhere and is refused. It must also be the very file: the device and
+  inode recorded at show time are compared at each chunk (another file put at the path is
+  refused), and a file with more than one hard link is refused, since another name of it may be
+  outside the place.
 - `agent.file` is a `read` method: a `viewer` sees what a session showed as it sees the
   conversation.
 - **Bounds**: a chunk is at most 512 KiB (in base64 it fits a link's 1 MiB frame), a file at
-  most 2 GiB, and a machine serves 2 MiB a second, all askers together (a chunk past that waits
-  its turn; less than a third of the requests a device's signature allows in five minutes).
+  most 2 GiB, and a machine serves 2 MiB a second, all askers together (less than a third of the
+  requests a device's signature allows in five minutes). A chunk that would wait more than 3
+  seconds for its turn is refused at once (`refused`, "busy: ..."), and so is a call when 8 are in
+  flight already; the asker tries again, so that one device asking without end never keeps the
+  others waiting. The window asks again, half a second apart, up to 20 times.
 - **Each chunk is one signed request**, on a stream of the link of its own; a seek asks for the
   range it needs (`offset`), with nothing before it read.
 - **In the window**, the line of a picture of another machine draws a placeholder that fades into
   the picture once it is in (`awaiting`), with **Open**; a video's line has **Play**. Both write a
-  copy on this machine (a folder of the window's own in the system's temporary folder, readable by
-  the user alone, removed when the window quits), hand it to the system's default handler as soon
-  as its first chunk is in, and the rest arrives into it while it plays. The kit has no video
+  copy on this machine (a folder of the window's own in `$XDG_RUNTIME_DIR`, else in a folder of the
+  user's in the temporary folder that no one else can enter, readable by the user alone, removed
+  when the window quits; leftovers of a window that did not quit are removed when the next one
+  starts; files are made new, a link in their place is never written through), hand it to the
+  system's default handler as soon as its first chunk is in, and the rest arrives into it while it
+  plays. Two Opens of a link share one copy, and a whole copy is given again, never fetched again.
+  A session's id that is not 1 to 64 letters, digits, `_` or `-` is never put in a file name: the
+  Open is refused. The kit has no video
   element: a video plays in the user's own player, never in the window.
 
 The command line takes `--machine <name>` on every command (`FLOTTILLE_MACHINE` too). The window
@@ -1249,8 +1260,9 @@ on a real phone, by hand, and reported.
   player fed through a local range server could seek ahead; a temporary file was the simpler,
   reversible step, and needs no listener on this machine.
 - **The pace of `agent.file` is the machine's, not each device's (#1150)**: 2 MiB a second for
-  every asker together, a chunk waiting its turn rather than being refused. Reversible: one budget
-  per device is a map.
+  every asker together, with at most 8 calls in flight and a wait of at most 3 seconds, past
+  which the call is refused at once (the daemon does not know the asking device at that point).
+  Reversible: one budget per device is a map.
 - **The window's tunnels are not listed again after a restart (#830).** The listener is the
   window's connection's: a window that quits closes them, and one that opens again starts with
   none (`tunnel.list` still lists what a command line holds).
