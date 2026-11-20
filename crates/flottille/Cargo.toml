@@ -34,6 +34,10 @@ oo7 = { version = "0.6.0", default-features = false, features = ["async-std", "n
 # Already in the tree (GPUI Fast uses it for the window): parses the Markdown an agent writes, to turn it into Jira's ADF.
 markdown = "1.0.0"
 pdf_oxide = { version = "0.3.78", default-features = false }
+# The sounds of a notification, played through the session's sound server (PulseAudio's protocol,
+# which PipeWire answers too): pure Rust over a socket, no ALSA or other C library linked into
+# the daemon, so that it starts on a machine without sound (#1002).
+pulseaudio = "0.3.2"
 # The client of the user's connections too: their servers over stdio and Streamable HTTP.
 rmcp = { version = "3.7.0", default-features = false, features = ["server", "transport-io", "transport-streamable-http-server", "client", "transport-streamable-http-client-reqwest", "reqwest-tls-no-provider"] }
 # Already built under rmcp's test client: the HTTP client of a URL connection, its TLS the daemon's
@@ -61,6 +65,10 @@ tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring
 tokio-util = "0.7.20"
 toml_edit = "0.25.17"
 url = "2.5.8"
+# The desktop's notifications on the session bus (`org.freedesktop.Notifications`, #1002): the
+# library the vault's Secret Service already uses (oo7), with its default features: nothing more
+# is compiled. The scenarios serve a notification server on a private bus with it.
+zbus = "5.19.0"
 # The device key read from the session's keyring by `flottille remote setup`, wiped when dropped.
 zeroize = "1.9.1"
 
@@ -72,14 +80,11 @@ flate2 = "1.1.10"
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
 # The window's scenarios run on GPUI's test platform, in front of a real daemon.
 flottille-window = { version = "0.1.0", path = "../flottille-window", features = ["test-support"] }
-gpui-design-system = { git = "https://github.com/KristenJestin/gpui-design-system", tag = "v0.3.0-beta.2" }
+gpui-design-system = { git = "https://github.com/KristenJestin/gpui-design-system", tag = "v0.3.0-alpha.feat-notice-toast.5" }
 gpui-kit = { version = "=0.8.0", default-features = false, features = ["assets", "test-support"] }
 rmcp = { version = "3.7.0", default-features = false, features = ["client", "transport-streamable-http-client-reqwest", "reqwest-tls-no-provider"] }
 # Only to give reqwest, under rmcp's test client, the crypto provider it insists on even for http.
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std"] }
-# The notification server and the private bus the desktop scenarios talk to (#1002): the same
-# library the daemon sends its notifications with.
-zbus = "5.19.0"
 # To take a store back to what an older version wrote (the scenarios of #519).
 rusqlite = { version = "0.41.0", features = ["bundled", "fallible_uint"] }
 # The hub of the remote scenarios runs on a runtime of the test's own.
