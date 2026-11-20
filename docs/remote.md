@@ -244,7 +244,8 @@ link.
   reached (`listen`): **Nowhere** (the default: it dials the others, nobody dials it), an address
   of one of its interfaces, a Tailscale or WireGuard one offered first and marked, **Every
   network** (`0.0.0.0`, which opens a port on any network the machine joins) or an address typed.
-  Both are set in the window and from the command line (`flottille remote on [--listen
+  Whether remote is on is set in the window (Settings, Machines) and from the command line; where
+  it is reached (`listen`) from the command line only (`flottille remote on [--listen
   <address>|tailnet|nowhere]`, `flottille remote off`, `flottille remote listen <address>`;
   `remote.configure`, `protocol.md`), and taken at once: the link starts, stops, or listens
   elsewhere, with no restart. Turning remote off closes the links and keeps the hub's setup and
@@ -1042,13 +1043,13 @@ on a real phone, by hand, and reported.
 - **A change of where this machine is reached is taken by closing the link and making it again,
   not by the daemon starting again** (#1144): simpler, and no client reconnects. It cuts what the
   link carries, so while an agent runs the change is written and waits for the next start, and
-  Settings, Machines says so (`remote.settings`' `waits`). Turning remote on or off is not held:
+  the command says so (`remote.settings`' `waits`). Turning remote on or off is not held:
   the user asked for it, the off one after a confirmation.
-- **Where this machine is reached is one select** (Nowhere, the interfaces' addresses, Every
-  network, Another address…), not radio choices, which hold four kinds at most; an interface
-  gives its address on port 7447, and a port is changed in Another address…, whose field unfolds
-  under the choice.
-- **The interfaces offered** are the IPv4 ones the system lists (`getifaddrs`), loopback and
+- **The window offers no `listen`** (#1144, the maintainer's decision): the traffic between devices
+  is to go through the hub (a relay, its own coming issue), so a device will not need to listen on
+  any address. The direct link, `remote.configure {listen}`, `remote.settings` and the command line
+  stay as they are until a later decision.
+- **The interfaces `remote.settings` lists** are the IPv4 ones the system lists (`getifaddrs`), loopback and
   interfaces that are down left out: a Tailscale or WireGuard one (an address of 100.64.0.0/10, or
   an interface named `tailscale*` or `wg*`) first.
 

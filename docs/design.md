@@ -1321,17 +1321,12 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   **Machines** is Remote (`remote.md`), and nothing of it is typed on the page: a section says the
   state and holds the buttons, and what is typed, or what a request shows, is a dialog of the
   window's host. First whether remote is on: off, a notice ("Remote is off. This machine can join
-  a hub and link to your other machines; nothing is opened until you say where it is reached.")
+  a hub and link to your other machines.")
   and **Turn on**; on, a **Remote** switch ("Turn it off and the links close; the hub's setup is
   kept"), whose off asks once, in the one confirmation dialog. The notice folds away and the
-  settings unfold, and back. Then **Where this machine is reached**, one select: **Nowhere** (the
-  default: it dials the others, nobody dials it), each address of this machine named by its
-  interface, a Tailscale or WireGuard one first and marked ("Only your tailnet"), then the local
-  network's, **Every network** (`0.0.0.0`, with a warning that it opens a port on any network the
-  machine joins) and **Another address…**, whose field (an address and its port) unfolds under
-  it; the port is 7447 unless another is typed there. The choice is taken at once, without a
-  restart; while an agent runs, a change of address waits for the next start and the section says
-  so. While this machine is in no hub, **Hub** holds **Set up a hub**, which opens its dialog (the
+  settings unfold, and back. The window offers no choice of address to listen on, on purpose: the
+  traffic between devices is to go through the hub, so a device needs none (`remote.md`, "Defaults
+  taken"); the daemon's `listen` stays, set from the command line. While this machine is in no hub, **Hub** holds **Set up a hub**, which opens its dialog (the
   hub's address and the setup code, the refusal under its fields, a toast when it is done);
   then the hub's state, **Devices** (**Add a device** shows its invitation, QR, code, Copy code
   and expiry in a dialog, which closes when the invitation is used or expires; a join request

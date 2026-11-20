@@ -258,7 +258,7 @@ the wrong code first).
     px window), `window_rules.rs`.
 13. **Tabs by subject; a part gets a tab of its own when it fits.** A tab holds one subject,
     the one the user goes to on its own, with several sections of its own: Machines (Remote:
-    whether it is on, where this machine is reached, the hub, the devices, the addresses) is one,
+    whether it is on, the hub, the devices, the addresses) is one,
     and Usage and Notifications will be. Settings has six tabs (Agents, Approvals, Features,
     Vault, Machines, General), Usage later; a project's settings have six (Repositories,
     Workspaces, Tasks, Instructions, Features, Vault); the project page four at most and room for
