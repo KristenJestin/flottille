@@ -8,10 +8,12 @@
 //! repositories.
 
 use crate::common;
-use crate::remote::{Machine, eventually, pc_and_server_on, signed};
+use crate::remote::{Machine, NoKeyring, eventually, pc_and_server_on, signed};
 
 use common::User;
+use flottille_link::{DeviceKey, Request};
 use serde_json::{Value, json};
+use std::time::{Duration, SystemTime};
 
 fn add_app(user: &User) {
     let folder = user.path("work/app");
@@ -220,4 +222,167 @@ fn a_close_for_another_machine_or_of_another_method_is_refused() {
         .unwrap_err();
     assert!(refused.1.contains("agent.stop"), "{refused:?}");
     assert_eq!(state(&server, &agent), "idle");
+}
+
+/// The close of `agent` on `machine`, signed by `key` `ago` before now, as a client writes it.
+fn close_signed(key: &DeviceKey, machine: &str, agent: &str, ago: Duration) -> Value {
+    let at = SystemTime::now() - ago;
+    let request = Request::sign(
+        key,
+        "close-1",
+        machine,
+        "agent.stop",
+        &json!({"agent": agent}),
+        at,
+    )
+    .unwrap();
+    serde_json::to_value(request).unwrap()
+}
+
+/// The words of the inbox's entries that say a message was dropped.
+fn dropped_words(machine: &Machine) -> Vec<String> {
+    machine.user.call("inbox.list", json!({})).unwrap()["entries"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|entry| entry["kind"] == "dropped")
+        .filter_map(|entry| entry["text"].as_str().map(str::to_owned))
+        .collect()
+}
+
+#[test]
+fn a_close_replayed_after_a_resume_stops_nothing() {
+    let (_hub, pc, server) = pc_and_server();
+    let agent = session(&server, "Ship the server part");
+    eventually("pc keeps server's session", || {
+        kept_ids(&pc, "server").contains(&agent)
+    });
+    off(&server);
+    pc.wait_for("server", "offline");
+    let request = close_of(&pc, "server", &agent);
+    pc.user
+        .call("remote.close", json!({"request": request}))
+        .unwrap();
+    on(&server);
+    pc.wait_for("server", "online");
+    eventually("the session ended on server", || {
+        state(&server, &agent) == "ended"
+    });
+
+    // The user resumes it on server; then the same signed close comes again (the outbox after a
+    // lost answer, or a member that saw it signed).
+    server
+        .user
+        .call("agent.resume", json!({"agent": agent}))
+        .unwrap();
+    assert_eq!(state(&server, &agent), "idle");
+    pc.user
+        .call("remote.close", json!({"request": request}))
+        .unwrap();
+
+    // It is answered (the session is back in pc's list, no close waits any more) and did nothing.
+    eventually("the replayed close is answered", || {
+        kept_ids(&pc, "server").contains(&agent)
+    });
+    assert_eq!(state(&server, &agent), "idle", "{}", server.log());
+    assert_eq!(
+        server.log().matches("agent.stop asked by pc").count(),
+        1,
+        "{}",
+        server.log()
+    );
+}
+
+#[test]
+fn a_close_a_list_that_is_behind_refuses_is_kept_and_sent_again_later() {
+    let (_hub, pc, server) = pc_and_server();
+    let agent = session(&server, "Ship the server part");
+    eventually("pc keeps server's session", || {
+        kept_ids(&pc, "server").contains(&agent)
+    });
+    // Signed by a device server's member list does not hold (yet): it may be a list that is
+    // behind, so the refusal is for now.
+    let stranger = DeviceKey::load_or_make(&NoKeyring, &pc.user.path("stranger")).unwrap();
+    let request = close_signed(&stranger, "server", &agent, Duration::ZERO);
+    pc.user
+        .call("remote.close", json!({"request": request}))
+        .unwrap();
+
+    eventually("server answers it for later", || {
+        server
+            .log()
+            .contains("a close from another machine is taken later")
+    });
+    assert!(
+        server.log().contains("not signed by a member"),
+        "{}",
+        server.log()
+    );
+    std::thread::sleep(Duration::from_secs(1));
+    assert!(dropped_words(&pc).is_empty(), "{:?}", dropped_words(&pc));
+    // Still waiting to be sent: the session stays out of pc's list, and open on server.
+    assert!(!kept_ids(&pc, "server").contains(&agent));
+    assert_eq!(state(&server, &agent), "idle");
+}
+
+#[test]
+fn a_close_refused_for_good_is_dropped_and_names_the_session() {
+    let (_hub, pc, server) = pc_and_server();
+    let agent = session(&server, "Ship the server part");
+    eventually("pc keeps server's session", || {
+        kept_ids(&pc, "server").contains(&agent)
+    });
+    // Signed 31 days ago: older than a close counts for, however often it is sent.
+    let old = close_signed(
+        &pc.device(),
+        "server",
+        &agent,
+        Duration::from_secs(31 * 24 * 3600),
+    );
+    pc.user
+        .call("remote.close", json!({"request": old}))
+        .unwrap();
+
+    eventually("the drop is said in the inbox", || {
+        !dropped_words(&pc).is_empty()
+    });
+    let words = dropped_words(&pc).join(" ");
+    assert!(words.contains("close"), "{words}");
+    assert!(words.contains("Ship the server part"), "{words}");
+    assert!(!words.contains("agent  of"), "{words}");
+    assert_eq!(state(&server, &agent), "idle");
+    // The session is in pc's list again.
+    assert!(kept_ids(&pc, "server").contains(&agent));
+}
+
+#[test]
+fn a_second_close_of_a_session_replaces_the_one_waiting() {
+    let (_hub, pc, server) = pc_and_server();
+    let agent = session(&server, "Ship the server part");
+    eventually("pc keeps server's session", || {
+        kept_ids(&pc, "server").contains(&agent)
+    });
+    off(&server);
+    pc.wait_for("server", "offline");
+    // The first is too old to be served, the second is the user's close now: the latest is the
+    // one kept.
+    let old = close_signed(
+        &pc.device(),
+        "server",
+        &agent,
+        Duration::from_secs(31 * 24 * 3600),
+    );
+    let fresh = close_signed(&pc.device(), "server", &agent, Duration::ZERO);
+    for request in [&old, &fresh] {
+        pc.user
+            .call("remote.close", json!({"request": request}))
+            .unwrap();
+    }
+
+    on(&server);
+    pc.wait_for("server", "online");
+    eventually("the session ended on server", || {
+        state(&server, &agent) == "ended"
+    });
+    assert!(dropped_words(&pc).is_empty(), "{:?}", dropped_words(&pc));
 }

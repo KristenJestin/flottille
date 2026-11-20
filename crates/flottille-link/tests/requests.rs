@@ -5,8 +5,9 @@ use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use flottille_link::{
-    Action, DeviceKey, Keyring, KeyringError, MemberList, Members, NONCES_PER_DEVICE, Request,
-    Requests, Role, Signature, full_switch, kept_close, runs_agents,
+    Action, CLOSES_SERVED_MOST, ClosesServed, DeviceKey, Keyring, KeyringError, MemberList,
+    Members, NONCES_PER_DEVICE, Request, Requests, Role, Signature, full_switch, kept_close,
+    runs_agents,
 };
 use flottille_protocol::{Class, METHODS};
 use serde_json::{Value, json};
@@ -737,11 +738,35 @@ fn a_close_kept_while_its_machine_was_off_is_taken_from_a_member_that_may_stop()
     let close = |key: &DeviceKey| request_of(&signed(key, "agent.stop", json!({"agent": "a1"}), 0));
     let day = 24 * 60 * MINUTE;
 
-    // Hours later, its nonce unchecked: played again, it closes a session closed already.
-    let (member, agent) = kept_close(&close(&pixel), "pc", &members, time(2 * day)).unwrap();
+    // Hours later, it is still the user's close.
+    let first = close(&pixel);
+    let (member, agent) = kept_close(&first, "pc", &members, time(2 * day)).unwrap();
     assert_eq!((member.name.as_str(), agent.as_str()), ("pixel", "a1"));
-    assert!(kept_close(&close(&pixel), "pc", &members, time(2 * day)).is_ok());
     assert!(kept_close(&close(&pc), "pc", &members, time(MINUTE)).is_ok());
+
+    // Served once: the same close played again, by the outbox after a lost answer or by a member
+    // that saw it signed, is answered and does nothing.
+    let mut served = ClosesServed::default();
+    assert!(served.serve(&first, time(2 * day)));
+    assert!(!served.serve(&first, time(2 * day + MINUTE)));
+    assert!(served.serve(&close(&pixel), time(2 * day)), "another close");
+    // A close whose service failed for now is served again when it is sent again.
+    let retried = close(&pixel);
+    assert!(served.serve(&retried, time(2 * day)));
+    served.release(&retried);
+    assert!(served.serve(&retried, time(2 * day)));
+    // Remembered for its 30 days, never longer, and bounded: the oldest leave first.
+    assert!(
+        served.serve(&first, time(33 * day)),
+        "forgotten after 30 days"
+    );
+    let mut full = ClosesServed::default();
+    let oldest = close(&pixel);
+    assert!(full.serve(&oldest, time(0)));
+    for _ in 0..CLOSES_SERVED_MOST {
+        assert!(full.serve(&close(&pixel), time(0)));
+    }
+    assert!(full.serve(&oldest, time(0)), "the oldest was let go");
 
     let refusal = |request: &Request, machine: &str, at: u64| {
         kept_close(request, machine, &members, time(at))

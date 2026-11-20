@@ -1352,3 +1352,24 @@ pub(crate) async fn call(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_close_dropped_names_the_session_and_that_it_was_a_close() {
+        let named = json!({"machine": "pc", "kind": "close", "agent": "a1", "title": "Ship it",
+            "refused": "the close is older than thirty days"});
+        let text = dropped_text(&named);
+        assert!(text.contains("close"), "{text}");
+        assert!(text.contains("Ship it"), "{text}");
+        assert!(text.contains("pc"), "{text}");
+        assert!(!text.contains("agent  of"), "{text}");
+        // Its title not known: its id.
+        let unnamed = json!({"machine": "pc", "kind": "close", "agent": "a1", "title": null,
+            "refused": null});
+        let text = dropped_text(&unnamed);
+        assert!(text.contains("close") && text.contains("a1"), "{text}");
+    }
+}

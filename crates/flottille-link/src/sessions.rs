@@ -156,4 +156,44 @@ mod tests {
             .is_err()
         );
     }
+
+    #[test]
+    fn a_list_with_a_cycle_of_pilots_is_refused() {
+        let mut a = session("a1");
+        let mut b = session("b2");
+        a.pilot = Some("b2".to_owned());
+        b.pilot = Some("a1".to_owned());
+        let cycle = SessionList {
+            sessions: vec![a, b],
+        };
+        let why = cycle.check().unwrap_err();
+        assert!(why.contains("cycle"), "{why}");
+        let mut itself = session("a1");
+        itself.pilot = Some("a1".to_owned());
+        assert!(
+            SessionList {
+                sessions: vec![itself]
+            }
+            .check()
+            .is_err()
+        );
+        // A chain is no cycle, and a pilot that is not listed is the sender's business.
+        let mut under = session("b2");
+        under.pilot = Some("a1".to_owned());
+        let mut away = session("c3");
+        away.pilot = Some("gone".to_owned());
+        let chain = SessionList {
+            sessions: vec![session("a1"), under, away],
+        };
+        assert_eq!(chain.check(), Ok(()));
+    }
+
+    #[test]
+    fn a_list_with_the_same_id_twice_is_refused() {
+        let twice = SessionList {
+            sessions: vec![session("a1"), session("b2"), session("a1")],
+        };
+        let why = twice.check().unwrap_err();
+        assert!(why.contains("twice"), "{why}");
+    }
 }

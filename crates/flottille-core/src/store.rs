@@ -8945,4 +8945,32 @@ mod tests {
             ("refused", Some(id))
         );
     }
+
+    #[test]
+    fn a_machine_s_list_is_forgotten_when_it_leaves_the_members_or_stops_being_a_runner() {
+        let mut store = Store::open_in_memory().unwrap();
+        for (machine, name) in [("aa", "pc"), ("bb", "server"), ("cc", "tablet")] {
+            store
+                .keep_machine_sessions(machine, name, &json!({"sessions": []}), 1)
+                .unwrap();
+        }
+        let kept = |store: &Store| -> Vec<String> {
+            store
+                .machine_sessions()
+                .unwrap()
+                .into_iter()
+                .map(|(machine, ..)| machine)
+                .collect()
+        };
+        // Only the machines still among the members keep a list.
+        store
+            .forget_machine_sessions_except(&["aa".to_owned(), "bb".to_owned()])
+            .unwrap();
+        assert_eq!(kept(&store), ["aa", "bb"]);
+        // One machine's list, when it is no runner any more.
+        store.forget_machine_sessions("aa").unwrap();
+        assert_eq!(kept(&store), ["bb"]);
+        store.forget_machine_sessions_except(&[]).unwrap();
+        assert!(kept(&store).is_empty());
+    }
 }

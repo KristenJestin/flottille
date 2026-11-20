@@ -3042,4 +3042,23 @@ mod tests {
         remote.keep_offers(&key, 2, app());
         assert_eq!(kept(&remote), Some(app()));
     }
+
+    #[tokio::test]
+    async fn a_late_list_of_a_link_replaced_is_not_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let (remote, keys) = remote_in(dir.path(), 1);
+        let (_ends, link, _other) = linked(dir.path()).await;
+        let key = keys[0];
+        remote
+            .seen
+            .lock()
+            .unwrap()
+            .entry(*key.as_bytes())
+            .or_insert_with(Seen::new)
+            .link = Some((2, link, true));
+
+        // The link of generation 1 was replaced by the 2nd: its sessions are not the machine's.
+        assert!(!remote.on_link(&key, 1));
+        assert!(remote.on_link(&key, 2));
+    }
 }
