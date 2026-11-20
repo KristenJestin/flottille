@@ -721,21 +721,18 @@ const SERVED: [Definition; 33] = [
         title: "Launch a child, or start a session",
         description: "kind (required): child, a part of your own task, in your place, that you \
             direct and that reports to you (no workspace; refused above the children cap); led, an \
-            autonomous job of its own that you pilot, a real session the user sees under you and \
-            may talk to, which asks you its questions and wakes you when it asks, reports or ends; \
+            autonomous job of its own that you pilot, a real session the user sees under you, \
+            which asks you its questions and wakes you when it asks, reports or ends; \
             handed, a session you start for the user and let go, of which you hear nothing more \
-            unless it writes to you. led and handed: a root only, judged, in workspace (main is \
-            the project folder) or new_workspace; you and it write with session_send. Answered at \
+            unless it writes to you. led and handed: a root only, judged, in workspace or \
+            new_workspace; you and it write with session_send. Answered at \
             once with its id; never poll. The brief is all it knows: the task, what to read, the \
             checks, the deliverable. {\"kind\": \"child\", \"title\": \"Write the tests\", \
-            \"brief\": \"...\"}; {\"kind\": \"led\", \"title\": \"Fix login\", \"brief\": \
-            \"...\", \"workspace\": \"login\"}; {\"kind\": \"handed\", \"title\": \"Add API\", \
-            \"brief\": \"...\", \"new_workspace\": \"api\", \"repositories\": [\"api\"]}. \
-            machine starts it on another of the user's machines, judged there. It works on a copy \
-            of your place there: your branch and your uncommitted changes are sent with it. Its \
-            commits come back to you on a branch of their own, \
-            refs/flottille/machines/<machine>/<launch>/<branch>, which you review and merge as you \
-            would a local child's work; nothing moves your branch.",
+            \"brief\": \"...\"}. \
+            machine starts it on another of the user's machines, judged there, on a copy of \
+            your place (your branch and uncommitted changes go with it); its commits come back \
+            on refs/flottille/machines/<machine>/<launch>/<branch>, for you to merge; \
+            nothing moves your branch.",
         read_only: false,
         idempotent: false,
         destructive: false,
