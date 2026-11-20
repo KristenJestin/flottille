@@ -941,6 +941,19 @@ impl Remote {
         Ok(json!({}))
     }
 
+    /// Whether the link of `generation` is the one kept for the machine of `key`.
+    fn on_link(&self, key: &PublicKey, generation: u64) -> bool {
+        self.seen
+            .lock()
+            .unwrap()
+            .get(key.as_bytes())
+            .is_some_and(|seen| {
+                seen.link
+                    .as_ref()
+                    .is_some_and(|(at, _, _)| *at == generation)
+            })
+    }
+
     /// Keeps what the machine of `key` offers, when its link of `generation` is the one kept: a
     /// link replaced since says nothing of the machine any more.
     fn keep_offers(&self, key: &PublicKey, generation: u64, offers: Capabilities) {
@@ -1303,9 +1316,11 @@ async fn serve(remote: Arc<Remote>, link: Link, name: String, generation: u64) {
             Message::Machine(MachineMessage::Sessions(list)) => {
                 // The list is checked, the store written: away from the tasks that take links.
                 let (taking, key, list) = (remote.clone(), link.peer(), list.clone());
-                let answer = tokio::task::spawn_blocking(move || taking.took_sessions(&key, list))
-                    .await
-                    .unwrap_or_else(|_| Err("the list could not be taken".to_owned()));
+                let answer = tokio::task::spawn_blocking(move || {
+                    taking.took_sessions(&key, generation, list)
+                })
+                .await
+                .unwrap_or_else(|_| Err("the list could not be taken".to_owned()));
                 if let Err(why) = &answer {
                     eprintln!("flottille daemon: the sessions {name} lists were not kept: {why}");
                 }
@@ -1430,6 +1445,7 @@ impl Remote {
     fn took_sessions(
         &self,
         key: &PublicKey,
+        generation: u64,
         list: flottille_link::SessionList,
     ) -> Result<Value, String> {
         let (members, _) = self.listed()?;
@@ -1444,6 +1460,10 @@ impl Remote {
             ));
         }
         list.check()?;
+        // A link replaced since says nothing of the machine any more.
+        if !self.on_link(key, generation) {
+            return Ok(json!({}));
+        }
         let daemon = self
             .daemon()
             .ok_or_else(|| "the daemon is stopping".to_owned())?;
@@ -1523,10 +1543,31 @@ impl Remote {
 }
 
 impl Remote {
+    /// Forgets the list of each machine that is no runner among the members any more (removed, or
+    /// added again as another role): what it told before is no one's to show. Left as it is when
+    /// the member list cannot be read now.
+    fn unlist(&self, daemon: &Arc<Daemon>) {
+        let Ok((members, _)) = self.listed() else {
+            return;
+        };
+        let runners: Vec<String> = members
+            .members()
+            .iter()
+            .filter(|member| member.role == Role::Runner)
+            .filter_map(|member| member.machine.as_ref().map(hex_of))
+            .collect();
+        let _ = daemon.write(|store| {
+            store
+                .forget_machine_sessions_except(&runners)
+                .map(|()| ((), None))
+        });
+    }
+
     /// `remote.sessions`: this machine's live root sessions, and each other machine's as it last
     /// listed them, without those whose close waits to be sent. It reads the store: called on a
     /// blocking thread.
     fn lists(&self, daemon: &Arc<Daemon>) -> Result<Value, String> {
+        self.unlist(daemon);
         let closing = crate::across::closing(daemon);
         let kept = daemon
             .read(|store| store.machine_sessions())

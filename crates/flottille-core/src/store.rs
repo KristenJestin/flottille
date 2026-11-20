@@ -3382,6 +3382,25 @@ impl Store {
         Ok(())
     }
 
+    /// Forgets the list of each machine but those of keys `machines`: the others left the members or
+    /// are no runner any more.
+    pub fn forget_machine_sessions_except(&mut self, machines: &[String]) -> Result<()> {
+        let transaction = self.connection.transaction()?;
+        let kept: Vec<String> = {
+            let mut statement = transaction.prepare("SELECT machine FROM machine_sessions")?;
+            let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+            rows.collect::<std::result::Result<_, _>>()?
+        };
+        for machine in kept.iter().filter(|machine| !machines.contains(machine)) {
+            transaction.execute(
+                "DELETE FROM machine_sessions WHERE machine = ?1",
+                params![machine],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
     /// Each other machine's list as it last told it: its key, its name, the list, and when.
     pub fn machine_sessions(&self) -> Result<Vec<(String, String, Value, u64)>> {
         let mut statement = self
@@ -8967,8 +8986,10 @@ mod tests {
             .forget_machine_sessions_except(&["aa".to_owned(), "bb".to_owned()])
             .unwrap();
         assert_eq!(kept(&store), ["aa", "bb"]);
-        // One machine's list, when it is no runner any more.
-        store.forget_machine_sessions("aa").unwrap();
+        // A machine that is no runner any more is left out of the runners.
+        store
+            .forget_machine_sessions_except(&["bb".to_owned()])
+            .unwrap();
         assert_eq!(kept(&store), ["bb"]);
         store.forget_machine_sessions_except(&[]).unwrap();
         assert!(kept(&store).is_empty());
