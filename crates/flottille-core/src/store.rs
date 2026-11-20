@@ -976,6 +976,9 @@ const AGENT_COLUMNS: &str = "id, provider, role, project, workspace, folder, sta
 const DELIVERY_COLUMNS: &str =
     "id, agent, kind, body, urgency, state, created_at, sent_at, images, typed, commands";
 
+/// The kind and the time of the last delivery a launch on another machine sent here.
+pub type Heard = (String, u64);
+
 /// What changes on an agent; what is left `None` stays as it is.
 #[derive(Clone, Debug, Default)]
 pub struct AgentChange {
@@ -3267,7 +3270,7 @@ impl Store {
     /// `<launch>-…`): those that started a session there, not refused, not handed to the user,
     /// and not ended, unless it ended on a report and the agent that started it lives. In one
     /// read: every launch ever made is never read.
-    pub fn launches_shown(&self) -> Result<Vec<(Launch, Option<(String, u64)>)>> {
+    pub fn launches_shown(&self) -> Result<Vec<(Launch, Option<Heard>)>> {
         let mut statement = self.connection.prepare_cached(
             "SELECT l.way, l.machine, l.launch, l.caller, l.kind, l.project, l.state, l.request, \
              l.agent, l.workspace, l.workspace_id, l.asked, l.at, h.kind, h.created_at \
