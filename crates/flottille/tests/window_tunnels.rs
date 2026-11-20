@@ -566,30 +566,22 @@ fn the_tunnel_s_line_unfolds_and_folds_away(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn a_tunnel_that_cannot_open_is_a_toast_with_its_reason(cx: &mut TestAppContext) {
     let machines = machines();
-    // The run says it answers on a port it does not listen on: the machine refuses.
-    let url = format!("http://127.0.0.1:{}", free_port());
+    let url = format!("http://127.0.0.1:{}", machines.port);
     let run = web(&machines.server.user, &url, machines.port);
     let (shell, cx, opened) = window(&machines.pc, cx);
     on_the_server(&shell, cx);
-    project_page(&shell, cx);
-    let link = format!("place-run-link-{run}");
-    until(
-        &shell,
-        cx,
-        "the project page shows the run's address",
-        |cx| label(cx, &link).is_some(),
-    );
-    settle(&shell, cx);
+    // The link names a port the only running run does not listen on: the machine refuses.
+    let (_page, at) = card_of(&shell, &machines, "SHOW NOWHERE", cx);
 
-    click(&shell, cx, &link);
+    click(&shell, cx, &format!("row-{at}-link-0-open"));
     until(&shell, cx, "a toast says why", |cx| {
         !toasts(&shell, cx).is_empty()
     });
 
     let said = toasts(&shell, cx);
     assert!(
-        said.iter().any(|title| title.contains("Not opened")
-            && title.contains(&format!("is none of run {run}'s"))),
+        said.iter().any(|title| title.starts_with("Not opened")
+            && title.contains(&format!("port 1 is none of run {run}'s"))),
         "{said:?}"
     );
     assert!(opened.lock().unwrap().is_empty(), "nothing opened");
@@ -599,8 +591,6 @@ fn a_tunnel_that_cannot_open_is_a_toast_with_its_reason(cx: &mut TestAppContext)
 #[gpui_kit::test]
 fn a_link_no_run_of_the_machine_serves_is_a_toast_with_its_reason(cx: &mut TestAppContext) {
     let machines = machines();
-    let url = format!("http://127.0.0.1:{}", machines.port);
-    web(&machines.server.user, &url, machines.port);
     let (shell, cx, opened) = window(&machines.pc, cx);
     on_the_server(&shell, cx);
     let (_page, at) = card_of(&shell, &machines, "SHOW NOWHERE", cx);
@@ -614,7 +604,8 @@ fn a_link_no_run_of_the_machine_serves_is_a_toast_with_its_reason(cx: &mut TestA
 
     let said = toasts(&shell, cx);
     assert!(
-        said.iter().any(|title| title.contains("port 1")),
+        said.iter()
+            .any(|title| title.contains("no run of server serves port 1")),
         "{said:?}"
     );
     assert!(opened.lock().unwrap().is_empty());
