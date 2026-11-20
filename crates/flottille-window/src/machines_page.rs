@@ -131,6 +131,11 @@ impl MachinesSection {
         self.invitation.as_ref()
     }
 
+    /// Whether an invitation is being asked of the hub.
+    pub fn is_inviting(&self) -> bool {
+        self.inviting
+    }
+
     pub fn join(&self) -> Option<&JoinRequest> {
         self.join.as_ref()
     }

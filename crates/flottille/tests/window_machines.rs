@@ -19,6 +19,7 @@ use flottille_link::Hello;
 use flottille_window::Shell;
 use flottille_window::device::Device;
 use flottille_window::link::Connect;
+use flottille_window::machines::{Machine as Seen, Reached, how_it_failed};
 use flottille_window::machines_page::Removal;
 use flottille_window::tree::{SWITCHER, SWITCHER_THIS};
 use gpui_design_system::motion::PANEL;
@@ -75,6 +76,16 @@ impl TestHub {
     fn down(&mut self) {
         let served = self.served.take().unwrap();
         self.runtime.block_on(served.stop());
+    }
+
+    /// The hub serves again from its folder, at the address it had: a host that is back.
+    fn up(&mut self) {
+        let served = self.runtime.block_on(async {
+            let hub = Hub::open(&self._folder.path().join("hub"), SystemClock).unwrap();
+            let listener = tokio::net::TcpListener::bind(self.address).await.unwrap();
+            flottille_hub::serve(hub, listener, None, Hello::ours("0.4.0")).unwrap()
+        });
+        self.served = Some(served);
     }
 }
 
@@ -825,9 +836,37 @@ const HUB_TITLE: &str = "hub-state";
 const HUB_TAG: &str = "hub-state-tag-0";
 const HUB_REASON: &str = "hub-reason";
 const HUB_DOWN: &str = "devices-hub-down-line";
+/// What waits for the hub while it does not answer: the state is the tag's to say.
+const WAITS: &str = "Adding a device and changing the list wait for the hub.";
 
 fn address_line(name: &str) -> String {
     format!("member-address-{name}")
+}
+
+fn member_tag(name: &str) -> String {
+    format!("member-{name}-tag-0")
+}
+
+/// How opaque a control is drawn: the widest alpha of what is painted inside it (its border, its
+/// fill), which a faded control lowers.
+fn drawn_alpha(cx: &mut VisualTestContext, id: &str) -> f32 {
+    cx.update(|window, _| {
+        let Some(found) = window.try_find(id.to_owned()) else {
+            return 0.0;
+        };
+        let bounds = found.bounds().scale(window.scale_factor());
+        window
+            .painted_quads()
+            .iter()
+            .filter(|quad| bounds.contains(&quad.bounds.center()))
+            .flat_map(|quad| {
+                [
+                    quad.background.as_solid().map_or(0.0, |bg| bg.a),
+                    quad.border_color.a,
+                ]
+            })
+            .fold(0.0, f32::max)
+    })
 }
 
 #[gpui_kit::test]
@@ -850,7 +889,8 @@ fn settings_show_the_hub_and_whether_it_is_reachable(cx: &mut TestAppContext) {
         "its section says what it is for"
     );
 
-    // Down, it is unreachable since a time, and says which address was tried and how it failed.
+    // Down, it is unreachable since a time, and says which address was tried and how it failed:
+    // the state and the time are the tag's, the reason does not say them again.
     hub.down();
     until(&shell, cx, "the hub is unreachable", |cx| {
         label(cx, HUB_TAG).is_some_and(|tag| tag.starts_with("unreachable since "))
@@ -861,7 +901,11 @@ fn settings_show_the_hub_and_whether_it_is_reachable(cx: &mut TestAppContext) {
     settle(&shell, cx);
     let reason = label(cx, HUB_REASON).unwrap();
     assert!(
-        reason.contains(&format!("the hub at {} is unreachable", hub.address)),
+        reason.starts_with(&format!("tried {}", hub.address)),
+        "{reason}"
+    );
+    assert!(
+        !reason.contains("unreachable") && !reason.contains("since"),
         "{reason}"
     );
 }
@@ -874,87 +918,213 @@ fn each_machine_says_the_address_it_is_reached_at_or_the_one_that_failed(cx: &mu
     machines_tab(&shell, cx);
     let line = address_line("server");
     until(&shell, cx, "the server's address is said", |cx| {
-        label(cx, &line).is_some_and(|said| said.contains("127.0.0.1:"))
+        label(cx, &line).is_some_and(|said| said.contains("127.0.0.1"))
     });
     settle(&shell, cx);
-    // Linked, it says where: the address pc dialled, or the one the link came from.
+    // Linked, it says where: the address pc dialled, or the host the link came from (its port is
+    // the one it dialled from, which tells nothing).
     let said = label(cx, &line).unwrap();
     assert!(
-        said == format!("Reached at {at}") || said.starts_with("Linked from 127.0.0.1:"),
+        said == format!("Reached at {at}") || said == "Linked from 127.0.0.1",
         "{said}"
     );
 
-    // Off, it says the address that was tried and how it failed.
+    // Off, it says the address that was tried and how it failed: its tag says it is off.
     assert!(server.user.run(&["daemon", "stop"]).status.success());
     until(&shell, cx, "the failed address is said", |cx| {
         label(cx, &line).is_some_and(|said| said.contains(&format!("tried {at} from pc")))
     });
     settle(&shell, cx);
     let said = label(cx, &line).unwrap();
-    assert!(said.contains("is unreachable"), "{said}");
+    assert!(
+        said.starts_with("tried ") && !said.contains("is unreachable"),
+        "{said}"
+    );
+    let tag = label(cx, &member_tag("server")).unwrap();
+    assert!(tag.starts_with("offline since "), "{tag}");
+}
+
+#[test]
+fn a_link_the_other_machine_dialled_says_its_host_not_its_port() {
+    let linked = |address: &str, dialled: bool| Seen {
+        name: "server".to_owned(),
+        fingerprint: String::new(),
+        state: "online".to_owned(),
+        since: None,
+        reason: None,
+        role: None,
+        reached: Some(Reached {
+            address: address.to_owned(),
+            dialled,
+        }),
+        addresses: Vec::new(),
+    };
+    assert_eq!(
+        linked("127.0.0.1:54321", false).address_words(true),
+        "Linked from 127.0.0.1"
+    );
+    assert_eq!(
+        linked("[::1]:54321", false).address_words(true),
+        "Linked from ::1"
+    );
+    // The address this machine dialled is the one to dial again: with its port.
+    assert_eq!(
+        linked("127.0.0.1:7421", true).address_words(true),
+        "Reached at 127.0.0.1:7421"
+    );
+}
+
+#[test]
+fn a_failure_is_said_without_the_state_and_the_time_the_tag_says() {
+    assert_eq!(
+        how_it_failed("server is unreachable: tried 192.0.2.10:7421 from pc, no answer in 10 s"),
+        "tried 192.0.2.10:7421 from pc, no answer in 10 s"
+    );
+    assert_eq!(
+        how_it_failed(
+            "the hub at hub.example:7420 is unreachable since 22:14: tried 192.0.2.5:7420: refused"
+        ),
+        "tried 192.0.2.5:7420: refused"
+    );
+    // Any other reason says all it has.
+    assert_eq!(
+        how_it_failed("the connection was closed"),
+        "the connection was closed"
+    );
 }
 
 #[gpui_kit::test]
 fn adding_a_device_while_the_hub_is_unreachable_says_so(cx: &mut TestAppContext) {
-    let (mut hub, pc, server) = pc_and_server(User::new());
-    let at = server.found().remove(0);
+    let (mut hub, pc, _server) = pc_and_server(User::new());
     let (shell, cx) = window(&pc, cx);
     machines_tab(&shell, cx);
     until(&shell, cx, "Add a device is offered", |cx| {
         present(cx, "add-device")
     });
+    settle(&shell, cx);
     assert!(!present(cx, HUB_DOWN), "the hub answers: nothing to say");
+    let enabled = drawn_alpha(cx, "add-device");
+    assert!(enabled > 0.0, "the button is drawn: {enabled}");
 
     hub.down();
     until(&shell, cx, "the hub's absence is said", |cx| {
         present(cx, HUB_DOWN)
     });
     settle(&shell, cx);
-    let said = label(cx, HUB_DOWN).unwrap();
+    // What waits is said once: the tag and the hub's reason say the state.
+    assert_eq!(label(cx, HUB_DOWN).as_deref(), Some(WAITS));
+
+    // Add a device cannot work: it is faded, and it asks nothing of the hub, whatever asks it.
+    let disabled = drawn_alpha(cx, "add-device");
     assert!(
-        said.starts_with("The hub is unreachable since ") && said.contains("adding a device"),
+        disabled < enabled * 0.6,
+        "Add a device is faded: {disabled} against {enabled}"
+    );
+    click(&shell, cx, "add-device");
+    shell.update(cx, |shell, cx| {
+        shell
+            .machines()
+            .update(cx, |section, cx| section.invite(cx))
+    });
+    assert!(
+        !shell.read_with(cx, |s, cx| s.machines().read(cx).is_inviting()),
+        "nothing is asked of a hub that does not answer"
+    );
+    assert!(shell.read_with(cx, |s, cx| s.machines().read(cx).invitation().is_none()));
+}
+
+#[gpui_kit::test]
+fn a_machine_only_the_hub_could_tell_shows_its_last_known_address(cx: &mut TestAppContext) {
+    let (mut hub, pc, server) = pc_and_server(User::new());
+    let at = server.found().remove(0);
+    let (shell, cx) = window(&pc, cx);
+    machines_tab(&shell, cx);
+    let line = address_line("server");
+    until(&shell, cx, "the server's address is said", |cx| {
+        label(cx, &line).is_some_and(|said| said.contains("127.0.0.1"))
+    });
+    hub.down();
+    until(&shell, cx, "the hub's absence is said", |cx| {
+        present(cx, HUB_DOWN)
+    });
+
+    // The link ends: its reason does not name an address (the next try, 10 s later, will).
+    assert!(server.user.run(&["daemon", "stop"]).status.success());
+    until(&shell, cx, "the last known address is said", |cx| {
+        label(cx, &line).is_some_and(|said| said.contains("Last known address"))
+    });
+    let said = label(cx, &line).unwrap();
+    assert!(
+        said.ends_with(&format!("Last known address {at}.")),
         "{said}"
     );
 
-    // Add a device cannot work, and asks nothing of the hub.
-    click(&shell, cx, "add-device");
-    assert!(shell.read_with(cx, |s, cx| s.machines().read(cx).invitation().is_none()));
-    assert!(
-        !toasts(&shell, cx)
-            .iter()
-            .any(|t| t == "No invitation was made")
-    );
+    // Once the try names the address, it is said once, by the failure.
+    until(&shell, cx, "the failed try is said", |cx| {
+        label(cx, &line).is_some_and(|said| said.contains("tried "))
+    });
+    let said = label(cx, &line).unwrap();
+    assert!(!said.contains("Last known address"), "{said}");
+    assert_eq!(said.matches(&at).count(), 1, "{said}");
+}
 
-    // A machine only the hub could tell shows the last address it was known at.
-    assert!(server.user.run(&["daemon", "stop"]).status.success());
-    until(&shell, cx, "the last known address is said", |cx| {
-        label(cx, &address_line("server")).is_some_and(|said| said.contains(&at))
+#[gpui_kit::test]
+fn the_notice_leaves_when_the_hub_is_back(cx: &mut TestAppContext) {
+    let (mut hub, pc, _server) = pc_and_server(User::new());
+    let (shell, cx) = window(&pc, cx);
+    machines_tab(&shell, cx);
+    until(&shell, cx, "Add a device is offered", |cx| {
+        present(cx, "add-device")
+    });
+    hub.down();
+    until(&shell, cx, "the hub's absence is said", |cx| {
+        present(cx, HUB_DOWN) && present(cx, HUB_REASON)
     });
 
-    // The hub's answering again takes the notice away.
-    // (Not tried here: a hub that stopped keeps no port to come back on.)
+    hub.up();
+    // The daemon tries again within its longest wait; the window hears it as an event.
+    until(&shell, cx, "the notice and the reason leave", |cx| {
+        !present(cx, HUB_DOWN) && !present(cx, HUB_REASON)
+    });
+    settle(&shell, cx);
+    assert_eq!(label(cx, HUB_TAG).as_deref(), Some("reachable"));
+
+    // Add a device works again.
+    click(&shell, cx, "add-device");
+    until(&shell, cx, "the invitation comes", |cx| {
+        shell.read_with(cx, |s, cx| s.machines().read(cx).invitation().is_some())
+    });
 }
 
 #[gpui_kit::test]
 fn the_address_change_of_a_row_fades(cx: &mut TestAppContext) {
     let (_hub, pc, server) = pc_and_server(User::new());
+    let at = server.found().remove(0);
     let (shell, cx) = window(&pc, cx);
     machines_tab(&shell, cx);
     let line = address_line("server");
     until(&shell, cx, "the server's address is said", |cx| {
-        label(cx, &line).is_some_and(|said| said.contains("127.0.0.1:"))
+        label(cx, &line).is_some_and(|said| said.contains("127.0.0.1"))
+    });
+
+    // The link ends: the row's tag says it is off, and the line says why.
+    assert!(server.user.run(&["daemon", "stop"]).status.success());
+    until(&shell, cx, "the row is off", |cx| {
+        label(cx, &member_tag("server")).is_some_and(|tag| tag.starts_with("offline since "))
     });
     settle(&shell, cx);
     let before = label(cx, &line).unwrap();
+    assert!(!before.contains("tried "), "{before}");
     let rest = (0..200).find(|_| step(&shell, Duration::from_millis(16), cx) == 0);
     assert!(rest.is_some(), "the page came to rest before the change");
 
-    assert!(server.user.run(&["daemon", "stop"]).status.success());
+    // The next try, 10 s later, fails: only the line changes, the tag stays as it was, so what
+    // moves is the line, over HOVER from the last frame's text.
+    let tag = label(cx, &member_tag("server")).unwrap();
     until(&shell, cx, "the address line changes", |cx| {
-        label(cx, &line).is_some_and(|said| said != before)
+        label(cx, &line).is_some_and(|said| said.contains(&format!("tried {at} from pc")))
     });
-    // The line fades back in over HOVER from the last frame's text: frames are asked while it
-    // does, and no more once it has.
+    assert_eq!(label(cx, &member_tag("server")), Some(tag), "the tag stays");
     assert!(present(cx, &line), "the line fades, it is not swapped");
     assert!(
         cx.update(|window, cx| window.simulate_next_frame(cx)) > 0,

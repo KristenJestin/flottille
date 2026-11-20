@@ -250,6 +250,11 @@ impl Hub {
     }
 }
 
+/// How a failure to reach something went, without the state and the time the row's tag says.
+pub fn how_it_failed(reason: &str) -> &str {
+    reason
+}
+
 /// Everything the window shows of the user's machines.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Machines {
