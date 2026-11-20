@@ -375,7 +375,7 @@ fn links_go_on_while_the_hub_is_down() {
     server.wait_for("pc", "online");
     let hub_seen = pc.remote()["hub"].clone();
     assert_eq!(hub_seen["state"], "connected", "{hub_seen}");
-    assert_eq!(hub_seen["url"], format!("{}/", hub.url()));
+    assert_eq!(hub_seen["url"], hub.url());
 
     hub.down();
     // What needs the hub says so, with since when...
@@ -857,13 +857,13 @@ fn a_machine_with_a_hub_pinned_sets_up_another_only_when_asked_to_replace_it() {
     let pinned: Value =
         serde_json::from_str(&std::fs::read_to_string(pc.folder().join("hub.json")).unwrap())
             .unwrap();
-    assert_eq!(pinned["url"], format!("{}/", first.url()));
+    assert_eq!(pinned["url"], first.url());
 
     setup_call(&pc, &second, true).unwrap();
     let pinned: Value =
         serde_json::from_str(&std::fs::read_to_string(pc.folder().join("hub.json")).unwrap())
             .unwrap();
-    assert_eq!(pinned["url"], format!("{}/", second.url()));
+    assert_eq!(pinned["url"], second.url());
 }
 
 #[test]
@@ -2095,5 +2095,40 @@ fn a_declaration_lost_on_a_dead_session_is_not_resumed_again() {
         resumed.is_null(),
         "the join whose session ended is resumed again\n{}",
         server.log()
+    );
+}
+
+#[test]
+fn the_hubs_address_is_shown_without_its_default_port_or_a_trailing_slash() {
+    let hub = TestHub::new();
+    let pc = Machine::new(None);
+    // Typed with a trailing slash: it is not shown with one, and the port the hub is on, which is
+    // not its scheme's own, stays. The default ports are the unit test's of `HubUrl::shown`.
+    let typed = format!("{}/", hub.url());
+    let output = pc.user.run_with_input(
+        &["remote", "setup", &typed, "--name", "pc"],
+        &format!("{}\n", hub.code()),
+    );
+    assert!(output.status.success(), "{}", pc.log());
+    let said = String::from_utf8_lossy(&output.stdout).into_owned();
+    assert!(said.contains(&format!("hub at {},", hub.url())), "{said}");
+    assert!(!said.contains(&typed), "{said}");
+
+    let seen = pc.remote();
+    assert_eq!(seen["hub"]["url"], hub.url());
+    let members = pc.user.call("remote.members", json!({})).unwrap();
+    assert_eq!(members["hub"], hub.url());
+    // The command line says it as the section does.
+    let invited = pc.user.run(&["remote", "invite"]);
+    let said = String::from_utf8_lossy(&invited.stdout).into_owned();
+    assert!(said.contains(&format!("hub at {},", hub.url())), "{said}");
+    let again = pc.user.run_with_input(
+        &["remote", "setup", &hub.url(), "--name", "pc"],
+        &format!("{}\n", hub.code()),
+    );
+    let said = String::from_utf8_lossy(&again.stderr).into_owned();
+    assert!(
+        said.contains(&format!("hub at {} already", hub.url())),
+        "{said}"
     );
 }

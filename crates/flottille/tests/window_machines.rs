@@ -519,6 +519,14 @@ fn set_up_a_hub_joins_with_the_setup_code(cx: &mut TestAppContext) {
     let members = pc.members();
     assert_eq!(members.len(), 1, "{members:#?}");
     assert_eq!(members[0]["role"], "runner");
+    // The hub's address is shown as a user writes it: no trailing slash.
+    let shown = shell.read_with(cx, |s, cx| {
+        s.machines()
+            .read(cx)
+            .machines()
+            .and_then(|m| m.hub.as_ref().map(|h| h.url.clone()))
+    });
+    assert_eq!(shown, Some(hub.url()));
     assert!(
         toasts(&shell, cx)
             .iter()
@@ -796,13 +804,19 @@ fn every_change_of_the_machines_page_is_animated(cx: &mut TestAppContext) {
 
     // The invitation is a dialog: it rises and fades in over the page, never unfolds in it.
     cx.update(|window, cx| window.click("add-device", cx));
-    until(&shell, cx, "the invitation comes", |cx| {
-        shell.read_with(cx, |s, cx| s.machines().read(cx).invitation().is_some())
-    });
-    let early = drawn_alpha(cx, "invitation-scrim");
-    settle(&shell, cx);
-    let full = drawn_alpha(cx, "invitation-scrim");
-    assert!(early < full, "its scrim fades in: {early} then {full}");
+    // The scrim fades in, frame by frame from the first frame the invitation is there.
+    let mut alphas = Vec::new();
+    let deadline = Instant::now() + WAIT;
+    while alphas.len() < 30 {
+        step(&shell, Duration::from_millis(16), cx);
+        if shell.read_with(cx, |s, cx| s.machines().read(cx).invitation().is_some()) {
+            alphas.push(drawn_alpha(cx, "invitation-scrim"));
+        }
+        assert!(Instant::now() < deadline, "the invitation never came");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let full = alphas.iter().cloned().fold(0.0, f32::max);
+    assert!(alphas[0] < full, "its scrim fades in: {alphas:?}");
     assert!(
         !present(cx, "invitation-card"),
         "nothing unfolds in the page"
@@ -1497,12 +1511,19 @@ fn machines_is_a_tab_of_settings(cx: &mut TestAppContext) {
     let (shell, cx) = window(&pc, cx);
     machines_tab(&shell, cx);
     // Its sections, and none of them in General.
-    for section in ["remote", "reached", "hub", "devices", "addresses"] {
-        until(&shell, cx, section, |cx| present(cx, section));
+    until(&shell, cx, "remote", |cx| present(cx, "remote"));
+    for section in ["reached", "hub", "devices", "addresses"] {
+        let title = format!("{section}-title");
+        until(&shell, cx, section, |cx| present(cx, &title));
     }
     click(&shell, cx, "settings-tabs-general");
     settle(&shell, cx);
-    for section in ["devices", "addresses", "reached", "remote"] {
+    for section in [
+        "devices-title",
+        "addresses-title",
+        "reached-title",
+        "remote",
+    ] {
         assert!(!present(cx, section), "{section} is not in General");
     }
 
@@ -1772,7 +1793,8 @@ fn setting_up_a_hub_is_a_dialog_not_a_form_on_the_page(cx: &mut TestAppContext) 
     type_into(cx, &code, "0000-0000-0000-0000");
     click(&shell, cx, "set-up-hub");
     until(&shell, cx, "the refusal is said", |cx| {
-        label(cx, "hub-setup-problem").is_some_and(|said| !said.is_empty())
+        shell.read_with(cx, |s, cx| s.machines().read(cx).setup_problem().is_some())
+            && present(cx, "hub-setup-problem")
     });
     assert_eq!(
         stack(&shell, cx),

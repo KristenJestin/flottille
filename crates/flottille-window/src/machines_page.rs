@@ -174,6 +174,11 @@ impl MachinesSection {
         self.removal.as_ref()
     }
 
+    /// What the setup dialog says is wrong, under its fields.
+    pub fn setup_problem(&self) -> Option<&str> {
+        self.setup_error.as_deref()
+    }
+
     pub fn setup_is_open(&self) -> bool {
         self.setup_open
     }
