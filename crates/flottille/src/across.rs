@@ -516,10 +516,9 @@ pub(crate) fn keep_close(
     let kept = daemon
         .read(|store| store.outgoing(Some(machine)))
         .map_err(|error| format!("it cannot be kept: {error}"))?;
-    if kept.iter().any(|outgoing| outgoing.id == id) {
-        return Ok(());
-    }
-    if kept.len() >= MOST_KEPT {
+    // A close kept for this session is replaced: the latest is the user's word now.
+    let replacing = kept.iter().any(|outgoing| outgoing.id == id);
+    if !replacing && kept.len() >= MOST_KEPT {
         return Err(format!("{MOST_KEPT} messages wait for {name} already"));
     }
     let outgoing = Outgoing {
@@ -533,7 +532,10 @@ pub(crate) fn keep_close(
         at: now_ms(),
     };
     daemon
-        .write(|store| store.keep_outgoing(&outgoing).map(|()| ((), None)))
+        .write(|store| {
+            store.forget_outgoing(&outgoing.id)?;
+            store.keep_outgoing(&outgoing).map(|()| ((), None))
+        })
         .map_err(|error| format!("it cannot be kept: {error}"))?;
     send_kept(daemon, machine);
     Ok(())
