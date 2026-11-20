@@ -231,7 +231,23 @@ fn selected(cx: &mut VisualTestContext, id: &str) -> bool {
     })
 }
 
+/// Lets the motions that run end, frame by frame, and stops at the first frame where none does.
+fn calm(cx: &mut VisualTestContext) {
+    for _ in 0..60 {
+        cx.executor().advance_clock(Duration::from_millis(16));
+        let moving = cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+        if moving == 0 {
+            break;
+        }
+    }
+}
+
+/// A click on an element that has come in, then the window settled. What a test waited for with
+/// `until` is drawn from the frame the daemon's answer came in on, which a loaded machine reaches
+/// late: its list may still be unfolding, and a click on a row that unfolds is lost.
 fn click(cx: &mut VisualTestContext, id: &str) {
+    calm(cx);
     let id = id.to_owned();
     cx.update(|window, cx| window.click(id, cx));
     settle(cx);
