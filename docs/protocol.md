@@ -216,6 +216,9 @@ no device calls a `local` one over a link (`docs/remote.md`, "Roles").
 | `remote.setup` | local |
 | `remote.join` | local |
 | `remote.declare` | local |
+| `tunnel.open` | drive |
+| `tunnel.list` | local |
+| `tunnel.close` | local |
 | `skill.list` | read |
 | `skill.show` | read |
 | `skill.add` | drive |
@@ -1298,6 +1301,31 @@ with the reason. No method answers a private key.
   the device that joined after `head`; the daemon claims it with the machine key, pins the hub
   (`remote/hub.json`) once the hub sent it back, and keeps the session. It answers `{"url", "hub",
   "root", "name"}`. `Local`.
+
+### The tunnel methods
+
+A run's port of another machine reached on this one (`docs/remote.md`, "Tunnels"), with remote on.
+Each is `refused` with it off, as the remote methods are.
+
+- `tunnel.open {run, port?}` aimed at a machine (`machine`, signed: "Requests from another
+  machine's clients"): the machine checks it as any request, then that `run` is a run of its own
+  that still runs, and that `port` is the port the run reports as its address (`run.list`'s `url`)
+  or one its processes listen on, read from the system; any other is `refused` (`port 22 is none
+  of run r1's`). Without `port`, the run's address, or the only port it listens on. The tunnel is
+  held open by the request: its answer is `{"tunnel", "machine", "run", "port", "local_port",
+  "address"}`, `address` being the `127.0.0.1:<local_port>` the carrying daemon listens on (the
+  run's port when it is free there, another otherwise), and what follows on the connection is the
+  `tunnel.closed` event (`docs/events.md`) when the tunnel ends: the run ended, `tunnel.close`, the
+  link dropped, the device was removed, or the client's connection went. The client's connection
+  ending closes the tunnel. It is a `drive` method: a `viewer` is refused (`laptop may only view: a
+  controller or a runner may open a tunnel`). Never without `machine`: a tunnel is to another
+  machine (`refused`).
+- `tunnel.list {}` answers `{"tunnels": [{"tunnel", "machine", "run", "port", "local_port",
+  "address", "connections", "since"}]}`: the tunnels this machine's daemon carries, `connections`
+  being the TCP connections open on them now and `since` when it opened (milliseconds since the
+  Unix epoch). `Local`.
+- `tunnel.close {tunnel}` closes one of them, answers `{"closed": "<tunnel>"}`; `not-found` for a
+  tunnel this daemon does not carry. `Local`.
 
 ### The skill methods
 

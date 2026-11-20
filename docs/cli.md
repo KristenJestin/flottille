@@ -385,6 +385,31 @@ machines linked to this one. `remote.address.add`.
 Removes an address declared by hand, and tells the machines linked to this one.
 `remote.address.remove`.
 
+## Tunnels
+
+### `flottille tunnel open <run> [--port <port>] [--json]`
+
+Reaches a run's port on another machine on a local port, so it takes `--machine <name>`
+(`docs/remote.md`, "Tunnels"). The machine checks that the run is one it started and still runs, and that the port is the one the run
+reports as its address or one its processes listen on (`--port` says which when it listens on
+several); any other port is refused. This machine listens on `127.0.0.1` (the run's port when it is
+free, another otherwise), prints where, and keeps the tunnel open until the run ends or you press
+Ctrl+C. A viewer is refused. `tunnel.open`.
+
+```
+$ flottille --machine server tunnel open 3f9a1c0b7d2e
+Run 3f9a1c0b7d2e of server, port 3000, is on 127.0.0.1:41873. It stays open until the run ends or you press Ctrl+C.
+```
+
+### `flottille tunnel list [--machine <name>] [--json]`
+
+The tunnels this machine carries, with their local address and connections; with `--machine`, the
+ones to that machine only (the flag is a filter here, no request is carried). `tunnel.list`.
+
+### `flottille tunnel close <tunnel>`
+
+Closes one of them: the command that opened it says it is closed. `tunnel.close`.
+
 ## Extensions and specs
 
 Parts of Flottille that can be turned off with Flottille still working (`docs/extensions.md`).

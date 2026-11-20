@@ -221,3 +221,8 @@ stack"). Nothing of Flottille goes into the kit, and no component is drawn here 
 Run `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test`, plus the
 manual checks the issue asks for, and report the real output. If something fails, say so;
 don't claim green.
+
+A pull request's CI runs a fast check: the test binaries whose files it changes and those listed
+on a line `Tests: <binary> <binary>…` of its description (`docs/releases.md`, "What CI checks").
+List there each binary you ran that CI would not pick up by itself; the whole suite runs on `dev`
+after the merge.

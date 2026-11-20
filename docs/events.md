@@ -384,6 +384,22 @@ A link to another machine of the user's was made, or ended (`docs/remote.md`, "T
 `name` and `fingerprint` of the machine, and, when it ended, `reason` (`it was removed from the
 member list`, for a machine whose member was removed: its link is cut at once).
 
+### `tunnel.opened`, `tunnel.closed`
+
+A tunnel to a run's port of another machine opened, or ended (`docs/remote.md`, "Tunnels"). Said by
+both machines: the one that carries it (where the local port is) with `machine`, the one that
+serves it with `device`, the name of the member whose client asked.
+
+| Field | |
+|---|---|
+| `tunnel` | The tunnel's id. |
+| `run` | The run whose port it carries. |
+| `port` | That port, on the machine of the run. |
+| `machine` | The carrying machine's side: the machine of the run. |
+| `local_port` | The carrying machine's side: the port it listens on, on `127.0.0.1`. |
+| `device` | The serving machine's side: the member that opened it. |
+| `reason` | `tunnel.closed` only: why (`run r1 ended`, `closed by the user`, `the link to server was lost`, `its client left`). |
+
 ### `workspace.created`
 
 A workspace was written, before anything is made on disk (`docs/workspaces.md`). Every event of a
@@ -743,7 +759,7 @@ activity.
 | `link` | Only for a `forge` `run` that was done and whose answer gave the run's link: that link. |
 | `pictures` | Only when a result carried images the agent was given (a connection's, an image file `fs_read` opened, an image page `web` read): their names, in order, which `agent.image` gives back (`docs/extensions.md`, "Connections"). The bytes are in the agent's folder of images, never in the event. |
 | `cut` | Only when the result was cut at the source (`docs/tools.md`, "Long results"): `{"result", "chars", "left_out"}`, the id the whole text is read by, its length and how many characters the agent was not shown. |
-| `setup` | Only on a `tickets` `log_time` or `worklogs` that was refused for want of the project's vault entry (none named, one the project does not see, or one with no username): `time_logging`. The window says it in the conversation, with a button to the project's Settings, Tracker (`docs/tickets.md`, "Logging time"). |
+| `setup` | Only on a `tickets` `log_time`, `worklog_edit`, `worklog_delete` or `worklogs` that was refused for want of the project's vault entry (none named, one the project does not see, or one with no username): `time_logging`. The window says it in the conversation, with a button to the project's Settings, Tracker (`docs/tickets.md`, "Logging time"). |
 
 #### `agent.link_shown`
 

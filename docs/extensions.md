@@ -689,6 +689,13 @@ or without a spec. Project-scoped.
   one, or when the project's instructions say to), not on withholding the tool: withheld, a lead
   asked by the user for a review of a session it leads answered it had no review tool and built a
   review of its own with `agent_launch`.
+- **A pull request** (#1091): a root asked by the user to review a pull request (a colleague's, or
+  one of theirs already pushed, possibly only its last commits) calls `review {action: start,
+  pull_request, repository?, from?}`. It needs no session's workspace: the daemon fetches the pull
+  request's head into a detached worktree of its own (`tools.md`, "Review"), the pilot is the
+  caller's child, and the findings are delivered to the caller, never posted on the forge. A lead
+  asked for this answered, before the tool said so, that it had no review tool and read the diff by
+  hand with `forge` and `run`.
 - **A session a lead leads** (`agent_launch` `led`, `tools.md`, "Sessions an agent starts") is a
   root of its own, in its own workspace, which the window shows under its lead: every door reviews
   it as any session (`/review` in its composer, `flottille review <session>`, its pull request),
@@ -756,6 +763,12 @@ As built (#338):
   kept. `review.finding` marks one. They show under the review's row of the session's rail and,
   for a spec's development, on the spec's page.
 - **Guidance**: `review.md`, 4,000 characters, edited on Review's page.
+- **A pull request's review** (#1091) is a review whose row names the pull request (`pull_request`:
+  its repository, number, head and place) and whose `session` is the caller; it has no workspace,
+  no round after the first and no spec. The agents of it have the place as their own folder (the
+  frame's `launch` takes it, `Launched.at`), so that the gate sees their commands inside their
+  place. Its findings are kept under the caller's identifiers (`F1`, `F2`…) beside those of the
+  caller's own change, which they never count as a round of.
 - **Data**: `ext_review_reviews`, `ext_review_agents`, `ext_review_findings`. The core's scan
   looks for `extensions::review` alone, `review` being the forge's word too (`forge::review`).
 

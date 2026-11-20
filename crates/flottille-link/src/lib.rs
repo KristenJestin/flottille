@@ -17,6 +17,7 @@ mod offers;
 mod request;
 mod serial;
 mod transport;
+mod tunnel;
 mod words;
 
 use std::fmt;
@@ -52,6 +53,7 @@ pub use request::{
     runs_agents,
 };
 pub use transport::TlsServer;
+pub use tunnel::TunnelStream;
 pub use words::verification_words;
 
 /// The machine key's file in the key folder: the daemon's alone.

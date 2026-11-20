@@ -586,6 +586,19 @@ fn session_send(grant: &Grant, args: &Value) -> Verdict {
     found.verdict(Kind::Action)
 }
 
+/// What the reason of a line that runs a pull request's code in the copy its review reads ends
+/// with: `asks_pull_request_code` finds it, and Full does not let it through.
+pub const PULL_REQUEST_CODE: &str = "in the copy its review reads: only the user lets a review run \
+    it, in every mode, Full included";
+
+/// Whether a held call runs the code of a pull request in its review's copy: held for the user in
+/// every mode, Full included, and never decided by the judge.
+pub fn asks_pull_request_code(ask: &Ask) -> bool {
+    ask.reasons
+        .iter()
+        .any(|reason| reason.contains(PULL_REQUEST_CODE))
+}
+
 /// What every reason of a verdict on a pull request ends with, whichever way it is given (the
 /// tool `forge`, a `gh` or a `bkt` line): `asks_review` finds it, and Full does not let it through.
 pub const REVIEW_VERDICT: &str = "only the user approves a pull request or asks for changes on \
@@ -614,6 +627,27 @@ pub fn creates_in_a_milestone(tool: &str, args: &Value) -> bool {
 /// a comment edited before the user allows it is not posted with words they never read.
 pub fn replies_to_a_comment(tool: &str, args: &Value) -> bool {
     tool == "tickets" && args["action"] == "reply"
+}
+
+/// Why `tickets worklog_delete` comes to the user, every time: a worklog deleted cannot be got
+/// back, and its time may already be billed.
+pub const WORKLOG_DELETE: &str = "a deleted worklog cannot be got back: only the user deletes \
+    one, in every mode, Full included";
+
+/// Whether a held call deletes a worklog: held for the user in every mode, Full included, and
+/// never decided by the judge.
+pub fn asks_worklog_delete(ask: &Ask) -> bool {
+    ask.reasons.iter().any(|reason| reason == WORKLOG_DELETE)
+}
+
+/// Whether a call of `tickets` changes or deletes a worklog: its card says the worklog as it
+/// stood, and one changed in Jira before the user allows it is not written over unseen.
+pub fn changes_a_worklog(tool: &str, args: &Value) -> bool {
+    tool == "tickets"
+        && matches!(
+            args["action"].as_str(),
+            Some("worklog_edit" | "worklog_delete")
+        )
 }
 
 /// Whether a call of `forge` approves a pull request or requests changes on it.
@@ -721,6 +755,9 @@ fn untexted(tool: &str, action: &str, args: &Value, keys: &[&str]) -> Result<(),
                 ("title", _) => "edit and create",
                 ("comment", _) => "close and reopen",
                 ("message", _) => "a merge by squash",
+                ("body", "tickets") if action.starts_with("worklog_") => {
+                    "create, comment and log_time (a worklog's new text is comment)"
+                }
                 (_, "forge") => "create, comment, edit, reply and review",
                 _ => "create, comment and edit",
             };
@@ -894,19 +931,21 @@ pub const FORGE_ACTIONS: &str = "list, show, people, subscribe, unsubscribe, cre
 /// The actions of `tickets`, as a refusal names them.
 pub const TICKET_ACTIONS: &str = "list, search, show, people, types, fields, link_types, sprints, milestones, subscribe, unsubscribe, \
      create, comment, reply, edit, close, reopen, status, link, unlink, comment_edit, \
-     comment_delete, milestone_create, milestone_edit, log_time, time_spent and worklogs";
+     comment_delete, milestone_create, milestone_edit, log_time, worklog_edit, worklog_delete, \
+     time_spent and worklogs";
 /// What `tickets close` closes for, as `gh issue close --reason` names it.
 pub const CLOSE_REASONS: [&str; 2] = ["completed", "not planned"];
 /// The arguments of `tickets` that belong to `edit` or `close` alone.
-const TICKET_ONLY: [(&str, &str); 8] = [
-    ("duration", "log_time"),
-    ("started", "log_time"),
-    ("to", "worklogs"),
-    ("author", "worklogs"),
-    ("reason", "close"),
-    ("remove_labels", "edit"),
-    ("assignees", "edit"),
-    ("remove_assignees", "edit"),
+const TICKET_ONLY: [(&str, &[&str]); 9] = [
+    ("duration", &["log_time", "worklog_edit"]),
+    ("started", &["log_time", "worklog_edit"]),
+    ("worklog", &["worklog_edit", "worklog_delete"]),
+    ("to", &["worklogs"]),
+    ("author", &["worklogs"]),
+    ("reason", &["close"]),
+    ("remove_labels", &["edit"]),
+    ("assignees", &["edit"]),
+    ("remove_assignees", &["edit"]),
 ];
 
 /// `tickets`: its reads are harmless, and so is waiting for what happens to a ticket; its writes
@@ -929,6 +968,16 @@ fn tickets(call: &Call) -> Verdict {
                 || "that long before it is logged".to_owned(),
                 |_| shown("started")
             )
+        ),
+        "worklog_edit" => format!(
+            "it changes the worklog {} of {} on the tracker",
+            shown("worklog"),
+            shown("ticket")
+        ),
+        "worklog_delete" => format!(
+            "it deletes the worklog {} of {} on the tracker",
+            shown("worklog"),
+            shown("ticket")
         ),
         // The link as the ticket named reads it, so that the card says its direction.
         "link" => format!(
@@ -985,7 +1034,8 @@ fn tickets(call: &Call) -> Verdict {
     };
     let none: &[&str] = match action {
         "comment" | "reply" | "comment_edit" | "log_time" => &["title"],
-        "close" | "reopen" | "status" | "link" | "unlink" | "comment_delete" => &["title", "body"],
+        "close" | "reopen" | "status" | "link" | "unlink" | "comment_delete" | "worklog_edit"
+        | "worklog_delete" => &["title", "body"],
         // A milestone's text is its description.
         "milestone_create" | "milestone_edit" => &["body"],
         _ => &[],
@@ -994,9 +1044,10 @@ fn tickets(call: &Call) -> Verdict {
         return refused;
     }
     for (key, takers) in TICKET_ONLY {
-        if takers != action && call.args.get(key).is_some_and(|value| !value.is_null()) {
+        if !takers.contains(&action) && call.args.get(key).is_some_and(|value| !value.is_null()) {
             return Verdict::Deny(format!(
-                "refused: tickets {action} takes no {key}: {key} is for {takers}"
+                "refused: tickets {action} takes no {key}: {key} is for {}",
+                takers.join(" and ")
             ));
         }
     }
@@ -1018,10 +1069,18 @@ fn tickets(call: &Call) -> Verdict {
     }
     let mut found = Found::default();
     found.judge(said);
+    if action == "worklog_delete" {
+        found.base(WORKLOG_DELETE.into());
+    }
     if let Err(refused) = texts(
         call.grant,
         call.args,
-        &["title", "body", "description", "status", "kind"],
+        // A worklog's new text is its `comment`: read like a body, as `log_time`'s is.
+        if action == "worklog_edit" {
+            &["title", "body", "description", "status", "kind", "comment"]
+        } else {
+            &["title", "body", "description", "status", "kind"]
+        },
         &mut found,
     ) {
         return refused;
@@ -1320,6 +1379,18 @@ fn run(call: &Call) -> Verdict {
             }
         }
     }
+    // The copy of a pull request a review reads is someone else's code: a line that does more
+    // than read there runs it, which only the user lets a review do, in every mode.
+    let copy = call
+        .paths
+        .first()
+        .and_then(|folder| pull_request_copy(call.own, folder))
+        .filter(|_| !reads || files);
+    if let Some((number, _)) = &copy {
+        found.base(format!(
+            "it runs the code of pull request #{number}, {PULL_REQUEST_CODE}"
+        ));
+    }
     if let Some((name, command)) = call.command {
         // A service runs in its own folder, never the project's.
         let service = call.tool == "services";
@@ -1366,6 +1437,14 @@ fn run(call: &Call) -> Verdict {
                 found.base(why);
                 continue;
             }
+            // Inside the copy of the pull request it runs in, Flottille's data folder holds the
+            // pull request's files: what the line does there is already held for the user.
+            if copy
+                .as_ref()
+                .is_some_and(|(_, folder)| inside_copy(folder, path))
+            {
+                continue;
+            }
             if let Some(why) = forbidden(call.own, call.grant.place.home.as_deref(), path, true) {
                 return Verdict::Deny(why);
             }
@@ -1406,6 +1485,42 @@ fn run(call: &Call) -> Verdict {
         }
     }
     found.verdict(Kind::Call)
+}
+
+/// The pull request whose copy `folder` is in, and the copy's folder: a place of Review's in
+/// Flottille's data folder, named after the pull request it holds (`reviews/pr<number>-…`).
+fn pull_request_copy(own: &[PathBuf], folder: &Resolved) -> Option<(u64, PathBuf)> {
+    let reviews = own.first()?.join("reviews");
+    let real = place::real_path(&reviews).ok();
+    [&folder.path, &folder.written]
+        .into_iter()
+        .find_map(|path| {
+            let (top, rest) = match path.strip_prefix(&reviews) {
+                Ok(rest) => (&reviews, rest),
+                Err(_) => (real.as_ref()?, path.strip_prefix(real.as_ref()?).ok()?),
+            };
+            let name = rest.iter().next()?;
+            let number = name
+                .to_str()?
+                .strip_prefix("pr")?
+                .split('-')
+                .next()?
+                .parse()
+                .ok()?;
+            Some((number, top.join(name)))
+        })
+}
+
+/// Whether `path`, both as written and where it leads, is inside the copy `folder` (never the
+/// copy itself).
+fn inside_copy(folder: &Path, path: &Resolved) -> bool {
+    let real = place::real_path(folder).ok();
+    [&path.path, &path.written].into_iter().all(|path| {
+        [Some(folder), real.as_deref()]
+            .into_iter()
+            .flatten()
+            .any(|folder| path.starts_with(folder) && path != folder)
+    })
 }
 
 /// A layer that deletes untracked files: where, the folders its `-C`s go to from the run's, and
@@ -5076,6 +5191,27 @@ mod tests {
             Fixture::new(Some("w"))
         }
 
+        /// The place of a review of pull request 7: a copy in Flottille's data folder, beside
+        /// another's (`pr8-x`) and the vault's folder, with a link in it to that folder.
+        fn copy() -> Fixture {
+            let mut fixture = Fixture::new(None);
+            let data = fixture.own[0].clone();
+            let copy = data.join("reviews/pr7-x");
+            for folder in [
+                copy.join("sub"),
+                data.join("reviews/pr8-x"),
+                data.join("vault"),
+            ] {
+                std::fs::create_dir_all(folder).unwrap();
+            }
+            std::os::unix::fs::symlink(&data, copy.join("link")).unwrap();
+            let copy = std::fs::canonicalize(copy).unwrap();
+            fixture.grant.place.root = copy.clone();
+            fixture.grant.place.repositories = vec![(".".into(), copy.clone())];
+            fixture.root = copy;
+            fixture
+        }
+
         fn main() -> Fixture {
             Fixture::new(None)
         }
@@ -5202,6 +5338,50 @@ mod tests {
 
     fn base_class(verdict: &Verdict) -> bool {
         matches!(verdict, Verdict::Ask(ask) if ask.class == Class::Base && !ask.reasons.is_empty())
+    }
+
+    #[test]
+    fn a_line_in_a_pull_request_s_copy_never_reaches_another_copy() {
+        let fixture = Fixture::copy();
+        let verdict = fixture.run("rm ../pr8-x/f");
+        assert!(denied(&verdict), "{verdict:?}");
+    }
+
+    #[test]
+    fn a_line_in_a_pull_request_s_copy_never_reaches_flottille_s_folder_through_a_link() {
+        let fixture = Fixture::copy();
+        let verdict = fixture.run("rm link/vault/f");
+        assert!(denied(&verdict), "{verdict:?}");
+    }
+
+    #[test]
+    fn a_line_in_a_pull_request_s_copy_never_climbs_out_of_it_by_dots() {
+        let fixture = Fixture::copy();
+        let verdict = fixture.run("rm sub/../../../vault");
+        assert!(denied(&verdict), "{verdict:?}");
+    }
+
+    #[test]
+    fn a_line_in_a_pull_request_s_copy_never_removes_the_copy_itself() {
+        let fixture = Fixture::copy();
+        let verdict = fixture.run("rm .");
+        assert!(denied(&verdict), "{verdict:?}");
+    }
+
+    #[test]
+    fn a_line_that_runs_in_a_pull_request_s_copy_is_held_as_base() {
+        let fixture = Fixture::copy();
+        let verdict = fixture.run("make");
+        assert!(base_class(&verdict), "{verdict:?}");
+        assert!(reasons(&verdict).contains("pull request #7"), "{verdict:?}");
+        let verdict = fixture.run("rm sub/f");
+        assert!(base_class(&verdict), "{verdict:?}");
+    }
+
+    #[test]
+    fn a_read_in_a_pull_request_s_copy_passes() {
+        let fixture = Fixture::copy();
+        assert_eq!(fixture.run("git diff"), Verdict::Allow);
     }
 
     #[test]
