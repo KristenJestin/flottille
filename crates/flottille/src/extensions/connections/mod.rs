@@ -2061,13 +2061,25 @@ fn own_to_this_machine(declaration: &Declaration) -> Option<String> {
         Reach::Url(url) => {
             declaration.url_fault().is_none()
                 && url::Url::parse(url).is_ok_and(|url| {
+                    // A name is not resolved: what it resolves to at the share proves nothing
+                    // of later (`docs/remote.md`, "Connections").
                     let here = match url.host() {
                         Some(url::Host::Domain(name)) => {
                             let name = name.to_ascii_lowercase();
+                            let name = name.strip_suffix('.').unwrap_or(&name);
                             name == "localhost" || name.ends_with(".localhost")
                         }
-                        Some(url::Host::Ipv4(address)) => address.is_loopback(),
-                        Some(url::Host::Ipv6(address)) => address.is_loopback(),
+                        Some(url::Host::Ipv4(address)) => {
+                            address.is_loopback() || address.is_unspecified()
+                        }
+                        // `[::ffff:127.0.0.1]` is the loopback, `[::]` every address of here.
+                        Some(url::Host::Ipv6(address)) => {
+                            address.is_loopback()
+                                || address.is_unspecified()
+                                || address
+                                    .to_ipv4()
+                                    .is_some_and(|v4| v4.is_loopback() || v4.is_unspecified())
+                        }
                         None => true,
                     };
                     url.scheme() == "https" && !here
