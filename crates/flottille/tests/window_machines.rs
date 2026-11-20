@@ -1708,10 +1708,16 @@ fn turning_remote_off_closes_the_links_and_keeps_the_hub(cx: &mut TestAppContext
         !present(cx, "member-removal-action")
     });
     settle(&shell, cx);
-    click(&shell, cx, "turn-on-remote");
+    // The notice unfolds over wall-clock time: a press that lands while it is still folded hits
+    // nothing, so it is pressed again until the daemon is on.
+    let mut pressed = Instant::now() - Duration::from_secs(1);
     let deadline = Instant::now() + WAIT;
     while !(present(cx, "member-server") && present(cx, "member-pc")) {
         step(&shell, Duration::from_millis(16), cx);
+        if present(cx, "turn-on-remote") && pressed.elapsed() > Duration::from_millis(500) {
+            click(&shell, cx, "turn-on-remote");
+            pressed = Instant::now();
+        }
         assert!(
             Instant::now() < deadline,
             "its devices are not listed again: toasts {:?}, notice {}, settings {:?}, switch {}, no hub {}, rest {}, read {:?}\n{}",
