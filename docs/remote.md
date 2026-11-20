@@ -584,7 +584,7 @@ speak two.
   for later.
 - **A link or a file an agent shows** (`web` `show_link`) belongs to its machine: a `localhost`
   address of another machine opens through a tunnel ("Tunnels"); a file of another machine is shown
-  with its machine and path, and opened later.
+  with its machine and path, and never opened here (a file of another machine is not on this one).
 
 The command line takes `--machine <name>` on every command (`FLOTTILLE_MACHINE` too). The window
 shows **one machine at a time**, chosen in a switcher at the top of the sidebar (this machine first,
@@ -843,6 +843,23 @@ As built (#818):
 - **In the window**, a run's address on another machine (its row, a link an agent showed with
   `show_link`) opens through a tunnel: the window opens it, then the system's default handler opens
   the local address. The rows of open tunnels show in the run's row, with Close.
+  Built (#830): the window asks the same signed `tunnel.open` the command line does, from this
+  machine's daemon, on a connection of its own that it holds for as long as the tunnel is wanted:
+  Close (`tunnel.close`), the run's end, the link's loss or the window quitting ends it, and the
+  window never keeps a listener the user cannot see. The local address the handler is given is
+  `http://localhost:<local port>` with the address's own path, query and fragment (a name under
+  `.localhost` is kept, for a server that tells hosts apart). A second click on an address a
+  tunnel already reaches opens it again and makes no second tunnel. The row says `localhost:5173 →
+  server` with **Close**, under the run's lines, on the machine's page as on the project's. A
+  failure (the machine is unreachable, the run is gone, the port is refused) is a toast with the
+  reason the machine gave, `Not opened: port 22 is none of run r1's`, and opens nothing.
+- **A link an agent shows, on another machine.** A `localhost` link (`localhost`, `127.0.0.1`,
+  `[::1]`, `0.0.0.0`, a name under `.localhost`) names a port of the machine the agent runs on:
+  Open asks that machine for its runs and takes the one that reports an address on that port, else
+  the only one running, then opens the tunnel as above; no run to take is a toast (`no run of
+  server serves port 5173`). A link of the web opens as it is, as on this machine. A file is the
+  agent's machine's: its card says `server: /path/to/file` and draws no Open, and the window reads
+  nothing of it, a path of the same name here being none of that file (no thumbnail either).
 - **On the phone**, the page opens in an in-app browser by default (the tunnel lives with the app in
   the foreground). **Open in browser** hands it to the user's browser and keeps the tunnel alive
   with a foreground service and its notification, closed from that notification.
@@ -852,7 +869,7 @@ As built (#818):
   free there, another otherwise, says which (`address`, `local_port`) and holds the tunnel while
   the command runs; Ctrl+C, or the command's end, closes it. `tunnel list [--machine m]` lists the
   tunnels this machine carries (the flag filters, it is no request for another machine) and
-  `tunnel close <tunnel>` closes one. The window's rows are #830.
+  `tunnel close <tunnel>` closes one. The window's rows are above (#830).
 - **The machine of the run decides, never the one that asks.** The request is checked as every
   request of another machine's client ("Requests from another machine's clients": member,
   signature, time, nonce, and the role: `tunnel.open` is a `drive` method, a `viewer` is
@@ -1199,6 +1216,16 @@ on a real phone, by hand, and reported.
   (`flottille --machine server tunnel open r1`): Ctrl+C closes it. A tunnel that outlives its
   command would need a name and a way to find it again; the window and the phone hold theirs for as
   long as they are open. Reversible: a `--detach` is a later flag.
+- **A link an agent shows names no run (#830).** Its port is looked for among the machine's running
+  commands (`run.list`): the one that reports it, else the only one that runs, the machine
+  checking the port again. A guess that is wrong is refused there (`port 5173 is none of run r2's`),
+  never reached. Reversible: the agent's own run could be named by the link later.
+- **A file of another machine is not opened (#830).** Fetching it to open it here is the later
+  work "Pictures travel as bytes already; files other than pictures are left for later" names:
+  until then its card says where it is and draws no Open.
+- **The window's tunnels are not listed again after a restart (#830).** The listener is the
+  window's connection's: a window that quits closes them, and one that opens again starts with
+  none (`tunnel.list` still lists what a command line holds).
 - A tunnel carries at most 64 connections at once and a device has at most 8 tunnels open on a
   machine: a small cap for one person's pages and APIs, said in the refusal; raising it is one
   constant.
