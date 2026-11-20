@@ -761,17 +761,14 @@ fn every_change_of_the_machines_page_is_animated(cx: &mut TestAppContext) {
     let mut offsets = Vec::new();
     for _ in 0..60 {
         step(&shell, Duration::from_millis(16), cx);
-        if present(cx, "enter-machines-devices") && present(cx, "enter-machines-addresses") {
-            let devices = top(cx, "enter-machines-devices");
-            let below = devices + height(cx, "enter-machines-devices");
-            offsets.push((devices, top(cx, "enter-machines-addresses") - below));
+        if present(cx, "enter-machines-hub") && present(cx, "enter-machines-devices") {
+            let first = top(cx, "enter-machines-hub");
+            let below = first + height(cx, "enter-machines-hub");
+            offsets.push((first, top(cx, "enter-machines-devices") - below));
         }
     }
-    let (devices, gap) = *offsets.last().unwrap();
-    assert!(
-        offsets[0].0 > devices,
-        "the first section rises: {offsets:?}"
-    );
+    let (first, gap) = *offsets.last().unwrap();
+    assert!(offsets[0].0 > first, "the first section rises: {offsets:?}");
     // Staggered: the second starts later, so the space between them first opens, then closes as
     // the second arrives.
     let widest = offsets.iter().map(|at| at.1).fold(f32::MIN, f32::max);
