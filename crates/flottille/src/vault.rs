@@ -1952,6 +1952,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_bind_at_the_moment_of_a_save_keeps_the_user_s_bind() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = a_daemon(dir.path());
+        ok(call(
+            daemon.clone(),
+            "vault.set",
+            json!({"name": "tracker", "secret": "own-t0ken-Zr81"}),
+        )
+        .await);
+        // The user saves a new secret while they bind the entry from a connection's request.
+        let mut set = std::pin::pin!(call(
+            daemon.clone(),
+            "vault.set",
+            json!({"name": "tracker", "secret": "new-t0ken-Qd52"}),
+        ));
+        assert!(futures::poll!(set.as_mut()).is_pending());
+        let bound = bound_to(&daemon, "tracker", "https://notes.example.com");
+        ok(set.await);
+        ok(bound);
+
+        let entries = listed(&daemon).await;
+        assert_eq!(
+            entries[0].url.as_deref(),
+            Some("https://notes.example.com"),
+            "the Save did not undo the bind"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_share_sent_at_the_moment_of_a_save_is_one_entry_s_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = a_daemon(dir.path());
+        ok(call(
+            daemon.clone(),
+            "vault.set",
+            json!({"name": "tracker", "secret": "old-t0ken-Zr81", "url": "https://old.example.com"}),
+        )
+        .await);
+        let mut set = std::pin::pin!(call(
+            daemon.clone(),
+            "vault.set",
+            json!({"name": "tracker", "secret": "new-t0ken-Qd52", "url": "https://new.example.com"}),
+        ));
+        let mut copy = std::pin::pin!(copy_of(&daemon, "tracker"));
+        assert!(futures::poll!(set.as_mut()).is_pending());
+        assert!(futures::poll!(copy.as_mut()).is_pending());
+        ok(set.await);
+        let (metadata, secret) = ok(copy.await);
+
+        let pair = (metadata["url"].as_str().unwrap(), secret.as_str());
+        assert!(
+            pair == ("https://new.example.com", "new-t0ken-Qd52")
+                || pair == ("https://old.example.com", "old-t0ken-Zr81"),
+            "the metadata and the secret of one entry: {}",
+            pair.0
+        );
+    }
+
+    #[tokio::test]
     async fn a_share_answers_the_ask_waiting_for_its_entry() {
         let dir = tempfile::tempdir().unwrap();
         let daemon = a_daemon(dir.path());
