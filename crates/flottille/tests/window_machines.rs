@@ -385,15 +385,15 @@ fn toasts(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Vec<String> {
     })
 }
 
-/// Settings, General, Machines: the last section of the General tab.
+/// Settings, Machines: the tab of its own, after Vault and before General.
 fn machines_tab(shell: &Entity<Shell>, cx: &mut VisualTestContext) {
-    // Tall enough for the whole of General: what is clicked must be in view.
+    // Tall enough for the whole of the tab: what is clicked must be in view.
     cx.simulate_resize(size(px(1280.), px(3000.)));
     click(shell, cx, "settings");
     until(shell, cx, "the settings page is shown", |cx| {
-        present(cx, "settings-tabs-general")
+        present(cx, "settings-tabs-machines")
     });
-    click(shell, cx, "settings-tabs-general");
+    click(shell, cx, "settings-tabs-machines");
 }
 
 fn option(name: &str) -> String {
@@ -478,7 +478,8 @@ fn choosing_a_machine_shows_its_sessions(cx: &mut TestAppContext) {
     assert_eq!(shell.read_with(cx, |s, _| s.machine_shown()), None);
 }
 
-/// Settings, General, Machines: the hub's address and its setup code typed, and Set up a hub clicked.
+/// Settings, Machines: Set up a hub opens its dialog, the hub's address and its setup code are
+/// typed there, and Set up is clicked.
 fn set_up_from_the_page(
     hub: &TestHub,
     shell: &Entity<Shell>,
@@ -486,8 +487,10 @@ fn set_up_from_the_page(
 ) -> String {
     machines_tab(shell, cx);
     until(shell, cx, "the setup is offered", |cx| {
-        present(cx, "set-up-hub")
+        present(cx, "open-hub-setup")
     });
+    click(shell, cx, "open-hub-setup");
+    assert!(present(cx, "set-up-hub"), "the dialog holds its button");
     let (url, code) = shell.read_with(cx, |s, cx| {
         let section = s.machines().read(cx);
         (
@@ -750,7 +753,7 @@ fn every_change_of_the_machines_page_is_animated(cx: &mut TestAppContext) {
     set_up(&hub, &pc);
     pair(&pc, &laptop, "laptop", "controller");
     let (shell, cx) = window(&pc, cx);
-    // Tall enough for the whole of General, the invitation's QR and the rows under it.
+    // Tall enough for the whole of the tab and the rows under it.
     cx.simulate_resize(size(px(1280.), px(3000.)));
     // Read whole before the page is measured: what the daemon answers later moves the sections.
     until(&shell, cx, "the machines are read", |cx| {
@@ -763,12 +766,12 @@ fn every_change_of_the_machines_page_is_animated(cx: &mut TestAppContext) {
     settle(&shell, cx);
     click(&shell, cx, "settings");
     until(&shell, cx, "the settings page is shown", |cx| {
-        present(cx, "settings-tabs-general")
+        present(cx, "settings-tabs-machines")
     });
 
     // The sections show up one after the other, each rising into place: the second measured
     // from the first's bottom, which moves as the first's rows unfold.
-    cx.update(|window, cx| window.click("settings-tabs-general", cx));
+    cx.update(|window, cx| window.click("settings-tabs-machines", cx));
     let mut offsets = Vec::new();
     for _ in 0..60 {
         step(&shell, Duration::from_millis(16), cx);
@@ -791,17 +794,20 @@ fn every_change_of_the_machines_page_is_animated(cx: &mut TestAppContext) {
     );
     settle(&shell, cx);
 
-    // The invitation's panel unfolds: a height between none and its own.
+    // The invitation is a dialog: it rises and fades in over the page, never unfolds in it.
     cx.update(|window, cx| window.click("add-device", cx));
     until(&shell, cx, "the invitation comes", |cx| {
         shell.read_with(cx, |s, cx| s.machines().read(cx).invitation().is_some())
     });
-    let early = height(cx, "invitation");
+    let early = drawn_alpha(cx, "invitation-scrim");
     settle(&shell, cx);
-    let full = height(cx, "invitation");
-    assert!(early < full, "it unfolds: {early} then {full}");
-    // The code wraps beside the QR, not a character to a line.
-    assert!(full < 480., "the panel holds the QR and its code: {full}");
+    let full = drawn_alpha(cx, "invitation-scrim");
+    assert!(early < full, "its scrim fades in: {early} then {full}");
+    assert!(
+        !present(cx, "invitation-card"),
+        "nothing unfolds in the page"
+    );
+    click(&shell, cx, "invitation-cancel");
 
     // A row removed folds away: a height between its own and none.
     let row = height(cx, "member-item-laptop");
@@ -1447,4 +1453,536 @@ impl flottille_link::Keyring for NoKeyring {
     ) -> Result<(), flottille_link::KeyringError> {
         Err(flottille_link::KeyringError::Absent)
     }
+}
+
+// ── Remote in its own tab, turned on and configured from the window (#1144) ────────────────────
+
+/// A machine with remote off, its interfaces said as a test says them.
+fn off_machine(interfaces: &str) -> Machine {
+    let user = User::new().with_env("FLOTTILLE_TEST_INTERFACES", interfaces);
+    std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
+    user.status();
+    Machine { user }
+}
+
+const INTERFACES: &str =
+    r#"[["eth0","192.168.1.20"],["wg0","10.8.0.2"],["tailscale0","100.64.0.7"]]"#;
+
+fn stack(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Vec<&'static str> {
+    shell.read_with(cx, |s, cx| s.modal_stack(cx))
+}
+
+fn type_into(
+    cx: &mut VisualTestContext,
+    field: &Entity<gpui_kit::base::input::InputState>,
+    text: &str,
+) {
+    let text = text.to_owned();
+    cx.update(|window, cx| field.update(cx, |f, cx| f.set_value(text, window, cx)));
+}
+
+#[gpui_kit::test]
+fn machines_is_a_tab_of_settings(cx: &mut TestAppContext) {
+    let keys: Vec<&str> = flottille_window::settings::SECTIONS
+        .iter()
+        .map(|(key, _)| *key)
+        .collect();
+    let vault = keys.iter().position(|k| *k == "vault").unwrap();
+    assert_eq!(keys[vault + 1], "machines", "after Vault: {keys:?}");
+    assert_eq!(keys[vault + 2], "general", "before General: {keys:?}");
+
+    let hub = TestHub::new();
+    let pc = Machine::new();
+    set_up(&hub, &pc);
+    let (shell, cx) = window(&pc, cx);
+    machines_tab(&shell, cx);
+    // Its sections, and none of them in General.
+    for section in ["remote", "reached", "hub", "devices", "addresses"] {
+        until(&shell, cx, section, |cx| present(cx, section));
+    }
+    click(&shell, cx, "settings-tabs-general");
+    settle(&shell, cx);
+    for section in ["devices", "addresses", "reached", "remote"] {
+        assert!(!present(cx, section), "{section} is not in General");
+    }
+
+    // An old link to General's machines section opens the tab.
+    let machines = flottille_window::settings::SECTIONS
+        .iter()
+        .position(|(key, _)| *key == "machines")
+        .unwrap();
+    for link in ["general#machines", "settings:general#machines"] {
+        let at = flottille_window::settings::Reveal::from_link(link)
+            .unwrap_or_else(|| panic!("{link} is no link"));
+        shell.update_in(cx, |shell, window, cx| {
+            shell.open_settings_at(at, window, cx)
+        });
+        settle(&shell, cx);
+        let page = shell
+            .read_with(cx, |s, cx| s.main().read(cx).settings_page().cloned())
+            .unwrap();
+        assert_eq!(page.read_with(cx, |page, _| page.tab()), machines, "{link}");
+        click(&shell, cx, "settings-tabs-general");
+    }
+    assert!(flottille_window::settings::Reveal::from_link("general#appearance").is_none());
+}
+
+#[gpui_kit::test]
+fn turning_remote_on_in_settings_starts_the_link(cx: &mut TestAppContext) {
+    let pc = off_machine(INTERFACES);
+    let (shell, cx) = window(&pc, cx);
+    machines_tab(&shell, cx);
+    until(&shell, cx, "the notice is shown", |cx| {
+        present(cx, "remote-notice")
+    });
+    assert!(present(cx, "turn-on-remote"));
+    assert!(
+        !present(cx, "remote-switch"),
+        "the switch comes once it is on"
+    );
+    let said = label(cx, "remote-notice").unwrap();
+    assert!(
+        said.contains("nothing is opened until you say where it is reached"),
+        "{said}"
+    );
+    assert!(!said.contains("daemon.toml"), "{said}");
+
+    click(&shell, cx, "turn-on-remote");
+    until(&shell, cx, "the daemon says it is on", |cx| {
+        pc.user.call("remote.settings", json!({})).unwrap()["on"] == true
+            && present(cx, "remote-switch")
+    });
+    settle(&shell, cx);
+    assert!(pc.user.call("remote.machines", json!({})).is_ok());
+    assert!(!present(cx, "remote-notice"), "the notice is gone");
+    assert!(!present(cx, "turn-on-remote"));
+    // A machine with no hub offers to join one, or to set one up.
+    assert!(present(cx, "join-machines") && present(cx, "open-hub-setup"));
+}
+
+#[gpui_kit::test]
+fn a_tailnet_address_is_offered_first_and_marked(cx: &mut TestAppContext) {
+    let pc = off_machine(INTERFACES);
+    pc.user
+        .call("remote.configure", json!({"on": true}))
+        .unwrap();
+    let (shell, cx) = window(&pc, cx);
+    machines_tab(&shell, cx);
+    until(&shell, cx, "the choice is offered", |cx| {
+        present(cx, "reach")
+    });
+    click(&shell, cx, "reach");
+    for key in [
+        "nowhere",
+        "100.64.0.7",
+        "10.8.0.2",
+        "192.168.1.20",
+        "every",
+        "other",
+    ] {
+        until(&shell, cx, key, |cx| present(cx, &format!("reach-{key}")));
+    }
+    // Nowhere first (the default), then the tailnet's, then the local network's.
+    let order: Vec<f32> = [
+        "nowhere",
+        "100.64.0.7",
+        "10.8.0.2",
+        "192.168.1.20",
+        "every",
+        "other",
+    ]
+    .iter()
+    .map(|key| top(cx, &format!("reach-{key}")))
+    .collect();
+    assert!(order.windows(2).all(|pair| pair[0] < pair[1]), "{order:?}");
+    for tailnet in ["100.64.0.7", "10.8.0.2"] {
+        assert_eq!(
+            label(cx, &format!("reach-{tailnet}-line")).as_deref(),
+            Some("Only your tailnet"),
+            "{tailnet}"
+        );
+    }
+    assert!(
+        label(cx, "reach-100.64.0.7")
+            .unwrap()
+            .contains("tailscale0"),
+        "named by its interface"
+    );
+    assert!(
+        label(cx, "reach-192.168.1.20-line")
+            .unwrap()
+            .contains("local network")
+    );
+    assert!(
+        label(cx, "reach-every-line")
+            .unwrap()
+            .contains("any network")
+    );
+}
+
+#[gpui_kit::test]
+fn choosing_where_this_machine_is_reached_listens_there(cx: &mut TestAppContext) {
+    let pc = off_machine(INTERFACES);
+    pc.user
+        .call("remote.configure", json!({"on": true}))
+        .unwrap();
+    let pid = pc.user.status()["pid"].clone();
+    let (shell, cx) = window(&pc, cx);
+    machines_tab(&shell, cx);
+    until(&shell, cx, "the choice is offered", |cx| {
+        present(cx, "reach")
+    });
+    // Another address…: its field unfolds under the choice, and the address is used from it.
+    click(&shell, cx, "reach");
+    click(&shell, cx, "reach-other");
+    until(&shell, cx, "its field unfolds", |cx| {
+        present(cx, "reach-other-use")
+    });
+    let field = shell.read_with(cx, |s, cx| {
+        s.machines().read(cx).listen_field().unwrap().clone()
+    });
+    type_into(cx, &field, "127.0.0.1:0");
+    click(&shell, cx, "reach-other-use");
+    until(&shell, cx, "the daemon listens there", |cx| {
+        pc.user.call("remote.settings", json!({})).unwrap()["listening"]
+            .as_str()
+            .is_some_and(|at| at.starts_with("127.0.0.1:"))
+    });
+    assert_eq!(pc.user.status()["pid"], pid, "no restart");
+    assert!(
+        toasts(&shell, cx)
+            .iter()
+            .any(|t| t.starts_with("This machine is reached at 127.0.0.1")),
+        "{:?}",
+        toasts(&shell, cx)
+    );
+    // Back to nowhere.
+    click(&shell, cx, "reach");
+    click(&shell, cx, "reach-nowhere");
+    until(&shell, cx, "the daemon listens nowhere", |_| {
+        pc.user.call("remote.settings", json!({})).unwrap()["listening"].is_null()
+    });
+}
+
+#[gpui_kit::test]
+fn turning_remote_off_closes_the_links_and_keeps_the_hub(cx: &mut TestAppContext) {
+    let (_hub, pc, server) = pc_and_server(User::new());
+    let (shell, cx) = window(&pc, cx);
+    machines_tab(&shell, cx);
+    until(&shell, cx, "the switch is shown", |cx| {
+        present(cx, "remote-switch")
+    });
+    settle(&shell, cx);
+    // One confirmation, a dialog: nothing closes until it is confirmed.
+    click(&shell, cx, "remote-switch");
+    assert!(present(cx, "remote-off-action"));
+    assert_eq!(
+        pc.user.call("remote.settings", json!({})).unwrap()["on"],
+        true
+    );
+    click(&shell, cx, "remote-off-action");
+    until(&shell, cx, "the notice is back", |cx| {
+        present(cx, "remote-notice")
+    });
+    assert_eq!(
+        pc.user.call("remote.settings", json!({})).unwrap()["on"],
+        false
+    );
+    server.wait_for("pc", "offline");
+    // Turned on again, the hub's setup is the same.
+    click(&shell, cx, "turn-on-remote");
+    until(&shell, cx, "its devices are listed again", |cx| {
+        present(cx, "member-server") && present(cx, "member-pc")
+    });
+}
+
+#[gpui_kit::test]
+fn a_change_that_waits_for_the_next_start_says_so(cx: &mut TestAppContext) {
+    let user = User::with_fake_agent();
+    user.fake_script(json!({"turns": [{"when": "", "do": [{"say": "ready"}]}]}));
+    let pc = Machine::of(user);
+    let folder = pc.user.path("work/harbor");
+    pc.user.git_init(&folder);
+    std::fs::write(folder.join("README.md"), "harbor\n").unwrap();
+    pc.user.git(&folder, &["add", "README.md"]);
+    pc.user.git(&folder, &["commit", "--quiet", "-m", "start"]);
+    pc.user
+        .call("project.add", json!({"folder": folder, "name": "harbor"}))
+        .unwrap();
+    pc.user
+        .call(
+            "agent.start",
+            json!({"project": "harbor", "message": "Write the notes"}),
+        )
+        .unwrap();
+    let (shell, cx) = window(&pc, cx);
+    machines_tab(&shell, cx);
+    until(&shell, cx, "the choice is offered", |cx| {
+        present(cx, "reach")
+    });
+    assert!(!present(cx, "reach-waits"));
+    click(&shell, cx, "reach");
+    click(&shell, cx, "reach-other");
+    until(&shell, cx, "its field unfolds", |cx| {
+        present(cx, "reach-other-use")
+    });
+    let field = shell.read_with(cx, |s, cx| {
+        s.machines().read(cx).listen_field().unwrap().clone()
+    });
+    type_into(cx, &field, "127.0.0.2:0");
+    click(&shell, cx, "reach-other-use");
+    until(&shell, cx, "the wait is said", |cx| {
+        present(cx, "reach-waits")
+    });
+    let said = label(cx, "reach-waits").unwrap();
+    assert!(said.contains("next start"), "{said}");
+    assert!(said.contains("agent"), "{said}");
+}
+
+#[gpui_kit::test]
+fn a_machine_with_no_hub_offers_join_first_and_says_setup_is_for_the_first(
+    cx: &mut TestAppContext,
+) {
+    let laptop = Machine::new();
+    let (shell, cx) = window(&laptop, cx);
+    machines_tab(&shell, cx);
+    until(&shell, cx, "both are offered", |cx| {
+        present(cx, "join-machines") && present(cx, "open-hub-setup")
+    });
+    settle(&shell, cx);
+    assert!(
+        top(cx, "join-machines") < top(cx, "open-hub-setup"),
+        "Join your machines is the default, first"
+    );
+    assert_eq!(
+        label(cx, "join-machines").as_deref(),
+        Some("Join your machines")
+    );
+    assert_eq!(label(cx, "open-hub-setup").as_deref(), Some("Set up a hub"));
+    let join = label(cx, "join-note").unwrap();
+    assert!(join.contains("invitation"), "{join}");
+    let setup = label(cx, "setup-note").unwrap();
+    assert!(setup.contains("first machine"), "{setup}");
+    assert!(setup.contains("code the hub printed"), "{setup}");
+}
+
+#[gpui_kit::test]
+fn setting_up_a_hub_is_a_dialog_not_a_form_on_the_page(cx: &mut TestAppContext) {
+    let hub = TestHub::new();
+    let pc = Machine::new();
+    let (shell, cx) = window(&pc, cx);
+    machines_tab(&shell, cx);
+    until(&shell, cx, "the setup is offered", |cx| {
+        present(cx, "open-hub-setup")
+    });
+    settle(&shell, cx);
+    // The page draws no field of the setup, and no button that sets up.
+    for id in ["hub-url", "hub-code", "set-up-hub"] {
+        assert!(!present(cx, id), "{id} is drawn on the page");
+    }
+    assert!(stack(&shell, cx).is_empty());
+
+    click(&shell, cx, "open-hub-setup");
+    assert_eq!(stack(&shell, cx), vec!["hub-setup"]);
+    for id in ["hub-url", "hub-code", "set-up-hub"] {
+        assert!(present(cx, id), "{id} is in the dialog");
+    }
+    let (url, code) = shell.read_with(cx, |s, cx| {
+        let section = s.machines().read(cx);
+        (
+            section.url_field().unwrap().clone(),
+            section.code_field().unwrap().clone(),
+        )
+    });
+    // A refusal stays in the dialog, under its field: no toast says it.
+    type_into(cx, &url, &hub.url());
+    type_into(cx, &code, "0000-0000-0000-0000");
+    click(&shell, cx, "set-up-hub");
+    until(&shell, cx, "the refusal is said", |cx| {
+        label(cx, "hub-setup-problem").is_some_and(|said| !said.is_empty())
+    });
+    assert_eq!(
+        stack(&shell, cx),
+        vec!["hub-setup"],
+        "the dialog stays open"
+    );
+    assert!(
+        !toasts(&shell, cx)
+            .iter()
+            .any(|t| t == "The hub was not set up")
+    );
+    assert!(pc.user.call("remote.members", json!({})).is_err() || pc.members().is_empty());
+
+    // The right code closes it, and a toast says it.
+    type_into(cx, &code, &hub.code());
+    click(&shell, cx, "set-up-hub");
+    until(&shell, cx, "the devices are listed", |cx| {
+        present(cx, "add-device")
+    });
+    settle(&shell, cx);
+    assert!(stack(&shell, cx).is_empty());
+    assert!(
+        toasts(&shell, cx)
+            .iter()
+            .any(|t| t == "This machine set up the hub")
+    );
+    assert_eq!(pc.members().len(), 1);
+}
+
+#[gpui_kit::test]
+fn adding_a_device_shows_its_invitation_in_a_dialog(cx: &mut TestAppContext) {
+    let hub = TestHub::new();
+    let pc = Machine::new();
+    let laptop = Machine::new();
+    set_up(&hub, &pc);
+    let (shell, cx) = window(&pc, cx);
+    machines_tab(&shell, cx);
+    until(&shell, cx, "Add a device is offered", |cx| {
+        present(cx, "add-device")
+    });
+    click(&shell, cx, "add-device");
+    until(&shell, cx, "the invitation is shown", |cx| {
+        present(cx, "invitation-qr-code")
+    });
+    settle(&shell, cx);
+    assert_eq!(stack(&shell, cx), vec!["invitation"]);
+    // Its QR, its code, Copy code and its expiry are the dialog's, none the section's.
+    for id in ["invitation-code", "invitation-expiry", "copy-invitation"] {
+        assert!(present(cx, id), "{id}");
+    }
+    assert!(
+        !present(cx, "invitation-card"),
+        "nothing unfolds in Devices"
+    );
+    let code = label(cx, "invitation-code").unwrap();
+
+    // Used: the device asks to join with it, and the dialog closes (the join request opens).
+    let mut joining = laptop
+        .user
+        .command(&["remote", "join"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    joining
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(format!("{code}\n").as_bytes())
+        .unwrap();
+    until(&shell, cx, "the invitation closes", |cx| {
+        !stack(&shell, cx).contains(&"invitation")
+    });
+    joining.kill().ok();
+}
+
+#[gpui_kit::test]
+fn an_invitation_that_expires_closes_its_dialog(cx: &mut TestAppContext) {
+    let hub = TestHub::new();
+    let pc = Machine::new();
+    set_up(&hub, &pc);
+    let (shell, cx) = window(&pc, cx);
+    machines_tab(&shell, cx);
+    until(&shell, cx, "Add a device is offered", |cx| {
+        present(cx, "add-device")
+    });
+    click(&shell, cx, "add-device");
+    until(&shell, cx, "the invitation is shown", |cx| {
+        stack(&shell, cx) == vec!["invitation"]
+    });
+    step(&shell, Duration::from_secs(5 * 60), cx);
+    settle(&shell, cx);
+    assert!(stack(&shell, cx).is_empty());
+    assert!(!present(cx, "invitation-qr-code"));
+}
+
+#[gpui_kit::test]
+fn a_second_machine_joins_from_the_window_with_the_invitation(cx: &mut TestAppContext) {
+    let hub = TestHub::new();
+    let pc = Machine::new();
+    let laptop = Machine::new();
+    set_up(&hub, &pc);
+    let invited = pc.user.run(&["remote", "invite", "--json"]);
+    assert!(invited.status.success(), "{}", pc.log());
+    let invited: Value = serde_json::from_slice(&invited.stdout).unwrap();
+    let code = invited["code"].as_str().unwrap().to_owned();
+
+    let (shell, cx) = window(&laptop, cx);
+    machines_tab(&shell, cx);
+    until(&shell, cx, "Join is offered", |cx| {
+        present(cx, "join-machines")
+    });
+    click(&shell, cx, "join-machines");
+    assert_eq!(stack(&shell, cx), vec!["join-hub"]);
+
+    // Something that is no invitation is refused in the dialog, which stays on its first step.
+    let field = shell.read_with(cx, |s, cx| {
+        s.machines().read(cx).invitation_field().unwrap().clone()
+    });
+    type_into(cx, &field, "not an invitation");
+    click(&shell, cx, "join-hub-go");
+    until(&shell, cx, "the refusal is said", |cx| {
+        label(cx, "join-hub-problem").is_some_and(|said| !said.is_empty())
+    });
+    assert!(!present(cx, "join-hub-words"));
+
+    // The invitation pasted, then the four words to compare with the other screen.
+    type_into(cx, &field, &code);
+    click(&shell, cx, "join-hub-go");
+    until(&shell, cx, "the four words are shown", |cx| {
+        present(cx, "join-hub-words")
+    });
+    let words = label(cx, "join-hub-words").unwrap();
+    assert_eq!(words.split(' ').count(), 4, "{words}");
+    // Then it waits for the other machine to accept.
+    until(&shell, cx, "it waits", |cx| present(cx, "join-hub-waiting"));
+    assert!(
+        label(cx, "join-hub-waiting")
+            .unwrap()
+            .contains("waiting for the other machine to accept")
+    );
+    // The other machine shows the same four words.
+    let deadline = Instant::now() + WAIT;
+    let request = loop {
+        if let Some(first) = pc.requests().first() {
+            break first.clone();
+        }
+        assert!(Instant::now() < deadline, "no join request came");
+        std::thread::sleep(Duration::from_millis(200));
+    };
+    let theirs = request["words"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|w| w.as_str().unwrap())
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert_eq!(words, theirs);
+
+    // Accepted there: done, and a toast says it.
+    let id = request["request"].as_str().unwrap();
+    let accepted = pc.user.run(&[
+        "remote", "accept", id, "--name", "laptop", "--role", "runner",
+    ]);
+    assert!(
+        accepted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&accepted.stderr)
+    );
+    until(&shell, cx, "the dialog closes", |cx| {
+        stack(&shell, cx).is_empty()
+    });
+    until(&shell, cx, "its devices are listed", |cx| {
+        present(cx, "add-device")
+    });
+    assert!(
+        toasts(&shell, cx)
+            .iter()
+            .any(|t| t.starts_with("Joined the hub")),
+        "{:?}",
+        toasts(&shell, cx)
+    );
+    assert!(laptop.member("laptop").is_some());
+    assert!(!laptop.log().contains(&code));
 }
