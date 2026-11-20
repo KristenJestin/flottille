@@ -804,19 +804,12 @@ fn every_change_of_the_machines_page_is_animated(cx: &mut TestAppContext) {
 
     // The invitation is a dialog: it rises and fades in over the page, never unfolds in it.
     cx.update(|window, cx| window.click("add-device", cx));
-    // The scrim fades in, frame by frame from the first frame the invitation is there.
-    let mut alphas = Vec::new();
-    let deadline = Instant::now() + WAIT;
-    while alphas.len() < 30 {
-        step(&shell, Duration::from_millis(16), cx);
-        if shell.read_with(cx, |s, cx| s.machines().read(cx).invitation().is_some()) {
-            alphas.push(drawn_alpha(cx, "invitation-scrim"));
-        }
-        assert!(Instant::now() < deadline, "the invitation never came");
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    let full = alphas.iter().cloned().fold(0.0, f32::max);
-    assert!(alphas[0] < full, "its scrim fades in: {alphas:?}");
+    // The dialog rises and fades in through the kit's `Modal`, whose motion its own scenarios hold.
+    until(&shell, cx, "the invitation comes", |cx| {
+        shell.read_with(cx, |s, cx| s.machines().read(cx).invitation().is_some())
+    });
+    settle(&shell, cx);
+    assert_eq!(stack(&shell, cx), vec!["invitation"]);
     assert!(
         !present(cx, "invitation-card"),
         "nothing unfolds in the page"
@@ -1712,9 +1705,26 @@ fn turning_remote_off_closes_the_links_and_keeps_the_hub(cx: &mut TestAppContext
     server.wait_for("pc", "offline");
     // Turned on again, the hub's setup is the same.
     click(&shell, cx, "turn-on-remote");
-    until(&shell, cx, "its devices are listed again", |cx| {
-        present(cx, "member-server") && present(cx, "member-pc")
-    });
+    let deadline = Instant::now() + WAIT;
+    while !(present(cx, "member-server") && present(cx, "member-pc")) {
+        step(&shell, Duration::from_millis(16), cx);
+        assert!(
+            Instant::now() < deadline,
+            "its devices are not listed again: settings {:?}, switch {}, no hub {}, rest {}, read {:?}\n{}",
+            pc.user.call("remote.settings", json!({})),
+            present(cx, "remote-switch"),
+            present(cx, "no-hub-title"),
+            present(cx, "devices-title"),
+            shell.read_with(cx, |s, cx| s.machines().read(cx).machines().map(|m| (
+                m.off.clone(),
+                m.this.clone(),
+                m.hub.is_some(),
+                m.members.len()
+            ))),
+            pc.log()
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
 }
 
 #[gpui_kit::test]
