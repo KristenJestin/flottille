@@ -28,6 +28,7 @@ use gpui_kit::{
 };
 use serde_json::{Value, json};
 
+use crate::about::AboutEditor;
 use crate::actions::{Command, SessionsSetting};
 use crate::commands::{spaced, stack};
 use crate::extensions::Registry;
@@ -59,7 +60,8 @@ const AGENTS_BLOCKS: [&str; 5] = [
 ];
 
 /// The blocks of the General tab, top to bottom.
-const GENERAL_BLOCKS: [&str; 5] = [
+const GENERAL_BLOCKS: [&str; 6] = [
+    "about",
     "appearance",
     "workspaces",
     "developer",
@@ -273,6 +275,8 @@ pub struct SettingsPage {
     narrow: bool,
     /// The user's rules for every project, edited on this page.
     rules: Entity<RulesEditor>,
+    /// What the user says of themselves, edited on this page.
+    about: Entity<AboutEditor>,
     /// The Auto judge's guidance, edited on this page.
     judge_guidance: Entity<RulesEditor>,
     /// The compactor's guidance, edited on this page.
@@ -379,6 +383,7 @@ impl SettingsPage {
     pub fn new(
         shell: WeakEntity<Shell>,
         rules: Entity<RulesEditor>,
+        about: Entity<AboutEditor>,
         judge_guidance: Entity<RulesEditor>,
         compaction_guidance: Entity<RulesEditor>,
         workspaces: Entity<WorkspacesFolder>,
@@ -391,6 +396,7 @@ impl SettingsPage {
             machines,
             version,
             rules,
+            about,
             judge_guidance,
             compaction_guidance,
             compaction: None,
@@ -493,6 +499,10 @@ impl SettingsPage {
 
     pub fn rules(&self) -> &Entity<RulesEditor> {
         &self.rules
+    }
+
+    pub fn about(&self) -> &Entity<AboutEditor> {
+        &self.about
     }
 
     pub fn judge_guidance(&self) -> &Entity<RulesEditor> {
@@ -2338,6 +2348,7 @@ impl Render for SettingsPage {
             "features" => vec![("features", self.features_tab(cx))],
             "vault" => vec![("vault", self.vault.clone().into_any_element())],
             _ => vec![
+                ("about", self.about.clone().into_any_element()),
                 ("appearance", self.appearance_section(cx).into_any_element()),
                 ("workspaces", self.workspaces.clone().into_any_element()),
                 ("developer", self.developer_section(cx).into_any_element()),

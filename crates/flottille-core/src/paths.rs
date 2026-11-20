@@ -104,6 +104,12 @@ impl Paths {
         self.config.join("rules.md")
     }
 
+    /// What the user says of themselves, which every agent reads (`docs/design.md` §8); absent
+    /// while they said nothing.
+    pub fn about(&self) -> PathBuf {
+        self.config.join("about.toml")
+    }
+
     /// How the user wants the Auto judge to judge (`docs/design.md` §7.1); absent while they
     /// keep Flottille's default.
     pub fn judge(&self) -> PathBuf {

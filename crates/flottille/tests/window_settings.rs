@@ -959,3 +959,114 @@ fn the_settings_page_has_the_subjects_with_their_events(cx: &mut TestAppContext)
         "nothing moves at rest"
     );
 }
+
+/// Types `text` in a one-line field, as the user would have.
+fn type_line(
+    field: &Entity<gpui_kit::base::input::InputState>,
+    text: &str,
+    cx: &mut VisualTestContext,
+) {
+    cx.update(|window, cx| field.update(cx, |state, cx| state.set_value(text, window, cx)));
+    settle(cx);
+}
+
+/// The same, in a text area.
+fn type_area(
+    field: &Entity<gpui_kit::base::input::TextareaState>,
+    text: &str,
+    cx: &mut VisualTestContext,
+) {
+    cx.update(|window, cx| field.update(cx, |state, cx| state.set_value(text, window, cx)));
+    settle(cx);
+}
+
+#[gpui_kit::test]
+fn about_you_is_edited_in_settings(cx: &mut TestAppContext) {
+    let user = user();
+    let (shell, cx) = window(&user, cx);
+    let page = open_settings(&shell, cx);
+    tab(&shell, cx, "general");
+    let editor = page.read_with(cx, |p, _| p.about().clone());
+    until(&shell, cx, "what the user said is read", |cx| {
+        editor.read_with(cx, |e, _| e.shown().is_some())
+    });
+    settle(cx);
+
+    // Three labelled fields, nothing saved, so nothing to save and nothing to reset.
+    assert!(visible(cx, "about-title"));
+    for (field, said) in [
+        ("about-name-label", "Name"),
+        ("about-pronouns-label", "How to refer to you"),
+        ("about-notes-label", "Anything every agent should know"),
+    ] {
+        assert_eq!(label(cx, field).as_deref(), Some(said), "{field}");
+    }
+    assert!(!present(cx, "about-save"), "no Save at rest");
+    assert!(editor.read_with(cx, |e, _| !e.is_set()));
+
+    // Typed, saved: Save unfolds, the daemon keeps it, a toast says so.
+    let (name, pronouns, notes) = editor.read_with(cx, |e, _| {
+        (
+            e.name_field().cloned().unwrap(),
+            e.pronouns_field().cloned().unwrap(),
+            e.notes_field().cloned().unwrap(),
+        )
+    });
+    type_line(&name, "Sam", cx);
+    type_line(&pronouns, "he/him", cx);
+    type_area(&notes, "Backend developer, new to Rust.", cx);
+    assert!(editor.read_with(cx, |e, cx| e.is_edited(cx)));
+    assert!(visible(cx, "about-save"), "Save unfolds beside the change");
+    click(cx, "about-save");
+    until(&shell, cx, "what was typed is saved", |cx| {
+        editor.read_with(cx, |e, _| e.is_set())
+    });
+    settle(cx);
+    assert!(!present(cx, "about-save"), "no Save once saved");
+    let said = shell.read_with(cx, |s, cx| {
+        s.toasts()
+            .read(cx)
+            .toasts()
+            .find(|toast| toast.title() == "About you saved")
+            .map(|toast| toast.second_line().map(str::to_owned))
+    });
+    assert_eq!(
+        said,
+        Some(Some("Agents started from now on read it.".to_owned()))
+    );
+
+    // The value read back: from the daemon, and from the file in the configuration folder.
+    let shown = user.call("about.show", json!({})).unwrap();
+    assert_eq!(shown["name"], "Sam");
+    assert_eq!(shown["pronouns"], "he/him");
+    assert_eq!(shown["notes"], "Backend developer, new to Rust.");
+    let file = std::fs::read_to_string(user.path("config/flottille/about.toml")).unwrap();
+    assert!(file.contains("Sam") && file.contains("he/him"), "{file}");
+    assert_eq!(
+        editor.read_with(cx, |e, cx| e.typed(cx)),
+        Some((
+            "Sam".to_owned(),
+            "he/him".to_owned(),
+            "Backend developer, new to Rust.".to_owned()
+        ))
+    );
+
+    // Changed from another client, the fields follow.
+    user.call("about.set", json!({"name": "Samira"})).unwrap();
+    until(&shell, cx, "the change of another client is shown", |cx| {
+        editor.read_with(cx, |e, cx| {
+            e.typed(cx).is_some_and(|(name, _, _)| name == "Samira")
+        })
+    });
+
+    // Reset forgets all three.
+    click(cx, "about-reset");
+    until(&shell, cx, "the fields are reset", |cx| {
+        editor.read_with(cx, |e, _| !e.is_set())
+    });
+    assert_eq!(
+        editor.read_with(cx, |e, cx| e.typed(cx)),
+        Some((String::new(), String::new(), String::new()))
+    );
+    assert!(!user.path("config/flottille/about.toml").exists());
+}

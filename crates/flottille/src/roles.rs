@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 
 use flottille_core::secrets;
 
+use crate::about::About;
 use crate::claude::BOUNDARY;
 use crate::rules::Rules;
 
@@ -66,6 +67,8 @@ pub struct Session<'a> {
     pub skills: &'a [(String, String)],
     /// How the user wants it to work.
     pub rules: &'a Rules,
+    /// What the user says of themselves.
+    pub about: &'a About,
 }
 
 /// What the instructions say of the agent's place: `place` is `main`, or `workspace <name>`.
@@ -74,6 +77,39 @@ fn place_sentence(project: &str, place: &str, folder: &Path) -> String {
         "You work for the project {project}, in {place}: the folder {}.",
         folder.display()
     )
+}
+
+/// The block that tells an agent who the user is, when they said anything: before the rules, in
+/// the part every project shares. It is told to every agent, a child's too, and says that what an
+/// agent writes for another one follows it, since that one reads nothing of the user but this.
+fn about_block(
+    about: &About,
+    env: &std::collections::BTreeMap<std::ffi::OsString, std::ffi::OsString>,
+) -> Option<String> {
+    if about.is_empty() {
+        return None;
+    }
+    let mut block = String::from(
+        "# About the user\n\nWhat the user says of themselves. Follow it when you write to them \
+         and when you write for another agent (a brief, a message): that agent has not read it \
+         from them.",
+    );
+    let name = secrets::mask(about.name.trim(), env);
+    let pronouns = secrets::mask(about.pronouns.trim(), env);
+    let notes = secrets::mask(about.notes.trim(), env);
+    if !name.is_empty() {
+        block.push_str(&format!("\n\nName: {name}"));
+    }
+    if !pronouns.is_empty() {
+        block.push_str(&format!(
+            "{}Refer to them as: {pronouns}",
+            if name.is_empty() { "\n\n" } else { "\n" }
+        ));
+    }
+    if !notes.is_empty() {
+        block.push_str(&format!("\n\n{notes}"));
+    }
+    Some(block)
 }
 
 /// The instructions of an agent that worked in the workspace `workspace`, in `from`, now saying
@@ -107,6 +143,9 @@ pub fn instructions(role: &Role, session: &Session, files: &[File]) -> String {
     let global = secrets::mask(session.rules.shared.trim(), &env);
     let own = secrets::mask(session.rules.own.trim(), &env);
     let mut shared = BASE.trim_end().replace("{role}", role.name);
+    if let Some(block) = about_block(session.about, &env) {
+        shared.push_str(&format!("\n\n---\n\n{block}"));
+    }
     if !global.is_empty() {
         shared.push_str(&format!("\n\n---\n\n# How to work\n\n{global}"));
     }
@@ -221,8 +260,15 @@ mod tests {
             at_depth_limit: false,
             skills: &[],
             rules: &DEFAULT_RULES,
+            about: &NO_ABOUT,
         }
     }
+
+    static NO_ABOUT: About = About {
+        name: String::new(),
+        pronouns: String::new(),
+        notes: String::new(),
+    };
 
     static DEFAULT_RULES: std::sync::LazyLock<Rules> = std::sync::LazyLock::new(|| Rules {
         shared: crate::rules::DEFAULT.to_owned(),
@@ -365,6 +411,47 @@ mod tests {
         let text = with(&alone, "zebra");
         assert!(!text.contains("French") && !text.contains("How to work"));
         assert!(text.contains("# This project's rules\n\nAnswer in Spanish."));
+    }
+
+    #[test]
+    fn what_the_user_says_of_themselves_comes_before_the_rules_and_is_the_same_for_every_project() {
+        let about = About {
+            name: "Sam".into(),
+            pronouns: "he/him".into(),
+            notes: "Backend developer, new to Rust.".into(),
+        };
+        let alone = Rules {
+            own: "Answer in Spanish.".into(),
+            alone: true,
+            ..Rules::default()
+        };
+        let with = |project: &str, rules: &Rules| {
+            let folder = Path::new("/work").join(project);
+            instructions(
+                role(WORKER).unwrap(),
+                &Session {
+                    project,
+                    rules,
+                    about: &about,
+                    ..session(&folder)
+                },
+                &[],
+            )
+        };
+        let text = with("zebra", &DEFAULT_RULES);
+        let (before, after) = text.split_once(BOUNDARY).unwrap();
+        let block = before.find("# About the user").unwrap();
+        assert!(before.find("# What Flottille enforces").unwrap() < block);
+        assert!(block < before.find("# How to work").unwrap());
+        assert!(before.contains("Name: Sam\nRefer to them as: he/him\n\nBackend developer"));
+        assert!(!after.contains("Sam"));
+        // A project that uses its own rules alone still tells what the user said of themselves.
+        let other = with("other", &alone);
+        let block = |text: &str| {
+            let from = text.find("# About the user").unwrap();
+            text[from..text[from..].find("\n\n---").unwrap() + from].to_owned()
+        };
+        assert_eq!(block(&text), block(&other));
     }
 
     #[test]
