@@ -629,7 +629,11 @@ fn a_taken_local_port_gets_another_said_in_the_answer() {
 
 #[test]
 fn an_agent_has_no_way_to_open_a_tunnel() {
-    let pc_user = User::with_fake_agent().with_allowing_judge();
+    // The daemon's refusal by the client's ancestry is what is tested: the run's private mount
+    // namespace, which hides the daemon's socket before that, is left out.
+    let pc_user = User::with_fake_agent()
+        .with_allowing_judge()
+        .with_env("FLOTTILLE_TEST_NO_USER_NAMESPACES", "1");
     let (_hub, pc, server) = pc_and_server_on(Machine::of(pc_user), User::new());
     let (run, _port) = web_on(&server.user);
     let repository = repository(&pc.user);

@@ -145,8 +145,13 @@ pub fn run(paths: &Paths) -> Result<()> {
     crate::display::clean(paths);
     // Before anything runs: where the SSH agent's socket is, which every run is kept from.
     crate::ssh_agent::find();
+    crate::mounts::find_bus();
+    if crate::mounts::namespaces() == crate::mounts::Namespaces::Refused {
+        eprintln!("flottille daemon: {}", crate::mounts::REFUSED_GAP);
+    }
     // Before any repository is read: the user's own credential helpers, the only ones it runs.
     crate::git::find_helpers();
+    crate::git::find_own_ssh();
     let machine_key = crate::remote::machine_key(paths)?;
     children::say_sessions_in(paths.sessions())?;
     let _store_lock = hold_store(paths)?;
@@ -1244,6 +1249,7 @@ fn status(daemon: &Daemon) -> flottille_core::Result<Value> {
             "waiting_for_user": approvals::waiting_for_user(daemon)?,
             "failed": count(&[AgentState::Failed]),
         },
+        "sandbox": crate::mounts::sandbox(),
     }))
 }
 

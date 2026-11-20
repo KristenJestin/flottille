@@ -332,6 +332,11 @@ jobs:
       # where `env!("CARGO_BIN_EXE_…")` and the fakes beside it are looked for), which are these.
       # `target/tmp` is where the tests keep scratch files (`CARGO_TARGET_TMPDIR`): cargo makes it
       # when it runs a test, and an archive does not hold it.
+      # Ubuntu's AppArmor lets an unprivileged user make a user namespace, then refuses it every
+      # capability there: the private mount namespace of a confined command (`mounts.rs`) is never
+      # made, and its tests would be skipped. Lifted, they run.
+      - name: Let the tests make user namespaces
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - run: mkdir -p "$GITHUB_WORKSPACE/target/tmp"
       - run: cargo nextest run --archive-file "$RUNNER_TEMP/archive/tests.tar.zst" --extract-to "$GITHUB_WORKSPACE" --extract-overwrite --workspace-remap . --profile ci --partition count:${{ matrix.partition }}/12
       # Whatever the tests said: the flaky ones are seen (job summary `Flaky tests`), and kept for
@@ -397,6 +402,11 @@ jobs:
           fakes=()
           for crate in crates/flottille-fake-*; do fakes+=(-p "${crate#crates/}"); done
           cargo build --locked "${fakes[@]}"
+      # Ubuntu's AppArmor lets an unprivileged user make a user namespace, then refuses it every
+      # capability there: the private mount namespace of a confined command (`mounts.rs`) is never
+      # made, and its tests would be skipped. Lifted, they run.
+      - name: Let the tests make user namespaces
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       # The profile `ci` retries a failed test twice, as on the partitions: a flaky one is listed.
       - run: cargo nextest run --locked --profile ci $SELECTED
       - name: Flaky tests
