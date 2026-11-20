@@ -23,8 +23,9 @@ its code sent by itself (#816), the deliveries and calls between a session and t
 started it on another machine, kept for a machine that is off, with the commits coming back (#817),
 where a question and a held request go while the parent's machine is off (#818), the tunnels
 to the ports of a run's server (#829), a vault entry shared with another machine (#832), a
-connection shared the same way (#833) and the window's machines, in Settings, General, Machines
-(#814). What is decided is said as such; the defaults taken are in "Defaults taken, to confirm";
+connection shared the same way (#833), the window's machines, in Settings, General, Machines
+(#814), and one list of the sessions of every machine in the window, with the close of a session
+of a machine that is off kept until it is back (#1150, its points 1 to 3). What is decided is said as such; the defaults taken are in "Defaults taken, to confirm";
 what is open
 is in "Open questions". It replaces the proposal of 2026-11-03 (a relay
 every device connects to, on a private network) and the review that put Tailscale and SSH at the
@@ -514,14 +515,15 @@ and its code, with the time it expires, folding away then), and this machine's a
 or declared (New address, Remove…). A join request opens its dialog over any page: the four
 words, the device's name, **This device can: Run agents / Control only / View only**, Accept
 and Refuse. Every new member is a toast, `New device: pixel (control only), added at 18:42 from
-pc`, with Remove. The machine switcher at the top of the sidebar shows this machine first, then
-each runner with its state; choosing one shows its projects and sessions, every request of the
-window signed with the device key, as the command line signs it, and carried by this machine's
-daemon. Sharing a vault entry or a connection from the machine shown shares that machine's: the
+pc`, with Remove. The sidebar lists the sessions of every machine ("One list of every machine");
+opening one of another machine brings that machine in front, its projects and its sessions, every
+request of the window signed with the device key, as the command line signs it, and carried by
+this machine's daemon. Sharing a vault entry or a connection from the machine shown shares that machine's: the
 request goes to it with the device's signature for it, which it checks and sends on with the
 secret, as when it is asked on that machine; the sign-in of a copy on another machine comes back
-to this machine's `127.0.0.1` whichever machine is shown. Choosing a machine that is off or needs an update is a failure toast that says why, and
-the window stays on the machine it shows. The window reads the device key from the same keyring
+to this machine's `127.0.0.1` whichever machine is shown. A session of a machine that is off is greyed and does not open; bringing in front a machine
+that needs an update, or that went off meanwhile, is a failure toast that says why, and the window
+stays on the machine it shows. The window reads the device key from the same keyring
 item, or the same file, as the command line.
 
 A machine that joins is no member yet: it reaches the hub with its machine key, pinning the hub's
@@ -593,7 +595,9 @@ speak two.
   `the watch asked by <device> ended`.
 - **What the user sends to a machine that is off is refused**, never kept: a message, an answer to a
   request, a new session. The client says so, with since when (`server is offline since 22:14`). A
-  message kept would arrive hours later, after the user forgot it.
+  message kept would arrive hours later, after the user forgot it. **One written exception: the
+  close of a session** ("One list of every machine"). A close cannot surprise anyone hours later:
+  it is kept, and sent when that machine links again.
 - **Paths are picked, not typed**, from the lists the machine gives, except where the user types one
   on purpose (`flottille --machine server project add ~/code/app`, which is that machine's path).
 - **Pictures** travel as bytes already (`agent.send {images}`); files other than pictures are left
@@ -603,10 +607,39 @@ speak two.
   with its machine and path, and never opened here (a file of another machine is not on this one).
 
 The command line takes `--machine <name>` on every command (`FLOTTILLE_MACHINE` too). The window
-shows **one machine at a time**, chosen in a switcher at the top of the sidebar (this machine first,
-then each runner with its state: online, offline since, needs an update); merging the lists of
-several machines in one sidebar is left for later. A led session on another machine appears under
-its pilot with the machine's name, and opening it switches to that machine.
+shows the sessions of every machine in one list ("One list of every machine", decided by the
+maintainer on 2026-11-20); a led session on another machine appears under its pilot with the
+machine's name.
+
+### One list of every machine
+
+- **One list.** The sidebar holds the sessions of every member machine together, grouped by
+  project: a project registered on several machines under the same name is one group. Sessions
+  are ordered by last exchange, as on one machine. A session of another machine carries that
+  machine's name as a tag (`server`); a session of this machine carries none. There is no machine
+  switcher: the machines' states (online, offline since, needs an update) are in Settings,
+  Machines.
+- **Live everywhere.** A runner tells each machine it links to its list of sessions, light (the
+  `sessions` message, "What a machine may send"): when the link is made, and again whenever it
+  changes (a session that starts, ends, is written to, answers or asks). The window reads it from
+  its own daemon, which follows every machine linked to it, and the rows move as the lists do.
+  Reading, writing, answering, Allow/Deny and Stop work in any session through its machine: opening
+  a session of another machine brings that machine in front, every request of the window signed
+  for it and carried by this machine's daemon, its conversation watched live as a request carried
+  is ("Requests from another machine's clients").
+- **A machine that is off.** Its sessions stay in the list, greyed, with `server offline since
+  22:14`, and cannot be opened. Each machine keeps, in its store, a light copy of each other
+  machine's list for this: each live root session's title, project, state and last exchange, never
+  its conversation, the copy replaced whenever that machine lists again, kept across a restart.
+- **Closing such a session is allowed.** It leaves the window's list at once. This machine's
+  daemon keeps the close, the user's `agent.stop` signed by their device, stored before it is sent
+  like a delivery ("Deliveries across machines"), and sends it once when that machine links again
+  (the `close` message); that machine checks the signature, the role and that it is its own, and
+  stops the session as the device's request. The other devices see the session closed when that
+  machine comes back. It is the written exception to "what the user sends to a machine that is
+  off is refused": a close cannot surprise anyone hours later. A close played again closes a
+  session closed already, which changes nothing; a close kept 30 days is dropped, as any message
+  kept.
 
 ## What a machine may send
 
@@ -623,8 +656,10 @@ what it recorded (that this agent of that machine started that session, or is th
 | `capabilities` | What a runner offers: its projects, its agents signed in, its free slots ("Roles"). |
 | `share` | A vault entry or a connection the user shared, signed by their device ("Sharing"): `{"request", "entry", "secret"}`, the device's signed `vault.share` as the client wrote it, the entry's metadata, its secret; for a connection (`share_connection`), `{"request", "connection", "entries": [{"entry", "secret"}]}`, the signed `connection.share`, the declaration, and each entry the request names with its secret. |
 | `addresses` | Every address the sender may be reached at now: kept for it, so that the two link again without the hub ("The transport"). |
+| `sessions` | A runner's live root sessions, light: each one's id, title, project, state, last exchange, and the session leading it there; 500 at most, a title 200 characters at most. Kept by the receiver, in place of the one before ("One list of every machine"). |
+| `close` | The user's close of a session of the receiver (`agent.stop`, as their device signed it), kept by the sender while the receiver was off. Taken when its signature is a member's that may stop a session, for the receiver, signed less than 30 days ago; its nonce is not checked. |
 
-Nothing else: no user method, no `approval.approve`, no `agent.mode`, no `agent.send` as the user, no
+Nothing else: no user method but the kept close, no `approval.approve`, no `agent.mode`, no `agent.send` as the user, no
 change of the member list (those go to the hub, signed by a device). A machine that forwards a
 user's request does so on the `client` side, with the device's signature.
 
@@ -737,8 +772,8 @@ under its pilot's session, or the session whose tree holds its parent: its title
 machine's name and its state as last known, `server · running` (no delivery came yet),
 `waiting` (held for the user there, or its last delivery a turn's end, a question or a request),
 `reported`, `failed`, or the machine's own state while it is off (`offline since 22:14`, `needs an
-update`). Clicking it switches the window to that machine (the switcher's own switch and its bounded
-wait) and opens that session there, its header and its composer entering staggered. A report whose
+update`), greyed then. Clicking it brings that machine in front (with a bounded wait for its first
+read) and opens that session there, its header and its composer entering staggered. A report whose
 commits came back names the ref under its step's title, folded or not (`Branch back:
 refs/flottille/machines/server/<launch>/feat/export`). While another machine is shown, its inbox
 items say `· on server` after their session, and its question cards `· on server` after their time.
@@ -1046,7 +1081,24 @@ on a real phone, by hand, and reported.
 
 ## Defaults taken, to confirm
 
-- The window shows one machine at a time, with a switcher.
+- One list of every machine (#1150): the window follows the other machines through its own
+  daemon, which keeps each machine's list as that machine tells it over the link (the `sessions`
+  message), not through a watch carried to each machine: the list is the same whether a client is
+  open or not, and its light copy is what is shown while the machine is off. The session open is
+  watched on its machine, through a watch carried there.
+- A machine's list holds 500 sessions at most (those of the latest exchange), a title 200
+  characters at most; it is told again on any event of a session but what an agent streams during
+  a turn, and every 30 seconds while a link is up when it changed.
+- A session's state in a list is `needs you` while its root waits for an answer, `running` while
+  a turn runs in its tree, `idle` otherwise: a request held for the user shows as the machine in
+  front reads it, not in another machine's list.
+- Opening a session of another machine brings that machine in front: the project pages, the
+  "Ended" group, the bell and a new session are that machine's while it is; opening a session of
+  this machine brings this one back. A project of another machine only is a group of the list
+  whose page is that machine's.
+- A close of a session of another machine goes through this machine's daemon whether that machine
+  is on or off: kept, then sent at once when it is linked. A close is kept 30 days, as every
+  message kept for another machine.
 - The project must be registered by hand on the other machine, under the same name.
 - A launch on another machine is judged by the receiving machine's gate, `child` as `led`; a child
   launch on the same machine stays unjudged.
