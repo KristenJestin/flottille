@@ -201,7 +201,7 @@ fn turning_remote_off_closes_the_links_and_keeps_the_hub() {
     assert!(message.contains("remote is off"), "{message}");
     // The other machine sees the link closed.
     server.wait_for("pc", "offline");
-    // The hub's setup is kept: on again, the same hub and the same list.
+    // The pairing with the hub is kept: on again, the same hub and the same list.
     configure(&pc.user, json!({"on": true}));
     let again = pc.remote();
     assert_eq!(again["hub"]["url"], hub);
@@ -302,7 +302,7 @@ fn remote_on_and_off_from_the_cli() {
 #[test]
 fn what_says_remote_is_off_points_to_the_switch_and_the_command() {
     let user = User::new();
-    for method in ["remote.machines", "remote.setup", "remote.join"] {
+    for method in ["remote.machines", "remote.pair", "remote.members"] {
         let (code, message) = user.call(method, json!({})).unwrap_err();
         assert_eq!(code, "refused", "{method}");
         assert!(message.contains("remote is off"), "{message}");
@@ -311,10 +311,7 @@ fn what_says_remote_is_off_points_to_the_switch_and_the_command() {
         assert!(!message.contains("daemon.toml"), "{message}");
     }
     // The commands that start with it off say it the same way.
-    let output = user.run_with_input(
-        &["remote", "setup", "http://127.0.0.1:9", "--name", "pc"],
-        "abcd\n",
-    );
+    let output = user.run(&["remote", "members"]);
     let said = String::from_utf8_lossy(&output.stderr).into_owned();
     assert!(said.contains("flottille remote on"), "{said}");
     assert!(!said.contains("daemon.toml"), "{said}");

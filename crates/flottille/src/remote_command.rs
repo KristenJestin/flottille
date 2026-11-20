@@ -1,8 +1,8 @@
-//! `flottille remote`: Flottille on the user's other machines (`docs/remote.md`). Here, the hub's
-//! first member (`setup`), pairing (`invite`, `join`, `requests`, `accept`, `refuse`), the members
-//! (`members`, `rename`, `remove`), and the addresses this machine may be reached at: those its link
-//! listens on, and those the user declares by hand (a VPN address, a DNS name, a forwarded port),
-//! which it tells the machines it is linked to.
+//! `flottille remote`: Flottille on the user's other machines (`docs/remote.md`). Here, pairing
+//! with the hub (`pair`, with the code `flottille-hub pair` printed on the hub's host), the members
+//! (`members`, `rename`, `icon`, `colour`, `remove`), and the addresses this machine may be reached
+//! at: those its link listens on, and those the user declares by hand (a VPN address, a DNS name, a
+//! forwarded port), which it tells the machines it is linked to.
 //!
 //! The device key that signs the user's actions is this command's, never the daemon's: it is
 //! made and read here, in the session's keyring (or `remote/device.key` without one), and only
@@ -32,7 +32,7 @@ pub enum RemoteAction {
         #[arg(long)]
         json: bool,
     },
-    /// Turn remote off: the links close, the hub's setup is kept
+    /// Turn remote off: the links close, this machine stays paired with its hub
     Off {
         #[arg(long)]
         json: bool,
@@ -44,53 +44,25 @@ pub enum RemoteAction {
         #[arg(long)]
         json: bool,
     },
-    /// Make this machine the first member of a new hub, with the setup code it printed, read on
-    /// the standard input (asked for on a terminal), never on the command line
-    Setup {
-        /// The hub's URL: http:// or https://, its host and its port
-        url: String,
+    /// Pair this machine with the user's hub, with the code `flottille-hub pair` printed on the
+    /// hub's host, read on the standard input (asked for on a terminal), never on the command line.
+    /// The name, icon and role proposed are this machine's own unless given
+    Pair {
         /// This device's name among the user's [default: the host's name]
         #[arg(long)]
         name: Option<String>,
-        /// Set this machine up with another hub than the one it is set up with
+        /// What it may do [default: runner with agents signed in, controller without]
+        #[arg(long, value_enum)]
+        role: Option<RoleArg>,
+        /// How it is drawn [default: laptop with a battery, desktop with a screen, server]
+        #[arg(long, value_enum)]
+        icon: Option<IconArg>,
+        /// Its colour [default: one of its key's]
+        #[arg(long, value_enum)]
+        colour: Option<ColourArg>,
+        /// Pair this machine with another hub than the one it is paired with
         #[arg(long)]
         replace: bool,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Ask the hub for an invitation: a code, valid 5 minutes, once, that a new device joins with
-    Invite {
-        #[arg(long)]
-        json: bool,
-    },
-    /// Join the user's hub with an invitation's code, read on the standard input (asked for on a
-    /// terminal), never on the command line: this machine's device prints the four words to
-    /// compare, then waits until the member that invited accepts it
-    Join {
-        #[arg(long)]
-        json: bool,
-    },
-    /// The join requests that wait for this machine's member, with their four words
-    Requests {
-        #[arg(long)]
-        json: bool,
-    },
-    /// Accept a join request, once its four words are those the new device shows
-    Accept {
-        /// The request: the new device's fingerprint, as `flottille remote requests` says it
-        request: String,
-        /// The new device's name among the user's
-        #[arg(long)]
-        name: String,
-        /// What it may do: run agents, control only, or view only
-        #[arg(long, value_enum)]
-        role: RoleArg,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Refuse a join request
-    Refuse {
-        request: String,
         #[arg(long)]
         json: bool,
     },
@@ -116,7 +88,23 @@ pub enum RemoteAction {
         #[arg(long)]
         json: bool,
     },
-    /// Remove a member: its links are cut everywhere, and its key never joins again
+    /// Change how a member is drawn
+    Icon {
+        name: String,
+        #[arg(value_enum)]
+        icon: IconArg,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Change a member's colour
+    Colour {
+        name: String,
+        #[arg(value_enum)]
+        colour: ColourArg,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove a member: its links are cut everywhere; it comes back only paired again on the hub
     Remove {
         name: String,
         #[arg(long)]
@@ -129,7 +117,7 @@ pub enum RemoteAction {
     },
 }
 
-/// What a device accepted may do (`docs/remote.md`, "Roles").
+/// What a device paired may do (`docs/remote.md`, "Roles").
 #[derive(Clone, Copy, clap::ValueEnum)]
 pub enum RoleArg {
     Runner,
@@ -144,6 +132,41 @@ impl RoleArg {
             RoleArg::Controller => flottille_link::Role::Controller,
             RoleArg::Viewer => flottille_link::Role::Viewer,
         }
+    }
+}
+
+/// How a device is drawn (`docs/remote.md`, "A device's card").
+#[derive(Clone, Copy, clap::ValueEnum)]
+pub enum IconArg {
+    Desktop,
+    Laptop,
+    Server,
+    Phone,
+    Tablet,
+}
+
+impl IconArg {
+    fn icon(self) -> flottille_link::Icon {
+        flottille_link::Icon::ALL[self as usize]
+    }
+}
+
+/// A device's colour.
+#[derive(Clone, Copy, clap::ValueEnum)]
+pub enum ColourArg {
+    Grey,
+    Red,
+    Orange,
+    Yellow,
+    Green,
+    Teal,
+    Blue,
+    Purple,
+}
+
+impl ColourArg {
+    fn colour(self) -> flottille_link::Colour {
+        flottille_link::Colour::ALL[self as usize]
     }
 }
 
@@ -191,7 +214,7 @@ pub fn run(paths: &Paths, action: RemoteAction) -> Result<ExitCode> {
             let settings = ask("remote.configure", json!({"on": false}))?;
             say_settings(
                 &settings,
-                "Remote is off: the links are closed, the hub's setup is kept.",
+                "Remote is off: the links are closed, this machine stays paired with its hub.",
                 json,
             );
             return Ok(ExitCode::SUCCESS);
@@ -199,157 +222,6 @@ pub fn run(paths: &Paths, action: RemoteAction) -> Result<ExitCode> {
         RemoteAction::Listen { address, json } => {
             let settings = ask("remote.configure", json!({"listen": address}))?;
             say_settings(&settings, "", json);
-            return Ok(ExitCode::SUCCESS);
-        }
-        RemoteAction::Invite { json } => {
-            let hub: flottille_link::PublicKey =
-                serde_json::from_value(ask("remote.machines", json!({}))?["hub"]["key"].clone())
-                    .map_err(|_| {
-                        "this machine is not set up with a hub: flottille remote setup, or \
-                         flottille remote join"
-                    })?;
-            let device = device_key(paths)?;
-            let ask_ = flottille_link::InvitationAsk::sign(&hub, unix_now(), &device)?;
-            let invited = ask("remote.invite", json!({"ask": ask_}))?;
-            if json {
-                println!("{invited}");
-            } else {
-                let code = invited["code"].as_str().unwrap_or_default();
-                println!(
-                    "An invitation to the hub at {}, valid 5 minutes, once, from {} ({}):\n\n{code}\n\n\
-                     The QR holds the same text. On the new device: flottille remote join, then \
-                     give it the code",
-                    invited["url"].as_str().unwrap_or_default(),
-                    invited["inviter"].as_str().unwrap_or_default(),
-                    invited["fingerprint"].as_str().unwrap_or_default(),
-                );
-            }
-            return Ok(ExitCode::SUCCESS);
-        }
-        RemoteAction::Join { json } => {
-            let code = read_code("The invitation's code: ", "no invitation code")?;
-            let invitation = flottille_link::Invitation::from_code(&code)?;
-            let resumed = settle_pending(paths, &mut ask)?;
-            let machine: flottille_link::PublicKey =
-                serde_json::from_value(ask("remote.machines", json!({}))?["this"]["key"].clone())?;
-            // A join accepted while its command was gone goes on with its answer and its key.
-            let (device, new, accepted) = match resumed {
-                Some((accepted, pending)) => (pending, true, accepted),
-                None => {
-                    let (device, new) = device_key_to_join(paths)?;
-                    let words = invitation.words(&device.public());
-                    if json {
-                        println!("{}", json!({"words": words}));
-                    } else {
-                        println!(
-                            "Verification words: {}\nThe device that invited shows them too: \
-                             accept there only if they are the same. Waiting for it...",
-                            words.join(" ")
-                        );
-                    }
-                    std::io::Write::flush(&mut std::io::stdout())?;
-                    let accepted = ask(
-                        "remote.join",
-                        json!({"code": code.as_str(), "key": device.public()}),
-                    )?;
-                    (device, new, accepted)
-                }
-            };
-            let head: flottille_link::ChangeHash =
-                serde_json::from_value(accepted["head"].clone())?;
-            // Claimed by the machine's daemon, which holds its key.
-            let declared = flottille_link::Change::sign(
-                head,
-                flottille_link::Action::Machine {
-                    key: device.public(),
-                    machine,
-                },
-                &device,
-            );
-            let joined = ask("remote.declare", json!({"change": declared}))?;
-            // Kept only once the machine is pinned with it: a declaration the hub did not take
-            // leaves it pending, for the next command to settle by the daemon's list.
-            if new {
-                keep_new(paths, device)?;
-            }
-            if json {
-                println!("{}", json!({"accepted": accepted, "joined": joined}));
-            } else {
-                println!(
-                    "{} joined the hub at {} as a {}, added by {}",
-                    accepted["name"].as_str().unwrap_or_default(),
-                    joined["url"].as_str().unwrap_or_default(),
-                    accepted["role"].as_str().unwrap_or_default(),
-                    accepted["added_by"].as_str().unwrap_or_default(),
-                );
-            }
-            return Ok(ExitCode::SUCCESS);
-        }
-        RemoteAction::Requests { json } => {
-            let requests = ask("remote.requests", json!({}))?;
-            if json {
-                println!("{requests}");
-            } else {
-                for request in requests.as_array().into_iter().flatten() {
-                    println!(
-                        "{}  {}",
-                        request["request"].as_str().unwrap_or_default(),
-                        words_of(request)
-                    );
-                }
-            }
-            return Ok(ExitCode::SUCCESS);
-        }
-        RemoteAction::Accept {
-            request,
-            name,
-            role,
-            json,
-        } => {
-            let requests = ask("remote.requests", json!({}))?;
-            let Some(found) = requests
-                .as_array()
-                .into_iter()
-                .flatten()
-                .find(|waiting| waiting["request"] == request.as_str())
-                .cloned()
-            else {
-                return Err(format!(
-                    "no join request of {request} waits for this machine: flottille remote \
-                     requests lists them"
-                )
-                .into());
-            };
-            if !json {
-                println!("Verification words: {}", words_of(&found));
-            }
-            let device = device_key(paths)?;
-            let key: flottille_link::PublicKey = serde_json::from_value(found["key"].clone())?;
-            let members = ask("remote.members", json!({}))?;
-            let added = signed_after(
-                &members,
-                flottille_link::Action::Add {
-                    key,
-                    name: name.clone(),
-                    role: role.role(),
-                },
-                &device,
-            )?;
-            let members = ask("remote.change", json!({"change": added}))?;
-            if json {
-                println!("{members}");
-            } else {
-                println!("{name} was added, its entry signed by this device");
-            }
-            return Ok(ExitCode::SUCCESS);
-        }
-        RemoteAction::Refuse { request, json } => {
-            let refused = ask("remote.refuse", json!({"request": request}))?;
-            if json {
-                println!("{refused}");
-            } else {
-                println!("The join request of {request} was refused");
-            }
             return Ok(ExitCode::SUCCESS);
         }
         RemoteAction::Members {
@@ -424,6 +296,14 @@ pub fn run(paths: &Paths, action: RemoteAction) -> Result<ExitCode> {
             }
             return Ok(ExitCode::SUCCESS);
         }
+        RemoteAction::Icon { name, icon, json } => {
+            look(paths, &mut ask, &name, Some(icon.icon()), None, json)?;
+            return Ok(ExitCode::SUCCESS);
+        }
+        RemoteAction::Colour { name, colour, json } => {
+            look(paths, &mut ask, &name, None, Some(colour.colour()), json)?;
+            return Ok(ExitCode::SUCCESS);
+        }
         RemoteAction::Remove { name, json } => {
             let device = device_key(paths)?;
             let members = ask("remote.members", json!({}))?;
@@ -433,54 +313,76 @@ pub fn run(paths: &Paths, action: RemoteAction) -> Result<ExitCode> {
             if json {
                 println!("{members}");
             } else {
-                println!("{name} was removed: its links are cut, and its key never joins again");
+                println!(
+                    "{name} was removed: its links are cut, and it comes back only paired again on \
+                     the hub"
+                );
             }
             return Ok(ExitCode::SUCCESS);
         }
-        RemoteAction::Setup {
-            url,
+        RemoteAction::Pair {
             name,
+            role,
+            icon,
+            colour,
             replace,
             json,
         } => {
-            let name = match name {
-                Some(name) => name,
-                None => host_name()?,
-            };
-            let code = read_code("The hub's setup code: ", "no setup code")?;
-            settle_pending(paths, &mut ask)?;
-            let (device, new) = device_key_to_join(paths)?;
+            let code = read_code("The pair code: ", "no pair code")?;
+            // Refused here when it is none, before anything is made.
+            flottille_link::PairCode::from_code(&code)?;
+            let device = device_key_to_pair(paths)?;
+            let machines = ask("remote.machines", json!({}))?;
+            let proposed = &machines["proposed"];
             let machine: flottille_link::PublicKey =
-                serde_json::from_value(ask("remote.machines", json!({}))?["this"]["key"].clone())?;
-            let mut list = flottille_link::MemberList::start(&name, &device)?;
+                serde_json::from_value(machines["this"]["key"].clone())?;
+            let card = flottille_link::Proposed {
+                key: device.public(),
+                name: match name {
+                    Some(name) => name,
+                    None => proposed["name"]
+                        .as_str()
+                        .ok_or("the host has no name: give one with --name")?
+                        .to_owned(),
+                },
+                role: match role {
+                    Some(role) => role.role(),
+                    None => serde_json::from_value(proposed["role"].clone())
+                        .unwrap_or(flottille_link::Role::Controller),
+                },
+                icon: match icon {
+                    Some(icon) => icon.icon(),
+                    None => serde_json::from_value(proposed["icon"].clone())
+                        .unwrap_or(flottille_link::Icon::Desktop),
+                },
+                colour: colour.map_or_else(
+                    || flottille_link::Colour::of(&device.public()),
+                    ColourArg::colour,
+                ),
+            };
+            let paired = ask(
+                "remote.pair",
+                json!({"code": code.as_str(), "proposed": card, "replace": replace}),
+            )?;
+            let head: flottille_link::ChangeHash = serde_json::from_value(paired["head"].clone())?;
             // Claimed by the machine's daemon, which holds its key.
-            list.sign(
+            let declared = flottille_link::Change::sign(
+                head,
                 flottille_link::Action::Machine {
                     key: device.public(),
                     machine,
                 },
                 &device,
             );
-            let set = ask(
-                "remote.setup",
-                json!({
-                    "url": url,
-                    "code": code.as_str(),
-                    "changes": list.changes(),
-                    "replace": replace,
-                }),
-            )?;
-            if new {
-                keep_new(paths, device)?;
-            }
+            let pinned = ask("remote.declare", json!({"change": declared}))?;
             if json {
-                println!("{set}");
+                println!("{}", json!({"paired": paired, "pinned": pinned}));
             } else {
                 println!(
-                    "{name} is the first member of the hub at {}, whose key is {}: the root every \
-                     device that joins pins",
-                    set["url"].as_str().unwrap_or_default(),
-                    set["hub"].as_str().unwrap_or_default()
+                    "{} is paired with the hub at {} as a {}",
+                    paired["name"].as_str().unwrap_or_default(),
+                    pinned["url"].as_str().unwrap_or_default(),
+                    paired["role"].as_str().unwrap_or_default(),
                 );
             }
             return Ok(ExitCode::SUCCESS);
@@ -511,15 +413,43 @@ pub fn run(paths: &Paths, action: RemoteAction) -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-/// The four words of a join request, as `remote.requests` says them.
-fn words_of(request: &Value) -> String {
-    request["words"]
+/// A member's icon or colour changed, the other kept, signed with this device's key.
+fn look(
+    paths: &Paths,
+    ask: &mut impl FnMut(&str, Value) -> Result<Value>,
+    name: &str,
+    icon: Option<flottille_link::Icon>,
+    colour: Option<flottille_link::Colour>,
+    json: bool,
+) -> Result<()> {
+    let device = device_key(paths)?;
+    let members = ask("remote.members", json!({}))?;
+    let key = member_key(&members, name)?;
+    let entry = members["members"]
         .as_array()
         .into_iter()
         .flatten()
-        .filter_map(Value::as_str)
-        .collect::<Vec<_>>()
-        .join(" ")
+        .find(|member| member["name"] == name)
+        .cloned()
+        .unwrap_or_default();
+    let icon = icon
+        .or_else(|| serde_json::from_value(entry["icon"].clone()).ok())
+        .unwrap_or(flottille_link::Icon::Desktop);
+    let colour = colour
+        .or_else(|| serde_json::from_value(entry["colour"].clone()).ok())
+        .unwrap_or_else(|| flottille_link::Colour::of(&key));
+    let change = signed_after(
+        &members,
+        flottille_link::Action::Look { key, icon, colour },
+        &device,
+    )?;
+    let members = ask("remote.change", json!({"change": change}))?;
+    if json {
+        println!("{members}");
+    } else {
+        println!("{name} is drawn as a {} {}", colour.word(), icon.word());
+    }
+    Ok(())
 }
 
 /// What a runner offers, as `remote members --runners` says it: `app (3 free), site (none
@@ -610,16 +540,8 @@ fn signed_after(
     Ok(flottille_link::Change::sign(head, action, device))
 }
 
-fn unix_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|since| since.as_secs())
-        .unwrap_or_default()
-}
-
-/// A code (the hub's setup code, an invitation's), from the standard input: asked for when it is
-/// a terminal. Never an argument, which other users of the machine and the shell's history would
-/// see.
+/// A pair code, from the standard input: asked for when it is a terminal. Never an argument, which
+/// other users of the machine and the shell's history would see.
 fn read_code(prompt: &str, none: &str) -> Result<zeroize::Zeroizing<String>> {
     use std::io::{BufRead, IsTerminal, Write};
     if std::io::stdin().is_terminal() {
@@ -636,10 +558,11 @@ fn read_code(prompt: &str, none: &str) -> Result<zeroize::Zeroizing<String>> {
 }
 
 /// The device key of this user session's clients, a member's: in the session's keyring, or, with
-/// none, `remote/device.key`. Only a setup or a join that succeeded keeps one.
+/// none, `remote/device.key`. A pairing makes it.
 pub(crate) fn device_key(paths: &Paths) -> Result<flottille_link::DeviceKey> {
     kept_device_key(paths)?.ok_or_else(|| {
-        "this device holds no key of a member: flottille remote setup, or flottille remote join"
+        "this device holds no key of a member: flottille remote pair, with the code flottille-hub \
+         pair prints on the hub's host"
             .into()
     })
 }
@@ -650,13 +573,18 @@ fn kept_device_key(paths: &Paths) -> Result<Option<flottille_link::DeviceKey>> {
     })
 }
 
-/// The device key a setup or a join is made with: the one kept, or a new one, kept as pending
-/// before the hub sees it and kept only once the hub took it (`keep_new`). A join that did not
-/// succeed leaves no key kept, so the next one sends a key the hub never saw, whose words it could
-/// not have searched a token for (`docs/remote.md`, "Pairing").
-fn device_key_to_join(paths: &Paths) -> Result<(flottille_link::DeviceKey, bool)> {
-    Ok(match kept_device_key(paths)? {
-        Some(key) => (key, false),
+/// The device key a pairing is made with: the one kept, made once (`docs/remote.md`, "Identity and
+/// keys"); one a setup or a join of before pair mode left pending, kept now; or a new one, kept at
+/// once. A device paired again with its key finds its card on the hub.
+fn device_key_to_pair(paths: &Paths) -> Result<flottille_link::DeviceKey> {
+    if let Some(key) = kept_device_key(paths)? {
+        return Ok(key);
+    }
+    let pending = with_keyring(paths, |keyring, folder| {
+        flottille_link::DeviceKey::load_pending(keyring, folder)
+    })?;
+    let key = match pending {
+        Some(pending) => pending,
         None => {
             let key = flottille_link::DeviceKey::make()?;
             let public = key.public();
@@ -664,58 +592,14 @@ fn device_key_to_join(paths: &Paths) -> Result<(flottille_link::DeviceKey, bool)
             if pending.public() != public {
                 return Err(ANOTHER_CLIENT.into());
             }
-            (pending, true)
+            pending
         }
-    })
+    };
+    keep_new(paths, key)
 }
 
 const ANOTHER_CLIENT: &str = "another client kept a device key at the same moment: run flottille \
                               remote members to see which one is a member";
-
-/// The pending key a setup or a join left when its command was gone before it ended (`keep_new`
-/// was never reached): kept when the list of the hub this machine pinned holds it as a member,
-/// removed otherwise, so that a key the hub saw in a join or a setup that did not succeed is never
-/// sent again. When the daemon holds a join accepted for it, that join's answer and the key, still
-/// pending until its declaration is taken. A setup or a join the daemon still runs is waited for.
-fn settle_pending(
-    paths: &Paths,
-    ask: &mut impl FnMut(&str, Value) -> Result<Value>,
-) -> Result<Option<(Value, flottille_link::DeviceKey)>> {
-    let Some(pending) = with_keyring(paths, |keyring, folder| {
-        flottille_link::DeviceKey::load_pending(keyring, folder)
-    })?
-    else {
-        return Ok(None);
-    };
-    let key = pending.public();
-    // Also when pinned: a setup that replaces the hub is waited for the same way, and the join of
-    // a machine pinned cannot hold an accepted device. A member only of a join the daemon
-    // accepted has its declaration still to come.
-    eprintln!(
-        "A setup or a join of this device whose command was gone is looked for: a join \
-         waits for the member who invited it to accept or refuse it, and goes on with the \
-         code it was given, not the one typed now..."
-    );
-    let accepted = ask("remote.join", json!({"key": key, "resume": true}))?;
-    if !accepted.is_null() {
-        return Ok(Some((accepted, pending)));
-    }
-    // Pinned now, before or by a setup the daemon ended meanwhile: its list says.
-    let listed = !ask("remote.machines", json!({}))?["hub"].is_null()
-        && ask("remote.members", json!({}))?["members"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .any(|member| member["key"] == json!(key));
-    if listed {
-        keep_new(paths, pending)?;
-    } else {
-        with_keyring(paths, |keyring, folder| {
-            flottille_link::DeviceKey::discard_pending(keyring, folder)
-        })?;
-    }
-    Ok(None)
-}
 
 /// `act` on the keyring of this session's clients, and the key folder.
 fn with_keyring<T>(
@@ -787,7 +671,7 @@ impl flottille_link::Keyring for ClientKeyring {
     }
 }
 
-/// Keeps `key`, the pending key a setup or a join succeeded with.
+/// Keeps `key`, the pending key of a pairing.
 fn keep_new(paths: &Paths, key: flottille_link::DeviceKey) -> Result<flottille_link::DeviceKey> {
     let public = key.public();
     let kept = with_keyring(paths, |keyring, folder| key.promote(keyring, folder))?;
@@ -932,24 +816,6 @@ impl flottille_link::Keyring for SessionKeyring {
                 .map_err(|error| flottille_link::KeyringError::Failed(error.to_string()))
         })
     }
-}
-
-/// The host's name, as a device's default name.
-fn host_name() -> Result<String> {
-    let mut buffer = [0u8; 256];
-    // SAFETY: the buffer is as long as said; gethostname writes within it.
-    if unsafe { libc::gethostname(buffer.as_mut_ptr().cast(), buffer.len()) } != 0 {
-        return Err("the host has no name: give one with --name".into());
-    }
-    let end = buffer
-        .iter()
-        .position(|byte| *byte == 0)
-        .unwrap_or(buffer.len());
-    let name = String::from_utf8_lossy(&buffer[..end]).into_owned();
-    if name.is_empty() {
-        return Err("the host has no name: give one with --name".into());
-    }
-    Ok(name)
 }
 
 #[cfg(test)]

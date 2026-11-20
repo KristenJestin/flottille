@@ -7,10 +7,8 @@
 
 use crate::common;
 
-use std::io::{BufRead, BufReader, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use common::User;
@@ -59,9 +57,11 @@ impl TestHub {
         format!("http://{}", self.address)
     }
 
+    /// Pair mode opened, as `flottille-hub pair` opens it on the hub's host: its code.
     fn code(&self) -> String {
+        let url = self.url();
         self.served
-            .with_hub(|hub| hub.setup_code().unwrap().to_owned())
+            .with_hub(|hub| hub.open_pairing(&url, None).unwrap().1.code().unwrap())
     }
 }
 
@@ -245,67 +245,27 @@ pub(crate) fn eventually(what: &str, check: impl Fn() -> bool) {
     }
 }
 
-/// `pc` set up as the hub's first member.
+/// `pc` paired as the hub's first device, a runner.
 fn set_up(hub: &TestHub, pc: &Machine) {
-    let output = pc.user.run_with_input(
-        &["remote", "setup", &hub.url(), "--name", "pc"],
-        &format!("{}\n", hub.code()),
+    pair(hub, pc, "pc", "runner");
+}
+
+/// `machine` paired with `hub` as the user pairs it, as `name` with `role`.
+pub(crate) fn pair(hub: &TestHub, machine: &Machine, name: &str, role: &str) {
+    let output = machine.user.run_with_input(
+        &["remote", "pair", "--name", name, "--role", role],
+        &format!(
+            "{}
+",
+            hub.code()
+        ),
     );
     assert!(
         output.status.success(),
-        "{}\n{}",
+        "the pairing failed: {}
+{}",
         String::from_utf8_lossy(&output.stderr),
-        pc.log()
-    );
-}
-
-/// `joiner` joins the hub of `inviter` as the user pairs them, as `name` with `role`.
-pub(crate) fn pair(inviter: &Machine, joiner: &Machine, name: &str, role: &str) {
-    let invited = inviter.user.run(&["remote", "invite", "--json"]);
-    assert!(invited.status.success(), "{}", inviter.log());
-    let invited: Value = serde_json::from_slice(&invited.stdout).unwrap();
-    let code = invited["code"].as_str().unwrap().to_owned();
-    let mut joining = joiner
-        .user
-        .command(&["remote", "join"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    {
-        let mut input = joining.stdin.take().unwrap();
-        input.write_all(format!("{code}\n").as_bytes()).unwrap();
-    }
-    let mut out = BufReader::new(joining.stdout.take().unwrap());
-    let mut first = String::new();
-    out.read_line(&mut first).unwrap();
-    let deadline = Instant::now() + WAIT;
-    let request = loop {
-        let requests = inviter.user.call("remote.requests", json!({})).unwrap();
-        if let Some(first) = requests.as_array().and_then(|all| all.first()) {
-            break first.clone();
-        }
-        assert!(Instant::now() < deadline, "no join request came");
-        std::thread::sleep(Duration::from_millis(200));
-    };
-    let id = request["request"].as_str().unwrap();
-    let accepted = inviter
-        .user
-        .run(&["remote", "accept", id, "--name", name, "--role", role]);
-    assert!(
-        accepted.status.success(),
-        "{}",
-        String::from_utf8_lossy(&accepted.stderr)
-    );
-    let mut rest = String::new();
-    std::io::Read::read_to_string(&mut out, &mut rest).unwrap();
-    let ended = joining.wait_with_output().unwrap();
-    assert!(
-        ended.status.success(),
-        "the join failed: {}\n{}",
-        String::from_utf8_lossy(&ended.stderr),
-        joiner.log()
+        machine.log()
     );
 }
 
@@ -323,7 +283,7 @@ pub(crate) fn pc_and_server(
     let pc = Machine::of(pc_user);
     set_up(&hub, &pc);
     let server = Machine::of(server_user);
-    pair(&pc, &server, "server", "runner");
+    pair(&hub, &server, "server", "runner");
     pc.wait_for("server");
     server.wait_for("pc");
     let repo = pc.folder();
@@ -612,9 +572,9 @@ fn a_launch_to_an_offline_machine_is_refused_at_once() {
 
 #[test]
 fn a_launch_to_a_controller_is_refused() {
-    let (_hub, pc, server) = pc_and_server(server_user(None), Some(""));
+    let (hub, pc, server) = pc_and_server(server_user(None), Some(""));
     let tablet = Machine::of(User::new());
-    pair(&pc, &tablet, "tablet", "controller");
+    pair(&hub, &tablet, "tablet", "controller");
     pc.wait_for("tablet");
     let (_root, mcp) = pc.root("auto");
 
@@ -634,10 +594,10 @@ fn a_launch_to_a_controller_is_refused() {
 
 #[test]
 fn a_runner_with_no_free_slot_is_refused_naming_those_that_would_take_it() {
-    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some("max_children = 1"));
+    let (hub, pc, server) = pc_and_server(server_user(allowing()), Some("max_children = 1"));
     let laptop_user = server_user(None);
     let laptop = Machine::of(laptop_user);
-    pair(&pc, &laptop, "laptop", "runner");
+    pair(&hub, &laptop, "laptop", "runner");
     laptop.register("");
     pc.wait_for("laptop");
     pc.wait_for_offer("server", 1);
