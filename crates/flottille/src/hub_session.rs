@@ -833,6 +833,10 @@ async fn keep_session(
     // The ask of this machine's addresses on its way, at most one: dropped with the session.
     let mut telling = tokio::task::JoinSet::new();
     let mut said: Option<String> = None;
+    // The links to the other machines go through this session while it lasts.
+    if let Some(port) = session.relay() {
+        remote.through(port);
+    }
     let mut awake = Awake::now();
     remote.awake_at(awake);
     loop {

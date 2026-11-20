@@ -1,11 +1,12 @@
 //! The daemon's link to the user's other machines (`docs/remote.md`, "Architecture", "The
-//! transport", "The version"), with remote on: one endpoint, listening where `daemon.toml` says
-//! (`[remote] listen`), nowhere when it says nothing; a link kept to every machine this one trusts, dialled at the addresses it
-//! knows for it; each side telling the other its addresses whenever they change.
+//! transport", "The version"), with remote on: one endpoint, whose links go through the user's hub
+//! over the session this machine keeps to it (`hub_session.rs`); a link kept to every machine this
+//! one trusts that the hub says is online. The direct path stays: listening where `daemon.toml`
+//! says (`[remote] listen`, nowhere by default), dialling the addresses it knows for a machine
+//! first, each side telling the other its addresses whenever they change.
 //!
-//! Flottille handles no network channel: no relay, no NAT traversal, no discovery. How two machines
-//! reach each other (a LAN, a VPN, a public address, a tunnel) is the user's; a machine dials what
-//! it is told.
+//! No NAT traversal, no discovery: with the hub unreachable, machines that know no address of
+//! each other do not link, and say so with the hub's own sentence.
 //!
 //! The machines it trusts, and their addresses, are in `remote/peers.json`, which the control
 //! session to the hub writes from the member list once the machine is set up (`hub_session.rs`);
@@ -329,6 +330,30 @@ impl Remote {
             tunnels: crate::tunnel::Tunnels::default(),
             transfers: Default::default(),
             receiving: Default::default(),
+        }
+    }
+
+    /// Carries the links through the hub over a session to it just opened, until it ends.
+    pub(crate) fn through(&self, port: flottille_link::RelayPort) {
+        self.endpoint.through(port);
+    }
+
+    /// Why the hub cannot be reached now, when this machine has one and is not connected to it:
+    /// what the links that go through it say.
+    fn hub_down(&self) -> Option<String> {
+        let seen = self.control.get()?.seen();
+        if seen["state"] == "connected" {
+            return None;
+        }
+        seen["reason"].as_str().map(str::to_owned)
+    }
+
+    /// `error` in a sentence: a machine with no address and no hub to go through says why the hub
+    /// is out of reach.
+    fn said(&self, error: &LinkError) -> String {
+        match (error, self.hub_down()) {
+            (LinkError::NoAddress(name), Some(why)) => format!("{name} cannot be reached: {why}"),
+            _ => error.to_string(),
         }
     }
 
@@ -674,7 +699,7 @@ impl Remote {
 
     /// A link that could not be made, or that ended: the machine's state, said once in the log.
     fn failed(&self, key: [u8; 32], name: &str, error: &LinkError) {
-        let reason = error.to_string();
+        let reason = self.said(error);
         let mut seen = self.seen.lock().unwrap();
         let seen = seen.entry(key).or_insert_with(Seen::new);
         if seen.reason.as_deref() != Some(reason.as_str()) {
@@ -818,7 +843,12 @@ impl Remote {
                     "reason": seen.reason,
                     // Where the live link goes (`dialled`) or came from.
                     "reached": seen.link.as_ref().map(|(_, link, dialled)| {
-                        json!({"address": link.remote().to_string(), "dialled": dialled})
+                        let address = if link.through_hub() {
+                            "the hub".to_owned()
+                        } else {
+                            link.remote().to_string()
+                        };
+                        json!({"address": address, "dialled": dialled})
                     }),
                     "addresses": peer.known(),
                 })
@@ -1391,10 +1421,14 @@ impl Remote {
                 "{machine} needs an update: {}",
                 seen.reason.clone().unwrap_or_default()
             )),
-            Some(seen) => Err(format!(
-                "{machine} is offline since {}",
-                time_of_day(seen.since)
-            )),
+            // With the hub down, why: links go through it.
+            Some(seen) => Err(match self.hub_down() {
+                Some(why) => format!(
+                    "{machine} is offline since {}: {why}",
+                    time_of_day(seen.since)
+                ),
+                None => format!("{machine} is offline since {}", time_of_day(seen.since)),
+            }),
             None => Err(format!("{machine} is offline")),
         }
     }
@@ -1926,7 +1960,7 @@ pub(crate) async fn forward(
             Ok(asked) => break asked,
             Err(_) if tries < 2 => continue,
             Err(why) => {
-                send(error("unavailable", why.to_string())).await;
+                send(error("unavailable", remote.said(&why))).await;
                 return false;
             }
         }
