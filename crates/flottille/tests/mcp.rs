@@ -982,7 +982,7 @@ fn stopping_a_run_kills_after_the_grace_one_that_ignores_sigterm() {
 fn a_daemon_that_stops_stops_its_runs_together_not_one_after_another() {
     let user = User::with_fake_agent()
         .with_allowing_judge()
-        .with_env("FLOTTILLE_TEST_RUN_GRACE_MS", "2000");
+        .with_env("FLOTTILLE_TEST_RUN_GRACE_MS", "3000");
     let (mcp, folder) = session(&user);
     let watch = user.watch(&["--after", "0"]);
     let runs: Vec<String> = [301, 302, 303]
@@ -1004,9 +1004,9 @@ fn a_daemon_that_stops_stops_its_runs_together_not_one_after_another() {
     );
     let events = watch.until(|e| e["name"] == "daemon.stopping");
 
-    // Each takes the 2 s of grace: one after another would be 6 s.
+    // Each takes the 3 s of grace: one after another would be 9 s.
     assert!(
-        asked.elapsed() < Duration::from_millis(4800),
+        asked.elapsed() < Duration::from_secs(7),
         "{:?}",
         asked.elapsed()
     );
