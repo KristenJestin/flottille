@@ -153,11 +153,16 @@ about five minutes, not twenty.
 - **A pull request** (the required check is its `verify`) runs `check` (formatting and clippy),
   `commit-messages`, and **the tests it touches** (`test-selected`): the test binaries whose
   files it adds or changes (`crates/<crate>/tests/<name>.rs` is the binary `<name>`; so is any file
-  of `crates/<crate>/tests/<name>/` that has a `main.rs`, the way grouped binaries are made), the
-  binaries whose files name a changed file of `.github/` or `tools/` (the tests that read `ci.yml`
-  or run `package.sh` judge a change of them), and the binaries listed on a line of its description, `Tests: <name> <name>…` (the developing agent lists
-  those it ran; the description is read when the jobs run, so running them again picks up a line
-  written after the push). When it selects no binary, it runs the unit tests of the crates whose
+  of `crates/<crate>/tests/<name>/` that has a `main.rs`). `crates/flottille` links its tests as a
+  few **grouped** binaries (`tests/group/<group>.rs`, whose `mod` lines declare the files, which
+  stay in `tests/`; `AGENTS.md`, "Adding a test file"): a changed file of a group runs **that
+  file's tests only**, the group's binary filtered to `<file>::` (`--test group_x -E
+  'binary(=group_x)&(test(/^<file>::/))'`), and a `mod` line added to a group's main adds the file
+  it names. The check also takes the binaries whose files name a changed file of `.github/` or
+  `tools/` (the tests that read `ci.yml` or run `package.sh` judge a change of them), and those
+  listed on a line of its description, `Tests: <name> <name>…`, a binary's name or a grouped
+  file's (the developing agent lists those it ran; the description is read when the jobs run, so
+  running them again picks up a line written after the push). When it selects no binary, it runs the unit tests of the crates whose
   `src/` it changes, if they have a library and are not `flottille` or `flottille-window` (too big
   to build for that). `.github/scripts/pr-tests.sh` decides, from the files and the description,
   nothing else. A pull request that touches no test and no such source runs `check` alone. A push

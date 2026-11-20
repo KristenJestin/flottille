@@ -90,7 +90,7 @@ list. Every figure below is from that second run unless a section says otherwise
 - **Reproduce**:
 
   ```
-  FLOTTILLE_TOOL_LISTS_OUT=/tmp/dump.json cargo test -p flottille --test tool_list_cost
+  FLOTTILLE_TOOL_LISTS_OUT=/tmp/dump.json cargo test -p flottille --test group_daemon tool_list_cost::
   cd tools/tool-list-cost
   cargo run --release -- lists /tmp/dump.json                  # the tables of this note
   cargo run --release -- lists /tmp/dump.json forge,tickets    # what slimming only those saves
