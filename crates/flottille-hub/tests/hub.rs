@@ -242,33 +242,53 @@ fn pair_mode_ends_when_its_minutes_pass_or_its_command_stops() {
 }
 
 #[test]
-fn a_wrong_proof_pairs_nothing_and_five_close_pair_mode() {
+fn wrong_proofs_pair_nothing_and_leave_pair_mode_open() {
     let (_dir, folder) = folder();
     let time = Time::new();
     let mut hub = open(&folder, &time);
     let (pc, stranger) = (key(1), key(9));
     let (number, code) = open_pairing(&mut hub);
-    for _ in 0..4 {
+    // Far more wrong proofs than any count would allow: nothing is paired, pair mode stays open.
+    for _ in 0..20 {
         let wrong = error(hub.pair(&proposed(&stranger, "x", Role::Runner), |_| false, "0.4.0"));
         assert!(
             wrong.starts_with("this device did not prove it holds the pair code"),
             "{wrong}"
         );
     }
-    // Four wrong proofs: the right one still pairs.
+    assert!(hub.members().is_none());
+    assert_eq!(hub.pairing_ended(number), None);
+    assert!(hub.pairing_left().is_some());
+    // The user's device still pairs, with the code.
     let paired = pair_with(&mut hub, &code, &pc, "pc", Role::Runner).unwrap();
     assert_eq!(paired.name, "pc");
-
-    let (number_2, _) = open_pairing(&mut hub);
-    assert_ne!(number, number_2);
-    for _ in 0..5 {
-        let _ = hub.pair(&proposed(&stranger, "x", Role::Runner), |_| false, "0.4.0");
-    }
-    let Some(PairEnd::Over(why)) = hub.pairing_ended(number_2) else {
-        panic!("pair mode is still open");
-    };
-    assert!(why.contains("after 5 wrong proofs"), "{why}");
     assert_eq!(members(&hub, &hub.key()).len(), 1);
+}
+
+#[test]
+fn a_pairing_whose_facts_cannot_be_written_spends_pair_mode_all_the_same() {
+    let (_dir, folder) = folder();
+    let time = Time::new();
+    let mut hub = open(&folder, &time);
+    let pc = key(1);
+    pair(&mut hub, &pc, "pc", Role::Runner);
+
+    // Paired again, an entry the hub keeps: only the facts are written, and the disk refuses
+    // them (a folder sits where the temporary file goes).
+    let (number, code) = open_pairing(&mut hub);
+    let blocked = folder.join(format!(".hub.json.{}.new", std::process::id()));
+    std::fs::create_dir(&blocked).unwrap();
+    let failed = error(pair_with(&mut hub, &code, &pc, "pc", Role::Runner));
+    assert!(failed.contains("cannot be written"), "{failed}");
+    // The device is paired: its code is spent, and does not pair a second time.
+    assert!(matches!(
+        hub.pairing_ended(number),
+        Some(PairEnd::Paired(device)) if device.key == pc.public()
+    ));
+    assert_eq!(hub.pairing_left(), None);
+    std::fs::remove_dir(&blocked).unwrap();
+    let again = error(pair_with(&mut hub, &code, &pc, "pc", Role::Runner));
+    assert!(again.contains("pair mode is not open"), "{again}");
 }
 
 #[test]

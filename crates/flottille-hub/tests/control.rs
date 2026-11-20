@@ -389,7 +389,7 @@ async fn pair_mode_prints_a_code_and_its_qr_and_pairs_one_device() {
     );
 
     // `flottille-hub pair` beside the hub that runs: the code holds the hub's address and key.
-    let (mut child, lines) = pair_command(&state, &[]);
+    let (mut child, lines) = pair_command(&state, &["--public-url", &url(address)]);
     let (said, code) = read_code(&lines);
     assert!(
         said[0].contains(&format!("with the hub at http://{address}")),
@@ -465,6 +465,37 @@ async fn pair_mode_prints_a_code_and_its_qr_and_pairs_one_device() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn pair_prints_no_code_nobody_can_dial_and_says_how() {
+    let place = Place::new();
+    let state = place.hub_folder();
+    // A hub on the loopback, as the systemd example runs it: its own address is no one's.
+    let running = Running::start(place.dir.path(), &state);
+    running.until_listening();
+    let output = Command::new(env!("CARGO_BIN_EXE_flottille-hub"))
+        .args(["--state", state.to_str().unwrap(), "pair"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let said = String::from_utf8_lossy(&output.stderr);
+    assert!(said.contains("loopback"), "{said}");
+    assert!(said.contains("--public-url"), "{said}");
+    assert!(
+        !String::from_utf8_lossy(&output.stdout).contains("Pair mode is open"),
+        "no code was printed"
+    );
+    // Nothing was opened: the command that gives a URL opens pair mode, and no other is open.
+    let (mut child, lines) = pair_command(&state, &["--public-url", "https://hub.example.net"]);
+    let (_, code) = read_code(&lines);
+    assert_eq!(
+        PairCode::from_code(&code).unwrap().hub_url,
+        "https://hub.example.net"
+    );
+    child.kill().unwrap();
+    child.wait().unwrap();
+    running.stop();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn pair_mode_ends_at_its_minutes_or_when_its_command_stops() {
     let place = Place::new();
     let state = place.hub_folder();
@@ -485,6 +516,7 @@ async fn pair_mode_ends_at_its_minutes_or_when_its_command_stops() {
     // A second pair mode while one is open: refused.
     let output = Command::new(env!("CARGO_BIN_EXE_flottille-hub"))
         .args(["--state", state.to_str().unwrap(), "pair"])
+        .args(["--public-url", &url(address)])
         .output()
         .unwrap();
     assert!(!output.status.success());
@@ -1568,10 +1600,122 @@ async fn a_pairing_whose_card_is_changed_on_the_way_is_refused() {
     );
     served.with_hub(|hub| {
         assert!(hub.members().is_none());
-        // A wrong proof does not close pair mode at once: the user's device may still pair.
+        // A wrong proof does not close pair mode: the user's device may still pair.
         assert!(hub.pairing_left().is_some());
     });
     served.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stranger_cannot_close_pair_mode() {
+    let place = Place::new();
+    let served = place.serve("127.0.0.1:0").await;
+    let code = code_at(&served, served.address());
+    // A throwaway key per try, a code of its own with the right hub key and a wrong secret:
+    // far more tries than any limit a pair mode could have had.
+    for n in 0..12u8 {
+        let wrong = PairCode {
+            secret: flottille_link::PairSecret([n.wrapping_add(1); 16]),
+            ..code.clone()
+        };
+        let refused = pair_with(
+            &wrong,
+            &device_key(100 + n),
+            &place.machine("stranger"),
+            "stranger",
+            Role::Runner,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            refused
+                .to_string()
+                .contains("did not prove it holds the pair code"),
+            "{refused}"
+        );
+    }
+    served.with_hub(|hub| {
+        assert!(hub.members().is_none());
+        assert!(hub.pairing_left().is_some());
+    });
+    // The user's device pairs, with its code, after all of them.
+    let (device, _session) = pair_with(
+        &code,
+        &device_key(1),
+        &place.machine("pc"),
+        "pc",
+        Role::Runner,
+    )
+    .await
+    .unwrap();
+    assert_eq!(device.list.members().len(), 1);
+    served.stop().await;
+}
+
+/// What a build of before this protocol says first: protocol 1, the frames of before pair mode.
+fn old_hello() -> Hello {
+    Hello {
+        flottille: "0.3.9".to_owned(),
+        protocols: vec![1],
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_old_device_is_told_to_update_by_the_hub() {
+    let place = Place::new();
+    let served = place.serve("127.0.0.1:0").await;
+    let code = code_at(&served, served.address());
+    let refused = Device::pair(
+        &code,
+        proposed(&device_key(1), "pc", Role::Runner),
+        &place.machine("pc"),
+        &old_hello(),
+        &Tls::System,
+    )
+    .await
+    .err()
+    .expect("an old device is refused");
+    assert!(
+        refused.to_string().contains("update one of them"),
+        "{refused}"
+    );
+    // Nothing was paired, and pair mode is still open for a device that can.
+    served.with_hub(|hub| {
+        assert!(hub.members().is_none());
+        assert!(hub.pairing_left().is_some());
+    });
+    served.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_old_hub_is_told_to_update_by_the_device() {
+    let place = Place::new();
+    let key = hub_signer(&place.hub_folder());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        // The hub of before: its hello says protocol 1. Its refusal is its own to write.
+        let _ = arrive(Box::new(stream), &key, &old_hello()).await;
+    });
+    let code = PairCode {
+        hub_url: url(address),
+        hub_key: hub_signer(&place.hub_folder()).public(),
+        secret: flottille_link::PairSecret([1; 16]),
+    };
+    let refused = pair_with(
+        &code,
+        &device_key(1),
+        &place.machine("pc"),
+        "pc",
+        Role::Runner,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        refused.to_string().contains("update one of them"),
+        "{refused}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

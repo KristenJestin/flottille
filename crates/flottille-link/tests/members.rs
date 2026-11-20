@@ -877,6 +877,36 @@ fn the_hub_removes_a_device_and_any_member_restyles_one() {
 }
 
 #[test]
+fn the_hub_does_not_restyle_a_device_a_member_does() {
+    let (pc, pixel, mut list) = paired();
+    // The hub cannot change what a device says of itself, its look any more than its name.
+    list.sign_as_hub(
+        Action::Look {
+            key: pc.public(),
+            icon: Icon::Server,
+            colour: Colour::Orange,
+        },
+        hub_key(),
+    );
+    let refused = list.check(&hub(), &hub()).unwrap_err().to_string();
+    assert!(
+        refused.contains("is the hub's and would change the icon and colour of a member"),
+        "{refused}"
+    );
+    // A member's restyle of the same device is taken.
+    let (_, _, mut list) = paired();
+    list.sign(
+        Action::Look {
+            key: pc.public(),
+            icon: Icon::Server,
+            colour: Colour::Orange,
+        },
+        &pixel,
+    );
+    assert!(list.check(&hub(), &hub()).is_ok());
+}
+
+#[test]
 fn the_hubs_changes_have_their_documented_encoding() {
     let pixel = key(2);
     let change = Change::sign_as_hub(
