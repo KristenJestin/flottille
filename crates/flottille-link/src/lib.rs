@@ -51,8 +51,9 @@ pub use members::{
 };
 pub use offers::{Capabilities, MOST_AGENTS, MOST_PROJECTS, Offered};
 pub use request::{
-    Accepted, CLOSE_LASTS, FULL_SWITCH_LASTS, NONCES_PER_DEVICE, Nonce, REQUEST_WINDOW, Request,
-    RequestError, Requests, Signed, full_switch, kept_close, runs_agents,
+    Accepted, CLOSE_LASTS, CLOSES_SERVED_MOST, ClosesServed, FULL_SWITCH_LASTS, NONCES_PER_DEVICE,
+    Nonce, REQUEST_WINDOW, Request, RequestError, Requests, Signed, full_switch, kept_close,
+    runs_agents,
 };
 pub use sessions::{LightSession, MOST_SESSIONS, STATES, SessionList, TITLE_LIMIT};
 pub use transport::TlsServer;

@@ -21,7 +21,7 @@
 //! params    length (4 bytes, big-endian), the JSON text
 //! ```
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -377,8 +377,9 @@ pub const CLOSE_LASTS: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 /// as `request` holds the close: `agent.stop {agent}` that device signed for that machine, by a
 /// member that may stop a session (a runner or a controller). Kept by another machine while this
 /// one was off and sent when it linked again (`docs/remote.md`, "One list of every machine"), it
-/// counts for `CLOSE_LASTS` from when it was signed, by `now`. Its nonce is not checked: a close
-/// played again closes a session closed already, which changes nothing.
+/// counts for `CLOSE_LASTS` from when it was signed, by `now`. Its nonce is not checked here: the
+/// receiver serves a close once (`ClosesServed`) and does nothing to a session started or resumed
+/// after the close was signed.
 pub fn kept_close(
     request: &Request,
     machine: &str,
@@ -421,6 +422,50 @@ pub fn kept_close(
         return refused("is older than thirty days");
     }
     Ok((member.clone(), agent.to_owned()))
+}
+
+/// How many closes served a machine remembers; past it, the oldest are let go.
+pub const CLOSES_SERVED_MOST: usize = 4096;
+
+/// The closes a machine served (`kept_close`), by nonce, for as long as each counts: a close is
+/// served once, however often it is sent again (the outbox after an answer that was lost, a
+/// member that saw it signed). In memory: a daemon started again forgets them, which is safe
+/// because the receiver also ignores a close for a session started or resumed after it was signed.
+#[derive(Debug, Default)]
+pub struct ClosesServed {
+    /// Each close's nonce and when it stops counting, oldest first.
+    served: VecDeque<(Nonce, u64)>,
+}
+
+impl ClosesServed {
+    /// Whether `request` is a close not served yet, at `now`: it is then remembered. False for one
+    /// served already, which is answered and does nothing.
+    pub fn serve(&mut self, request: &Request, now: SystemTime) -> bool {
+        let now = milliseconds(now);
+        self.served.retain(|(_, until)| *until > now);
+        if self
+            .served
+            .iter()
+            .any(|(nonce, _)| *nonce == request.signed.nonce)
+        {
+            return false;
+        }
+        if self.served.len() >= CLOSES_SERVED_MOST {
+            self.served.pop_front();
+        }
+        let until = request
+            .signed
+            .at
+            .saturating_add(CLOSE_LASTS.as_millis() as u64);
+        self.served.push_back((request.signed.nonce, until));
+        true
+    }
+
+    /// Forgets `request`, whose service failed for now: it is served when it is sent again.
+    pub fn release(&mut self, request: &Request) {
+        self.served
+            .retain(|(nonce, _)| *nonce != request.signed.nonce);
+    }
 }
 
 /// What `method` does, as a refusal names it: the user's words for what they do most, the

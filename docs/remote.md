@@ -622,7 +622,11 @@ machine's name.
 - **Live everywhere.** A runner tells each machine it links to its list of sessions, light (the
   `sessions` message, "What a machine may send"): when the link is made, and again whenever it
   changes (a session that starts, ends, is written to, answers or asks). The window reads it from
-  its own daemon, which follows every machine linked to it, and the rows move as the lists do.
+  its own daemon, which follows every machine linked to it, and the rows move as the lists do. A
+  list is kept only from the link now current, and only for a machine that is a runner among the
+  members: a machine removed, or added again as another role, loses its list. A list that names an
+  id twice or whose pilots make a cycle is refused. There is no rate limit on `sessions` (a
+  follow-up).
   Reading, writing, answering, Allow/Deny and Stop work in any session through its machine: opening
   a session of another machine brings that machine in front, every request of the window signed
   for it and carried by this machine's daemon, its conversation watched live as a request carried
@@ -637,9 +641,15 @@ machine's name.
   (the `close` message); that machine checks the signature, the role and that it is its own, and
   stops the session as the device's request. The other devices see the session closed when that
   machine comes back. It is the written exception to "what the user sends to a machine that is
-  off is refused": a close cannot surprise anyone hours later. A close played again closes a
-  session closed already, which changes nothing; a close kept 30 days is dropped, as any message
-  kept.
+  off is refused": a close cannot surprise anyone hours later. A close is served once: the receiver
+  remembers the nonces of the closes it served, for their 30 days (bounded, 4096, in memory), and
+  answers one sent again and does nothing; it also does nothing to a session started or resumed
+  after the close was signed, which covers a replay after a restart. A close signed by a device
+  the receiver's member list does not hold is answered *for later* (its list may be behind): the
+  sender keeps it and sends it again; any other refusal (a viewer, the wrong machine or method,
+  older than 30 days) is final, and the sender drops the close and says so in the inbox, naming
+  the session (its title if known, else its id). Asking again for the close of a session whose
+  close waits replaces the one waiting. A close kept 30 days is dropped, as any message kept.
 
 ## What a machine may send
 
@@ -656,8 +666,8 @@ what it recorded (that this agent of that machine started that session, or is th
 | `capabilities` | What a runner offers: its projects, its agents signed in, its free slots ("Roles"). |
 | `share` | A vault entry or a connection the user shared, signed by their device ("Sharing"): `{"request", "entry", "secret"}`, the device's signed `vault.share` as the client wrote it, the entry's metadata, its secret; for a connection (`share_connection`), `{"request", "connection", "entries": [{"entry", "secret"}]}`, the signed `connection.share`, the declaration, and each entry the request names with its secret. |
 | `addresses` | Every address the sender may be reached at now: kept for it, so that the two link again without the hub ("The transport"). |
-| `sessions` | A runner's live root sessions, light: each one's id, title, project, state, last exchange, and the session leading it there; 500 at most, a title 200 characters at most. Kept by the receiver, in place of the one before ("One list of every machine"). |
-| `close` | The user's close of a session of the receiver (`agent.stop`, as their device signed it), kept by the sender while the receiver was off. Taken when its signature is a member's that may stop a session, for the receiver, signed less than 30 days ago; its nonce is not checked. |
+| `sessions` | A runner's live root sessions, light: each one's id, title, project, state, last exchange, and the session leading it there; 500 at most, a title 200 characters at most, no id twice and no cycle of pilots. Kept by the receiver, in place of the one before ("One list of every machine"). |
+| `close` | The user's close of a session of the receiver (`agent.stop`, as their device signed it), kept by the sender while the receiver was off. Taken when its signature is a member's that may stop a session, for the receiver, signed less than 30 days ago; served once (its nonce is remembered 30 days), and not for a session started or resumed after it was signed. |
 
 Nothing else: no user method but the kept close, no `approval.approve`, no `agent.mode`, no `agent.send` as the user, no
 change of the member list (those go to the hub, signed by a device). A machine that forwards a

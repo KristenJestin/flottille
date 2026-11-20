@@ -182,6 +182,8 @@ pub struct Remote {
     refused: Mutex<Refused>,
     /// The machines whose addresses told are being written: the latest told, not written yet.
     learning: Mutex<HashMap<[u8; 32], Option<Vec<String>>>>,
+    /// The closes of sessions of this machine served, so that one is served once.
+    closes: Mutex<flottille_link::ClosesServed>,
     /// Held while the peers' file is read and written again: apart from `peers`, so that a link
     /// coming in is not judged after a write to the disk.
     writing: Mutex<()>,
@@ -317,6 +319,7 @@ impl Remote {
             links: Default::default(),
             refused: Mutex::new(Refused::new(Instant::now())),
             learning: Mutex::new(HashMap::new()),
+            closes: Mutex::new(flottille_link::ClosesServed::default()),
             writing: Mutex::new(()),
             control: std::sync::OnceLock::new(),
             heard: tokio::sync::watch::Sender::new(Some(tokio::time::Instant::now())),
@@ -1331,7 +1334,7 @@ async fn serve(remote: Arc<Remote>, link: Link, name: String, generation: u64) {
                 let (remote, request, peer) = (remote.clone(), (**request).clone(), link.peer());
                 tokio::spawn(async move {
                     let answered = remote.closed(&peer, request).await;
-                    received.answer(answered);
+                    received.answer(crate::across::answer_of(answered, "a close"));
                 });
             }
             // Each in a task of its own: a bundle offered is read back on this same link.
@@ -1482,25 +1485,37 @@ impl Remote {
 
     /// The user's close of a session of this machine, kept by the machine of `from` while this one
     /// was off (`docs/remote.md`, "One list of every machine"): checked (`kept_close`), then
-    /// served as that device's `agent.stop`. A session ended already, or no longer here, is
-    /// answered as closed: the close is idempotent.
+    /// served as that device's `agent.stop`, once: a close sent again, or played by a member that
+    /// saw it signed, is answered and does nothing, as is one of a session started or resumed
+    /// after it was signed. A session ended already, or no longer here, is answered as closed.
+    /// A device this machine's member list does not hold may be one it has not heard of yet: that
+    /// refusal is for now.
     async fn closed(
         self: &Arc<Self>,
         from: &PublicKey,
         request: flottille_link::Request,
-    ) -> Result<Value, String> {
+    ) -> Result<Value, crate::across::Refused> {
+        use crate::across::Refused;
         let Some(daemon) = self.daemon() else {
-            return Ok(json!({"later": "the daemon is stopping"}));
+            return Err(Refused::Now("the daemon is stopping".to_owned()));
         };
         let checking = (self.clone(), request.clone());
         let (member, agent) = tokio::task::spawn_blocking(move || {
             let (remote, request) = checking;
-            let (members, name) = remote.listed()?;
+            let (members, name) = remote.listed().map_err(Refused::Now)?;
+            if members
+                .get(&request.signed.device)
+                .is_none_or(|_| !request.signed())
+            {
+                return Err(Refused::Now(
+                    "the close is not signed by a member this machine knows yet".to_owned(),
+                ));
+            }
             flottille_link::kept_close(&request, &name, &members, wall_now())
-                .map_err(|error| error.to_string())
+                .map_err(|error| Refused::Never(error.to_string()))
         })
         .await
-        .map_err(|_| "the close could not be checked".to_owned())??;
+        .map_err(|_| Refused::Now("the close could not be checked".to_owned()))??;
         let over = |daemon: &Daemon| {
             daemon
                 .read(|store| store.agent(&agent))
@@ -1508,7 +1523,25 @@ impl Remote {
                 .flatten()
                 .is_none_or(|found| found.state.is_final())
         };
-        if over(&daemon) {
+        let signed_at = request.signed.at;
+        let since = |daemon: &Daemon| {
+            daemon
+                .read(|store| {
+                    let started = store
+                        .agent(&agent)?
+                        .is_none_or(|found| found.created_at > signed_at);
+                    let resumed = store
+                        .last_agent_events(&agent, "agent.resumed", 1)?
+                        .first()
+                        .is_some_and(|event| event.at > signed_at);
+                    Ok(started || resumed)
+                })
+                .unwrap_or(false)
+        };
+        if over(&daemon)
+            || since(&daemon)
+            || !self.closes.lock().unwrap().serve(&request, wall_now())
+        {
             return Ok(json!({}));
         }
         let from = self.name_of(from).unwrap_or_default();
@@ -1522,10 +1555,13 @@ impl Remote {
         let mut serving = match self.start(accepted, signed, &from).await {
             Ok(serving) => serving,
             Err(refused) => {
-                return Err(serde_json::to_value(&*refused)
-                    .ok()
-                    .and_then(|answer| answer["error"]["message"].as_str().map(str::to_owned))
-                    .unwrap_or_else(|| "the close could not be served".to_owned()));
+                self.closes.lock().unwrap().release(&request);
+                return Err(Refused::Never(
+                    serde_json::to_value(&*refused)
+                        .ok()
+                        .and_then(|answer| answer["error"]["message"].as_str().map(str::to_owned))
+                        .unwrap_or_else(|| "the close could not be served".to_owned()),
+                ));
             }
         };
         let line = serving.lines.next_line().await.ok().flatten();
@@ -1536,9 +1572,12 @@ impl Remote {
         if answer["error"].is_null() && line.is_some() || over(&daemon) {
             return Ok(json!({}));
         }
-        Err(answer["error"]["message"]
-            .as_str()
-            .map_or_else(|| "the close was not answered".to_owned(), str::to_owned))
+        self.closes.lock().unwrap().release(&request);
+        Err(Refused::Never(
+            answer["error"]["message"]
+                .as_str()
+                .map_or_else(|| "the close was not answered".to_owned(), str::to_owned),
+        ))
     }
 }
 

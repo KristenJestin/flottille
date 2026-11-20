@@ -65,7 +65,7 @@ const RETRY: Duration = Duration::from_secs(30);
 
 /// Why a message from another machine is not taken: never, or not now (its sender keeps it and
 /// sends it again).
-enum Refused {
+pub(crate) enum Refused {
     Never(String),
     Now(String),
 }
@@ -77,7 +77,7 @@ impl From<String> for Refused {
 }
 
 /// The answer to another machine of `answer`: a refusal for now is an answer saying `later`.
-fn answer_of(answer: Result<Value, Refused>, what: &str) -> Result<Value, String> {
+pub(crate) fn answer_of(answer: Result<Value, Refused>, what: &str) -> Result<Value, String> {
     match answer {
         Ok(value) => Ok(value),
         Err(Refused::Never(why)) => {
