@@ -49,7 +49,7 @@ fn socket_at(user: &User, agent: &str) -> PathBuf {
 /// socket its `SSH_AUTH_SOCK` names (`reached <path>`, `refused <path>`, `no agent`), the value
 /// of `FLOTTILLE_PLANTED` it was given (`planted=…`), the session bus's address (`dbus=…`),
 /// whether it could list the runtime folder (`runtime listed`, `runtime unlisted`) and connect to its bus (`bus reached`, `bus refused`),
-/// and what git asked it to run on the remote (`asked git-upload-pack '…'`), and serves git's
+/// its words (`args …`), and what git asked it to run on the remote (`asked git-upload-pack '…'`), and serves git's
 /// own call from
 /// `remotes/<name>`, whatever the host.
 fn fake_ssh(user: User) -> User {
@@ -68,6 +68,7 @@ fn fake_ssh(user: User) -> User {
          else echo 'runtime unlisted' >> '{said}'; fi\n\
          if {connect} '{runtime}/bus' 2>/dev/null; then echo 'bus reached' >> '{said}'\n\
          else echo 'bus refused' >> '{said}'; fi\n\
+         echo \"args $*\" >> '{said}'\n\
          for last; do :; done\n\
          echo \"asked $last\" >> '{said}'\n\
          service=${{last%% *}}\n\
@@ -1625,4 +1626,225 @@ fn a_user_ssh_command_a_run_can_change_lends_no_push() {
     assert!(!user.path("own/ssh-ran").exists(), "{}", pushed.text);
     assert!(!remote_has(&user, "changed"));
     assert!(pushed.text.contains("lent to no push"), "{}", pushed.text);
+}
+
+/// A hook at `path` that notes in `hook-said` whether it could reach the user's SSH agent and
+/// session bus by their paths, as a hook a run wrote would try.
+fn noting_hook(user: &User, path: &Path) {
+    let connect = "python3 -c 'import socket, sys; \
+                   socket.socket(socket.AF_UNIX).connect(sys.argv[1])'";
+    script(
+        path,
+        &format!(
+            "if {connect} '{agent}' 2>/dev/null; then echo 'agent reached' >> '{said}'\n\
+             else echo 'agent refused' >> '{said}'; fi\n\
+             if {connect} '{runtime}/bus' 2>/dev/null; then echo 'bus reached' >> '{said}'\n\
+             else echo 'bus refused' >> '{said}'; fi\n",
+            agent = socket(user).display(),
+            runtime = user.path("runtime").display(),
+            said = user.path("hook-said").display(),
+        ),
+    );
+}
+
+fn hook_said(user: &User) -> Vec<String> {
+    std::fs::read_to_string(user.path("hook-said"))
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Whether the bare repository at `bare` has the branch.
+fn has(bare: &Path, branch: &str) -> bool {
+    std::process::Command::new("git")
+        .arg("--git-dir")
+        .arg(bare)
+        .args(["rev-parse", "--verify", "--quiet"])
+        .arg(format!("refs/heads/{branch}"))
+        .output()
+        .unwrap()
+        .status
+        .success()
+}
+
+#[test]
+fn a_push_to_a_path_runs_the_target_s_hooks_in_the_sandbox() {
+    if landlock_abi() < 2 {
+        eprintln!("skipped: no Landlock to keep the agent out of a confined command's reach");
+        return;
+    }
+    let (user, _agent, _bus) = user();
+    project(&user, SSH_REMOTE);
+    // A bare repository a run made, with a hook it wrote, and the remote's push URL it set.
+    let target = user.path("planted.git");
+    user.git(
+        &user.path(""),
+        &["init", "--quiet", "--bare", target.to_str().unwrap()],
+    );
+    noting_hook(&user, &target.join("hooks/post-receive"));
+    user.git(
+        &user.path("work/app"),
+        &["config", "remote.origin.pushurl", target.to_str().unwrap()],
+    );
+    let mcp = agent(&user);
+
+    let pushed = line(&user, &mcp, "git push origin HEAD:refs/heads/planted");
+
+    let said = hook_said(&user);
+    assert!(!said.contains(&"agent reached".to_owned()), "{said:?}");
+    assert!(!said.contains(&"bus reached".to_owned()), "{said:?}");
+    // A push to a path needs no credential of the user's: it goes, as a run's own would.
+    assert!(has(&target, "planted"), "{}", pushed.text);
+}
+
+#[test]
+fn a_push_runs_no_submodule_push_a_run_set_up() {
+    if landlock_abi() < 2 {
+        eprintln!("skipped: no Landlock to keep the agent out of a confined command's reach");
+        return;
+    }
+    let (user, _agent, _bus) = user();
+    project(&user, SSH_REMOTE);
+    // A submodule whose remote is a bare repository of the run's, with a commit it lacks.
+    let target = user.path("sub.git");
+    let sub = user.path("sub");
+    user.git_init(&sub);
+    std::fs::write(sub.join("a.txt"), "a\n").unwrap();
+    user.git(&sub, &["add", "a.txt"]);
+    user.git(&sub, &["commit", "--quiet", "-m", "a"]);
+    user.git(
+        &user.path(""),
+        &["init", "--quiet", "--bare", target.to_str().unwrap()],
+    );
+    user.git(
+        &sub,
+        &[
+            "push",
+            "--quiet",
+            target.to_str().unwrap(),
+            "HEAD:refs/heads/main",
+        ],
+    );
+    let folder = user.path("work/app");
+    user.git(
+        &folder,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "--quiet",
+            "add",
+            target.to_str().unwrap(),
+            "sub",
+        ],
+    );
+    let inner = folder.join("sub");
+    std::fs::write(inner.join("b.txt"), "b\n").unwrap();
+    user.git(&inner, &["add", "b.txt"]);
+    user.git(&inner, &["commit", "--quiet", "-m", "b"]);
+    user.git(&folder, &["add", "sub", ".gitmodules"]);
+    user.git(&folder, &["commit", "--quiet", "-m", "sub"]);
+    noting_hook(&user, &target.join("hooks/post-receive"));
+    // As a run could write it: the submodule's commits pushed with the repository's.
+    user.git(&folder, &["config", "push.recurseSubmodules", "on-demand"]);
+    let mcp = agent(&user);
+
+    let pushed = line(&user, &mcp, "git push origin HEAD:refs/heads/with-sub");
+
+    let said = hook_said(&user);
+    assert!(!said.contains(&"agent reached".to_owned()), "{said:?}");
+    assert!(!said.contains(&"bus reached".to_owned()), "{said:?}");
+    assert!(remote_has(&user, "with-sub"), "{}", pushed.text);
+}
+
+#[test]
+fn an_allowed_push_runs_no_credential_helper_a_run_wrote() {
+    let (user, _agent, _bus) = user();
+    let user = credential_helper(user);
+    let (_server, url) = http_remote(&user);
+    project(&user, &url);
+    let planted = user.path("planted/helper");
+    script(
+        &planted,
+        &format!(
+            "echo \"$1\" >> '{}'\n",
+            user.path("planted-helper-ran").display()
+        ),
+    );
+    // As a run could write it in the repository's settings.
+    user.git(
+        &user.path("work/app"),
+        &["config", "credential.helper", planted.to_str().unwrap()],
+    );
+    let mcp = agent(&user);
+
+    let pushed = line(&user, &mcp, "git push origin HEAD:refs/heads/helped");
+
+    assert!(
+        !user.path("planted-helper-ran").exists(),
+        "the planted helper ran: {}",
+        pushed.text
+    );
+    assert!(remote_has(&user, "helped"), "{}", pushed.text);
+    assert!(
+        helper_said(&user).contains(&"get".to_owned()),
+        "{:?}",
+        helper_said(&user)
+    );
+}
+
+#[test]
+fn an_allowed_push_runs_no_git_a_run_put_first_in_the_path() {
+    let (user, _agent, _bus) = user();
+    // A folder of the user's first in the daemon's `PATH`, as `~/.local/bin` often is.
+    let bin = user.path("home/.local/bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    // Before the fake `ssh` and the other programs `fake_ssh` put in it.
+    let path = format!(
+        "{}:{}:{}",
+        bin.display(),
+        user.path("ssh-bin").display(),
+        user.path("programs").display()
+    );
+    let user = user.with_env("PATH", &path);
+    let mcp = session(&user, SSH_REMOTE);
+    // Written by a run once the daemon runs.
+    script(
+        &bin.join("git"),
+        &format!(
+            "case \"$*\" in *push*) echo ran >> '{ran}';; esac\nexec '{real}' \"$@\"\n",
+            ran = user.path("planted-git-ran").display(),
+            real = common::program("git").display(),
+        ),
+    );
+
+    let pushed = line(&user, &mcp, "git push origin HEAD:refs/heads/real-git");
+
+    assert!(
+        !user.path("planted-git-ran").exists(),
+        "the planted git ran: {}",
+        pushed.text
+    );
+    assert!(remote_has(&user, "real-git"), "{}", pushed.text);
+}
+
+#[test]
+fn an_allowed_push_s_ssh_shares_no_connection_and_forwards_no_agent() {
+    let (user, _agent, _bus) = user();
+    let mcp = session(&user, SSH_REMOTE);
+
+    let pushed = line(&user, &mcp, "git push origin HEAD:refs/heads/plain");
+
+    assert!(remote_has(&user, "plain"), "{}", pushed.text);
+    let said = ssh_said(&user);
+    let args = said
+        .iter()
+        .find(|line| line.starts_with("args "))
+        .unwrap_or_else(|| panic!("{said:?}"));
+    // First, so that neither `~/.ssh/config` nor a later option of the line sets them.
+    assert!(
+        args.starts_with("args -o ControlMaster=no -o ControlPath=none -o ForwardAgent=no "),
+        "{args}"
+    );
 }

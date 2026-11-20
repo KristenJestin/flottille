@@ -405,6 +405,8 @@ fn a_command_in_ssh_s_configuration_lends_no_push() {
         "Host forge.invalid\n  ProxyCommand ~/bin/proxy %h %p\n",
         "Match exec \"test -e ~/flag\"\n  User git\n",
         "Host *\n  KnownHostsCommand=~/bin/hosts\n",
+        // Quoted, as ssh reads a keyword too.
+        "Host forge.invalid\n  \"ProxyCommand\" ~/bin/proxy %h %p\n",
     ] {
         let user = User::with_fake_agent();
         ssh_config(&user, line);
@@ -418,7 +420,10 @@ fn a_command_in_ssh_s_configuration_lends_no_push() {
 }
 
 #[test]
-fn a_missing_include_of_the_git_settings_lends_no_push() {
+fn a_missing_include_of_the_git_settings_is_judged_when_it_appears() {
+    if skipped_without_user_namespaces() {
+        return;
+    }
     let user = User::with_fake_agent();
     std::fs::write(
         user.path("home/.gitconfig"),
@@ -429,10 +434,65 @@ fn a_missing_include_of_the_git_settings_lends_no_push() {
     let user = user.with_env("GIT_CONFIG_GLOBAL", settings.to_str().unwrap());
     started(&user);
 
-    let (lent, warnings) = lent(&user);
+    // Git reads a missing include as nothing: so does Flottille.
+    let (lent_at_start, warnings) = lent(&user);
+    assert!(lent_at_start, "{warnings}");
 
+    // Made since the start, by the user or a run: not kept read-only, so it lends nothing.
+    std::fs::write(user.path("home/.gitconfig-work"), "[user]\n\tname = x\n").unwrap();
+    let (lent, warnings) = lent(&user);
     assert!(!lent, "{warnings}");
     assert!(warnings.contains(".gitconfig-work"), "{warnings}");
+}
+
+#[test]
+fn a_link_ssh_never_reads_lends_the_push() {
+    if skipped_without_user_namespaces() {
+        return;
+    }
+    let user = User::with_fake_agent();
+    ssh_config(&user, "Host forge.invalid\n  IdentityFile ~/.ssh/work\n");
+    // The agent's socket linked where a terminal multiplexer finds it, and a file of `~/.ssh`
+    // linked to another in it.
+    std::fs::create_dir_all(user.path("agent")).unwrap();
+    let _listening = std::os::unix::net::UnixListener::bind(user.path("agent/agent.1")).unwrap();
+    std::os::unix::fs::symlink(
+        user.path("agent/agent.1"),
+        user.path("home/.ssh/ssh_auth_sock"),
+    )
+    .unwrap();
+    std::fs::write(user.path("home/.ssh/work-key"), "").unwrap();
+    std::os::unix::fs::symlink("work-key", user.path("home/.ssh/work")).unwrap();
+    started(&user);
+
+    let (lent, warnings) = lent(&user);
+
+    assert!(lent, "{warnings}");
+}
+
+#[test]
+fn a_link_ssh_reads_out_of_ssh_lends_no_push() {
+    for (config, link) in [
+        ("Host forge.invalid\n", "id_ed25519"),
+        ("Host forge.invalid\n  IdentityFile ~/.ssh/work\n", "work"),
+        ("Host *\n  UserKnownHostsFile ~/.ssh/hosts\n", "hosts"),
+    ] {
+        let user = User::with_fake_agent();
+        ssh_config(&user, config);
+        std::fs::create_dir_all(user.path("home/dots")).unwrap();
+        std::fs::write(user.path("home/dots/file"), "").unwrap();
+        std::os::unix::fs::symlink(
+            user.path("home/dots/file"),
+            user.path("home/.ssh").join(link),
+        )
+        .unwrap();
+        started(&user);
+
+        let (lent, warnings) = lent(&user);
+
+        assert!(!lent, "{link}: {warnings}");
+        assert!(warnings.contains(link), "{link}: {warnings}");
+    }
 }
 
 #[test]
@@ -529,6 +589,25 @@ fn the_agent_is_lent_to_no_push_where_user_namespaces_are_refused() {
     assert_eq!(report["sandbox"]["ssh_lent"], false, "{report}");
     assert!(
         report["warnings"].to_string().contains("lent to no push"),
+        "{report}"
+    );
+}
+
+#[test]
+fn the_agent_is_lent_to_no_push_where_landlock_is_absent() {
+    let user = User::with_fake_agent().with_env("FLOTTILLE_TEST_NO_LANDLOCK", "1");
+    started(&user);
+
+    let doctor = user
+        .command(&["doctor", "--json"])
+        .env_remove("FLOTTILLE_TEST_NO_LANDLOCK")
+        .output()
+        .unwrap();
+    let report: Value = serde_json::from_slice(&doctor.stdout).unwrap();
+
+    assert_eq!(report["sandbox"]["ssh_lent"], false, "{report}");
+    assert!(
+        report["warnings"].to_string().contains("Landlock"),
         "{report}"
     );
 }

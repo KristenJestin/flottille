@@ -810,6 +810,9 @@ mod tests {
             ("PKCS11Provider /usr/lib/p11.so\n", true),
             ("LocalCommand echo\n", true),
             ("# ProxyCommand nc\n", false),
+            ("\"ProxyCommand\" nc %h %p\n", true),
+            ("Proxy\"Command\"=nc %h %p\n", true),
+            ("Match host x \"ex\"ec true\n", true),
         ] {
             std::fs::write(&config, text).unwrap();
             assert_eq!(
@@ -862,12 +865,35 @@ mod tests {
         };
         let wrapper = temp.path().join(".ssh/wrap");
         assert!(checked("ssh -i ~/.ssh/work -o IdentitiesOnly=yes", Some(&found)).is_ok());
+        // Its first options, which win over any later: no shared connection, no forwarding.
         assert_eq!(
-            checked(wrapper.to_str().unwrap(), Some(&found)).unwrap(),
-            OsString::from(wrapper.to_str().unwrap())
+            checked(&format!("{} -v", wrapper.display()), Some(&found)).unwrap(),
+            OsString::from(format!(
+                "{} -o ControlMaster=no -o ControlPath=none -o ForwardAgent=no -v",
+                wrapper.display()
+            ))
+        );
+        let own = checked("ssh -i ~/.ssh/work", Some(&found)).unwrap();
+        assert!(
+            own.to_string_lossy().ends_with(
+                " -o ControlMaster=no -o ControlPath=none -o ForwardAgent=no -i ~/.ssh/work"
+            ),
+            "{own:?}"
         );
         assert!(checked("~/.ssh/wrap -v", Some(&found)).is_ok());
+        assert!(checked("ssh -F /dev/null -i ~/.ssh/work", Some(&found)).is_ok());
+        assert!(checked("ssh -vp 2222 -l git", Some(&found)).is_ok());
         for refused in [
+            "ssh -vF/tmp/config",
+            "ssh -vF /tmp/config",
+            "ssh -A",
+            "ssh -vA",
+            "ssh -S /tmp/master",
+            "ssh -M",
+            "ssh -oControlPath=/tmp/master",
+            "ssh -o ControlMaster=auto",
+            "ssh -o ForwardAgent=yes",
+            "ssh -o controlpersist=yes",
             "~/bin/wrap",
             "/tmp/wrap",
             "ssh -F ~/dots/ssh_config",

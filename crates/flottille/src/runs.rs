@@ -2722,7 +2722,14 @@ mod tests {
         assert_eq!(get(format!("GIT_CONFIG_KEY_{count}")), "core.hooksPath");
         assert_eq!(get(format!("GIT_CONFIG_VALUE_{count}")), "/dev/null");
         assert_eq!(get("GIT_SSH_COMMAND".into()), "'/usr/bin/ssh'");
-        assert_eq!(get("GIT_ALLOW_PROTOCOL".into()), "ssh:https:http:git:file");
+        // Not `file`: a push to a path runs the target's programs, and goes in the sandbox.
+        assert_eq!(get("GIT_ALLOW_PROTOCOL".into()), "ssh:https:http:git");
+        // The user's own credential helpers alone, never one a repository's settings name.
+        assert_eq!(
+            get(format!("GIT_CONFIG_KEY_{}", count + 1)),
+            "credential.helper"
+        );
+        assert_eq!(get(format!("GIT_CONFIG_VALUE_{}", count + 1)), "");
         assert_eq!(get("GIT_PROXY_COMMAND".into()), "");
         assert_eq!(get("GIT_ASKPASS".into()), "");
         let replaced = lifted("ssh".into(), true, true);
@@ -2730,7 +2737,7 @@ mod tests {
         let unlent = lifted("ssh".into(), false, false);
         assert_eq!(
             unlent[&OsString::from("GIT_ALLOW_PROTOCOL")],
-            OsString::from("https:http:git:file")
+            OsString::from("https:http:git")
         );
         assert!(!unlent.contains_key(&OsString::from(crate::ssh_agent::VARIABLE)));
     }

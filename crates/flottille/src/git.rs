@@ -458,6 +458,18 @@ async fn kill(child: &mut tokio::process::Child) {
 pub(crate) mod tests {
     use super::*;
 
+    #[test]
+    fn the_ssh_git_runs_shares_no_connection_and_forwards_no_agent() {
+        // First, so that neither `~/.ssh/config` nor a later option sets them: a master socket
+        // in the read-only `~/.ssh` could not be made, and one made elsewhere any run could use.
+        let ssh = ssh_command();
+        assert!(
+            ssh.to_string_lossy()
+                .ends_with(" -o ControlMaster=no -o ControlPath=none -o ForwardAgent=no"),
+            "{ssh:?}"
+        );
+    }
+
     /// An empty home of the tests' own, for every git they run.
     pub(crate) fn home() -> &'static Path {
         static HOME: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
