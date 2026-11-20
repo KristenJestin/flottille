@@ -152,10 +152,7 @@ async fn fetched(
     };
     let place_text = place.to_string_lossy().into_owned();
     let filters_off = filters_off(&target.folder).await;
-    let env: Vec<(&str, &std::ffi::OsStr)> = filters_off
-        .iter()
-        .map(|(name, value)| (name.as_str(), std::ffi::OsStr::new(value)))
-        .collect();
+    let env = as_env(&filters_off);
     git::output_with(
         &target.folder,
         &[
@@ -203,7 +200,17 @@ async fn fetched(
     };
     // The place is the repository's copy, whatever its path in the project: its files are said
     // from its top, which is where the review's agents work.
-    let files = git_lines(place, &["diff", "--name-only", &start]).await;
+    // Commit to commit: the working tree, just written, is racily clean, and comparing it would
+    // run the user's clean filters on the pull request's files.
+    let files: Vec<String> = git::output_with(
+        place,
+        &["diff", "--name-only", &start, "HEAD"],
+        Class::Read,
+        &env,
+    )
+    .await
+    .map(|out| out.lines().map(str::to_owned).collect())
+    .unwrap_or_default();
     if files.is_empty() {
         return Err(Failure::refused(match from {
             Some(from) => {
@@ -215,7 +222,7 @@ async fn fetched(
             ),
         }));
     }
-    let before = snapshot(".", place).await;
+    let before = snapshot(".", place, &env).await;
     Ok(Prepared {
         pull: PullRequest {
             repository: target.path.clone(),
@@ -242,7 +249,7 @@ async fn fetched(
 /// pull request's own `.lfsconfig` names. Every driver the repository's configuration names, and
 /// Large File Storage's, is given no program and is not required: its files are written as the
 /// commit holds them.
-async fn filters_off(folder: &Path) -> Vec<(String, String)> {
+pub(super) async fn filters_off(folder: &Path) -> Vec<(String, String)> {
     let named = git::output(
         folder,
         &["config", "--name-only", "--get-regexp", r"^filter\."],
@@ -264,6 +271,13 @@ async fn filters_off(folder: &Path) -> Vec<(String, String)> {
         .and_then(|count| count.trim().parse().ok())
         .unwrap_or(0);
     filter_env(&drivers, inherited)
+}
+
+/// What `git::output_with` takes of an environment `filters_off` made.
+pub(super) fn as_env(env: &[(String, String)]) -> Vec<(&str, &std::ffi::OsStr)> {
+    env.iter()
+        .map(|(name, value)| (name.as_str(), std::ffi::OsStr::new(value)))
+        .collect()
 }
 
 /// The environment `filters_off` gives git for `drivers`: `inherited` is the number of

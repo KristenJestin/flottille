@@ -768,7 +768,7 @@ async fn start(daemon: &Arc<Daemon>, session: &Agent) -> std::result::Result<Val
             from,
             rules_from,
         });
-        before.push(snapshot(&tree.path, &folder).await);
+        before.push(snapshot(&tree.path, &folder, &[]).await);
     }
     if files.is_empty() && (round == 1 || open.is_empty()) {
         let bases: Vec<&str> = diffs.iter().map(|d| d.base.as_str()).collect();
@@ -1039,16 +1039,23 @@ async fn git_lines(folder: &std::path::Path, args: &[&str]) -> Vec<String> {
         .unwrap_or_default()
 }
 
-async fn snapshot(path: &str, folder: &std::path::Path) -> Snapshot {
+/// `env` is set on the git that reads the working tree: a pull request's copy gives it
+/// `pull_request::filters_off`, so no clean filter of the user runs on its files.
+async fn snapshot(
+    path: &str,
+    folder: &std::path::Path,
+    env: &[(&str, &std::ffi::OsStr)],
+) -> Snapshot {
     Snapshot {
         path: path.to_owned(),
         head: git_line(folder, &["rev-parse", "HEAD"])
             .await
             .unwrap_or_default(),
-        status: crate::git::output(
+        status: crate::git::output_with(
             folder,
             &["status", "--porcelain=v1", "--untracked-files=all"],
             Class::Read,
+            env,
         )
         .await
         .unwrap_or_default(),
@@ -2211,7 +2218,12 @@ fn checked(
 async fn workspace_changed(review: &Review) -> Option<String> {
     let mut said = Vec::new();
     for (diff, was) in review.diffs.iter().zip(&review.before) {
-        let now = snapshot(&was.path, std::path::Path::new(&diff.folder)).await;
+        let folder = std::path::Path::new(&diff.folder);
+        let off = match review.pull {
+            Some(_) => pull_request::filters_off(folder).await,
+            None => Vec::new(),
+        };
+        let now = snapshot(&was.path, folder, &pull_request::as_env(&off)).await;
         if now.head != was.head {
             said.push(format!("{}: HEAD moved", was.path));
         } else if now.status != was.status {
