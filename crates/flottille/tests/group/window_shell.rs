@@ -79,5 +79,7 @@ mod window_vault;
 mod window_vault_ask;
 #[path = "../window_vault_share.rs"]
 mod window_vault_share;
+#[path = "../window_whats_new.rs"]
+mod window_whats_new;
 #[path = "../windows.rs"]
 mod windows;
