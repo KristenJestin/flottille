@@ -13,6 +13,10 @@ pub struct Snapshot {
     /// By name.
     pub projects: Vec<Project>,
     pub sessions: Vec<Session>,
+    /// The sessions this machine's agents started on other machines, each under its pilot: rows
+    /// of the tree only. This machine's daemon does not know them, so nothing else reads them (a
+    /// project's page, search, a session's page).
+    pub elsewhere: Vec<Session>,
     /// By project, then name.
     pub workspaces: Vec<Workspace>,
     /// Oldest first.
@@ -1002,6 +1006,7 @@ impl Snapshot {
         Snapshot {
             projects,
             sessions,
+            elsewhere: Vec::new(),
             workspaces,
             bell,
             project_changes: 0,
@@ -1031,12 +1036,14 @@ impl Snapshot {
             .filter(move |s| s.project == project && &s.place == place)
     }
 
-    /// The sessions of a project that have not ended, whatever their place: the one whose last
-    /// exchange is the latest first, then the newest.
+    /// The sessions of a project that have not ended, whatever their place, as the tree lists
+    /// them (those on other machines included): the one whose last exchange is the latest first,
+    /// then the newest.
     pub fn live_sessions_of(&self, project: &str) -> Vec<&Session> {
         let mut live: Vec<&Session> = self
             .sessions
             .iter()
+            .chain(&self.elsewhere)
             .filter(|s| s.project == project && !s.ended)
             .collect();
         live.sort_by(|a, b| {
@@ -1114,7 +1121,7 @@ impl Snapshot {
                 }),
             });
         }
-        self.sessions.extend(added);
+        self.elsewhere = added;
         self
     }
 

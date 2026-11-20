@@ -3010,8 +3010,8 @@ impl Shell {
             let (started_by, led_by) = (found.started_by.clone(), found.led_by.clone());
             page.update(cx, |page, cx| page.set_by(started_by, led_by, cx));
         }
-        // The sessions on other machines are found there, not here.
-        let read = self.read.clone().unwrap_or_else(|| self.snapshot.clone());
+        // The sessions on other machines are found there, not here: they are not in `sessions`.
+        let read = self.snapshot.clone();
         self.switcher
             .update(cx, |switcher, cx| switcher.set_snapshot(&read, cx));
         self.ring(cx);
