@@ -719,6 +719,9 @@ pub struct Travelled {
     /// The machine it came from, as the base's note says it.
     pub from: String,
     pub repositories: BTreeMap<String, (String, String)>,
+    /// Whether its setup comes with it: only for a launch this machine's gate judged, which runs
+    /// it only once the launch is allowed (`launches::holds`).
+    pub setup: bool,
 }
 
 /// `workspace.create`, or the workspace made of what another machine sent: on the branch asked,
@@ -896,10 +899,10 @@ pub async fn create_from(
         return Err(refusal);
     }
 
-    // Another machine's code runs nothing here until a launch this machine's gate accepted
-    // brings its setup with it (#816): its worktrees alone.
+    // Another machine's code runs nothing here but as part of a launch this machine's gate
+    // judged, which brings its setup: its worktrees alone otherwise.
     let mut steps = snapshot(&project, &taken);
-    if travelled.is_some() {
+    if travelled.as_ref().is_some_and(|travelled| !travelled.setup) {
         steps.retain(|step| matches!(step.action, Action::Worktree));
     }
     let workspace = Workspace {
@@ -931,7 +934,34 @@ pub async fn create_from(
     daemon.preparing.lock().unwrap().insert(id);
     tokio::spawn(prepare(daemon.clone(), id, Some(made)));
     let _ = worktrees.await;
-    Ok(daemon.read(|store| store.workspace_by_id(id))?.to_json())
+    let made = daemon.read(|store| store.workspace_by_id(id))?;
+    // Another machine's code is placed only whole: a worktree that failed fails the place, which
+    // its sender may then send again.
+    if travelled.is_some()
+        && let Some(step) = made
+            .steps
+            .iter()
+            .find(|step| step.action == Action::Worktree && step.state == StepState::Failed)
+    {
+        let why = step
+            .failure
+            .as_ref()
+            .map(|failure| format!("{}: {}", failure.doing, failure.output))
+            .unwrap_or_else(|| step.doing());
+        return Err(Failure::new(
+            "failed",
+            format!("the workspace {} could not be made: {why}", made.name),
+        ));
+    }
+    Ok(made.to_json())
+}
+
+/// Goes on preparing the workspace `id` from its first pending step: a launch of another
+/// machine's agent the user allowed, whose setup was held until then.
+pub fn go_on_preparing(daemon: &Arc<Daemon>, id: i64) {
+    if daemon.preparing.lock().unwrap().insert(id) {
+        tokio::spawn(prepare(daemon.clone(), id, None));
+    }
 }
 
 /// What a workspace made says of the repositories that started from their local branch, one
@@ -1525,6 +1555,11 @@ async fn prepare_steps(
             })?;
             return Ok(());
         };
+        // Code another machine sent runs its setup only once its launch is allowed, a start of
+        // the daemon included: held otherwise, whatever became of the launch.
+        if step.action != Action::Worktree && crate::launches::holds(daemon, &workspace) {
+            return Ok(());
+        }
         if step.action != Action::Worktree
             && let Some(made) = made.take()
         {

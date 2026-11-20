@@ -41,8 +41,8 @@ pub use hello::{Hello, NeedsUpdate, PeerState, choose};
 pub use invitation::{Invitation, InvitationAsk, InvitationError, Token};
 pub use link::{
     Accepting, Answers, ConnectionShare, Endpoint, FRAME_LIMIT, Git, GitFetch, GitOffer, GitPlace,
-    GitRepository, Link, LinkError, MachineMessage, Message, Received, Secret, Share, SharedEntry,
-    Streamed, Traffic,
+    GitRepository, LaunchAsk, Link, LinkError, MachineMessage, Message, Received, Secret, Share,
+    SharedEntry, Streamed, Traffic,
 };
 pub use members::{
     Action, Change, ChangeHash, ListError, MANAGING_HEADROOM, MOST_CHANGES, Member, MemberList,
@@ -50,8 +50,8 @@ pub use members::{
 };
 pub use offers::{Capabilities, MOST_AGENTS, MOST_PROJECTS, Offered};
 pub use request::{
-    Accepted, NONCES_PER_DEVICE, Nonce, REQUEST_WINDOW, Request, RequestError, Requests, Signed,
-    runs_agents,
+    Accepted, FULL_SWITCH_LASTS, NONCES_PER_DEVICE, Nonce, REQUEST_WINDOW, Request, RequestError,
+    Requests, Signed, full_switch, runs_agents,
 };
 pub use transport::TlsServer;
 pub use tunnel::TunnelStream;

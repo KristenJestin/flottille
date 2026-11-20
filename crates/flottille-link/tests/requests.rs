@@ -6,7 +6,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use flottille_link::{
     Action, DeviceKey, Keyring, KeyringError, MemberList, Members, NONCES_PER_DEVICE, Request,
-    Requests, Role, Signature, runs_agents,
+    Requests, Role, Signature, full_switch, runs_agents,
 };
 use flottille_protocol::{Class, METHODS};
 use serde_json::{Value, json};
@@ -629,4 +629,98 @@ fn every_method_that_starts_an_agent_is_refused_on_a_machine_that_is_no_runner()
     }
     // A command of the project's runs no agent.
     assert!(runs_agents(&members, "pixel", "task.run").is_ok());
+}
+
+#[test]
+fn a_switch_to_full_is_taken_only_as_a_member_that_may_switch_signed_it() {
+    let (pc, pixel, tablet, list) = three();
+    let members = members(&list);
+    let switch = |key: &DeviceKey, params: Value| signed(key, "agent.mode", params, 0);
+    let full = json!({"agent": "a1", "mode": "full"});
+    let now = time(MINUTE);
+
+    let taken = full_switch(&switch(&pixel, full.clone()), "pc", "a1", &members, now).unwrap();
+    assert_eq!(taken.name, "pixel");
+    assert!(full_switch(&switch(&pc, full.clone()), "pc", "a1", &members, now).is_ok());
+
+    let refusal = |text: &str, machine: &str, tree: &str| {
+        full_switch(text, machine, tree, &members, now)
+            .unwrap_err()
+            .to_string()
+    };
+    assert!(refusal(&switch(&tablet, full.clone()), "pc", "a1").contains("may only view"));
+    assert!(refusal(&switch(&pixel, full.clone()), "server", "a1").contains("not one of server"));
+    let auto = json!({"agent": "a1", "mode": "auto"});
+    assert!(refusal(&switch(&pixel, auto), "pc", "a1").contains("another mode"));
+    let other = signed(
+        &pixel,
+        "agent.stop",
+        json!({"agent": "a1", "mode": "full"}),
+        0,
+    );
+    assert!(refusal(&other, "pc", "a1").contains("not one of pc"));
+    // A key that is no member's, and a signature over other bytes.
+    let stranger = signed(&key(9), "agent.mode", full.clone(), 0);
+    assert!(refusal(&stranger, "pc", "a1").contains("not signed by a member"));
+    let forged = switch(&pixel, full).replace(r#"\"a1\""#, r#"\"a2\""#);
+    assert!(refusal(&forged, "pc", "a2").contains("not signed by a member"));
+    assert!(refusal("{}", "pc", "a1").contains("not a signed request"));
+}
+
+#[test]
+fn a_switch_kept_for_another_tree_is_refused() {
+    let (_, pixel, _, list) = three();
+    let members = members(&list);
+    let switch = signed(
+        &pixel,
+        "agent.mode",
+        json!({"agent": "a1", "mode": "full"}),
+        0,
+    );
+
+    let refused = full_switch(&switch, "pc", "b2", &members, time(MINUTE))
+        .unwrap_err()
+        .to_string();
+
+    assert!(refused.contains("another tree"), "{refused}");
+}
+
+#[test]
+fn a_switch_to_full_counts_for_twelve_hours_from_its_signing() {
+    let (_, pixel, _, list) = three();
+    let members = members(&list);
+    let switch = signed(
+        &pixel,
+        "agent.mode",
+        json!({"agent": "a1", "mode": "full"}),
+        0,
+    );
+    let hour = 60 * MINUTE;
+
+    // One night's work: still the user's switch.
+    assert!(full_switch(&switch, "pc", "a1", &members, time(12 * hour)).is_ok());
+    let refusal = |at: u64| {
+        full_switch(&switch, "pc", "a1", &members, time(at))
+            .unwrap_err()
+            .to_string()
+    };
+    assert!(
+        refusal(12 * hour + MINUTE).contains("is older than twelve hours"),
+        "{}",
+        refusal(12 * hour + MINUTE)
+    );
+    // Dated ahead of the clock beyond the window a request is given.
+    let ahead = signed(
+        &pixel,
+        "agent.mode",
+        json!({"agent": "a1", "mode": "full"}),
+        10 * MINUTE,
+    );
+    let refused = full_switch(&ahead, "pc", "a1", &members, time(0))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        refused.contains("ahead of this machine's clock"),
+        "{refused}"
+    );
 }

@@ -986,7 +986,7 @@ async fn moved(
 /// program on `PATH`, or a test's override) and signed in where Flottille can see it: its login
 /// file present, checked by its metadata only and never opened, or its sign-in variable set,
 /// never read.
-fn offered(daemon: &Daemon) -> Capabilities {
+pub(crate) fn offered(daemon: &Daemon) -> Capabilities {
     let launching = daemon.launching.lock().unwrap().clone();
     let projects = crate::projects::all(daemon)
         .into_iter()
@@ -1183,6 +1183,16 @@ async fn serve(remote: Arc<Remote>, link: Link, name: String, generation: u64) {
                     received.answer(answered);
                 });
             }
+            // In a task of its own: the judge may take seconds.
+            Message::Machine(MachineMessage::Launch(asked)) => {
+                let asked = asked.clone();
+                tokio::spawn(crate::launches::serve(
+                    remote.clone(),
+                    link.peer(),
+                    received,
+                    asked,
+                ));
+            }
             // Kept apart by the link's protocol name: a client's request on a machine link is
             // refused before it gets here (`Link::next`).
             Message::Client(_) => received.answer(Err(
@@ -1375,6 +1385,25 @@ impl Remote {
     /// The daemon, unless it is stopping.
     pub(crate) fn daemon(&self) -> Option<Arc<Daemon>> {
         self.daemon.get().and_then(std::sync::Weak::upgrade)
+    }
+
+    /// What each machine linked to this one offers, by its name: only a runner's is kept.
+    pub(crate) fn offers(&self) -> Vec<(String, Capabilities)> {
+        let peers = self.peers().machines;
+        let seen = self.seen.lock().unwrap();
+        peers
+            .into_iter()
+            .filter_map(|peer| {
+                let offers = seen.get(peer.key.as_bytes())?.offers.clone()?;
+                Some((peer.name, offers))
+            })
+            .collect()
+    }
+
+    /// The checked member list this machine keeps, and its own member's name. It reads a file:
+    /// not under a lock.
+    pub(crate) fn members(&self) -> Result<(flottille_link::Members, String), String> {
+        self.listed()
     }
 
     /// The checked member list this machine keeps, and its own member's name.
