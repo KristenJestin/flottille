@@ -267,6 +267,9 @@ jobs:
       # smaller thing to pack, upload and download twelve times. The same on every job that shares
       # this cache (the key follows the environment).
       CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      # The suite is CPU-bound: the workspace's crates at one level, as the dependencies are in
+      # Cargo.toml. The same on every job that shares this cache; not on `check`.
+      CARGO_PROFILE_DEV_OPT_LEVEL: 1
     steps:
       - uses: actions/checkout@v4
       - uses: rui314/setup-mold@v1
@@ -366,6 +369,7 @@ jobs:
     env:
       CARGO_INCREMENTAL: 0
       CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_DEV_OPT_LEVEL: 1
       # Names of test binaries and crates, nothing else (the script keeps only those).
       SELECTED: ${{ needs.changes.outputs.selected }}
     steps:
@@ -422,6 +426,7 @@ jobs:
     env:
       CARGO_INCREMENTAL: 0
       CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_DEV_OPT_LEVEL: 1
     steps:
       - uses: actions/checkout@v4
       - uses: rui314/setup-mold@v1
