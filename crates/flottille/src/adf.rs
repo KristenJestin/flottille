@@ -806,6 +806,20 @@ mod tests {
     }
 
     #[test]
+    fn a_mention_read_in_a_comment_keeps_its_account_id() {
+        let adf = json!({"type": "doc", "version": 1, "content": [{"type": "paragraph",
+            "content": [{"type": "text", "text": "Hi "},
+                {"type": "mention", "attrs": {"id": "5b10ac8d82e05b22cc7d4ef5",
+                    "text": "@Ana Example"}}]}]});
+        assert_eq!(
+            to_markdown(&adf),
+            "Hi [@Ana Example](mention:5b10ac8d82e05b22cc7d4ef5)"
+        );
+        // What was read is what is written back: the same node.
+        assert_eq!(from_markdown(&to_markdown(&adf)), adf);
+    }
+
+    #[test]
     fn a_mention_link_is_a_mention_node_and_an_at_name_stays_text() {
         let adf = from_markdown("Hi [@Ana Example](mention:5b10ac8d82e05b22cc7d4ef5), and @Ben");
         assert_eq!(
