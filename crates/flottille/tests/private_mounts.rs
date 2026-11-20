@@ -198,11 +198,24 @@ fn a_run_starts_where_user_namespaces_are_refused() {
         .with_env("FLOTTILLE_TEST_NO_USER_NAMESPACES", "1");
     let (mcp, place) = session(&user);
 
-    let out = ran(&mcp, &place, "out['started'] = True");
+    let out = ran(
+        &mcp,
+        &place,
+        "out['started'] = True\nout['namespace'] = os.readlink('/proc/self/ns/mnt')\n",
+    );
 
     assert_eq!(out["started"], true, "{out}");
-    // The gap is said where the sandbox's state is.
-    let doctor = user.run(&["doctor", "--json"]);
+    // The refusal was played: the run is in the mount namespace of the test, and so of the
+    // daemon, not in one of its own.
+    let ours = std::fs::read_link("/proc/self/ns/mnt").unwrap();
+    assert_eq!(out["namespace"], ours.to_str().unwrap(), "{out}");
+    // The gap is said where the sandbox's state is: the daemon's, not the command line's, which
+    // is not given the variable.
+    let doctor = user
+        .command(&["doctor", "--json"])
+        .env_remove("FLOTTILLE_TEST_NO_USER_NAMESPACES")
+        .output()
+        .unwrap();
     let report: Value = serde_json::from_slice(&doctor.stdout).unwrap();
     assert_eq!(report["sandbox"]["private_mounts"], false, "{report}");
     assert!(
@@ -380,4 +393,285 @@ fn a_run_still_reads_ssh() {
 
     assert_eq!(out["config"], "Host forge\n  User git\n", "{out}");
     assert_eq!(out["known_hosts"], "forge ssh-ed25519 AAAA\n", "{out}");
+}
+
+/// The error number of a change to a mount point: what cannot be renamed nor removed.
+const PINNED: i64 = libc::EBUSY as i64;
+
+/// `~/.ssh/config` of the test's home including `dots/conf.d/*.conf` (`forge.conf` is there) and
+/// `dots/later/forge.conf`, which is not there yet.
+fn included_from_dots(user: &User) {
+    let ssh = user.path("home/.ssh");
+    std::fs::create_dir_all(&ssh).unwrap();
+    std::fs::create_dir_all(user.path("dots/conf.d")).unwrap();
+    std::fs::create_dir_all(user.path("dots/later")).unwrap();
+    std::fs::write(user.path("dots/conf.d/forge.conf"), "Host forge\n").unwrap();
+    std::fs::write(
+        ssh.join("config"),
+        format!(
+            "Include {}/conf.d/*.conf\nInclude {}/later/forge.conf\n",
+            user.path("dots").display(),
+            user.path("dots").display()
+        ),
+    )
+    .unwrap();
+}
+
+#[test]
+fn a_run_cannot_rename_a_folder_on_the_way_to_an_included_file() {
+    if skipped_without_user_namespaces() {
+        return;
+    }
+    let user = User::with_fake_agent().with_allowing_judge();
+    included_from_dots(&user);
+    let (mcp, place) = session(&user);
+    let at = |sub: &str| py_path(&user.path(sub));
+
+    let out = ran(
+        &mcp,
+        &place,
+        &[
+            attempt(
+                "dots",
+                &format!("os.rename({}, {})", at("dots"), at("dots-old")),
+            ),
+            attempt(
+                "folder",
+                &format!("os.rename({}, {})", at("dots/conf.d"), at("dots/old")),
+            ),
+            attempt("remove", &format!("os.rmdir({})", at("dots/later"))),
+            // A folder beside them is the run's.
+            attempt("beside", &format!("os.mkdir({})", at("dots/other"))),
+        ]
+        .concat(),
+    );
+
+    assert_eq!(out["dots"], PINNED, "{out}");
+    assert_eq!(out["folder"], PINNED, "{out}");
+    assert_ne!(out["remove"], "done", "{out}");
+    assert_eq!(out["beside"], "done", "{out}");
+}
+
+#[test]
+fn a_run_cannot_add_a_file_to_an_included_folder() {
+    if skipped_without_user_namespaces() {
+        return;
+    }
+    let user = User::with_fake_agent().with_allowing_judge();
+    included_from_dots(&user);
+    let (mcp, place) = session(&user);
+
+    let out = ran(
+        &mcp,
+        &place,
+        &attempt(
+            "added",
+            &format!(
+                "open({}, 'w').write('ProxyCommand x')",
+                py_path(&user.path("dots/conf.d/evil.conf"))
+            ),
+        ),
+    );
+
+    assert_eq!(out["added"], READ_ONLY, "{out}");
+}
+
+#[test]
+fn a_run_cannot_create_a_missing_included_file() {
+    if skipped_without_user_namespaces() {
+        return;
+    }
+    let user = User::with_fake_agent().with_allowing_judge();
+    included_from_dots(&user);
+    let (mcp, place) = session(&user);
+
+    let out = ran(
+        &mcp,
+        &place,
+        &attempt(
+            "created",
+            &format!(
+                "open({}, 'w').write('ProxyCommand x')",
+                py_path(&user.path("dots/later/forge.conf"))
+            ),
+        ),
+    );
+
+    assert_eq!(out["created"], READ_ONLY, "{out}");
+}
+
+#[test]
+fn a_run_cannot_replace_the_ssh_link() {
+    if skipped_without_user_namespaces() {
+        return;
+    }
+    let user = User::with_fake_agent().with_allowing_judge();
+    let ssh = linked_ssh(&user);
+    let (mcp, place) = session(&user);
+
+    let out = ran(
+        &mcp,
+        &place,
+        &[
+            attempt("remove", &format!("os.remove({})", py_path(&ssh))),
+            attempt(
+                "rename",
+                &format!(
+                    "os.rename({}, {})",
+                    py_path(&ssh),
+                    py_path(&user.path("home/old"))
+                ),
+            ),
+            format!(
+                "out['config'] = open({}).read()\n",
+                py_path(&ssh.join("config"))
+            ),
+        ]
+        .concat(),
+    );
+
+    assert_eq!(out["remove"], PINNED, "{out}");
+    assert_eq!(out["rename"], PINNED, "{out}");
+    // The link still leads where it did.
+    assert_eq!(out["config"], "Host forge\n  User git\n", "{out}");
+}
+
+/// What `flottille doctor` says of the SSH agent: the daemon's `sandbox.ssh_agent`.
+fn ssh_agent_said(user: &User) -> Value {
+    let doctor = user.run(&["doctor", "--json"]);
+    let report: Value = serde_json::from_slice(&doctor.stdout).unwrap();
+    report["sandbox"]["ssh_agent"].clone()
+}
+
+#[test]
+fn the_ssh_agent_is_lent_to_nothing_where_an_include_s_folder_is_missing() {
+    let user = User::with_fake_agent();
+    let ssh = user.path("home/.ssh");
+    std::fs::create_dir_all(&ssh).unwrap();
+    std::fs::write(ssh.join("config"), "Host forge\n").unwrap();
+    assert_eq!(
+        ssh_agent_said(&user)["lent"],
+        true,
+        "{}",
+        ssh_agent_said(&user)
+    );
+
+    // A folder a run could make, and then the file in it.
+    std::fs::write(
+        ssh.join("config"),
+        format!("Include {}/nowhere/*.conf\n", user.path("dots").display()),
+    )
+    .unwrap();
+
+    let said = ssh_agent_said(&user);
+    assert_eq!(said["lent"], false, "{said}");
+    assert!(said["why"].to_string().contains("nowhere"), "{said}");
+}
+
+#[test]
+fn the_ssh_agent_is_lent_to_nothing_where_an_include_is_in_the_home_itself() {
+    let user = User::with_fake_agent();
+    let ssh = user.path("home/.ssh");
+    std::fs::create_dir_all(&ssh).unwrap();
+    std::fs::write(ssh.join("config"), "Include ~/forge.conf\n").unwrap();
+
+    let said = ssh_agent_said(&user);
+
+    assert_eq!(said["lent"], false, "{said}");
+    assert!(said["why"].to_string().contains("forge.conf"), "{said}");
+    let doctor = user.run(&["doctor", "--json"]);
+    let report: Value = serde_json::from_slice(&doctor.stdout).unwrap();
+    assert!(
+        report["warnings"].to_string().contains("forge.conf"),
+        "{report}"
+    );
+}
+
+/// The most memory the process `pid` has held, in bytes.
+fn peak_memory(pid: u32) -> u64 {
+    let status = std::fs::read_to_string(format!("/proc/{pid}/status")).unwrap();
+    let line = status
+        .lines()
+        .find(|line| line.starts_with("VmHWM:"))
+        .unwrap();
+    let kib: u64 = line.split_whitespace().nth(1).unwrap().parse().unwrap();
+    kib * 1024
+}
+
+#[test]
+fn a_fifo_or_a_huge_file_in_an_include_does_not_hold_a_run() {
+    let user = User::with_fake_agent().with_allowing_judge();
+    let ssh = user.path("home/.ssh");
+    std::fs::create_dir_all(&ssh).unwrap();
+    let (mcp, place) = session(&user);
+    let pipe = user.path("dots/pipe");
+    let huge = user.path("dots/huge");
+    std::fs::create_dir_all(user.path("dots")).unwrap();
+    let c = std::ffi::CString::new(pipe.to_str().unwrap()).unwrap();
+    // SAFETY: a valid C string.
+    assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+    // Sparse: nothing is written to the disk.
+    std::fs::File::create(&huge)
+        .unwrap()
+        .set_len(512 << 20)
+        .unwrap();
+    std::fs::write(
+        ssh.join("config"),
+        format!("Include {} {}\n", pipe.display(), huge.display()),
+    )
+    .unwrap();
+    // Whatever waits on the pipe is let go after a while, so that a failure is a failure and
+    // not a test that never ends.
+    let freeing = pipe.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(20));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            use std::os::unix::fs::OpenOptionsExt;
+            if std::fs::OpenOptions::new()
+                .write(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .open(&freeing)
+                .is_ok()
+            {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    });
+    let pid = daemon_pid(&user);
+    let started = Instant::now();
+
+    let out = ran(&mcp, &place, "out['started'] = True");
+
+    assert_eq!(out["started"], true, "{out}");
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "the run took {:?}",
+        started.elapsed()
+    );
+    assert!(
+        peak_memory(pid) < 300 << 20,
+        "the daemon held {} bytes",
+        peak_memory(pid)
+    );
+}
+
+#[test]
+fn a_run_cannot_connect_to_a_session_bus_outside_the_runtime_folder() {
+    if skipped_without_user_namespaces() {
+        return;
+    }
+    let bus_folder = tempfile::tempdir().unwrap();
+    let bus = bus_folder.path().join("dbus-test");
+    let _listening = std::os::unix::net::UnixListener::bind(&bus).unwrap();
+    let user = User::with_fake_agent().with_allowing_judge().with_env(
+        "DBUS_SESSION_BUS_ADDRESS",
+        &format!("unix:path={},guid=0123456789abcdef", bus.display()),
+    );
+    let (mcp, place) = session(&user);
+
+    let out = ran(&mcp, &place, &connect("bus", bus.to_str().unwrap()));
+
+    assert_ne!(out["bus"], "connected", "{out}");
 }

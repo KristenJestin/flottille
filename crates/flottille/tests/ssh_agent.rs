@@ -28,6 +28,8 @@ fn user() -> (User, UnixListener, UnixListener) {
 /// `user`, the agent listening at `agent`.
 fn user_with(agent: &str) -> (User, UnixListener, UnixListener) {
     let user = User::with_fake_agent().with_allowing_judge();
+    // The agent is lent only where the user's `~/.ssh` is there to be made read-only.
+    std::fs::create_dir_all(user.path("home/.ssh")).unwrap();
     let at = user.path(agent);
     std::fs::create_dir_all(at.parent().unwrap()).unwrap();
     let listening = UnixListener::bind(&at).unwrap();
@@ -376,6 +378,42 @@ fn an_allowed_push_reaches_the_users_ssh_agent() {
     assert!(remote_has(&user, "allowed"));
     let reached = format!("reached {}", socket(&user).display());
     assert!(ssh_said(&user).contains(&reached), "{:?}", ssh_said(&user));
+}
+
+#[test]
+fn an_allowed_push_gets_no_ssh_agent_where_an_include_cannot_be_made_read_only() {
+    let (user, _agent, _bus) = user();
+    // A file of the home itself, which a run writes.
+    std::fs::write(user.path("home/.ssh/config"), "Include ~/forge.conf\n").unwrap();
+    let mcp = session(&user, SSH_REMOTE);
+
+    let pushed = done(mcp.call(
+        "run",
+        json!({"line": "git push origin HEAD:refs/heads/unlent"}),
+    ));
+
+    assert!(pushed.contains("exited with code 0"), "{pushed}");
+    assert!(
+        ssh_said(&user).contains(&"no agent".to_owned()),
+        "{:?}",
+        ssh_said(&user)
+    );
+    let reached = format!("reached {}", socket(&user).display());
+    assert!(!ssh_said(&user).contains(&reached), "{:?}", ssh_said(&user));
+}
+
+#[test]
+fn the_daemon_s_fetch_gets_no_ssh_agent_where_an_include_cannot_be_made_read_only() {
+    let (user, _agent, _bus) = user();
+    std::fs::write(user.path("home/.ssh/config"), "Include ~/forge.conf\n").unwrap();
+
+    project(&user, SSH_REMOTE);
+
+    created(&user);
+
+    assert!(!ssh_said(&user).is_empty(), "the daemon fetched nothing");
+    let reached = format!("reached {}", lent(&user).display());
+    assert!(!ssh_said(&user).contains(&reached), "{:?}", ssh_said(&user));
 }
 
 #[test]
