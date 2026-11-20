@@ -1055,7 +1055,7 @@ fn a_line_s_changelog_lists_its_commits_since_its_previous_tag() {
 // The archive.
 
 /// `tools/package.sh <version> <binary> <folder>`: the archive and its sum, in `folder`.
-fn package(version: &str, binary: &Path, out: &Path) -> Output {
+pub(crate) fn package(version: &str, binary: &Path, out: &Path) -> Output {
     Command::new(tool("tools/package.sh"))
         .args([version, binary.to_str().unwrap(), out.to_str().unwrap()])
         .output()
@@ -1064,7 +1064,7 @@ fn package(version: &str, binary: &Path, out: &Path) -> Output {
 
 /// The SHA-256 of a file. It is read in chunks: the `flottille` binary weighs over a gigabyte in
 /// a debug build and the tests run side by side, so none of them may hold it whole.
-fn sha256(path: impl AsRef<Path>) -> String {
+pub(crate) fn sha256(path: impl AsRef<Path>) -> String {
     let mut file = std::fs::File::open(path).unwrap();
     let mut hasher = Sha256::new();
     let mut chunk = vec![0; 1 << 20];
@@ -1179,16 +1179,16 @@ fn the_archive_holds_the_binary_both_licences_and_the_desktop_files_with_its_sum
 
 /// A local server standing for GitHub: the releases' API under `/repos/o/r/` and their assets
 /// under `/download/<tag>/`. Each request's path is noted.
-struct Releases {
+pub(crate) struct Releases {
     base: String,
     files: Arc<Mutex<HashMap<String, Vec<u8>>>>,
-    asked: Arc<Mutex<Vec<String>>>,
+    pub(crate) asked: Arc<Mutex<Vec<String>>>,
     /// Each release made is published a second after the previous one.
     published: AtomicUsize,
 }
 
 impl Releases {
-    fn serve() -> Releases {
+    pub(crate) fn serve() -> Releases {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         let files: Arc<Mutex<HashMap<String, Vec<u8>>>> = Arc::default();
@@ -1234,18 +1234,18 @@ impl Releases {
     }
 
     /// The API's base, as `FLOTTILLE_RELEASES` takes it.
-    fn api(&self) -> String {
+    pub(crate) fn api(&self) -> String {
         format!("{}/repos/o/r", self.base)
     }
 
-    fn put(&self, path: &str, body: Vec<u8>) {
+    pub(crate) fn put(&self, path: &str, body: Vec<u8>) {
         self.files.lock().unwrap().insert(path.to_owned(), body);
     }
 
     /// The list the API answers in GitHub's own layout, not `list`'s short one: `author` before
     /// the tag, `published_at` (`null` on a draft) before the assets, an `uploader` object in each
     /// asset, and a body of commas and escaped quotes at the end.
-    fn list_as_github(&self, releases: &[&serde_json::Value]) {
+    pub(crate) fn list_as_github(&self, releases: &[&serde_json::Value]) {
         let each: Vec<String> = releases
             .iter()
             .map(|r| {
@@ -1278,7 +1278,7 @@ impl Releases {
 
     /// The list of releases the API gives, with each one's keys in GitHub's order (the tag, then
     /// when it was published, then its assets), which `install.sh` reads without a JSON parser.
-    fn list(&self, releases: &[&serde_json::Value]) {
+    pub(crate) fn list(&self, releases: &[&serde_json::Value]) {
         let each: Vec<String> = releases
             .iter()
             .map(|r| {
@@ -1297,7 +1297,7 @@ impl Releases {
     /// A release of that tag, holding the archive of `binary` at `version` and its sum (`sum`
     /// in place of the right one when given). Its API entry, which is also what the tag's own
     /// address answers.
-    fn release(
+    pub(crate) fn release(
         &self,
         tag: &str,
         version: &str,
@@ -1335,7 +1335,7 @@ impl Releases {
 }
 
 /// A program that says the version it stands for, as `flottille --version` does.
-fn standing_for(dir: &Path, version: &str) -> PathBuf {
+pub(crate) fn standing_for(dir: &Path, version: &str) -> PathBuf {
     let path = dir.join(format!("flottille-{version}"));
     std::fs::write(
         &path,
@@ -3083,7 +3083,7 @@ fn the_branch_name_is_sanitised_the_same_way_everywhere() {
 // `flottille update`.
 
 /// Flottille's binary in a folder of its own, the one `update` replaces.
-struct Installed {
+pub(crate) struct Installed {
     _folder: tempfile::TempDir,
     path: PathBuf,
 }
@@ -3112,7 +3112,7 @@ impl AsRef<std::ffi::OsStr> for Installed {
 /// in a debug build, and /tmp may be a small tmpfs. `update` renames the new binary over this
 /// name, so the real one is left as it is. The folder is where cargo keeps the tests' scratch
 /// files, on the file system of the build: a link cannot cross to /tmp.
-fn installed() -> Installed {
+pub(crate) fn installed() -> Installed {
     let folder = tempfile::Builder::new()
         .tempdir_in(env!("CARGO_TARGET_TMPDIR"))
         .unwrap();
@@ -3811,7 +3811,7 @@ fn going_to_a_lower_version_needs_force() {
 }
 
 /// The version this test build says, `0.1.0` in `flottille 0.1.0 (local, …)`.
-fn this_version() -> String {
+pub(crate) fn this_version() -> String {
     let said = Command::new(env!("CARGO_BIN_EXE_flottille"))
         .arg("--version")
         .output()
@@ -3824,7 +3824,7 @@ fn this_version() -> String {
 }
 
 /// A stable release at `version` only.
-fn stable_at(releases: &Releases, programs: &Path, version: &str) {
+pub(crate) fn stable_at(releases: &Releases, programs: &Path, version: &str) {
     let stable = releases.release(
         &format!("v{version}"),
         version,
