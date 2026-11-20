@@ -5,8 +5,8 @@
 //! daemon with the fake ACP agent and the fake MCP server (`crates/flottille-fake-mcp`): no real
 //! server, the in-memory keyring, temporary folders, no window on a screen.
 
-mod common;
-mod guard;
+use crate::common;
+use crate::guard;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

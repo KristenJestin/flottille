@@ -2,7 +2,7 @@
 //! minutes with its reason, and a delivery wakes it then, a subscription whose source is a timer.
 //! The fake ACP agent, temporary folders, and the clock the test moves: nobody waits for real.
 
-mod common;
+use crate::common;
 
 use std::time::{Duration, Instant};
 

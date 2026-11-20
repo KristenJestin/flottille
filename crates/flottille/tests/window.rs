@@ -2,7 +2,7 @@
 //! whose agents are the fake ACP agent, with a throwaway user (temporary home and XDG folders).
 //! No window opens on a screen.
 
-mod common;
+use crate::common;
 
 use flottille_window::state::AgentState;
 use std::path::PathBuf;

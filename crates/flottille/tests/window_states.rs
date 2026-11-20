@@ -2,7 +2,7 @@
 //! state change on a shared model updates every component reading it", "with nothing running or
 //! waiting, no frame is requested after the animations end".
 
-mod kit_common;
+use crate::kit_common;
 
 use std::time::Duration;
 

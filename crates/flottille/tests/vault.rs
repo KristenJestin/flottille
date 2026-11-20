@@ -3,7 +3,7 @@
 //! tests' configuration chooses (`User::new`): the user's own keyring is never reached. No real
 //! agent ever runs here.
 
-mod common;
+use crate::common;
 
 use std::path::Path;
 use std::time::{Duration, Instant};

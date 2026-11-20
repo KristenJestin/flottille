@@ -3,7 +3,7 @@
 //! platform in front of a real daemon in temporary folders, its providers the fake ones. No window
 //! opens on a screen.
 
-mod common;
+use crate::common;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};

@@ -4,7 +4,7 @@
 //! with a throwaway user and rmcp's client in place of the agent's own. No window opens on a
 //! screen.
 
-mod common;
+use crate::common;
 
 use std::path::PathBuf;
 use std::sync::Arc;

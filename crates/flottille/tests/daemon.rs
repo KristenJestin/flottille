@@ -1,6 +1,6 @@
 //! The scenarios of the daemon's skeleton, against the real binary, with temporary XDG folders.
 
-mod common;
+use crate::common;
 
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::os::unix::process::CommandExt;

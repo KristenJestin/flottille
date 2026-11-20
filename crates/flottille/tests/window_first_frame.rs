@@ -3,7 +3,7 @@
 //! the test lets it, with a throwaway user whose desktop is described by temporary files. No window
 //! opens on a screen.
 
-mod common;
+use crate::common;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};

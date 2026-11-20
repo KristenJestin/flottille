@@ -3,7 +3,7 @@
 //! against a local server standing for the releases, in a throwaway home. Nothing here talks to
 //! GitHub; what only a real push proves is said in `docs/releases.md`.
 
-mod common;
+use crate::common;
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -4722,6 +4722,17 @@ fn the_suite_runs_only_when_the_decision_does_not_say_otherwise() {
 /// repository's files, `changed` are written over (or added to) them and `deleted` removed, in the
 /// pull request's one commit, whose description is `body`.
 fn selected_tests(base: &[&str], changed: &[&str], deleted: &[&str], body: &str) -> String {
+    let output = selection(base, changed, deleted, body);
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
+}
+
+/// The whole output of `.github/scripts/pr-tests.sh` (its notices and warnings are on stderr).
+fn selection(
+    base: &[&str],
+    changed: &[&str],
+    deleted: &[&str],
+    body: &str,
+) -> std::process::Output {
     let repo = Repo::new();
     // A file is `path`, or `path::text` when the text it holds matters.
     let write = |paths: &[&str], content: &str| {
@@ -4753,7 +4764,7 @@ fn selected_tests(base: &[&str], changed: &[&str], deleted: &[&str], body: &str)
         .output()
         .unwrap();
     assert!(output.status.success(), "{output:?}");
-    String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    output
 }
 
 #[test]
@@ -4795,6 +4806,194 @@ fn a_pull_request_runs_a_grouped_binary_for_any_file_of_its_folder() {
     assert_eq!(
         selected_tests(&base, &["crates/flottille/tests/common/mod.rs"], &[], ""),
         ""
+    );
+}
+
+/// The files of a crate with grouped test binaries: `Cargo.toml` names the binaries, each main of
+/// `tests/group/` declares the files it holds (`#1106`).
+fn grouped_crate() -> Vec<&'static str> {
+    vec![
+        "crates/flottille/Cargo.toml::[package]\nname = \"flottille\"\n\n[[test]]\nname = \"group_window_session\"\npath = \"tests/group/window_session.rs\"\n\n[[test]]\nname = \"group_agents\"\npath = \"tests/group/agents.rs\"\n",
+        "crates/flottille/tests/group/window_session.rs::#[path = \"../common/mod.rs\"]\nmod common;\n#[path = \"../window_conversation.rs\"]\nmod window_conversation;\n#[path = \"../window_cards.rs\"]\nmod window_cards;\n",
+        "crates/flottille/tests/group/agents.rs::#[path = \"../common/mod.rs\"]\nmod common;\n#[path = \"../agents.rs\"]\nmod agents;\n",
+        "crates/flottille/tests/common/mod.rs",
+        "crates/flottille/tests/window_conversation.rs",
+        "crates/flottille/tests/window_cards.rs",
+        "crates/flottille/tests/agents.rs",
+        "crates/flottille/tests/orphan.rs",
+        "crates/flottille-core/tests/families.rs",
+    ]
+}
+
+#[test]
+fn a_pull_request_runs_only_the_file_it_changes_of_a_grouped_binary() {
+    let base = grouped_crate();
+    assert_eq!(
+        selected_tests(
+            &base,
+            &["crates/flottille/tests/window_conversation.rs"],
+            &[],
+            ""
+        ),
+        "--test group_window_session -E binary(=group_window_session)&(test(/^window_conversation::/))"
+    );
+    // Two files of one binary share its filter; a file of another binary has its own, and a binary
+    // of another crate, run whole, is in the same expression.
+    assert_eq!(
+        selected_tests(
+            &base,
+            &[
+                "crates/flottille/tests/window_conversation.rs",
+                "crates/flottille/tests/agents.rs",
+                "crates/flottille/tests/window_cards.rs",
+                "crates/flottille-core/tests/families.rs",
+            ],
+            &[],
+            ""
+        ),
+        "--test families --test group_agents --test group_window_session -E \
+binary(=group_agents)&(test(/^agents::/))|\
+binary(=group_window_session)&(test(/^window_cards::/)|test(/^window_conversation::/))|\
+binary(=families)"
+    );
+}
+
+/// The `#[path = "../<name>.rs"]` files each group main of `tests/group/` declares: `(group, file)`.
+fn declared_by_the_groups() -> Vec<(String, String)> {
+    let tests = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
+    let mut declared = Vec::new();
+    for entry in std::fs::read_dir(tests.join("group")).unwrap() {
+        let main = entry.unwrap().path();
+        let group = main.file_stem().unwrap().to_string_lossy().into_owned();
+        for line in std::fs::read_to_string(&main).unwrap().lines() {
+            if let Some(path) = line
+                .strip_prefix("#[path = \"../")
+                .and_then(|rest| rest.strip_suffix("\"]"))
+            {
+                declared.push((group.clone(), path.to_owned()));
+            }
+        }
+    }
+    declared
+}
+
+#[test]
+fn every_test_file_is_declared_by_exactly_one_group() {
+    // `autotests = false`: a file no group declares is never built nor run, and nothing says so.
+    let tests = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
+    let declared = declared_by_the_groups();
+    let mut missing = Vec::new();
+    let mut twice = Vec::new();
+    for entry in std::fs::read_dir(&tests).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_none_or(|ext| ext != "rs") {
+            continue;
+        }
+        let file = path.file_name().unwrap().to_string_lossy().into_owned();
+        let groups: Vec<&str> = declared
+            .iter()
+            .filter(|(_, declared)| *declared == file)
+            .map(|(group, _)| group.as_str())
+            .collect();
+        let stem = file.trim_end_matches(".rs");
+        match groups.len() {
+            0 => missing.push(format!(
+                "tests/{file} is declared by no group, so it is never built nor run: add \
+                 `#[path = \"../{file}\"]` and `mod {stem};` to the group in tests/group/ that fits \
+                 (AGENTS.md, \"Adding a test file\")"
+            )),
+            1 => {}
+            _ => twice.push(format!(
+                "tests/{file} is declared by {} groups ({}): keep one",
+                groups.len(),
+                groups.join(", ")
+            )),
+        }
+    }
+    assert!(missing.is_empty(), "{}", missing.join("\n"));
+    assert!(twice.is_empty(), "{}", twice.join("\n"));
+}
+
+#[test]
+fn every_path_a_group_declares_is_a_file_that_exists() {
+    let tests = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
+    let gone: Vec<String> = declared_by_the_groups()
+        .into_iter()
+        .filter(|(_, file)| !tests.join("group").join("..").join(file).exists())
+        .map(|(group, file)| {
+            format!("tests/group/{group}.rs declares ../{file}, which does not exist")
+        })
+        .collect();
+    assert!(gone.is_empty(), "{}", gone.join("\n"));
+}
+
+#[test]
+fn a_file_a_group_does_not_declare_selects_no_test() {
+    let base = grouped_crate();
+    assert_eq!(
+        selected_tests(&base, &["crates/flottille/tests/orphan.rs"], &[], ""),
+        ""
+    );
+    // The helpers every group shares are no test either: a change of them selects nothing (the
+    // description says what to run, `Tests:`).
+    assert_eq!(
+        selected_tests(&base, &["crates/flottille/tests/common/mod.rs"], &[], ""),
+        ""
+    );
+}
+
+#[test]
+fn a_changed_test_file_no_group_declares_is_a_warning_not_a_notice() {
+    let output = selection(
+        &grouped_crate(),
+        &["crates/flottille/tests/orphan.rs"],
+        &[],
+        "",
+    );
+    let said = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        said.contains("::warning::crates/flottille/tests/orphan.rs is declared by no group"),
+        "{said}"
+    );
+    assert!(said.contains("#[path = \"../orphan.rs\"]"), "{said}");
+}
+
+#[test]
+fn a_file_a_group_gains_is_run_and_the_rest_of_its_main_is_not() {
+    let base = grouped_crate();
+    // The main of the group now declares one more file: that file's tests run, not the group's.
+    let main = "crates/flottille/tests/group/agents.rs::#[path = \"../common/mod.rs\"]\nmod common;\n#[path = \"../agents.rs\"]\nmod agents;\n#[path = \"../orphan.rs\"]\nmod orphan;\n";
+    assert_eq!(
+        selected_tests(&base, &[main, "crates/flottille/tests/orphan.rs"], &[], ""),
+        "--test group_agents -E binary(=group_agents)&(test(/^orphan::/))"
+    );
+    // The main changed and no file with it, a file moved there from another group.
+    assert_eq!(
+        selected_tests(&base, &[main], &[], ""),
+        "--test group_agents -E binary(=group_agents)&(test(/^orphan::/))"
+    );
+    // A main that only lost a line selects nothing.
+    let less = "crates/flottille/tests/group/window_session.rs::#[path = \"../common/mod.rs\"]\nmod common;\n#[path = \"../window_cards.rs\"]\nmod window_cards;\n";
+    assert_eq!(selected_tests(&base, &[less], &[], ""), "");
+}
+
+#[test]
+fn the_tests_line_names_a_grouped_file_or_a_group() {
+    let base = grouped_crate();
+    // A file's name, as the issues and the descriptions of before the groups say it.
+    assert_eq!(
+        selected_tests(&base, &["docs/a.md"], &[], "Tests: window_conversation"),
+        "--test group_window_session -E binary(=group_window_session)&(test(/^window_conversation::/))"
+    );
+    // A group's name runs the whole binary, and a file of it adds nothing to it.
+    assert_eq!(
+        selected_tests(
+            &base,
+            &["crates/flottille/tests/window_cards.rs"],
+            &[],
+            "Tests: group_window_session"
+        ),
+        "--test group_window_session -E binary(=group_window_session)"
     );
 }
 

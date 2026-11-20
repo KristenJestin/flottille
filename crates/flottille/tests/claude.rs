@@ -1,7 +1,7 @@
 //! The scenarios of agents run over ACP, end to end: the daemon starts Flottille's Claude bridge,
 //! which drives the fake `claude` (`crates/flottille-fake-claude`). No real agent ever runs here.
 
-mod common;
+use crate::common;
 
 use std::os::unix::fs::DirBuilderExt;
 use std::path::PathBuf;

@@ -4,7 +4,7 @@
 //! allowed. Against the real daemon with the fake ACP agent, throwaway repositories and temporary
 //! XDG folders.
 
-mod common;
+use crate::common;
 
 use std::time::{Duration, Instant};
 

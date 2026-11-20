@@ -6,7 +6,7 @@
 //! The tests act as the review's agents through each one's own MCP token, as the fake agent
 //! would, while the fake agent keeps each of them mid-turn.
 
-mod common;
+use crate::common;
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};

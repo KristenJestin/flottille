@@ -7,7 +7,7 @@
 //! number, beside `id`, `author`, `body` and `created`), the vault's keyring the daemon's memory,
 //! and `acli` and `gh` the fakes: no test reaches a site, the user's keyring or anyone's sign-in.
 
-mod common;
+use crate::common;
 
 use std::io::{Read, Write};
 use std::net::TcpListener;

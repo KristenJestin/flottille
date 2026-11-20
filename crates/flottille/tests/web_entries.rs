@@ -5,7 +5,7 @@
 //! API and another site; the vault's keyring is the daemon's memory; the agents are fake ACP
 //! agents, in throwaway repositories and temporary XDG folders.
 
-mod common;
+use crate::common;
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};

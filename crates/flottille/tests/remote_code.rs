@@ -5,7 +5,7 @@
 //! and throwaway repositories. `agent_launch` is not built yet: the test build's `test.travel`
 //! and `test.travel_back` start what a launch will.
 
-mod common;
+use crate::common;
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::SocketAddr;

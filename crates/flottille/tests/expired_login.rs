@@ -2,7 +2,7 @@
 //! not end the session, and a failed root whose session is known can be resumed (#631). Against
 //! the fake agent, scripted to answer a prompt with Claude's own sign-in error.
 
-mod common;
+use crate::common;
 
 use common::User;
 use serde_json::{Value, json};

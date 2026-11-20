@@ -2,7 +2,7 @@
 //! agents are the fake ACP agent: unfolded it takes a maximum height and scrolls inside itself, and
 //! its rows come in the order the sessions ended. No window opens on a screen.
 
-mod common;
+use crate::common;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};

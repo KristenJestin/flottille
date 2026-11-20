@@ -1,7 +1,7 @@
 //! The scenarios of workspaces, asked of the daemon over its socket, with throwaway repositories,
 //! local bare remotes and temporary XDG folders.
 
-mod common;
+use crate::common;
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};

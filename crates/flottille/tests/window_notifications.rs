@@ -5,7 +5,7 @@
 //! platform in front of a real daemon whose agents are the fake ACP agent and whose `gh` is the
 //! fake one, with a throwaway user. No window opens on a screen.
 
-mod common;
+use crate::common;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};

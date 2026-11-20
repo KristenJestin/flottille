@@ -4,7 +4,7 @@
 //! list, the test makes them trust each other's key and gives the addresses they reach each other
 //! by, in the file the hub will keep (`remote/peers.json`).
 
-mod common;
+use crate::common;
 
 use std::time::{Duration, Instant};
 

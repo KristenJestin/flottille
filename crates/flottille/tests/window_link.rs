@@ -5,7 +5,7 @@
 //! Nothing opens by itself. On GPUI's test platform in front of a real daemon whose agents are the fake ACP agent,
 //! with a throwaway user. No window opens on a screen, and no link opens anywhere.
 
-mod common;
+use crate::common;
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};

@@ -5,7 +5,7 @@
 //! GPUI's test platform in front of a real daemon, with the fake ACP agent, the in-memory keyring,
 //! throwaway repositories and temporary XDG folders. No window opens on a screen.
 
-mod common;
+use crate::common;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};

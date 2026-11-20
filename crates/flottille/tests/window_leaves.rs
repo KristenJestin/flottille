@@ -3,7 +3,7 @@
 //! write to another, on both sessions' pages, and Withdraw takes it back through the daemon, its
 //! row folding away. No window opens on a screen.
 
-mod common;
+use crate::common;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};

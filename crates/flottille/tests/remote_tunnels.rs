@@ -5,7 +5,7 @@
 //! HTTP on the local port with a plain `TcpStream`. A test that sends a line to a daemon has the
 //! fake `sudo`, `doas`, `pkexec`, `su` and `run0` at the head of its `PATH` (`User::new`).
 
-mod common;
+use crate::common;
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};

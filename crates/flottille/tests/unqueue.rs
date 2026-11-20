@@ -2,7 +2,7 @@
 //! back, taken back to be edited, sent at once, and the race with the root reading them. Against
 //! the real daemon with the fake ACP agent; no real agent ever runs here.
 
-mod common;
+use crate::common;
 
 use std::time::{Duration, Instant};
 

@@ -5,7 +5,7 @@
 
 #![cfg(target_os = "linux")]
 
-mod common;
+use crate::common;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -167,7 +167,11 @@ fn a_killed_test_binary_leaves_no_daemon_nor_fake_server() {
     let told = tempfile::tempdir().unwrap();
     let file = told.path().join("folder");
     let mut binary = Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", "holds_a_daemon_and_a_server", "--test-threads=1"])
+        .args([
+            "--exact",
+            "no_leftovers::holds_a_daemon_and_a_server",
+            "--test-threads=1",
+        ])
         .env(HOLD, &file)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())

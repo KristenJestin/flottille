@@ -2,7 +2,7 @@
 //! its conversation with the tools its role has now (`docs/tools.md`, "When the tools change").
 //! Against the fake ACP agent, with throwaway repositories and temporary XDG folders.
 
-mod common;
+use crate::common;
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};

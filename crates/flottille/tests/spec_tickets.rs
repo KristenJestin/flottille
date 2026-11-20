@@ -6,7 +6,7 @@
 //! fake ACP agent, a fake `acli` and a fake `gh` recording their calls, temporary XDG folders,
 //! throwaway projects; no test calls Jira or GitHub.
 
-mod common;
+use crate::common;
 
 use std::time::{Duration, Instant};
 
