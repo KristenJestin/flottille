@@ -946,7 +946,10 @@ fn stubborn(folder: &Path, seconds: u32) -> Value {
 
 #[test]
 fn stopping_a_run_kills_after_the_grace_one_that_ignores_sigterm() {
-    let user = User::with_fake_agent().with_allowing_judge();
+    // A grace of two seconds, not five.
+    let user = User::with_fake_agent()
+        .with_allowing_judge()
+        .with_env("FLOTTILLE_TEST_RUN_GRACE_MS", "2000");
     let (mcp, folder) = session(&user);
     let run = run_id(&ok(mcp.call("run", stubborn(&folder, 300))));
     eventually("the shell's pid", || folder.join("pid-300").exists());
@@ -960,14 +963,14 @@ fn stopping_a_run_kills_after_the_grace_one_that_ignores_sigterm() {
     let asked = Instant::now();
     let stopped = ok(mcp.call("run_status", json!({"run": run, "action": "stop"})));
 
-    // It answers once the run ended: not before the 5 s of grace, since the term was ignored.
+    // It answers once the run ended: not before the 2 s of grace, since the term was ignored.
     assert!(
-        asked.elapsed() >= Duration::from_secs(4),
+        asked.elapsed() >= Duration::from_millis(1600),
         "{:?}",
         asked.elapsed()
     );
     assert!(
-        asked.elapsed() < Duration::from_secs(15),
+        asked.elapsed() < Duration::from_secs(6),
         "{:?}",
         asked.elapsed()
     );
@@ -977,7 +980,9 @@ fn stopping_a_run_kills_after_the_grace_one_that_ignores_sigterm() {
 
 #[test]
 fn a_daemon_that_stops_stops_its_runs_together_not_one_after_another() {
-    let user = User::with_fake_agent().with_allowing_judge();
+    let user = User::with_fake_agent()
+        .with_allowing_judge()
+        .with_env("FLOTTILLE_TEST_RUN_GRACE_MS", "2000");
     let (mcp, folder) = session(&user);
     let watch = user.watch(&["--after", "0"]);
     let runs: Vec<String> = [301, 302, 303]
@@ -999,9 +1004,9 @@ fn a_daemon_that_stops_stops_its_runs_together_not_one_after_another() {
     );
     let events = watch.until(|e| e["name"] == "daemon.stopping");
 
-    // Each takes the 5 s of grace: one after another would be 15 s.
+    // Each takes the 2 s of grace: one after another would be 6 s.
     assert!(
-        asked.elapsed() < Duration::from_secs(12),
+        asked.elapsed() < Duration::from_millis(4800),
         "{:?}",
         asked.elapsed()
     );
