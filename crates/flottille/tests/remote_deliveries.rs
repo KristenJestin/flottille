@@ -323,7 +323,8 @@ fn a_delivery_kept_thirty_days_is_dropped_with_an_inbox_entry() {
 fn the_pilot_stops_its_led_session_on_the_other_machine() {
     let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
     pc.wait_for_offer("server", 12);
-    let (_root, mcp) = pc.root("auto");
+    // In Full, its end is let through here as a session's it leads on this machine would be.
+    let (_root, mcp) = pc.root("full");
     let answer = launched(
         &mcp,
         json!({"kind": "led", "machine": "server", "title": "Finish the export",
@@ -344,4 +345,32 @@ fn the_pilot_stops_its_led_session_on_the_other_machine() {
         reason.as_str().unwrap_or_default().contains("led it"),
         "{reason}"
     );
+}
+
+#[test]
+fn a_child_whose_report_came_back_no_longer_counts_in_its_parent_s_cap() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    pc.register("max_children = 1");
+    script(
+        &server,
+        json!([{"when": "Write the tests of the export.", "times": 1, "do": [
+            {"hold": "release"},
+            {"mcp": {"tool": "report", "arguments": {"text": "Done with the tests."}}}
+        ]}]),
+    );
+    let (_child, _launch, mcp) = child_on_server(&pc, &server, "Write the tests of the export.");
+    let full = launched(
+        &mcp,
+        json!({"kind": "child", "title": "Local", "brief": "Here."}),
+    );
+    assert!(refused(&full).contains("its cap"), "{}", full.text);
+
+    release(&server);
+    prompted(&pc, "Done with the tests.");
+
+    let again = launched(
+        &mcp,
+        json!({"kind": "child", "title": "Local", "brief": "Here."}),
+    );
+    done(&again);
 }
