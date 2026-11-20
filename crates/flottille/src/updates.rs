@@ -103,6 +103,7 @@ fn shown(daemon: &Daemon) -> Value {
     let state = daemon.updates.state.lock().unwrap();
     let staged = binary().and_then(|binary| update::staged(&binary));
     let (channel, branch) = update::followed_now(paths);
+    let automatically = checks_automatically(paths);
     json!({
         "version": update::VERSION,
         "full": crate::VERSION,
@@ -110,12 +111,13 @@ fn shown(daemon: &Daemon) -> Value {
         "commit": commit(),
         "channel": channel,
         "branch": branch,
-        "check": match checks_automatically(paths) {
-            Ok(false) => "never",
-            _ => "automatically",
+        // A file that cannot be read means never: what the user wrote there is not overridden.
+        "check": match automatically {
+            Ok(true) => "automatically",
+            _ => "never",
         },
         "latest": state.latest,
-        "failed": state.failed,
+        "failed": automatically.err().or_else(|| state.failed.clone()),
         "checking": state.checking,
         "staged": staged,
         "downloading": state.downloading.map(|(done, total)| json!({"done": done, "total": total})),
@@ -135,7 +137,7 @@ fn changed(daemon: &Daemon) {
 /// the daemon.
 pub async fn watch(daemon: Arc<Daemon>, mut stopping: watch::Receiver<bool>) {
     loop {
-        if checks_automatically(&daemon.paths).unwrap_or(true) {
+        if checks_automatically(&daemon.paths).unwrap_or(false) {
             check(&daemon).await;
         }
         tokio::select! {
