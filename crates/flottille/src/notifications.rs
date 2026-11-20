@@ -256,7 +256,10 @@ fn seed(
             // `note` keeps one only while it is held for the user.
             "approval.requested" | "approval.forwarded" => true,
             "vault.asked" => !given.contains(&event.seq),
-            "agent.asked" => match root(daemon, event.data["agent"].as_str()) {
+            // An ended session sends no event that would resolve its question later.
+            "agent.asked" => match root(daemon, event.data["agent"].as_str())
+                .filter(|id| !is_final(daemon, id))
+            {
                 Some(id) => waiting
                     .entry(id.clone())
                     .or_insert_with(|| {
@@ -374,6 +377,12 @@ fn root(daemon: &Daemon, id: Option<&str>) -> Option<String> {
     let id = id?;
     let agent = daemon.read(|store| store.agent(id)).ok().flatten()?;
     agent.parent.is_none().then_some(agent.id)
+}
+
+/// Whether the session ended or failed.
+fn is_final(daemon: &Daemon, id: &str) -> bool {
+    let agent = daemon.read(|store| store.agent(id)).ok().flatten();
+    agent.is_some_and(|agent| agent.state.is_final())
 }
 
 /// Whether the request waits for the user: held by them, and nothing answered it.
