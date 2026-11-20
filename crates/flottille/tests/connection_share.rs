@@ -196,7 +196,15 @@ fn a_local_connection_is_refused_for_sharing() {
             json!({"name": "memo", "about": "A memo server.", "url": "http://127.0.0.1:9/mcp"}),
         )
         .unwrap();
-    for name in ["desk", "memo"] {
+    // An https:// address of this machine is its own too.
+    pc.user
+        .call(
+            "connection.add",
+            json!({"name": "loop", "about": "A loopback server.", "enabled": false,
+                "url": "https://localhost:9443/mcp"}),
+        )
+        .unwrap();
+    for name in ["desk", "memo", "loop"] {
         let output = pc
             .user
             .run(&["connection", "share", name, "--machine", "server"]);
