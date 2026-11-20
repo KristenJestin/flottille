@@ -586,6 +586,19 @@ fn session_send(grant: &Grant, args: &Value) -> Verdict {
     found.verdict(Kind::Action)
 }
 
+/// What the reason of a line that runs a pull request's code in the copy its review reads ends
+/// with: `asks_pull_request_code` finds it, and Full does not let it through.
+pub const PULL_REQUEST_CODE: &str = "in the copy its review reads: only the user lets a review run \
+    it, in every mode, Full included";
+
+/// Whether a held call runs the code of a pull request in its review's copy: held for the user in
+/// every mode, Full included, and never decided by the judge.
+pub fn asks_pull_request_code(ask: &Ask) -> bool {
+    ask.reasons
+        .iter()
+        .any(|reason| reason.contains(PULL_REQUEST_CODE))
+}
+
 /// What every reason of a verdict on a pull request ends with, whichever way it is given (the
 /// tool `forge`, a `gh` or a `bkt` line): `asks_review` finds it, and Full does not let it through.
 pub const REVIEW_VERDICT: &str = "only the user approves a pull request or asks for changes on \
@@ -1366,6 +1379,18 @@ fn run(call: &Call) -> Verdict {
             }
         }
     }
+    // The copy of a pull request a review reads is someone else's code: a line that does more
+    // than read there runs it, which only the user lets a review do, in every mode.
+    let copy = call
+        .paths
+        .first()
+        .and_then(|folder| pull_request_copy(call.own, folder))
+        .filter(|_| !reads || files);
+    if let Some((number, _)) = &copy {
+        found.base(format!(
+            "it runs the code of pull request #{number}, {PULL_REQUEST_CODE}"
+        ));
+    }
     if let Some((name, command)) = call.command {
         // A service runs in its own folder, never the project's.
         let service = call.tool == "services";
@@ -1412,6 +1437,14 @@ fn run(call: &Call) -> Verdict {
                 found.base(why);
                 continue;
             }
+            // Inside the copy of the pull request it runs in, Flottille's data folder holds the
+            // pull request's files: what the line does there is already held for the user.
+            if copy
+                .as_ref()
+                .is_some_and(|(_, folder)| inside_copy(folder, path))
+            {
+                continue;
+            }
             if let Some(why) = forbidden(call.own, call.grant.place.home.as_deref(), path, true) {
                 return Verdict::Deny(why);
             }
@@ -1452,6 +1485,42 @@ fn run(call: &Call) -> Verdict {
         }
     }
     found.verdict(Kind::Call)
+}
+
+/// The pull request whose copy `folder` is in, and the copy's folder: a place of Review's in
+/// Flottille's data folder, named after the pull request it holds (`reviews/pr<number>-…`).
+fn pull_request_copy(own: &[PathBuf], folder: &Resolved) -> Option<(u64, PathBuf)> {
+    let reviews = own.first()?.join("reviews");
+    let real = place::real_path(&reviews).ok();
+    [&folder.path, &folder.written]
+        .into_iter()
+        .find_map(|path| {
+            let (top, rest) = match path.strip_prefix(&reviews) {
+                Ok(rest) => (&reviews, rest),
+                Err(_) => (real.as_ref()?, path.strip_prefix(real.as_ref()?).ok()?),
+            };
+            let name = rest.iter().next()?;
+            let number = name
+                .to_str()?
+                .strip_prefix("pr")?
+                .split('-')
+                .next()?
+                .parse()
+                .ok()?;
+            Some((number, top.join(name)))
+        })
+}
+
+/// Whether `path`, both as written and where it leads, is inside the copy `folder` (never the
+/// copy itself).
+fn inside_copy(folder: &Path, path: &Resolved) -> bool {
+    let real = place::real_path(folder).ok();
+    [&path.path, &path.written].into_iter().all(|path| {
+        [Some(folder), real.as_deref()]
+            .into_iter()
+            .flatten()
+            .any(|folder| path.starts_with(folder) && path != folder)
+    })
 }
 
 /// A layer that deletes untracked files: where, the folders its `-C`s go to from the run's, and
@@ -5122,6 +5191,27 @@ mod tests {
             Fixture::new(Some("w"))
         }
 
+        /// The place of a review of pull request 7: a copy in Flottille's data folder, beside
+        /// another's (`pr8-x`) and the vault's folder, with a link in it to that folder.
+        fn copy() -> Fixture {
+            let mut fixture = Fixture::new(None);
+            let data = fixture.own[0].clone();
+            let copy = data.join("reviews/pr7-x");
+            for folder in [
+                copy.join("sub"),
+                data.join("reviews/pr8-x"),
+                data.join("vault"),
+            ] {
+                std::fs::create_dir_all(folder).unwrap();
+            }
+            std::os::unix::fs::symlink(&data, copy.join("link")).unwrap();
+            let copy = std::fs::canonicalize(copy).unwrap();
+            fixture.grant.place.root = copy.clone();
+            fixture.grant.place.repositories = vec![(".".into(), copy.clone())];
+            fixture.root = copy;
+            fixture
+        }
+
         fn main() -> Fixture {
             Fixture::new(None)
         }
@@ -5248,6 +5338,50 @@ mod tests {
 
     fn base_class(verdict: &Verdict) -> bool {
         matches!(verdict, Verdict::Ask(ask) if ask.class == Class::Base && !ask.reasons.is_empty())
+    }
+
+    #[test]
+    fn a_line_in_a_pull_request_s_copy_never_reaches_another_copy() {
+        let fixture = Fixture::copy();
+        let verdict = fixture.run("rm ../pr8-x/f");
+        assert!(denied(&verdict), "{verdict:?}");
+    }
+
+    #[test]
+    fn a_line_in_a_pull_request_s_copy_never_reaches_flottille_s_folder_through_a_link() {
+        let fixture = Fixture::copy();
+        let verdict = fixture.run("rm link/vault/f");
+        assert!(denied(&verdict), "{verdict:?}");
+    }
+
+    #[test]
+    fn a_line_in_a_pull_request_s_copy_never_climbs_out_of_it_by_dots() {
+        let fixture = Fixture::copy();
+        let verdict = fixture.run("rm sub/../../../vault");
+        assert!(denied(&verdict), "{verdict:?}");
+    }
+
+    #[test]
+    fn a_line_in_a_pull_request_s_copy_never_removes_the_copy_itself() {
+        let fixture = Fixture::copy();
+        let verdict = fixture.run("rm .");
+        assert!(denied(&verdict), "{verdict:?}");
+    }
+
+    #[test]
+    fn a_line_that_runs_in_a_pull_request_s_copy_is_held_as_base() {
+        let fixture = Fixture::copy();
+        let verdict = fixture.run("make");
+        assert!(base_class(&verdict), "{verdict:?}");
+        assert!(reasons(&verdict).contains("pull request #7"), "{verdict:?}");
+        let verdict = fixture.run("rm sub/f");
+        assert!(base_class(&verdict), "{verdict:?}");
+    }
+
+    #[test]
+    fn a_read_in_a_pull_request_s_copy_passes() {
+        let fixture = Fixture::copy();
+        assert_eq!(fixture.run("git diff"), Verdict::Allow);
     }
 
     #[test]

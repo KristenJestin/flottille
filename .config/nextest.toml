@@ -1,0 +1,15 @@
+# nextest's configuration (https://nexte.st/docs/configuration/).
+
+# The profile CI's `test` job runs (`--profile ci`, docs/releases.md, "What CI checks"). A test that
+# fails is run again, up to two more times: one that passes on a retry does not fail the run, but
+# nextest marks it flaky, and the job's summary lists it (`.github/scripts/flaky-report.sh`) so
+# that it is fixed, never silently absorbed. One that fails every attempt fails the run.
+[profile.ci]
+retries = 2
+# Every partition says all that fails in it, not only its first failure.
+fail-fast = false
+
+# What `flaky-report.sh` reads: one <testcase> per test, with one <flakyFailure> per failed
+# attempt of a test that passed in the end.
+[profile.ci.junit]
+path = "junit.xml"

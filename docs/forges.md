@@ -593,6 +593,22 @@ assumed from the forges' REST documentation and `bkt`'s help (v0.37.0), not seen
 and the maintainer checks them.** What was posted is recorded like a comment (the body and each
 comment on a line), so that it is read back as an agent's.
 
+### A pull request for a review
+
+Review reads a pull request of the project's forge, by its number, to review it (`docs/tools.md`,
+"Review", `review {action: start, pull_request}`, #1091). The repository is the one the call names
+or the project's only one, its forge declared and checked against its remote as for any read; one
+with no forge is refused (`no forge set for this repository`), a pull request the forge does not
+have is refused (`acme/app has no pull request #99`), before anything is fetched. Reading it gives
+the branch it merges into and where its head is fetched from, with the user's own `git` over
+the repository's remote (`git::output_remote`, no shell, `--end-of-options` before the remote and
+the refspecs): GitHub's `refs/pull/<n>/head`, which a fork's pull request has too; Bitbucket Data
+Center's `refs/pull-requests/<n>/from`; Bitbucket Cloud has no ref of a pull request, so its
+source branch, `refs/heads/<branch>`, which a pull request from a fork has not (refused, and so is
+a branch name git does not take). The head and the base branch are fetched into refs of Flottille's
+own (`refs/flottille/review/…`, deleted as soon as the place holds the head), never into the user's
+branches nor their remote-tracking refs. Nothing is written on the forge.
+
 ### Review threads
 
 A comment on a line of the diff and its replies are a **review thread**. `forge show` with
