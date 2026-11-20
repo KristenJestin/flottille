@@ -13395,7 +13395,9 @@ fn the_window_says_the_daemon_does_not_answer(cx: &mut TestAppContext) {
         true => connector(),
         false => std::os::unix::net::UnixStream::connect(&socket),
     });
-    // Before the window asks anything.
+    // Before the window asks anything. It gives up on a Flottille after two seconds, not thirty.
+    let limit = Duration::from_secs(2);
+    link::not_answering_after_on_this_thread(limit);
     let asked = Instant::now();
     let (shell, cx) = window(&user, connect, 1280., cx);
     let restarted = Arc::new(AtomicUsize::new(0));
@@ -13424,7 +13426,7 @@ fn the_window_says_the_daemon_does_not_answer(cx: &mut TestAppContext) {
         &shell,
         cx,
         "the window says Flottille does not answer",
-        || asked.elapsed() < link::NOT_ANSWERING + Duration::from_secs(20),
+        || asked.elapsed() < limit + Duration::from_secs(20),
         |cx| {
             assert!(
                 text_of("add-first-project", cx).is_none(),
@@ -13433,11 +13435,7 @@ fn the_window_says_the_daemon_does_not_answer(cx: &mut TestAppContext) {
             text_of("not-answering-title", cx).is_some()
         },
     );
-    assert!(
-        asked.elapsed() >= link::NOT_ANSWERING,
-        "{:?}",
-        asked.elapsed()
-    );
+    assert!(asked.elapsed() >= limit, "{:?}", asked.elapsed());
     assert_eq!(
         text_of("not-answering-title", cx).as_deref(),
         Some("Flottille is not answering")

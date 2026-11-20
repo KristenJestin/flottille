@@ -10,6 +10,9 @@ repository.workspace = true
 # Prints the frames drawn each second on the standard error, to measure the window at rest: a
 # development build only (`--features frames`), never the shipped one.
 frames = ["gpui-kit/profiler"]
+# What only the window's scenarios may reach: the waits of the link a test shortens for the window
+# it opens. Switched on by the dev-dependency of `flottille`, never by a shipped build.
+test-support = []
 
 [dependencies]
 base64 = "0.22.1"
