@@ -1374,10 +1374,12 @@ impl Shell {
                 self.set_online(true, cx);
                 self.waiting_for_the_daemon(false, cx);
                 self.main.update(cx, |main, cx| main.set_read(cx));
-                // What the machine now shown lists: the read made when the window opened went to
-                // the machine it was on then.
+                // What the machine now shown lists, and its connections: the reads made when the
+                // window opened went to the machine it was on then.
                 if switched {
                     self.extensions.update(cx, |registry, cx| registry.read(cx));
+                    let connections = self.settings.read(cx).connections().clone();
+                    connections.update(cx, |section, cx| section.read(cx));
                 }
                 self.show(snapshot, window, cx);
                 if std::mem::take(&mut self.texts_due) {
