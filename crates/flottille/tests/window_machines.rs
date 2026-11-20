@@ -822,7 +822,7 @@ fn every_change_of_the_machines_page_is_animated(cx: &mut TestAppContext) {
 }
 
 /// The hub's card and the address line of a machine's row.
-const HUB_TITLE: &str = "hub-state-title";
+const HUB_TITLE: &str = "hub-state";
 const HUB_TAG: &str = "hub-state-tag-0";
 const HUB_REASON: &str = "hub-reason";
 const HUB_DOWN: &str = "devices-hub-down-line";
