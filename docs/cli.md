@@ -404,8 +404,8 @@ again. `remote.change`.
 
 With remote on (`docs/remote.md`, "Identity and keys"), the addresses another machine reaches this
 one at: the one its link listens on, `found` (its interfaces' when it listens on all of them; none
-until `[remote] listen` is set), and those declared by hand, `declared`. Flottille finds no path by itself, and relays nothing: how two
-machines reach each other (a LAN, a VPN, a public address, a tunnel) is the user's to arrange.
+until `[remote] listen` is set), and those declared by hand, `declared`. They serve the direct path
+only, unused by default: links go through the hub (`docs/remote.md`, "The transport").
 `remote.machines` (`docs/protocol.md`).
 
 ```

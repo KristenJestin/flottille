@@ -1580,10 +1580,10 @@ to the front.
 ## 12. Later: remote
 
 Designed for, not built before the milestone "Remote": the user's machines and devices, members
-of their own hub (a control plane: the signed member list, invitations, presence and addresses;
-it never carries a link's bytes), linked peer to peer, directly, by their own keys over an
-end-to-end encrypted transport, over whatever network the user has (Flottille handles no network
-channel: no relay, no NAT traversal), each with a
+of their own hub (the signed member list, invitations, presence, and the links' packets, which it
+forwards between members and can neither read nor change), linked by their own keys over an
+end-to-end encrypted transport through that hub, so that only the hub needs to be reachable (no
+NAT traversal, no relay of anyone else's), each with a
 role (`runner`, `controller`, `viewer`); sessions started on another machine through the same
 `agent_launch`, the code sent over Flottille's own link and the new commits brought back, with the
 tree spanning machines through deliveries; a native Android app, tunnels to a run's port, and
