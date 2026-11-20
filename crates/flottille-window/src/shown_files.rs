@@ -230,9 +230,188 @@ pub fn open(link: &ShownLink, cx: &mut App) {
     .detach();
 }
 
+/// A machine's agent id goes into a file name only when it is a plain name.
+pub fn is_plain_agent(_agent: &str) -> bool {
+    todo!("round 2, point 5")
+}
+
+/// The folder this window writes its copies in, made now: in `runtime` (`$XDG_RUNTIME_DIR`) when
+/// the user has one, else in a folder of `temp` made for the user alone.
+pub fn private_folder(
+    _runtime: Option<&Path>,
+    _temp: &Path,
+    _pid: u32,
+    _stamp: u128,
+) -> std::io::Result<PathBuf> {
+    todo!("round 2, point 3")
+}
+
+/// Removes, in `parent`, the folders of this window's naming that earlier runs left.
+pub fn sweep(_parent: &Path, _alive: impl Fn(u32) -> bool) {
+    todo!("round 2, point 4")
+}
+
+/// What an Open of a link finds: its copy to fetch, being fetched, or there.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Claim {
+    Fetch,
+    Wait,
+    Open,
+}
+
+/// The copies this window made or is making.
+#[derive(Default)]
+pub struct Copies;
+
+impl Copies {
+    pub fn claim(&mut self, _path: &Path) -> Claim {
+        todo!("round 2, point 4")
+    }
+    pub fn begun(&mut self, _path: &Path) {
+        todo!("round 2, point 4")
+    }
+    pub fn complete(&mut self, _path: &Path) {
+        todo!("round 2, point 4")
+    }
+    pub fn failed(&mut self, _path: &Path) {
+        todo!("round 2, point 4")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_agent_id_of_a_remote_goes_into_a_file_name_only_when_plain() {
+        assert!(is_plain_agent("agent-7_B"));
+        assert!(is_plain_agent(&"a".repeat(64)));
+        assert!(!is_plain_agent(&"a".repeat(65)));
+        assert!(!is_plain_agent(""));
+        assert!(!is_plain_agent("../../etc"));
+        assert!(!is_plain_agent("a/b"));
+        assert!(!is_plain_agent("a b"));
+        assert!(!is_plain_agent("a\u{e9}"));
+        assert!(!is_plain_agent(".."));
+    }
+
+    #[test]
+    fn copies_go_in_the_runtime_folder_else_in_a_private_one_of_the_temp_folder() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = tempfile::tempdir().unwrap();
+        let runtime = root.path().join("run");
+        let temp = root.path().join("tmp");
+        std::fs::create_dir_all(&runtime).unwrap();
+        std::fs::create_dir_all(&temp).unwrap();
+
+        let folder = private_folder(Some(&runtime), &temp, 7, 1).unwrap();
+        assert_eq!(folder.parent(), Some(runtime.as_path()));
+        assert_eq!(
+            std::fs::metadata(&folder).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+
+        // No runtime folder: a folder of the user's, 0700, in the temp folder, then the window's.
+        let folder = private_folder(None, &temp, 7, 1).unwrap();
+        let base = folder.parent().unwrap();
+        assert_eq!(base.parent(), Some(temp.as_path()));
+        assert_eq!(
+            std::fs::metadata(base).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            std::fs::metadata(&folder).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        // A second window shares the base.
+        assert_eq!(
+            private_folder(None, &temp, 8, 2).unwrap().parent(),
+            Some(base)
+        );
+    }
+
+    #[test]
+    fn a_folder_of_the_temp_folder_that_is_not_the_users_alone_is_refused() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = tempfile::tempdir().unwrap();
+        let temp = root.path().join("tmp");
+        std::fs::create_dir_all(&temp).unwrap();
+        let folder = private_folder(None, &temp, 7, 1).unwrap();
+        let base = folder.parent().unwrap().to_owned();
+
+        // Opened up to others since: not trusted.
+        std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(private_folder(None, &temp, 8, 2).is_err());
+        std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(private_folder(None, &temp, 8, 2).is_ok());
+
+        // A link put in its place by another user is not followed.
+        let elsewhere = root.path().join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::fs::remove_dir_all(&base).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &base).unwrap();
+        assert!(private_folder(None, &temp, 9, 3).is_err());
+        assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn the_leftovers_of_earlier_runs_are_removed_when_the_window_starts() {
+        let parent = tempfile::tempdir().unwrap();
+        let at = |name: &str| parent.path().join(name);
+        // Earlier runs, whose window is gone (pid 11 and 12 are not alive).
+        for name in ["flottille-shown-11-100", "flottille-shown-12-200"] {
+            std::fs::create_dir_all(at(name)).unwrap();
+            std::fs::write(at(name).join("1-2-shot.png"), "x").unwrap();
+        }
+        // A window still running, another folder, a file of the naming and a link of the naming.
+        std::fs::create_dir_all(at("flottille-shown-99-300")).unwrap();
+        std::fs::create_dir_all(at("something-else")).unwrap();
+        std::fs::write(at("flottille-shown-13-400"), "a file").unwrap();
+        let aside = parent.path().join("aside");
+        std::fs::create_dir_all(&aside).unwrap();
+        std::fs::write(aside.join("keep"), "x").unwrap();
+        std::os::unix::fs::symlink(&aside, at("flottille-shown-14-500")).unwrap();
+
+        sweep(parent.path(), |pid| pid == 99);
+
+        assert!(!at("flottille-shown-11-100").exists());
+        assert!(!at("flottille-shown-12-200").exists());
+        assert!(at("flottille-shown-99-300").exists(), "a running window's");
+        assert!(at("something-else").exists());
+        assert!(at("flottille-shown-13-400").exists());
+        assert!(aside.join("keep").exists(), "a link is never followed");
+    }
+
+    #[test]
+    fn two_opens_of_a_link_share_one_copy_and_a_complete_one_is_not_fetched_again() {
+        let path = Path::new("/run/flottille-shown-1-1/a-7-clip.mp4");
+        let mut copies = Copies::default();
+        assert_eq!(copies.claim(path), Claim::Fetch);
+        // A second click while the first chunk is not in: nothing is written over the copy.
+        assert_eq!(copies.claim(path), Claim::Wait);
+        copies.begun(path);
+        // While it is written, the player is given the same file, never a truncated one.
+        assert_eq!(copies.claim(path), Claim::Open);
+        copies.complete(path);
+        assert_eq!(copies.claim(path), Claim::Open);
+        // Another link has its own copy.
+        assert_eq!(
+            copies.claim(Path::new("/run/flottille-shown-1-1/a-8-clip.mp4")),
+            Claim::Fetch
+        );
+    }
+
+    #[test]
+    fn a_copy_that_failed_is_fetched_again_by_the_next_open() {
+        let path = Path::new("/run/flottille-shown-1-1/a-7-clip.mp4");
+        let mut copies = Copies::default();
+        assert_eq!(copies.claim(path), Claim::Fetch);
+        copies.failed(path);
+        assert_eq!(copies.claim(path), Claim::Fetch);
+        copies.begun(path);
+        copies.failed(path);
+        assert_eq!(copies.claim(path), Claim::Fetch);
+    }
 
     #[test]
     fn a_video_is_told_by_its_extension() {

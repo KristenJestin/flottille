@@ -288,3 +288,117 @@ fn a_machine_serves_no_file_its_session_did_not_show() {
         "a folder put back as a link",
     );
 }
+
+/// One signed line written to a daemon's socket on a thread of its own: its answer, and how long
+/// it took.
+fn send_apart(
+    socket: std::path::PathBuf,
+    line: String,
+) -> std::thread::JoinHandle<(Value, Duration)> {
+    std::thread::spawn(move || {
+        let began = Instant::now();
+        let mut stream = UnixStream::connect(socket).unwrap();
+        stream.set_read_timeout(Some(WAIT)).unwrap();
+        writeln!(stream, "{line}").unwrap();
+        let answer = common::read_line_patiently(stream);
+        (serde_json::from_str(&answer).unwrap(), began.elapsed())
+    })
+}
+
+#[test]
+fn one_device_asking_without_end_does_not_starve_another() {
+    let (_hub, pc, server, agent) = machines();
+    std::fs::write(server.user.path("work/app/clip.mp4"), clip(CHUNK * 2)).unwrap();
+    let shown = show(&server, &agent, "SHOW CLIP");
+    let socket = pc.user.path("runtime/flottille/daemon.sock");
+    let params = json!({"agent": agent, "shown": shown});
+    // One device asks forty chunks at once: each is one more call waiting for the machine's rate.
+    let lines: Vec<String> = (0..40)
+        .map(|n| {
+            signed(
+                &pc.device(),
+                &format!("burst-{n}"),
+                "server",
+                "agent.file",
+                params.clone(),
+            )
+        })
+        .collect();
+    pc.user.status();
+
+    let began = Instant::now();
+    let burst: Vec<_> = lines
+        .into_iter()
+        .map(|line| send_apart(socket.clone(), line))
+        .collect();
+    std::thread::sleep(Duration::from_millis(300));
+
+    // Another asker, meanwhile: it may be told to retry, and it is served within a few seconds.
+    let mut served = None;
+    while began.elapsed() < Duration::from_secs(5) {
+        let answer = ask(&pc, params.clone());
+        if answer["result"].is_object() {
+            served = Some(began.elapsed());
+            break;
+        }
+        let why = error_of(&answer);
+        assert!(why.contains("busy"), "a refusal that says to retry: {why}");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    assert!(
+        served.is_some(),
+        "another asker got no chunk within 5 s of a burst of 40 calls"
+    );
+
+    let (mut refused, mut served_in_burst) = (0, 0);
+    for call in burst {
+        let (answer, took) = call.join().unwrap();
+        if answer["result"].is_object() {
+            served_in_burst += 1;
+            assert!(took < Duration::from_secs(5), "a chunk waited {took:?}");
+        } else {
+            refused += 1;
+            let why = error_of(&answer);
+            assert!(why.contains("busy"), "{why}");
+            assert!(
+                took < Duration::from_secs(2),
+                "a refusal came after {took:?}"
+            );
+        }
+    }
+    assert!(refused > 0, "no call of the burst was refused");
+    assert!(served_in_burst > 0, "the burst got nothing");
+}
+
+#[test]
+fn a_file_that_is_a_hard_link_or_another_file_than_the_one_shown_is_not_served() {
+    let (_hub, pc, server, agent) = machines();
+    let place = server.user.path("work/app");
+    // A file outside the place, and a hard link to it made in the place: its real path is in
+    // the place, its bytes are the outside file's.
+    let outside = server.user.path("home/private");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("secret.png"), b"\x89PNG not to be seen").unwrap();
+    std::fs::hard_link(outside.join("secret.png"), place.join("shot.png")).unwrap();
+    let linked = show(&server, &agent, "SHOW SHOT");
+    let answer = ask(&pc, json!({"agent": agent, "shown": linked}));
+    assert!(
+        answer["error"].is_object(),
+        "a hard link was served: {answer}"
+    );
+    assert!(!answer.to_string().contains("not to be seen"), "{answer}");
+
+    // A file shown, then another file put in its place (a rename over it): not the one shown.
+    std::fs::write(place.join("clip.mp4"), clip(1000)).unwrap();
+    std::fs::write(place.join("other.mp4"), b"not to be seen either").unwrap();
+    let shown = show(&server, &agent, "SHOW CLIP");
+    let before = ask(&pc, json!({"agent": agent, "shown": shown}));
+    assert_eq!(bytes_of(&before), clip(1000), "{before}");
+    std::fs::rename(place.join("other.mp4"), place.join("clip.mp4")).unwrap();
+    let answer = ask(&pc, json!({"agent": agent, "shown": shown}));
+    assert!(
+        answer["error"].is_object(),
+        "another file was served: {answer}"
+    );
+    assert!(!answer.to_string().contains("either"), "{answer}");
+}
