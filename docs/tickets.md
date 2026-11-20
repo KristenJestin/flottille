@@ -1059,16 +1059,18 @@ tickets {action: "log_time", ticket: "ABC-123", duration: "2h 30m", started: "20
   while to allow it). **`body`**, optional, is the worklog's comment, Markdown converted to ADF as
   every Jira text is. **`ticket` is required**: the workspace's ticket is never taken for it, so that the card names the work item the user allows.
 - **The token is a vault entry the project names** (`docs/vault.md`): `worklog_token = "<entry>"`
-  in `[tracker]` (`kind = "jira"` only), the entry's secret being a Jira API token and its
+  in `[tracker]` (`kind = "jira"` only; the key keeps its name, but the entry is the project's
+  **Jira API access**: it serves worklogs, replies, mentions, an `edit` with `fields`, and the
+  site search of `people`, and the window and the refusals say "Jira API"), the entry's secret being a Jira API token and its
   username the account's e-mail; the request is `Basic` over `username:secret`. The daemon reads
   the secret with `vault::secret` for this one request. No entry named, an entry the project does
   not see, or one with no username is refused before anyone is asked, with a sentence that says
-  how to set one up: the window's way first (the project's Settings, Tracker, `Log time with`), the
+  how to set one up: the window's way first (the project's Settings, Tracker, `Jira API access with`), the
   file's second. **The window offers that way**: the refusal's `agent.tool_served` carries
   `setup: "time_logging"` (`docs/events.md`), and the conversation shows a line and a `Set up
-  time logging` button that opens the project's Settings at Tracker. The token is in no card, result, log, event nor the store: what Jira
+  Jira API access` button that opens the project's Settings at Tracker. The token is in no card, result, log, event nor the store: what Jira
   answers is masked of it, and so is every error.
-- **A change of the tracker says its entry**: the card of `project set_settings` reads `Set the tracker to Jira on <site> (ABC), logging time with the vault entry `<name>``, so that the user sees which credentials a worklog would use. The entry is bound to the project's worklog, not to a host: when the site or the entry changes, the card says where the secret goes too (`Log time with it: the secret of the vault entry `<name>` will be sent to <site>`). Such a change, an agent's `set_settings` that sends the token to another site or names another entry for it, is held for the user in every mode, **Full included**, and never reaches the judge: answered at once, the result coming later as a delivery, so that an agent cannot send the user's token to a host it chose. A change that keeps the site and the entry passes in Full as before; the window, the command line and an edit of the project's file are the user's own.
+- **A change of the tracker says its entry**: the card of `project set_settings` reads `Set the tracker to Jira on <site> (ABC), Jira API access with the vault entry `<name>``, so that the user sees which credentials a worklog would use. The entry is bound to the project's worklog, not to a host: when the site or the entry changes, the card says where the secret goes too (`Jira API access with it: the secret of the vault entry `<name>` will be sent to <site>`). Such a change, an agent's `set_settings` that sends the token to another site or names another entry for it, is held for the user in every mode, **Full included**, and never reaches the judge: answered at once, the result coming later as a delivery, so that an agent cannot send the user's token to a host it chose. A change that keeps the site and the entry passes in Full as before; the window, the command line and an edit of the project's file are the user's own.
 - **GitHub is refused with a sentence** (`GitHub issues have no time tracking`), and so are a
   duration or a start that is wrong, before anyone is asked.
 - **It is a ticket write**, judged like `comment`: held in Ask, allowed in Full, and the card says

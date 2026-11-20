@@ -562,7 +562,7 @@ fn a_jira_reply_without_a_tracker_entry_is_refused_before_anything_runs() {
 
     let said = refused_at_once(&user, &mcp, ask.clone());
 
-    assert!(said.contains("no vault entry to reply"), "{said}");
+    assert!(said.contains("no Jira API vault entry to reply"), "{said}");
     assert!(said.contains("worklog_token"), "{said}");
 
     // An entry the project names and the vault does not hold: the agent may ask the user for it.
@@ -705,7 +705,10 @@ fn a_mention_in_a_jira_comment_without_a_tracker_entry_is_refused() {
             "body": format!("[@Ana Example](mention:{ANA}) fixed")}),
     );
 
-    assert!(said.contains("no vault entry to mention"), "{said}");
+    assert!(
+        said.contains("no Jira API vault entry to mention"),
+        "{said}"
+    );
     // A comment with no mention is as it was: held for the user.
     held(&mcp.call(
         "tickets",
@@ -854,7 +857,7 @@ fn people_without_the_entry_says_it_searched_the_assignees_only() {
     let said = people_said(&mcp, json!({"action": "people", "query": "ben"}));
 
     assert!(said.contains("Only the assignees were searched"), "{said}");
-    assert!(said.contains("no vault entry"), "{said}");
+    assert!(said.contains("no Jira API vault entry"), "{said}");
     assert!(jira.received().is_empty(), "{:?}", jira.received());
 }
 
@@ -984,7 +987,10 @@ fn a_description_with_a_mention_without_a_tracker_entry_is_refused() {
         json!({"action": "create", "title": "A new one", "project": "ABC", "body": body}),
     ] {
         let said = refused_at_once(&user, &mcp, ask);
-        assert!(said.contains("no vault entry to mention"), "{said}");
+        assert!(
+            said.contains("no Jira API vault entry to mention"),
+            "{said}"
+        );
     }
     // Neither `acli` nor the site was called.
     assert!(
@@ -1158,7 +1164,10 @@ fn a_mention_in_an_edited_jira_comment_without_a_tracker_entry_is_refused() {
             "body": format!("[@Ana Example](mention:{ANA}) second")}),
     );
 
-    assert!(said.contains("no vault entry to mention"), "{said}");
+    assert!(
+        said.contains("no Jira API vault entry to mention"),
+        "{said}"
+    );
     assert!(jira.received().is_empty(), "{:?}", jira.received());
 }
 

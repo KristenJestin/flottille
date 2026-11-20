@@ -61,7 +61,7 @@ An entry made for one precise feature is that feature's alone. `for` names it:
   secret is read, with a sentence naming its use (`the vault entry jira-time is bound to the
   worklog of the project app and serves no other use`), never its value. A connection naming
   another use's entry is refused when it is declared, and its server does not start; the
-  worklog's `Log time with` does not offer it, and `tickets log_time` refuses it before any card.
+  worklog's `Jira API access with` does not offer it, and `tickets log_time` refuses it before any card.
 - **Made from a feature, bound to it from the start**: the entry set from a request's card (the
   worklog's need), from a project's Settings, Tracker, "New entry in the vault", or from a feature's
   own screen, which says `for`. An entry set from Settings, Vault (or `flottille vault set`)
@@ -130,10 +130,10 @@ most for a keyring that asks to be unlocked, then goes on), and a new secret is 
 it is set. A secret replaced or removed stays masked until the daemon restarts: another entry may
 hold the same value.
 
-## Choosing the entry for time logging
+## Choosing the entry for Jira API access
 
 A Jira project's Settings, Repositories tab, Tracker, names the entry (`docs/projects.md`, "Forges
-and tracker"): the select `Log time with` lists the entries the project sees by name and username,
+and tracker"): the select `Jira API access with` lists the entries the project sees by name and username,
 but those bound to another use, and its link opens the vault's new-entry dialog from there, the
 entry it makes bound to the project's worklog.
 

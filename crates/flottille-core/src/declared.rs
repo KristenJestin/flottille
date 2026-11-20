@@ -254,7 +254,9 @@ impl ProjectTracker {
             } => {
                 let said = format!("Jira on {site} ({})", projects.join(", "));
                 match worklog_token {
-                    Some(entry) => format!("{said}, logging time with the vault entry `{entry}`"),
+                    Some(entry) => {
+                        format!("{said}, Jira API access with the vault entry `{entry}`")
+                    }
                     None => said,
                 }
             }
@@ -601,7 +603,7 @@ mod tests {
         }
         assert_eq!(
             jira.said(),
-            "Jira on example.atlassian.net (ABC), logging time with the vault entry `jira-time`"
+            "Jira on example.atlassian.net (ABC), Jira API access with the vault entry `jira-time`"
         );
     }
 
