@@ -9,7 +9,7 @@ use crate::common;
 use crate::remote_deliveries::{answered, child_on_server, off, on, prompts_with, release, script};
 use crate::remote_launch::{
     Machine, a_while, allowing, done, eventually, id_in, launched, pc_and_server, prompted,
-    refused, restarted, sent_with, server_user,
+    refused, restarted, sent_with, server_user, titled,
 };
 
 use common::mcp::Mcp;
@@ -394,4 +394,96 @@ fn no_agent_allows_a_request_across_machines() {
         users_request(&server, second).is_some()
     });
     assert_eq!(users_request(&server, second).unwrap()["state"], "pending");
+}
+
+/// A second child of `pc`'s root on `server`, titled `title`, started with `brief`: its id there.
+fn another_child(pc_root: &Mcp, server: &Machine, title: &str, brief: &str) -> String {
+    let answer = launched(
+        pc_root,
+        json!({"kind": "child", "machine": "server", "title": title, "brief": brief}),
+    );
+    let text = done(&answer).to_owned();
+    let child = titled(server, title);
+    assert_eq!(id_in(&text), child["id"].as_str().unwrap(), "{text}");
+    child["id"].as_str().unwrap().to_owned()
+}
+
+#[test]
+fn a_parent_with_two_children_on_one_machine_answers_the_second_s_request() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    script(
+        &server,
+        json!([{"when": "Write the docs of the export.", "times": 1, "do": [
+            {"mcp": {"tool": "fs_read", "arguments": {"path": ".env"}}}
+        ]}]),
+    );
+    // The first child asks nothing; the second, started after it, is held.
+    let (_first, _launch, mcp) = child_on_server(&pc, &server, "Write the tests of the export.");
+    another_child(
+        &mcp,
+        &server,
+        "Write the docs",
+        "Write the docs of the export.",
+    );
+    let number = number_in(&tool_answer(&server, "your parent decides"));
+    prompt_with(&pc, &format!("Request #{number}"));
+
+    let forward = mcp.call(
+        "approval_answer",
+        json!({"request_id": number, "machine": "server", "decision": "forward",
+            "why": "the docs need the database name"}),
+    );
+
+    done(&forward);
+    eventually("the request held by the user", || {
+        users_request(&server, number).is_some()
+    });
+    assert_eq!(
+        users_request(&server, number).unwrap()["forwards"][0]["why"],
+        "the docs need the database name"
+    );
+}
+
+#[test]
+fn an_approval_answer_aimed_at_another_tree_or_a_local_request_is_refused() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    script(
+        &server,
+        json!([
+            {"when": "Write the docs of the export.", "times": 1, "do": [
+                {"mcp": {"tool": "fs_read", "arguments": {"path": ".env"}}}
+            ]},
+            {"when": "hello", "times": 1, "do": [
+                {"mcp": {"tool": "fs_read", "arguments": {"path": ".env.local"}}}
+            ]}
+        ]),
+    );
+    // The first root's child on server, which asks nothing.
+    let (_child, _launch, mcp) = child_on_server(&pc, &server, "Write the tests of the export.");
+    // Another root's child there, whose request that root holds.
+    let (_other, other) = pc.root("auto");
+    another_child(
+        &other,
+        &server,
+        "Write the docs",
+        "Write the docs of the export.",
+    );
+    let theirs = number_in(&tool_answer(&server, "your parent decides"));
+    prompt_with(&pc, &format!("Request #{theirs}"));
+    // A session of server's own, whose request its user holds.
+    server.root("auto");
+    eventually("server's own request", || !server.requests().is_empty());
+    let local = server.requests()[0]["number"].as_u64().unwrap();
+
+    for number in [theirs, local] {
+        let answer = mcp.call(
+            "approval_answer",
+            json!({"request_id": number, "machine": "server", "decision": "deny",
+                "why": "not needed"}),
+        );
+        assert!(refused(&answer).contains("not held by"), "{}", answer.text);
+    }
+    a_while();
+    assert!(users_request(&server, theirs).is_none());
+    assert_eq!(users_request(&server, local).unwrap()["state"], "pending");
 }
