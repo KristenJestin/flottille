@@ -21,7 +21,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use flottille_core::paths::Paths;
 use flottille_link::{
     Address, Capabilities, Endpoint, Hello, Link, LinkError, MachineKey, MachineMessage, Message,
-    Offered, PeerState, PublicKey, Role, Traffic,
+    Offered, PeerState, PublicKey, Role, Share, Traffic,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -214,12 +214,14 @@ pub struct Remote {
     offer_now: tokio::sync::Notify,
     /// Counts the member lists taken: a watch carried for a device looks again whether the
     /// device is still a member.
-    lists: tokio::sync::watch::Sender<u64>,
+    pub(crate) lists: tokio::sync::watch::Sender<u64>,
     /// The bundles offered to another machine, while it reads them (`travel.rs`).
     pub(crate) transfers: crate::travel::Transfers,
     /// The machines this one is reading a bundle from or placing code of, one thing at a time
     /// each (`travel.rs`).
     pub(crate) receiving: crate::travel::Receiving,
+    /// The tunnels this machine carries and serves (`tunnel.rs`).
+    pub(crate) tunnels: crate::tunnel::Tunnels,
 }
 
 /// Starts the link: the endpoint, the loop that accepts and the one that dials. A link that
@@ -324,6 +326,7 @@ impl Remote {
             offered: tokio::sync::watch::Sender::new(None),
             offer_now: tokio::sync::Notify::new(),
             lists: tokio::sync::watch::Sender::new(0),
+            tunnels: crate::tunnel::Tunnels::default(),
             transfers: Default::default(),
             receiving: Default::default(),
         }
@@ -765,6 +768,8 @@ impl Remote {
         };
         let offers = self.offers_here(listed.as_ref());
         let this = json!({
+            // Its member's name, once it is one: what a client signs a request of this machine's
+            // for (`vault.share`).
             "name": listed.as_ref().map(|(_, name)| name),
             "role": role_of(&key),
             "offers": offers,
@@ -1164,6 +1169,13 @@ async fn serve(remote: Arc<Remote>, link: Link, name: String, generation: u64) {
                     git,
                 ));
             }
+            Message::Machine(MachineMessage::Share(share)) => {
+                let (remote, share, peer) = (remote.clone(), share.clone(), link.peer());
+                tokio::spawn(async move {
+                    let answered = remote.shared(&peer, share).await;
+                    received.answer(answered);
+                });
+            }
             // Kept apart by the link's protocol name: a client's request on a machine link is
             // refused before it gets here (`Link::next`).
             Message::Client(_) => received.answer(Err(
@@ -1204,6 +1216,19 @@ async fn serve_clients(remote: Arc<Remote>, link: Link, from: String) {
             link.close(REMOVED);
             break;
         }
+        // A connection of a tunnel opened for this link's machine (`docs/remote.md`, "Tunnels").
+        let received = match received.take_tunnel() {
+            Ok((tunnel, stream)) => {
+                tokio::spawn(crate::tunnel::connection(
+                    remote.clone(),
+                    link.peer(),
+                    tunnel,
+                    stream,
+                ));
+                continue;
+            }
+            Err(received) => *received,
+        };
         let Message::Client(request) = received.message().clone() else {
             // Kept apart by the link's protocol name: refused before it gets here.
             received.answer(Err(
@@ -1211,13 +1236,27 @@ async fn serve_clients(remote: Arc<Remote>, link: Link, from: String) {
             ));
             continue;
         };
-        let (remote, from) = (remote.clone(), from.clone());
+        let (remote, from, link) = (remote.clone(), from.clone(), link.clone());
         tokio::spawn(async move {
             let mut answer = received.stream();
             let mut lists = remote.lists.subscribe();
             let gone = answer.gone();
             tokio::pin!(gone);
-            match remote.serve(&request, &from).await {
+            let accepted = match remote.accept(&request) {
+                Ok(accepted) => accepted,
+                Err(refused) => {
+                    let _ = answer.send(&message_bytes(&refused)).await;
+                    answer.end().await;
+                    return;
+                }
+            };
+            // A tunnel is held open by its request, which its own module serves.
+            if accepted.method.starts_with("tunnel.") {
+                crate::tunnel::serve(&remote, &link, accepted, &mut answer, &from).await;
+                answer.end().await;
+                return;
+            }
+            match remote.start(accepted, request.to_string(), &from).await {
                 Err(refused) => {
                     let _ = answer.send(&message_bytes(&refused)).await;
                 }
@@ -1321,6 +1360,11 @@ impl Remote {
         self.trusted(key).map(|peer| peer.name)
     }
 
+    /// Emits an event of the daemon's (`docs/events.md`).
+    pub(crate) fn emit(&self, name: &str, data: Value) {
+        (self.emit)(name, data);
+    }
+
     /// The daemon, unless it is stopping.
     pub(crate) fn daemon(&self) -> Option<Arc<Daemon>> {
         self.daemon.get().and_then(std::sync::Weak::upgrade)
@@ -1341,14 +1385,22 @@ impl Remote {
     }
 
     /// `request`, as a link or a client of this machine carried it from the machine `from`:
-    /// checked (`flottille_link::Requests`), then served on a connection of its own as one of a
-    /// local client's, the member that signed it named in the log and in the events its serving
-    /// emits; the refusal, as an answer, otherwise.
+    /// checked (`accept`), then served on a connection of its own (`start`).
     async fn serve(
         &self,
         request: &Value,
         from: &str,
     ) -> Result<Serving, Box<flottille_core::protocol::Message>> {
+        let accepted = self.accept(request)?;
+        self.start(accepted, request.to_string(), from).await
+    }
+
+    /// `request` as a link or a client of this machine carried it, checked
+    /// (`flottille_link::Requests`): the refusal, as an answer, otherwise.
+    pub(crate) fn accept(
+        &self,
+        request: &Value,
+    ) -> Result<flottille_link::Accepted, Box<flottille_core::protocol::Message>> {
         use flottille_core::protocol::Message as Answer;
         let id = request["id"].as_str().map(str::to_owned);
         let refused =
@@ -1363,6 +1415,20 @@ impl Remote {
             .unwrap()
             .check(&text, &name, &members, SystemTime::now())
             .map_err(|error| refused(error.to_string()))?;
+        Ok(accepted)
+    }
+
+    /// A request `accept` took, served on a connection of its own as one of a local client's, the
+    /// member that signed it named in the log and in the events its serving emits; `signed` is the
+    /// request as it was signed, which a method that carries the user's consent further sends on.
+    async fn start(
+        &self,
+        accepted: flottille_link::Accepted,
+        signed: String,
+        from: &str,
+    ) -> Result<Serving, Box<flottille_core::protocol::Message>> {
+        use flottille_core::protocol::Message as Answer;
+        let id = Some(accepted.id.clone());
         let daemon = self
             .daemon
             .get()
@@ -1385,7 +1451,10 @@ impl Remote {
         tokio::spawn(crate::daemon::served_for(
             daemon,
             theirs,
-            accepted.device.name.clone(),
+            crate::daemon::Asked {
+                device: accepted.device.name.clone(),
+                signed,
+            },
         ));
         let (read, mut write) = ours.into_split();
         let once = accepted.method != "events.watch";
@@ -1411,7 +1480,7 @@ impl Remote {
 
     /// Whether the device of `key` is a member of the list this machine checked: a list that
     /// cannot be checked says no.
-    async fn still_member(self: &Arc<Self>, key: &PublicKey) -> bool {
+    pub(crate) async fn still_member(self: &Arc<Self>, key: &PublicKey) -> bool {
         let (remote, key) = (self.clone(), *key);
         tokio::task::spawn_blocking(move || {
             remote
@@ -1457,6 +1526,105 @@ impl Remote {
             link.close("it failed");
         }
     }
+}
+
+impl Remote {
+    /// A vault entry the user shared, as the machine `peer` sent it: taken only with the user's
+    /// own request, which this machine checks itself as it checks any request of a device (a
+    /// machine alone shares nothing): `vault.share` of that very entry with this machine, signed
+    /// for the machine that sent it, within its time, and never twice.
+    async fn shared(&self, peer: &PublicKey, share: Share) -> Result<Value, String> {
+        let (members, name) = self.listed().map_err(|why| format!("refused: {why}"))?;
+        let sender = members
+            .by_machine(peer)
+            .ok_or_else(|| "refused: this machine is no member's".to_owned())?;
+        let from = sender.name.clone();
+        // As code (`travel`): a viewer's machine sends nothing the user decided, whoever signed.
+        if sender.role == Role::Viewer {
+            return Err(format!(
+                "refused: {from} is a viewer's machine: only a runner's or a controller's \
+                 machine shares a vault entry"
+            ));
+        }
+        let accepted = self
+            .requests
+            .lock()
+            .unwrap()
+            .check(
+                &share.request.to_string(),
+                &from,
+                &members,
+                SystemTime::now(),
+            )
+            .map_err(|error| error.to_string())?;
+        if accepted.method != "vault.share" {
+            return Err(format!(
+                "refused: {} is not the user's share of a vault entry",
+                accepted.method
+            ));
+        }
+        let shown = |value: &Value| {
+            value
+                .as_str()
+                .unwrap_or_default()
+                .chars()
+                .take(64)
+                .collect::<String>()
+                .escape_debug()
+                .to_string()
+        };
+        if accepted.params["machine"].as_str() != Some(name.as_str()) {
+            return Err(format!(
+                "refused: the user shared it with {}, not with {name}",
+                shown(&accepted.params["machine"])
+            ));
+        }
+        if accepted.params["name"] != share.entry["name"] || !share.entry["name"].is_string() {
+            return Err(format!(
+                "refused: the user shared {}, not {}",
+                shown(&accepted.params["name"]),
+                shown(&share.entry["name"])
+            ));
+        }
+        let daemon = self
+            .daemon
+            .get()
+            .and_then(std::sync::Weak::upgrade)
+            .ok_or_else(|| "the daemon is stopping".to_owned())?;
+        crate::vault::receive(&daemon, &share.entry, &share.secret.0, &from).await?;
+        Ok(json!({"name": share.entry["name"]}))
+    }
+}
+
+/// Sends the vault entry the user shared, `share`, to their machine `machine`, a runner, which
+/// checks the user's signature it carries and keeps it: what it answered, or why it is refused.
+pub(crate) async fn share(daemon: &Daemon, machine: &str, share: Share) -> Result<(), String> {
+    let remote = remote_of(daemon).map_err(|failure| failure.message)?;
+    let (members, _) = remote.listed()?;
+    let Some(peer) = remote
+        .peers()
+        .machines
+        .into_iter()
+        .find(|peer| peer.name == machine)
+    else {
+        return Err(format!(
+            "no machine of the user's is named {}",
+            machine.chars().take(64).collect::<String>().escape_debug()
+        ));
+    };
+    if members
+        .by_machine(&peer.key)
+        .is_none_or(|member| member.role != flottille_link::Role::Runner)
+    {
+        return Err(format!(
+            "{machine} runs no agent: a vault entry is shared with a runner"
+        ));
+    }
+    let link = remote.machine_link(&peer)?;
+    link.send(&Message::Machine(MachineMessage::Share(share)))
+        .await
+        .map(|_| ())
+        .map_err(|error| error.to_string())
 }
 
 /// `since`, milliseconds since the Unix epoch, as the time of day it was here (`22:14`).
@@ -1558,17 +1726,18 @@ pub(crate) async fn forward(
     let message = Message::Client(request.clone());
     // A client link kept may be gone unnoticed: dialled again once.
     let mut tries = 0;
-    let mut answers = loop {
+    let (mut answers, link) = loop {
         tries += 1;
         let asked = match remote.client_link(&peer).await {
             Ok(link) => link
                 .ask(&message)
                 .await
+                .map(|answers| (answers, link))
                 .inspect_err(|_| remote.drop_client(&peer)),
             Err(error) => Err(error),
         };
         match asked {
-            Ok(answers) => break answers,
+            Ok(asked) => break asked,
             Err(_) if tries < 2 => continue,
             Err(why) => {
                 send(error("unavailable", why.to_string())).await;
@@ -1576,6 +1745,11 @@ pub(crate) async fn forward(
             }
         }
     };
+    // A tunnel stays open after its answer, and listens here: its own module carries it.
+    if request["signed"]["method"] == "tunnel.open" {
+        crate::tunnel::carry(&remote, &request, &machine, link, answers, &out).await;
+        return false;
+    }
     let mut answered = false;
     loop {
         match answers.next().await {

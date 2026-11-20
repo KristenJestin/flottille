@@ -6,6 +6,8 @@
 
 #[path = "../common/mod.rs"]
 mod common;
+#[path = "../remote/mod.rs"]
+mod remote;
 
 #[path = "../connection_requests.rs"]
 mod connection_requests;
@@ -25,12 +27,16 @@ mod remote_keys;
 mod remote_link;
 #[path = "../remote_requests.rs"]
 mod remote_requests;
+#[path = "../remote_tunnels.rs"]
+mod remote_tunnels;
 #[path = "../ssh_agent.rs"]
 mod ssh_agent;
 #[path = "../vault.rs"]
 mod vault;
 #[path = "../vault_ask.rs"]
 mod vault_ask;
+#[path = "../vault_share.rs"]
+mod vault_share;
 #[path = "../web.rs"]
 mod web;
 #[path = "../web_entries.rs"]

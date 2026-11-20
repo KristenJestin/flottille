@@ -202,6 +202,7 @@ no device calls a `local` one over a link (`docs/remote.md`, "Roles").
 | `vault.list` | read |
 | `vault.set` | drive |
 | `vault.remove` | drive |
+| `vault.share` | drive |
 | `vault.asks` | read |
 | `vault.ask_dismiss` | drive |
 | `remote.machines` | read |
@@ -215,6 +216,9 @@ no device calls a `local` one over a link (`docs/remote.md`, "Roles").
 | `remote.setup` | local |
 | `remote.join` | local |
 | `remote.declare` | local |
+| `tunnel.open` | drive |
+| `tunnel.list` | local |
+| `tunnel.close` | local |
 | `skill.list` | read |
 | `skill.show` | read |
 | `skill.add` | drive |
@@ -1161,8 +1165,9 @@ door alone reaches them: an agent's only part is the `vault` tool, which lists, 
 for an entry a feature names and that is missing.
 
 - `vault.list {project?}` answers `{"entries": [{"name", "description", "url", "username",
-  "project", "for"}]}`, by name, `for` the use it is bound to or `null` (`docs/vault.md`, "Bound to
-  one use"); with `project`, the entries its agents see (its own and every project's).
+  "project", "for", "shared_from"}]}`, by name, `for` the use it is bound to or `null` (`docs/vault.md`, "Bound to
+  one use"), `shared_from` the machine of the user's it was shared from, `null` for this machine's
+  own; with `project`, the entries its agents see (its own and every project's).
 - `vault.set {name, secret, description?, url?, username?, project?, for?}` keeps the secret in
   the keyring and the rest in the store, in place of the entry of that name if there is one, and
   answers the entry as listed. `for` binds it to one use (`worklog:<project>`,
@@ -1176,6 +1181,16 @@ for an entry a feature names and that is missing.
   answers `{"removed": <entry>}`; `refused`, naming the feature and what stops working, for an
   entry bound to a feature that names it, unless `confirmed`; `not-found` when there is none; `unavailable` when the keyring refuses
   (locked), the entry then left whole.
+
+- `vault.share {name, machine}` sends the entry to the user's machine `machine`, a runner
+  (`docs/vault.md`, "Shared with another machine"): served only as a request the user's device
+  signed (`docs/remote.md`, "Requests from another machine's clients"), aimed at this machine by
+  its own name (`remote.machines`' `this.name`), whose signature goes with the secret for the other
+  machine to check; answers `{"name", "machine"}` once that machine kept it. `refused` for a
+  client that did not sign (`sharing a vault entry is signed by the user's device: …`), a machine
+  that runs no agent, or what the other machine refused, in its words (`server refused: this
+  machine has no keyring: …`); `unavailable` for a machine that is off (`server is offline since
+  22:14`) or a keyring that cannot be read here; `not-found` for an unknown entry or machine.
 
 Both writes emit `vault.changed`, and give the agents of every project the tools their roles have
 now (`vault` is listed to an agent whose project sees an entry, misses one a feature names, or has
@@ -1203,9 +1218,9 @@ remote on (`[remote] on = true` in `daemon.toml`). With it off, each is `refused
 turn it on in daemon.toml ([remote] on = true)`); with a link that could not listen, `unavailable`,
 with the reason. No method answers a private key.
 
-- `remote.machines` answers `{"this": {"key", "fingerprint", "listening", "addresses": [{"address",
+- `remote.machines` answers `{"this": {"name", "key", "fingerprint", "listening", "addresses": [{"address",
   "how"}]}, "machines": [{"name", "key", "fingerprint", "state", "since", "reason",
-  "addresses"}]}`: this machine's public key, the socket its link listens on (`null` until
+  "addresses"}]}`: this machine's member name (`null` until it is set up), its public key, the socket its link listens on (`null` until
   `[remote] listen` is set), and its addresses,
   `how` being `found` (the one it listens on, or its interfaces' when it listens on all of them) or
   `declared` (by hand, with the link's port when it gave none); then each machine it trusts, its
@@ -1286,6 +1301,31 @@ with the reason. No method answers a private key.
   the device that joined after `head`; the daemon claims it with the machine key, pins the hub
   (`remote/hub.json`) once the hub sent it back, and keeps the session. It answers `{"url", "hub",
   "root", "name"}`. `Local`.
+
+### The tunnel methods
+
+A run's port of another machine reached on this one (`docs/remote.md`, "Tunnels"), with remote on.
+Each is `refused` with it off, as the remote methods are.
+
+- `tunnel.open {run, port?}` aimed at a machine (`machine`, signed: "Requests from another
+  machine's clients"): the machine checks it as any request, then that `run` is a run of its own
+  that still runs, and that `port` is the port the run reports as its address (`run.list`'s `url`)
+  or one its processes listen on, read from the system; any other is `refused` (`port 22 is none
+  of run r1's`). Without `port`, the run's address, or the only port it listens on. The tunnel is
+  held open by the request: its answer is `{"tunnel", "machine", "run", "port", "local_port",
+  "address"}`, `address` being the `127.0.0.1:<local_port>` the carrying daemon listens on (the
+  run's port when it is free there, another otherwise), and what follows on the connection is the
+  `tunnel.closed` event (`docs/events.md`) when the tunnel ends: the run ended, `tunnel.close`, the
+  link dropped, the device was removed, or the client's connection went. The client's connection
+  ending closes the tunnel. It is a `drive` method: a `viewer` is refused (`laptop may only view: a
+  controller or a runner may open a tunnel`). Never without `machine`: a tunnel is to another
+  machine (`refused`).
+- `tunnel.list {}` answers `{"tunnels": [{"tunnel", "machine", "run", "port", "local_port",
+  "address", "connections", "since"}]}`: the tunnels this machine's daemon carries, `connections`
+  being the TCP connections open on them now and `since` when it opened (milliseconds since the
+  Unix epoch). `Local`.
+- `tunnel.close {tunnel}` closes one of them, answers `{"closed": "<tunnel>"}`; `not-found` for a
+  tunnel this daemon does not carry. `Local`.
 
 ### The skill methods
 

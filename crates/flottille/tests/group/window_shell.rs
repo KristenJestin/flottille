@@ -8,6 +8,8 @@
 mod common;
 #[path = "../guard/mod.rs"]
 mod guard;
+#[path = "../remote/mod.rs"]
+mod remote;
 
 #[path = "../window_appearance.rs"]
 mod window_appearance;
@@ -67,5 +69,7 @@ mod window_switcher;
 mod window_vault;
 #[path = "../window_vault_ask.rs"]
 mod window_vault_ask;
+#[path = "../window_vault_share.rs"]
+mod window_vault_share;
 #[path = "../windows.rs"]
 mod windows;
