@@ -730,13 +730,15 @@ const SERVED: [Definition; 33] = [
             checks, the deliverable. {\"kind\": \"child\", \"title\": \"Write the tests\", \
             \"brief\": \"...\"}; {\"kind\": \"led\", \"title\": \"Fix login\", \"brief\": \
             \"...\", \"workspace\": \"login\"}; {\"kind\": \"handed\", \"title\": \"Add API\", \
-            \"brief\": \"...\", \"new_workspace\": \"api\", \"repositories\": [\"api\"]}",
+            \"brief\": \"...\", \"new_workspace\": \"api\", \"repositories\": [\"api\"]} \
+            machine: another machine, in a copy of your place.",
         read_only: false,
         idempotent: false,
         destructive: false,
         schema: || {
             json!({"type": "object", "properties": {
                 "kind": {"type": "string", "enum": ["child", "led", "handed"], "description": "child: a part of your task, in your place, that reports to you. led: an autonomous session you pilot, which asks you and wakes you. handed: a session you start for the user and let go."},
+                "machine": {"type": "string", "description": "Another of the user's machines, by name, to start it on, judged there, in a copy of your place (your branch and uncommitted changes are sent with it); this machine when left out. Its commits come back to you on a branch of their own, refs/flottille/machines/<machine>/<launch>/<branch>, which you review and merge as you would a local child's work; nothing moves your branch."},
                 "project": {"type": "string", "description": "With led or handed: another registered project to start the session in, a full lead of its own there; yours when left out. Always held for the user."},
                 "title": {"type": "string", "description": "The task in a few words: how you and the user will name this session or child."},
                 "brief": {"type": "string", "description": "Everything the session or the child needs to know."},
@@ -2757,6 +2759,11 @@ fn verdict_of(
     }
     if tool == "agent_stop" && crate::tree::ends_led(daemon, grant, args) {
         return gate::end_led();
+    }
+    // A launch on another machine is judged there, by that machine's gate, every time
+    // (`docs/remote.md`, "Starting a session on another machine"): nothing of it runs here.
+    if tool == "agent_launch" && !args["machine"].is_null() {
+        return gate::too_long("brief", &args["brief"]).unwrap_or(gate::Verdict::Allow);
     }
     // A launch in another project is the user's, every time: its setup steps are that
     // project's, played once the user allowed the session.
