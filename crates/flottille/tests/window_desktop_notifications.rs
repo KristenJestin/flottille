@@ -27,6 +27,20 @@ fn presence(user: &common::User) -> Value {
     user.call("notifications.status", json!({})).unwrap()["window"].clone()
 }
 
+/// `until`, with the clock moving: a toast folds away as time passes, and leaves the tree then.
+fn until_folded(
+    shell: &gpui_kit::Entity<flottille_window::Shell>,
+    cx: &mut gpui_kit::VisualTestContext,
+    what: &str,
+    check: impl Fn(&mut gpui_kit::VisualTestContext) -> bool,
+) {
+    until(shell, cx, what, |cx| {
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(16));
+        check(cx)
+    });
+}
+
 fn frames_pending(cx: &mut gpui_kit::VisualTestContext) -> usize {
     cx.update(|window, cx| window.simulate_next_frame(cx))
 }
@@ -99,7 +113,7 @@ fn with_the_window_focused_the_notification_is_a_toast_not_a_system_one(cx: &mut
     until(&shell, cx, "the request was decided", |_| {
         pending(&user).is_empty()
     });
-    until(&shell, cx, "the toast left", |cx| !has("toast-1", cx));
+    until_folded(&shell, cx, "the toast left", |cx| !has("toast-1", cx));
     settle(cx);
     assert_eq!(frames_pending(cx), 0, "at rest after the toast left");
     assert!(server.notified().is_empty());
@@ -127,7 +141,7 @@ fn a_toast_opens_its_session_on_a_click(cx: &mut TestAppContext) {
     until(&shell, cx, "the session's page opens", |cx| {
         shell.read_with(cx, |s, cx| s.main().read(cx).session_page().is_some())
     });
-    until(&shell, cx, "the toast left", |cx| !has("toast-1", cx));
+    until_folded(&shell, cx, "the toast left", |cx| !has("toast-1", cx));
 }
 
 #[gpui_kit::test]
@@ -150,7 +164,7 @@ fn the_toast_of_a_request_answered_elsewhere_is_withdrawn(cx: &mut TestAppContex
     user.call("approval.deny", json!({"number": number}))
         .unwrap();
 
-    until(&shell, cx, "the toast folded away", |cx| {
+    until_folded(&shell, cx, "the toast folded away", |cx| {
         !has("toast-1", cx)
     });
     settle(cx);
@@ -211,6 +225,7 @@ fn settings_say_when_this_desktop_shows_no_notifications(cx: &mut TestAppContext
         label("desktop-notifications", cx).as_deref(),
         Some("This desktop shows no notifications")
     );
+    settle(cx);
     settle(cx);
     assert_eq!(frames_pending(cx), 0, "at rest with the line shown");
 }
