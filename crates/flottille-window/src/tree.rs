@@ -257,7 +257,6 @@ impl Mark {
 /// The side panel: the primary button, the `PROJECTS` label, the projects and, pinned at the
 /// panel's bottom under a line whatever the tree's length, the "Ended" group, which unfolds upward
 /// over the tree.
-
 pub struct Sidebar {
     shell: WeakEntity<Shell>,
     projects: Vec<Entity<ProjectNode>>,
