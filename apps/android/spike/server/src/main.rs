@@ -399,13 +399,16 @@ struct State {
     accepted: Vec<String>,
 }
 
+/// The pushes held for the stub distributor, by token.
+type Queues = HashMap<String, VecDeque<Vec<u8>>>;
+
 struct Gate {
     user: User,
     agent: String,
     state: Mutex<State>,
     requests: Mutex<Requests>,
     /// The stub distributor's queue, by token.
-    pushes: (Mutex<HashMap<String, VecDeque<Vec<u8>>>>, Condvar),
+    pushes: (Mutex<Queues>, Condvar),
     vapid: Vapid,
 }
 
