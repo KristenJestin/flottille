@@ -32,9 +32,9 @@ const WAIT: Duration = Duration::from_secs(40);
 
 /// The hub, served from a temporary state folder in a runtime of the test's own.
 struct TestHub {
-    _runtime: tokio::runtime::Runtime,
+    runtime: tokio::runtime::Runtime,
     _folder: tempfile::TempDir,
-    served: Served<SystemClock>,
+    served: Option<Served<SystemClock>>,
     address: SocketAddr,
 }
 
@@ -53,9 +53,9 @@ impl TestHub {
         });
         let address = served.address();
         TestHub {
-            _runtime: runtime,
+            runtime,
             _folder: folder,
-            served,
+            served: Some(served),
             address,
         }
     }
@@ -66,7 +66,15 @@ impl TestHub {
 
     fn code(&self) -> String {
         self.served
+            .as_ref()
+            .unwrap()
             .with_hub(|hub| hub.setup_code().unwrap().to_owned())
+    }
+
+    /// The hub stops: down, as a host that is off.
+    fn down(&mut self) {
+        let served = self.served.take().unwrap();
+        self.runtime.block_on(served.stop());
     }
 }
 
@@ -130,13 +138,18 @@ impl Machine {
 
     /// Trusts `other` as `name` with no hub: what the link of #811 does by hand.
     fn trust(&self, name: &str, other: &Machine) {
+        self.trust_at(name, other, other.found());
+    }
+
+    /// [`Machine::trust`], knowing `other` at `addresses` only.
+    fn trust_at(&self, name: &str, other: &Machine, addresses: Vec<String>) {
         let file = self.user.path("state/flottille/remote/peers.json");
         let mut peers: Value = std::fs::read_to_string(&file)
             .ok()
             .and_then(|text| serde_json::from_str(&text).ok())
             .unwrap_or_else(|| json!({"machines": []}));
         peers["machines"].as_array_mut().unwrap().push(json!({
-            "name": name, "key": other.key(), "addresses": other.found(),
+            "name": name, "key": other.key(), "addresses": addresses,
         }));
         std::fs::write(file, peers.to_string()).unwrap();
     }
@@ -806,6 +819,144 @@ fn every_change_of_the_machines_page_is_animated(cx: &mut TestAppContext) {
     // Nothing moves once it all ended.
     let quiet = (0..200).find(|_| step(&shell, Duration::from_millis(16), cx) == 0);
     assert!(quiet.is_some(), "the page never came to rest");
+}
+
+/// The hub's card and the address line of a machine's row.
+const HUB_TITLE: &str = "hub-state-title";
+const HUB_TAG: &str = "hub-state-tag-0";
+const HUB_REASON: &str = "hub-reason";
+const HUB_DOWN: &str = "devices-hub-down-line";
+
+fn address_line(name: &str) -> String {
+    format!("member-address-{name}")
+}
+
+#[gpui_kit::test]
+fn settings_show_the_hub_and_whether_it_is_reachable(cx: &mut TestAppContext) {
+    let mut hub = TestHub::new();
+    let pc = Machine::new();
+    set_up(&hub, &pc);
+    let (shell, cx) = window(&pc, cx);
+    machines_tab(&shell, cx);
+    until(&shell, cx, "the hub is shown", |cx| present(cx, HUB_TITLE));
+    settle(&shell, cx);
+
+    // Its address, that it is reachable, and what it is for.
+    let title = label(cx, HUB_TITLE).unwrap();
+    assert!(title.contains(&hub.address.to_string()), "{title}");
+    assert_eq!(label(cx, HUB_TAG).as_deref(), Some("reachable"));
+    assert!(!present(cx, HUB_REASON), "nothing to say while it answers");
+    assert!(present(cx, "hub-sentence"), "its section says what it is for");
+
+    // Down, it is unreachable since a time, and says which address was tried and how it failed.
+    hub.down();
+    until(&shell, cx, "the hub is unreachable", |cx| {
+        label(cx, HUB_TAG).is_some_and(|tag| tag.starts_with("unreachable since "))
+    });
+    until(&shell, cx, "the reason unfolds", |cx| present(cx, HUB_REASON));
+    settle(&shell, cx);
+    let reason = label(cx, HUB_REASON).unwrap();
+    assert!(
+        reason.contains(&format!("the hub at {} is unreachable", hub.address)),
+        "{reason}"
+    );
+}
+
+#[gpui_kit::test]
+fn each_machine_says_the_address_it_is_reached_at_or_the_one_that_failed(
+    cx: &mut TestAppContext,
+) {
+    let (_hub, pc, server) = pc_and_server(User::new());
+    let at = server.found().remove(0);
+    let (shell, cx) = window(&pc, cx);
+    machines_tab(&shell, cx);
+    let line = address_line("server");
+    until(&shell, cx, "the server's address is said", |cx| {
+        label(cx, &line).is_some_and(|said| said.contains("127.0.0.1:"))
+    });
+    settle(&shell, cx);
+    // Linked, it says where: the address pc dialled, or the one the link came from.
+    let said = label(cx, &line).unwrap();
+    assert!(
+        said == format!("Reached at {at}") || said.starts_with("Linked from 127.0.0.1:"),
+        "{said}"
+    );
+
+    // Off, it says the address that was tried and how it failed.
+    assert!(server.user.run(&["daemon", "stop"]).status.success());
+    until(&shell, cx, "the failed address is said", |cx| {
+        label(cx, &line).is_some_and(|said| said.contains(&format!("tried {at} from pc")))
+    });
+    settle(&shell, cx);
+    let said = label(cx, &line).unwrap();
+    assert!(said.contains("is unreachable"), "{said}");
+}
+
+#[gpui_kit::test]
+fn adding_a_device_while_the_hub_is_unreachable_says_so(cx: &mut TestAppContext) {
+    let (mut hub, pc, server) = pc_and_server(User::new());
+    let at = server.found().remove(0);
+    let (shell, cx) = window(&pc, cx);
+    machines_tab(&shell, cx);
+    until(&shell, cx, "Add a device is offered", |cx| {
+        present(cx, "add-device")
+    });
+    assert!(!present(cx, HUB_DOWN), "the hub answers: nothing to say");
+
+    hub.down();
+    until(&shell, cx, "the hub's absence is said", |cx| {
+        present(cx, HUB_DOWN)
+    });
+    settle(&shell, cx);
+    let said = label(cx, HUB_DOWN).unwrap();
+    assert!(
+        said.starts_with("The hub is unreachable since ") && said.contains("adding a device"),
+        "{said}"
+    );
+
+    // Add a device cannot work, and asks nothing of the hub.
+    click(&shell, cx, "add-device");
+    assert!(shell.read_with(cx, |s, cx| s.machines().read(cx).invitation().is_none()));
+    assert!(!toasts(&shell, cx).iter().any(|t| t == "No invitation was made"));
+
+    // A machine only the hub could tell shows the last address it was known at.
+    assert!(server.user.run(&["daemon", "stop"]).status.success());
+    until(&shell, cx, "the last known address is said", |cx| {
+        label(cx, &address_line("server")).is_some_and(|said| said.contains(&at))
+    });
+
+    // The hub's answering again takes the notice away.
+    // (Not tried here: a hub that stopped keeps no port to come back on.)
+}
+
+#[gpui_kit::test]
+fn the_address_change_of_a_row_fades(cx: &mut TestAppContext) {
+    let (_hub, pc, server) = pc_and_server(User::new());
+    let (shell, cx) = window(&pc, cx);
+    machines_tab(&shell, cx);
+    let line = address_line("server");
+    until(&shell, cx, "the server's address is said", |cx| {
+        label(cx, &line).is_some_and(|said| said.contains("127.0.0.1:"))
+    });
+    settle(&shell, cx);
+    let before = label(cx, &line).unwrap();
+    let rest = (0..200).find(|_| step(&shell, Duration::from_millis(16), cx) == 0);
+    assert!(rest.is_some(), "the page came to rest before the change");
+
+    assert!(server.user.run(&["daemon", "stop"]).status.success());
+    until(&shell, cx, "the address line changes", |cx| {
+        label(cx, &line).is_some_and(|said| said != before)
+    });
+    // The line fades back in over HOVER from the last frame's text: frames are asked while it
+    // does, and no more once it has.
+    assert!(present(cx, &line), "the line fades, it is not swapped");
+    assert!(
+        cx.update(|window, cx| window.simulate_next_frame(cx)) > 0,
+        "fading"
+    );
+    cx.executor().advance_clock(Duration::from_millis(500));
+    let rest = (0..200).find(|_| step(&shell, Duration::from_millis(16), cx) == 0);
+    assert!(rest.is_some(), "the page came to rest after the change");
 }
 
 #[gpui_kit::test]
