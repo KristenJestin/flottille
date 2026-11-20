@@ -846,14 +846,19 @@ fn settings_show_the_hub_and_whether_it_is_reachable(cx: &mut TestAppContext) {
     assert!(title.contains(&hub.address.to_string()), "{title}");
     assert_eq!(label(cx, HUB_TAG).as_deref(), Some("reachable"));
     assert!(!present(cx, HUB_REASON), "nothing to say while it answers");
-    assert!(present(cx, "hub-sentence"), "its section says what it is for");
+    assert!(
+        present(cx, "hub-sentence"),
+        "its section says what it is for"
+    );
 
     // Down, it is unreachable since a time, and says which address was tried and how it failed.
     hub.down();
     until(&shell, cx, "the hub is unreachable", |cx| {
         label(cx, HUB_TAG).is_some_and(|tag| tag.starts_with("unreachable since "))
     });
-    until(&shell, cx, "the reason unfolds", |cx| present(cx, HUB_REASON));
+    until(&shell, cx, "the reason unfolds", |cx| {
+        present(cx, HUB_REASON)
+    });
     settle(&shell, cx);
     let reason = label(cx, HUB_REASON).unwrap();
     assert!(
@@ -863,9 +868,7 @@ fn settings_show_the_hub_and_whether_it_is_reachable(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn each_machine_says_the_address_it_is_reached_at_or_the_one_that_failed(
-    cx: &mut TestAppContext,
-) {
+fn each_machine_says_the_address_it_is_reached_at_or_the_one_that_failed(cx: &mut TestAppContext) {
     let (_hub, pc, server) = pc_and_server(User::new());
     let at = server.found().remove(0);
     let (shell, cx) = window(&pc, cx);
@@ -917,7 +920,11 @@ fn adding_a_device_while_the_hub_is_unreachable_says_so(cx: &mut TestAppContext)
     // Add a device cannot work, and asks nothing of the hub.
     click(&shell, cx, "add-device");
     assert!(shell.read_with(cx, |s, cx| s.machines().read(cx).invitation().is_none()));
-    assert!(!toasts(&shell, cx).iter().any(|t| t == "No invitation was made"));
+    assert!(
+        !toasts(&shell, cx)
+            .iter()
+            .any(|t| t == "No invitation was made")
+    );
 
     // A machine only the hub could tell shows the last address it was known at.
     assert!(server.user.run(&["daemon", "stop"]).status.success());
