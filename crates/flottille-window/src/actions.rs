@@ -171,6 +171,11 @@ pub enum Command {
     DeveloperSet {
         log: bool,
     },
+    /// A request of the update's (`update.show`, `.set`, `.check`, `.download`, `.restart`).
+    Update {
+        method: &'static str,
+        params: Value,
+    },
     /// A request of a part of Flottille the window draws in its places (`extensions`): what to
     /// do with the answer is said by `then`.
     Ask {
@@ -1042,6 +1047,11 @@ pub enum Outcome {
     Developer {
         written: bool,
         shown: Result<crate::settings::Developer, String>,
+    },
+    /// The daemon's answer to a [`Command::Update`]: what `update.show` says, or why not.
+    Update {
+        method: &'static str,
+        answer: Result<Value, String>,
     },
     /// The daemon's answer to an [`Command::Ask`], or why there is none.
     Asked {
@@ -2103,6 +2113,10 @@ fn perform(connect: &Connect, sign: Option<Sign>, command: Command, bounds: Boun
                 }
             });
             Outcome::Developer { written, shown }
+        }
+        Command::Update { method, params } => {
+            let answer = answer(ask_alone(connect, method, params, bounds.quick));
+            Outcome::Update { method, answer }
         }
         Command::Ask {
             method,

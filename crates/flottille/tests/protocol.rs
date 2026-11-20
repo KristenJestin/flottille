@@ -80,8 +80,9 @@ fn every_method_the_sources_name_is_catalogued() {
         // An event, said in `docs/protocol.md` ("Rules").
         "rules.changed",
     ];
-    // `remote.git` is a bare repository's folder, beside the `remote.` methods.
-    let files = ["md", "toml", "log", "pdf", "sock", "git"];
+    // `remote.git` is a bare repository's folder, beside the `remote.` methods; `update.rs` a
+    // source file, beside the `update.` ones.
+    let files = ["md", "toml", "log", "pdf", "sock", "git", "rs"];
 
     let mut sources = Vec::new();
     for folder in [

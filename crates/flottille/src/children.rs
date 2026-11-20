@@ -489,13 +489,7 @@ mod tests {
     #[test]
     fn every_child_the_daemon_starts_is_spawned_here() {
         // The command lines' own processes and the bridges run outside the daemon.
-        let outside = [
-            "children.rs",
-            "client.rs",
-            "update.rs",
-            "bridge.rs",
-            "codex_bridge.rs",
-        ];
+        let outside = ["children.rs", "client.rs", "bridge.rs", "codex_bridge.rs"];
         // Not spawns, or not the daemon's: an HTTP answer's status, and what the web reader's
         // own process tries in a test of its sandbox.
         let not_spawns = ["response.status()", "Command::new(named(\"run\"))"];

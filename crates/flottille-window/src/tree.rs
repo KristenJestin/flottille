@@ -282,6 +282,8 @@ pub struct Sidebar {
     /// The user's machines as this machine last said them, and the one shown (`None`: this one).
     machines: Option<crate::machines::Machines>,
     shown: Option<String>,
+    /// What the foot says of an update of Flottille, when there is one to act on.
+    version_line: Option<SharedString>,
 }
 
 impl Sidebar {
@@ -299,6 +301,7 @@ impl Sidebar {
             loading: true,
             machines: None,
             shown: None,
+            version_line: None,
         }
     }
 
@@ -482,6 +485,21 @@ fn framed<V: Render>(
         .collect()
 }
 
+impl Sidebar {
+    /// What the foot says of an update: it unfolds when there is one, fades when it changes.
+    pub fn set_version_line(&mut self, line: Option<String>, cx: &mut Context<Self>) {
+        let line = line.map(SharedString::from);
+        if self.version_line != line {
+            self.version_line = line;
+            cx.notify();
+        }
+    }
+
+    pub fn version_line(&self) -> Option<&SharedString> {
+        self.version_line.as_ref()
+    }
+}
+
 impl Render for Sidebar {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
@@ -494,6 +512,7 @@ impl Render for Sidebar {
         );
         let shell = self.shell.clone();
         let adds = self.shell.clone();
+        let version = self.shell.clone();
         let ended = self.ended.clone().map(|(group, present)| {
             // At the panel's bottom, under a line; its rows scroll inside their own block, and it
             // folds away when its last session leaves.
@@ -606,6 +625,37 @@ impl Render for Sidebar {
                         .text_color(p.fail)
                         .child(line)
                         .test_support()
+                        .into_any_element()
+                },
+            ))
+            .child(presence_of(
+                "sidebar-version-line",
+                self.version_line.clone(),
+                move |line| {
+                    let opens = version.clone();
+                    div()
+                        .flex_none()
+                        .border_t_1()
+                        .border_color(p.line)
+                        .px(space::SM)
+                        .py(space::XS)
+                        // Its one change (downloading, then ready) fades.
+                        .child(changing("sidebar-version-label", line, move |line| {
+                            Button::quiet("sidebar-version", line)
+                                .full_width()
+                                .on_click(move |_, window, cx| {
+                                    opens
+                                        .update(cx, |shell, cx| {
+                                            shell.open_settings_at(
+                                                crate::settings::Reveal::Version,
+                                                window,
+                                                cx,
+                                            )
+                                        })
+                                        .ok();
+                                })
+                                .into_any_element()
+                        }))
                         .into_any_element()
                 },
             ))

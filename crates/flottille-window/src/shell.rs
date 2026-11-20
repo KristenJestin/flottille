@@ -124,11 +124,47 @@ impl Sharing {
     }
 }
 
+/// How a window starts again from the binary that replaced its own, given the page it shows
+/// (`Shell::page_name`): false when there is no other file to start from.
+pub type Reexec = Arc<dyn Fn(Option<String>) -> bool + Send + Sync>;
+
+/// The page a name of [`Shell::page_name`] is, and the tab of Settings it names.
+fn page_named(name: &str) -> Option<(Selection, Option<usize>)> {
+    let (kind, rest) = name.split_once(':').unwrap_or((name, ""));
+    Some(match kind {
+        "session" => (Selection::Session(rest.to_owned()), None),
+        "project" => (Selection::Project(rest.to_owned()), None),
+        "settings" => (Selection::Settings, rest.parse().ok()),
+        "project-settings" => (Selection::ProjectSettings(rest.to_owned()), None),
+        "spec" => {
+            let (spec, project) = rest.split_once(':')?;
+            (
+                Selection::Spec {
+                    project: project.to_owned(),
+                    spec: spec.parse().ok()?,
+                },
+                None,
+            )
+        }
+        "services" => (Selection::Services, None),
+        _ => return None,
+    })
+}
+
 pub struct Shell {
     seen: Arc<Seen>,
     /// What "Restart Flottille" runs, off the UI's thread: `flottille daemon stop`, after which
     /// the link starts Flottille again.
     restart: Arc<dyn Fn() + Send + Sync>,
+    /// This window's own build, and how it starts again from the binary that replaced it: once
+    /// the daemon says another build, the window becomes that one, on the page it shows.
+    build: Option<(String, Reexec)>,
+    /// Set once the window asked to start again: it asks once.
+    reexecuted: bool,
+    /// The page to open once the daemon's first read is in: the one shown before a re-exec.
+    reopen: Option<(Selection, Option<usize>)>,
+    /// The Version section of Settings, General.
+    version: Entity<crate::version::VersionSection>,
     snapshot: Snapshot,
     layout: Layout,
     selected: Option<Selection>,
@@ -358,6 +394,7 @@ impl Shell {
         let compaction_guidance = cx.new(|_| RulesEditor::compaction(this.clone()));
         let workspaces = cx.new(|_| WorkspacesFolder::new(this.clone(), None));
         let modals = cx.new(|_| Modals::new());
+        let version = cx.new(|_| crate::version::VersionSection::new(this.clone()));
         let vault = cx.new(|_| VaultSection::new(this.clone(), modals.clone()));
         let connections =
             cx.new(|_| ConnectionsSection::new(this.clone(), vault.clone(), modals.clone()));
@@ -387,6 +424,7 @@ impl Shell {
                 vault.clone(),
                 connections.clone(),
                 machines.clone(),
+                version.clone(),
             )
         });
         let services = {
@@ -517,6 +555,10 @@ impl Shell {
         let mut shell = Self {
             seen,
             restart: Arc::new(restart_flottille),
+            build: None,
+            reexecuted: false,
+            reopen: None,
+            version,
             snapshot: Snapshot::default(),
             layout: Layout::Wide,
             selected: None,
@@ -1382,6 +1424,14 @@ impl Shell {
                     connections.update(cx, |section, cx| section.read(cx));
                 }
                 self.show(snapshot, window, cx);
+                if let Some((page, tab)) = self.reopen.take()
+                    && self.page_of(&page, cx) != Page::Empty
+                {
+                    self.open(page, window, cx);
+                    if let Some(tab) = tab {
+                        self.settings.update(cx, |page, cx| page.choose(tab, cx));
+                    }
+                }
                 if std::mem::take(&mut self.texts_due) {
                     self.read_texts(cx);
                 }
@@ -1396,6 +1446,7 @@ impl Shell {
             Update::Providers(read, providers) => self.set_providers(read, providers, cx),
             Update::TextChanged { judge: true, .. } => self.actions.send(Command::JudgeRead),
             Update::DeveloperChanged => self.actions.send(Command::DeveloperRead),
+            Update::UpdateShown(shown) => self.update_shown(&shown, cx),
             Update::ToolResultsChanged => self.actions.send(Command::ToolResultsRead),
             Update::CompactionChanged => self.actions.send(Command::CompactionRead),
             Update::SessionsChanged => self.actions.send(Command::SessionsRead),
@@ -1987,6 +2038,13 @@ impl Shell {
                 {
                     self.open_connection_request(number, cx);
                 }
+            }
+            Outcome::Update { method, answer } => {
+                if let Ok(shown) = &answer {
+                    self.update_shown(shown, cx);
+                }
+                self.version
+                    .update(cx, |section, cx| section.answered(method, answer, cx));
             }
             Outcome::Developer { written, shown } => {
                 self.settings
@@ -2717,6 +2775,61 @@ impl Shell {
             self.actions.send(Command::WorkspacesFolderRead {
                 project: Some(name),
             });
+        }
+    }
+
+    /// This window's build (its `--version`) and how it starts again from its binary, given the
+    /// page it shows: what the binary gives; a window given none never starts again.
+    pub fn set_build(&mut self, full: String, reexec: Reexec) {
+        self.build = Some((full, reexec));
+    }
+
+    /// The page to open once the daemon's first read is in, as [`Shell::page_name`] names it.
+    pub fn reopen(&mut self, page: &str) {
+        self.reopen = page_named(page);
+    }
+
+    /// The page shown, named for [`Shell::reopen`]: `session:<id>`, `project:<name>`,
+    /// `settings:<tab>`, `project-settings:<name>`, `spec:<n>:<project>`, `services`.
+    pub fn page_name(&self, cx: &gpui_kit::App) -> Option<String> {
+        Some(match self.selected.as_ref()? {
+            Selection::Session(id) => format!("session:{id}"),
+            Selection::Project(name) => format!("project:{name}"),
+            Selection::Settings => format!("settings:{}", self.settings.read(cx).tab()),
+            Selection::ProjectSettings(name) => format!("project-settings:{name}"),
+            Selection::Spec { project, spec } => format!("spec:{spec}:{project}"),
+            Selection::Services => "services".to_owned(),
+        })
+    }
+
+    pub fn version(&self) -> &Entity<crate::version::VersionSection> {
+        &self.version
+    }
+
+    /// What the daemon says of an update: the Version section and the sidebar's foot show it,
+    /// and a daemon of another build than this window's has the window start again from the
+    /// binary that replaced it, on the page it shows.
+    fn update_shown(&mut self, value: &serde_json::Value, cx: &mut Context<Self>) {
+        let shown = crate::version::Shown::of(value);
+        let foot = shown.foot_line();
+        let full = shown.full.clone();
+        self.version
+            .update(cx, |section, cx| section.set_shown(shown, cx));
+        self.sidebar
+            .update(cx, |sidebar, cx| sidebar.set_version_line(foot, cx));
+        let Some((own, reexec)) = self.build.clone() else {
+            return;
+        };
+        if full.is_empty() || full == own || self.reexecuted {
+            return;
+        }
+        self.reexecuted = true;
+        let page = self.page_name(cx);
+        // What the composers hold reaches the daemon before this process becomes another.
+        self.closing(cx);
+        if !reexec(page) {
+            // No newer file at the binary's path: this window goes on as it is.
+            self.closed = false;
         }
     }
 
