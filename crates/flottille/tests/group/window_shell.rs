@@ -55,6 +55,8 @@ mod window_project_settings;
 mod window_project_vault;
 #[path = "../window_raise.rs"]
 mod window_raise;
+#[path = "../window_remote_tree.rs"]
+mod window_remote_tree;
 #[path = "../window_repositories.rs"]
 mod window_repositories;
 #[path = "../window_selection.rs"]
