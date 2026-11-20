@@ -336,14 +336,15 @@ fn mark_of(shell: &Entity<Shell>, id: &str, cx: &mut VisualTestContext) -> Optio
     })
 }
 
-/// The bell's unread items of the session: their labels and excerpts, which are the first line
-/// of the question, never the whole of it.
+/// The bell's items of the session that wait still (the open session reads them, but only an
+/// answer resolves them): their labels and excerpts, the first line of the question, never the
+/// whole of it.
 fn bell_of(shell: &Entity<Shell>, id: &str, cx: &mut VisualTestContext) -> Vec<(String, String)> {
     shell.read_with(cx, |s, _| {
         s.snapshot()
             .bell
             .iter()
-            .filter(|item| item.session.as_deref() == Some(id) && !item.read)
+            .filter(|item| item.session.as_deref() == Some(id) && !item.resolved)
             .map(|item| (item.label.clone(), item.detail.clone()))
             .collect()
     })
