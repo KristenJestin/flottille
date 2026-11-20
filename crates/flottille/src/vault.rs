@@ -149,10 +149,14 @@ impl Keyring {
     /// the user to unlock it and wait.
     async fn read(&self, name: &str) -> Result<Option<String>, String> {
         match self {
-            Keyring::Memory { kept, file } => Ok(Self::memory(kept, file)?
-                .get(name)
-                .cloned()
-                .or_else(|| held_before(file, name))),
+            Keyring::Memory { kept, file } => {
+                // An await, as the system's keyring's search over D-Bus is.
+                tokio::task::yield_now().await;
+                Ok(Self::memory(kept, file)?
+                    .get(name)
+                    .cloned()
+                    .or_else(|| held_before(file, name)))
+            }
             Keyring::Os => {
                 let keyring = os().await?;
                 let items = keyring
@@ -537,6 +541,28 @@ async fn share(daemon: &Daemon, name: &str, machine: &str) -> Result<Value, Fail
                 .is_ok_and(|request| request["signed"]["method"] == "vault.share")
         })
         .ok_or_else(|| Failure::refused(NOT_SIGNED))?;
+    let (metadata, secret) = copy_of(daemon, name).await?;
+    let message = flottille_link::Share {
+        request: serde_json::from_str(&asked.signed)?,
+        entry: metadata,
+        secret: flottille_link::Secret(secret.clone()),
+    };
+    crate::link::share(daemon, machine, message)
+        .await
+        .map_err(|why| Failure::refused(masked_of(&why, &secret)))?;
+    eprintln!(
+        "flottille daemon: the vault entry {name} was shared with {machine}, asked by {}",
+        asked.device
+    );
+    Ok(json!({"name": name, "machine": machine}))
+}
+
+/// The entry `name` as it goes to another machine: its metadata, less where this machine's copy
+/// came from (the receiver's to say), and its secret.
+pub(crate) async fn copy_of(
+    daemon: &Daemon,
+    name: &str,
+) -> Result<(Value, zeroize::Zeroizing<String>), Failure> {
     let Some(entry) = daemon
         .read(|store| store.vault_entries())?
         .into_iter()
@@ -563,19 +589,7 @@ async fn share(daemon: &Daemon, name: &str, machine: &str) -> Result<Value, Fail
     if let Some(object) = metadata.as_object_mut() {
         object.remove("shared_from");
     }
-    let message = flottille_link::Share {
-        request: serde_json::from_str(&asked.signed)?,
-        entry: metadata,
-        secret: flottille_link::Secret(secret.clone()),
-    };
-    crate::link::share(daemon, machine, message)
-        .await
-        .map_err(|why| Failure::refused(masked_of(&why, &secret)))?;
-    eprintln!(
-        "flottille daemon: the vault entry {name} was shared with {machine}, asked by {}",
-        asked.device
-    );
-    Ok(json!({"name": name, "machine": machine}))
+    Ok((metadata, secret))
 }
 
 /// The entry `entry` another machine of the user's, `from`, shared with this one, its user's
