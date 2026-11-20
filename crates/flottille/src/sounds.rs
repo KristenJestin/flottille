@@ -85,9 +85,11 @@ impl Pcm {
     /// The same samples at `volume` (1 is as made), never past full scale.
     pub fn at(&self, volume: f32) -> Vec<u8> {
         self.bytes
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .flat_map(|pair| {
-                let sample = i16::from_le_bytes([pair[0], pair[1]]) as f32 * volume;
+                let sample = i16::from_le_bytes(*pair) as f32 * volume;
                 (sample.round().clamp(i16::MIN as f32, i16::MAX as f32) as i16).to_le_bytes()
             })
             .collect()
@@ -232,8 +234,10 @@ mod tests {
             );
             let peak = pcm
                 .bytes
-                .chunks_exact(2)
-                .map(|pair| i16::from_le_bytes([pair[0], pair[1]]).unsigned_abs())
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|pair| i16::from_le_bytes(*pair).unsigned_abs())
                 .max()
                 .unwrap();
             assert!(peak > 3_000 && peak < 16_384, "{sound:?} peaks at {peak}");
@@ -251,14 +255,18 @@ mod tests {
         };
         let half: Vec<i16> = pcm
             .at(0.5)
-            .chunks_exact(2)
-            .map(|p| i16::from_le_bytes([p[0], p[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|p| i16::from_le_bytes(*p))
             .collect();
         assert_eq!(half, [500, -500, 15_000]);
         let loud: Vec<i16> = pcm
             .at(4.0)
-            .chunks_exact(2)
-            .map(|p| i16::from_le_bytes([p[0], p[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|p| i16::from_le_bytes(*p))
             .collect();
         assert_eq!(loud, [4_000, -4_000, i16::MAX]);
     }

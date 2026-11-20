@@ -100,9 +100,7 @@ struct Desk {
 
 fn desk(capabilities: &[&str]) -> Option<Desk> {
     let user = User::with_fake_agent();
-    let Some(bus) = Bus::start(&user) else {
-        return None;
-    };
+    let bus = Bus::start(&user)?;
     let server = Notifications::start(&bus, capabilities);
     let played = desktop::with_fake_audio(&user);
     project(&user);
