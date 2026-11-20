@@ -1118,35 +1118,31 @@ pub(crate) fn says(
 }
 
 /// The sessions and children this machine's agents started on other machines, as the window
-/// shows them under their pilot (`remote.launches`): those not refused, each with what its
-/// machine last said of it, the kind and time of its last delivery here.
+/// shows them under their pilot (`remote.launches`, `Store::launches_shown`), each with what its
+/// machine last said of it, the kind and time of its last delivery here. Never a delivery's text.
 pub(crate) fn launched(daemon: &Daemon) -> Result<Value, String> {
     let launches = daemon
-        .read(|store| store.launches("out", None, LaunchFilter::All))
+        .read(|store| store.launches_shown())
         .map_err(|error| error.to_string())?;
-    let mut listed = Vec::new();
-    for launch in launches.iter().filter(|launch| launch.state != "refused") {
-        let Some(agent) = &launch.agent else {
-            continue;
-        };
-        let heard = daemon
-            .read(|store| store.launch_heard(&launch.caller, &launch.launch))
-            .map_err(|error| error.to_string())?;
-        listed.push(json!({
-            "machine": machine_name(daemon, launch),
-            "launch": launch.launch,
-            "caller": launch.caller,
-            "kind": launch.kind,
-            "project": launch.project,
-            "title": launch.asked["title"],
-            "agent": agent,
-            "state": launch.state,
-            "request": launch.request,
-            "heard": heard.as_ref().map(|(kind, _)| kind),
-            "heard_at": heard.as_ref().map(|(_, at)| at),
-            "at": launch.at,
-        }));
-    }
+    let listed: Vec<Value> = launches
+        .iter()
+        .map(|(launch, heard)| {
+            json!({
+                "machine": machine_name(daemon, launch),
+                "launch": launch.launch,
+                "caller": launch.caller,
+                "kind": launch.kind,
+                "project": launch.project,
+                "title": launch.asked["title"],
+                "agent": launch.agent,
+                "state": launch.state,
+                "request": launch.request,
+                "heard": heard.as_ref().map(|(kind, _)| kind),
+                "heard_at": heard.as_ref().map(|(_, at)| at),
+                "at": launch.at,
+            })
+        })
+        .collect();
     Ok(json!({"launches": listed}))
 }
 

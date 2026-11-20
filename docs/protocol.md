@@ -1285,7 +1285,10 @@ with the reason. No method answers a private key.
   whose signature added it, `machine` the fingerprint of the machine it declared, or `null`.
   `refused` when this machine is not set up with a hub.
 - `remote.launches` answers the sessions and children this machine's agents started on other
-  machines (`docs/remote.md`, "A tree across machines"), each but those refused there: `{"launches":
+  machines (`docs/remote.md`, "A tree across machines"), as the window's tree shows them under
+  their pilot: those that started a session there, not refused, not handed to the user, and not
+  ended unless their last delivery was a report and the agent that started it has not ended (an
+  old launch is never listed). `{"launches":
   [{"machine", "launch", "caller", "kind", "project", "title", "agent", "state", "request", "heard",
   "heard_at", "at"}]}`, `machine` its name, `caller` the agent of this machine that started it,
   `kind` `child`, `led` or `handed`, `agent` its id there, `state` `held` (waiting for the user
