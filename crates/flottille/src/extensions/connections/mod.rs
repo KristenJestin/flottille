@@ -13,6 +13,8 @@ mod oauth;
 pub mod requests;
 mod schema;
 
+pub use oauth::Waiting as SignInWaiting;
+
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
@@ -2046,6 +2048,160 @@ fn changed_event(daemon: &Daemon, name: &str, why: Option<&str>) {
     }
 }
 
+// ── Shared with another machine ──────────────────────────────────────────────────────────────
+
+/// What a client that does not sign is answered for `connection.share`.
+pub const SHARE_NOT_SIGNED: &str = "sharing a connection is signed by the user's device: ask it with `flottille connection share`, or from the window's Settings, Connections";
+
+/// Why the connection `declaration` cannot go to another machine: a command, or a URL on this
+/// machine, is this machine's own (`docs/remote.md`, "Connections"); `None` for an `https://`
+/// connection.
+fn own_to_this_machine(declaration: &Declaration) -> Option<String> {
+    let remote = match &declaration.reach {
+        Reach::Url(url) => {
+            declaration.url_fault().is_none()
+                && url::Url::parse(url).is_ok_and(|url| url.scheme() == "https")
+        }
+        Reach::Command(_) => false,
+    };
+    (!remote).then(|| {
+        format!(
+            "the connection {} is this machine's own: only an https:// connection is shared",
+            declaration.name
+        )
+    })
+}
+
+/// Why the entries `entries` cannot go with the connection `declaration` to `machine`: its OAuth
+/// tokens never do, and an entry it does not name is not shared through it.
+fn entries_shareable(
+    declaration: &Declaration,
+    entries: &[String],
+    machine: &str,
+) -> std::result::Result<(), String> {
+    if entries
+        .iter()
+        .any(|entry| *entry == oauth::entry(&declaration.name))
+    {
+        return Err(format!(
+            "OAuth tokens are never shared: {machine} signs in for itself"
+        ));
+    }
+    if let Some(entry) = entries
+        .iter()
+        .find(|entry| !declaration.entries().any(|named| named == *entry))
+    {
+        return Err(format!(
+            "the connection {} names no vault entry {entry}",
+            declaration.name
+        ));
+    }
+    Ok(())
+}
+
+/// `connection.share {name, machine, entries?}`: the user's `https://` connection sent to their
+/// machine `machine`, with the vault entries it names that they chose (`entries`), only as the
+/// request their device signed, which goes with it for that machine to check.
+async fn share(daemon: &Arc<Daemon>, params: Value) -> std::result::Result<Value, Failure> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct ShareWith {
+        name: String,
+        machine: String,
+        #[serde(default)]
+        entries: Vec<String>,
+    }
+    let asked = crate::daemon::asked()
+        .filter(|asked| {
+            serde_json::from_str::<Value>(&asked.signed)
+                .is_ok_and(|request| request["signed"]["method"] == "connection.share")
+        })
+        .ok_or_else(|| Failure::refused(SHARE_NOT_SIGNED))?;
+    let ShareWith {
+        name,
+        machine,
+        entries,
+    } = serde_json::from_value(params)?;
+    let declaration = declaration(&daemon.paths, &name)?;
+    if let Some(why) = own_to_this_machine(&declaration) {
+        return Err(Failure::refused(why));
+    }
+    entries_shareable(&declaration, &entries, &machine).map_err(Failure::refused)?;
+    let mut copies = Vec::new();
+    for entry in &entries {
+        let (metadata, secret) = crate::vault::copy_of(daemon, entry).await?;
+        copies.push(flottille_link::SharedEntry {
+            entry: metadata,
+            secret: flottille_link::Secret(secret),
+        });
+    }
+    let message = flottille_link::ConnectionShare {
+        request: serde_json::from_str(&asked.signed)?,
+        connection: declaration.json(),
+        entries: copies,
+    };
+    let masked = |why: String| {
+        message.entries.iter().fold(why, |why, copy| {
+            why.replace(copy.secret.0.as_str(), "[masked]")
+        })
+    };
+    crate::link::share_connection(daemon, &machine, message.clone())
+        .await
+        .map_err(|why| Failure::refused(masked(why)))?;
+    eprintln!(
+        "flottille daemon: the connection {name} was shared with {machine}, asked by {}",
+        asked.device
+    );
+    Ok(json!({"name": name, "machine": machine, "entries": entries}))
+}
+
+/// The connection `connection` another machine of the user's, `from`, shared with this one,
+/// `here`, its user's request checked already (`link::Remote::shared_connection`), with the
+/// vault entries `entries` the request names: checked here as this machine's own Save checks it,
+/// never taken on the sender's word. The entries go to the vault as shared ones do
+/// (`vault::receive`), then the connection is declared as the user's own Save declares it. A
+/// connection this machine has already is never replaced.
+pub async fn receive(
+    daemon: &Arc<Daemon>,
+    connection: &Value,
+    entries: &[flottille_link::SharedEntry],
+    from: &str,
+    here: &str,
+) -> std::result::Result<(), String> {
+    let table = connection
+        .as_object()
+        .ok_or("refused: this is not a connection's declaration")?;
+    let declaration =
+        Declaration::of(table, "connection").map_err(|why| format!("refused: {why}"))?;
+    if let Some(why) = own_to_this_machine(&declaration) {
+        return Err(format!("refused: {why}"));
+    }
+    let names: Vec<String> = entries
+        .iter()
+        .map(|copy| copy.entry["name"].as_str().unwrap_or_default().to_owned())
+        .collect();
+    entries_shareable(&declaration, &names, here).map_err(|why| format!("refused: {why}"))?;
+    let name = declaration.name.clone();
+    if declaration_exists(daemon, &name) {
+        return Err(format!(
+            "refused: {here} has its own connection {name}: remove or rename it there first"
+        ));
+    }
+    for copy in entries {
+        crate::vault::receive(daemon, &copy.entry, &copy.secret.0, from).await?;
+    }
+    add(daemon, connection.clone())
+        .await
+        .map_err(|failure| failure.message)?;
+    eprintln!("flottille daemon: the connection {name} was shared from {from}");
+    Ok(())
+}
+
+/// The sign-in of the connection `name` that waits for the browser, if one does.
+pub fn sign_in_waiting(daemon: &Daemon, name: &str) -> Option<SignInWaiting> {
+    oauth::waiting(daemon, name)
+}
+
 // ── The user's door ──────────────────────────────────────────────────────────────────────────
 
 fn call(daemon: Arc<Daemon>, method: String, params: Value) -> super::Answered {
@@ -2063,6 +2219,7 @@ fn call(daemon: Arc<Daemon>, method: String, params: Value) -> super::Answered {
             "connection.review" => review(&daemon, params).await,
             "connection.accept" => accept(&daemon, params).await,
             "connection.login" => login(&daemon, params).await,
+            "connection.share" => share(&daemon, params).await,
             "connection.proposed" => requests::proposed(&daemon, &params),
             "connection.share_entry" | "connection.bind_entry" => {
                 requests::widened(&daemon, &method, &params).await

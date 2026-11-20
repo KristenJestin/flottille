@@ -10,6 +10,8 @@ mod guidance;
 mod review;
 mod specs;
 
+pub use connections::command::ConnectionAction;
+
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
@@ -764,6 +766,24 @@ pub fn vault_provide(socket: &std::path::Path) -> std::process::ExitCode {
 
 /// Whether the use of an extension's feature a vault entry would be bound to (`bound`,
 /// `connection:<name>`) can exist: a connection's name is checked as connections check theirs.
+/// The sign-in of the connection `name` waiting for the browser on this machine, if one does: what
+/// a tunnel of another machine's client may reach (`tunnel.rs`).
+pub fn sign_in_waiting(daemon: &Daemon, name: &str) -> Option<connections::SignInWaiting> {
+    connections::sign_in_waiting(daemon, name)
+}
+
+/// A connection another machine of the user's shared with this one (`docs/remote.md`,
+/// "Connections"), its user's request checked already.
+pub async fn receive_connection(
+    daemon: &std::sync::Arc<Daemon>,
+    connection: &serde_json::Value,
+    entries: &[flottille_link::SharedEntry],
+    from: &str,
+    here: &str,
+) -> Result<(), String> {
+    connections::receive(daemon, connection, entries, from, here).await
+}
+
 pub fn bound_possible(bound: &str) -> bool {
     match bound.split_once(':') {
         Some(("connection", name)) => connections::name_ok(name),

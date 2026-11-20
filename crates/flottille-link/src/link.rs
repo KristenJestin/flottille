@@ -95,6 +95,9 @@ pub enum MachineMessage {
     Git(Git),
     /// A vault entry the user shared with the receiver (`docs/remote.md`, "Vault entries").
     Share(Share),
+    /// A connection the user shared with the receiver, and the vault entries it names they chose
+    /// to share with it (`docs/remote.md`, "Connections").
+    ShareConnection(ConnectionShare),
 }
 
 /// The `git` messages: what the receiver has, a bundle offered, its bytes, the workspace made of
@@ -168,6 +171,28 @@ pub struct Share {
     /// The user's request, as their device signed it for the machine that holds the entry.
     pub request: Value,
     /// The entry's metadata, as the holder's vault lists it.
+    pub entry: Value,
+    pub secret: Secret,
+}
+
+/// A connection the user shared: their device's signed `connection.share`, which the receiver
+/// checks itself (a machine alone shares nothing), the connection's declaration, and the vault
+/// entries it names that the user chose to share with it, each with its secret.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConnectionShare {
+    /// The user's request, as their device signed it for the machine that holds the connection.
+    pub request: Value,
+    /// The connection's declaration, as the holder's configuration has it.
+    pub connection: Value,
+    pub entries: Vec<SharedEntry>,
+}
+
+/// A vault entry going with a connection: its metadata, as the holder's vault lists it, and its
+/// secret.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SharedEntry {
     pub entry: Value,
     pub secret: Secret,
 }

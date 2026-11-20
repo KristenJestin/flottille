@@ -53,12 +53,51 @@ struct Carried {
     id: String,
     machine: String,
     run: String,
+    /// The connection whose sign-in the tunnel carries the redirect of, instead of a run's port.
+    sign_in: Option<String>,
     port: u16,
     local_port: u16,
     since: u64,
     connections: AtomicUsize,
     /// Set to the reason when something asks it to close (`tunnel.close`).
     close: watch::Sender<Option<String>>,
+}
+
+/// What a served tunnel reaches.
+#[derive(Clone)]
+enum Target {
+    /// A port of the run whose session `pid` leads, and that reports `url`.
+    Run { pid: u32, url: Option<String> },
+    /// The one-shot loopback listener of a connection's sign-in, while that very sign-in waits.
+    SignIn {
+        name: String,
+        flow: u64,
+        address: IpAddr,
+    },
+}
+
+/// What ends a served tunnel: its run, or its sign-in.
+enum Ends {
+    Run(crate::runs::Reachable),
+    SignIn(watch::Receiver<Option<bool>>),
+}
+
+impl Ends {
+    /// Returns once it ended: for a sign-in, whether it signed in.
+    async fn ended(&mut self) -> Option<bool> {
+        match self {
+            Ends::Run(reach) => {
+                reach.ended().await;
+                None
+            }
+            Ends::SignIn(ended) => Some(
+                ended
+                    .wait_for(Option::is_some)
+                    .await
+                    .is_ok_and(|ended| *ended == Some(true)),
+            ),
+        }
+    }
 }
 
 /// A tunnel this machine serves for a device of another machine.
@@ -68,10 +107,10 @@ struct Served {
     device: PublicKey,
     /// The machine the tunnel came from: only its link may open a connection of it.
     carrier: PublicKey,
+    /// The run's id, or `sign-in of <connection>`: what the log says it reaches.
     run: String,
     port: u16,
-    pid: u32,
-    url: Option<String>,
+    target: Target,
     connections: AtomicUsize,
     closed: watch::Sender<bool>,
 }
@@ -129,6 +168,7 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Result<Va
                 "tunnel": tunnel.id,
                 "machine": tunnel.machine,
                 "run": tunnel.run,
+                "sign_in": tunnel.sign_in,
                 "port": tunnel.port,
                 "local_port": tunnel.local_port,
                 "address": format!("127.0.0.1:{}", tunnel.local_port),
@@ -218,9 +258,10 @@ pub(crate) async fn carry(
         return;
     }
     let result = answer.result.unwrap_or_default();
+    let sign_in = result["sign_in"].as_str().map(str::to_owned);
     let (Some(tunnel), Some(run), Some(port)) = (
         result["tunnel"].as_str(),
-        result["run"].as_str(),
+        result["run"].as_str().or(sign_in.as_ref().map(|_| "")),
         result["port"]
             .as_u64()
             .and_then(|port| u16::try_from(port).ok()),
@@ -233,15 +274,22 @@ pub(crate) async fn carry(
             .await;
         return;
     };
-    let (listener, local_port) = match bind_local(port) {
+    // A sign-in's redirect names its port: the browser comes back to that one or to none.
+    let bound = match &sign_in {
+        Some(_) => bind_exact(port),
+        None => bind_local(port),
+    };
+    let (listener, local_port) = match bound {
         Ok(bound) => bound,
         Err(why) => {
-            let _ = out
-                .send(error(
-                    "unavailable",
-                    format!("cannot listen on 127.0.0.1: {why}"),
-                ))
-                .await;
+            let why = match &sign_in {
+                Some(_) => format!(
+                    "cannot listen on 127.0.0.1:{port}, the port the sign-in's redirect names: \
+                     {why}"
+                ),
+                None => format!("cannot listen on 127.0.0.1: {why}"),
+            };
+            let _ = out.send(error("unavailable", why)).await;
             return;
         }
     };
@@ -250,6 +298,7 @@ pub(crate) async fn carry(
         id: tunnel.to_owned(),
         machine: machine.to_owned(),
         run: run.to_owned(),
+        sign_in: sign_in.clone(),
         port,
         local_port,
         since: now(),
@@ -275,11 +324,11 @@ pub(crate) async fn carry(
     };
     remote.emit(
         "tunnel.opened",
-        json!({"tunnel": carried.id, "machine": machine, "run": run, "port": port,
-            "local_port": local_port}),
+        json!({"tunnel": carried.id, "machine": machine, "run": run, "sign_in": sign_in,
+            "port": port, "local_port": local_port}),
     );
-    let shown = json!({"tunnel": carried.id, "machine": machine, "run": run, "port": port,
-        "local_port": local_port, "address": format!("127.0.0.1:{local_port}")});
+    let shown = json!({"tunnel": carried.id, "machine": machine, "run": run, "sign_in": sign_in,
+        "port": port, "local_port": local_port, "address": format!("127.0.0.1:{local_port}")});
     if out
         .send(Answer::result(id.clone().unwrap_or_default(), shown))
         .await
@@ -288,10 +337,14 @@ pub(crate) async fn carry(
         return;
     }
     // Until the tunnel ends, whichever side ends it.
+    let mut signed_in = None;
     holding.reason = tokio::select! {
         // The machine of the run ended it, saying why, or its stream ended with the link.
         frame = answers.next() => match frame {
-            Some(Ok(frame)) => frame["closed"].as_str().unwrap_or("the tunnel ended").to_owned(),
+            Some(Ok(frame)) => {
+                signed_in = frame["signed_in"].as_bool();
+                frame["closed"].as_str().unwrap_or("the tunnel ended").to_owned()
+            }
             Some(Err(why)) => why.to_string(),
             None => format!("{machine} closed it"),
         },
@@ -305,7 +358,7 @@ pub(crate) async fn carry(
         at: now(),
         name: "tunnel.closed".to_owned(),
         data: json!({"tunnel": carried.id, "machine": machine, "run": run,
-            "reason": holding.reason}),
+            "sign_in": sign_in, "reason": holding.reason, "signed_in": signed_in}),
     };
     let _ = out.send(Answer::event(closed)).await;
 }
@@ -351,6 +404,13 @@ fn bind_local(port: u16) -> std::io::Result<(TcpListener, u16)> {
     bind(port).or_else(|_| bind(0))
 }
 
+/// Listens on `127.0.0.1:<port>`, that port or none.
+fn bind_exact(port: u16) -> std::io::Result<(TcpListener, u16)> {
+    let listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, port))?;
+    listener.set_nonblocking(true)?;
+    Ok((TcpListener::from_std(listener)?, port))
+}
+
 /// Takes the connections of the local port: each one is a stream of the link, until the tunnel
 /// closes (the tasks of the connections go with this one).
 async fn accept(
@@ -394,9 +454,13 @@ async fn carry_connection(link: Link, id: &str, mut tcp: TcpStream) {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Open {
-    run: String,
+    #[serde(default)]
+    run: Option<String>,
     #[serde(default)]
     port: Option<u16>,
+    /// A connection whose sign-in waits on this machine: its redirect is what is reached.
+    #[serde(default)]
+    sign_in: Option<String>,
 }
 
 /// A `tunnel.*` request another machine's client signed, checked by `Remote::accept`, as this
@@ -433,7 +497,7 @@ pub(crate) async fn serve(
         return;
     }
     eprintln!("flottille daemon: tunnel.open asked by {device} from {from}");
-    let opened = match open(remote, &daemon, link, signer, accepted.params) {
+    let opened = match open(remote, &daemon, link, signer, accepted.params, &device) {
         Ok(opened) => opened,
         Err(why) => {
             let _ = answer
@@ -442,9 +506,14 @@ pub(crate) async fn serve(
             return;
         }
     };
-    let (served, mut reach) = opened;
+    let (served, mut ends) = opened;
     let mut lists = remote.lists.subscribe();
-    let shown = json!({"tunnel": served.id, "run": served.run, "port": served.port});
+    let shown = match &served.target {
+        Target::SignIn { name, .. } => {
+            json!({"tunnel": served.id, "sign_in": name, "port": served.port})
+        }
+        Target::Run { .. } => json!({"tunnel": served.id, "run": served.run, "port": served.port}),
+    };
     remote.emit(
         "tunnel.opened",
         json!({"tunnel": served.id, "run": served.run, "port": served.port, "device": device}),
@@ -463,10 +532,22 @@ pub(crate) async fn serve(
     let gone = answer.gone();
     tokio::pin!(gone);
     // Until the run ends, the link goes, the device is no member's, or its client closes it.
+    let mut signed_in = None;
     let reason = loop {
         tokio::select! {
             _ = &mut gone => break "its client closed it".to_owned(),
-            _ = reach.ended() => break format!("run {} ended", served.run),
+            ended = ends.ended() => {
+                signed_in = ended;
+                break match (&served.target, ended) {
+                    (Target::SignIn { name, .. }, Some(true)) => {
+                        format!("the sign-in of {name} ended: signed in")
+                    }
+                    (Target::SignIn { name, .. }, _) => {
+                        format!("the sign-in of {name} ended without signing in")
+                    }
+                    (Target::Run { .. }, _) => format!("run {} ended", served.run),
+                };
+            }
             _ = link.closed() => break "the link was lost".to_owned(),
             changed = lists.changed() => {
                 if changed.is_err() || !remote.still_member(&signer).await {
@@ -475,7 +556,9 @@ pub(crate) async fn serve(
             }
         }
     };
-    let _ = answer.send(&bytes(&json!({"closed": reason}))).await;
+    let _ = answer
+        .send(&bytes(&json!({"closed": reason, "signed_in": signed_in})))
+        .await;
     drop(ended);
 }
 
@@ -486,24 +569,30 @@ fn open(
     link: &Link,
     signer: PublicKey,
     params: Value,
-) -> Result<(Arc<Served>, crate::runs::Reachable), String> {
-    let Open { run, port } = serde_json::from_value(params)
-        .map_err(|error| format!("refused: tunnel.open takes {{run, port?}}: {error}"))?;
-    let Some(reach) = crate::runs::reachable(daemon, &run) else {
-        return Err(format!("refused: there is no run {run} going on here"));
-    };
-    let reached = reached(reach.pid, reach.url.as_deref());
-    let port = match port {
-        Some(port) if reached.target(port).is_some() => port,
-        Some(port) => {
-            return Err(format!(
-                "refused: port {port} is none of run {run}'s: {}",
-                reached.said(&run)
-            ));
+    device: &str,
+) -> Result<(Arc<Served>, Ends), String> {
+    let Open { run, port, sign_in } = serde_json::from_value(params).map_err(|error| {
+        format!("refused: tunnel.open takes {{run, port?}} or {{sign_in}}: {error}")
+    })?;
+    let (run, port, target, ends) = match (run, sign_in) {
+        (Some(run), None) => {
+            let (port, target, reach) = run_reached(daemon, &run, port)?;
+            (run, port, target, Ends::Run(reach))
         }
-        None => reached
-            .only()
-            .map_err(|why| format!("refused: {why} (run {run})"))?,
+        (None, Some(name)) if port.is_none() => {
+            let (port, target, ended) = sign_in_reached(daemon, &name, device)?;
+            (
+                format!("sign-in of {name}"),
+                port,
+                target,
+                Ends::SignIn(ended),
+            )
+        }
+        _ => {
+            return Err(
+                "refused: tunnel.open takes {run, port?} or {sign_in}, not both".to_owned(),
+            );
+        }
     };
     let mut served = remote.tunnels.served.lock().unwrap();
     if served
@@ -522,13 +611,71 @@ fn open(
         carrier: link.peer(),
         run,
         port,
-        pid: reach.pid,
-        url: reach.url.clone(),
+        target,
         connections: AtomicUsize::new(0),
         closed: watch::Sender::new(false),
     });
     served.insert(tunnel.id.clone(), tunnel.clone());
-    Ok((tunnel, reach))
+    Ok((tunnel, ends))
+}
+
+/// The sign-in of the connection `name` a tunnel may reach, for the member `device`: only one
+/// that waits on this machine, that this very device began, and only its one-shot listener.
+fn sign_in_reached(
+    daemon: &Arc<Daemon>,
+    name: &str,
+    device: &str,
+) -> Result<(u16, Target, watch::Receiver<Option<bool>>), String> {
+    let here = crate::link::remote_of(daemon)
+        .ok()
+        .and_then(|remote| remote.listed().ok().map(|(_, name)| name))
+        .unwrap_or_else(|| "this machine".to_owned());
+    let Some(waiting) = crate::extensions::sign_in_waiting(daemon, name) else {
+        return Err(format!(
+            "refused: no sign-in of the connection {name} waits on {here}: begin it first"
+        ));
+    };
+    if waiting.device.as_deref() != Some(device) {
+        return Err(format!(
+            "refused: the sign-in of {name} was not begun by {device}: begin it again from \
+             this client"
+        ));
+    }
+    let target = Target::SignIn {
+        name: name.to_owned(),
+        flow: waiting.flow,
+        address: waiting.address,
+    };
+    Ok((waiting.port, target, waiting.ended))
+}
+
+/// The port of the run `run` a tunnel may reach: `port`, or the one the run reports.
+fn run_reached(
+    daemon: &Arc<Daemon>,
+    run: &str,
+    port: Option<u16>,
+) -> Result<(u16, Target, crate::runs::Reachable), String> {
+    let Some(reach) = crate::runs::reachable(daemon, run) else {
+        return Err(format!("refused: there is no run {run} going on here"));
+    };
+    let reached = reached(reach.pid, reach.url.as_deref());
+    let port = match port {
+        Some(port) if reached.target(port).is_some() => port,
+        Some(port) => {
+            return Err(format!(
+                "refused: port {port} is none of run {run}'s: {}",
+                reached.said(&run)
+            ));
+        }
+        None => reached
+            .only()
+            .map_err(|why| format!("refused: {why} (run {run})"))?,
+    };
+    let target = Target::Run {
+        pid: reach.pid,
+        url: reach.url.clone(),
+    };
+    Ok((port, target, reach))
 }
 
 /// A tunnel's id: 8 random bytes in hexadecimal. It names a tunnel on the link of the machine it
@@ -601,17 +748,42 @@ pub(crate) async fn connection(
     // taken its port since. It is connected to the address the run listens on, which is what was
     // checked, and no other. What is left is the instant between this check and the connection
     // (`docs/remote.md`, "Tunnels").
-    let (pid, url, port) = (served.pid, served.url.clone(), served.port);
-    let target = tokio::task::spawn_blocking(move || reached(pid, url.as_deref()).target(port))
-        .await
-        .ok()
-        .flatten();
-    let Some(target) = target else {
-        eprintln!(
-            "flottille daemon: port {port} is no longer one of run {}'s: a connection of tunnel {tunnel} is closed",
-            served.run
-        );
-        return;
+    let port = served.port;
+    let target = match served.target.clone() {
+        Target::Run { pid, url } => {
+            let target =
+                tokio::task::spawn_blocking(move || reached(pid, url.as_deref()).target(port))
+                    .await
+                    .ok()
+                    .flatten();
+            let Some(target) = target else {
+                eprintln!(
+                    "flottille daemon: port {port} is no longer one of run {}'s: a connection of tunnel {tunnel} is closed",
+                    served.run
+                );
+                return;
+            };
+            target
+        }
+        // Only while that very sign-in waits: one begun again, or ended, is reached no more.
+        Target::SignIn {
+            name,
+            flow,
+            address,
+        } => {
+            let Some(daemon) = remote.daemon() else {
+                return;
+            };
+            if crate::extensions::sign_in_waiting(&daemon, &name)
+                .is_none_or(|waiting| waiting.flow != flow)
+            {
+                eprintln!(
+                    "flottille daemon: the sign-in of {name} no longer waits: a connection of tunnel {tunnel} is closed"
+                );
+                return;
+            }
+            address
+        }
     };
     let connected = tokio::time::timeout(
         CONNECT_WITHIN,
