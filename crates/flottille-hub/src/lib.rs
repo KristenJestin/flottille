@@ -391,12 +391,14 @@ impl<C: Clock> Hub<C> {
                 }
             }
         };
+        // The device is paired once its entry is stored: pair mode ends before the facts are
+        // written, so that a disk that refuses them does not leave the code to pair again.
+        self.end_pairing(PairEnd::Paired(Box::new(paired.clone())));
         let facts = self.facts_mut(&paired.key);
         facts.paired_at = Some(now);
         facts.version = Some(version.to_owned());
         facts.last_seen = Some(now);
         self.write_facts()?;
-        self.end_pairing(PairEnd::Paired(Box::new(paired.clone())));
         Ok(paired)
     }
 
