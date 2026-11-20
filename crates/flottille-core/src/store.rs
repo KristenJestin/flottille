@@ -5192,7 +5192,8 @@ mod tests {
     #[test]
     fn the_notification_cursor_is_kept() {
         let store = Store::open_in_memory().unwrap();
-        assert_eq!(store.notification_cursor().unwrap(), None);
+        // The migration starts it at the last event there was: none in a new store.
+        assert_eq!(store.notification_cursor().unwrap(), Some(0));
         store.set_notification_cursor(7).unwrap();
         store.set_notification_cursor(9).unwrap();
         assert_eq!(store.notification_cursor().unwrap(), Some(9));
