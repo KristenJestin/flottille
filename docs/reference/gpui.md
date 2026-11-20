@@ -195,7 +195,12 @@ the wrong code first).
    "Claude"), never its state ("On", "Enabled", "Use"): the switch already draws whether it is
    on. A setting that only means something for one choice (a switch on, a radio chosen) unfolds
    right under it, its label read after the choice's ("Compact automatically", then "When the
-   context reaches"), never shown greyed elsewhere on the page. A field saved on its own shows
+   context reaches"), never shown greyed elsewhere on the page. A choice that may be left unsaid
+   is a switch ("Wait until it is ready", "Link to it on its run") that unfolds its kinds, never a
+   radio with a "None" row; a list that grows with the data is a `ChipPicker`, never a switch per
+   item. A long form is sections with a heading and one sentence each: what is required first,
+   then one line ("Optional: everything below can stay empty", `commands::optional_line`) instead
+   of the word after each label. A field saved on its own shows
    no Save at rest: a secondary Save unfolds beside it once its value differs from the saved one,
    and folds away after it is saved or set back.
 5. **A state is said once per view**: an agent's state by its icon on its own row, "needs you" in
@@ -318,6 +323,7 @@ The components that hold them:
 | `Field::new(id, label, control)` | `.optional()`, `.hint(h)`, `.hint_mono()`, `.error(Option<e>)` |
 | `Switch::new(id, on, label)` | `.hint(h)`, `.on_click(f)`; the whole row toggles |
 | `Tag::new(id, text)` | the small bordered mono word after a title (a state, a kind): the element `<id>`, cut at 160 px with its whole text as a tooltip, fading in when its text changes. `ListRow::tag` and `Section::tag` draw theirs through it; a tag anywhere else (the Changed / New mark of a block of a review) is a `Tag`, never a styled div |
+| `ChipPicker::new(id, label, &input, options, chosen)` | a list that grows with the data (a service's or a task's needs, a repository's dependencies) is never a switch per item: it is this multi-select of keys. `ChipOption::new(key, label).detail(line)`, `.placeholder(p)`, `.on_change(f)` (given the whole list, in the order added); chips (`RemovableChip`, each its label, a detail and a remove button) unfold in and fold away, a count after the label, a line when none, a field that opens a menu of what is not chosen yet (searched with `fuzzy`, arrows and Enter add, Backspace removes the last); ids `<id>-chip-<key>`, `<id>-chip-<key>-remove`, `<id>-search`, `<id>-menu`, `<id>-item-<key>`, `<id>-count`, `<id>-none` |
 | `Segmented::new(id, label, choices, chosen)` | at most three choices, never in a dialog; `.unavailable(i)` shows a choice that cannot be taken here, faded over `HOVER` and with no hover, a line beside it saying why |
 | `RadioChoices::new(id, label)` | `.choice(key, title, line)`, `.leading(Icon)`, `.chosen(i)`, `.on_choose(f)`; two to four |
 | `Select::new(id, options, chosen)` | `SelectOption::new(key, title).line(l)`, `.fit()`, `.disabled(b)`, `.on_choose(f)` |

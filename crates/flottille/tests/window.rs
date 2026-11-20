@@ -9550,6 +9550,46 @@ fn every_switch_of_the_task_dialog_draws_its_label_and_its_hint(cx: &mut TestApp
 }
 
 #[gpui_kit::test]
+fn the_task_dialog_says_what_is_required_and_what_is_optional_once(cx: &mut TestAppContext) {
+    let user = user();
+    project(&user, "atlas");
+    let (shell, cx) = window(&user, Arc::new(user.connector()), 1280., cx);
+    sections_of(&shell, "atlas", "tasks", cx);
+
+    cx.update(|window, cx| window.click("add-task", cx));
+    settle(cx);
+    assert_eq!(
+        text_of("task-section-run-tag", cx).as_deref(),
+        Some("required")
+    );
+    assert_eq!(
+        text_of("task-optional", cx).as_deref(),
+        Some("Optional: everything below can stay empty")
+    );
+    cx.update(|window, _| {
+        let line = window.find("task-optional").bounds();
+        for required in ["task-name-field-label", "task-line-field-label"] {
+            assert!(
+                window.find(required).bounds().bottom() <= line.top(),
+                "{required}"
+            );
+        }
+        for optional in [
+            "task-section-kind-title",
+            "task-needs",
+            "task-section-ready-title",
+            "task-section-address-title",
+            "task-section-agents-title",
+        ] {
+            assert!(
+                window.find(optional).bounds().top() >= line.bottom(),
+                "{optional}"
+            );
+        }
+    });
+}
+
+#[gpui_kit::test]
 fn a_task_s_kinds_read_as_what_they_are(cx: &mut TestAppContext) {
     let user = user();
     project(&user, "atlas");
@@ -11227,14 +11267,18 @@ fn a_task_s_ready_and_address_are_chosen_in_its_form(cx: &mut TestAppContext) {
     cx.update(|window, cx| window.click("add-task", cx));
     settle(cx);
     cx.update(|window, _| {
-        assert!(window.find("task-ready-field-label").visible());
-        assert!(window.find("task-url-field-label").visible());
-        assert!(
-            window
-                .try_find("task-ready-line-block")
-                .is_none_or(|b| !b.visible()),
-            "no field while nothing is said"
-        );
+        assert!(window.find("task-ready-switch-label").visible());
+        assert!(window.find("task-url-switch-label").visible());
+        for hidden in [
+            "task-ready-line-block",
+            "task-ready-line",
+            "task-url-command",
+        ] {
+            assert!(
+                window.try_find(hidden).is_none_or(|b| !b.visible()),
+                "{hidden}: nothing while nothing is said"
+            );
+        }
     });
     let (name, line) = section.read_with(cx, |s, _| {
         (
@@ -11246,6 +11290,9 @@ fn a_task_s_ready_and_address_are_chosen_in_its_form(cx: &mut TestAppContext) {
         name.update(cx, |f, cx| f.set_value("web", window, cx));
         line.update(cx, |f, cx| f.set_value("npm run dev", window, cx));
     });
+    cx.update(|window, cx| window.click("task-ready-switch", cx));
+    cx.update(|window, cx| window.click("task-url-switch", cx));
+    settle(cx);
     cx.update(|window, cx| window.click("task-ready-line", cx));
     cx.update(|window, cx| window.click("task-url-command", cx));
     settle(cx);
@@ -11255,7 +11302,7 @@ fn a_task_s_ready_and_address_are_chosen_in_its_form(cx: &mut TestAppContext) {
         // Each field is `space::MD` under the choice that asks for it, not against it.
         for (choice, field) in [
             ("task-ready-command", "task-ready-line-block"),
-            ("task-url-field-hint", "task-url-command-block"),
+            ("task-url-command", "task-url-command-block"),
         ] {
             assert_eq!(
                 window.find(field).bounds().top() - window.find(choice).bounds().bottom(),
@@ -11307,9 +11354,17 @@ fn a_task_s_ready_and_address_are_chosen_in_its_form(cx: &mut TestAppContext) {
         )
     });
     assert_eq!(shown, (Some(ReadyKind::Line), "ready in".to_owned()));
-    cx.update(|window, cx| window.click("task-ready-none", cx));
+    cx.update(|window, cx| window.click("task-ready-switch", cx));
     settle(cx);
     assert_eq!(section.read_with(cx, |s, _| s.ready_kind()), None);
+    cx.update(|window, _| {
+        assert!(
+            window
+                .try_find("task-ready-line-block")
+                .is_none_or(|b| !b.visible()),
+            "its field folds away with the switch"
+        );
+    });
     cx.update(|window, cx| window.click("task-url-address", cx));
     let url = section.read_with(cx, |s, _| {
         s.url_field(AddressKind::Address).unwrap().clone()

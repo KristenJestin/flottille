@@ -19,7 +19,7 @@ const BOUNDARY: &str = "\n\n__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__\n\n";
 
 /// A project `app` that is one repository, its file starting with a comment, and its ready
 /// workspace `login`.
-fn project(user: &User) -> PathBuf {
+pub(crate) fn project(user: &User) -> PathBuf {
     let folder = user.path("work/app");
     user.git_init(&folder);
     std::fs::write(folder.join("README.md"), "app\n").unwrap();
@@ -51,7 +51,7 @@ fn project(user: &User) -> PathBuf {
 }
 
 /// A root agent the user started, in `login` or in the project folder: its id and MCP session.
-fn root(user: &User, workspace: Option<&str>) -> (String, Mcp) {
+pub(crate) fn root(user: &User, workspace: Option<&str>) -> (String, Mcp) {
     let opened = user.received_requests("session/new").len();
     let mut params = json!({"project": "app", "message": "hello"});
     if let Some(workspace) = workspace {
@@ -66,7 +66,7 @@ fn root(user: &User, workspace: Option<&str>) -> (String, Mcp) {
 }
 
 /// The instructions of an agent, split at the cache boundary.
-fn instructions(user: &User, agent: &str) -> (String, String) {
+pub(crate) fn instructions(user: &User, agent: &str) -> (String, String) {
     let shown = user.call("agent.show", json!({"agent": agent})).unwrap();
     let text = shown["agent"]["instructions"].as_str().unwrap();
     let (before, after) = text.split_once(BOUNDARY).expect("the cache boundary");

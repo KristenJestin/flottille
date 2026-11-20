@@ -15,7 +15,7 @@ use flottille_window::tree::session_id;
 use gpui_design_system::omarchy::Environment;
 use gpui_design_system::toggle_id;
 use gpui_kit::test::TestWindowExt;
-use gpui_kit::{Entity, TestAppContext, VisualTestContext, px, size};
+use gpui_kit::{Entity, Focusable as _, TestAppContext, VisualTestContext, px, size};
 use serde_json::json;
 
 /// A user whose fake agent answers "ok", with the project `app` over a throwaway repository and
@@ -792,6 +792,7 @@ fn the_window_draws_no_frame_at_rest_on_each_tab_of_settings_and_a_feature_s_pag
         ("approvals", "judge-model"),
         ("features", "features-review"),
         ("vault", "vault-title"),
+        ("general", "about-title"),
         ("general", "appearance-title"),
         // The machines are the last section of General.
         ("general", "machines-off"),
@@ -1040,6 +1041,78 @@ fn the_services_page_is_still_at_rest(cx: &mut TestAppContext) {
         })
     });
     settle(&shell, cx);
+
+    assert_eq!(
+        frames_at_rest(&shell, cx),
+        (0, 0),
+        "(frames drawn, frames asked)"
+    );
+}
+
+#[gpui_kit::test]
+fn the_window_draws_no_frame_at_rest_on_a_service_dialog_with_chips(cx: &mut TestAppContext) {
+    let user = User::with_fake_agent();
+    idle_session(&user);
+    std::fs::create_dir_all(user.path("bin")).unwrap();
+    let server = user.path("bin/fake-server");
+    std::os::unix::fs::symlink(common::fake_server(), &server).unwrap();
+    let folder = user.path("home/tools");
+    std::fs::create_dir_all(&folder).unwrap();
+    let service = |name: &str| {
+        format!(
+            "[services.{name}]\nfolder = \"{}\"\nline = \"{} --listen 0\"\n",
+            folder.display(),
+            server.display()
+        )
+    };
+    std::fs::write(
+        user.path("config/flottille/services.toml"),
+        ["mongo", "redis", "relay"].map(service).concat(),
+    )
+    .unwrap();
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the project is known", |cx| {
+        shell.read_with(cx, |s, _| !s.snapshot().projects.is_empty())
+    });
+    cx.update(|window, cx| window.click("services", cx));
+    until(&shell, cx, "the services are listed", |cx| {
+        shell.read_with(cx, |s, cx| {
+            s.main()
+                .read(cx)
+                .services_page()
+                .is_some_and(|page| page.read(cx).services().is_some_and(|l| l.len() == 3))
+        })
+    });
+    settle(&shell, cx);
+
+    // The dialog opened and two needs chosen with the picker.
+    cx.update(|window, cx| window.click("add-service", cx));
+    settle(&shell, cx);
+    let search = shell.read_with(cx, |s, cx| {
+        let page = s.main().read(cx).services_page().unwrap().clone();
+        let form = page.read(cx).form().clone();
+        form.read(cx).needs_field().unwrap().clone()
+    });
+    for name in ["mongo", "redis"] {
+        cx.update(|window, cx| window.blur(cx));
+        settle(&shell, cx);
+        cx.update(|window, cx| {
+            let focus = search.focus_handle(cx);
+            window.focus(&focus, cx);
+        });
+        settle(&shell, cx);
+        cx.update(|window, cx| window.click(format!("service-needs-item-{name}"), cx));
+        settle(&shell, cx);
+    }
+    // A click outside the menu closes it; no field keeps the caret, which would blink.
+    cx.update(|window, cx| window.click("service-modal-title", cx));
+    settle(&shell, cx);
+    cx.update(|window, cx| window.blur(cx));
+    settle(&shell, cx);
+    cx.update(|window, _| {
+        assert!(window.find("service-needs-chip-mongo").visible());
+        assert!(window.find("service-needs-chip-redis").visible());
+    });
 
     assert_eq!(
         frames_at_rest(&shell, cx),

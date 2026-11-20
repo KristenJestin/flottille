@@ -400,6 +400,7 @@ impl Shell {
         let top = cx.new(|_| TopBar::new(this.clone()));
         let sidebar = cx.new(|_| Sidebar::new(this.clone()));
         let rules = cx.new(|_| RulesEditor::new(this.clone(), None));
+        let about = cx.new(|_| crate::about::AboutEditor::new(this.clone()));
         let judge_guidance = cx.new(|_| RulesEditor::judge(this.clone()));
         let compaction_guidance = cx.new(|_| RulesEditor::compaction(this.clone()));
         let workspaces = cx.new(|_| WorkspacesFolder::new(this.clone(), None));
@@ -428,6 +429,7 @@ impl Shell {
             SettingsPage::new(
                 this.clone(),
                 rules.clone(),
+                about.clone(),
                 judge_guidance.clone(),
                 compaction_guidance.clone(),
                 workspaces.clone(),
@@ -476,7 +478,7 @@ impl Shell {
             modals.add(
                 crate::extensions::connections::FORM_MODAL,
                 &connections,
-                |section, window, cx| section.form_dialog(window, cx),
+                |section, _, cx| section.form_dialog(cx),
                 ConnectionsSection::form_is_open,
                 ConnectionsSection::form_focus,
                 cx,
@@ -1534,6 +1536,7 @@ impl Shell {
             Update::Done(outcome) => self.done(outcome, window, cx),
             Update::Providers(read, providers) => self.set_providers(read, providers, cx),
             Update::TextChanged { judge: true, .. } => self.actions.send(Command::JudgeRead),
+            Update::AboutChanged => self.actions.send(Command::AboutRead),
             Update::DeveloperChanged => self.actions.send(Command::DeveloperRead),
             Update::UpdateShown(shown) => self.update_shown(&shown, cx),
             Update::WhatsNewShown(shown) => self.whats_new_shown(&shown, cx),
@@ -2149,6 +2152,10 @@ impl Shell {
                 self.version
                     .update(cx, |section, cx| section.answered(method, answer, cx));
             }
+            Outcome::About { written, shown } => {
+                let editor = self.settings.read(cx).about().clone();
+                editor.update(cx, |editor, cx| editor.answered(shown, written, window, cx));
+            }
             Outcome::Developer { written, shown } => {
                 self.settings
                     .update(cx, |page, cx| page.developer_answered(shown, written, cx));
@@ -2536,7 +2543,12 @@ impl Shell {
                 if let Some(page) = self.project_settings.clone() {
                     let names = listed
                         .as_ref()
-                        .map(|services| services.iter().map(|s| s.name.clone()).collect())
+                        .map(|services| {
+                            services
+                                .iter()
+                                .map(|s| (s.name.clone(), s.line.clone()))
+                                .collect()
+                        })
                         .map_err(Clone::clone);
                     let section = page.read(cx).tasks().clone();
                     section.update(cx, |section, cx| section.set_services(names, cx));
@@ -2852,6 +2864,7 @@ impl Shell {
     /// Asks the daemon for what the settings page edits.
     fn read_settings(&mut self) {
         self.actions.send(Command::RulesRead { project: None });
+        self.actions.send(Command::AboutRead);
         self.actions.send(Command::JudgeRead);
         self.actions.send(Command::CompactionRead);
         self.actions.send(Command::DeveloperRead);
