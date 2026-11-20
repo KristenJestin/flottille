@@ -9,7 +9,7 @@ use crate::common;
 use crate::remote_deliveries::{answered, child_on_server, off, on, prompts_with, release, script};
 use crate::remote_launch::{
     Machine, a_while, allowing, done, eventually, id_in, launched, pc_and_server, prompted,
-    refused, restarted, sent_with, server_user, titled,
+    refused, restarted, sent_with, server_user,
 };
 
 use common::mcp::Mcp;
@@ -20,9 +20,10 @@ const QUESTION: &str = "Which format first, CSV or JSON?";
 
 /// A session led by `pc`'s root, started on `server` with `brief`: its id there, and the root's
 /// MCP session.
-fn led_on_server(pc: &Machine, server: &Machine, brief: &str) -> (String, Mcp) {
+/// The root is in `mode`: in Full, its `session_send` is let through without a judge on pc.
+fn led_on_server(pc: &Machine, server: &Machine, brief: &str, mode: &str) -> (String, Mcp) {
     pc.wait_for_offer("server", 12);
-    let (_root, mcp) = pc.root("auto");
+    let (_root, mcp) = pc.root(mode);
     let answer = launched(
         &mcp,
         json!({"kind": "led", "machine": "server", "title": "Finish the export", "brief": brief}),
@@ -119,7 +120,7 @@ fn a_led_session_asks_the_user_when_its_pilot_s_machine_is_off() {
             {"mcp": {"tool": "ask", "arguments": {"question": QUESTION}}}
         ]}]),
     );
-    let (session, _mcp) = led_on_server(&pc, &server, "Finish the export.");
+    let (session, _mcp) = led_on_server(&pc, &server, "Finish the export.", "auto");
     off(&pc);
     offline(&server, "pc");
 
@@ -158,7 +159,7 @@ fn while_the_pilot_s_machine_is_linked_the_ask_goes_to_the_pilot() {
         ]}]),
     );
 
-    let (session, mcp) = led_on_server(&pc, &server, "Finish the export.");
+    let (session, mcp) = led_on_server(&pc, &server, "Finish the export.", "full");
 
     let said = tool_answer(&server, "Your question went to agent");
     assert!(said.contains("leads this session"), "{said}");
@@ -196,7 +197,7 @@ fn questions_open_to_the_pilot_go_to_the_user_when_its_machine_goes_off() {
             {"mcp": {"tool": "ask", "arguments": {"question": QUESTION}}}
         ]}]),
     );
-    let (session, _mcp) = led_on_server(&pc, &server, "Finish the export.");
+    let (session, _mcp) = led_on_server(&pc, &server, "Finish the export.", "auto");
     tool_answer(&server, "Your question went to agent");
     prompted(&pc, QUESTION);
     assert!(questions(&server).is_empty(), "{:#?}", questions(&server));
@@ -229,7 +230,7 @@ fn the_pilot_back_is_told_what_was_asked_and_answered() {
             {"mcp": {"tool": "ask", "arguments": {"question": QUESTION}}}
         ]}]),
     );
-    let (session, _mcp) = led_on_server(&pc, &server, "Finish the export.");
+    let (session, _mcp) = led_on_server(&pc, &server, "Finish the export.", "auto");
     off(&pc);
     offline(&server, "pc");
     release(&server);
@@ -327,7 +328,7 @@ fn no_agent_allows_a_request_across_machines() {
     let (child, launch, mcp) = child_on_server(&pc, &server, "Write the tests of the export.");
     let first = number_in(&tool_answer(&server, "your parent decides"));
     let asks = prompt_with(&pc, &format!("Request #{first}"));
-    assert!(asks.contains("\"machine\": \"server\""), "{asks}");
+    assert!(asks.contains(r#"\"machine\": \"server\""#), "{asks}");
 
     // The parent cannot allow it; it forwards it, and the user of server holds it.
     let allow = mcp.call(
