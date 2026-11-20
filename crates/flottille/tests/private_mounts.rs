@@ -571,6 +571,10 @@ fn the_ssh_agent_is_lent_to_nothing_where_an_include_s_folder_is_missing() {
 #[test]
 fn the_ssh_agent_is_lent_to_nothing_where_an_include_is_in_the_home_itself() {
     let user = User::with_fake_agent();
+    // An agent to lend, for the gap to be a warning.
+    let agent = user.path("agent.sock");
+    let _agent = std::os::unix::net::UnixListener::bind(&agent).unwrap();
+    let user = user.with_env("SSH_AUTH_SOCK", agent.to_str().unwrap());
     let ssh = user.path("home/.ssh");
     std::fs::create_dir_all(&ssh).unwrap();
     std::fs::write(ssh.join("config"), "Include ~/forge.conf\n").unwrap();
