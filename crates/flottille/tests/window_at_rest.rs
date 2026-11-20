@@ -2,7 +2,7 @@
 //! moving, the window draws no frame and asks for none, on GPUI's test platform in front of a
 //! real daemon whose agents are the fake ACP agent. No window opens on a screen.
 
-mod common;
+use crate::common;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};

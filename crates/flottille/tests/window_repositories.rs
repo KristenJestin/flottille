@@ -4,7 +4,7 @@
 //! stands. On GPUI's test platform in front of a real daemon, with throwaway repositories (one
 //! with no remote) and temporary XDG folders. No window opens on a screen.
 
-mod common;
+use crate::common;
 
 use std::path::PathBuf;
 use std::sync::Arc;

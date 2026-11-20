@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use zeroize::Zeroizing;
 
-use crate::transport::{Conn, Failure, Frames, Reply, Transport};
+use crate::transport::{Conn, Failure, Frames, Inbound, Raw, Reply, Transport};
 use crate::{Hello, MachineKey, NeedsUpdate, PeerState, PublicKey, choose};
 
 /// The longest frame a link takes. Bigger transfers (a git bundle) will have streams of their
@@ -93,6 +93,8 @@ pub enum MachineMessage {
     /// A place's code on its way, or a session's new commits on their way back (`docs/remote.md`,
     /// "What travels").
     Git(Git),
+    /// A vault entry the user shared with the receiver (`docs/remote.md`, "Vault entries").
+    Share(Share),
 }
 
 /// The `git` messages: what the receiver has, a bundle offered, its bytes, the workspace made of
@@ -156,6 +158,41 @@ pub struct GitPlace {
     /// The repositories of the place, by their paths in the project, each received for this
     /// launch.
     pub repositories: Vec<String>,
+}
+
+/// A vault entry the user shared: their device's signed `vault.share`, which the receiver checks
+/// itself (a machine alone shares nothing), the entry's metadata, and its secret.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Share {
+    /// The user's request, as their device signed it for the machine that holds the entry.
+    pub request: Value,
+    /// The entry's metadata, as the holder's vault lists it.
+    pub entry: Value,
+    pub secret: Secret,
+}
+
+/// A secret on its way to another machine's keyring: zeroized when dropped, and never in its
+/// `Debug`.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Secret(pub Zeroizing<String>);
+
+impl fmt::Debug for Secret {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Secret([masked])")
+    }
+}
+
+impl Serialize for Secret {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for Secret {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Secret, D::Error> {
+        Ok(Secret(Zeroizing::new(String::deserialize(deserializer)?)))
+    }
 }
 
 /// The answer to one message.
@@ -600,8 +637,7 @@ impl Accepting {
     /// they speak no protocol in common. `name` is the other machine's, for the sentence.
     pub async fn handshake(self, ours: &Hello, name: &str) -> Result<Link, LinkError> {
         let conn = self.conn;
-        let Ok(Some((bytes, reply))) = tokio::time::timeout(WAIT, conn.next(FRAME_LIMIT)).await
-        else {
+        let Ok(Some((bytes, reply))) = tokio::time::timeout(WAIT, conn.next()).await else {
             conn.close(CLOSE_DONE, "no hello");
             return Err(LinkError::Closed(format!("{name} said no hello")));
         };
@@ -635,7 +671,7 @@ impl Accepting {
 /// A link made: two machines that proved their keys, and a protocol both speak.
 #[derive(Clone)]
 pub struct Link {
-    conn: Conn,
+    pub(crate) conn: Conn,
     peer: PublicKey,
     name: String,
     traffic: Traffic,
@@ -663,8 +699,7 @@ impl Link {
 
     /// Sends `message`, and waits for its answer.
     pub async fn send(&self, message: &Message) -> Result<Value, LinkError> {
-        self.send_raw(&serde_json::to_vec(message).expect("a message is JSON"))
-            .await
+        self.send_raw(&framed(message)).await
     }
 
     /// Sends a frame as it is. What it holds is the receiver's to judge: a peer is never trusted
@@ -709,10 +744,30 @@ impl Link {
     /// A message of the other kind, or one this side does not know, is refused and passed over.
     pub async fn next(&self) -> Option<Received> {
         loop {
-            let (bytes, reply) = self.conn.next(FRAME_LIMIT).await?;
-            match self.judge(&bytes) {
-                Ok(message) => return Some(Received { message, reply }),
-                Err(reason) => reply.send(&answer(Err(reason))).await,
+            match self.conn.next_stream().await? {
+                Inbound::Frame(bytes, reply) => {
+                    // A frame may carry a vault entry's secret (`share`): wiped once it is read.
+                    let bytes = Zeroizing::new(bytes);
+                    match self.judge(&bytes) {
+                        Ok(message) => {
+                            return Some(Received {
+                                message,
+                                reply: Replying::Frame(reply),
+                            });
+                        }
+                        Err(reason) => reply.send(&answer(Err(reason))).await,
+                    }
+                }
+                // A tunnel's connection (`docs/remote.md`, "Tunnels"), on a client link only.
+                Inbound::Raw(raw, head) => match (self.traffic, tunnel_of(&head)) {
+                    (Traffic::Client, Some(id)) => {
+                        return Some(Received {
+                            message: Message::Client(serde_json::json!({"tunnel": id})),
+                            reply: Replying::Tunnel(id, raw),
+                        });
+                    }
+                    _ => raw.refuse(),
+                },
             }
         }
     }
@@ -739,7 +794,7 @@ impl Link {
             .map_err(|_| "not a message a machine may send".to_owned())
     }
 
-    fn lost(&self, failure: Failure) -> LinkError {
+    pub(crate) fn lost(&self, failure: Failure) -> LinkError {
         LinkError::Closed(match failure {
             Failure::Closed(reason) => format!("{} closed the link: {reason}", self.name),
             Failure::Lost(why) => format!("the link to {} was lost: {why}", self.name),
@@ -755,6 +810,26 @@ impl Link {
     pub async fn closed(&self) -> String {
         self.lost(self.conn.closed().await).to_string()
     }
+}
+
+/// `message` as a frame, wiped when it is dropped: one may carry a vault entry's secret
+/// (`share`). Sized first, so that no buffer it outgrew is freed with a copy of it.
+fn framed(message: &Message) -> Zeroizing<Vec<u8>> {
+    struct Counted(usize);
+    impl std::io::Write for Counted {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 += bytes.len();
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut counted = Counted(0);
+    serde_json::to_writer(&mut counted, message).expect("a message is JSON");
+    let mut frame = Zeroizing::new(Vec::with_capacity(counted.0));
+    serde_json::to_writer(&mut *frame, message).expect("a message is JSON");
+    frame
 }
 
 impl fmt::Debug for Link {
@@ -832,7 +907,24 @@ impl Streamed {
 /// A message received, to answer.
 pub struct Received {
     message: Message,
-    reply: Reply,
+    reply: Replying,
+}
+
+/// Where a message is answered: on the stream it came on, or, for a tunnel's connection, that
+/// stream is the connection itself.
+enum Replying {
+    Frame(Reply),
+    Tunnel(String, Raw),
+}
+
+/// The id of the tunnel an opening line names: `{"tunnel": "<id>"}`.
+fn tunnel_of(head: &[u8]) -> Option<String> {
+    match serde_json::from_slice::<Value>(head).ok()? {
+        Value::Object(object) if object.len() == 1 => {
+            object.get("tunnel")?.as_str().map(str::to_owned)
+        }
+        _ => None,
+    }
 }
 
 impl Received {
@@ -840,15 +932,36 @@ impl Received {
         &self.message
     }
 
+    /// The tunnel connection this is, with the id of the tunnel it names, or the message back
+    /// when it is any other.
+    pub fn take_tunnel(self) -> Result<(String, crate::TunnelStream), Box<Received>> {
+        match self.reply {
+            Replying::Tunnel(id, raw) => Ok((id, crate::TunnelStream::new(raw))),
+            reply => Err(Box::new(Received {
+                message: self.message,
+                reply,
+            })),
+        }
+    }
+
     /// Answers it frame by frame: a client's request, whose answer may be followed by events.
     pub fn stream(self) -> Streamed {
-        Streamed(self.reply)
+        match self.reply {
+            Replying::Frame(reply) => Streamed(reply),
+            Replying::Tunnel(..) => unreachable!("a tunnel's connection is taken with take_tunnel"),
+        }
     }
 
     /// Answers it: what it gave, or why it was refused. Within a Tokio runtime.
     pub fn answer(self, answered: Result<Value, String>) {
-        let bytes = answer(answered);
-        tokio::spawn(self.reply.send_owned(bytes));
+        match self.reply {
+            Replying::Frame(reply) => {
+                let bytes = answer(answered);
+                tokio::spawn(reply.send_owned(bytes));
+            }
+            // A connection of a tunnel has no answer to give: it is closed.
+            Replying::Tunnel(_, raw) => raw.refuse(),
+        }
     }
 }
 

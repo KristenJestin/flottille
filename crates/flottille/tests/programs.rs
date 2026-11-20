@@ -2,7 +2,7 @@
 //! Fakes of `gh`, `bkt` and `acli`, a PATH of the test's own and temporary XDG folders: no real
 //! program is ever run, and none of their folders is read.
 
-mod common;
+use crate::common;
 
 use std::time::{Duration, Instant};
 

@@ -3,7 +3,7 @@
 //! ready, reviewers, labels and a base. The forge is the fake `gh` and `bkt`; the remotes are
 //! throwaway bare repositories; every write is held for the user and done once they allow it.
 
-mod common;
+use crate::common;
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};

@@ -4,7 +4,7 @@
 //! (`docs/items.md`), which each test starts itself (`items.refresh`). Through the fake `gh` and
 //! the fake `bkt`; no test ever calls GitHub nor Bitbucket.
 
-mod common;
+use crate::common;
 
 use std::time::{Duration, Instant};
 

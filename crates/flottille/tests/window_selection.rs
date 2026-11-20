@@ -2,7 +2,7 @@
 //! makes it and after it, in the message where the drag started alone, and nothing is drawn
 //! while the pointer rests over it.
 
-mod common;
+use crate::common;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};

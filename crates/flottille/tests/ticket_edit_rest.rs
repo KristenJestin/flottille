@@ -5,7 +5,7 @@
 //! `fields`. Jira is a fake HTTP server on this machine, the vault's keyring the daemon's memory,
 //! and the `acli` the fake: no test reaches a site, the user's keyring or anyone's sign-in.
 
-mod common;
+use crate::common;
 
 use std::io::{Read, Write};
 use std::net::TcpListener;

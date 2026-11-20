@@ -4,7 +4,7 @@
 //! against the real daemon with the fake ACP agent, throwaway repositories and temporary XDG
 //! folders. The lead of each tree is played by the fake agent's script, through its own session.
 
-mod common;
+use crate::common;
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};

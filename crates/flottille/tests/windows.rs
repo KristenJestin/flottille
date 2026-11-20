@@ -4,7 +4,7 @@
 //! the setting on. The agents are the fake ACP agent, in throwaway repositories, temporary XDG
 //! folders and a temporary runtime folder holding a fake `wayland-0` socket.
 
-mod common;
+use crate::common;
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};

@@ -2,7 +2,7 @@
 //! (`docs/agents.md`, "The models"): the fake ACP agent and the fake `claude` stand for the
 //! programs, in a throwaway home. No real agent runs.
 
-mod common;
+use crate::common;
 
 use std::time::{Duration, Instant};
 

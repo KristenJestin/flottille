@@ -25,9 +25,11 @@ is English only.
 ```
 cargo build
 cargo test
-# before one test binary alone (cargo test -p flottille --test <name>), build the fakes it spawns:
+# before one test binary alone (cargo test -p flottille --test <group> [<file>::]), build the fakes it spawns:
 cargo build -p flottille-fake-acli -p flottille-fake-agent -p flottille-fake-bkt -p flottille-fake-claude \
   -p flottille-fake-codex -p flottille-fake-gh -p flottille-fake-mcp -p flottille-fake-pnpm -p flottille-fake-server
+cargo test -p flottille --test group_window_session window_conversation::   # one test file
+cargo nextest run -p flottille -E 'binary(group_window_session) & test(/^window_conversation::/)'
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 tools/commit-message.sh --range origin/dev..HEAD
@@ -147,6 +149,32 @@ stack"). Nothing of Flottille goes into the kit, and no component is drawn here 
   a real window only in a headless nested compositor (`docs/reference/gpui.md`).
 - A test that fails only under load is rerun alone before the failure is called real.
 
+### Adding a test file
+
+The integration tests of `crates/flottille/tests/` link as **nine binaries**, not one per file
+(each link of the crate is tens of seconds and gigabytes). A test file stays a file of `tests/`,
+and is a module of one **group**: the `main` of the group in `tests/group/<group>.rs`. To add
+`tests/<file>.rs`:
+
+1. Write it with `use crate::common;` (and `use crate::guard;`, `use crate::kit_common;` when it
+   needs them), never `mod common;`: the group declares them once.
+2. Add two lines to the group that fits, in the alphabetical order of its files:
+   `#[path = "../<file>.rs"]` and `mod <file>;`. A test file no group declares is never built
+   (`autotests = false`), and the fast check selects nothing for it.
+
+The groups: `group_agents` (the agents and their providers), `group_sessions` (sessions and their
+tree), `group_forges` (forges, workspaces, services), `group_tickets` (tickets, specs, projects),
+`group_remote` (connections, vault, MCP, remote), `group_daemon` (the daemon, its protocol, the
+CLI, the release and CI files), and the window's `group_window_session` (a conversation),
+`group_window_shell` (the shell, settings, composer) and `group_window_work` (items, specs,
+reviews). Pick by what the file tests; a group that grows far beyond the others' build time is
+split in a pull request of its own. A test is named `<file>::<test>`: to run one file,
+`cargo test -p flottille --test group_<name> <file>::`.
+
+Under `cargo test` the tests of a group share a process: a test never sets an environment
+variable, changes the working folder or leaves a `static` that another test reads. (Nextest runs
+each test in a process of its own, which hides such a test: CI is not what finds it.)
+
 ## How the work is organised
 
 | Who | What |
@@ -221,3 +249,8 @@ stack"). Nothing of Flottille goes into the kit, and no component is drawn here 
 Run `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test`, plus the
 manual checks the issue asks for, and report the real output. If something fails, say so;
 don't claim green.
+
+A pull request's CI runs a fast check: the test binaries whose files it changes and those listed
+on a line `Tests: <binary or file> …` of its description (`docs/releases.md`, "What CI checks").
+List there each binary you ran that CI would not pick up by itself; the whole suite runs on `dev`
+after the merge.

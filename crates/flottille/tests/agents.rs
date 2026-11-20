@@ -1,7 +1,7 @@
 //! The scenarios of agents run over ACP, against the fake agent (`crates/flottille-fake-agent`),
 //! with throwaway repositories and temporary XDG folders. No real agent ever runs here.
 
-mod common;
+use crate::common;
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};

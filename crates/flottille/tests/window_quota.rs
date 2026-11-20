@@ -4,7 +4,7 @@
 //! `Resume at 13:00` for this session alone; and the setting of Settings, Agents, off by
 //! default. Each unfolds and folds away, and the page rests. No window opens on a screen.
 
-mod common;
+use crate::common;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};

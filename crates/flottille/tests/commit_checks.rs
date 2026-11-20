@@ -5,7 +5,7 @@
 //! programs first in the daemon's `PATH`, the agent the fake ACP agent, in throwaway repositories
 //! and temporary XDG folders.
 
-mod common;
+use crate::common;
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};

@@ -4,7 +4,7 @@
 //! real daemon with the fake ACP agent and the fake `codex`, throwaway repositories and temporary
 //! XDG folders. No real agent ever runs here.
 
-mod common;
+use crate::common;
 
 use std::time::{Duration, Instant};
 

@@ -6,7 +6,7 @@
 //! throwaway bare repositories; the escalating programs are fakes, first on the daemon's `PATH`,
 //! and none runs.
 
-mod common;
+use crate::common;
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};

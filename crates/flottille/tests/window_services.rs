@@ -4,7 +4,7 @@
 //! development server, linked into the test's own temporary folder and run in temporary folders
 //! of a temporary home. No window opens on a screen, no real service runs.
 
-mod common;
+use crate::common;
 
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;

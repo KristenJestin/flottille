@@ -4,7 +4,7 @@
 //! daemon whose agents are the fake ACP agent, with a throwaway user: no window opens on a
 //! screen, and the 500 ms of the debounce are the test platform's clock, never a sleep.
 
-mod common;
+use crate::common;
 
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, Ordering};

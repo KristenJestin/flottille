@@ -5,7 +5,7 @@
 //! device key file of its machine's key folder, as `flottille remote` does there. No window opens
 //! on a screen.
 
-mod common;
+use crate::common;
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::SocketAddr;

@@ -3,7 +3,7 @@
 //! Features tab a list that opens a page for each project-scoped feature. On GPUI's test platform
 //! in front of a real daemon in temporary folders. No window opens on a screen.
 
-mod common;
+use crate::common;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};

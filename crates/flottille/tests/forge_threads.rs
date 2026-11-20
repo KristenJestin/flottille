@@ -4,7 +4,7 @@
 //! `forge resolve {number, thread, resolved}` marks it, both judged like `comment`. The forge is
 //! the fake `gh` and `bkt`; the remotes are throwaway bare repositories.
 
-mod common;
+use crate::common;
 
 use std::time::{Duration, Instant};
 

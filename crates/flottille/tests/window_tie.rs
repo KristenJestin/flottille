@@ -1,7 +1,7 @@
 //! The connector of a led row (#740), on GPUI's test platform with rows of their own and no
 //! daemon: where its turn meets a row, whatever the row's height. No window opens on a screen.
 
-mod kit_common;
+use crate::kit_common;
 
 use kit_common::{Desktop, init};
 

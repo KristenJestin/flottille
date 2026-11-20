@@ -3,7 +3,7 @@
 //! compactor Flottille picked, the session's menu entry that compacts, and the conversation's line
 //! that unfolds to the summary. No window opens on a screen.
 
-mod common;
+use crate::common;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};

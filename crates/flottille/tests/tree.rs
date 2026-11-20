@@ -6,7 +6,7 @@
 //! The tests act as the agents through each session's own MCP token, as the fake agent would,
 //! while the fake agent plays the turns (`hang` keeps a worker mid-turn).
 
-mod common;
+use crate::common;
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};

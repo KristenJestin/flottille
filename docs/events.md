@@ -384,6 +384,22 @@ A link to another machine of the user's was made, or ended (`docs/remote.md`, "T
 `name` and `fingerprint` of the machine, and, when it ended, `reason` (`it was removed from the
 member list`, for a machine whose member was removed: its link is cut at once).
 
+### `tunnel.opened`, `tunnel.closed`
+
+A tunnel to a run's port of another machine opened, or ended (`docs/remote.md`, "Tunnels"). Said by
+both machines: the one that carries it (where the local port is) with `machine`, the one that
+serves it with `device`, the name of the member whose client asked.
+
+| Field | |
+|---|---|
+| `tunnel` | The tunnel's id. |
+| `run` | The run whose port it carries. |
+| `port` | That port, on the machine of the run. |
+| `machine` | The carrying machine's side: the machine of the run. |
+| `local_port` | The carrying machine's side: the port it listens on, on `127.0.0.1`. |
+| `device` | The serving machine's side: the member that opened it. |
+| `reason` | `tunnel.closed` only: why (`run r1 ended`, `closed by the user`, `the link to server was lost`, `its client left`). |
+
 ### `workspace.created`
 
 A workspace was written, before anything is made on disk (`docs/workspaces.md`). Every event of a

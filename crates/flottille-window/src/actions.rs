@@ -386,6 +386,13 @@ pub enum Command {
     Vault,
     /// An entry set or removed (`vault.set`, `vault.remove`).
     VaultWrite(VaultWrite),
+    /// The machines an entry may be shared with: the user's others that are online.
+    ShareMachines,
+    /// The entry `name` shared with the machine `machine` (`vault.share`), signed by this device.
+    VaultShare {
+        name: String,
+        machine: String,
+    },
     /// The card of the request `ask` for a vault entry dismissed.
     VaultDismiss {
         ask: u64,
@@ -989,6 +996,16 @@ pub enum Outcome {
     },
     /// A change to the vault was made, or refused with why.
     VaultWritten {
+        refused: Option<String>,
+    },
+    /// The user's other machines that are online, by name, or why they cannot be read.
+    ShareMachines {
+        listed: Result<Vec<String>, String>,
+    },
+    /// The entry `name` was shared with `machine`, or refused with why.
+    VaultShared {
+        name: String,
+        machine: String,
         refused: Option<String>,
     },
     /// A change to the commands was made, or refused with why.
@@ -1645,6 +1662,26 @@ fn of_part(part: &Option<String>, mut params: Value) -> Value {
     params
 }
 
+/// `vault.share` of the entry `name` with `machine`: a request of this machine's, signed with this
+/// device's key, whose signature goes with the secret for that machine to check.
+fn share(connect: &Connect, name: &str, machine: &str, bound: Duration) -> Result<(), String> {
+    let sign = crate::link::signer().ok_or(
+        "this window cannot sign with this device's key: share it with flottille vault share",
+    )?;
+    let this = ask_alone(connect, "remote.machines", json!({}), bound)??["this"]["name"]
+        .as_str()
+        .map(str::to_owned)
+        .ok_or("this machine is no member of the user's yet")?;
+    connected(connect)?
+        .signing(sign, this)
+        .ask_within(
+            "vault.share",
+            json!({"name": name, "machine": machine}),
+            bound,
+        )?
+        .map(|_| ())
+}
+
 /// One request on a connection of its own.
 fn ask_alone(
     connect: &Connect,
@@ -2230,6 +2267,30 @@ fn perform(connect: &Connect, command: Command, bounds: Bounds) -> Outcome {
                 Ok(Err(why)) | Err(why) => Some(why),
             };
             Outcome::VaultWritten { refused }
+        }
+        Command::ShareMachines => {
+            let listed = ask_alone(connect, "remote.machines", json!({}), bounds.quick)
+                .and_then(|listed| listed)
+                .map(|listed| {
+                    listed["machines"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter(|machine| machine["state"] == "online")
+                        // A share is for a runner: a controller's machine would refuse it.
+                        .filter(|machine| machine["role"] == "runner")
+                        .filter_map(|machine| machine["name"].as_str().map(str::to_owned))
+                        .collect()
+                });
+            Outcome::ShareMachines { listed }
+        }
+        Command::VaultShare { name, machine } => {
+            let refused = share(connect, &name, &machine, bounds.quick).err();
+            Outcome::VaultShared {
+                name,
+                machine,
+                refused,
+            }
         }
         Command::VaultDismiss { ask } => {
             let refused = match ask_alone(

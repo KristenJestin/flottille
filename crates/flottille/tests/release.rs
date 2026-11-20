@@ -3,7 +3,7 @@
 //! against a local server standing for the releases, in a throwaway home. Nothing here talks to
 //! GitHub; what only a real push proves is said in `docs/releases.md`.
 
-mod common;
+use crate::common;
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -2852,6 +2852,17 @@ fn version_step_on_main(repo: &Repo, sha: &str) -> (Output, String) {
 /// a `tag`) at `sha`, in a clone of the repository with its `origin`. Its outputs, or its
 /// failure, and the changelog it wrote.
 fn version_step(repo: &Repo, name: &str, kind: &str, sha: &str) -> (Output, String, String) {
+    version_step_with(repo, name, kind, sha, &[])
+}
+
+/// `version_step` with more of the run's environment: a pull request's `HEAD_REF` and `HEAD_SHA`.
+fn version_step_with(
+    repo: &Repo,
+    name: &str,
+    kind: &str,
+    sha: &str,
+    more: &[(&str, &str)],
+) -> (Output, String, String) {
     let clone = tempfile::tempdir().unwrap();
     repo.git(&[
         "clone",
@@ -2876,6 +2887,7 @@ fn version_step(repo: &Repo, name: &str, kind: &str, sha: &str) -> (Output, Stri
         .env("GITHUB_SHA", sha)
         .env("GITHUB_OUTPUT", &outputs)
         .env("RUNNER_TEMP", temp.path())
+        .envs(more.iter().copied())
         .output()
         .unwrap();
     (
@@ -4458,7 +4470,9 @@ fn publish_never_runs_on_a_commit_no_verify_passed_on() {
     // `verify` is skipped only when the commit passed it on dev.
     let verify = job("verify");
     assert!(
-        verify.contains("needs: [verified-on-dev, changes, check, test, hub]"),
+        verify.contains(
+            "needs: [verified-on-dev, changes, check, build-tests, doc-tests, test, test-selected, hub]"
+        ),
         "{verify}"
     );
     assert!(
@@ -4468,7 +4482,7 @@ fn publish_never_runs_on_a_commit_no_verify_passed_on() {
     // `publish` needs `verify` to have passed, or to have been skipped for that reason.
     let publish = job("publish");
     assert!(
-        publish.contains("needs: [verified-on-dev, verify, build, hub]"),
+        publish.contains("needs: [verified-on-dev, changes, verify, build, hub]"),
         "{publish}"
     );
     let condition: String = publish.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -4502,7 +4516,13 @@ fn verify_fails_unless_the_checks_and_every_partition_passed() {
         Fake::new()
             .run(
                 &script,
-                &[("CHECK", check), ("TEST", test), ("RUST", "true")],
+                &[
+                    ("CHECK", check),
+                    ("BUILD", "success"),
+                    ("DOC", "success"),
+                    ("TEST", test),
+                    ("RUST", "true"),
+                ],
             )
             .status
             .success()
@@ -4518,11 +4538,48 @@ fn verify_fails_unless_the_checks_and_every_partition_passed() {
 }
 
 #[test]
+fn verify_fails_when_the_tests_were_not_built_or_the_doc_tests_failed() {
+    // The partitions are skipped when the archive was not built, and the doc tests are a job of
+    // their own: neither may let a red suite through.
+    let script = step_script(".github/workflows/ci.yml", "verdict");
+    let run = |build: &str, doc: &str, test: &str| {
+        Fake::new()
+            .run(
+                &script,
+                &[
+                    ("CHECK", "success"),
+                    ("BUILD", build),
+                    ("DOC", doc),
+                    ("TEST", test),
+                    ("RUST", "true"),
+                ],
+            )
+            .status
+            .success()
+    };
+
+    assert!(run("success", "success", "success"));
+    for state in ["failure", "cancelled", "skipped"] {
+        assert!(!run(state, "success", "skipped"), "build-tests: {state}");
+        assert!(!run("success", state, "success"), "doc-tests: {state}");
+    }
+}
+
+#[test]
 fn verify_passes_skipped_jobs_only_when_the_paths_said_the_suite_is_not_needed() {
     let script = step_script(".github/workflows/ci.yml", "verdict");
     let run = |rust: &str, check: &str, test: &str| {
         Fake::new()
-            .run(&script, &[("CHECK", check), ("TEST", test), ("RUST", rust)])
+            .run(
+                &script,
+                &[
+                    ("CHECK", check),
+                    ("BUILD", test),
+                    ("DOC", test),
+                    ("TEST", test),
+                    ("RUST", rust),
+                ],
+            )
             .status
             .success()
     };
@@ -4640,7 +4697,7 @@ fn the_rust_suite_always_runs_off_a_pull_request() {
 #[test]
 fn the_suite_runs_only_when_the_decision_does_not_say_otherwise() {
     let workflow = std::fs::read_to_string(tool(".github/workflows/ci.yml")).unwrap();
-    for name in ["check", "test"] {
+    for name in ["check", "build-tests", "doc-tests"] {
         let lines: Vec<&str> = workflow.lines().collect();
         let at = lines
             .iter()
@@ -4658,6 +4715,548 @@ fn the_suite_runs_only_when_the_decision_does_not_say_otherwise() {
             job.contains("&& needs.changes.outputs.rust != 'false'"),
             "{job}"
         );
+    }
+}
+
+/// What `.github/scripts/pr-tests.sh` selects for a pull request: `base` is a throwaway
+/// repository's files, `changed` are written over (or added to) them and `deleted` removed, in the
+/// pull request's one commit, whose description is `body`.
+fn selected_tests(base: &[&str], changed: &[&str], deleted: &[&str], body: &str) -> String {
+    let output = selection(base, changed, deleted, body);
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
+}
+
+/// The whole output of `.github/scripts/pr-tests.sh` (its notices and warnings are on stderr).
+fn selection(
+    base: &[&str],
+    changed: &[&str],
+    deleted: &[&str],
+    body: &str,
+) -> std::process::Output {
+    let repo = Repo::new();
+    // A file is `path`, or `path::text` when the text it holds matters.
+    let write = |paths: &[&str], content: &str| {
+        for path in paths {
+            let (path, text) = path.split_once("::").unwrap_or((path, content));
+            let file = repo.dir.path().join(path);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(&file, text).unwrap();
+        }
+    };
+    write(base, "base");
+    repo.git(&["add", "--all"]);
+    repo.git(&["commit", "--quiet", "--allow-empty", "-m", "base"]);
+    let base_commit = repo.head();
+    write(changed, "changed");
+    for path in deleted {
+        std::fs::remove_file(repo.dir.path().join(path)).unwrap();
+    }
+    repo.git(&["add", "--all"]);
+    repo.git(&["commit", "--quiet", "--allow-empty", "-m", "change"]);
+    let output = Command::new("bash")
+        .arg(tool(".github/scripts/pr-tests.sh"))
+        .current_dir(repo.dir.path())
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("BASE", &base_commit)
+        .env("HEAD", repo.head())
+        .env("BODY", body)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    output
+}
+
+#[test]
+fn a_pull_request_runs_the_test_binaries_whose_files_it_changes() {
+    let base = ["crates/flottille-core/tests/families.rs"];
+    assert_eq!(
+        selected_tests(&base, &["crates/flottille-core/tests/families.rs"], &[], ""),
+        "--test families"
+    );
+    // Every crate's tests/ folder, the binaries in alphabetical order, each once.
+    assert_eq!(
+        selected_tests(
+            &base,
+            &[
+                "crates/flottille/tests/release.rs",
+                "crates/flottille-core/tests/families.rs",
+                "crates/flottille/tests/alerts.rs",
+                "crates/flottille-core/src/lib.rs",
+            ],
+            &[],
+            ""
+        ),
+        "--test alerts --test families --test release"
+    );
+}
+
+#[test]
+fn a_pull_request_runs_a_grouped_binary_for_any_file_of_its_folder() {
+    // A binary made of a folder (tests/<name>/main.rs, the way #1106 groups the files) is run for
+    // a change of any file in it; a folder with no main.rs (shared helpers) is no binary.
+    let base = [
+        "crates/flottille/tests/sessions/main.rs",
+        "crates/flottille/tests/common/mod.rs",
+    ];
+    assert_eq!(
+        selected_tests(&base, &["crates/flottille/tests/sessions/wake.rs"], &[], ""),
+        "--test sessions"
+    );
+    assert_eq!(
+        selected_tests(&base, &["crates/flottille/tests/common/mod.rs"], &[], ""),
+        ""
+    );
+}
+
+/// The files of a crate with grouped test binaries: `Cargo.toml` names the binaries, each main of
+/// `tests/group/` declares the files it holds (`#1106`).
+fn grouped_crate() -> Vec<&'static str> {
+    vec![
+        "crates/flottille/Cargo.toml::[package]\nname = \"flottille\"\n\n[[test]]\nname = \"group_window_session\"\npath = \"tests/group/window_session.rs\"\n\n[[test]]\nname = \"group_agents\"\npath = \"tests/group/agents.rs\"\n",
+        "crates/flottille/tests/group/window_session.rs::#[path = \"../common/mod.rs\"]\nmod common;\n#[path = \"../window_conversation.rs\"]\nmod window_conversation;\n#[path = \"../window_cards.rs\"]\nmod window_cards;\n",
+        "crates/flottille/tests/group/agents.rs::#[path = \"../common/mod.rs\"]\nmod common;\n#[path = \"../agents.rs\"]\nmod agents;\n",
+        "crates/flottille/tests/common/mod.rs",
+        "crates/flottille/tests/window_conversation.rs",
+        "crates/flottille/tests/window_cards.rs",
+        "crates/flottille/tests/agents.rs",
+        "crates/flottille/tests/orphan.rs",
+        "crates/flottille-core/tests/families.rs",
+    ]
+}
+
+#[test]
+fn a_pull_request_runs_only_the_file_it_changes_of_a_grouped_binary() {
+    let base = grouped_crate();
+    assert_eq!(
+        selected_tests(
+            &base,
+            &["crates/flottille/tests/window_conversation.rs"],
+            &[],
+            ""
+        ),
+        "--test group_window_session -E binary(=group_window_session)&(test(/^window_conversation::/))"
+    );
+    // Two files of one binary share its filter; a file of another binary has its own, and a binary
+    // of another crate, run whole, is in the same expression.
+    assert_eq!(
+        selected_tests(
+            &base,
+            &[
+                "crates/flottille/tests/window_conversation.rs",
+                "crates/flottille/tests/agents.rs",
+                "crates/flottille/tests/window_cards.rs",
+                "crates/flottille-core/tests/families.rs",
+            ],
+            &[],
+            ""
+        ),
+        "--test families --test group_agents --test group_window_session -E \
+binary(=group_agents)&(test(/^agents::/))|\
+binary(=group_window_session)&(test(/^window_cards::/)|test(/^window_conversation::/))|\
+binary(=families)"
+    );
+}
+
+/// The `#[path = "../<name>.rs"]` files each group main of `tests/group/` declares: `(group, file)`.
+fn declared_by_the_groups() -> Vec<(String, String)> {
+    let tests = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
+    let mut declared = Vec::new();
+    for entry in std::fs::read_dir(tests.join("group")).unwrap() {
+        let main = entry.unwrap().path();
+        let group = main.file_stem().unwrap().to_string_lossy().into_owned();
+        for line in std::fs::read_to_string(&main).unwrap().lines() {
+            if let Some(path) = line
+                .strip_prefix("#[path = \"../")
+                .and_then(|rest| rest.strip_suffix("\"]"))
+            {
+                declared.push((group.clone(), path.to_owned()));
+            }
+        }
+    }
+    declared
+}
+
+#[test]
+fn every_test_file_is_declared_by_exactly_one_group() {
+    // `autotests = false`: a file no group declares is never built nor run, and nothing says so.
+    let tests = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
+    let declared = declared_by_the_groups();
+    let mut missing = Vec::new();
+    let mut twice = Vec::new();
+    for entry in std::fs::read_dir(&tests).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_none_or(|ext| ext != "rs") {
+            continue;
+        }
+        let file = path.file_name().unwrap().to_string_lossy().into_owned();
+        let groups: Vec<&str> = declared
+            .iter()
+            .filter(|(_, declared)| *declared == file)
+            .map(|(group, _)| group.as_str())
+            .collect();
+        let stem = file.trim_end_matches(".rs");
+        match groups.len() {
+            0 => missing.push(format!(
+                "tests/{file} is declared by no group, so it is never built nor run: add \
+                 `#[path = \"../{file}\"]` and `mod {stem};` to the group in tests/group/ that fits \
+                 (AGENTS.md, \"Adding a test file\")"
+            )),
+            1 => {}
+            _ => twice.push(format!(
+                "tests/{file} is declared by {} groups ({}): keep one",
+                groups.len(),
+                groups.join(", ")
+            )),
+        }
+    }
+    assert!(missing.is_empty(), "{}", missing.join("\n"));
+    assert!(twice.is_empty(), "{}", twice.join("\n"));
+}
+
+#[test]
+fn every_path_a_group_declares_is_a_file_that_exists() {
+    let tests = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
+    let gone: Vec<String> = declared_by_the_groups()
+        .into_iter()
+        .filter(|(_, file)| !tests.join("group").join("..").join(file).exists())
+        .map(|(group, file)| {
+            format!("tests/group/{group}.rs declares ../{file}, which does not exist")
+        })
+        .collect();
+    assert!(gone.is_empty(), "{}", gone.join("\n"));
+}
+
+#[test]
+fn a_file_a_group_does_not_declare_selects_no_test() {
+    let base = grouped_crate();
+    assert_eq!(
+        selected_tests(&base, &["crates/flottille/tests/orphan.rs"], &[], ""),
+        ""
+    );
+    // The helpers every group shares are no test either: a change of them selects nothing (the
+    // description says what to run, `Tests:`).
+    assert_eq!(
+        selected_tests(&base, &["crates/flottille/tests/common/mod.rs"], &[], ""),
+        ""
+    );
+}
+
+#[test]
+fn a_changed_test_file_no_group_declares_is_a_warning_not_a_notice() {
+    let output = selection(
+        &grouped_crate(),
+        &["crates/flottille/tests/orphan.rs"],
+        &[],
+        "",
+    );
+    let said = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        said.contains("::warning::crates/flottille/tests/orphan.rs is declared by no group"),
+        "{said}"
+    );
+    assert!(said.contains("#[path = \"../orphan.rs\"]"), "{said}");
+}
+
+#[test]
+fn a_file_a_group_gains_is_run_and_the_rest_of_its_main_is_not() {
+    let base = grouped_crate();
+    // The main of the group now declares one more file: that file's tests run, not the group's.
+    let main = "crates/flottille/tests/group/agents.rs::#[path = \"../common/mod.rs\"]\nmod common;\n#[path = \"../agents.rs\"]\nmod agents;\n#[path = \"../orphan.rs\"]\nmod orphan;\n";
+    assert_eq!(
+        selected_tests(&base, &[main, "crates/flottille/tests/orphan.rs"], &[], ""),
+        "--test group_agents -E binary(=group_agents)&(test(/^orphan::/))"
+    );
+    // The main changed and no file with it, a file moved there from another group.
+    assert_eq!(
+        selected_tests(&base, &[main], &[], ""),
+        "--test group_agents -E binary(=group_agents)&(test(/^orphan::/))"
+    );
+    // A main that only lost a line selects nothing.
+    let less = "crates/flottille/tests/group/window_session.rs::#[path = \"../common/mod.rs\"]\nmod common;\n#[path = \"../window_cards.rs\"]\nmod window_cards;\n";
+    assert_eq!(selected_tests(&base, &[less], &[], ""), "");
+}
+
+#[test]
+fn the_tests_line_names_a_grouped_file_or_a_group() {
+    let base = grouped_crate();
+    // A file's name, as the issues and the descriptions of before the groups say it.
+    assert_eq!(
+        selected_tests(&base, &["docs/a.md"], &[], "Tests: window_conversation"),
+        "--test group_window_session -E binary(=group_window_session)&(test(/^window_conversation::/))"
+    );
+    // A group's name runs the whole binary, and a file of it adds nothing to it.
+    assert_eq!(
+        selected_tests(
+            &base,
+            &["crates/flottille/tests/window_cards.rs"],
+            &[],
+            "Tests: group_window_session"
+        ),
+        "--test group_window_session -E binary(=group_window_session)"
+    );
+}
+
+#[test]
+fn a_test_file_added_is_run_and_one_deleted_is_not() {
+    let base = [
+        "crates/flottille/tests/old.rs",
+        "crates/flottille/tests/kept.rs",
+    ];
+    assert_eq!(
+        selected_tests(
+            &base,
+            &["crates/flottille/tests/new.rs"],
+            &["crates/flottille/tests/old.rs"],
+            ""
+        ),
+        "--test new"
+    );
+}
+
+#[test]
+fn the_tests_line_of_the_description_adds_the_binaries_it_lists() {
+    let base = ["crates/flottille/tests/other.rs"];
+    let changed = ["crates/flottille/tests/other.rs"];
+    for (body, expected) in [
+        ("Tests: families", "--test other --test families"),
+        (
+            "Closes #1\r\n\r\nTests: families, release\r\n",
+            "--test other --test families --test release",
+        ),
+        (
+            "text\n  Tests:  families   release  \nmore",
+            "--test other --test families --test release",
+        ),
+        // A binary a file already selected is run once.
+        ("Tests: other", "--test other"),
+        // Another line, or the word in a sentence, is no list.
+        ("The Tests: families are slow", "--test other"),
+        ("Test: families", "--test other"),
+    ] {
+        assert_eq!(
+            selected_tests(&base, &changed, &[], body),
+            expected,
+            "{body:?}"
+        );
+    }
+    // Alone: nothing else changed.
+    assert_eq!(
+        selected_tests(&base, &["docs/a.md"], &[], "Tests: families"),
+        "--test families"
+    );
+}
+
+#[test]
+fn a_name_that_is_not_a_binary_name_is_never_passed_on() {
+    // The description is the author's, and its words reach a command line: only letters, digits,
+    // dashes and underscores are names.
+    let output = selected_tests(
+        &[],
+        &["docs/a.md"],
+        &[],
+        "Tests: ok $(touch pwned) a;b `id` --release ../x ok-2_b",
+    );
+    assert_eq!(output, "--test ok --test ok-2_b");
+}
+
+#[test]
+fn the_unit_tests_of_a_small_crate_run_when_no_binary_is_selected() {
+    let base = [
+        "crates/flottille-core/src/lib.rs",
+        "crates/flottille-protocol/src/lib.rs",
+    ];
+    assert_eq!(
+        selected_tests(&base, &["crates/flottille-core/src/lib.rs"], &[], ""),
+        "-p flottille-core --lib"
+    );
+    assert_eq!(
+        selected_tests(
+            &base,
+            &[
+                "crates/flottille-protocol/src/lib.rs",
+                "crates/flottille-core/src/model/mod.rs",
+            ],
+            &[],
+            ""
+        ),
+        "-p flottille-core -p flottille-protocol --lib"
+    );
+}
+
+#[test]
+fn the_unit_tests_do_not_run_beside_a_binary_nor_for_a_big_crate_nor_for_a_crate_with_no_library() {
+    let base = [
+        "crates/flottille-core/src/lib.rs",
+        "crates/flottille/src/lib.rs",
+        "crates/flottille-window/src/lib.rs",
+        "crates/flottille-fake-gh/src/main.rs",
+    ];
+    // A binary is selected (by a file, or by the description): the crates' unit tests are not.
+    assert_eq!(
+        selected_tests(
+            &base,
+            &[
+                "crates/flottille-core/src/lib.rs",
+                "crates/flottille-core/tests/families.rs"
+            ],
+            &[],
+            ""
+        ),
+        "--test families"
+    );
+    assert_eq!(
+        selected_tests(
+            &base,
+            &["crates/flottille-core/src/lib.rs"],
+            &[],
+            "Tests: release"
+        ),
+        "--test release"
+    );
+    // flottille and the window are too big to build for their unit tests alone; a fake has no
+    // library.
+    for path in [
+        "crates/flottille/src/lib.rs",
+        "crates/flottille-window/src/lib.rs",
+        "crates/flottille-fake-gh/src/main.rs",
+    ] {
+        assert_eq!(selected_tests(&base, &[path], &[], ""), "", "{path}");
+    }
+}
+
+#[test]
+fn a_changed_workflow_or_tool_runs_the_tests_that_name_it() {
+    // The tests that read ci.yml or run package.sh are the ones to judge a change of them.
+    let base = [
+        "crates/flottille/tests/release.rs::reads .github/workflows/ci.yml and tools/package.sh",
+        "crates/flottille-hub/tests/publish.rs::reads .github/workflows/ci.yml",
+        "crates/flottille/tests/grouped/main.rs::runs tools/package.sh",
+        "crates/flottille/tests/other.rs::says nothing of them",
+    ];
+    assert_eq!(
+        selected_tests(&base, &[".github/workflows/ci.yml"], &[], ""),
+        "--test publish --test release"
+    );
+    assert_eq!(
+        selected_tests(&base, &["tools/package.sh"], &[], ""),
+        "--test grouped --test release"
+    );
+    // No test names it, and a file of the docs is no workflow: nothing is selected.
+    assert_eq!(
+        selected_tests(&base, &[".github/scripts/none.sh"], &[], ""),
+        ""
+    );
+    assert_eq!(selected_tests(&base, &["docs/a.md"], &[], ""), "");
+}
+
+#[test]
+fn a_pull_request_that_changes_no_test_and_no_source_runs_no_test() {
+    assert_eq!(
+        selected_tests(&["docs/a.md"], &["docs/a.md", "Cargo.lock"], &[], ""),
+        ""
+    );
+}
+
+#[test]
+fn a_pull_request_runs_the_selected_tests_alone_and_a_push_the_whole_suite() {
+    let selected = ci_job("test-selected");
+    assert!(
+        selected.contains("needs: [verified-on-dev, changes]"),
+        "{selected}"
+    );
+    let condition: String = selected.split_whitespace().collect::<Vec<_>>().join(" ");
+    for part in [
+        "needs.changes.outputs.rust != 'false'",
+        "needs.changes.outputs.suite == 'false'",
+        "needs.changes.outputs.selected != ''",
+    ] {
+        assert!(condition.contains(part), "{part}: {selected}");
+    }
+    // The whole suite: unless the pull request said it runs the fast check (`suite=false`, which
+    // only the step that read the pull request writes: a failure of it runs everything).
+    for name in ["build-tests", "doc-tests"] {
+        let job = ci_job(name);
+        assert!(
+            job.contains("&& needs.changes.outputs.suite != 'false'"),
+            "{name}: {job}"
+        );
+    }
+    let test = ci_job("test");
+    assert!(test.contains("needs: [build-tests]"), "{test}");
+    // `verify` waits for the selected tests, and reads their flaky ones.
+    let verify = ci_job("verify");
+    assert!(
+        verify.contains(
+            "needs: [verified-on-dev, changes, check, build-tests, doc-tests, test, test-selected, hub]"
+        ),
+        "{verify}"
+    );
+}
+
+#[test]
+fn a_partition_makes_the_scratch_folder_cargo_makes_before_it_runs_the_tests() {
+    // The tests keep scratch files in `CARGO_TARGET_TMPDIR` (`target/tmp`), which cargo makes when
+    // it runs a test and an archive does not hold: run 44623882394 failed on it, 27 tests.
+    let test = ci_job("test");
+    let make = test
+        .find("mkdir -p \"$GITHUB_WORKSPACE/target/tmp\"")
+        .expect("the folder is made");
+    let run = test
+        .find("cargo nextest run --archive-file")
+        .expect("the run");
+    assert!(make < run, "{test}");
+}
+
+#[test]
+fn every_job_that_compiles_links_with_mold() {
+    for name in [
+        "check",
+        "build-tests",
+        "test-selected",
+        "doc-tests",
+        "build",
+        "hub",
+    ] {
+        let job = ci_job(name);
+        assert!(job.contains("uses: rui314/setup-mold@v1"), "{name}: {job}");
+    }
+}
+
+#[test]
+fn a_pull_request_passes_verify_on_its_checks_and_its_selected_tests() {
+    let script = step_script(".github/workflows/ci.yml", "verdict");
+    let run = |suite: &str, check: &str, selected: &str| {
+        Fake::new()
+            .run(
+                &script,
+                &[
+                    ("CHECK", check),
+                    ("BUILD", "skipped"),
+                    ("DOC", "skipped"),
+                    ("TEST", "skipped"),
+                    ("SELECTED", selected),
+                    ("SUITE", suite),
+                    ("RUST", "true"),
+                ],
+            )
+            .status
+            .success()
+    };
+
+    // The selected tests ran and passed, or there were none to run.
+    assert!(run("false", "success", "success"));
+    assert!(run("false", "success", "skipped"));
+    // Anything else is red, as ever.
+    for selected in ["failure", "cancelled"] {
+        assert!(!run("false", "success", selected), "selected: {selected}");
+    }
+    for check in ["failure", "cancelled", "skipped"] {
+        assert!(!run("false", check, "success"), "check: {check}");
+    }
+    // The decision that failed (no `suite`) or says "whole": the selected tests are not the suite.
+    for suite in ["", "true"] {
+        assert!(!run(suite, "success", "success"), "suite: {suite:?}");
     }
 }
 
@@ -4737,5 +5336,333 @@ fn the_version_says_the_channel_and_the_commit() {
     assert!(
         said.trim().starts_with("flottille ") && said.contains(&format!("({channel}")),
         "{said}"
+    );
+}
+
+/// A job of `ci.yml`: its lines, from its name to the next job's.
+fn ci_job(name: &str) -> String {
+    let workflow = std::fs::read_to_string(tool(".github/workflows/ci.yml")).unwrap();
+    let lines: Vec<&str> = workflow.lines().collect();
+    let at = lines
+        .iter()
+        .position(|l| *l == format!("  {name}:"))
+        .unwrap_or_else(|| panic!("a job {name}"));
+    lines[at + 1..]
+        .iter()
+        .take_while(|l| !(l.starts_with("  ") && !l.starts_with("   ") && l.ends_with(':')))
+        .copied()
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn a_push_to_a_feature_branch_runs_no_check_and_no_test() {
+    // Its pull request's run judges it (and publishes its alpha): a push run too would run the
+    // whole suite twice on the same commit.
+    let workflow = std::fs::read_to_string(tool(".github/workflows/ci.yml")).unwrap();
+    let triggers = &workflow[..workflow.find("\nconcurrency:").expect("concurrency")];
+    let branches = triggers
+        .lines()
+        .find(|l| l.trim_start().starts_with("branches:"))
+        .expect("the branches pushed");
+    for kept in ["main", "dev", "stable/*", "next/*"] {
+        assert!(branches.contains(kept), "{kept}: {branches}");
+    }
+    for feature in ["feat/", "fix/"] {
+        assert!(!branches.contains(feature), "{feature}: {branches}");
+    }
+    assert!(triggers.contains("\n  pull_request:\n"), "{triggers}");
+}
+
+/// The `changes` step that says whether a pull request publishes an alpha, as GitHub runs it.
+fn publishes_an_alpha(event: &str, head_ref: &str, head_repo: &str) -> String {
+    let out = tempfile::tempdir().unwrap();
+    let output_file = out.path().join("github-output");
+    let output = Command::new("bash")
+        .args([
+            "-e",
+            "-c",
+            &step_script(".github/workflows/ci.yml", "alpha"),
+        ])
+        .env("EVENT_NAME", event)
+        .env("HEAD_REF", head_ref)
+        .env("HEAD_REPO", head_repo)
+        .env("GITHUB_REPOSITORY", "o/r")
+        .env("GITHUB_OUTPUT", &output_file)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    std::fs::read_to_string(&output_file)
+        .unwrap()
+        .trim()
+        .to_owned()
+}
+
+#[test]
+fn a_pull_request_of_a_feature_branch_of_the_repository_publishes_its_alpha() {
+    for head_ref in ["feat/12-topic", "fix/7-bug", "feat/a/b"] {
+        assert_eq!(
+            publishes_an_alpha("pull_request", head_ref, "o/r"),
+            "alpha=true",
+            "{head_ref}"
+        );
+    }
+}
+
+#[test]
+fn no_other_run_publishes_an_alpha() {
+    // Another branch never had one; a fork's token cannot write; a push's own build publishes its
+    // channel's release, not an alpha.
+    for (event, head_ref, head_repo) in [
+        ("pull_request", "ci/1-topic", "o/r"),
+        ("pull_request", "docs/1-topic", "o/r"),
+        ("pull_request", "dev", "o/r"),
+        ("pull_request", "feat/12-topic", "someone/r"),
+        ("push", "", ""),
+        ("workflow_dispatch", "", ""),
+    ] {
+        assert_eq!(
+            publishes_an_alpha(event, head_ref, head_repo),
+            "alpha=false",
+            "{event} {head_ref} {head_repo}"
+        );
+    }
+}
+
+#[test]
+fn the_alpha_of_a_pull_request_is_built_and_published_for_the_head_of_its_branch() {
+    let build = ci_job("build");
+    assert!(build.contains("needs: [changes]"), "{build}");
+    let condition: String = build.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        condition.contains("|| needs.changes.outputs.alpha == 'true')"),
+        "{build}"
+    );
+    // What is built is the head a person pushed, not the merge commit GitHub makes.
+    assert!(
+        build.contains("ref: ${{ github.event.pull_request.head.sha }}"),
+        "{build}"
+    );
+    // `publish` still needs `verify` to have passed on this very run.
+    let publish = ci_job("publish");
+    let condition: String = publish.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        condition.contains("|| needs.changes.outputs.alpha == 'true')"),
+        "{publish}"
+    );
+    assert!(
+        condition.contains("(needs.verify.result == 'success' ||"),
+        "{publish}"
+    );
+    // The branch's own name keeps the alpha's series and its cleanup, not `<n>/merge`.
+    assert!(
+        publish.contains("group: publish-${{ github.head_ref || github.ref_name }}"),
+        "{publish}"
+    );
+}
+
+#[test]
+fn an_alpha_built_from_a_pull_request_is_named_after_its_branch_and_its_head() {
+    let repo = ready_for_a_release();
+    repo.git(&["checkout", "--quiet", "-b", "feat/12-topic"]);
+    repo.commit("fix(cli): a typo (#2)");
+    let head = repo.head();
+    repo.git(&["checkout", "--quiet", "dev"]);
+
+    // A pull request's run is on a merge ref, `12/merge`, at a commit no one pushed.
+    let (output, outputs, _) = version_step_with(
+        &repo,
+        "12/merge",
+        "branch",
+        "0000000000000000000000000000000000000000",
+        &[("HEAD_REF", "feat/12-topic"), ("HEAD_SHA", &head)],
+    );
+
+    assert!(output.status.success(), "{output:?}");
+    assert!(outputs.starts_with("channel=alpha\nversion="), "{outputs}");
+    assert!(outputs.contains("-alpha.feat-12-topic."), "{outputs}");
+}
+
+#[test]
+fn the_alpha_of_a_pull_request_is_published_for_its_head_when_the_branch_still_is_there() {
+    let fake = Fake::new();
+    let run = |tip: &str| {
+        fake.run(
+            &step_script(".github/workflows/ci.yml", "publish"),
+            &[
+                ("GH_TOKEN", "unused"),
+                ("CHANNEL", "alpha"),
+                ("VERSION", "0.2.0-alpha.feat-12-topic.1"),
+                ("TAG", "v0.2.0-alpha.feat-12-topic.1"),
+                ("GITHUB_REF_NAME", "12/merge"),
+                ("GITHUB_SHA", "merge999"),
+                ("HEAD_REF", "feat/12-topic"),
+                ("HEAD_SHA", "abc123"),
+                ("FAKE_TIP", tip),
+            ],
+        )
+    };
+
+    // The branch moved on: its later push has a pull request run of its own, which publishes.
+    let output = run("def456");
+    assert!(output.status.success(), "{output:?}");
+    assert!(!fake.log().contains("release create"), "{}", fake.log());
+
+    let output = run("abc123");
+    assert!(output.status.success(), "{output:?}");
+    let log = fake.log();
+    assert!(log.contains("--target abc123"), "{log}");
+    assert!(!log.contains("merge999"), "{log}");
+    assert!(log.contains("--prerelease --latest=false"), "{log}");
+    assert!(log.contains("git/ref/heads/feat/12-topic"), "{log}");
+}
+
+#[test]
+fn the_tests_are_built_once_and_run_on_twelve_partitions_of_the_archive() {
+    let build = ci_job("build-tests");
+    assert_eq!(build.matches("cargo nextest archive").count(), 1, "{build}");
+    assert!(build.contains("--archive-file"), "{build}");
+    assert!(build.contains("actions/upload-artifact"), "{build}");
+
+    let test = ci_job("test");
+    assert!(test.contains("needs: [build-tests]"), "{test}");
+    assert!(test.contains("actions/download-artifact"), "{test}");
+    assert!(test.contains("--archive-file"), "{test}");
+    assert!(test.contains("--workspace-remap ."), "{test}");
+    // The test binaries hold the paths of their build (`env!("CARGO_BIN_EXE_flottille")`, the
+    // fakes beside it): the archive is extracted where `target/` was, in the checkout.
+    assert!(
+        test.contains("--extract-to \"$GITHUB_WORKSPACE\" --extract-overwrite"),
+        "{test}"
+    );
+    assert!(
+        test.contains("--partition count:${{ matrix.partition }}/12"),
+        "{test}"
+    );
+    let matrix = test
+        .lines()
+        .find(|l| l.trim_start().starts_with("partition:"))
+        .expect("the partitions");
+    assert_eq!(matrix.matches(',').count() + 1, 12, "{matrix}");
+    // A partition only runs: it compiles nothing, and has no cache of a build to restore.
+    for building in ["cargo build", "cargo test", "cargo clippy", "rust-cache"] {
+        assert!(!test.contains(building), "{building}: {test}");
+    }
+    // The doc tests run once, in a job of their own.
+    let doc = ci_job("doc-tests");
+    assert!(doc.contains("cargo test --doc --locked"), "{doc}");
+    assert!(!test.contains("--doc"), "{test}");
+}
+
+#[test]
+fn a_failed_test_is_retried_twice_in_the_profile_ci_uses() {
+    let config = std::fs::read_to_string(tool(".config/nextest.toml")).unwrap();
+    let profile = &config[config.find("[profile.ci]").expect("a profile ci")..];
+    let profile = &profile[..profile[1..].find("\n[").map_or(profile.len(), |at| at + 1)];
+    assert!(profile.contains("retries = 2"), "{config}");
+    // A report to tell the flaky tests by: nextest writes a JUnit file for the profile.
+    assert!(config.contains("[profile.ci.junit]"), "{config}");
+    assert!(
+        test_job_runs_profile_ci(),
+        "the test job runs `--profile ci`"
+    );
+}
+
+fn test_job_runs_profile_ci() -> bool {
+    ci_job("test").contains("--profile ci")
+}
+
+/// The flaky tests of JUnit files, as `flaky-report.sh` lists them.
+fn flaky_report(reports: &[&str]) -> (bool, String) {
+    let dir = tempfile::tempdir().unwrap();
+    let files: Vec<PathBuf> = reports
+        .iter()
+        .enumerate()
+        .map(|(n, xml)| {
+            let file = dir.path().join(format!("junit-{n}.xml"));
+            std::fs::write(&file, xml).unwrap();
+            file
+        })
+        .collect();
+    let output = Command::new(tool(".github/scripts/flaky-report.sh"))
+        .args(&files)
+        .output()
+        .unwrap();
+    (
+        output.status.success(),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+    )
+}
+
+const JUNIT_WITH_A_FLAKY_TEST: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<testsuites name="nextest-run" tests="3" failures="1">
+  <testsuite name="flottille-core::probe" tests="3">
+    <testcase name="flaky_test" classname="flottille-core::probe">
+      <flakyFailure type="test failure with exit code 101"><system-out>first</system-out></flakyFailure>
+      <flakyFailure type="test failure with exit code 101"><system-out>second</system-out></flakyFailure>
+    </testcase>
+    <testcase name="steady_test" classname="flottille-core::probe"/>
+    <testcase name="broken_test" classname="flottille-core::probe">
+      <failure type="test failure with exit code 101"/>
+      <rerunFailure type="test failure with exit code 101"/>
+      <rerunFailure type="test failure with exit code 101"/>
+    </testcase>
+  </testsuite>
+</testsuites>
+"#;
+
+#[test]
+fn a_flaky_test_is_listed_with_its_attempts_under_a_heading() {
+    let (ok, report) = flaky_report(&[JUNIT_WITH_A_FLAKY_TEST]);
+    assert!(ok, "{report}");
+    assert!(report.starts_with("## Flaky tests\n"), "{report}");
+    assert!(
+        report.contains("| `flottille-core::probe flaky_test` | 3 |"),
+        "{report}"
+    );
+    // A test that passed first time, and one that failed every attempt (it fails its job), are
+    // not flaky.
+    assert!(!report.contains("steady_test"), "{report}");
+    assert!(!report.contains("broken_test"), "{report}");
+}
+
+#[test]
+fn nothing_is_said_when_no_test_was_flaky() {
+    let report = r#"<?xml version="1.0"?><testsuites><testsuite name="a"><testcase name="t" classname="c"/></testsuite></testsuites>"#;
+    let (ok, said) = flaky_report(&[report, report]);
+    assert!(ok, "{said}");
+    assert_eq!(said, "");
+}
+
+#[test]
+fn the_flaky_tests_of_every_partition_are_listed_once_in_one_report() {
+    let other = JUNIT_WITH_A_FLAKY_TEST
+        .replace("flaky_test", "another_flaky_test")
+        .replace("<flakyFailure type=\"test failure with exit code 101\"><system-out>second</system-out></flakyFailure>\n", "");
+    let (ok, report) = flaky_report(&[JUNIT_WITH_A_FLAKY_TEST, &other]);
+    assert!(ok, "{report}");
+    assert_eq!(report.matches("## Flaky tests").count(), 1, "{report}");
+    assert!(
+        report.contains("`flottille-core::probe flaky_test` | 3 |"),
+        "{report}"
+    );
+    assert!(report.contains("another_flaky_test` | 2 |"), "{report}");
+}
+
+#[test]
+fn verify_and_the_partitions_both_put_the_flaky_tests_in_their_summary() {
+    for job in ["test", "verify"] {
+        let text = ci_job(job);
+        assert!(
+            text.contains(".github/scripts/flaky-report.sh"),
+            "{job}: {text}"
+        );
+        assert!(text.contains("$GITHUB_STEP_SUMMARY"), "{job}: {text}");
+    }
+    // The summary is informational: it never decides the verdict.
+    assert!(
+        ci_job("verify").contains("continue-on-error: true"),
+        "{}",
+        ci_job("verify")
     );
 }

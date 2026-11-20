@@ -4,7 +4,7 @@
 //! cut under the limit or when the setting is off, and what is kept is masked. The agent is the
 //! fake ACP agent, in a throwaway repository and temporary XDG folders.
 
-mod common;
+use crate::common;
 
 use std::path::PathBuf;
 

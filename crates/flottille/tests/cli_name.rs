@@ -1,7 +1,7 @@
 //! The program answers to the name it was called by (`docs/cli.md`, "The `flot` name"): a link
 //! named `flot` to the one binary behaves as `flottille` does, and its help and errors say `flot`.
 
-mod common;
+use crate::common;
 
 use std::path::{Path, PathBuf};
 use std::process::Output;
