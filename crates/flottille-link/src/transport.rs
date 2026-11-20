@@ -8,7 +8,9 @@
 //! two machines reach each other (a LAN, a VPN, a public address, a tunnel) is the user's.
 
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use quinn::crypto::rustls::{HandshakeData, QuicClientConfig, QuicServerConfig};
@@ -21,6 +23,10 @@ use rustls::pki_types::{
 use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
 use rustls::sign::CertifiedKey;
 use rustls::{DigitallySignedStruct, DistinguishedName, SignatureScheme};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::sync::mpsc;
+
+use crate::link::FRAME_LIMIT;
 use zeroize::Zeroizing;
 
 /// An Ed25519 public key's SubjectPublicKeyInfo, before its 32 bytes (RFC 8410).
@@ -157,7 +163,7 @@ impl Transport {
             .map_err(Failure::Lost)?
             .connect_with(client, address, SERVER_NAME)
             .map_err(|error| Failure::Lost(error.to_string()))?;
-        connecting.await.map(Conn).map_err(failure)
+        connecting.await.map(Conn::new).map_err(failure)
     }
 
     /// The next connection that comes from an address that proved it is the sender's, `None`
@@ -243,15 +249,48 @@ impl Incoming {
     }
 
     pub(crate) async fn finish(self) -> Result<Conn, Failure> {
-        self.0.await.map(Conn).map_err(failure)
+        self.0.await.map(Conn::new).map_err(failure)
     }
 }
 
 /// A connection, its TLS done: the other side holds the key it showed.
+///
+/// The streams the other side opens are taken as they come, each read in a task of its own: one
+/// that is slow to say what it is (or never does) holds up no other, and is given up on after
+/// `OPENING`.
 #[derive(Clone)]
-pub(crate) struct Conn(quinn::Connection);
+pub(crate) struct Conn(quinn::Connection, Arc<Inbox>);
+
+/// What the other side opened, read, and not taken yet.
+struct Inbox(tokio::sync::Mutex<mpsc::Receiver<Inbound>>);
+
+/// The streams read and waiting to be taken: the others wait in the connection's own limit.
+const WAITING: usize = 16;
 
 impl Conn {
+    fn new(connection: quinn::Connection) -> Conn {
+        let (inbound, queue) = mpsc::channel(WAITING);
+        let accepting = connection.clone();
+        tokio::spawn(async move {
+            // It ends with the connection, or when nobody holds the connection any more: a
+            // handle kept here would keep it open.
+            loop {
+                let accepted = tokio::select! {
+                    accepted = accepting.accept_bi() => accepted,
+                    _ = inbound.closed() => break,
+                };
+                let Ok((send, recv)) = accepted else { break };
+                let inbound = inbound.clone();
+                tokio::spawn(async move {
+                    if let Some(opened) = Conn::read_opening(send, recv).await {
+                        let _ = inbound.send(opened).await;
+                    }
+                });
+            }
+        });
+        Conn(connection, Arc::new(Inbox(tokio::sync::Mutex::new(queue))))
+    }
+
     /// The other side's key.
     pub(crate) fn peer(&self) -> Option<[u8; 32]> {
         let identity = self.0.peer_identity()?;
@@ -286,14 +325,68 @@ impl Conn {
     }
 
     /// The next frame the other side sends, with the stream to answer it on; `None` once the
-    /// connection is gone. A stream that fails alone is passed over.
-    pub(crate) async fn next(&self, limit: usize) -> Option<(Vec<u8>, Reply)> {
+    /// connection is gone. A stream that fails alone is passed over, and so is a raw one
+    /// (`Conn::next_stream`): this is for a link that carries frames only.
+    pub(crate) async fn next(&self) -> Option<(Vec<u8>, Reply)> {
         loop {
-            let (send, mut recv) = self.0.accept_bi().await.ok()?;
-            if let Ok(frame) = recv.read_to_end(limit).await {
-                return Some((frame, Reply(send)));
+            match self.next_stream().await? {
+                Inbound::Frame(frame, reply) => return Some((frame, reply)),
+                Inbound::Raw(raw, _) => raw.refuse(),
             }
         }
+    }
+
+    /// What a stream the other side opened is: a frame, read whole, or a raw stream and its
+    /// opening line; `None` when it failed or was too slow.
+    async fn read_opening(send: quinn::SendStream, mut recv: quinn::RecvStream) -> Option<Inbound> {
+        let first = recv.read_chunk(64 * 1024, true).await.ok()?;
+        let first = first.map(|chunk| chunk.bytes.to_vec()).unwrap_or_default();
+        if first.first() == Some(&RAW) {
+            let opened = tokio::time::timeout(OPENING, Raw::opened(send, recv, first)).await;
+            return opened
+                .ok()
+                .flatten()
+                .map(|(raw, line)| Inbound::Raw(raw, line));
+        }
+        let room = FRAME_LIMIT.checked_sub(first.len())?;
+        let rest = recv.read_to_end(room).await.ok()?;
+        let mut frame = first;
+        frame.extend_from_slice(&rest);
+        Some(Inbound::Frame(frame, Reply(send)))
+    }
+
+    /// The next stream the other side opens: a frame, read whole, with the stream to answer it
+    /// on, or a raw stream (`Conn::open_raw`) with the line that opened it. `None` once the
+    /// connection is gone. A stream that fails alone is passed over.
+    pub(crate) async fn next_stream(&self) -> Option<Inbound> {
+        self.1.0.lock().await.recv().await
+    }
+
+    /// Opens a raw, two-way stream, opened by one line (`header`, no newline): what follows it,
+    /// either way, is bytes. A tunnel's connection (`docs/remote.md`, "Tunnels").
+    pub(crate) async fn open_raw(&self, header: &[u8]) -> Result<Raw, Failure> {
+        let (mut send, recv) = self.0.open_bi().await.map_err(failure)?;
+        let mut line = Vec::with_capacity(header.len() + 2);
+        line.push(RAW);
+        line.extend_from_slice(header);
+        line.push(b'\n');
+        send.write_all(&line).await.map_err(write_failure)?;
+        Ok(Raw {
+            send,
+            recv,
+            early: Vec::new(),
+        })
+    }
+
+    /// A stream that sends `bytes` and then nothing, held by the stream it gives back (tests).
+    #[cfg(test)]
+    pub(crate) async fn open_unfinished(
+        &self,
+        bytes: &[u8],
+    ) -> (quinn::SendStream, quinn::RecvStream) {
+        let (mut send, recv) = self.0.open_bi().await.unwrap();
+        send.write_all(bytes).await.unwrap();
+        (send, recv)
     }
 
     pub(crate) fn close(&self, code: u32, reason: &str) {
@@ -303,6 +396,101 @@ impl Conn {
     /// Waits until the connection is gone; why.
     pub(crate) async fn closed(&self) -> Failure {
         failure(self.0.closed().await)
+    }
+}
+
+/// What opens a raw stream, as the first byte of its opening line: a frame is JSON, and starts
+/// with something else.
+const RAW: u8 = 0;
+/// The longest opening line of a raw stream, newline and marker included.
+const RAW_HEADER: usize = 512;
+/// How long the other side has to end the opening line of a raw stream.
+const OPENING: Duration = Duration::from_secs(5);
+
+/// What a stream the other side opened is.
+pub(crate) enum Inbound {
+    /// A frame, read whole, and where to answer it.
+    Frame(Vec<u8>, Reply),
+    /// A raw stream and the line that opened it, marker and newline left out.
+    Raw(Raw, Vec<u8>),
+}
+
+/// A two-way stream of bytes, past its opening line: reads what the other side writes, writes
+/// what it reads. Ending its writing ends what the other side reads.
+pub(crate) struct Raw {
+    send: quinn::SendStream,
+    recv: quinn::RecvStream,
+    /// What came with the opening line, read before the stream is.
+    early: Vec<u8>,
+}
+
+impl Raw {
+    /// The opening line of a stream whose first bytes are `first`, read to its newline; `None`
+    /// when it is too long or the stream failed.
+    async fn opened(
+        send: quinn::SendStream,
+        mut recv: quinn::RecvStream,
+        first: Vec<u8>,
+    ) -> Option<(Raw, Vec<u8>)> {
+        let mut buffer = first;
+        loop {
+            if let Some(at) = buffer.iter().position(|byte| *byte == b'\n') {
+                let early = buffer.split_off(at + 1);
+                buffer.pop();
+                buffer.remove(0);
+                return Some((Raw { send, recv, early }, buffer));
+            }
+            if buffer.len() > RAW_HEADER {
+                return None;
+            }
+            match recv.read_chunk(RAW_HEADER, true).await {
+                Ok(Some(chunk)) => buffer.extend_from_slice(&chunk.bytes),
+                _ => return None,
+            }
+        }
+    }
+
+    /// Ends the stream both ways: the other side's reads and writes fail.
+    pub(crate) fn refuse(mut self) {
+        let _ = self.send.reset(REFUSED.into());
+        let _ = self.recv.stop(REFUSED.into());
+    }
+}
+
+/// The code a raw stream refused is reset with.
+const REFUSED: u32 = 1;
+
+impl AsyncRead for Raw {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        if !self.early.is_empty() {
+            let count = self.early.len().min(buf.remaining());
+            let rest = self.early.split_off(count);
+            buf.put_slice(&std::mem::replace(&mut self.early, rest));
+            return Poll::Ready(Ok(()));
+        }
+        AsyncRead::poll_read(Pin::new(&mut self.recv), cx, buf)
+    }
+}
+
+impl AsyncWrite for Raw {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        AsyncWrite::poll_write(Pin::new(&mut self.send), cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        AsyncWrite::poll_flush(Pin::new(&mut self.send), cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        AsyncWrite::poll_shutdown(Pin::new(&mut self.send), cx)
     }
 }
 
