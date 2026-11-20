@@ -41,6 +41,47 @@ pub struct Travel {
     pub at: u64,
 }
 
+/// A session or a child started on another machine by an agent (`launches`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Launch {
+    /// `out` on the caller's machine, `in` on the machine it runs on.
+    pub way: String,
+    /// The other machine's key.
+    pub machine: String,
+    pub launch: String,
+    pub caller: String,
+    pub kind: String,
+    pub project: String,
+    /// `held`, `accepted`, `started` or `refused`.
+    pub state: String,
+    pub request: Option<u64>,
+    pub agent: Option<String>,
+    pub workspace: Option<String>,
+    /// The store's id of `workspace`, the one made of the launch's code; cleared when that
+    /// workspace is removed, as a later one may take its name and its id.
+    pub workspace_id: Option<i64>,
+    pub asked: Value,
+    pub at: u64,
+}
+
+/// Why `Store::add_launch` did not record a launch: the launch was asked already, or its machine
+/// has as many launches waiting for their code, or for the user, as it may.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LaunchRefused {
+    Known,
+    Waiting,
+    Held,
+}
+
+/// Which launches `Store::launches` gives.
+#[derive(Debug, Clone, Copy)]
+pub enum LaunchFilter<'a> {
+    All,
+    Named(&'a str),
+    Agent(&'a str),
+    Request(u64),
+}
+
 /// A run's process recorded while it runs (`run_processes`), what a daemon started after a crash
 /// ends.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -840,6 +881,38 @@ const MIGRATIONS: &[&str] = &[
     -- of that machine's entry, NULL for an entry of this machine's own.
     ALTER TABLE vault_entries ADD COLUMN shared_from TEXT;
 ",
+    "
+    -- A session or a child started on another machine by an agent (`docs/remote.md`, \"Starting
+    -- a session on another machine\"): `out` on the caller's machine, `in` on the machine it runs
+    -- on. `machine` is the other machine's key; `caller` the agent that launched it (of this
+    -- machine for `out`, of the other for `in`); `state` `held` (for the user there), `accepted`
+    -- (by the gate there), `started`, or `refused`; `request` the user's request there while it is
+    -- held; `agent` the agent it started (there for `out`); `asked` the launch as it was asked.
+    CREATE TABLE launches (
+        way       TEXT NOT NULL CHECK (way IN ('out', 'in')),
+        machine   TEXT NOT NULL,
+        launch    TEXT NOT NULL,
+        caller    TEXT NOT NULL,
+        kind      TEXT NOT NULL,
+        project   TEXT NOT NULL,
+        state     TEXT NOT NULL,
+        request   INTEGER,
+        agent     TEXT,
+        workspace TEXT,
+        asked     TEXT NOT NULL,
+        at        INTEGER NOT NULL,
+        PRIMARY KEY (way, machine, launch)
+    ) STRICT;
+    CREATE INDEX launches_by_agent ON launches (agent);
+    -- The user's switch of a tree to Full, as the device that made it signed it: what a launch on
+    -- another machine needs to start in Full there.
+    ALTER TABLE agents ADD COLUMN full_switch TEXT;
+",
+    "
+    -- The store's id of the workspace a launch's code was made into (`workspace` is its name),
+    -- until that workspace is removed: a later one may take the name, and the id.
+    ALTER TABLE launches ADD COLUMN workspace_id INTEGER;
+",
 ];
 
 /// How many of each extension's own migrations were applied (`docs/extensions.md`, "Data"): its
@@ -1317,6 +1390,7 @@ impl Store {
     pub fn remove_workspace(&mut self, workspace: i64, event: (&str, Value)) -> Result<Event> {
         let transaction = self.connection.transaction()?;
         transaction.execute("DELETE FROM workspaces WHERE id = ?1", params![workspace])?;
+        forget_launches_workspace(&transaction, workspace)?;
         let event = append_event(&transaction, event.0, event.1)?;
         transaction.commit()?;
         Ok(event)
@@ -1338,6 +1412,7 @@ impl Store {
     ) -> Result<(Vec<Event>, Vec<Request>)> {
         let transaction = self.connection.transaction()?;
         transaction.execute("DELETE FROM workspaces WHERE id = ?1", params![workspace])?;
+        forget_launches_workspace(&transaction, workspace)?;
         transaction.execute(
             "UPDATE agents SET workspace = NULL, folder = ?2, instructions = ?3, updated_at = ?4 \
              WHERE id = ?1",
@@ -2354,6 +2429,30 @@ impl Store {
         Ok(Some(event))
     }
 
+    /// Settles a request whose answer is for no agent: the launch of another machine's agent,
+    /// which the user allowed or refused here. Its answer is kept as sent, never delivered.
+    pub fn settle_unsent(&mut self, request: &Request, outcome: &str) -> Result<Option<Event>> {
+        let transaction = self.connection.transaction()?;
+        let id = format!("approval-{}", request.number);
+        let stored = transaction.execute(
+            "INSERT OR IGNORE INTO deliveries (id, agent, kind, body, urgency, state, created_at, \
+             images) VALUES (?1, ?2, 'approval', ?3, 'urgent', 'superseded', ?4, '[]')",
+            params![id, request.agent, outcome, now_ms()],
+        )?;
+        if stored == 0 {
+            return Ok(None);
+        }
+        let event = append_agent_event(
+            &transaction,
+            &request.agent,
+            "approval.settled",
+            json!({"number": request.number, "agent": request.agent, "outcome": outcome,
+                "delivery": id}),
+        )?;
+        transaction.commit()?;
+        Ok(Some(event))
+    }
+
     /// The requests allowed whose answer was never stored: a daemon stopped while it performed
     /// them.
     pub fn unsettled_requests(&self) -> Result<Vec<Request>> {
@@ -2989,6 +3088,177 @@ impl Store {
         Ok(())
     }
 
+    /// Records a launch, in place of the one of the same name with the same machine; a launch `in`
+    /// already recorded keeps its workspace (`place_launch` writes it).
+    pub fn record_launch(&mut self, launch: &Launch) -> Result<()> {
+        insert_launch(&self.connection, launch)
+    }
+
+    /// Records what came of a launch `in` that was recorded: its `state`, `request` and `agent`,
+    /// and the workspace `workspace`, as it is in this very write (its name and its id); when
+    /// that workspace was removed meanwhile, none, as a later one may take its id. The id
+    /// recorded, `None` when the launch is not there (forgotten meanwhile).
+    pub fn place_launch(
+        &mut self,
+        launch: &Launch,
+        workspace: Option<i64>,
+    ) -> Result<Option<Option<i64>>> {
+        Ok(self
+            .connection
+            .query_row(
+                "UPDATE launches SET state = ?4, request = ?5, agent = ?6, \
+                 workspace = (SELECT name FROM workspaces WHERE id = ?7), \
+                 workspace_id = (SELECT id FROM workspaces WHERE id = ?7) \
+                 WHERE way = ?1 AND machine = ?2 AND launch = ?3 RETURNING workspace_id",
+                params![
+                    launch.way,
+                    launch.machine,
+                    launch.launch,
+                    launch.state,
+                    launch.request.map(|n| n as i64),
+                    launch.agent,
+                    workspace,
+                ],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Settles the launch `launch` of `machine`, held for the user, as `state`: only a launch
+    /// still held is settled, so that the user's answer and the end of its agent never overwrite
+    /// each other. The id of its workspace, as it is now, when it was; `None` when it was not held.
+    pub fn settle_launch(
+        &mut self,
+        machine: &str,
+        launch: &str,
+        state: &str,
+    ) -> Result<Option<Option<i64>>> {
+        Ok(self
+            .connection
+            .query_row(
+                "UPDATE launches SET state = ?3 WHERE way = 'in' AND machine = ?1 AND launch = ?2 \
+                 AND state = 'held' RETURNING workspace_id",
+                params![machine, launch, state],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Records a new launch `in` from its machine, unless it was asked already or that machine
+    /// has `most_waiting` launches waiting for their code, or `most_held` waiting for the user
+    /// (when this one is held): counted and recorded in one transaction, so that launches asked at
+    /// once never go past them. Why it was not, when it was not.
+    pub fn add_launch(
+        &mut self,
+        launch: &Launch,
+        most_waiting: usize,
+        most_held: usize,
+    ) -> Result<Option<LaunchRefused>> {
+        let transaction = self.connection.transaction()?;
+        let (known, waiting, held): (i64, i64, i64) = transaction.query_row(
+            "SELECT COALESCE(SUM(launch = ?2), 0), \
+             COALESCE(SUM(agent IS NULL AND state != 'refused'), 0), \
+             COALESCE(SUM(state = 'held'), 0) \
+             FROM launches WHERE way = 'in' AND machine = ?1",
+            params![launch.machine, launch.launch],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        let refused = if known > 0 {
+            Some(LaunchRefused::Known)
+        } else if waiting as usize >= most_waiting {
+            Some(LaunchRefused::Waiting)
+        } else if launch.state == "held" && held as usize >= most_held {
+            Some(LaunchRefused::Held)
+        } else {
+            None
+        };
+        if refused.is_none() {
+            insert_launch(&transaction, launch)?;
+        }
+        transaction.commit()?;
+        Ok(refused)
+    }
+
+    /// The launches `way` with `machine` (any, when `None`) that match `filter`: `launch` the
+    /// launch's name, `agent` the agent it started, `request` the user's request.
+    pub fn launches(
+        &self,
+        way: &str,
+        machine: Option<&str>,
+        filter: LaunchFilter<'_>,
+    ) -> Result<Vec<Launch>> {
+        let (launch, agent, request) = match filter {
+            LaunchFilter::All => (None, None, None),
+            LaunchFilter::Named(launch) => (Some(launch), None, None),
+            LaunchFilter::Agent(agent) => (None, Some(agent), None),
+            LaunchFilter::Request(request) => (None, None, Some(request as i64)),
+        };
+        let mut statement = self.connection.prepare_cached(
+            "SELECT way, machine, launch, caller, kind, project, state, request, agent, \
+             workspace, workspace_id, asked, at FROM launches \
+             WHERE way = ?1 AND (?2 IS NULL OR machine = ?2) AND (?3 IS NULL OR launch = ?3) \
+             AND (?4 IS NULL OR agent = ?4) AND (?5 IS NULL OR request = ?5) ORDER BY at, launch",
+        )?;
+        let rows = statement.query_map(params![way, machine, launch, agent, request], |row| {
+            Ok((
+                Launch {
+                    way: row.get(0)?,
+                    machine: row.get(1)?,
+                    launch: row.get(2)?,
+                    caller: row.get(3)?,
+                    kind: row.get(4)?,
+                    project: row.get(5)?,
+                    state: row.get(6)?,
+                    request: row.get::<_, Option<i64>>(7)?.map(|n| n as u64),
+                    agent: row.get(8)?,
+                    workspace: row.get(9)?,
+                    workspace_id: row.get(10)?,
+                    asked: Value::Null,
+                    at: row.get::<_, i64>(12)? as u64,
+                },
+                row.get::<_, String>(11)?,
+            ))
+        })?;
+        rows.map(|row| {
+            let (mut launch, asked) = row?;
+            launch.asked = serde_json::from_str(&asked)?;
+            Ok(launch)
+        })
+        .collect()
+    }
+
+    /// Forgets a launch.
+    pub fn forget_launch(&mut self, way: &str, machine: &str, launch: &str) -> Result<()> {
+        self.connection.execute(
+            "DELETE FROM launches WHERE way = ?1 AND machine = ?2 AND launch = ?3",
+            params![way, machine, launch],
+        )?;
+        Ok(())
+    }
+
+    /// Keeps the user's switch of the tree of `agent` to Full as the device signed it, or forgets
+    /// it (`None`).
+    pub fn set_full_switch(&mut self, agent: &str, signed: Option<&str>) -> Result<()> {
+        self.connection.execute(
+            "UPDATE agents SET full_switch = ?2 WHERE id = ?1",
+            params![agent, signed],
+        )?;
+        Ok(())
+    }
+
+    /// The user's switch of the tree of `agent` to Full, as the device signed it, when kept.
+    pub fn full_switch(&self, agent: &str) -> Result<Option<String>> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT full_switch FROM agents WHERE id = ?1",
+                params![agent],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten())
+    }
+
     /// The keys of the drafts the composers hold.
     pub fn draft_keys(&self) -> Result<Vec<String>> {
         let mut statement = self
@@ -3599,9 +3869,19 @@ impl Store {
 
     /// The children of the project that have not ended: what its children cap counts.
     pub fn live_children(&self, project: &str) -> Result<usize> {
+        // A child another machine launched here has no parent here (one whose code is on its way
+        // counts already), and one an agent of this machine launched on another counts while its
+        // parent lives (`docs/remote.md`, "Starting
+        // a session on another machine").
         let count: u64 = self.connection.query_row(
-            "SELECT count(*) FROM agents WHERE project = ?1 AND parent IS NOT NULL \
-             AND state NOT IN ('ended', 'failed')",
+            "SELECT (SELECT count(*) FROM agents WHERE project = ?1 \
+             AND state NOT IN ('ended', 'failed') AND (parent IS NOT NULL OR id IN \
+             (SELECT agent FROM launches WHERE way = 'in' AND kind = 'child' AND agent IS NOT NULL))) \
+             + (SELECT count(*) FROM launches WHERE way = 'in' AND kind = 'child' \
+             AND project = ?1 AND agent IS NULL AND state IN ('held', 'accepted')) \
+             + (SELECT count(*) FROM launches JOIN agents ON agents.id = launches.caller \
+             WHERE launches.way = 'out' AND launches.kind = 'child' AND launches.project = ?1 \
+             AND launches.state != 'refused' AND agents.state NOT IN ('ended', 'failed'))",
             params![project],
             |row| row.get(0),
         )?;
@@ -4051,6 +4331,47 @@ impl Space<'_> {
         checked?;
         Ok(transaction.commit()?)
     }
+}
+
+/// Records a launch, in place of the one of the same name with the same machine: a launch `in`
+/// already recorded keeps its workspace, its name and its id, as `place_launch` alone writes them.
+fn insert_launch(connection: &Connection, launch: &Launch) -> Result<()> {
+    connection.execute(
+        "INSERT INTO launches (way, machine, launch, caller, kind, project, state, request, \
+         agent, workspace, workspace_id, asked, at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13) \
+         ON CONFLICT (way, machine, launch) DO UPDATE SET caller = excluded.caller, \
+         kind = excluded.kind, project = excluded.project, state = excluded.state, \
+         request = excluded.request, agent = excluded.agent, \
+         workspace = CASE WHEN launches.way = 'in' THEN launches.workspace \
+         ELSE excluded.workspace END, asked = excluded.asked, at = excluded.at",
+        params![
+            launch.way,
+            launch.machine,
+            launch.launch,
+            launch.caller,
+            launch.kind,
+            launch.project,
+            launch.state,
+            launch.request.map(|n| n as i64),
+            launch.agent,
+            launch.workspace,
+            launch.workspace_id,
+            serde_json::to_string(&launch.asked)?,
+            launch.at as i64,
+        ],
+    )?;
+    Ok(())
+}
+
+/// The launches made of the workspace `workspace`, removed now, no longer name it: a workspace
+/// made later may take its name and its id.
+fn forget_launches_workspace(connection: &Connection, workspace: i64) -> Result<()> {
+    connection.execute(
+        "UPDATE launches SET workspace = NULL, workspace_id = NULL WHERE workspace_id = ?1",
+        params![workspace],
+    )?;
+    Ok(())
 }
 
 fn append_event(connection: &Connection, name: &str, data: Value) -> Result<Event> {
@@ -7804,5 +8125,157 @@ mod tests {
 
         store.set_service_writer("mongo", None).unwrap();
         assert_eq!(store.service_writer("mongo").unwrap(), None);
+    }
+
+    fn a_launch_in() -> Launch {
+        Launch {
+            way: "in".into(),
+            machine: "0123456789ab".into(),
+            launch: "first".into(),
+            caller: "caller".into(),
+            kind: "led".into(),
+            project: "app".into(),
+            state: "held".into(),
+            request: None,
+            agent: None,
+            workspace: None,
+            workspace_id: None,
+            asked: json!({}),
+            at: 1,
+        }
+    }
+
+    #[test]
+    fn a_launch_update_never_resurrects_a_workspace_id_cleared_since() {
+        let mut store = Store::open_in_memory().unwrap();
+        let (id, _) = store
+            .create_workspace(&a_workspace(), ("workspace.created", json!({})))
+            .unwrap();
+        let stale = a_launch_in();
+        assert_eq!(store.add_launch(&stale, 8, 4).unwrap(), None);
+        store
+            .connection
+            .execute(
+                "UPDATE launches SET workspace = 'login', workspace_id = ?1",
+                params![id],
+            )
+            .unwrap();
+        // What a write that read the launch before the removal still holds.
+        let stale = Launch {
+            workspace: Some("login".into()),
+            workspace_id: Some(id),
+            state: "started".into(),
+            ..stale
+        };
+        store
+            .remove_workspace(id, ("workspace.removed", json!({})))
+            .unwrap();
+
+        store.record_launch(&stale).unwrap();
+
+        let read = &store.launches("in", None, LaunchFilter::All).unwrap()[0];
+        assert_eq!(read.state, "started");
+        assert_eq!((read.workspace.as_deref(), read.workspace_id), (None, None));
+    }
+
+    #[test]
+    fn a_store_that_shipped_the_launches_table_without_a_workspace_id_gains_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("flottille.db");
+        let old = Connection::open(&path).unwrap();
+        let previous = MIGRATIONS.len() - 1;
+        for migration in &MIGRATIONS[..previous] {
+            old.execute_batch(migration).unwrap();
+        }
+        old.pragma_update(None, "user_version", previous).unwrap();
+        // The table as an alpha of this branch made it: no `workspace_id`.
+        let columns: i64 = old
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('launches') WHERE name = 'workspace_id'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(columns, 0, "the earlier schema already has the column");
+        old.execute_batch(
+            "INSERT INTO launches (way, machine, launch, caller, kind, project, state, asked, at) \
+             VALUES ('in', '0123456789ab', 'first', 'caller', 'led', 'app', 'held', '{}', 1);",
+        )
+        .unwrap();
+        drop(old);
+
+        let store = Store::open(&path).unwrap();
+
+        assert_eq!(store.schema_version().unwrap(), MIGRATIONS.len());
+        let read = store.launches("in", None, LaunchFilter::All).unwrap();
+        assert_eq!(read.len(), 1);
+        assert_eq!(read[0].workspace_id, None);
+    }
+
+    #[test]
+    fn a_launch_records_a_workspace_only_while_it_exists() {
+        let mut store = Store::open_in_memory().unwrap();
+        let (id, _) = store
+            .create_workspace(&a_workspace(), ("workspace.created", json!({})))
+            .unwrap();
+        let launch = a_launch_in();
+        assert_eq!(store.add_launch(&launch, 8, 4).unwrap(), None);
+        let placed = Launch {
+            agent: Some("agent".into()),
+            ..launch.clone()
+        };
+
+        assert_eq!(
+            store.place_launch(&placed, Some(id)).unwrap(),
+            Some(Some(id))
+        );
+        let read = &store.launches("in", None, LaunchFilter::All).unwrap()[0];
+        assert_eq!(
+            (read.workspace.as_deref(), read.workspace_id),
+            (Some("login"), Some(id))
+        );
+        assert_eq!(read.agent.as_deref(), Some("agent"));
+
+        // Removed before a write that still names it: nothing is recorded, never a dead id.
+        store
+            .remove_workspace(id, ("workspace.removed", json!({})))
+            .unwrap();
+        assert_eq!(store.place_launch(&placed, Some(id)).unwrap(), Some(None));
+        let read = &store.launches("in", None, LaunchFilter::All).unwrap()[0];
+        assert_eq!((read.workspace.as_deref(), read.workspace_id), (None, None));
+
+        // A launch forgotten meanwhile is not brought back.
+        store
+            .forget_launch("in", &launch.machine, &launch.launch)
+            .unwrap();
+        assert_eq!(store.place_launch(&placed, None).unwrap(), None);
+        assert!(
+            store
+                .launches("in", None, LaunchFilter::All)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_held_launch_is_settled_once_and_keeps_its_workspace_as_it_is() {
+        let mut store = Store::open_in_memory().unwrap();
+        let (id, _) = store
+            .create_workspace(&a_workspace(), ("workspace.created", json!({})))
+            .unwrap();
+        let launch = a_launch_in();
+        store.add_launch(&launch, 8, 4).unwrap();
+        store.place_launch(&launch, Some(id)).unwrap();
+
+        let settled = store.settle_launch(&launch.machine, &launch.launch, "refused");
+        assert_eq!(settled.unwrap(), Some(Some(id)));
+        // The user's answer after the end of its agent, or the reverse, settles nothing more.
+        let again = store.settle_launch(&launch.machine, &launch.launch, "started");
+        assert_eq!(again.unwrap(), None);
+        let read = &store.launches("in", None, LaunchFilter::All).unwrap()[0];
+        assert_eq!(
+            (read.state.as_str(), read.workspace_id),
+            ("refused", Some(id))
+        );
     }
 }
