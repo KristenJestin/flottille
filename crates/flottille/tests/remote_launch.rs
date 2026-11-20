@@ -1521,6 +1521,47 @@ fn a_forgotten_launch_never_removes_a_workspace_of_the_user_s_of_the_same_name()
     );
 }
 
+/// The state of the launches `server` holds from other machines, by launch name.
+fn launch_states(server: &Machine) -> Vec<String> {
+    let store =
+        rusqlite::Connection::open(server.user.path("state/flottille/flottille.db")).unwrap();
+    let mut statement = store
+        .prepare("SELECT state FROM launches WHERE way = 'in' ORDER BY launch")
+        .unwrap();
+    statement
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .map(|state| state.unwrap())
+        .collect()
+}
+
+#[test]
+fn stopping_a_held_launch_s_agent_settles_it_and_frees_its_place() {
+    let (_hub, pc, server) = pc_and_server(server_user(None), None);
+    let mark = with_marking_setup(&server);
+    pc.wait_for_offer("server", 12);
+    let (_root, mcp) = pc.root("ask");
+    held_launch(&pc, &server, &mcp, "Stopped while held");
+    let held = titled(&server, "Stopped while held");
+    assert_eq!(launch_states(&server), vec!["held"]);
+    assert_eq!(workspaces(&server).len(), 1);
+
+    server
+        .user
+        .call("agent.stop", json!({"agent": held["id"]}))
+        .unwrap();
+
+    // It no longer waits for anyone: it does not count against the cap, and its workspace, made
+    // of code that never ran, goes.
+    eventually("the launch settled as refused", || {
+        launch_states(&server) == vec!["refused"]
+    });
+    assert_eq!(held_in_store(&server), 0);
+    eventually("its workspace removed", || workspaces(&server).is_empty());
+    a_while();
+    assert!(!mark.exists(), "the setup of a stopped launch ran");
+}
+
 #[test]
 fn a_launch_with_an_unfit_title_caller_or_branch_is_refused() {
     let (_hub, pc, server) = pc_and_server(server_user(None), Some(""));

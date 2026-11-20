@@ -8058,4 +8058,89 @@ mod tests {
         store.set_service_writer("mongo", None).unwrap();
         assert_eq!(store.service_writer("mongo").unwrap(), None);
     }
+
+    fn a_launch_in() -> Launch {
+        Launch {
+            way: "in".into(),
+            machine: "0123456789ab".into(),
+            launch: "first".into(),
+            caller: "caller".into(),
+            kind: "led".into(),
+            project: "app".into(),
+            state: "held".into(),
+            request: None,
+            agent: None,
+            workspace: None,
+            workspace_id: None,
+            asked: json!({}),
+            at: 1,
+        }
+    }
+
+    #[test]
+    fn a_launch_update_never_resurrects_a_workspace_id_cleared_since() {
+        let mut store = Store::open_in_memory().unwrap();
+        let (id, _) = store
+            .create_workspace(&a_workspace(), ("workspace.created", json!({})))
+            .unwrap();
+        let stale = a_launch_in();
+        assert_eq!(store.add_launch(&stale, 8, 4).unwrap(), None);
+        store
+            .connection
+            .execute(
+                "UPDATE launches SET workspace = 'login', workspace_id = ?1",
+                params![id],
+            )
+            .unwrap();
+        // What a write that read the launch before the removal still holds.
+        let stale = Launch {
+            workspace: Some("login".into()),
+            workspace_id: Some(id),
+            state: "started".into(),
+            ..stale
+        };
+        store
+            .remove_workspace(id, ("workspace.removed", json!({})))
+            .unwrap();
+
+        store.record_launch(&stale).unwrap();
+
+        let read = &store.launches("in", None, LaunchFilter::All).unwrap()[0];
+        assert_eq!(read.state, "started");
+        assert_eq!((read.workspace.as_deref(), read.workspace_id), (None, None));
+    }
+
+    #[test]
+    fn a_store_that_shipped_the_launches_table_without_a_workspace_id_gains_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("flottille.db");
+        let old = Connection::open(&path).unwrap();
+        let previous = MIGRATIONS.len() - 1;
+        for migration in &MIGRATIONS[..previous] {
+            old.execute_batch(migration).unwrap();
+        }
+        old.pragma_update(None, "user_version", previous).unwrap();
+        // The table as an alpha of this branch made it: no `workspace_id`.
+        let columns: i64 = old
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('launches') WHERE name = 'workspace_id'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(columns, 0, "the earlier schema already has the column");
+        old.execute_batch(
+            "INSERT INTO launches (way, machine, launch, caller, kind, project, state, asked, at) \
+             VALUES ('in', '0123456789ab', 'first', 'caller', 'led', 'app', 'held', '{}', 1);",
+        )
+        .unwrap();
+        drop(old);
+
+        let store = Store::open(&path).unwrap();
+
+        assert_eq!(store.schema_version().unwrap(), MIGRATIONS.len());
+        let read = store.launches("in", None, LaunchFilter::All).unwrap();
+        assert_eq!(read.len(), 1);
+        assert_eq!(read[0].workspace_id, None);
+    }
 }
