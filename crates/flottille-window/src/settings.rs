@@ -2346,7 +2346,7 @@ impl Render for SettingsPage {
             ],
             "features" => vec![("features", self.features_tab(cx))],
             "vault" => vec![("vault", self.vault.clone().into_any_element())],
-            // Remote (#814, #1144): whether it is on, where it is reached, the hub, the devices.
+            // Remote (#814, #1144): whether it is on, the hub, the devices.
             "machines" => vec![("machines", self.machines.clone().into_any_element())],
             _ => vec![
                 ("appearance", self.appearance_section(cx).into_any_element()),

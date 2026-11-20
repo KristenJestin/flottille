@@ -1,6 +1,6 @@
 //! Settings, Machines (`docs/remote.md`, "Identity and keys", "The hub", "Pairing", "Roles"):
 //! whether remote is on (a **Turn on** button while it is off, a **Remote** switch once it is),
-//! where this machine is reached, **Set up a hub** while this machine is in no member list; then
+//! **Set up a hub** while this machine is in no member list; then
 //! the devices of the list, each renamed or removed from its "⋯", **Add a device**, and the
 //! addresses this machine is reached at. The page says the state and holds the buttons: what is
 //! typed, and what a request shows (the hub's setup, the invitation's QR and its code), is a
@@ -13,8 +13,8 @@ use std::time::Duration;
 
 use gpui_design_system::{
     Button, Confirm, EmptyLine, Field, Icon, ListCard, ListRow, Listing, Menu, Modal, QrCode,
-    RadioChoices, Section, Select, SelectOption, Switch, Toast, changed, changing, enter, palette,
-    presence, presence_of, space, tipped_when_cut, toast,
+    RadioChoices, Section, Switch, Toast, changed, changing, enter, palette, presence, presence_of,
+    space, tipped_when_cut, toast,
 };
 use gpui_kit::base::input::{Input, InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -28,8 +28,8 @@ use zeroize::Zeroizing;
 
 use crate::commands::{boxed, line_field, menu_of, problem_line, spaced, stack};
 use crate::machines::{
-    Ask, Asked, Hub, Invitation, JoinRequest, Machines, Member, News, PORT, ROLES, Reach, Remote,
-    how_it_failed, role_words,
+    Ask, Asked, Hub, Invitation, JoinRequest, Machines, Member, News, ROLES, Remote, how_it_failed,
+    role_words,
 };
 use crate::modals::Modals;
 
@@ -47,10 +47,8 @@ pub const SETUP_MODAL: &str = "hub-setup";
 pub const INVITE_MODAL: &str = "invitation";
 
 const REMOTE_OFF: &str = "Remote is off. This machine can join a hub and link to your other \
-                          machines; nothing is opened until you say where it is reached.";
+                          machines.";
 const REMOTE_HINT: &str = "Turn it off and the links close; the hub's setup is kept.";
-const REACH_SENTENCE: &str = "Where your other machines reach this one. Nowhere is enough when it \
-                              dials them.";
 const SETUP_SENTENCE: &str = "Your machines find each other through a hub you run on a host that \
                               is always on. Give its address and the setup code it printed: this \
                               machine becomes its first device.";
@@ -88,9 +86,6 @@ pub struct MachinesSection {
     shown_until: SharedString,
     /// What was read while remote was on: drawn while the settings fold away as it is turned off.
     kept: Option<Machines>,
-    /// "Another address…" was chosen: its field is unfolded under the choice.
-    reach_other: bool,
-    listen: Option<Entity<InputState>>,
     /// A change of remote was asked and not answered yet.
     configuring: bool,
     expiry: Option<Task<()>>,
@@ -130,8 +125,6 @@ impl MachinesSection {
             shown_code: SharedString::default(),
             shown_until: SharedString::default(),
             kept: None,
-            reach_other: false,
-            listen: None,
             configuring: false,
             expiry: None,
             members: Listing::default(),
@@ -239,12 +232,6 @@ impl MachinesSection {
         self.join_name = Some(line_field("pixel", window, cx));
         self.rename = Some(line_field("laptop", window, cx));
         self.address = Some(line_field("100.64.0.7", window, cx));
-        self.listen = Some(line_field("100.64.0.7:7447", window, cx));
-    }
-
-    /// The field of "Another address…": an address and its port.
-    pub fn listen_field(&self) -> Option<&Entity<InputState>> {
-        self.listen.as_ref()
     }
 
     pub fn url_field(&self) -> Option<&Entity<InputState>> {
@@ -356,17 +343,11 @@ impl MachinesSection {
                 self.inviting = false;
                 self.show_invitation(invitation, cx);
             }
-            (Asked::Configure { on, listen }, done) => {
+            (Asked::Configure { on }, done) => {
                 self.configuring = false;
                 match done {
                     Ok(_) => {
-                        let said = match (on, listen.as_deref()) {
-                            (Some(true), _) => "Remote is on".to_owned(),
-                            (Some(false), _) => "Remote is off".to_owned(),
-                            (None, Some("nowhere")) => "This machine is reached nowhere".to_owned(),
-                            (None, Some(at)) => format!("This machine is reached at {at}"),
-                            (None, None) => "Remote is set".to_owned(),
-                        };
+                        let said = if on { "Remote is on" } else { "Remote is off" };
                         toast(Toast::success(said), cx);
                     }
                     Err(why) => toast(Toast::failure("Remote was not changed").detail(why), cx),
@@ -482,44 +463,11 @@ impl MachinesSection {
         cx.notify();
     }
 
-    /// Turns remote on or off, or says where this machine is reached.
-    fn configure(&mut self, on: Option<bool>, listen: Option<String>, cx: &mut Context<Self>) {
+    /// Turns remote on or off.
+    fn configure(&mut self, on: bool, cx: &mut Context<Self>) {
         self.configuring = true;
-        self.remote.ask(Ask::Configure { on, listen });
+        self.remote.ask(Ask::Configure { on });
         cx.notify();
-    }
-
-    /// An option of "Where this machine is reached" was chosen.
-    fn choose_reach(&mut self, key: &str, cx: &mut Context<Self>) {
-        match key {
-            "other" => {
-                self.reach_other = true;
-                cx.notify();
-            }
-            "nowhere" => {
-                self.reach_other = false;
-                self.configure(None, Some("nowhere".into()), cx);
-            }
-            "every" => {
-                self.reach_other = false;
-                self.configure(None, Some(format!("0.0.0.0:{PORT}")), cx);
-            }
-            address => {
-                self.reach_other = false;
-                self.configure(None, Some(format!("{address}:{PORT}")), cx);
-            }
-        }
-    }
-
-    fn use_other_address(&mut self, cx: &mut Context<Self>) {
-        let address = self
-            .listen
-            .as_ref()
-            .map(|field| field.read(cx).value().trim().to_owned())
-            .unwrap_or_default();
-        if !address.is_empty() {
-            self.configure(None, Some(address), cx);
-        }
     }
 
     /// Add a device: an invitation from the hub, shown in its dialog.
@@ -610,7 +558,7 @@ impl MachinesSection {
         match self.removal.take() {
             Some(Removal::Member(name)) => self.remote.ask(Ask::Remove { name }),
             Some(Removal::Address(address)) => self.remote.ask(Ask::AddressRemove(address)),
-            Some(Removal::Remote) => self.configure(Some(false), None, cx),
+            Some(Removal::Remote) => self.configure(false, cx),
             None => {}
         }
         cx.notify();
@@ -939,9 +887,7 @@ impl MachinesSection {
                 div().child(
                     Button::primary("turn-on-remote", "Turn on")
                         .disabled(self.configuring)
-                        .on_click(
-                            cx.listener(|this, _, _, cx| this.configure(Some(true), None, cx)),
-                        ),
+                        .on_click(cx.listener(|this, _, _, cx| this.configure(true, cx))),
                 ),
             ));
         let switch = Switch::new("remote-switch", true, "Remote")
@@ -955,126 +901,6 @@ impl MachinesSection {
             .child(presence("remote-off-block", off, notice))
             .child(presence("remote-on-block", !off, switch))
             .test_support()
-    }
-
-    /// Where this machine is reached: nowhere, an address of its own (a tailnet's first), every
-    /// network, or one typed, which unfolds under its choice.
-    fn reach_section(&mut self, reach: &Reach, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let p = palette(cx);
-        let mut keys: Vec<String> = vec!["nowhere".into()];
-        let mut options = vec![
-            SelectOption::new("nowhere", "Nowhere")
-                .line("It dials your other machines; none of them dials it."),
-        ];
-        for interface in &reach.interfaces {
-            keys.push(interface.address.clone());
-            options.push(
-                SelectOption::new(
-                    interface.address.clone(),
-                    format!("{} · {}", interface.name, interface.address),
-                )
-                .line(if interface.tailnet {
-                    "Only your tailnet"
-                } else {
-                    "Your local network"
-                }),
-            );
-        }
-        keys.push("every".into());
-        options.push(
-            SelectOption::new("every", "Every network")
-                .line("Opens a port on any network this machine joins."),
-        );
-        keys.push("other".into());
-        options.push(
-            SelectOption::new("other", "Another address…").line("An IP address and its port."),
-        );
-        let wanted = reach.listen.as_deref();
-        let chosen = if self.reach_other {
-            keys.len() - 1
-        } else {
-            match wanted {
-                None => 0,
-                Some(at) if at == format!("0.0.0.0:{PORT}") => keys.len() - 2,
-                Some(at) => keys
-                    .iter()
-                    .position(|key| at == format!("{key}:{PORT}"))
-                    .unwrap_or(keys.len() - 1),
-            }
-        };
-        let other = chosen == keys.len() - 1;
-        let every = chosen == keys.len() - 2;
-        let this = cx.entity().downgrade();
-        let picked = keys.clone();
-        let select = Select::new("reach", options, chosen)
-            .disabled(self.configuring)
-            .on_choose(move |index, _, cx| {
-                this.update(cx, |this, cx| this.choose_reach(&picked[index], cx))
-                    .ok();
-            });
-        let field = self.listen.clone().map(|field| {
-            stack(space::MD)
-                .child(spaced(
-                    space::MD,
-                    Field::new(
-                        "reach-other-field",
-                        "Address and port",
-                        boxed("reach-other-value", Input::new(&field), cx),
-                    )
-                    .hint("An IP address and its port: 100.64.0.7:7447."),
-                ))
-                .child(spaced(
-                    space::MD,
-                    div().child(
-                        Button::secondary("reach-other-use", "Use this address")
-                            .disabled(self.configuring)
-                            .on_click(cx.listener(|this, _, _, cx| this.use_other_address(cx))),
-                    ),
-                ))
-        });
-        let field = field.unwrap_or_else(div);
-        let warning = every.then(|| {
-            SharedString::from(
-                "Every network opens a port on any network this machine joins, a café's included.",
-            )
-        });
-        let waits = reach.waits.then(|| {
-            SharedString::from(
-                "The change waits for the next start: an agent runs, and its links are not cut.",
-            )
-        });
-        let line = move |id: &'static str, said: SharedString| {
-            div()
-                .id(id)
-                .aria_label(said.clone())
-                .text_size(px(12.5))
-                .text_color(p.mute)
-                .child(said)
-                .test_support()
-                .into_any_element()
-        };
-        Section::new("reached", "Where this machine is reached")
-            .sentence(REACH_SENTENCE)
-            .child(
-                stack(space::MD)
-                    .child(spaced(
-                        space::MD,
-                        Field::new("reach-field", "Reached at", select),
-                    ))
-                    .child(presence("reach-other-block", other, field).space(space::MD))
-                    .child(
-                        presence_of("reach-warning-block", warning, move |said| {
-                            line("reach-warning", said)
-                        })
-                        .space(space::MD),
-                    )
-                    .child(
-                        presence_of("reach-waits-block", waits, move |said| {
-                            line("reach-waits", said)
-                        })
-                        .space(space::MD),
-                    ),
-            )
     }
 
     /// While this machine is in no hub: what the hub is for, and **Set up a hub**, which opens its
@@ -1433,9 +1259,6 @@ impl MachinesSection {
     ) -> Vec<(&'static str, gpui_kit::AnyElement)> {
         let read = self.read.clone().unwrap_or_default();
         let mut blocks = Vec::new();
-        if let Some(reach) = &read.reach {
-            blocks.push(("reached", self.reach_section(reach, cx).into_any_element()));
-        }
         if !read.member() {
             blocks.push(("no-hub", self.no_hub_section(cx).into_any_element()));
             return blocks;

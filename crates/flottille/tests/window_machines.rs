@@ -1464,16 +1464,13 @@ impl flottille_link::Keyring for NoKeyring {
 
 // ── Remote in its own tab, turned on and configured from the window (#1144) ────────────────────
 
-/// A machine with remote off, its interfaces said as a test says them.
-fn off_machine(interfaces: &str) -> Machine {
-    let user = User::new().with_env("FLOTTILLE_TEST_INTERFACES", interfaces);
+/// A machine with remote off.
+fn off_machine() -> Machine {
+    let user = User::new();
     std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
     user.status();
     Machine { user }
 }
-
-const INTERFACES: &str =
-    r#"[["eth0","192.168.1.20"],["wg0","10.8.0.2"],["tailscale0","100.64.0.7"]]"#;
 
 fn stack(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Vec<&'static str> {
     shell.read_with(cx, |s, cx| s.modal_stack(cx))
@@ -1505,18 +1502,13 @@ fn machines_is_a_tab_of_settings(cx: &mut TestAppContext) {
     machines_tab(&shell, cx);
     // Its sections, and none of them in General.
     until(&shell, cx, "remote", |cx| present(cx, "remote"));
-    for section in ["reached", "hub", "devices", "addresses"] {
+    for section in ["hub", "devices", "addresses"] {
         let title = format!("{section}-title");
         until(&shell, cx, section, |cx| present(cx, &title));
     }
     click(&shell, cx, "settings-tabs-general");
     settle(&shell, cx);
-    for section in [
-        "devices-title",
-        "addresses-title",
-        "reached-title",
-        "remote",
-    ] {
+    for section in ["devices-title", "addresses-title", "remote"] {
         assert!(!present(cx, section), "{section} is not in General");
     }
 
@@ -1543,7 +1535,7 @@ fn machines_is_a_tab_of_settings(cx: &mut TestAppContext) {
 
 #[gpui_kit::test]
 fn turning_remote_on_in_settings_starts_the_link(cx: &mut TestAppContext) {
-    let pc = off_machine(INTERFACES);
+    let pc = off_machine();
     let (shell, cx) = window(&pc, cx);
     machines_tab(&shell, cx);
     until(&shell, cx, "the notice is shown", |cx| {
@@ -1555,9 +1547,10 @@ fn turning_remote_on_in_settings_starts_the_link(cx: &mut TestAppContext) {
         "the switch comes once it is on"
     );
     let said = label(cx, "remote-notice").unwrap();
+    assert!(said.contains("join a hub"), "{said}");
     assert!(
-        said.contains("nothing is opened until you say where it is reached"),
-        "{said}"
+        !said.contains("reached"),
+        "no address is chosen here: {said}"
     );
     assert!(!said.contains("daemon.toml"), "{said}");
 
@@ -1572,109 +1565,6 @@ fn turning_remote_on_in_settings_starts_the_link(cx: &mut TestAppContext) {
     assert!(!present(cx, "turn-on-remote"));
     // A machine with no hub is offered Set up a hub.
     assert!(present(cx, "open-hub-setup"));
-}
-
-#[gpui_kit::test]
-fn a_tailnet_address_is_offered_first_and_marked(cx: &mut TestAppContext) {
-    let pc = off_machine(INTERFACES);
-    pc.user
-        .call("remote.configure", json!({"on": true}))
-        .unwrap();
-    let (shell, cx) = window(&pc, cx);
-    machines_tab(&shell, cx);
-    until(&shell, cx, "the choice is offered", |cx| {
-        present(cx, "reach")
-    });
-    click(&shell, cx, "reach");
-    for key in [
-        "nowhere",
-        "100.64.0.7",
-        "10.8.0.2",
-        "192.168.1.20",
-        "every",
-        "other",
-    ] {
-        until(&shell, cx, key, |cx| present(cx, &format!("reach-{key}")));
-    }
-    // Nowhere first (the default), then the tailnet's, then the local network's.
-    let order: Vec<f32> = [
-        "nowhere",
-        "100.64.0.7",
-        "10.8.0.2",
-        "192.168.1.20",
-        "every",
-        "other",
-    ]
-    .iter()
-    .map(|key| top(cx, &format!("reach-{key}")))
-    .collect();
-    assert!(order.windows(2).all(|pair| pair[0] < pair[1]), "{order:?}");
-    for tailnet in ["100.64.0.7", "10.8.0.2"] {
-        assert_eq!(
-            label(cx, &format!("reach-{tailnet}-line")).as_deref(),
-            Some("Only your tailnet"),
-            "{tailnet}"
-        );
-    }
-    assert!(
-        label(cx, "reach-100.64.0.7")
-            .unwrap()
-            .contains("tailscale0"),
-        "named by its interface"
-    );
-    assert!(
-        label(cx, "reach-192.168.1.20-line")
-            .unwrap()
-            .contains("local network")
-    );
-    assert!(
-        label(cx, "reach-every-line")
-            .unwrap()
-            .contains("any network")
-    );
-}
-
-#[gpui_kit::test]
-fn choosing_where_this_machine_is_reached_listens_there(cx: &mut TestAppContext) {
-    let pc = off_machine(INTERFACES);
-    pc.user
-        .call("remote.configure", json!({"on": true}))
-        .unwrap();
-    let pid = pc.user.status()["pid"].clone();
-    let (shell, cx) = window(&pc, cx);
-    machines_tab(&shell, cx);
-    until(&shell, cx, "the choice is offered", |cx| {
-        present(cx, "reach")
-    });
-    // Another address…: its field unfolds under the choice, and the address is used from it.
-    click(&shell, cx, "reach");
-    click(&shell, cx, "reach-other");
-    until(&shell, cx, "its field unfolds", |cx| {
-        present(cx, "reach-other-use")
-    });
-    let field = shell.read_with(cx, |s, cx| {
-        s.machines().read(cx).listen_field().unwrap().clone()
-    });
-    type_into(cx, &field, "127.0.0.1:0");
-    click(&shell, cx, "reach-other-use");
-    until(&shell, cx, "the daemon listens there", |_| {
-        pc.user.call("remote.settings", json!({})).unwrap()["listening"]
-            .as_str()
-            .is_some_and(|at| at.starts_with("127.0.0.1:"))
-    });
-    assert_eq!(pc.user.status()["pid"], pid, "no restart");
-    // The answer reaches the window after the daemon has applied the change.
-    until(&shell, cx, "the toast says where it is reached", |cx| {
-        toasts(&shell, cx)
-            .iter()
-            .any(|t| t.starts_with("This machine is reached at 127.0.0.1"))
-    });
-    // Back to nowhere.
-    click(&shell, cx, "reach");
-    click(&shell, cx, "reach-nowhere");
-    until(&shell, cx, "the daemon listens nowhere", |_| {
-        pc.user.call("remote.settings", json!({})).unwrap()["listening"].is_null()
-    });
 }
 
 #[gpui_kit::test]
@@ -1737,49 +1627,6 @@ fn turning_remote_off_closes_the_links_and_keeps_the_hub(cx: &mut TestAppContext
         );
         std::thread::sleep(Duration::from_millis(25));
     }
-}
-
-#[gpui_kit::test]
-fn a_change_that_waits_for_the_next_start_says_so(cx: &mut TestAppContext) {
-    let user = User::with_fake_agent();
-    user.fake_script(json!({"turns": [{"when": "", "do": [{"say": "ready"}]}]}));
-    let pc = Machine::of(user);
-    let folder = pc.user.path("work/harbor");
-    pc.user.git_init(&folder);
-    std::fs::write(folder.join("README.md"), "harbor\n").unwrap();
-    pc.user.git(&folder, &["add", "README.md"]);
-    pc.user.git(&folder, &["commit", "--quiet", "-m", "start"]);
-    pc.user
-        .call("project.add", json!({"folder": folder, "name": "harbor"}))
-        .unwrap();
-    pc.user
-        .call(
-            "agent.start",
-            json!({"project": "harbor", "message": "Write the notes"}),
-        )
-        .unwrap();
-    let (shell, cx) = window(&pc, cx);
-    machines_tab(&shell, cx);
-    until(&shell, cx, "the choice is offered", |cx| {
-        present(cx, "reach")
-    });
-    assert!(!present(cx, "reach-waits"));
-    click(&shell, cx, "reach");
-    click(&shell, cx, "reach-other");
-    until(&shell, cx, "its field unfolds", |cx| {
-        present(cx, "reach-other-use")
-    });
-    let field = shell.read_with(cx, |s, cx| {
-        s.machines().read(cx).listen_field().unwrap().clone()
-    });
-    type_into(cx, &field, "127.0.0.2:0");
-    click(&shell, cx, "reach-other-use");
-    until(&shell, cx, "the wait is said", |cx| {
-        present(cx, "reach-waits")
-    });
-    let said = label(cx, "reach-waits").unwrap();
-    assert!(said.contains("next start"), "{said}");
-    assert!(said.contains("agent"), "{said}");
 }
 
 #[gpui_kit::test]
