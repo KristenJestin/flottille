@@ -267,8 +267,9 @@ jobs:
       # smaller thing to pack, upload and download twelve times. The same on every job that shares
       # this cache (the key follows the environment).
       CARGO_PROFILE_DEV_DEBUG: line-tables-only
-      # The suite is CPU-bound: the workspace's crates at one level, as the dependencies are in
-      # Cargo.toml. The same on every job that shares this cache; not on `check`.
+      # The whole suite is CPU-bound (test time dominates), so the workspace's crates are built at
+      # one level here, as the dependencies are in Cargo.toml everywhere. `test-selected` and
+      # `doc-tests` are compile-bound: they keep level 0 for the workspace.
       CARGO_PROFILE_DEV_OPT_LEVEL: 1
     steps:
       - uses: actions/checkout@v4
@@ -369,7 +370,6 @@ jobs:
     env:
       CARGO_INCREMENTAL: 0
       CARGO_PROFILE_DEV_DEBUG: line-tables-only
-      CARGO_PROFILE_DEV_OPT_LEVEL: 1
       # Names of test binaries and crates, nothing else (the script keeps only those).
       SELECTED: ${{ needs.changes.outputs.selected }}
     steps:
@@ -379,6 +379,11 @@ jobs:
         with:
           prefix-key: v2-rust
           shared-key: verify
+          # The workspace is at level 0 here and at 1 in `build-tests`, so the environment hash of
+          # the key differs; the cache holds the dependencies only (never the workspace's crates),
+          # and they are the same at level 1 in both (Cargo.toml). Without the hash, the key is
+          # the prefix of the one `build-tests` writes, and this job restores that one.
+          add-rust-environment-hash-key: false
           save-if: false
       - name: Have the window's system libraries
         run: |
@@ -426,7 +431,6 @@ jobs:
     env:
       CARGO_INCREMENTAL: 0
       CARGO_PROFILE_DEV_DEBUG: line-tables-only
-      CARGO_PROFILE_DEV_OPT_LEVEL: 1
     steps:
       - uses: actions/checkout@v4
       - uses: rui314/setup-mold@v1
@@ -434,6 +438,11 @@ jobs:
         with:
           prefix-key: v2-rust
           shared-key: verify
+          # The workspace is at level 0 here and at 1 in `build-tests`, so the environment hash of
+          # the key differs; the cache holds the dependencies only (never the workspace's crates),
+          # and they are the same at level 1 in both (Cargo.toml). Without the hash, the key is
+          # the prefix of the one `build-tests` writes, and this job restores that one.
+          add-rust-environment-hash-key: false
           save-if: false
       - name: Have the window's system libraries
         run: |
