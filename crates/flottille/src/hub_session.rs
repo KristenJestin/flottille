@@ -657,8 +657,10 @@ fn members_json(device: &Device, members: &Members, own: &PublicKey) -> Value {
     })
 }
 
+/// The wall clock in ms: a test build's, which a test may set ahead (`link::wall_now`), so that
+/// an invitation expires without the test waiting its five minutes.
 fn now() -> u64 {
-    std::time::SystemTime::now()
+    crate::link::wall_now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|since| since.as_millis() as u64)
         .unwrap_or_default()

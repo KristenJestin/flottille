@@ -29,7 +29,9 @@ use crate::session_read::{form, shown_date};
 use crate::vault;
 
 /// What a call to the site may take, from the connection to the last byte.
-const WORKLOG_TIME: Duration = Duration::from_secs(30);
+fn worklog_time() -> Duration {
+    crate::test_time::tuned("FLOTTILLE_TEST_SITE_WAIT_MS", Duration::from_secs(30))
+}
 /// How much of an answer is read: a worklog's answer is a few hundred bytes.
 const ANSWER_BYTES: usize = 64 * 1024;
 /// Only a test sends its calls elsewhere than to the tracker's site, to a server of this machine.
@@ -591,7 +593,7 @@ pub async fn log_time(
         Ok(url) => url,
         Err(why) => return Outcome::Failed(why),
     };
-    let answer = tokio::time::timeout(WORKLOG_TIME, post(&url, &authorization, &body)).await;
+    let answer = tokio::time::timeout(worklog_time(), post(&url, &authorization, &body)).await;
     // Whatever the site said, the token is not in it as far as anything of ours goes.
     let clean = |text: &str| {
         masked(
@@ -605,7 +607,7 @@ pub async fn log_time(
         Err(_) => Outcome::Failed(format!(
             "the worklog was not confirmed: {site} did not answer in {} s; check the work item \
              before logging it again",
-            WORKLOG_TIME.as_secs()
+            worklog_time().as_secs()
         )),
         Ok(Err(why)) => Outcome::Failed(clean(&why)),
         Ok(Ok((status, text))) if status.is_success() => {
@@ -720,7 +722,7 @@ pub(super) async fn request(
         .await
         .map_err(|e| failed("HTTP failed with", &e))?;
     tokio::spawn(async move {
-        let _ = tokio::time::timeout(WORKLOG_TIME, connection).await;
+        let _ = tokio::time::timeout(worklog_time(), connection).await;
     });
     let host_header = match url.port() {
         Some(port) => format!("{host}:{port}"),

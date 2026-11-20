@@ -54,8 +54,24 @@ pub const LINK_READS: usize = 10;
 /// A page's reader, a process of its own: its memory, its CPU seconds, its time on the clock,
 /// and what it may answer.
 const READER_MEMORY: u64 = 512 * 1024 * 1024;
+/// The CPU seconds and the time on the clock of a reader: in a test build, the test's own
+/// (`FLOTTILLE_TEST_READER_MS`: that many ms on the clock, a second less of CPU), so that a page
+/// that blows its reader up is not waited for 25 s.
+fn reader_time() -> Duration {
+    crate::test_time::tuned("FLOTTILLE_TEST_READER_MS", Duration::from_secs(25))
+}
+
+/// The CPU seconds of a reader in production; a test's shorter time only lowers it.
 const READER_CPU_SECONDS: u64 = 20;
-const READER_TIME: Duration = Duration::from_secs(25);
+
+fn reader_cpu_seconds() -> u64 {
+    cpu_seconds_for(reader_time())
+}
+
+/// Never more than `READER_CPU_SECONDS`: the sandbox does not widen with the clock.
+fn cpu_seconds_for(time: Duration) -> u64 {
+    READER_CPU_SECONDS.min(time.as_secs().saturating_sub(1).max(1))
+}
 const READER_ANSWER_BYTES: u64 = 4 * 1024 * 1024;
 /// The hidden subcommand the reader runs as.
 pub const READER: &str = "read-page";
@@ -1331,10 +1347,12 @@ async fn in_reader(net: &Net, kind: Body, page: &Page) -> Result<Extracted, Stri
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null());
+    // Read here: nothing that allocates runs between fork and exec.
+    let cpu_seconds = reader_cpu_seconds();
     // SAFETY: setrlimit, prctl and unshare are async-signal-safe, and nothing else runs between
     // fork and exec.
     unsafe {
-        command.pre_exec(|| {
+        command.pre_exec(move || {
             // No setuid program it could run, nor a file capability, gives it more than it has.
             if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
                 return Err(std::io::Error::last_os_error());
@@ -1345,7 +1363,7 @@ async fn in_reader(net: &Net, kind: Body, page: &Page) -> Result<Extracted, Stri
             };
             for (resource, value) in [
                 (libc::RLIMIT_AS, READER_MEMORY),
-                (libc::RLIMIT_CPU, READER_CPU_SECONDS),
+                (libc::RLIMIT_CPU, cpu_seconds),
                 // A reader that dies leaves no core behind.
                 (libc::RLIMIT_CORE, 0),
             ] {
@@ -1380,7 +1398,7 @@ async fn in_reader(net: &Net, kind: Body, page: &Page) -> Result<Extracted, Stri
         let _ = input.write_all(&bytes).await;
     });
     let mut output = child.stdout.take().expect("piped");
-    let done = tokio::time::timeout(READER_TIME, async {
+    let done = tokio::time::timeout(reader_time(), async {
         let mut said = Vec::new();
         let read = (&mut output)
             .take(READER_ANSWER_BYTES)
@@ -1394,7 +1412,7 @@ async fn in_reader(net: &Net, kind: Body, page: &Page) -> Result<Extracted, Stri
             let _ = child.start_kill();
             return Err(format!(
                 "its reader took more than {} seconds and was stopped",
-                READER_TIME.as_secs()
+                reader_time().as_secs()
             ));
         }
         Ok((said, status)) => (said, status),
@@ -2235,6 +2253,19 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::io::{BufRead, BufReader, Write};
+
+    #[test]
+    fn a_long_reader_time_never_widens_the_reader_cpu_limit() {
+        for seconds in [25, 26, 60, 3600] {
+            assert_eq!(
+                cpu_seconds_for(Duration::from_secs(seconds)),
+                20,
+                "{seconds}"
+            );
+        }
+        assert_eq!(cpu_seconds_for(Duration::from_secs(6)), 5);
+        assert_eq!(cpu_seconds_for(Duration::from_millis(500)), 1);
+    }
     use std::net::TcpListener;
     use std::sync::atomic::{AtomicUsize, Ordering};
 

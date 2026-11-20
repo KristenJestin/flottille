@@ -82,7 +82,22 @@ impl Place {
         let listener = tokio::net::TcpListener::bind(at).await.unwrap();
         flottille_hub::serve(hub, listener, None, hello()).unwrap()
     }
+
+    /// [`Place::serve`], its waits short: a setup session lasts `QUICK_SETUP` and a connection
+    /// has `QUICK_ARRIVAL` to arrive, not ten and five seconds.
+    async fn serve_quickly(&self, at: &str) -> Served<SystemClock> {
+        let hub = Hub::open(&self.hub_folder(), SystemClock).unwrap();
+        let listener = tokio::net::TcpListener::bind(at).await.unwrap();
+        let waits = flottille_hub::Waits {
+            arrival: QUICK_ARRIVAL,
+            setup_idle: QUICK_SETUP,
+        };
+        flottille_hub::serve_with(hub, listener, None, hello(), waits).unwrap()
+    }
 }
+
+const QUICK_SETUP: Duration = Duration::from_secs(2);
+const QUICK_ARRIVAL: Duration = Duration::from_secs(1);
 
 fn url(address: SocketAddr) -> String {
     format!("http://{address}")
@@ -1252,16 +1267,20 @@ async fn connections_that_have_not_proved_a_member_are_capped() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_session_opened_before_setup_that_sets_nothing_up_is_closed() {
     let place = Place::new();
-    let served = place.serve("127.0.0.1:0").await;
+    let served = place.serve_quickly("127.0.0.1:0").await;
     let mut session = stranger_at(&served, &device_key(7))
         .connect(&place.machine("stranger"), &hello(), &Tls::System)
         .await
         .unwrap();
-    let ended = tokio::time::timeout(Duration::from_secs(25), async {
+    let ended = tokio::time::timeout(QUICK_SETUP * 5, async {
         while session.next().await.is_some() {}
     })
     .await;
-    assert!(ended.is_ok(), "the session is still open after 25 s");
+    assert!(
+        ended.is_ok(),
+        "the session is still open after {:?}",
+        QUICK_SETUP * 5
+    );
     assert!(session.ended().contains("no setup"), "{}", session.ended());
     served.stop().await;
 }
@@ -1269,12 +1288,12 @@ async fn a_session_opened_before_setup_that_sets_nothing_up_is_closed() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_session_that_keeps_asking_before_setup_is_still_closed() {
     let place = Place::new();
-    let served = place.serve("127.0.0.1:0").await;
+    let served = place.serve_quickly("127.0.0.1:0").await;
     let mut session = stranger_at(&served, &device_key(7))
         .connect(&place.machine("stranger"), &hello(), &Tls::System)
         .await
         .unwrap();
-    // It asks every 2 s, within the 10 s a session that asks nothing is given: still closed.
+    // It asks every 0.5 s, within the 2 s a session that asks nothing is given: still closed.
     let asker = session.asker();
     let asking = tokio::spawn(async move {
         loop {
@@ -1283,17 +1302,18 @@ async fn a_session_that_keeps_asking_before_setup_is_still_closed() {
                     addresses: Vec::new(),
                 })
                 .await;
-            tokio::time::sleep(Duration::from_secs(2)).await;
+            tokio::time::sleep(QUICK_SETUP / 4).await;
         }
     });
-    let ended = tokio::time::timeout(Duration::from_secs(15), async {
+    let ended = tokio::time::timeout(QUICK_SETUP * 5 / 2, async {
         while session.next().await.is_some() {}
     })
     .await;
     asking.abort();
     assert!(
         ended.is_ok(),
-        "the session that keeps asking is still open after 15 s"
+        "the session that keeps asking is still open after {:?}",
+        QUICK_SETUP * 5 / 2
     );
     assert!(session.ended().contains("no setup"), "{}", session.ended());
     served.stop().await;
@@ -1334,15 +1354,16 @@ async fn members_still_connect_while_strangers_hold_the_unauthenticated_places()
 async fn a_connection_that_says_nothing_is_let_go_within_a_few_seconds() {
     use tokio::io::AsyncReadExt;
     let place = Place::new();
-    let served = place.serve("127.0.0.1:0").await;
+    let served = place.serve_quickly("127.0.0.1:0").await;
     let mut stream = tokio::net::TcpStream::connect(served.address())
         .await
         .unwrap();
     let mut byte = [0u8; 1];
-    let closed = tokio::time::timeout(Duration::from_secs(8), stream.read(&mut byte)).await;
+    let closed = tokio::time::timeout(QUICK_ARRIVAL * 5, stream.read(&mut byte)).await;
     assert!(
         matches!(closed, Ok(Ok(0)) | Ok(Err(_))),
-        "a connection that says nothing is still held after 8 s: {closed:?}"
+        "a connection that says nothing is still held after {:?}: {closed:?}",
+        QUICK_ARRIVAL * 5
     );
     served.stop().await;
 }

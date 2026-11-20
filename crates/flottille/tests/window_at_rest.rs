@@ -132,7 +132,6 @@ fn frames_at_rest(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> (u64, us
     while gone < Duration::from_secs(10) {
         asked += step(shell, Duration::from_millis(16), cx);
         gone += Duration::from_millis(16);
-        std::thread::sleep(Duration::from_millis(5));
     }
     let drawn = cx.update(|window, _| window.layout_stats().frames);
     (drawn, asked)
@@ -1409,8 +1408,11 @@ fn the_window_draws_no_frame_at_rest_on_a_spec_page_with_amendments(cx: &mut Tes
     let user = User::with_fake_agent()
         .with_fetcher()
         .with_env("FLOTTILLE_TEST_CLOCK", "1")
-        // The development's workspace fetches from `origin`: it reaches no server.
-        .with_env("GIT_SSH_COMMAND", "false");
+        // The development's workspace fetches from `origin`: it reaches no server. The daemon's
+        // git runs the `ssh` it found, never the test's `GIT_SSH_COMMAND`, so that was the real
+        // one, which waited for example.com for the 30 s of a read; the fake one fails at once
+        // (no repository of that name in the user's `remotes`).
+        .with_fake_ssh(&[]);
     std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
     let folder = user.path("work/app");
     user.git_init(&folder);

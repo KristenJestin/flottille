@@ -230,8 +230,9 @@ fn a_model_without_effort_shows_no_effort_picker(cx: &mut TestAppContext) {
 
 #[gpui_kit::test]
 fn while_efforts_are_learned_the_effort_picker_shows_its_skeleton(cx: &mut TestAppContext) {
-    // The listing takes its time: the efforts are being learned while the page is shown.
-    let user = efforts_user(json!(["low"]), json!({"init_wait": 10000}));
+    // The listing takes its time (three seconds, not ten): the efforts are being learned while
+    // the page is shown.
+    let user = efforts_user(json!(["low"]), json!({"init_wait": 3000}));
     let (shell, _composer, cx) = atlas(&user, cx);
 
     until(&shell, cx, "the effort picker's skeleton is shown", |cx| {

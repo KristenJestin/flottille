@@ -24,7 +24,12 @@ use crate::mcp::Outcome;
 use crate::vault;
 
 /// What a call to the site may take, from the connection to the last byte.
-const READ_TIME: std::time::Duration = std::time::Duration::from_secs(30);
+fn read_time() -> std::time::Duration {
+    crate::test_time::tuned(
+        "FLOTTILLE_TEST_SITE_WAIT_MS",
+        std::time::Duration::from_secs(30),
+    )
+}
 /// How much of an answer is read: a page of worklogs with their comments.
 const ANSWER_BYTES: usize = 2 * 1024 * 1024;
 /// How much of an answer to a change is read: Jira's refusal is a few lines.
@@ -90,7 +95,7 @@ impl Site<'_> {
         let mut url = rest_url(self.site, path)?;
         url.query_pairs_mut().extend_pairs(query);
         let answer = tokio::time::timeout(
-            READ_TIME,
+            read_time(),
             request(
                 http::Method::GET,
                 &url,
@@ -104,7 +109,7 @@ impl Site<'_> {
             Err(_) => Err(format!(
                 "{} did not answer in {} s",
                 self.site,
-                READ_TIME.as_secs()
+                read_time().as_secs()
             )),
             Ok(Err(why)) => Err(self.clean(&why)),
             Ok(Ok(answered)) => Ok(answered),
@@ -211,7 +216,7 @@ impl Site<'_> {
     ) -> Result<String, String> {
         let url = rest_url(self.site, path)?;
         let answer = tokio::time::timeout(
-            READ_TIME,
+            read_time(),
             request(method, &url, &self.authorization, body, WRITE_ANSWER_BYTES),
         )
         .await;
@@ -220,7 +225,7 @@ impl Site<'_> {
                 "the change was not confirmed: {} did not answer in {} s; check the work item \
                  before changing it again",
                 self.site,
-                READ_TIME.as_secs()
+                read_time().as_secs()
             )),
             Ok(Err(why)) => Err(format!(
                 "{}; the change was not confirmed: check the work item before changing it again",
