@@ -13,6 +13,7 @@ use serde_json::{Value, json};
 use crate::agent::{Agent, AgentState, Choices, GateMode, TurnUsage, Used};
 use crate::approval::{Decision, Delivery, Forward, Judgement, Kind, Leave, Request, RequestState};
 use crate::item::{Check, Cursor, Filter, Item, Post};
+use crate::notification::{self, New as NewNotification, Notification};
 use crate::protocol::Event;
 use crate::run::{Readiness, Run, RunState};
 use crate::subscription::Subscription;
@@ -947,6 +948,31 @@ const MIGRATIONS: &[&str] = &[
         at      INTEGER NOT NULL
     ) STRICT;
     CREATE INDEX outbox_by_machine ON outbox (machine, seq);
+",
+    "
+    -- What the daemon tells the user, one row each, for every client to read and mark
+    -- (`docs/protocol.md`, `notifications.list`). `source` is what the row is about, once: a
+    -- row is written once for it, so that the events read again change nothing. A row is kept 30
+    -- days, or the newest 1,000.
+    CREATE TABLE notifications (
+        id        INTEGER PRIMARY KEY AUTOINCREMENT,
+        at        INTEGER NOT NULL,
+        kind      TEXT NOT NULL,
+        source    TEXT NOT NULL UNIQUE,
+        session   TEXT,
+        project   TEXT,
+        workspace TEXT,
+        title     TEXT NOT NULL,
+        excerpt   TEXT NOT NULL,
+        read_at   INTEGER,
+        resolved  INTEGER NOT NULL DEFAULT 0
+    ) STRICT;
+    CREATE INDEX notifications_by_session ON notifications (session);
+    -- The last event the centre made rows of.
+    CREATE TABLE notification_cursor (
+        id  INTEGER PRIMARY KEY CHECK (id = 1),
+        seq INTEGER NOT NULL
+    ) STRICT;
 ",
 ];
 
@@ -4166,6 +4192,178 @@ impl Store {
             .transpose()
     }
 
+    /// Keeps a notification, unless one is kept for its `source` already: its id, `None` for a
+    /// source seen before.
+    pub fn add_notification(&self, new: &NewNotification) -> Result<Option<u64>> {
+        Ok(self
+            .connection
+            .query_row(
+                "INSERT INTO notifications (at, kind, source, session, project, workspace, title, \
+                 excerpt) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
+                 ON CONFLICT (source) DO NOTHING RETURNING id",
+                params![
+                    new.at,
+                    new.kind,
+                    new.source,
+                    new.session,
+                    new.project,
+                    new.workspace,
+                    new.title,
+                    new.excerpt
+                ],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    /// The notifications, oldest first: with `after`, the first `limit` numbered after it;
+    /// without, the last `limit` of all. `unread` leaves out those read.
+    pub fn notifications(
+        &self,
+        after: Option<u64>,
+        limit: usize,
+        unread: bool,
+    ) -> Result<Vec<Notification>> {
+        let filter = if unread { "AND read_at IS NULL" } else { "" };
+        let columns =
+            "id, at, kind, session, project, workspace, title, excerpt, read_at, resolved";
+        let found = match after {
+            Some(after) => {
+                let mut statement = self.connection.prepare(&format!(
+                    "SELECT {columns} FROM notifications WHERE id > ?1 {filter} \
+                     ORDER BY id LIMIT ?2"
+                ))?;
+                statement
+                    .query_map(params![after, limit as i64], notification_row)?
+                    .collect::<rusqlite::Result<Vec<_>>>()?
+            }
+            None => {
+                let mut statement = self.connection.prepare(&format!(
+                    "SELECT {columns} FROM notifications WHERE 1 = 1 {filter} \
+                     ORDER BY id DESC LIMIT ?1"
+                ))?;
+                let mut found = statement
+                    .query_map(params![limit as i64], notification_row)?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                found.reverse();
+                found
+            }
+        };
+        Ok(found)
+    }
+
+    /// How many notifications are unread: those that wait for the user, and the others.
+    pub fn unread_notifications(&self) -> Result<(usize, usize)> {
+        let waits = notification::NEEDS_YOU
+            .iter()
+            .map(|kind| format!("'{kind}'"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let count = |wait: bool| -> Result<usize> {
+            Ok(self.connection.query_row(
+                &format!(
+                    "SELECT count(*) FROM notifications WHERE read_at IS NULL \
+                     AND kind {} IN ({waits})",
+                    if wait { "" } else { "NOT" }
+                ),
+                [],
+                |row| row.get(0),
+            )?)
+        };
+        Ok((count(true)?, count(false)?))
+    }
+
+    /// Marks notifications read at `now`: the numbers of those that changed.
+    pub fn read_notifications(&self, which: notification::Which, now: u64) -> Result<Vec<u64>> {
+        // `?1` is the time; what selects the rows numbers its own from `?2`.
+        let (condition, mut values): (String, Vec<rusqlite::types::Value>) = match which {
+            notification::Which::All => ("1 = 1".into(), Vec::new()),
+            notification::Which::Session(session) => {
+                ("session = ?2".into(), vec![session.to_owned().into()])
+            }
+            notification::Which::Ids(ids) => {
+                let marks: Vec<String> = (0..ids.len()).map(|n| format!("?{}", n + 2)).collect();
+                (
+                    format!("id IN ({})", marks.join(", ")),
+                    ids.iter().map(|id| (*id as i64).into()).collect(),
+                )
+            }
+        };
+        values.insert(0, (now as i64).into());
+        let mut statement = self.connection.prepare(&format!(
+            "UPDATE notifications SET read_at = ?1 WHERE read_at IS NULL AND {condition} \
+             RETURNING id"
+        ))?;
+        let mut changed = statement
+            .query_map(rusqlite::params_from_iter(values), |row| {
+                row.get::<_, u64>(0)
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        changed.sort_unstable();
+        Ok(changed)
+    }
+
+    /// What answered the notification of `source` resolves it, and reads it: its number, `None`
+    /// when there is no such row or it was resolved already.
+    pub fn resolve_notification(&self, source: &str, now: u64) -> Result<Option<u64>> {
+        Ok(self
+            .connection
+            .query_row(
+                "UPDATE notifications SET resolved = 1, read_at = coalesce(read_at, ?2) \
+                 WHERE source = ?1 AND resolved = 0 RETURNING id",
+                params![source, now],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    /// The sources of the notifications of `kind` still waiting for their answer.
+    pub fn unresolved_notifications(&self, kind: &str) -> Result<Vec<String>> {
+        let mut statement = self.connection.prepare(
+            "SELECT source FROM notifications WHERE kind = ?1 AND resolved = 0 ORDER BY id",
+        )?;
+        let found = statement
+            .query_map([kind], |row| row.get(0))?
+            .collect::<rusqlite::Result<Vec<String>>>()?;
+        Ok(found)
+    }
+
+    /// Forgets the notifications older than 30 days, then all but the newest 1,000: how many
+    /// went.
+    pub fn prune_notifications(&self, now: u64) -> Result<usize> {
+        let oldest = now.saturating_sub(notification::KEPT_DAYS * 24 * 3_600_000);
+        let old = self
+            .connection
+            .execute("DELETE FROM notifications WHERE at < ?1", [oldest])?;
+        let many = self.connection.execute(
+            "DELETE FROM notifications WHERE id NOT IN \
+             (SELECT id FROM notifications ORDER BY id DESC LIMIT ?1)",
+            [notification::KEPT_ROWS as i64],
+        )?;
+        Ok(old + many)
+    }
+
+    /// The last event the notifications were made of, `None` before the first.
+    pub fn notification_cursor(&self) -> Result<Option<u64>> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT seq FROM notification_cursor WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    pub fn set_notification_cursor(&self, seq: u64) -> Result<()> {
+        self.connection.execute(
+            "INSERT INTO notification_cursor (id, seq) VALUES (1, ?1) \
+             ON CONFLICT (id) DO UPDATE SET seq = excluded.seq",
+            [seq],
+        )?;
+        Ok(())
+    }
+
     /// The number of the last event, 0 when there is none.
     pub fn last_seq(&self) -> Result<u64> {
         let seq: Option<u64> = self
@@ -4534,6 +4732,23 @@ fn append_agent_event(
     Ok(event)
 }
 
+fn notification_row(row: &rusqlite::Row) -> rusqlite::Result<Notification> {
+    let kind: String = row.get(2)?;
+    Ok(Notification {
+        id: row.get(0)?,
+        at: row.get(1)?,
+        needs_you: notification::NEEDS_YOU.contains(&kind.as_str()),
+        kind,
+        session: row.get(3)?,
+        project: row.get(4)?,
+        workspace: row.get(5)?,
+        title: row.get(6)?,
+        excerpt: row.get(7)?,
+        read_at: row.get(8)?,
+        resolved: row.get::<_, i64>(9)? != 0,
+    })
+}
+
 fn event_row(row: &rusqlite::Row) -> rusqlite::Result<Result<Event>> {
     let (seq, at, name, data): (u64, u64, String, String) =
         (row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?);
@@ -4848,6 +5063,138 @@ mod tests {
     use crate::approval;
     use crate::workspace::{Base, Worktree};
     use serde_json::json;
+
+    fn noted(store: &Store, source: &str, at: u64, session: &str, kind: &str) -> u64 {
+        store
+            .add_notification(&NewNotification {
+                at,
+                kind: kind.into(),
+                source: source.into(),
+                session: Some(session.into()),
+                project: Some("app".into()),
+                workspace: None,
+                title: "Failed".into(),
+                excerpt: "it broke".into(),
+            })
+            .unwrap()
+            .unwrap()
+    }
+
+    #[test]
+    fn a_notification_is_kept_once_for_its_source() {
+        let store = Store::open_in_memory().unwrap();
+        noted(&store, "event:1", 10, "s1", "failure");
+        let again = store
+            .add_notification(&NewNotification {
+                at: 11,
+                kind: "failure".into(),
+                source: "event:1".into(),
+                session: None,
+                project: None,
+                workspace: None,
+                title: "Failed".into(),
+                excerpt: String::new(),
+            })
+            .unwrap();
+        assert_eq!(again, None);
+        assert_eq!(store.notifications(None, 10, false).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn reading_marks_by_ids_by_session_or_all_and_counts_what_waits_apart() {
+        let store = Store::open_in_memory().unwrap();
+        let a = noted(&store, "request:1", 10, "s1", "request");
+        let b = noted(&store, "event:2", 11, "s1", "failure");
+        let c = noted(&store, "event:3", 12, "s2", "report");
+        assert_eq!(store.unread_notifications().unwrap(), (1, 2));
+
+        assert_eq!(
+            store
+                .read_notifications(notification::Which::Ids(&[a]), 20)
+                .unwrap(),
+            [a]
+        );
+        assert_eq!(store.unread_notifications().unwrap(), (0, 2));
+        // Read once: nothing changes again, and the time stays the first one.
+        assert!(
+            store
+                .read_notifications(notification::Which::Session("s1"), 30)
+                .unwrap()
+                == [b]
+        );
+        let read = store.notifications(None, 10, false).unwrap();
+        assert_eq!(read[0].read_at, Some(20));
+        assert_eq!(read[1].read_at, Some(30));
+        assert_eq!(
+            store
+                .read_notifications(notification::Which::All, 40)
+                .unwrap(),
+            [c]
+        );
+        assert_eq!(store.unread_notifications().unwrap(), (0, 0));
+        assert!(store.notifications(None, 10, true).unwrap().is_empty());
+    }
+
+    #[test]
+    fn resolving_reads_and_happens_once() {
+        let store = Store::open_in_memory().unwrap();
+        let a = noted(&store, "request:1", 10, "s1", "request");
+        assert_eq!(
+            store.resolve_notification("request:1", 20).unwrap(),
+            Some(a)
+        );
+        assert_eq!(store.resolve_notification("request:1", 30).unwrap(), None);
+        assert_eq!(store.resolve_notification("request:9", 30).unwrap(), None);
+        let row = &store.notifications(None, 10, false).unwrap()[0];
+        assert!(row.resolved);
+        assert_eq!(row.read_at, Some(20));
+        assert!(
+            store
+                .unresolved_notifications("request")
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn notifications_are_listed_after_a_number_and_limited() {
+        let store = Store::open_in_memory().unwrap();
+        let ids: Vec<u64> = (1..=5)
+            .map(|n| noted(&store, &format!("event:{n}"), n, "s1", "failure"))
+            .collect();
+        let last = store.notifications(None, 2, false).unwrap();
+        assert_eq!(last.iter().map(|n| n.id).collect::<Vec<_>>(), ids[3..]);
+        let next = store.notifications(Some(ids[0]), 2, false).unwrap();
+        assert_eq!(next.iter().map(|n| n.id).collect::<Vec<_>>(), ids[1..3]);
+    }
+
+    #[test]
+    fn notifications_are_kept_thirty_days_or_a_thousand_whichever_is_less() {
+        let store = Store::open_in_memory().unwrap();
+        let day = 24 * 3_600_000;
+        let now = 100 * day;
+        noted(&store, "event:old", now - 31 * day, "s1", "failure");
+        noted(&store, "event:edge", now - 29 * day, "s1", "failure");
+        assert_eq!(store.prune_notifications(now).unwrap(), 1);
+        assert_eq!(store.notifications(None, 10, false).unwrap().len(), 1);
+        for n in 0..1100 {
+            noted(&store, &format!("event:{n}"), now, "s1", "report");
+        }
+        store.prune_notifications(now).unwrap();
+        let kept = store.notifications(None, 5000, false).unwrap();
+        assert_eq!(kept.len(), notification::KEPT_ROWS);
+        // The newest are the ones kept.
+        assert_eq!(kept.last().unwrap().id, 1102);
+    }
+
+    #[test]
+    fn the_notification_cursor_is_kept() {
+        let store = Store::open_in_memory().unwrap();
+        assert_eq!(store.notification_cursor().unwrap(), None);
+        store.set_notification_cursor(7).unwrap();
+        store.set_notification_cursor(9).unwrap();
+        assert_eq!(store.notification_cursor().unwrap(), Some(9));
+    }
 
     #[test]
     fn a_new_store_is_brought_to_the_last_schema() {
