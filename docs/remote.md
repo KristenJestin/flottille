@@ -868,20 +868,28 @@ and removes its workspace as today, through `call`.
   connection share <name> --machine <m> [--entry <e>]…`, and Settings, Connections, a row's
   **Share with…**. It is a signed user request on the machine that holds the connection, as
   `vault.share` is: that daemon refuses a command, an `http://` URL and an `https://` URL of this
-  machine (`localhost`, a loopback address, a name under `.localhost`), saying `the connection
-  <name> is this machine's own`; it refuses an entry the connection does not name, and its sign-in's
-  tokens (`<name>.oauth`) whoever asks (`OAuth tokens are never shared: <m> signs in for itself`).
+  machine (`localhost` or a name under `.localhost`, with or without their final dot, a loopback
+  address, `0.0.0.0` or `[::]`, a loopback written as an IPv6 mapping such as
+  `[::ffff:127.0.0.1]`), saying `the connection <name> is this machine's own`; it refuses an entry
+  the connection does not name, and a sign-in's tokens (an entry named `<x>.oauth`) whoever asks
+  (`OAuth tokens are never shared: <m> signs in for itself`). **Known limit**: a name is not
+  resolved, so a DNS name that resolves to a loopback address passes as remote (what it resolves
+  to when it is shared proves nothing of later); the receiver's checks are the same.
   The `share` message then carries the declaration and each entry the request names, with its
   secret (`{"request", "connection", "entries": [{"entry", "secret"}]}`). The other runner checks the
   request as it checks a vault entry's (member, signature, time, nonce, role, the sender a runner's
   or a controller's machine), then that the connection is the one the request names, that the
-  entries are exactly the ones it names, and the declaration and the entries as its own Save would:
-  the entries are kept as shared ones (`shared from pc`), then the connection is declared as the
-  user's Save declares it (given at once while Connections and it are on). A connection of the same
-  name there is never replaced (`server has its own connection notes: remove or rename it there
-  first`).
+  entries are exactly the ones it names, and the declaration and the entries' metadata as its own
+  Save would (an entry one project's alone or bound to another use is refused) before anything is
+  kept: the entries are kept as shared ones (`shared from pc`), then the connection is declared as
+  the user's Save declares it (given at once while Connections and it are on); if it cannot be
+  declared, the copies this share added are removed (a copy that replaced one the same machine
+  shared before stays). One share is received at a time. A connection of the same name there is
+  never replaced (`server has its own connection notes: remove or rename it there first`).
 - **The sign-in from a client (#833)**: `flottille --machine server connection login <name>`, or the
-  window's **Sign in on server** of a connection it shared. The client signs `connection.login` for
+  window's **Sign in on server** of a connection it shared. The address that machine answers is
+  checked as the window checks it before it is printed or opened (`https://`, or plain `http://` on
+  the loopback; no control character). The client signs `connection.login` for
   that machine, whose daemon begins the sign-in as for its own client and notes the member whose
   device asked; then `tunnel.open {sign_in: <name>}`, whose answer is the tunnel; then the browser
   opens the address. That tunnel reaches no run: the machine serves it only while a sign-in of that
