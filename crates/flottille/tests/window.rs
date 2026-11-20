@@ -4187,7 +4187,8 @@ fn choosing_each_settings_tab_shows_its_section_alone(cx: &mut TestAppContext) {
         let wanted: &[&str] = match *key {
             "agents" => &["providers", "rules", "tool-results", "sessions"],
             "approvals" => &["judge", "guidance"],
-            "features" => &[],
+            // Machines, remote off: a notice and a button, no section title (`window_machines.rs`).
+            "features" | "machines" => &[],
             "vault" => &["vault"],
             _ => &["appearance", "workspaces", "developer"],
         };

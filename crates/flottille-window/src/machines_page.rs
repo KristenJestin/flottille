@@ -1228,7 +1228,7 @@ impl MachinesSection {
         let mut blocks = vec![("remote", self.remote_section(off, cx).into_any_element())];
         let shown = if off { self.kept.clone() } else { Some(read) };
         if let Some(shown) = shown {
-            let live = std::mem::replace(&mut self.read, Some(shown));
+            let live = self.read.replace(shown);
             let rest = self.rest(window, cx);
             self.read = live;
             let column = div()
