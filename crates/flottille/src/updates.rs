@@ -124,7 +124,42 @@ fn shown(daemon: &Daemon) -> Value {
         "download_failed": state.download_failed,
         "restart": state.when_idle.then_some("idle"),
         "refused": REFUSED.get(),
+        "stops": stops(daemon),
     })
+}
+
+/// The sessions a restart stops: each whose agent, or one of its sub-agents, has a process,
+/// whatever its state (a session waiting for its user keeps its process until it is released).
+fn stops(daemon: &Daemon) -> Vec<Value> {
+    let alive = daemon.agents.with_process();
+    if alive.is_empty() {
+        return Vec::new();
+    }
+    let Ok(agents) = daemon.read(Store::agents) else {
+        return Vec::new();
+    };
+    let by_id: std::collections::HashMap<&str, &flottille_core::agent::Agent> = agents
+        .iter()
+        .map(|agent| (agent.id.as_str(), agent))
+        .collect();
+    let mut roots: Vec<&flottille_core::agent::Agent> = Vec::new();
+    for id in &alive {
+        let mut agent = by_id.get(id.as_str()).copied();
+        while let Some(parent) = agent.and_then(|a| a.parent.as_deref()) {
+            match by_id.get(parent) {
+                Some(found) => agent = Some(found),
+                None => break,
+            }
+        }
+        if let Some(root) = agent.filter(|root| !roots.iter().any(|r| r.id == root.id)) {
+            roots.push(root);
+        }
+    }
+    roots.sort_by_key(|root| root.created_at);
+    roots
+        .iter()
+        .map(|root| json!({"id": root.id, "title": root.title, "project": root.project}))
+        .collect()
 }
 
 fn changed(daemon: &Daemon) {
