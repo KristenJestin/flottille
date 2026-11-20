@@ -2,24 +2,36 @@
 //! plain (behind a reverse proxy that holds the certificate) or with TLS on a certificate given,
 //! and keeps a control session with each device that proves its key (`flottille_link::arrive`).
 //!
-//! A session sends the device the member list, the addresses the members' machines told, and, to
-//! a runner, the presence of the members' clients; then sends them again whenever they change. The
-//! device's asks (the first member's setup, a member's change, an invitation, the refusal of a
-//! join request, its addresses, its presence) go through the hub's rules (`Hub`), each checked
-//! again against the members as they are when it comes in. The hub carries no link's bytes: a
-//! session holds no message and no queue, only the list, the addresses and the presence.
+//! A session sends the device the member list, the addresses the members' machines told, what the
+//! hub knows of each member's device, and, to a runner, the presence of the members' clients; then
+//! sends them again whenever they change. The device's asks (a member's change, what it says of
+//! itself, its addresses, its presence) go through the hub's rules (`Hub`), each checked again
+//! against the members as they are when it comes in. The hub carries no link's bytes: a session
+//! holds no message and no queue.
 //!
-//! A machine that is no member yet may answer an invitation (`flottille_link::Joining`): its
-//! session is welcome while its join request waits, and is sent nothing; once the member that
-//! invited added its device, it is sent the list and may declare its machine. The member that
-//! invited is sent the requests that wait for it.
+//! A device that is no member yet may pair (`flottille_link::Pairing`) while pair mode is open:
+//! its proof is checked against the pair mode's secret, the device is paired, and its session is
+//! sent the list and may declare its machine, `PAIR_IDLE` at most.
+//!
+//! The commands of the hub's host (`flottille-hub pair`, `role`, `remove`, `devices`) reach the hub
+//! that runs on its socket, `hub.sock` in its state folder (`serve_local`): the folder is the
+//! user's only, and a connection from another user is refused. One JSON object a line:
+//!
+//! ```text
+//! {"pair": {"url": U | null, "minutes": n | null}} → {"code": C, "url": U, "left": s}, then
+//!                                                    {"paired": {…}} or {"over": "…"}
+//! {"role": {"device": D, "role": R}}               → {"ok": {…}} or {"refused": "…"}
+//! {"remove": {"device": D}}                        → {"ok": {…}} or {"refused": "…"}
+//! {"devices": {}}                                  → {"ok": [{…}]}
+//! ```
+//!
+//! A pair mode lasts while its command does: a command that stops closes it.
 //!
 //! What someone with no key may hold of the hub is bounded: at most `MOST_ARRIVING` connections
-//! that have not proved a member's key at once (a setup's session among them), then
+//! that have not proved a member's key at once (a pairing's session among them), then
 //! `KEPT_FOR_MEMBERS` more that are let go unless they prove one, a few KiB a handshake line,
-//! `ARRIVAL_WAIT` for the TLS handshake and the hub's, and `SETUP_IDLE` from its start a session
-//! opened to set the hub up. When the process runs out of file descriptors, it waits before it
-//! accepts again.
+//! `ARRIVAL_WAIT` for the TLS handshake and the hub's, and `PAIR_IDLE` from its start a pairing's
+//! session. When the process runs out of file descriptors, it waits before it accepts again.
 
 use std::net::SocketAddr;
 use std::path::Path;
@@ -27,14 +39,16 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use flottille_link::{
-    Action, Address, Ask, Change, Hello, HubSession, Joining, MemberList, PresenceOf, PublicKey,
-    Requested, Role, SetupCode, SetupProof, ToDevice, Token, Told, Transcript, arrive,
+    Address, Ask, Facts, Hello, HubSession, MemberList, PresenceOf, PublicKey, Role, ToDevice,
+    Told, arrive,
 };
-use tokio::net::TcpListener;
+use serde_json::{Value, json};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::net::{TcpListener, UnixListener, UnixStream};
 use tokio::sync::{Semaphore, watch};
 use tokio::task::JoinSet;
 
-use crate::{Clock, Hub, HubError, Presence, Standing, not_the_code};
+use crate::{Clock, Hub, HubError, PairEnd, Presence};
 
 /// Where the hub listens unless told otherwise: loopback, behind a reverse proxy on the same
 /// host. Another address takes TLS, or `--plain` for a proxy elsewhere.
@@ -46,8 +60,13 @@ pub const MOST_ARRIVING: usize = 64;
 /// The places kept, past `MOST_ARRIVING`, for connections that prove a member's key: one that
 /// does not is let go at the end of its handshake.
 pub const KEPT_FOR_MEMBERS: usize = 8;
-/// How long a session opened to set the hub up lasts, however much it asks, before it is closed.
-pub const SETUP_IDLE: Duration = Duration::from_secs(10);
+/// How long a pairing's session lasts, however much it asks, before it is closed, unless the
+/// machine it declared made it a member's: time to take the list and declare its machine.
+pub const PAIR_IDLE: Duration = Duration::from_secs(30);
+/// The socket of the hub's host's commands, in its state folder.
+pub const SOCKET_FILE: &str = "hub.sock";
+/// The longest line a command of the hub's host says.
+const COMMAND_LIMIT: usize = 4 << 10;
 /// How long the hub waits after a failed accept (no file descriptor left, mostly), at first and
 /// at most: twice longer each time it fails again.
 const ACCEPT_WAIT: Duration = Duration::from_millis(50);
@@ -60,20 +79,20 @@ const ARRIVAL_WAIT: Duration = Duration::from_secs(5);
 const MOST_ADDRESSES: usize = 64;
 const LONGEST_ADDRESS: usize = 300;
 
-/// The waits of the server: how long a connection may take to arrive, and how long a session
-/// opened to set the hub up lasts. The production's are the default; a test serves with shorter
-/// ones (`serve_with`).
+/// The waits of the server: how long a connection may take to arrive, and how long a pairing's
+/// session lasts. The production's are the default; a test serves with shorter ones
+/// (`serve_with`).
 #[derive(Clone, Copy, Debug)]
 pub struct Waits {
     pub arrival: Duration,
-    pub setup_idle: Duration,
+    pub pair_idle: Duration,
 }
 
 impl Default for Waits {
     fn default() -> Waits {
         Waits {
             arrival: ARRIVAL_WAIT,
-            setup_idle: SETUP_IDLE,
+            pair_idle: PAIR_IDLE,
         }
     }
 }
@@ -85,6 +104,9 @@ struct Shared<C: Clock> {
     changed: watch::Sender<u64>,
     hello: Hello,
     waits: Waits,
+    /// The URL a pair code holds unless its command gives one: `--public-url`, else the address
+    /// the hub listens on; `None` when that one is no address a device dials (`0.0.0.0`).
+    url: Mutex<Option<String>>,
 }
 
 /// A hub serving on the network, until `stop`.
@@ -114,12 +136,15 @@ pub fn serve_with<C: Clock + Send + 'static>(
     waits: Waits,
 ) -> std::io::Result<Served<C>> {
     let address = listener.local_addr()?;
+    let scheme = if tls.is_some() { "https" } else { "http" };
+    let url = (!address.ip().is_unspecified()).then(|| format!("{scheme}://{address}"));
     let shared = Arc::new(Shared {
         key: hub.key.clone(),
         hub: Mutex::new(hub),
         changed: watch::channel(0).0,
         hello,
         waits,
+        url: Mutex::new(url),
     });
     let (stop, stopping) = watch::channel(false);
     let accepting = tokio::spawn(accept(listener, tls, shared.clone(), stopping));
@@ -143,6 +168,50 @@ impl<C: Clock + Send + 'static> Served<C> {
         let result = act(&mut self.shared.hub.lock().unwrap());
         self.shared.changed.send_modify(|at| *at += 1);
         result
+    }
+
+    /// The URL a pair code holds unless its command gives one, in place of the address the hub
+    /// listens on (`--public-url`): where the devices reach it, through a reverse proxy mostly.
+    pub fn set_public_url(&self, url: String) {
+        *self.shared.url.lock().unwrap() = Some(url);
+    }
+
+    /// Serves the commands of the hub's host on the socket `path` (`hub.sock` in the state folder,
+    /// whose lock the hub holds: one left by a hub that stopped is replaced), until `stop`.
+    pub fn serve_local(&self, path: &Path) -> std::io::Result<()> {
+        let _ = std::fs::remove_file(path);
+        let listener = UnixListener::bind(path)?;
+        std::fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
+        let shared = self.shared.clone();
+        let mut stopping = self.stop.subscribe();
+        tokio::spawn(async move {
+            let mut commands = JoinSet::new();
+            loop {
+                let accepted = tokio::select! {
+                    accepted = listener.accept() => accepted,
+                    _ = stopped(&mut stopping) => break,
+                };
+                while commands.try_join_next().is_some() {}
+                let Ok((stream, _)) = accepted else {
+                    tokio::time::sleep(ACCEPT_WAIT).await;
+                    continue;
+                };
+                // The folder is the user's only; another user that reached the socket anyway is
+                // refused, but root, which reaches the state folder anyway (a systemd service's
+                // user is its own).
+                // SAFETY: getuid has no precondition and cannot fail.
+                let own = unsafe { libc::getuid() };
+                let peer = stream.peer_cred().map(|cred| cred.uid()).ok();
+                if peer != Some(own) && peer != Some(0) {
+                    continue;
+                }
+                let shared = shared.clone();
+                let stopping = stopping.clone();
+                commands.spawn(async move { command(stream, &shared, stopping).await });
+            }
+            commands.shutdown().await;
+        });
+        Ok(())
     }
 
     /// Stops serving: every session is closed, and the hub let go, its state folder with it.
@@ -223,26 +292,41 @@ async fn accept<C: Clock + Send + 'static>(
                 Err(_) => return,
             };
             let device = arriving.device();
-            let (welcome, setting_up) = {
+            let version = arriving.version().to_owned();
+            let (welcome, member) = {
                 let mut hub = shared.hub.lock().unwrap();
                 let welcome = hub.welcome(&device, arriving.pinned());
-                // A machine that is no member answers an invitation: its request waits. In a
-                // place kept for members it is not taken, and the invitation stays unanswered.
-                let welcome = match (welcome, arriving.joining()) {
+                // A device that is no member pairs. In a place kept for members it is not taken,
+                // and pair mode stays open.
+                let welcome = match (welcome, arriving.pairing()) {
                     (Err(_), Some(_)) if members_only => Err(Box::new((
                         "the hub is busy: try again in a moment".to_owned(),
                         false,
                     ))),
-                    (Err(_), Some(joining)) => hub
-                        .join(&joining.token, joining.key)
-                        .map(|()| Some(joining))
-                        .map_err(|error| Box::new((error.to_string(), false))),
+                    (Err(_), Some(pairing)) => {
+                        let transcript = *arriving.transcript();
+                        hub.pair(
+                            &pairing.proposed,
+                            |secret| {
+                                transcript.proves_pair(secret, &pairing.proposed, &pairing.proof)
+                            },
+                            &version,
+                        )
+                        .map(|paired| Some(paired.key))
+                        .map_err(|error| Box::new((error.to_string(), false)))
+                    }
                     (welcome, _) => welcome.map(|()| None),
                 };
-                (welcome, hub.members().is_none())
+                let member = member_of(&hub, &device, None);
+                if let Some(member) = member {
+                    let _ = hub.seen(&member, &version);
+                }
+                (welcome, member)
             };
-            let joining = match welcome {
-                Ok(joining) => joining,
+            // Told at once: a pairing changed the list or ended pair mode; a member was seen.
+            shared.changed.send_modify(|at| *at += 1);
+            let paired = match welcome {
+                Ok(paired) => paired,
                 Err(refusal) => {
                     let (reason, reset) = *refusal;
                     eprintln!(
@@ -253,29 +337,26 @@ async fn accept<C: Clock + Send + 'static>(
                     return;
                 }
             };
-            if joining.is_some() {
-                // The member that invited is told the request.
-                shared.changed.send_modify(|at| *at += 1);
-            }
-            // `welcome` takes anyone while no member exists: a setup is no member's.
-            if members_only && setting_up {
-                arriving
-                    .refuse("the hub is busy: try again in a moment", false)
-                    .await;
-                return;
-            }
-            // A member's session is not counted; a setup's or a joining machine's is, while it
-            // lasts.
-            let _permit = (setting_up || joining.is_some()).then_some(permit);
+            // A member's session is not counted; a pairing's is, while it lasts.
+            let _permit = paired.is_some().then_some(permit);
             let Ok(session) = arriving.welcome().await else {
                 return;
             };
-            eprintln!(
-                "flottille-hub: {} connected from {from}{}",
-                device.fingerprint(),
-                if joining.is_some() { " to join" } else { "" }
-            );
-            let why = run(session, joining, &shared, stopping).await;
+            match &paired {
+                Some(key) => eprintln!(
+                    "flottille-hub: {} paired {} from {from}",
+                    device.fingerprint(),
+                    key.fingerprint()
+                ),
+                None => eprintln!(
+                    "flottille-hub: {} connected from {from}",
+                    device.fingerprint()
+                ),
+            }
+            let why = run(session, paired, &shared, stopping).await;
+            if let Some(member) = member.or(paired) {
+                let _ = shared.hub.lock().unwrap().seen(&member, &version);
+            }
             eprintln!("flottille-hub: {} left: {why}", device.fingerprint());
         });
     }
@@ -288,45 +369,42 @@ struct Sent {
     list: Option<MemberList>,
     addresses: Option<Vec<Told>>,
     presence: Option<Vec<PresenceOf>>,
-    requests: Option<Vec<Requested>>,
+    facts: Option<Vec<Facts>>,
 }
 
-/// Whether a session may go on, as the members are now: a member's (or a setup's), or a joining
-/// machine's, whose request waits (it is sent nothing and may ask nothing) or was accepted.
-enum Welcome {
-    Member,
-    Waiting { left: u64 },
+/// The member a session is: its device's, its machine's, or, for a pairing's, the device paired.
+fn member_of<C: Clock>(
+    hub: &Hub<C>,
+    device: &PublicKey,
+    paired: Option<&PublicKey>,
+) -> Option<PublicKey> {
+    let members = hub.members()?;
+    members
+        .get(device)
+        .or_else(|| members.by_machine(device))
+        .or_else(|| paired.and_then(|paired| members.get(paired)))
+        .map(|member| member.key)
 }
 
-/// Where `device`'s session stands, or the refusal that ends it.
+/// Whether `device`'s session may go on, as the members are now: a member's, or a pairing's whose
+/// device is still a member. The refusal that ends it otherwise.
 fn standing<C: Clock>(
-    hub: &mut Hub<C>,
+    hub: &Hub<C>,
     device: &PublicKey,
     pinned: Option<flottille_link::ChangeHash>,
-    joining: Option<&Joining>,
-) -> Result<Welcome, (String, bool)> {
-    let refusal = match hub.welcome(device, pinned) {
-        Ok(()) => return Ok(Welcome::Member),
-        Err(refusal) => *refusal,
-    };
-    let Some(joining) = joining else {
-        return Err(refusal);
-    };
-    match hub.joined(&joining.token, &joining.key) {
-        Standing::Added => Ok(Welcome::Member),
-        Standing::Waiting { left } => Ok(Welcome::Waiting { left }),
-        Standing::Over => Err((
-            "this join request was refused, or its invitation expired: ask for a new one"
-                .to_owned(),
-            false,
-        )),
+    paired: Option<&PublicKey>,
+) -> Result<(), (String, bool)> {
+    match hub.welcome(device, pinned) {
+        Ok(()) => Ok(()),
+        Err(_) if member_of(hub, device, paired).is_some() => Ok(()),
+        Err(refusal) => Err(*refusal),
     }
 }
 
 /// One device's session, until it ends; why it ended.
 async fn run<C: Clock + Send + 'static>(
     mut session: HubSession,
-    joining: Option<Joining>,
+    paired: Option<PublicKey>,
     shared: &Shared<C>,
     mut stopping: watch::Receiver<bool>,
 ) -> String {
@@ -334,30 +412,22 @@ async fn run<C: Clock + Send + 'static>(
     let pinned = session.pinned();
     let mut changed = shared.changed.subscribe();
     let mut sent = Sent::default();
-    // Set once: a session that keeps asking is closed as one that asks nothing.
-    let setup_ends = tokio::time::Instant::now() + shared.waits.setup_idle;
+    // Set once: a pairing's session that keeps asking is closed as one that asks nothing.
+    let pair_ends = tokio::time::Instant::now() + shared.waits.pair_idle;
     loop {
         let frames = {
-            let mut hub = shared.hub.lock().unwrap();
-            standing(&mut hub, &device, pinned, joining.as_ref()).map(|standing| match standing {
-                Welcome::Member => (
-                    news(&hub, &device, joining.as_ref(), &mut sent),
-                    hub.members().is_none(),
-                    None,
-                ),
-                Welcome::Waiting { left } => (Vec::new(), false, Some(left)),
+            let hub = shared.hub.lock().unwrap();
+            standing(&hub, &device, pinned, paired.as_ref()).map(|()| {
+                // Until it declared its machine, or when it is the device itself (a phone).
+                let pairing = paired.is_some() && hub.welcome(&device, pinned).is_err();
+                (news(&hub, &device, paired.as_ref(), &mut sent), pairing)
             })
         };
-        let (frames, setting_up, waiting) = match frames {
+        let (frames, pairing) = match frames {
             Ok(frames) => frames,
             Err((reason, reset)) => {
                 let _ = session.send(&ToDevice::Refused { reason, reset }).await;
                 session.close().await;
-                if joining.is_some() {
-                    // The member that invited is told the request is over.
-                    shared.changed.send_modify(|at| *at += 1);
-                    return "its join request is over".to_owned();
-                }
                 return "it is not a member any more".to_owned();
             }
         };
@@ -367,17 +437,10 @@ async fn run<C: Clock + Send + 'static>(
             }
         }
         let idle = async {
-            if setting_up {
-                tokio::time::sleep_until(setup_ends).await;
+            if pairing {
+                tokio::time::sleep_until(pair_ends).await;
             } else {
                 std::future::pending::<()>().await;
-            }
-        };
-        // A request that waits ends with its invitation: looked at again then.
-        let expiry = async {
-            match waiting {
-                Some(left) => tokio::time::sleep(Duration::from_secs(left)).await,
-                None => std::future::pending::<()>().await,
             }
         };
         tokio::select! {
@@ -386,28 +449,19 @@ async fn run<C: Clock + Send + 'static>(
                     Ok(asked) => asked,
                     Err(why) => return why,
                 };
-                let transcript = *session.transcript();
-                let handled = handle(shared, &transcript, pinned, joining.as_ref(), asked.ask);
-                let (refused, extra) = match handled {
-                    Ok(extra) => (None, extra),
-                    Err(error) => (Some(error.to_string()), Extra::default()),
-                };
-                let answer = ToDevice::Answer {
-                    id: asked.id,
-                    refused,
-                    proof: extra.proof,
-                    token: extra.token,
-                };
+                let refused = handle(shared, &device, pinned, paired.as_ref(), asked.ask)
+                    .err()
+                    .map(|error| error.to_string());
+                let answer = ToDevice::Answer { id: asked.id, refused };
                 if session.send(&answer).await.is_err() {
                     return "it closed the connection".to_owned();
                 }
             }
             _ = changed.changed() => {}
-            _ = expiry => {}
             _ = idle => {
                 let reason = format!(
-                    "no setup came within {} s of this session",
-                    shared.waits.setup_idle.as_secs()
+                    "a pairing's session lasts {} s: this machine declared none in time",
+                    shared.waits.pair_idle.as_secs()
                 );
                 let _ = session.send(&ToDevice::Refused { reason: reason.clone(), reset: false }).await;
                 session.close().await;
@@ -425,7 +479,7 @@ async fn run<C: Clock + Send + 'static>(
 fn news<C: Clock>(
     hub: &Hub<C>,
     device: &PublicKey,
-    joining: Option<&Joining>,
+    paired: Option<&PublicKey>,
     sent: &mut Sent,
 ) -> Vec<ToDevice> {
     let mut frames = Vec::new();
@@ -452,24 +506,12 @@ fn news<C: Clock>(
         frames.push(ToDevice::Addresses(addresses.clone()));
         sent.addresses = Some(addresses);
     }
-    let member = members
-        .get(device)
-        .or_else(|| members.by_machine(device))
-        .or_else(|| joining.and_then(|joining| members.get(&joining.key)));
-    if let Some(member) = member {
-        let requests: Vec<Requested> = hub
-            .pending(&member.key)
-            .into_iter()
-            .map(|request| Requested {
-                token: request.token,
-                key: request.key,
-            })
-            .collect();
-        if sent.requests.as_ref() != Some(&requests) {
-            frames.push(ToDevice::Requests(requests.clone()));
-            sent.requests = Some(requests);
-        }
+    let facts = hub.facts().to_vec();
+    if sent.facts.as_ref() != Some(&facts) {
+        frames.push(ToDevice::Facts(facts.clone()));
+        sent.facts = Some(facts);
     }
+    let member = member_of(hub, device, paired).and_then(|key| members.get(&key));
     let runner = member.is_some_and(|member| member.role == Role::Runner);
     if runner {
         let presence: Vec<PresenceOf> = members
@@ -494,55 +536,27 @@ fn news<C: Clock>(
 
 /// A device's ask, through the hub's rules, the device welcome as the members are now: a session
 /// opened before a change that leaves it out asks nothing more. Every session is told what
-/// changed. The answer to a setup carries the hub's proof that it holds the code.
+/// changed.
 fn handle<C: Clock>(
     shared: &Shared<C>,
-    transcript: &Transcript,
+    device: &PublicKey,
     pinned: Option<flottille_link::ChangeHash>,
-    joining: Option<&Joining>,
+    paired: Option<&PublicKey>,
     ask: Ask,
-) -> Result<Extra, HubError> {
-    let device = &transcript.device;
+) -> Result<(), HubError> {
     let mut hub = shared.hub.lock().unwrap();
-    match standing(&mut hub, device, pinned, joining) {
-        Ok(Welcome::Member) => {}
-        Ok(Welcome::Waiting { .. }) => {
-            return Err(HubError(
-                "this device waits for its join request to be accepted: it may ask nothing yet"
-                    .to_owned(),
-            ));
-        }
-        Err((reason, _)) => return Err(HubError(reason)),
-    }
-    // The member this session is: its device's, its machine's, or, for a joining machine, the
-    // new device's once added.
-    let member = hub.members().and_then(|members| {
-        members
-            .get(device)
-            .or_else(|| members.by_machine(device))
-            .or_else(|| joining.and_then(|joining| members.get(&joining.key)))
-            .map(|member| member.key)
-    });
-    let mut extra = Extra::default();
+    standing(&hub, device, pinned, paired).map_err(|(reason, _)| HubError(reason))?;
+    let member = member_of(&hub, device, paired);
+    let not_member = || HubError("this device is not a member".to_owned());
     let done = match ask {
-        Ask::Setup {
-            proof: theirs,
-            changes,
-        } => setup(&mut hub, transcript, &theirs, changes).map(|ours| extra.proof = Some(ours)),
-        Ask::Invite { ask } => hub.invite(&ask).map(|token| extra.token = Some(token)),
-        Ask::Refuse { token } => match member {
-            Some(member) => hub.refuse(&token, &member),
-            None => Err(HubError("this device is not a member".to_owned())),
+        Ask::Submit { change } => hub.submit(change),
+        Ask::About {
+            device: kind,
+            system,
+        } => match member {
+            Some(member) => hub.about(&member, &kind, &system),
+            None => Err(not_member()),
         },
-        Ask::Submit { change } => {
-            if hub.members().is_none() {
-                Err(HubError(
-                    "the hub has no member yet: the first one joins with the setup code".to_owned(),
-                ))
-            } else {
-                hub.submit(change)
-            }
-        }
         Ask::Addresses { addresses } => {
             if addresses.len() > MOST_ADDRESSES
                 || addresses.iter().any(|address| {
@@ -558,53 +572,159 @@ fn handle<C: Clock>(
         }
         Ask::Presence { active, last_input } => match member {
             Some(member) => hub.tell_presence(&member, Presence { active, last_input }),
-            None => Err(HubError("this device is not a member".to_owned())),
+            None => Err(not_member()),
         },
     };
     drop(hub);
     if done.is_ok() {
         shared.changed.send_modify(|at| *at += 1);
     }
-    done.map(|()| extra)
+    done
 }
 
-/// What an answer carries besides a yes: the hub's proof of the setup code, an invitation's
-/// token.
-#[derive(Default)]
-struct Extra {
-    proof: Option<SetupProof>,
-    token: Option<Token>,
+/// One command of the hub's host, on its socket, until it is answered; a pair mode until it
+/// ends, closed when the command stops first.
+async fn command<C: Clock + Send + 'static>(
+    stream: UnixStream,
+    shared: &Shared<C>,
+    mut stopping: watch::Receiver<bool>,
+) {
+    let (read, mut write) = stream.into_split();
+    let mut lines = BufReader::new(read.take(COMMAND_LIMIT as u64)).lines();
+    let Ok(Some(line)) = lines.next_line().await else {
+        return;
+    };
+    let say = |value: Value| {
+        let mut line = value.to_string();
+        line.push('\n');
+        line
+    };
+    let asked: Value = serde_json::from_str(&line).unwrap_or(Value::Null);
+    let answer = |done: Result<Value, HubError>| match done {
+        Ok(value) => json!({"ok": value}),
+        Err(error) => json!({"refused": error.to_string()}),
+    };
+    let done = if let Some(pair) = asked.get("pair") {
+        let opened = {
+            let mut hub = shared.hub.lock().unwrap();
+            let url = pair["url"]
+                .as_str()
+                .map(str::to_owned)
+                .or_else(|| shared.url.lock().unwrap().clone());
+            match url {
+                None => Err(HubError(
+                    "the hub listens on every address, which no device dials: give the address \
+                     the devices reach it at, with --public-url"
+                        .to_owned(),
+                )),
+                Some(url) => hub
+                    .open_pairing(&url, pair["minutes"].as_u64())
+                    .map(|(number, code)| (number, code, hub.pairing_left().unwrap_or(0))),
+            }
+        };
+        let (number, code, left) = match opened {
+            Ok(opened) => opened,
+            Err(error) => {
+                let _ = write.write_all(say(answer(Err(error))).as_bytes()).await;
+                return;
+            }
+        };
+        let text = code.code().expect("checked when it was opened");
+        let shown = json!({"code": text, "url": code.hub_url, "left": left});
+        if write.write_all(say(shown).as_bytes()).await.is_err() {
+            shared.hub.lock().unwrap().close_pairing(number);
+            return;
+        }
+        let mut changed = shared.changed.subscribe();
+        let end = loop {
+            if let Some(end) = shared.hub.lock().unwrap().pairing_ended(number) {
+                break end;
+            }
+            // Its minutes end it: looked at again every second.
+            tokio::select! {
+                _ = changed.changed() => {}
+                _ = tokio::time::sleep(Duration::from_secs(1)) => {}
+                // The command stopped: nothing more comes on its socket.
+                _ = lines.next_line() => {
+                    shared.hub.lock().unwrap().close_pairing(number);
+                    shared.changed.send_modify(|at| *at += 1);
+                    return;
+                }
+                _ = stopped(&mut stopping) => {
+                    break PairEnd::Over("the hub stops".to_owned());
+                }
+            }
+        };
+        match end {
+            PairEnd::Paired(paired) => json!({"paired": paired}),
+            PairEnd::Over(why) => json!({"over": why}),
+        }
+    } else if let Some(role) = asked.get("role") {
+        let device = role["device"].as_str().unwrap_or_default();
+        let done = match role["role"].as_str().and_then(Role::from_word) {
+            None => Err(HubError(
+                "a role is runner, controller or viewer".to_owned(),
+            )),
+            Some(word) => shared
+                .hub
+                .lock()
+                .unwrap()
+                .change_role(device, word)
+                .map(|member| json!({"name": member.name, "role": member.role})),
+        };
+        shared.changed.send_modify(|at| *at += 1);
+        answer(done)
+    } else if let Some(removed) = asked.get("remove") {
+        let device = removed["device"].as_str().unwrap_or_default();
+        let done = shared
+            .hub
+            .lock()
+            .unwrap()
+            .remove(device)
+            .map(|member| json!({"name": member.name}));
+        shared.changed.send_modify(|at| *at += 1);
+        answer(done)
+    } else if asked.get("devices").is_some() {
+        answer(Ok(devices(&shared.hub.lock().unwrap())))
+    } else {
+        answer(Err(HubError(
+            "this is no command of flottille-hub's".to_owned(),
+        )))
+    };
+    let _ = write.write_all(say(done).as_bytes()).await;
 }
 
-/// The first member: its own entry and the declaration of the machine that presents the code,
-/// which is this session's key, with the device's proof that it holds the code, for this session
-/// and these changes. Both are checked before the code is taken, and stored in one write; the
-/// hub's own proof is the answer.
-fn setup<C: Clock>(
-    hub: &mut Hub<C>,
-    transcript: &Transcript,
-    proof: &SetupProof,
-    changes: Vec<Change>,
-) -> Result<SetupProof, HubError> {
-    let code = hub.setup_code()?.to_owned();
-    let parsed = SetupCode::parse(&code).ok_or_else(not_the_code)?;
-    let head = MemberList::from_changes(changes.clone()).head();
-    if !transcript.proves(&parsed, 2, &head, proof) {
-        return Err(not_the_code());
-    }
-    let [root, machine] = <[Change; 2]>::try_from(changes).map_err(|_| {
-        HubError(
-            "a setup is the first member's entry, then the declaration of its machine".to_owned(),
-        )
-    })?;
-    let declares = matches!(&machine.action, Action::Machine { key, machine } if *key == root.signer && *machine == transcript.device);
-    if !declares {
-        return Err(HubError(
-            "the setup's second change must declare the machine that presents the code".to_owned(),
-        ));
-    }
-    hub.setup(&code, vec![root, machine])?;
-    Ok(transcript.setup_proof(&parsed, 1, &head))
+/// The members, as `flottille-hub devices` says them.
+fn devices<C: Clock>(hub: &Hub<C>) -> Value {
+    let Some(members) = hub.members() else {
+        return json!([]);
+    };
+    let hub_key = hub.key();
+    let name_of = |key: &PublicKey| {
+        if *key == hub_key {
+            return "the hub".to_owned();
+        }
+        members
+            .get(key)
+            .map_or_else(|| key.fingerprint(), |member| member.name.clone())
+    };
+    Value::Array(
+        members
+            .members()
+            .iter()
+            .map(|member| {
+                let facts = hub.facts().iter().find(|facts| facts.key == member.key);
+                json!({
+                    "name": member.name,
+                    "fingerprint": member.key.fingerprint(),
+                    "role": member.role,
+                    "added_by": name_of(&member.added_by),
+                    "machine": member.machine.map(|machine| machine.fingerprint()),
+                    "last_seen": facts.and_then(|facts| facts.last_seen),
+                })
+            })
+            .collect(),
+    )
 }
 
 /// Until `stopping` says so; nothing held of it, so that a `select!` holding it stays `Send`.

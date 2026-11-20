@@ -282,12 +282,15 @@ list in a state folder (`--state`): that folder is what to back up.
 - *docker compose*: `crates/flottille-hub/compose.example.yml`, with `FLOTTILLE_HUB_IMAGE` set to
   the image and its version. It publishes 7448 on the host's loopback and keeps the state in a named
   volume, read-only and with no capability; the host's reverse proxy, which holds the certificate and passes HTTP upgrades on, is what
-  to open (443). The first start prints the **setup code** once in the hub's log:
-  `docker compose -f compose.example.yml logs hub`.
+  to open (443). Each device pairs in pair mode, run beside the hub that runs:
+  `docker compose -f compose.example.yml exec hub /flottille-hub --state /var/lib/flottille-hub pair
+  --public-url https://hub.example.net` prints a code and its QR for one device, holding the
+  address the devices reach the hub at (`docs/remote.md`, "Pairing").
 - *systemd*: the binary at `/usr/local/bin/flottille-hub` and
   `crates/flottille-hub/flottille-hub.service` in `/etc/systemd/system/`, a service of its own user
   with `/var/lib/flottille-hub` as its state, and no capability, a filtered set of system calls,
-  and IP and Unix sockets only. The setup code is in `journalctl -u flottille-hub`.
+  and IP and Unix sockets only. A device pairs with `sudo flottille-hub --state
+  /var/lib/flottille-hub pair`, beside the service; its log is in `journalctl -u flottille-hub`.
 - To reach the hub without a proxy, give it a certificate (`--tls-cert`, `--tls-key`) and open its
   port; the image and the unit are plain on the loopback by default.
 
@@ -296,10 +299,9 @@ what the release promises, each as a step named after its scenario:
 
 - `the_static_binary_runs_with_no_shared_library`: `tools/check-static.sh` (`file` says static,
   `ldd` lists no library), and the x86_64 binary is run;
-- `the_image_starts_prints_a_setup_code_and_answers_on_its_port`: `tools/check-hub-image.sh` starts
+- `the_image_starts_says_how_to_pair_and_answers_on_its_port`: `tools/check-hub-image.sh` starts
   the image as the compose example does (read-only, no capability, no new privilege) on a loopback
-  port, finds a setup code in its log (never printed back: CI logs are
-  public) and gets the hub's answer on its port;
+  port, finds in its log how to pair a first device, and gets the hub's answer on its port;
 - `the_compose_example_is_valid`: `docker compose config` on the example.
 
 It runs on a pull request **only when the hub or its release changes** (`changes`: the hub, `flottille-link`

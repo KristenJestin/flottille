@@ -1,22 +1,26 @@
-//! The hub's state and its rules (`docs/remote.md`, "The hub", "The first member", "Pairing"), as
-//! a library its server (`server.rs`) calls: its key, the setup code, the member list it stores, the
-//! invitations and their join requests, and the presence and addresses the members tell it.
+//! The hub's state and its rules (`docs/remote.md`, "The hub", "Pairing"), as a library its server
+//! (`server.rs`) calls: its key, the member list it stores, its pair mode, and what it knows of the
+//! members' devices, their presence and addresses.
 //!
-//! The hub signs nothing and cannot add, remove or rename a member: every change it stores is a
-//! member's, checked by `flottille-link`'s list check against the list it holds, before it is
-//! stored. An addition answers a join request and is signed by the member that invited.
+//! The hub adds the devices: in pair mode (`open_pairing`, from `flottille-hub pair` on its host), a
+//! device that proves it holds the pair code's secret is paired, its entry signed with the hub's
+//! key (`Action::Pair`); a role is changed and a device removed the same way from the hub's host
+//! (`flottille-hub role`, `flottille-hub remove`). A member's change (a removal, a name, an icon and
+//! a colour, the declaration of its machine) is checked by `flottille-link`'s list check against
+//! the list the hub holds before it is stored; a member adds no device.
 //!
 //! On disk, its state folder (700) holds `hub.key` (600, `flottille-link`'s `HubKey`), `hub.lock`,
-//! which one process holds while it uses the folder, and `hub.json` (600), written whole under a
-//! temporary name and renamed over the old one:
+//! which one process holds while it uses the folder, `hub.sock`, where `flottille-hub pair` and
+//! the other commands of the hub's host reach the hub that runs (`server.rs`), and `hub.json`
+//! (600), written whole under a temporary name and renamed over the old one:
 //!
 //! ```json
-//! {"version": 1, "setup_code": "7KQ2-M4XP-9TRW-H3CD", "members": [/* the list's changes */]}
+//! {"version": 1, "members": [/* the list's changes */], "devices": [/* `Facts` */]}
 //! ```
 //!
-//! `setup_code` is there only while the list is empty. The invitations, the join requests, the
-//! asks taken, the presence and the addresses are kept in memory: they last minutes, or are told
-//! again when a device connects.
+//! A `hub.json` of before pair mode may hold a `setup_code`: it is read, and dropped at the next
+//! write. The pair mode, the asks taken, the presence and the addresses are kept in memory: they
+//! last minutes, or are told again when a device connects.
 
 use std::fmt;
 use std::fs::{File, OpenOptions};
@@ -25,21 +29,25 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use flottille_link::{
-    Action, Change, ChangeHash, HubKey, InvitationAsk, ListError, MemberList, Members, PublicKey,
-    Role, SetupCode, Token,
+    Action, Change, Facts, HubKey, ListError, Member, MemberList, Members, PairCode, PairSecret,
+    Proposed, PublicKey, Role,
 };
 
+mod qr;
 mod server;
 
+pub use qr::qr;
 use serde::{Deserialize, Serialize};
 pub use server::{
-    KEPT_FOR_MEMBERS, LISTEN, MOST_ARRIVING, SETUP_IDLE, Served, Waits, serve, serve_with,
-    tls_server,
+    KEPT_FOR_MEMBERS, LISTEN, MOST_ARRIVING, PAIR_IDLE, SOCKET_FILE, Served, Waits, serve,
+    serve_with, tls_server,
 };
-use subtle::ConstantTimeEq;
 
-/// How long an invitation lasts, and how far an ask's time may be from the hub's.
-pub const FIVE_MINUTES: u64 = 5 * 60;
+/// How long a pair mode lasts unless told otherwise, and the longest it may last, in minutes.
+pub const PAIR_MINUTES: u64 = 5;
+pub const LONGEST_PAIR_MINUTES: u64 = 15;
+/// The wrong proofs a pair mode takes before it closes: someone tries codes, or holds a damaged one.
+pub const WRONG_PROOFS: u32 = 5;
 
 /// The most changes of the list one member makes within an hour: a member's device, a viewer's
 /// too, cannot fill the list (`flottille_link::MOST_CHANGES`) in an afternoon.
@@ -53,6 +61,9 @@ pub const STATE_FILE: &str = "hub.json";
 pub const LOCK_FILE: &str = "hub.lock";
 
 const VERSION: u32 = 1;
+
+/// The longest text a device says of itself (`Ask::About`).
+const LONGEST_ABOUT: usize = 32;
 
 /// The hub's time, in seconds since 1970: the system's, or one a test moves.
 pub trait Clock {
@@ -94,32 +105,32 @@ pub struct Presence {
     pub last_input: u64,
 }
 
-/// A device that answered an invitation and waits for the member that invited to accept it.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct JoinRequest {
-    pub token: Token,
+/// A device paired, as `flottille-hub pair` says it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct PairedDevice {
     pub key: PublicKey,
-    pub inviter: PublicKey,
+    pub name: String,
+    pub fingerprint: String,
+    pub role: Role,
+    /// It was a member already: nothing changed, its card is kept.
+    pub again: bool,
 }
 
-/// Where the join request of a joining machine stands.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Standing {
-    /// It waits for the member that invited, `left` seconds more at most.
-    Waiting { left: u64 },
-    /// The new device is a member.
-    Added,
-    /// It was refused, or its invitation expired.
-    Over,
+/// How a pair mode ended.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PairEnd {
+    Paired(PairedDevice),
+    /// Its minutes passed, or it was closed: why, in a sentence.
+    Over(String),
 }
 
-/// An invitation given and not yet over.
-struct Open {
-    token: Token,
-    inviter: PublicKey,
-    made: u64,
-    /// The new device's key, once one answered.
-    joining: Option<PublicKey>,
+/// The pair mode open: one at a time.
+struct PairMode {
+    /// Raised at each pair mode, so that a command waits for its own only.
+    number: u64,
+    secret: PairSecret,
+    until: u64,
+    wrong: u32,
 }
 
 /// What `hub.json` holds.
@@ -127,9 +138,14 @@ struct Open {
 #[serde(deny_unknown_fields)]
 struct Stored {
     version: u32,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// A hub of before pair mode kept its setup code here while it had no member: read, never
+    /// written.
+    #[serde(default, skip_serializing)]
     setup_code: Option<String>,
     members: MemberList,
+    /// What the hub knows of each member's device, by its key.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    devices: Vec<Facts>,
 }
 
 pub struct Hub<C: Clock = SystemClock> {
@@ -142,11 +158,10 @@ pub struct Hub<C: Clock = SystemClock> {
     stored: Stored,
     /// The stored list, checked; `None` while it is empty.
     checked: Option<Members>,
-    /// The line to print in the log, when this start made the setup code.
-    announcement: Option<String>,
-    open: Vec<Open>,
-    /// The asks taken, by their member and nonce, with their time: kept while they could be taken.
-    asks: Vec<(PublicKey, [u8; 16], u64)>,
+    pairing: Option<PairMode>,
+    /// How the last pair mode ended, with its number.
+    ended: Option<(u64, PairEnd)>,
+    pairings: u64,
     presence: Vec<(PublicKey, Presence)>,
     addresses: Vec<(PublicKey, Vec<String>)>,
     /// The changes stored within the last hour, by their signer, with their time.
@@ -154,39 +169,29 @@ pub struct Hub<C: Clock = SystemClock> {
 }
 
 impl<C: Clock> Hub<C> {
-    /// The hub of the state `folder`, made there the first time: its key, and with an empty member
-    /// list a setup code, announced once (`take_announcement`). The folder is locked while the hub
-    /// lives: another process using it is refused. A stored list that does not check is refused,
-    /// and so is the start.
+    /// The hub of the state `folder`, made there the first time: its key, and an empty list. The
+    /// folder is locked while the hub lives: another process using it is refused. A stored list
+    /// that does not check is refused, and so is the start.
     pub fn open(folder: &Path, clock: C) -> Result<Hub<C>, HubError> {
         let key = HubKey::load_or_make(folder).map_err(|error| HubError(error.to_string()))?;
         let lock = lock(folder)?;
         let file = folder.join(STATE_FILE);
-        let mut stored = read(&file)?.unwrap_or(Stored {
+        let stored = read(&file)?.unwrap_or(Stored {
             version: VERSION,
             ..Stored::default()
         });
         let checked = match stored.members.root() {
-            Some(root) => Some(stored.members.check(&root).map_err(|error| {
+            Some(root) => Some(stored.members.check(&root, &key.public()).map_err(|error| {
                 HubError(format!(
-                    "the member list in {} does not check: {}; the hub stores only what members \
-                     signed, so the file was changed or damaged: run flottille-hub setup-code \
-                     --reset on this machine to start again",
+                    "the member list in {} does not check: {}; the hub stores only what it and \
+                     the members signed, so the file was changed or damaged: run flottille-hub \
+                     reset on this machine to start again",
                     file.display(),
                     why(error)
                 ))
             })?),
             None => None,
         };
-        let mut announcement = None;
-        if checked.is_none() && stored.setup_code.is_none() {
-            let code = new_code()?;
-            stored.setup_code = Some(code.clone());
-            write(&file, &stored)?;
-            announcement = Some(format!(
-                "setup code: {code}, valid until a first member joins"
-            ));
-        }
         Ok(Hub {
             _lock: lock,
             file,
@@ -194,67 +199,21 @@ impl<C: Clock> Hub<C> {
             clock,
             stored,
             checked,
-            announcement,
-            open: Vec::new(),
-            asks: Vec::new(),
+            pairing: None,
+            ended: None,
+            pairings: 0,
             presence: Vec::new(),
             addresses: Vec::new(),
             recent: Vec::new(),
         })
     }
 
-    /// The hub's public key, which the devices pin when they join.
+    /// The hub's public key, which the devices pin when they pair.
     pub fn key(&self) -> PublicKey {
         self.key.public()
     }
 
-    /// The line the log prints at the start that made the setup code; `None` after, and at any
-    /// other start.
-    pub fn take_announcement(&mut self) -> Option<String> {
-        self.announcement.take()
-    }
-
-    /// The setup code, while no member exists.
-    pub fn setup_code(&self) -> Result<&str, HubError> {
-        match (&self.checked, &self.stored.setup_code) {
-            (None, Some(code)) => Ok(code),
-            _ => Err(has_members()),
-        }
-    }
-
-    /// The first member, with `code`: `changes`, its own entry as a runner signed by itself, then
-    /// what it signed after it (the declaration of its machine), stored in one write or not at
-    /// all. The code works once, only while no member exists.
-    pub fn setup(&mut self, code: &str, changes: Vec<Change>) -> Result<(), HubError> {
-        let stored = self.setup_code()?;
-        let same = match (SetupCode::parse(code), SetupCode::parse(stored)) {
-            (Some(presented), Some(stored)) => bool::from(
-                presented
-                    .to_string()
-                    .as_bytes()
-                    .ct_eq(stored.to_string().as_bytes()),
-            ),
-            _ => false,
-        };
-        if !same {
-            return Err(not_the_code());
-        }
-        let Some(root) = changes.first().map(|first| first.signer) else {
-            return Err(refused("a setup holds the first member's entry"));
-        };
-        let members = MemberList::from_changes(changes);
-        let checked = members.check(&root).map_err(refuse_change)?;
-        self.store(
-            Stored {
-                version: VERSION,
-                setup_code: None,
-                members,
-            },
-            checked,
-        )
-    }
-
-    /// The member list, as the members signed it.
+    /// The member list, as the hub and the members signed it.
     pub fn list(&self) -> &MemberList {
         &self.stored.members
     }
@@ -265,186 +224,261 @@ impl<C: Clock> Hub<C> {
     }
 
     /// Whether a device that proved `key`, and said it pinned the list whose first change's hash
-    /// is `pinned`, may keep a session: one that pinned none while the list is empty (it comes to
-    /// set the hub up), then a member's device or the machine a member declared. A refusal says
-    /// why, and whether the list the device pinned was reset; nothing else of the list.
+    /// is `pinned`, may keep a session: a member's device or the machine a member declared. A
+    /// refusal says why, and whether the list the device pinned was reset; nothing else of the
+    /// list.
     pub fn welcome(
         &self,
         key: &PublicKey,
-        pinned: Option<ChangeHash>,
+        pinned: Option<flottille_link::ChangeHash>,
     ) -> Result<(), Box<(String, bool)>> {
         let first = self.stored.members.changes().first().map(Change::hash);
         let reset = pinned.is_some_and(|pinned| Some(pinned) != first);
-        let Some(members) = &self.checked else {
-            if reset {
-                return Err(Box::new((
-                    "this hub's member list was reset".to_owned(),
-                    true,
-                )));
-            }
-            return Ok(());
-        };
-        if members.get(key).is_some() || members.by_machine(key).is_some() {
-            return Ok(());
-        }
-        Err(Box::new((
-            format!(
-                "{} is not one of this hub's members, nor a member's machine",
-                key.fingerprint()
-            ),
-            reset,
-        )))
-    }
-
-    /// The token of a new invitation, for a member's signed ask: valid 5 minutes, once.
-    pub fn invite(&mut self, ask: &InvitationAsk) -> Result<Token, HubError> {
-        let now = self.sweep();
-        if ask.hub != self.key() {
-            return Err(refused("this ask is for another hub"));
-        }
-        if !ask.signed() {
-            return Err(refused("this ask does not carry its member's signature"));
-        }
-        if now.abs_diff(ask.at) >= FIVE_MINUTES {
-            return Err(refused(
-                "this ask was not signed within 5 minutes of the hub's time: check the device's \
-                 clock",
-            ));
-        }
-        if self
-            .asks
-            .iter()
-            .any(|(member, nonce, _)| *member == ask.member && *nonce == ask.nonce)
-        {
-            return Err(refused("this ask was taken already"));
-        }
-        let member = self.member(&ask.member)?;
-        if member.role == Role::Viewer {
-            return Err(refused(format!(
-                "{} may only view: a controller or a runner may invite a device",
-                member.name
-            )));
-        }
-        let token = Token(random()?);
-        self.asks.push((ask.member, ask.nonce, ask.at));
-        self.open.push(Open {
-            token,
-            inviter: ask.member,
-            made: now,
-            joining: None,
-        });
-        Ok(token)
-    }
-
-    /// A new device answers the invitation of `token` with its key: the request waits for the
-    /// member that invited.
-    pub fn join(&mut self, token: &Token, key: PublicKey) -> Result<(), HubError> {
-        self.sweep();
-        if let Some(members) = &self.checked {
-            if members.was_removed(&key) {
-                return Err(refused(format!(
-                    "{} was removed from the member list: a removed device joins again with a \
-                     new key",
-                    key.fingerprint()
-                )));
-            }
-            if members.get(&key).is_some() || members.by_machine(&key).is_some() {
-                return Err(refused(format!(
-                    "{} is a member already",
-                    key.fingerprint()
-                )));
-            }
-        }
-        let open = self
-            .find(token)
-            .ok_or_else(|| refused("this invitation is unknown or expired: ask for a new one"))?;
-        if open.joining.is_some() {
-            return Err(refused(
-                "this invitation was answered already: ask for a new one",
-            ));
-        }
-        open.joining = Some(key);
-        Ok(())
-    }
-
-    /// The join requests that wait for `inviter`.
-    pub fn requests(&mut self, inviter: &PublicKey) -> Vec<JoinRequest> {
-        self.sweep();
-        self.open
-            .iter()
-            .filter(|open| open.inviter == *inviter)
-            .filter_map(|open| {
-                Some(JoinRequest {
-                    token: open.token,
-                    key: open.joining?,
-                    inviter: open.inviter,
-                })
-            })
-            .collect()
-    }
-
-    /// The join requests that wait for `inviter`, as they are at the hub's time: what a session
-    /// sends the member that invited, without ending what is over (`requests` does).
-    pub fn pending(&self, inviter: &PublicKey) -> Vec<JoinRequest> {
-        let now = self.clock.now();
-        self.open
-            .iter()
-            .filter(|open| open.inviter == *inviter && now < open.made + FIVE_MINUTES)
-            .filter_map(|open| {
-                Some(JoinRequest {
-                    token: open.token,
-                    key: open.joining?,
-                    inviter: open.inviter,
-                })
-            })
-            .collect()
-    }
-
-    /// Where the join request of `key`, answering the invitation of `token`, stands.
-    pub fn joined(&mut self, token: &Token, key: &PublicKey) -> Standing {
-        let now = self.sweep();
         if self
             .checked
             .as_ref()
-            .is_some_and(|members| members.get(key).is_some())
+            .is_some_and(|members| members.get(key).is_some() || members.by_machine(key).is_some())
         {
-            return Standing::Added;
+            return Ok(());
         }
-        match self.find(token) {
-            Some(open) if open.joining == Some(*key) => Standing::Waiting {
-                left: (open.made + FIVE_MINUTES).saturating_sub(now),
-            },
-            _ => Standing::Over,
-        }
+        let reason = if reset {
+            "this hub's member list was reset".to_owned()
+        } else {
+            format!(
+                "{} is not one of this hub's members, nor a member's machine: pair it with \
+                 flottille-hub pair on the hub's host",
+                key.fingerprint()
+            )
+        };
+        Err(Box::new((reason, reset)))
     }
 
-    /// `by`, the member that invited, refuses the join request of `token`: the invitation ends.
-    pub fn refuse(&mut self, token: &Token, by: &PublicKey) -> Result<(), HubError> {
-        self.sweep();
-        let open = self
-            .find(token)
-            .filter(|open| open.joining.is_some())
-            .ok_or_else(|| refused("no join request holds this invitation"))?;
-        if open.inviter != *by {
-            return Err(refused(
-                "only the member that invited may refuse its join request",
-            ));
-        }
-        let token = open.token;
-        self.open.retain(|open| open.token != token);
-        Ok(())
-    }
-
-    /// A member's change of the list, stored once it checks after the list the hub holds. An
-    /// addition must answer a join request to its signer, which it ends. A member makes at most
-    /// `CHANGES_AN_HOUR` changes within an hour.
-    pub fn submit(&mut self, change: Change) -> Result<(), HubError> {
+    /// Opens pair mode for `minutes` (`PAIR_MINUTES` when `None`, `LONGEST_PAIR_MINUTES` at most):
+    /// the code to print, which holds `url`, the hub's key and a new secret, valid once. One pair
+    /// mode at a time: another one open is said.
+    pub fn open_pairing(
+        &mut self,
+        url: &str,
+        minutes: Option<u64>,
+    ) -> Result<(u64, PairCode), HubError> {
         let now = self.sweep();
-        let Some(root) = self.stored.members.root() else {
+        if let Some(open) = &self.pairing {
+            return Err(refused(format!(
+                "pair mode is open already, {} s more: pair a device with its code, or stop the \
+                 flottille-hub pair that opened it",
+                open.until.saturating_sub(now)
+            )));
+        }
+        let minutes = minutes.unwrap_or(PAIR_MINUTES);
+        if !(1..=LONGEST_PAIR_MINUTES).contains(&minutes) {
+            return Err(refused(format!(
+                "pair mode lasts 1 to {LONGEST_PAIR_MINUTES} minutes"
+            )));
+        }
+        let code = PairCode {
+            hub_url: url.to_owned(),
+            hub_key: self.key(),
+            secret: PairSecret::new().map_err(HubError)?,
+        };
+        // Refused here when the URL is not one: before anything is open.
+        code.code().map_err(|error| refused(error.to_string()))?;
+        self.pairings += 1;
+        self.pairing = Some(PairMode {
+            number: self.pairings,
+            secret: code.secret,
+            until: now + minutes * 60,
+            wrong: 0,
+        });
+        Ok((self.pairings, code))
+    }
+
+    /// Closes the pair mode `number`, if it is still open: its command stopped.
+    pub fn close_pairing(&mut self, number: u64) {
+        if self
+            .pairing
+            .as_ref()
+            .is_some_and(|open| open.number == number)
+        {
+            self.end_pairing(PairEnd::Over("pair mode was closed".to_owned()));
+        }
+    }
+
+    /// How the pair mode `number` ended; `None` while it is open. Its minutes passed end it here.
+    pub fn pairing_ended(&mut self, number: u64) -> Option<PairEnd> {
+        self.sweep();
+        match &self.ended {
+            Some((ended, end)) if *ended == number => Some(end.clone()),
+            _ if self
+                .pairing
+                .as_ref()
+                .is_some_and(|open| open.number == number) =>
+            {
+                None
+            }
+            _ => Some(PairEnd::Over("pair mode was closed".to_owned())),
+        }
+    }
+
+    /// Seconds left to the pair mode open; `None` when none is.
+    pub fn pairing_left(&self) -> Option<u64> {
+        let now = self.clock.now();
+        self.pairing
+            .as_ref()
+            .map(|open| open.until.saturating_sub(now))
+    }
+
+    /// A device pairs: `proves` says whether its proof is good for a secret, the pair mode's. Once
+    /// the proof checks, pair mode ends: the device proposed is paired, its entry signed with the
+    /// hub's key, as it proposed it; one that is a member already keeps its entry and its card.
+    /// A wrong proof is counted: `WRONG_PROOFS` of them close pair mode.
+    pub fn pair(
+        &mut self,
+        proposed: &Proposed,
+        proves: impl Fn(&PairSecret) -> bool,
+        version: &str,
+    ) -> Result<PairedDevice, HubError> {
+        let now = self.sweep();
+        let Some(open) = &mut self.pairing else {
             return Err(refused(
-                "the hub has no member yet: the first one joins with the setup code",
+                "pair mode is not open on this hub, or this code's minutes passed, or it served \
+                 already: run flottille-hub pair on the hub's host for a new code",
             ));
         };
+        if !proves(&open.secret) {
+            open.wrong += 1;
+            if open.wrong >= WRONG_PROOFS {
+                self.end_pairing(PairEnd::Over(format!(
+                    "pair mode was closed after {WRONG_PROOFS} wrong proofs: a device holds a \
+                     damaged code, or someone tries codes"
+                )));
+            }
+            return Err(refused(
+                "this device did not prove it holds the pair code: copy the code again, whole, \
+                 from what flottille-hub pair printed",
+            ));
+        }
+        proposed.check().map_err(refused)?;
+        let again = self
+            .checked
+            .as_ref()
+            .and_then(|members| members.get(&proposed.key))
+            .cloned();
+        let paired = match again {
+            Some(member) => PairedDevice {
+                key: member.key,
+                fingerprint: member.key.fingerprint(),
+                name: member.name,
+                role: member.role,
+                again: true,
+            },
+            None => {
+                let mut list = match self.stored.members.root() {
+                    Some(_) => self.stored.members.clone(),
+                    None => MemberList::start_hub(&self.key)
+                        .map_err(|error| HubError(error.to_string()))?,
+                };
+                list.sign_as_hub(
+                    Action::Pair {
+                        key: proposed.key,
+                        name: proposed.name.clone(),
+                        role: proposed.role,
+                        icon: proposed.icon,
+                        colour: proposed.colour,
+                    },
+                    &self.key,
+                );
+                let pairing_end =
+                    |error: HubError| HubError(format!("this device cannot be paired: {error}"));
+                self.store_list(list).map_err(pairing_end)?;
+                PairedDevice {
+                    key: proposed.key,
+                    name: proposed.name.clone(),
+                    fingerprint: proposed.key.fingerprint(),
+                    role: proposed.role,
+                    again: false,
+                }
+            }
+        };
+        let facts = self.facts_mut(&paired.key);
+        facts.paired_at = Some(now);
+        facts.version = Some(version.to_owned());
+        facts.last_seen = Some(now);
+        self.write_facts()?;
+        self.end_pairing(PairEnd::Paired(paired.clone()));
+        Ok(paired)
+    }
+
+    /// `flottille-hub role <device> <role>`: the hub changes the role of the member `device` (its
+    /// name or its key's fingerprint), signed with its key.
+    pub fn change_role(&mut self, device: &str, role: Role) -> Result<Member, HubError> {
+        let member = self.named(device)?;
+        if member.role == role {
+            return Err(refused(format!(
+                "{} is a {} already",
+                member.name,
+                role.word()
+            )));
+        }
+        let mut list = self.stored.members.clone();
+        list.sign_as_hub(
+            Action::Role {
+                key: member.key,
+                role,
+            },
+            &self.key,
+        );
+        self.store_list(list)?;
+        Ok(Member { role, ..member })
+    }
+
+    /// `flottille-hub remove <device>`: the hub removes the member `device`, signed with its key.
+    pub fn remove(&mut self, device: &str) -> Result<Member, HubError> {
+        let member = self.named(device)?;
+        let mut list = self.stored.members.clone();
+        list.sign_as_hub(Action::Remove { key: member.key }, &self.key);
+        self.store_list(list)?;
+        Ok(member)
+    }
+
+    /// The member named `device`, or whose key's fingerprint it is.
+    fn named(&self, device: &str) -> Result<Member, HubError> {
+        self.checked
+            .as_ref()
+            .and_then(|members| {
+                members
+                    .members()
+                    .iter()
+                    .find(|member| member.name == device || member.key.fingerprint() == device)
+            })
+            .cloned()
+            .ok_or_else(|| {
+                refused(format!(
+                    "{device} is no member's name nor fingerprint: flottille-hub devices lists them"
+                ))
+            })
+    }
+
+    /// A member's change of the list, stored once it checks after the list the hub holds. A member
+    /// adds no device, and makes at most `CHANGES_AN_HOUR` changes within an hour.
+    pub fn submit(&mut self, change: Change) -> Result<(), HubError> {
+        let now = self.sweep();
+        if self.stored.members.root().is_none() {
+            return Err(refused(
+                "the hub has no member yet: pair a first device with flottille-hub pair",
+            ));
+        }
+        if change.signer == self.key() {
+            return Err(refused(
+                "the hub refuses this change: it is signed with the hub's own key, which signs on \
+                 the hub's host only",
+            ));
+        }
+        if matches!(change.action, Action::Add { .. }) {
+            return Err(refused(
+                "the hub refuses this change: a device is paired on the hub (flottille-hub pair), \
+                 no member adds one",
+            ));
+        }
         let made = self
             .recent
             .iter()
@@ -456,39 +490,57 @@ impl<C: Clock> Hub<C> {
                 change.signer.fingerprint()
             )));
         }
-        let answered = match &change.action {
-            Action::Add { key, .. } => {
-                let open = self
-                    .open
-                    .iter()
-                    .find(|open| open.inviter == change.signer && open.joining == Some(*key))
-                    .ok_or_else(|| {
-                        refused(
-                            "the hub refuses this change: it adds a key no join request to its \
-                             signer holds (a device joins through an invitation)",
-                        )
-                    })?;
-                Some(open.token)
-            }
-            Action::Remove { .. } | Action::Rename { .. } | Action::Machine { .. } => None,
-        };
         let signer = change.signer;
         let mut changes = self.stored.members.changes().to_vec();
         changes.push(change);
-        let members = MemberList::from_changes(changes);
-        let checked = members.check(&root).map_err(refuse_change)?;
-        self.store(
-            Stored {
-                members,
-                ..self.stored.clone()
-            },
-            checked,
-        )?;
-        if let Some(token) = answered {
-            self.open.retain(|open| open.token != token);
-        }
+        self.store_list(MemberList::from_changes(changes))?;
         self.recent.push((signer, now));
         Ok(())
+    }
+
+    /// What a member's device says of itself: what it is and its system.
+    pub fn about(
+        &mut self,
+        member: &PublicKey,
+        device: &str,
+        system: &str,
+    ) -> Result<(), HubError> {
+        let member = self.member(member)?.key;
+        let fine = |text: &str| {
+            !text.is_empty()
+                && text.len() <= LONGEST_ABOUT
+                && text
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        };
+        if !fine(device) || !fine(system) {
+            return Err(refused(format!(
+                "what a device says of itself is a word of at most {LONGEST_ABOUT} letters, digits, \
+                 hyphens, dots or underscores"
+            )));
+        }
+        let facts = self.facts_mut(&member);
+        if facts.kind.as_deref() == Some(device) && facts.system.as_deref() == Some(system) {
+            return Ok(());
+        }
+        facts.kind = Some(device.to_owned());
+        facts.system = Some(system.to_owned());
+        self.write_facts()
+    }
+
+    /// A member's device connected, or left, saying `version`: when it was last seen.
+    pub fn seen(&mut self, member: &PublicKey, version: &str) -> Result<(), HubError> {
+        let member = self.member(member)?.key;
+        let now = self.clock.now();
+        let facts = self.facts_mut(&member);
+        facts.last_seen = Some(now);
+        facts.version = Some(version.chars().take(LONGEST_ABOUT).collect());
+        self.write_facts()
+    }
+
+    /// What the hub knows of each member's device.
+    pub fn facts(&self) -> &[Facts] {
+        &self.stored.devices
     }
 
     /// What a member's client tells of its presence, kept in memory.
@@ -527,83 +579,105 @@ impl<C: Clock> Hub<C> {
             .map(|(_, addresses)| addresses.as_slice())
     }
 
-    /// Writes `stored`, then holds it: a state that could not be written is not taken.
-    fn store(&mut self, stored: Stored, checked: Members) -> Result<(), HubError> {
-        write(&self.file, &stored)?;
-        // A member removed takes its presence and addresses with it, and so does a machine no
-        // member declares any more.
+    /// Checks `members` after the list the hub holds, writes it, then holds it: a list that does
+    /// not check, or could not be written, is not taken.
+    fn store_list(&mut self, members: MemberList) -> Result<(), HubError> {
+        let root = members
+            .root()
+            .ok_or_else(|| refused("the hub refuses an empty list"))?;
+        let checked = members.check(&root, &self.key()).map_err(refuse_change)?;
+        // A member removed takes its presence, addresses and facts with it, and so does a machine
+        // no member declares any more.
         let member =
             |key: &PublicKey| checked.get(key).is_some() || checked.by_machine(key).is_some();
+        let stored = Stored {
+            version: VERSION,
+            setup_code: None,
+            devices: self
+                .stored
+                .devices
+                .iter()
+                .filter(|facts| checked.get(&facts.key).is_some())
+                .cloned()
+                .collect(),
+            members,
+        };
+        write(&self.file, &stored)?;
         self.presence.retain(|(key, _)| member(key));
         self.addresses.retain(|(key, _)| member(key));
-        // A removed member's invitations close with it: their waiting joins end, refused.
-        self.open
-            .retain(|open| checked.get(&open.inviter).is_some());
         self.stored = stored;
         self.checked = Some(checked);
         Ok(())
     }
 
+    fn write_facts(&mut self) -> Result<(), HubError> {
+        self.stored.setup_code = None;
+        write(&self.file, &self.stored)
+    }
+
+    fn facts_mut(&mut self, key: &PublicKey) -> &mut Facts {
+        let at = match self
+            .stored
+            .devices
+            .iter()
+            .position(|facts| facts.key == *key)
+        {
+            Some(at) => at,
+            None => {
+                self.stored.devices.push(Facts {
+                    key: *key,
+                    kind: None,
+                    system: None,
+                    version: None,
+                    paired_at: None,
+                    last_seen: None,
+                });
+                self.stored.devices.len() - 1
+            }
+        };
+        &mut self.stored.devices[at]
+    }
+
+    fn end_pairing(&mut self, end: PairEnd) {
+        if let Some(open) = self.pairing.take() {
+            self.ended = Some((open.number, end));
+        }
+    }
+
     /// The member of `key`, a member's device key or the machine it declared.
-    fn member(&self, key: &PublicKey) -> Result<&flottille_link::Member, HubError> {
+    fn member(&self, key: &PublicKey) -> Result<&Member, HubError> {
         self.checked
             .as_ref()
             .and_then(|members| members.get(key).or_else(|| members.by_machine(key)))
             .ok_or_else(|| refused(format!("{} is not a member", key.fingerprint())))
     }
 
-    /// The invitation of `token`, compared in constant time.
-    fn find(&mut self, token: &Token) -> Option<&mut Open> {
-        self.open
-            .iter_mut()
-            .find(|open| bool::from(open.token.0.ct_eq(&token.0)))
-    }
-
-    /// Drops what is over: the invitations 5 minutes old, their join requests with them, and the
-    /// asks that could not be taken any more. Returns the time.
+    /// Ends what is over: a pair mode whose minutes passed, the changes counted an hour. Returns
+    /// the time.
     fn sweep(&mut self) -> u64 {
         let now = self.clock.now();
-        self.open.retain(|open| now < open.made + FIVE_MINUTES);
-        self.asks.retain(|(_, _, at)| now < at + FIVE_MINUTES);
+        if self.pairing.as_ref().is_some_and(|open| now >= open.until) {
+            self.end_pairing(PairEnd::Over(
+                "pair mode's minutes passed with no device paired".to_owned(),
+            ));
+        }
         self.recent.retain(|(_, at)| now < at + AN_HOUR);
         now
     }
 }
 
-/// `flottille-hub setup-code`: the setup code of the state `folder`, while no member exists. It
-/// reads a state that is there without taking the folder's lock, so that it serves while the hub runs: the
-/// state is written whole and renamed into place, never seen half written.
-pub fn setup_code(folder: &Path) -> Result<String, HubError> {
-    let file = folder.join(STATE_FILE);
-    match read(&file)? {
-        Some(Stored {
-            setup_code: Some(code),
-            members,
-            ..
-        }) if members.changes().is_empty() => Ok(code),
-        Some(_) => Err(has_members()),
-        // No state yet: made as a start makes it, and its code said.
-        None => Hub::open(folder, SystemClock)?
-            .setup_code()
-            .map(str::to_owned),
-    }
-}
-
-/// `flottille-hub setup-code --reset` (`docs/remote.md`, "Recovery"): empties the member list of
-/// the state `folder` and makes a new setup code, which it returns. It reads nothing of the state,
-/// so that a list that does not check, or a damaged file, is no obstacle; the hub's key stays. The
-/// folder's lock is taken: refused while a hub uses it, whose next write would undo the reset.
-pub fn reset(folder: &Path) -> Result<String, HubError> {
+/// `flottille-hub reset` (`docs/remote.md`, "Recovery"): empties the member list of the state
+/// `folder`, and what the hub knew of the devices. It reads nothing of the state, so that a list
+/// that does not check, or a damaged file, is no obstacle; the hub's key stays. The folder's lock
+/// is taken: refused while a hub uses it, whose next write would undo the reset.
+pub fn reset(folder: &Path) -> Result<(), HubError> {
     HubKey::load_or_make(folder).map_err(|error| HubError(error.to_string()))?;
     let _lock = lock(folder)?;
-    let code = new_code()?;
     let stored = Stored {
         version: VERSION,
-        setup_code: Some(code.clone()),
-        members: MemberList::default(),
+        ..Stored::default()
     };
-    write(&folder.join(STATE_FILE), &stored)?;
-    Ok(code)
+    write(&folder.join(STATE_FILE), &stored)
 }
 
 /// The lock of the state `folder`, taken without waiting: held until the file is closed.
@@ -650,25 +724,10 @@ impl<C: Clock> fmt::Debug for Hub<C> {
     }
 }
 
-/// The refusal of a setup whose code, or proof of it, is not the hub's.
-pub(crate) fn not_the_code() -> HubError {
-    refused(
-        "this setup code is not the hub's: copy it again from the hub's log, or from \
-         flottille-hub setup-code on the hub's machine",
-    )
-}
-
-fn has_members() -> HubError {
-    refused(
-        "the hub has a member already: a setup code serves only before the first member joins \
-         (flottille-hub setup-code --reset empties the list and makes a new one)",
-    )
-}
-
 fn why(error: ListError) -> String {
     match error {
         ListError::Refused(why) => why,
-        ListError::Reset => "its root is not the first member's".to_owned(),
+        ListError::Reset => "its root is not the list's first change".to_owned(),
     }
 }
 
@@ -683,21 +742,8 @@ fn keep<T>(entries: &mut Vec<(PublicKey, T)>, key: &PublicKey, value: T) {
     }
 }
 
-fn random<const N: usize>() -> Result<[u8; N], HubError> {
-    let mut bytes = [0u8; N];
-    getrandom::fill(&mut bytes).map_err(|error| HubError(format!("no random bytes: {error}")))?;
-    Ok(bytes)
-}
-
-/// A new setup code (`flottille_link::SetupCode`), as the state keeps it.
-fn new_code() -> Result<String, HubError> {
-    SetupCode::new()
-        .map(|code| code.to_string())
-        .map_err(HubError)
-}
-
 /// The state in `file`, `None` when there is none. A link, or a file others may read or write, is
-/// refused: it holds the setup code.
+/// refused: what is in it is the user's, and the hub trusts nothing else wrote it.
 fn read(file: &Path) -> Result<Option<Stored>, HubError> {
     let shown = file.display();
     let opened = OpenOptions::new()
@@ -727,7 +773,7 @@ fn read(file: &Path) -> Result<Option<Stored>, HubError> {
     let mode = metadata.permissions().mode() & 0o777;
     if mode & 0o077 != 0 {
         return Err(HubError(format!(
-            "{shown} is open to other users (mode {mode:o}): it holds the setup code; make it \
+            "{shown} is open to other users (mode {mode:o}): it is the hub's state; make it \
              yours only with `chmod 600 {shown}`"
         )));
     }

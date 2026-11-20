@@ -3,9 +3,12 @@
 #
 #   systemctl daemon-reload && systemctl enable --now flottille-hub
 #
-# The first start makes the hub's key and a setup code, and prints the code once in the journal:
+# The first start makes the hub's key. Each device then pairs in pair mode, run beside the hub that
+# runs, as root (the service's user is its own), which prints a code and its QR for one device:
 #
-#   journalctl -u flottille-hub
+#   sudo flottille-hub --state /var/lib/flottille-hub pair
+#
+# Its log: journalctl -u flottille-hub
 #
 # It listens on the loopback, for a reverse proxy on this host that holds the certificate and
 # passes HTTP upgrades on (open 443 for the proxy, nothing for the hub). To reach it directly,
