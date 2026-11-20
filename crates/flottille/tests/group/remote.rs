@@ -23,6 +23,8 @@ mod remote_code;
 mod remote_hub;
 #[path = "../remote_keys.rs"]
 mod remote_keys;
+#[path = "../remote_launch.rs"]
+mod remote_launch;
 #[path = "../remote_link.rs"]
 mod remote_link;
 #[path = "../remote_requests.rs"]
