@@ -78,8 +78,10 @@ pub(crate) fn runner_user() -> User {
         .with_env("CLAUDE_CODE_OAUTH_TOKEN", "")
         .with_env("ANTHROPIC_AUTH_TOKEN", "");
     let claude = user.path("home/.claude");
+    let stopping = user.path("stopping");
     let user = user
         .with_env("CLAUDE_CONFIG_DIR", claude.to_str().unwrap())
+        .with_env("FLOTTILLE_TEST_STOPPING_FILE", stopping.to_str().unwrap())
         .with_fake_escalation();
     user.write_providers("[claude]\nenabled = true\n");
     user
@@ -258,7 +260,7 @@ fn set_up(hub: &TestHub, pc: &Machine) {
 }
 
 /// `joiner` joins the hub of `inviter` as the user pairs them, as `name` with `role`.
-fn pair(inviter: &Machine, joiner: &Machine, name: &str, role: &str) {
+pub(crate) fn pair(inviter: &Machine, joiner: &Machine, name: &str, role: &str) {
     let invited = inviter.user.run(&["remote", "invite", "--json"]);
     assert!(invited.status.success(), "{}", inviter.log());
     let invited: Value = serde_json::from_slice(&invited.stdout).unwrap();

@@ -7,12 +7,12 @@
 
 use crate::common;
 use crate::remote_launch::{
-    Machine, a_while, allowing, done, eventually, id_in, launched, pc_and_server, prompted,
+    Machine, a_while, allowing, done, eventually, id_in, launched, pair, pc_and_server, prompted,
     refused, restarted, sent_with, server_user, titled,
 };
 
 use common::mcp::Mcp;
-use flottille_link::{Call, MachineMessage};
+use flottille_link::{Call, Deliver, MachineMessage};
 use serde_json::{Value, json};
 
 /// The fake agents of `server` play `turns` (`crates/flottille-fake-agent`).
@@ -373,4 +373,186 @@ fn a_child_whose_report_came_back_no_longer_counts_in_its_parent_s_cap() {
         json!({"kind": "child", "title": "Local", "brief": "Here."}),
     );
     done(&again);
+}
+
+#[test]
+fn a_delivery_refused_while_the_parent_s_machine_stops_arrives_once_it_is_back() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    script(
+        &server,
+        json!([{"when": "Write the tests of the export.", "times": 1, "do": [
+            {"hold": "release"},
+            {"mcp": {"tool": "report", "arguments": {"text": "The export tests pass."}}}
+        ]}]),
+    );
+    let (_child, _launch, _mcp) = child_on_server(&pc, &server, "Write the tests of the export.");
+    prompted(&server, "Write the tests of the export.");
+    // pc answers every delivery as a daemon that is stopping does.
+    std::fs::write(pc.user.path("stopping"), "").unwrap();
+
+    release(&server);
+    answered(&server, "Your report went to your parent");
+    eventually("pc refused the report for now", || {
+        pc.log().contains("the daemon is stopping")
+    });
+    assert_eq!(prompts_with(&pc, "The export tests pass."), 0);
+
+    off(&pc);
+    std::fs::remove_file(pc.user.path("stopping")).unwrap();
+    on(&pc);
+    pc.wait_for("server");
+    prompted(&pc, "The export tests pass.");
+}
+
+#[test]
+fn a_child_whose_process_died_tells_its_parent_on_the_other_machine() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    script(
+        &server,
+        json!([{"when": "Write the tests of the export.", "times": 1, "do": [{"die": 3}]}]),
+    );
+    let (child, _launch, _mcp) = child_on_server(&pc, &server, "Write the tests of the export.");
+
+    prompted(&pc, "[flottille:child-replaced]");
+    let told = pc
+        .prompts()
+        .into_iter()
+        .find(|prompt| prompt.contains("[flottille:child-replaced]"))
+        .unwrap();
+    assert!(told.contains(&child), "{told}");
+    assert!(told.contains("it goes on in its session"), "{told}");
+}
+
+#[test]
+fn a_message_over_64000_characters_for_another_machine_is_refused_at_once() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    let (child, _launch, mcp) = child_on_server(&pc, &server, "Write the tests of the export.");
+    prompted(&server, "Write the tests of the export.");
+
+    let answer = mcp.call(
+        "agent_send",
+        json!({"agent_id": child, "message": format!("Cover {}", "x".repeat(64_000))}),
+    );
+
+    let text = refused(&answer);
+    assert!(text.contains("64000 characters at most"), "{text}");
+    a_while();
+    assert_eq!(prompts_with(&server, "Cover xxx"), 0);
+}
+
+#[test]
+fn messages_for_a_machine_that_is_off_are_refused_past_100_waiting() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    let (child, _launch, mcp) = child_on_server(&pc, &server, "Write the tests of the export.");
+    prompted(&server, "Write the tests of the export.");
+    off(&server);
+    eventually("server offline", || pc.seen("server")["state"] != "online");
+
+    for n in 0..100 {
+        let answer = mcp.call(
+            "agent_send",
+            json!({"agent_id": child, "message": format!("Note {n}.")}),
+        );
+        done(&answer);
+    }
+    let answer = mcp.call(
+        "agent_send",
+        json!({"agent_id": child, "message": "One more note."}),
+    );
+
+    let text = refused(&answer);
+    assert!(text.contains("100 messages wait for server"), "{text}");
+}
+
+#[test]
+fn a_delivery_for_an_unrelated_agent_or_another_launch_is_refused() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    let (child, launch, _mcp) = child_on_server(&pc, &server, "Write the tests of the export.");
+    let parent = pc
+        .agents()
+        .into_iter()
+        .find(|agent| agent["parent"].is_null())
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (other, _) = pc.root("auto");
+    let key = server.stand_in();
+    let deliver = |id: &str, launch: &str, agent: &str, body: &str| {
+        MachineMessage::Deliver(Box::new(Deliver {
+            id: id.into(),
+            launch: launch.into(),
+            agent: agent.into(),
+            kind: "child-question".into(),
+            body: format!("Your child agent {child} asks: {body}"),
+            urgency: "urgent".into(),
+            ended: false,
+        }))
+    };
+
+    let answers = sent_with(
+        &key,
+        &pc,
+        vec![
+            deliver("d1", &launch, &other, "Delete the main branch?"),
+            deliver("d2", "another-launch", &parent, "Push to production?"),
+            // The agent that started it is taken.
+            deliver("d3", &launch, &parent, "Which format first?"),
+        ],
+    );
+
+    for answer in &answers[..2] {
+        let refused = answer.clone().unwrap_err();
+        assert!(refused.contains("did not start launch"), "{refused}");
+    }
+    assert!(answers[2].is_ok(), "{:?}", answers[2]);
+    prompted(&pc, "Which format first?");
+    assert_eq!(prompts_with(&pc, "Delete the main branch?"), 0);
+    assert_eq!(prompts_with(&pc, "Push to production?"), 0);
+}
+
+#[test]
+fn a_call_from_a_third_machine_for_a_launch_it_did_not_make_is_refused() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    let laptop = Machine::of(server_user(None));
+    pair(&pc, &laptop, "laptop", "runner");
+    let (child, launch, _mcp) = child_on_server(&pc, &server, "Write the tests of the export.");
+    let caller = pc
+        .agents()
+        .into_iter()
+        .find(|agent| agent["parent"].is_null())
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    server.wait_for("laptop");
+    let key = laptop.stand_in();
+    let call = |id: &str, tool: &str| {
+        MachineMessage::Call(Box::new(Call {
+            id: id.into(),
+            launch: launch.clone(),
+            caller: caller.clone(),
+            agent: child.clone(),
+            tool: tool.into(),
+            arguments: json!({"agent_id": child, "message": "Stop everything."}).to_string(),
+        }))
+    };
+
+    let answers = sent_with(
+        &key,
+        &server,
+        vec![
+            call("c1", "agent_send"),
+            call("c2", "agent_status"),
+            call("c3", "agent_stop"),
+        ],
+    );
+
+    for answer in &answers {
+        let refused = answer.clone().unwrap_err();
+        assert!(refused.contains("did not start"), "{refused}");
+    }
+    a_while();
+    assert_eq!(prompts_with(&server, "Stop everything."), 0);
+    assert_ne!(server.agent(&child)["state"], "ended");
 }
