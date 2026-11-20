@@ -18,7 +18,7 @@
 //! ```text
 //! "flottille-member-change-v1" 0x00    the domain: nothing else a device key signs starts so
 //! previous   32 bytes                  the hash of the change before it; for the first, the
-//!                                      list's id: 32 random bytes made at setup
+//!                                      list's id: 32 random bytes made with the list
 //! signer     32 bytes                  the signing member's public key, or the hub's
 //! kind        1 byte                   1 add, 2 remove, 3 rename, 4 machine, 5 hub, 6 pair,
 //!                                      7 role, 8 look
@@ -36,9 +36,8 @@
 //! An icon is 1 desktop, 2 laptop, 3 server, 4 phone, 5 tablet; a colour 1 grey, 2 red, 3 orange,
 //! 4 yellow, 5 green, 6 teal, 7 blue, 8 purple.
 //!
-//! The list's id makes every setup a list of its own: a device that sets a hub up again after a
-//! reset, with the same key, the same name and the same machine, signs another first change, so
-//! that no change of the old list follows on the new one.
+//! The list's id makes every list one of its own: the hub, pairing a first device again after a
+//! reset, signs another first change, so that no change of the old list follows on the new one.
 //!
 //! A `machine` change is a member's own declaration of the key its machine's daemon holds: the
 //! list holds the devices' keys, while the link and the control session to the hub run on the
@@ -92,7 +91,7 @@ pub enum Role {
 }
 
 impl Role {
-    fn byte(self) -> u8 {
+    pub(crate) fn byte(self) -> u8 {
         match self {
             Role::Runner => 1,
             Role::Controller => 2,
@@ -142,7 +141,7 @@ impl Icon {
         Icon::Tablet,
     ];
 
-    fn byte(self) -> u8 {
+    pub(crate) fn byte(self) -> u8 {
         self as u8 + 1
     }
 
@@ -187,7 +186,7 @@ impl Colour {
         Colour::Purple,
     ];
 
-    fn byte(self) -> u8 {
+    pub(crate) fn byte(self) -> u8 {
         self as u8 + 1
     }
 

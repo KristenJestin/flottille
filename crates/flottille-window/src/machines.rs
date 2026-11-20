@@ -571,20 +571,11 @@ impl Remote {
                 }
                 Ok(None)
             }
-            Ask::Invite => {
-                let hub: flottille_link::PublicKey = serde_json::from_value(
-                    request("remote.machines", json!({}))?["hub"]["key"].clone(),
-                )
-                .map_err(|_| "this machine is not set up with a hub".to_owned())?;
-                let key = self.key()?;
-                let asked = flottille_link::InvitationAsk::sign(&hub, unix_now(), &key)
-                    .map_err(|error| error.to_string())?;
-                let invited = request("remote.invite", json!({"ask": asked}))?;
-                Ok(Some(Invitation {
-                    code: text(&invited["code"]),
-                    expires: invited["expires"].as_u64().unwrap_or_default(),
-                }))
-            }
+            // Devices add no device: a device pairs on the hub (`flottille-hub pair`).
+            Ask::Invite => Err(
+                "a device is paired on the hub: run flottille-hub pair on the hub's host"
+                    .to_owned(),
+            ),
             Ask::Accept {
                 request: join,
                 name,
@@ -753,13 +744,6 @@ fn signed_after(
     let head: flottille_link::ChangeHash =
         serde_json::from_value(members["head"].clone()).map_err(|error| error.to_string())?;
     Ok(flottille_link::Change::sign(head, action, key))
-}
-
-fn unix_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|since| since.as_secs())
-        .unwrap_or_default()
 }
 
 /// The host's name: this device's name when it sets a hub up, as `flottille remote setup` takes it.

@@ -1,5 +1,6 @@
-//! The invitation a member shows to add a device (`docs/remote.md`, "Pairing"), and the new
-//! device's check of the first list the hub sends it.
+//! The pair code (`docs/remote.md`, "Pairing"): what `flottille-hub pair` prints, and its QR, for
+//! one device to pair with the hub. It holds everything the device needs: where the hub is, its key,
+//! which the device pins, and the secret the device proves it knows, never sends.
 //!
 //! The code, which is also the QR's text, is in Crockford's base32 (digits and capital letters,
 //! which a QR holds in its compact alphanumeric mode; read in any case, `O` as `0`, `I` and `L` as
@@ -7,236 +8,170 @@
 //!
 //! ```text
 //! version     1 byte      1
-//! hub key    32 bytes     the hub's public key, which the new device pins
-//! inviter    32 bytes     the inviting member's public key, whole
-//! token      16 bytes     the hub's token for this invitation
+//! hub key    32 bytes     the hub's public key, which the device pins
+//! secret     16 bytes     random, made for this pairing: valid a few minutes, once
 //! hub URL    the rest     UTF-8
-//! checksum    4 bytes     the first 4 bytes of the SHA-256 of "flottille-invitation-v1" 0x00
-//!                         and every byte above
+//! checksum    4 bytes     the first 4 bytes of the SHA-256 of "flottille-pair-v1" 0x00 and every
+//!                         byte above
 //! ```
 //!
 //! A code that does not decode, or whose checksum is not its own, is refused as damaged.
 //!
-//! A member asks the hub for the token with an **ask** signed by its device key. Its signed bytes,
-//! a fixed encoding as a member change's are, and never one of them:
-//!
-//! ```text
-//! "flottille-hub-invite-v1" 0x00    the domain: nothing else a device key signs starts so
-//! hub      32 bytes                 the hub's public key: an ask made for one hub is no other's
-//! member   32 bytes                 the asking member's public key
-//! at        8 bytes                 when it was signed, in seconds since 1970, big-endian
-//! nonce    16 bytes                 random: two asks of the same second are two
-//! ```
+//! The device proves it holds the secret in its session's handshake (`control.rs`): an
+//! HMAC-SHA256 keyed by the secret, over the session's keys and nonces and the card it proposes,
+//! so that the proof is good for that session and that card only.
 
 use std::fmt;
 
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest, Sha256};
 
-use crate::serial::{from_hex_text, invisible, to_hex};
-use crate::{
-    DeviceKey, KeyError, ListError, MemberList, Members, PublicKey, Signature, random,
-    verification_words,
-};
+use crate::serial::invisible;
+use crate::{Colour, Icon, PublicKey, Role, check_name, random};
 
 const VERSION: u8 = 1;
-const CHECKSUM_DOMAIN: &[u8] = b"flottille-invitation-v1\0";
-/// The start of an ask's signed bytes.
-const ASK_DOMAIN: &[u8] = b"flottille-hub-invite-v1\0";
+const CHECKSUM_DOMAIN: &[u8] = b"flottille-pair-v1\0";
 const CHECKSUM: usize = 4;
 /// The bytes before the hub URL.
-const FIXED: usize = 1 + 32 + 32 + 16;
+const FIXED: usize = 1 + 32 + 16;
 /// The longest hub URL, in bytes.
 const URL_LIMIT: usize = 2048;
 const ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
-/// The hub's token for one invitation: valid 5 minutes, once. It lets a device ask to join, so it
-/// is not printed by `Debug`.
+/// The secret of one pairing. It lets a device pair, so `Debug` does not print it.
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub struct Token(pub [u8; 16]);
+pub struct PairSecret(pub [u8; 16]);
 
-impl fmt::Debug for Token {
+impl PairSecret {
+    /// A new secret, from the system's random generator.
+    pub fn new() -> Result<PairSecret, String> {
+        random().map(PairSecret).map_err(|error| error.to_string())
+    }
+}
+
+impl fmt::Debug for PairSecret {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("Token(..)")
+        f.write_str("PairSecret(..)")
     }
 }
 
-impl Serialize for Token {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(&to_hex(&self.0))
-    }
-}
-
-impl<'de> Deserialize<'de> for Token {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Token, D::Error> {
-        from_hex_text(deserializer, "a token").map(Token)
-    }
-}
-
-/// What the inviting member shows: where the hub is and which key it has, the token, and who
-/// invites.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Invitation {
+/// What a pair code holds.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PairCode {
     pub hub_url: String,
     pub hub_key: PublicKey,
-    pub token: Token,
-    pub inviter: PublicKey,
+    pub secret: PairSecret,
 }
 
-impl Invitation {
+impl PairCode {
     /// The code to copy, and the QR's text; refused when the hub URL is not one (`is_hub_url`).
-    pub fn code(&self) -> Result<String, InvitationError> {
+    pub fn code(&self) -> Result<String, PairCodeError> {
         if !is_hub_url(&self.hub_url) {
-            return Err(InvitationError::HubUrl);
+            return Err(PairCodeError::HubUrl);
         }
         let mut bytes = vec![VERSION];
         bytes.extend_from_slice(self.hub_key.as_bytes());
-        bytes.extend_from_slice(self.inviter.as_bytes());
-        bytes.extend_from_slice(&self.token.0);
+        bytes.extend_from_slice(&self.secret.0);
         bytes.extend_from_slice(self.hub_url.as_bytes());
         let checksum = checksum(&bytes);
         bytes.extend_from_slice(&checksum);
         Ok(encode(&bytes))
     }
 
-    pub fn from_code(code: &str) -> Result<Invitation, InvitationError> {
-        let bytes = decode(code).ok_or(InvitationError::Damaged)?;
+    pub fn from_code(code: &str) -> Result<PairCode, PairCodeError> {
+        let bytes = decode(code).ok_or(PairCodeError::Damaged)?;
         if bytes.len() <= FIXED + CHECKSUM {
-            return Err(InvitationError::Damaged);
+            return Err(PairCodeError::Damaged);
         }
         let (payload, sum) = bytes.split_at(bytes.len() - CHECKSUM);
         if checksum(payload) != sum {
-            return Err(InvitationError::Damaged);
+            return Err(PairCodeError::Damaged);
         }
         if payload[0] != VERSION {
-            return Err(InvitationError::OtherVersion);
+            return Err(PairCodeError::OtherVersion);
         }
-        let key = |at: usize| {
-            let bytes: [u8; 32] = payload[at..at + 32].try_into().expect("32 bytes");
-            PublicKey::from_bytes(&bytes).map_err(|_| InvitationError::BadKey)
-        };
+        let key: [u8; 32] = payload[1..33].try_into().expect("32 bytes");
+        let hub_key = PublicKey::from_bytes(&key).map_err(|_| PairCodeError::BadKey)?;
         let hub_url = std::str::from_utf8(&payload[FIXED..])
             .ok()
-            .ok_or(InvitationError::Damaged)?;
+            .ok_or(PairCodeError::Damaged)?;
         if !is_hub_url(hub_url) {
-            return Err(InvitationError::HubUrl);
+            return Err(PairCodeError::HubUrl);
         }
-        Ok(Invitation {
+        Ok(PairCode {
             hub_url: hub_url.to_owned(),
-            hub_key: key(1)?,
-            token: Token(payload[65..FIXED].try_into().expect("16 bytes")),
-            inviter: key(33)?,
+            hub_key,
+            secret: PairSecret(payload[33..FIXED].try_into().expect("16 bytes")),
         })
-    }
-
-    /// The four words the new device shows, its key being `new_device`.
-    pub fn words(&self, new_device: &PublicKey) -> [&'static str; 4] {
-        verification_words(new_device, &self.inviter, &self.token)
-    }
-
-    /// The new device's check of the first list the hub sends it, `own` being its key: the list
-    /// checks back to its own root, which the device pins from then on, and the device's entry is
-    /// there, signed by the member that invited it. A hub cannot make such a list: the inviter
-    /// signed the entry after the real list's last change.
-    pub fn check_list(&self, list: &MemberList, own: &PublicKey) -> Result<Members, ListError> {
-        let root = list
-            .root()
-            .ok_or_else(|| ListError::Refused("it is empty".to_owned()))?;
-        let members = list.check(&root, &self.hub_key)?;
-        let Some(entry) = members.get(own) else {
-            return Err(ListError::Refused("this device is not in it".to_owned()));
-        };
-        if entry.added_by != self.inviter {
-            return Err(ListError::Refused(format!(
-                "this device's entry is not signed by the member that invited it ({})",
-                self.inviter.fingerprint()
-            )));
-        }
-        Ok(members)
     }
 }
 
-/// Why an invitation code is refused.
+/// Why a pair code is refused.
 #[derive(Debug, PartialEq, Eq)]
-pub enum InvitationError {
+pub enum PairCodeError {
     Damaged,
     OtherVersion,
-    /// A key in it is not one, or is a weak one: a code made by hand, not a member.
+    /// The hub's key in it is not one, or is a weak one: a code made by hand, not a hub's.
     BadKey,
     HubUrl,
 }
 
-impl fmt::Display for InvitationError {
+impl fmt::Display for PairCodeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
-            InvitationError::Damaged => "this invitation code is damaged: copy it again, whole",
-            InvitationError::OtherVersion => {
-                "this invitation code comes from another version of Flottille: update the older \
-                 device (flottille update)"
+            PairCodeError::Damaged => {
+                "this is not a pair code, or it is damaged: copy it again, whole, from what \
+                 flottille-hub pair printed"
             }
-            InvitationError::BadKey => {
-                "this invitation code holds a key no device makes: ask for a new invitation"
+            PairCodeError::OtherVersion => {
+                "this pair code comes from another version of Flottille: update the older side \
+                 (flottille update)"
             }
-            InvitationError::HubUrl => {
-                "the hub URL of this invitation is not an http:// or https:// address of at most \
+            PairCodeError::BadKey => {
+                "this pair code holds a key no hub makes: run flottille-hub pair again"
+            }
+            PairCodeError::HubUrl => {
+                "the hub URL of this pair code is not an http:// or https:// address of at most \
                  2048 characters, with no space and no invisible character"
             }
         })
     }
 }
 
-impl std::error::Error for InvitationError {}
+impl std::error::Error for PairCodeError {}
 
-/// A member's ask for an invitation (`docs/remote.md`, "Pairing", 1): a user action, signed by the
-/// member's device key. The hub takes it within 5 minutes of `at`, once.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct InvitationAsk {
-    pub hub: PublicKey,
-    pub member: PublicKey,
-    pub at: u64,
-    pub nonce: [u8; 16],
-    pub signature: Signature,
+/// What a device proposes for itself when it pairs, and the user confirmed: its key, its name, its
+/// role, its icon and colour. The hub signs it as it is (`Action::Pair`).
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Proposed {
+    pub key: PublicKey,
+    pub name: String,
+    pub role: Role,
+    pub icon: Icon,
+    pub colour: Colour,
 }
 
-impl InvitationAsk {
-    /// An ask to the hub whose key is `hub`, at `at` (seconds since 1970), signed with `key`.
-    pub fn sign(hub: &PublicKey, at: u64, key: &DeviceKey) -> Result<InvitationAsk, KeyError> {
-        let mut ask = InvitationAsk {
-            hub: *hub,
-            member: key.public(),
-            at,
-            nonce: random()?,
-            signature: Signature([0; 64]),
-        };
-        ask.signature =
-            Signature(ed25519_dalek::Signer::sign(&key.0, &ask.signed_bytes()).to_bytes());
-        Ok(ask)
+impl Proposed {
+    /// Whether the name may name a device; why not otherwise.
+    pub fn check(&self) -> Result<(), String> {
+        check_name(&self.name).map_err(|why| format!("this device {why}"))
     }
 
-    /// What the signature covers: the encoding of the module's documentation.
-    pub fn signed_bytes(&self) -> Vec<u8> {
-        let mut bytes = ASK_DOMAIN.to_vec();
-        bytes.extend_from_slice(self.hub.as_bytes());
-        bytes.extend_from_slice(self.member.as_bytes());
-        bytes.extend_from_slice(&self.at.to_be_bytes());
-        bytes.extend_from_slice(&self.nonce);
+    /// The bytes a pairing's proof covers of it: its key, its name's length (4 bytes, big-endian)
+    /// and its name, its role, icon and colour (1 byte each, as a `pair` change says them).
+    pub(crate) fn bytes(&self) -> Vec<u8> {
+        let mut bytes = self.key.as_bytes().to_vec();
+        bytes.extend_from_slice(&(self.name.len() as u32).to_be_bytes());
+        bytes.extend_from_slice(self.name.as_bytes());
+        bytes.extend_from_slice(&[self.role.byte(), self.icon.byte(), self.colour.byte()]);
         bytes
-    }
-
-    /// Whether the signature is the member's over the signed bytes, strictly as a change's is.
-    pub fn signed(&self) -> bool {
-        let signature = ed25519_dalek::Signature::from_bytes(&self.signature.0);
-        self.member
-            .0
-            .verify_strict(&self.signed_bytes(), &signature)
-            .is_ok()
     }
 }
 
 /// Whether `url` is a hub URL: `http://` or `https://`, a host, at most `URL_LIMIT` bytes, and
 /// no space, control or invisible character, which would make the address a person checks differ
 /// from the one the device reaches.
-fn is_hub_url(url: &str) -> bool {
+pub(crate) fn is_hub_url(url: &str) -> bool {
     let Some(rest) = url
         .strip_prefix("https://")
         .or_else(|| url.strip_prefix("http://"))
@@ -310,6 +245,38 @@ fn decode(code: &str) -> Option<Vec<u8>> {
 mod tests {
     use super::*;
 
+    /// RFC 8032's second test key.
+    fn hub_key() -> PublicKey {
+        PublicKey::from_bytes(
+            &crate::serial::from_hex::<32>(
+                "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c",
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_pair_code_round_trips_and_a_changed_one_is_damaged() {
+        let code = PairCode {
+            hub_url: "https://hub.example.net".to_owned(),
+            hub_key: hub_key(),
+            secret: PairSecret([9; 16]),
+        };
+        let text = code.code().unwrap();
+        assert!(
+            text.chars().all(|c| ALPHABET.contains(&(c as u8))),
+            "{text}"
+        );
+        assert_eq!(PairCode::from_code(&text.to_lowercase()).unwrap(), code);
+        let mut changed = text.into_bytes();
+        changed[10] = if changed[10] == b'A' { b'B' } else { b'A' };
+        let error = PairCode::from_code(&String::from_utf8(changed).unwrap()).unwrap_err();
+        assert_eq!(error, PairCodeError::Damaged);
+        // The secret is never printed.
+        assert!(!format!("{code:?}").contains("9, 9"));
+    }
+
     #[test]
     fn a_code_of_another_version_says_so() {
         let mut bytes = vec![2u8];
@@ -318,40 +285,23 @@ mod tests {
         let sum = checksum(&bytes);
         bytes.extend_from_slice(&sum);
 
-        let error = Invitation::from_code(&encode(&bytes)).unwrap_err();
-        assert_eq!(error, InvitationError::OtherVersion);
-        assert_eq!(
-            error.to_string(),
-            "this invitation code comes from another version of Flottille: update the older \
-             device (flottille update)"
-        );
+        let error = PairCode::from_code(&encode(&bytes)).unwrap_err();
+        assert_eq!(error, PairCodeError::OtherVersion);
     }
 
     #[test]
     fn a_weak_key_in_a_code_is_refused() {
-        // RFC 8032's first test key, and the identity, a point of small order.
-        let key = crate::serial::from_hex::<32>(
-            "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
-        )
-        .unwrap();
         let mut identity = [0u8; 32];
         identity[0] = 1;
-        for (hub, inviter) in [(identity, key), (key, identity)] {
-            let mut bytes = vec![VERSION];
-            bytes.extend_from_slice(&hub);
-            bytes.extend_from_slice(&inviter);
-            bytes.extend_from_slice(&[7; 16]);
-            bytes.extend_from_slice(b"https://hub.example.net");
-            let sum = checksum(&bytes);
-            bytes.extend_from_slice(&sum);
+        let mut bytes = vec![VERSION];
+        bytes.extend_from_slice(&identity);
+        bytes.extend_from_slice(&[7; 16]);
+        bytes.extend_from_slice(b"https://hub.example.net");
+        let sum = checksum(&bytes);
+        bytes.extend_from_slice(&sum);
 
-            let error = Invitation::from_code(&encode(&bytes)).unwrap_err();
-            assert_eq!(error, InvitationError::BadKey);
-            assert_eq!(
-                error.to_string(),
-                "this invitation code holds a key no device makes: ask for a new invitation"
-            );
-        }
+        let error = PairCode::from_code(&encode(&bytes)).unwrap_err();
+        assert_eq!(error, PairCodeError::BadKey);
     }
 
     #[test]
