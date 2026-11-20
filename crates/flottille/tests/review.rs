@@ -2307,6 +2307,45 @@ fn the_review_tool_says_how_to_review_a_session_and_a_pull_request() {
     );
 }
 
+#[test]
+fn the_review_tool_says_the_order_to_choose_in() {
+    let user = forge_user();
+    pulled(&user);
+    let (_, mcp) = lead(&user);
+
+    let tool = review_tool(&mcp).expect("the review tool");
+
+    let description = tool["description"].as_str().unwrap();
+    // The three cases, in that order: a led session, the caller's own change, a pull request.
+    let led = description
+        .find("still alive")
+        .expect("the led session case");
+    let own = description[led..]
+        .find("a change of your own")
+        .map(|at| at + led)
+        .expect("the own change case");
+    let pull_request = description[own..]
+        .find("Otherwise")
+        .map(|at| at + own)
+        .expect("the pull request case");
+    assert!(led < own && own < pull_request, "{description}");
+    // The rule comes before the order: only when the user asks, or says yes to an offer.
+    let before = description.find("this order").expect("this order");
+    let rule = description
+        .find("only when the user asks for one")
+        .expect("the rule");
+    let offer = description
+        .find("never start one without the user's yes")
+        .expect("the offer");
+    assert!(rule < before && offer < before, "{description}");
+    // The user's words and the project's instructions come before the order too.
+    assert!(
+        description[..before].contains("user's words")
+            && description[..before].contains("project's instructions"),
+        "{description}"
+    );
+}
+
 // Round 2 of #1091: the review reads the pull request and nothing of the user's, runs none of
 // the user's filters on it, leaves nothing behind, and runs its code only with the user.
 

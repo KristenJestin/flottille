@@ -1576,8 +1576,15 @@ With Review active in a project (`docs/extensions.md`, "Review"), each root of t
 `review` tool with the action `start` **while the project lets agents start a review** (the
 setting `agents_start`, on by default since #1061; `/review` and `flottille review`, the user's,
 no switch touches). The tool's description says to start a review only when the user asks for one,
-or when the project's instructions say to, never on its own: the decision of #783 rests on that
-sentence, not on withholding the tool. The pilot of a review has it with `run_pass` and
+or when the project's instructions say to, never on its own initiative: an agent may offer one, but
+never starts one without the user's yes. The decision of #783 rests on that sentence, not on
+withholding the tool. **The order** (#1139) only picks the form once a review is asked for without
+saying which, and the description says it after that sentence, the user's words and the project's
+instructions still coming before it: (1) a lead whose led session is still alive reviews that
+session (`agent`), its findings going to the session that can fix them and the lead told;
+(2) otherwise a session with a change of its own reviews it (`{"action": "start"}`);
+(3) otherwise (a session in the project folder, or the change's session ended) the pull request
+(`pull_request`), the findings coming to the caller. The pilot of a review has it with `run_pass` and
 `report`; a pass, the verifier and any other child have none of it. Turning the switch on or off,
 in Settings or in the project's file, adds or removes `review` from the lists of the roots through
 "When the tools change"; a call of it made after it left is refused as a call of any tool the agent
