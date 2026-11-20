@@ -734,6 +734,7 @@ fn the_window_draws_no_frame_at_rest_on_each_tab_of_settings_and_a_feature_s_pag
         ("approvals", "judge-model"),
         ("features", "features-review"),
         ("vault", "vault-title"),
+        ("general", "about-title"),
         ("general", "appearance-title"),
         // The machines are the last section of General.
         ("general", "machines-off"),

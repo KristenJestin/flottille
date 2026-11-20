@@ -1291,7 +1291,13 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   its page in place of the list, under the path `Features / Review` (`docs/extensions.md`, "In
   the window").
   **Vault** holds the entries (`vault.md`).
-  **General** holds **Appearance**, with no sentence: **Colours**, Omarchy or Flottille, and for
+  **General** holds first **About you** ("What every agent is told about you, before the rules, and
+  what an agent writes for another one follows. Each field is optional."): **Name** ("What agents
+  call you."), **How to refer to you** ("One line: he/him, she/her, they.") and **Anything every
+  agent should know** (free text, at most 8,000 characters, its placeholder invented examples), each
+  labelled and marked optional; Reset forgets all three, Save unfolds beside it once a field changed,
+  and a save or a reset is a toast ("About you saved · Agents started from now on read it."); the
+  section enters with the page. Then **Appearance**, with no sentence: **Colours**, Omarchy or Flottille, and for
   Flottille **Shade**, Light or Dark, unfolding under it, each a segmented choice; off an Omarchy
   desktop the Omarchy choice is shown disabled, its tooltip saying why. Then **Workspaces folder**
   ("Where new workspaces are made. A project can choose its own."): **Where**, radios `In
