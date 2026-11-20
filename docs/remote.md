@@ -1351,7 +1351,7 @@ on a real phone, by hand, and reported.
 - A machine that cannot reach another says every address it tried, from where, and how each
   failed: `server is unreachable: tried 127.0.0.1:7447 from pc, no answer in 10 s`; `from` is the
   machine's name in the member list (its key's fingerprint before it has one). A hub that cannot
-  be reached is said the same way, with since when: `the hub at hub.example.net:443 is
+  be reached is said the same way, with since when: `the hub at hub.example.net is
   unreachable since 22:14: tried 192.0.2.10:443: Connection refused`.
 - A machine set up tells the hub its addresses at once, then whenever they change; the hub keeps
   them in memory, 64 at most per machine, each a host and a port, and sends every member all of

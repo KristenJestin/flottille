@@ -166,7 +166,7 @@ impl Control {
         };
         let seen = self.seen.lock().unwrap();
         json!({
-            "url": device.url,
+            "url": HubUrl::shown_text(&device.url),
             "key": device.hub,
             "fingerprint": device.hub.fingerprint(),
             "state": seen.state,
@@ -189,8 +189,10 @@ impl Control {
         // Held to the end, even when the command that asked is gone: its key's fate is told then.
         let _setting_up = self.setting_up.lock().await;
         if !replace && let Some(pinned) = self.pinned() {
-            let url =
-                pinned.map_or_else(|_| self.file().display().to_string(), |device| device.url);
+            let url = pinned.map_or_else(
+                |_| self.file().display().to_string(),
+                |device| HubUrl::shown_text(&device.url),
+            );
             return Err(format!(
                 "this machine is set up with the hub at {url} already: give --replace to set it \
                  up with another (the machines it trusts through that hub are forgotten)"
@@ -225,12 +227,12 @@ impl Control {
             .map_err(|error| format!("{} cannot be written: {error}", self.file().display()))?;
         eprintln!(
             "flottille daemon: this machine set up the hub at {}, whose key is {}",
-            device.url,
+            HubUrl::shown_text(&device.url),
             device.hub.fingerprint()
         );
         self.again.notify_one();
         Ok(json!({
-            "url": device.url,
+            "url": HubUrl::shown_text(&device.url),
             "hub": device.hub.fingerprint(),
             "root": device.root.fingerprint(),
         }))
@@ -297,7 +299,7 @@ impl Control {
         let code = invitation.code().map_err(|error| error.to_string())?;
         Ok(json!({
             "code": code,
-            "url": device.url,
+            "url": HubUrl::shown_text(&device.url),
             "hub": device.hub.fingerprint(),
             "inviter": name,
             "fingerprint": ask.member.fingerprint(),
@@ -368,8 +370,10 @@ impl Control {
     /// head after which the device declares this machine (`remote.declare`).
     pub async fn join(&self, code: &str, key: PublicKey) -> Result<Value, String> {
         if let Some(pinned) = self.pinned() {
-            let url =
-                pinned.map_or_else(|_| self.file().display().to_string(), |device| device.url);
+            let url = pinned.map_or_else(
+                |_| self.file().display().to_string(),
+                |device| HubUrl::shown_text(&device.url),
+            );
             return Err(format!(
                 "this machine is set up with the hub at {url} already: a machine joins one hub"
             ));
@@ -471,11 +475,11 @@ impl Control {
         }
         eprintln!(
             "flottille daemon: this machine joined the hub at {}",
-            device.url
+            HubUrl::shown_text(&device.url)
         );
         self.again.notify_one();
         Ok(json!({
-            "url": device.url,
+            "url": HubUrl::shown_text(&device.url),
             "hub": device.hub.fingerprint(),
             "root": device.root.fingerprint(),
             "name": this.as_ref().map(|this| this.name.clone()),
@@ -648,7 +652,7 @@ fn members_json(device: &Device, members: &Members, own: &PublicKey) -> Value {
             .map_or_else(|| key.fingerprint(), |member| member.name.clone())
     };
     json!({
-        "hub": device.url,
+        "hub": HubUrl::shown_text(&device.url),
         "root": name_of(&members.root()),
         "head": members.head(),
         "this": members.by_machine(own).map(|member| member.name.clone()),
@@ -698,7 +702,7 @@ pub async fn run(
         }
         if let Some(device) = pinned {
             let authority = HubUrl::parse(&device.url)
-                .map(|url| url.authority())
+                .map(|url| url.host_shown())
                 .unwrap_or_else(|_| device.url.clone());
             let hello = crate::link::hello();
             let connected = tokio::select! {

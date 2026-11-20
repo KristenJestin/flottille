@@ -53,16 +53,21 @@ pub fn interfaces() -> Vec<Interface> {
         Some(found) => found,
         None => system_interfaces(),
     };
-    let (mut tailnet, others): (Vec<_>, Vec<_>) = found
+    let mut found: Vec<Interface> = found
         .into_iter()
         .map(|(name, address)| Interface {
             tailnet: is_tailnet(&name, address),
             name,
             address,
         })
-        .partition(|interface| interface.tailnet);
-    tailnet.extend(others);
-    tailnet
+        .collect();
+    // Tailscale first, then WireGuard, then the others as the system lists them (a stable sort).
+    found.sort_by_key(|interface| match interface {
+        i if !i.tailnet => 2,
+        i if i.name.starts_with("wg") => 1,
+        _ => 0,
+    });
+    found
 }
 
 fn test_interfaces() -> Option<Vec<(String, Ipv4Addr)>> {

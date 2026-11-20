@@ -311,7 +311,7 @@ is refused unless `--replace` is given. `remote.setup`.
 ```
 $ flottille remote setup https://hub.example.net --name pc
 The hub's setup code: 7KQ2-M4XP-9TRW-H3CD
-pc is the first member of the hub at https://hub.example.net:443/, whose key is 3f2a-91bc-0d4e-77a1: the root every device that joins pins
+pc is the first member of the hub at https://hub.example.net, whose key is 3f2a-91bc-0d4e-77a1: the root every device that joins pins
 ```
 
 ### `flottille remote invite [--json]`
@@ -325,7 +325,7 @@ text), and how to join with it. The code is never part of a command it prints: i
 
 ```
 $ flottille remote invite
-An invitation to the hub at https://hub.example.net:443/, valid 5 minutes, once, from pc (3f2a-91bc-0d4e-77a1):
+An invitation to the hub at https://hub.example.net, valid 5 minutes, once, from pc (3f2a-91bc-0d4e-77a1):
 
 0ZJ7X3K2M9QH4V…  (about 150 characters)
 
@@ -351,7 +351,7 @@ $ flottille remote join
 The invitation's code: 0ZJ7X3K2M9QH4V…
 Verification words: maple orbit violet canyon
 The device that invited shows them too: accept there only if they are the same. Waiting for it...
-server joined the hub at https://hub.example.net:443/ as a runner, added by pc
+server joined the hub at https://hub.example.net as a runner, added by pc
 ```
 
 ### `flottille remote requests [--json]`
