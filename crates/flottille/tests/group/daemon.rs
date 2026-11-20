@@ -9,6 +9,8 @@ mod common;
 
 #[path = "../appearance.rs"]
 mod appearance;
+#[path = "../cli_open.rs"]
+mod cli_open;
 #[path = "../commands.rs"]
 mod commands;
 #[path = "../commit_message.rs"]

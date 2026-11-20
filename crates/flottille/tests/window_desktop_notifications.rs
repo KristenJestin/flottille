@@ -13,6 +13,7 @@ use common::desktop::{self, Bus, Notifications};
 use serde_json::{Value, json};
 
 use gpui_kit::TestAppContext;
+use gpui_kit::test::TestWindowExt;
 
 fn pending(user: &common::User) -> Vec<Value> {
     user.call("approval.list", json!({})).unwrap()["requests"]
@@ -85,10 +86,9 @@ fn with_the_window_focused_the_notification_is_a_toast_not_a_system_one(cx: &mut
         "it rises: {first:?} to {rested:?}"
     );
     assert_eq!(
-        label("toast-1-title", cx).as_deref(),
-        Some(format!("Request #{number} waits for you").as_str())
+        label("toast-1", cx).as_deref(),
+        Some(format!("Request #{number} waits for you Read .env").as_str())
     );
-    assert_eq!(label("toast-1-detail", cx).as_deref(), Some("Read .env"));
     assert!(has("toast-1-action", cx) && has("toast-1-action-2", cx));
     // The desktop is told nothing, and the sound plays, once, in the daemon.
     eventually("the sound", || desktop::played(&played) == ["needs-you"]);
@@ -179,8 +179,8 @@ fn nothing_is_toasted_for_the_session_the_window_shows(cx: &mut TestAppContext) 
     // The other's toast is the first the window drew: the open session's rang nothing.
     until(&shell, cx, "the toast", |cx| has("toast-1", cx));
     assert_eq!(
-        label("toast-1-title", cx).as_deref(),
-        Some(format!("Request #{other} waits for you").as_str())
+        label("toast-1", cx).as_deref(),
+        Some(format!("Request #{other} waits for you Read .env").as_str())
     );
     assert!(!has("toast-2", cx));
 }

@@ -23,7 +23,7 @@ fn eventually(what: &str, check: impl Fn() -> bool) {
 }
 
 /// A project `app` over a throwaway repository.
-fn project(user: &User) {
+pub(crate) fn project(user: &User) {
     let folder = user.path("work/app");
     user.git_init(&folder);
     std::fs::write(folder.join("README.md"), "app\n").unwrap();
@@ -41,7 +41,7 @@ fn state(user: &User, id: &str) -> String {
 }
 
 /// A root of `app` whose first turn ended: its id and its MCP session.
-fn root(user: &User, message: &str) -> (String, Mcp) {
+pub(crate) fn root(user: &User, message: &str) -> (String, Mcp) {
     let opened = user.received_requests("session/new").len();
     let answer = user
         .call("agent.run", json!({"project": "app", "message": message}))
@@ -236,22 +236,30 @@ fn nothing_is_sent_for_the_session_open_in_the_focused_window() {
         return;
     };
     let (_, other_mcp) = root(&desk.user, "hello again");
-    let mut window = Window::open(&desk.user, true, Some(&desk.root));
+    let watch = desk.user.watch(&[]);
+    let _window = Window::open(&desk.user, true, Some(&desk.root));
 
     let seen = held(&desk.mcp);
-    // The window looks elsewhere, and unfocused: what follows is told to the desktop, and it
-    // comes after the first in the daemon's order, so that its coming says the first was not.
-    window.tell(false, None);
     let unseen = held(&other_mcp);
 
-    let told = desk.server.wait_for(1);
-    assert_eq!(told.len(), 1, "{told:?}");
-    assert_eq!(told[0].summary, format!("Request #{unseen} waits for you"));
-    assert!(told[0].summary != format!("Request #{seen} waits for you"));
-    // Nothing rang for the session in sight, the sound neither.
-    eventually("the sound of the second", || {
-        desktop::played(&desk.played).len() == 1
-    });
+    // The daemon follows the notifications in order: that the other session's rang says the
+    // first was left alone, in the window and on the desktop alike.
+    let events = watch
+        .until(|event| event["name"] == "notification.rang" && event["data"]["request"] == unseen);
+    let rang: Vec<&Value> = events
+        .iter()
+        .filter(|event| event["name"] == "notification.rang")
+        .collect();
+    assert_eq!(rang.len(), 1, "{rang:?}");
+    assert_ne!(rang[0]["data"]["request"], seen);
+    assert!(
+        desk.server.notified().is_empty(),
+        "{:?}",
+        desk.server.notified()
+    );
+    // One sound, the other session's: the one in sight rang nothing.
+    eventually("the sound", || !desktop::played(&desk.played).is_empty());
+    assert_eq!(desktop::played(&desk.played), ["needs-you"]);
 }
 
 #[test]
