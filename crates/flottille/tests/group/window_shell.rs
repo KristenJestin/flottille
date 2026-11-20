@@ -31,6 +31,8 @@ mod window_first_frame;
 mod window_instance;
 #[path = "../window_link.rs"]
 mod window_link;
+#[path = "../window_machines.rs"]
+mod window_machines;
 #[path = "../window_menus.rs"]
 mod window_menus;
 #[path = "../window_notifications.rs"]

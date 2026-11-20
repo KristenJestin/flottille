@@ -662,6 +662,18 @@ fn with_keyring<T>(
     Ok(act(&keyring, &crate::remote::folder(paths))?)
 }
 
+/// The device key of this session's clients as the window holds it: the same keyring and folder
+/// as the commands', which the window signs with.
+pub(crate) fn window_device(paths: &Paths) -> flottille_window::device::Device {
+    let keyring: std::sync::Arc<dyn flottille_link::Keyring + Send + Sync> =
+        if crate::vault::memory_chosen(paths) {
+            std::sync::Arc::new(ClientKeyring::None(NoKeyring))
+        } else {
+            std::sync::Arc::new(ClientKeyring::Session(SessionKeyring))
+        };
+    flottille_window::device::Device::new(keyring, crate::remote::folder(paths))
+}
+
 /// The keyring of this session's clients: none in a test build whose configuration keeps the
 /// daemon's secrets in its memory.
 enum ClientKeyring {

@@ -39,6 +39,8 @@ use crate::extensions::specs::SpecPage;
 use crate::history::{History, Way};
 use crate::kept::{DraftKey, Folds, Written};
 use crate::link::{self, Connect, Seen, Update};
+use crate::machines::Machines;
+use crate::machines_page::{MachinesSection, RemovalDialog};
 use crate::modals::Modals;
 use crate::model::{BellItem, Forged, LinkShown, News, Place, Preparation, Snapshot};
 use crate::open::Opener;
@@ -285,6 +287,19 @@ pub struct Shell {
     extensions: Entity<Registry>,
     /// The open spec's page; made again for another spec.
     spec_page: Option<Entity<SpecPage>>,
+    /// The user's machines, read from this machine whichever one is shown.
+    remote: crate::machines::Remote,
+    /// The machine shown, which every other connection of the window goes to.
+    aim: crate::machines::Aim,
+    machines: Entity<MachinesSection>,
+    /// Another machine was chosen, and its first read has not come yet: the connections cut
+    /// for it are no broken link.
+    switching: bool,
+    /// The wait for that first read: past [`link::NOT_ANSWERING`] the window is back on this
+    /// machine.
+    switch_wait: Option<Task<()>>,
+    /// The machine chosen while its key is read.
+    choosing: Option<Task<()>>,
     /// The link's updates, until a task takes them.
     updates: Option<UnboundedReceiver<Update>>,
     _link: Task<()>,
@@ -322,8 +337,13 @@ pub fn now_ms() -> u64 {
 
 impl Shell {
     /// The shell, its updates taken as the link sends them.
-    pub fn new(connect: Connect, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let mut shell = Self::new_polled(connect, window, cx);
+    pub fn new(
+        connect: Connect,
+        device: Option<crate::device::Device>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut shell = Self::new_polled_with(connect, device, window, cx);
         if let Some(mut updates) = shell.updates.take() {
             shell._link = cx.spawn_in(window, async move |this: WeakEntity<Shell>, cx| {
                 while let Some(update) = updates.next().await {
@@ -342,14 +362,30 @@ impl Shell {
     /// The shell, its updates taken only by [`Shell::poll`]: on GPUI's test platform, another
     /// thread may not wake the UI's tasks.
     pub fn new_polled(connect: Connect, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        Self::new_polled_with(connect, None, window, cx)
+    }
+
+    /// [`Shell::new_polled`], with the device key of this session's clients, which signs what
+    /// the user does to the hub's list and each request to another machine.
+    pub fn new_polled_with(
+        connect: Connect,
+        device: Option<crate::device::Device>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let (sender, updates) = unbounded();
-        let seen = link::spawn_into(connect.clone(), sender.clone());
+        // The machines are this machine's to say; everything else goes to the machine shown.
+        let remote = crate::machines::Remote::spawn(connect.clone(), device, sender.clone());
+        let aim = crate::machines::Aim::default();
+        let local = connect.clone();
+        let connect = aim.connect(connect);
+        let seen = link::spawn_aimed_into(connect.clone(), aim.generations(), sender.clone());
         let follow = Follow {
             connect: connect.clone(),
             updates: sender.clone(),
             opener: crate::open::system(),
         };
-        let actions = Actions::spawn(connect, sender);
+        let actions = Actions::spawn_aimed(aim.clone(), local, sender);
         let this = cx.entity().downgrade();
         let top = cx.new(|_| TopBar::new(this.clone()));
         let sidebar = cx.new(|_| Sidebar::new(this.clone()));
@@ -362,6 +398,18 @@ impl Shell {
         let vault = cx.new(|_| VaultSection::new(this.clone(), modals.clone()));
         let connections =
             cx.new(|_| ConnectionsSection::new(this.clone(), vault.clone(), modals.clone()));
+        let machines = {
+            let (modals, remote) = (modals.clone(), remote.clone());
+            cx.new(|cx| {
+                let mut section = MachinesSection::new(modals, remote);
+                section.fields(window, cx);
+                section
+            })
+        };
+        let removal = {
+            let machines = machines.clone();
+            cx.new(|cx| RemovalDialog::new(machines, cx))
+        };
         {
             let reading = connections.clone();
             cx.defer(move |cx| reading.update(cx, |section, cx| section.read(cx)));
@@ -375,6 +423,7 @@ impl Shell {
                 workspaces.clone(),
                 vault.clone(),
                 connections.clone(),
+                machines.clone(),
                 version.clone(),
             )
         });
@@ -437,6 +486,36 @@ impl Shell {
                 crate::extensions::connection_request::MODAL,
                 &connection_request,
                 ConnectionRequest::is_open,
+                cx,
+            );
+            modals.add(
+                crate::machines_page::JOIN_MODAL,
+                &machines,
+                MachinesSection::join_dialog,
+                MachinesSection::join_is_open,
+                MachinesSection::join_focus,
+                cx,
+            );
+            modals.add(
+                crate::machines_page::RENAME_MODAL,
+                &machines,
+                MachinesSection::rename_dialog,
+                MachinesSection::rename_is_open,
+                MachinesSection::rename_focus,
+                cx,
+            );
+            modals.add(
+                crate::machines_page::ADDRESS_MODAL,
+                &machines,
+                MachinesSection::address_dialog,
+                MachinesSection::address_is_open,
+                MachinesSection::address_focus,
+                cx,
+            );
+            modals.add_view(
+                crate::machines_page::REMOVAL_DIALOG,
+                &removal,
+                RemovalDialog::is_open,
                 cx,
             );
         });
@@ -544,6 +623,12 @@ impl Shell {
             switcher,
             extensions,
             spec_page: None,
+            remote,
+            aim,
+            machines,
+            switching: false,
+            switch_wait: None,
+            choosing: None,
             updates: Some(updates),
             _link: Task::ready(()),
             _clock,
@@ -554,6 +639,145 @@ impl Shell {
         // Given once the window is built: a root built after would take it back.
         cx.defer_in(window, |this, window, cx| window.focus(&this.focus, cx));
         shell
+    }
+
+    /// What this machine's daemon said of the user's machines.
+    fn machines_news(
+        &mut self,
+        news: crate::machines::News,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let crate::machines::News::Read(read) = &news {
+            let shown = self.aim.machine();
+            self.sidebar.update(cx, |sidebar, cx| {
+                sidebar.set_machines(read.clone(), shown, cx)
+            });
+        }
+        self.machines
+            .update(cx, |section, cx| section.news(news, window, cx));
+    }
+
+    /// The Machines section of Settings.
+    pub fn machines(&self) -> &Entity<MachinesSection> {
+        &self.machines
+    }
+
+    /// The machine the window shows, when it is not this one.
+    pub fn machine_shown(&self) -> Option<String> {
+        self.aim.machine()
+    }
+
+    /// Shows the machine `name` (`None`: this one): its projects and its sessions, every request
+    /// signed with the device key. One that is off, or needs an update, is said so and not shown.
+    pub fn choose_machine(&mut self, name: Option<String>, cx: &mut Context<Self>) {
+        // A choice still reading the key gives way to this one.
+        self.choosing = None;
+        if name == self.aim.machine() {
+            return;
+        }
+        let Some(name) = name else {
+            self.switch_to(None, cx);
+            return;
+        };
+        let read: Option<Machines> = self.machines.read(cx).machines().cloned();
+        let machine = read.as_ref().and_then(|read| read.machine(&name)).cloned();
+        if let Some(machine) = machine.filter(|machine| !machine.online()) {
+            let detail = machine
+                .reason
+                .clone()
+                .unwrap_or_else(|| format!("{} is {}", machine.name, machine.state_words()));
+            gpui_design_system::toast(
+                gpui_design_system::Toast::failure(format!("{name} cannot be shown"))
+                    .detail(detail),
+                cx,
+            );
+            return;
+        }
+        // Read off the UI thread: a locked keyring holds the read until it is unlocked.
+        let remote = self.remote.clone();
+        self.choosing = Some(cx.spawn(async move |this, cx| {
+            let key = cx.background_spawn(async move { remote.key() }).await;
+            this.update(cx, |shell, cx| match key {
+                Ok(key) => shell.switch_to(Some((name, Arc::new(key))), cx),
+                Err(why) => gpui_design_system::toast(
+                    gpui_design_system::Toast::failure(format!("{name} cannot be shown"))
+                        .detail(why),
+                    cx,
+                ),
+            })
+            .ok();
+        }));
+    }
+
+    /// Shows `aimed` (`None`: this machine), and waits for its first read.
+    fn switch_to(
+        &mut self,
+        aimed: Option<(String, Arc<flottille_link::DeviceKey>)>,
+        cx: &mut Context<Self>,
+    ) {
+        self.switching = true;
+        self.aim_at(aimed, cx);
+        self.wait_for_the_first_read(cx);
+    }
+
+    /// A machine that went down before its first read would leave the window on a skeleton: the
+    /// wait has the limit the window gives a daemon that does not answer.
+    fn wait_for_the_first_read(&mut self, cx: &mut Context<Self>) {
+        self.switch_wait = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(link::NOT_ANSWERING).await;
+            this.update(cx, |shell, cx| shell.give_up_switching(cx))
+                .ok();
+        }));
+    }
+
+    /// Aims every connection of the window at `aimed` (`None`: this machine), and shows the tree
+    /// as waiting for its first read.
+    fn aim_at(
+        &mut self,
+        aimed: Option<(String, Arc<flottille_link::DeviceKey>)>,
+        cx: &mut Context<Self>,
+    ) {
+        // The other machine's events start from its own first: none of this one's is resumed.
+        let shown = aimed.as_ref().map(|(name, _)| name.clone());
+        self.seen.last_seq.store(0, Ordering::SeqCst);
+        self.seen.connections.store(0, Ordering::SeqCst);
+        self.aim.set(aimed);
+        self.seen.last_seq.store(0, Ordering::SeqCst);
+        self.seen.connections.store(0, Ordering::SeqCst);
+        self.waiting_for_the_daemon(true, cx);
+        if let Some(read) = self.machines.read(cx).machines().cloned() {
+            self.sidebar
+                .update(cx, |sidebar, cx| sidebar.set_machines(read, shown, cx));
+        }
+    }
+
+    /// The machine chosen gave no first read in time: the window is on this machine again, and
+    /// says why.
+    fn give_up_switching(&mut self, cx: &mut Context<Self>) {
+        self.switch_wait = None;
+        if !self.switching {
+            return;
+        }
+        // This machine itself gave no read: its own disconnections are said again from now on.
+        let Some(name) = self.aim.machine() else {
+            self.switching = false;
+            return;
+        };
+        let why = self
+            .machines
+            .read(cx)
+            .machines()
+            .and_then(|read| read.machine(&name))
+            .filter(|machine| !machine.online())
+            .map(|machine| format!("{} is {}", machine.name, machine.state_words()))
+            .unwrap_or_else(|| format!("{name} did not answer"));
+        // Still switching, back to this machine: the connections cut for it are no broken link.
+        self.switch_to(None, cx);
+        gpui_design_system::toast(
+            gpui_design_system::Toast::failure(format!("{name} cannot be shown")).detail(why),
+            cx,
+        );
     }
 
     /// Applies the updates the link sent since the last call.
@@ -1171,7 +1395,12 @@ impl Shell {
 
     fn apply(&mut self, update: Update, window: &mut Window, cx: &mut Context<Self>) {
         match update {
-            Update::Disconnected(_) => {
+            // Read or cut on a connection made for the machine shown before: not this one's.
+            Update::Snapshot(_, aimed) | Update::Disconnected(_, aimed)
+                if aimed != self.aim.generation() => {}
+            Update::Disconnected(..) if self.switching => {}
+            Update::Machines(news) => self.machines_news(*news, window, cx),
+            Update::Disconnected(..) => {
                 self.set_online(false, cx);
                 self.waiting_for_the_daemon(false, cx);
                 self.texts_due = true;
@@ -1181,7 +1410,9 @@ impl Shell {
                 .update(cx, |main, cx| main.set_not_answering(since, cx)),
             // The link subscribed to the events before it read: an edit made before that is in
             // what the pages read, not in the events, so they read it again.
-            Update::Snapshot(snapshot) => {
+            Update::Snapshot(snapshot, _) => {
+                self.switching = false;
+                self.switch_wait = None;
                 self.set_online(true, cx);
                 self.waiting_for_the_daemon(false, cx);
                 self.main.update(cx, |main, cx| main.set_read(cx));

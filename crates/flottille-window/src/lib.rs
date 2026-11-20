@@ -13,6 +13,7 @@ pub mod composer;
 pub mod connection_review;
 pub mod conventions;
 pub mod conversation;
+pub mod device;
 pub mod end_led;
 pub mod extensions;
 pub mod glyphs;
@@ -25,6 +26,8 @@ pub mod link;
 pub mod links_card;
 pub mod loading;
 pub mod look;
+pub mod machines;
+pub mod machines_page;
 pub mod message_checks;
 pub mod modals;
 pub mod mode;
@@ -124,7 +127,13 @@ pub struct Build {
     pub open: Option<String>,
 }
 
-pub fn run(connect: Connect, instance: Option<Instance>, build: Build) {
+/// The window, its requests on `connect`, signed with `device` for the user's other machines.
+pub fn run(
+    connect: Connect,
+    device: Option<device::Device>,
+    instance: Option<Instance>,
+    build: Build,
+) {
     gpui_kit::application()
         .with_assets(glyphs::Assets)
         .run(move |cx| {
@@ -147,7 +156,7 @@ pub fn run(connect: Connect, instance: Option<Instance>, build: Build) {
             };
             let window = gpui_kit::open_window(options, cx, |window, cx| {
                 let shell = cx.new(|cx| {
-                    let mut shell = Shell::new(connect, window, cx);
+                    let mut shell = Shell::new(connect, device, window, cx);
                     shell.set_build(build.full, build.reexec);
                     if let Some(page) = &build.open {
                         shell.reopen(page);

@@ -49,14 +49,16 @@ pub(crate) fn signer() -> Option<Sign> {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Update {
-    /// A fresh read of everything the shell shows.
-    Snapshot(Snapshot),
+    /// A fresh read of everything the shell shows, with the generation of the machine shown its
+    /// connection was made for ([`crate::machines::Aim::generation`]).
+    Snapshot(Snapshot, u64),
     /// What the daemon keeps of the window (the sidebar's folds, and the sessions that have a
     /// draft), read once, before the first snapshot: the tree is made as it was left, not
     /// animated from its default.
     Kept(crate::kept::Folds, std::collections::HashSet<String>),
-    /// The connection broke, with why; the link is connecting again.
-    Disconnected(String),
+    /// The connection broke, with why, and the generation of the machine shown it was made for;
+    /// the link is connecting again.
+    Disconnected(String, u64),
     /// Flottille has not answered the link for `NOT_ANSWERING`: since when it was asked, in ms
     /// after the epoch; `None` once it answers again.
     NotAnswering(Option<u64>),
@@ -119,6 +121,8 @@ pub enum Update {
         name: String,
         why: Option<String>,
     },
+    /// What this machine's daemon says of the user's machines (`machines`).
+    Machines(Box<crate::machines::News>),
     /// What the open session page's link read or saw, with the link's token.
     Session {
         token: u64,
@@ -141,6 +145,9 @@ pub struct Seen {
     pub project_changes: AtomicU64,
     /// When the link asked what it waits for, in ms after the epoch; 0 while it waits for nothing.
     pub asking: Arc<AtomicU64>,
+    /// The generation of the machine shown ([`crate::machines::Aim::generations`]): 0 for good
+    /// when the window shows only this machine.
+    pub aimed: Arc<AtomicU64>,
 }
 
 /// How long a request of the link may wait before the window says Flottille is not answering.
@@ -194,7 +201,20 @@ pub fn spawn(connect: Connect) -> (UnboundedReceiver<Update>, Arc<Seen>) {
 
 /// Starts the link's thread, sending its updates to `sender`.
 pub fn spawn_into(connect: Connect, sender: UnboundedSender<Update>) -> Arc<Seen> {
-    let seen = Arc::new(Seen::default());
+    spawn_aimed_into(connect, Arc::default(), sender)
+}
+
+/// [`spawn_into`], on connections made to the machine shown, whose generation is `aimed`: what
+/// the link reads and says is stamped with the generation its connection was made for.
+pub fn spawn_aimed_into(
+    connect: Connect,
+    aimed: Arc<AtomicU64>,
+    sender: UnboundedSender<Update>,
+) -> Arc<Seen> {
+    let seen = Arc::new(Seen {
+        aimed,
+        ..Seen::default()
+    });
     let shared = seen.clone();
     let watched = (seen.asking.clone(), sender.clone());
     let limit = not_answering();
@@ -246,18 +266,32 @@ fn run(connect: Connect, updates: UnboundedSender<Update>, seen: Arc<Seen>) {
     let mut briefs = Briefs::default();
     let reads = ProviderReads::default();
     loop {
+        let aimed = seen.aimed.load(Ordering::SeqCst);
         let why = match connect() {
+            // Made while another machine was chosen: made again, for that one.
+            Ok(_) if seen.aimed.load(Ordering::SeqCst) != aimed => continue,
             Ok(stream) => {
                 seen.connections.fetch_add(1, Ordering::Relaxed);
                 retry = FIRST_RETRY;
-                match follow(stream, &connect, &updates, &seen, &mut briefs, &reads) {
+                match follow(
+                    stream,
+                    &connect,
+                    &updates,
+                    &seen,
+                    &mut briefs,
+                    &reads,
+                    aimed,
+                ) {
                     Ok(()) => return,
                     Err(why) => why,
                 }
             }
             Err(error) => format!("cannot reach Flottille: {error}"),
         };
-        if updates.unbounded_send(Update::Disconnected(why)).is_err() {
+        if updates
+            .unbounded_send(Update::Disconnected(why, aimed))
+            .is_err()
+        {
             return;
         }
         std::thread::sleep(retry);
@@ -273,6 +307,7 @@ fn follow(
     seen: &Seen,
     briefs: &mut Briefs,
     reads: &ProviderReads,
+    aimed: u64,
 ) -> Result<()> {
     let mut conn = Conn::new(stream).map_err(|e| e.to_string())?;
     conn.asking = Some(seen.asking.clone());
@@ -408,7 +443,10 @@ fn follow(
             None => {
                 if stale.take().is_some() {
                     let snapshot = read(&mut conn, briefs, seen)?;
-                    if updates.unbounded_send(Update::Snapshot(snapshot)).is_err() {
+                    if updates
+                        .unbounded_send(Update::Snapshot(snapshot, aimed))
+                        .is_err()
+                    {
                         return Ok(());
                     }
                     seen.snapshots.fetch_add(1, Ordering::Relaxed);
