@@ -137,6 +137,9 @@ no device calls a `local` one over a link (`docs/remote.md`, "Roles").
 | `project.set_commit_checks` | drive |
 | `project.ticket` | read |
 | `project.progress` | read |
+| `about.show` | read |
+| `about.set` | drive |
+| `about.reset` | drive |
 | `rules.show` | read |
 | `rules.set` | drive |
 | `rules.reset` | drive |
@@ -644,6 +647,25 @@ own (the `rules` key of its file, where it stands, what is around it kept).
 
 A change to the user's rules emits `rules.changed {project: null}`; a project's emits
 `project.changed` like any edit of its file.
+
+### The about methods
+
+`about.show`, `about.set` and `about.reset` read, write and forget what the user says of themselves,
+which every agent reads (`docs/design.md` §8, "Instructions"): `about.toml` in Flottille's
+configuration folder, with the keys `name` (what agents call the user), `pronouns` (how to refer to
+them, one line) and `notes` (anything every agent should know). Each is optional.
+
+- `about.show {}` answers `{"name", "pronouns", "notes", "limit", "cut"}`: the three texts (`""`
+  for one not written), the notes' limit (8,000 characters) and why a text edited by hand past a
+  limit is cut for the agents (`null` when none is). `invalid-config` for a file that is not TOML.
+- `about.set {name?, pronouns?, notes?}` writes the fields given, keeps the others, clears one given
+  empty, and answers as `about.show`. `refused` above 8,000 characters for the notes, above 100 for
+  a name or `pronouns`, and for a name or `pronouns` on more than one line. What the user wrote
+  around the keys by hand is kept.
+- `about.reset {}` removes the file, and answers as `about.show`.
+
+A change emits `about.changed {}`. No tool of an agent reads or writes them: they are in its
+instructions.
 
 ### The judge methods
 

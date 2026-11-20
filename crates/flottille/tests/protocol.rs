@@ -79,6 +79,8 @@ fn every_method_the_sources_name_is_catalogued() {
         "sessions.next",
         // An event, said in `docs/protocol.md` ("Rules").
         "rules.changed",
+        // Another, said in the same place.
+        "about.changed",
     ];
     // `remote.git` is a bare repository's folder, beside the `remote.` methods; `update.rs` a
     // source file, beside the `update.` ones.

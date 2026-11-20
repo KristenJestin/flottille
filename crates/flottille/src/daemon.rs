@@ -36,7 +36,6 @@ use crate::locks::{Guard, Lock};
 use crate::mcp;
 use crate::projects::{self, Projects};
 use crate::providers;
-use crate::rules;
 use crate::run_methods;
 use crate::runs;
 use crate::setup;
@@ -47,6 +46,7 @@ use crate::tickets;
 use crate::tree;
 use crate::watchdog;
 use crate::workspaces;
+use crate::{about, rules};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -1158,6 +1158,13 @@ fn handle(daemon: &Arc<Daemon>, request: Request) -> (Message, Option<Subscripti
         ),
         method if method.starts_with("judge.") => (
             match judge::call(daemon, method, request.params) {
+                Ok(result) => Message::result(id, result),
+                Err(failure) => failure.answer(Some(id)),
+            },
+            None,
+        ),
+        method if method.starts_with("about.") => (
+            match about::call(daemon, method, request.params) {
                 Ok(result) => Message::result(id, result),
                 Err(failure) => failure.answer(Some(id)),
             },
