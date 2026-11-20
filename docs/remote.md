@@ -597,7 +597,7 @@ what it recorded (that this agent of that machine started that session, or is th
 | `deliver` | A delivery for an agent of the receiver: a report, a question, an answer, a request forwarded, `session-turn-ended`, a child's news, as `design.md` §5.2–5.3 make them. |
 | `call` | One of the tree's tools aimed at a session it started: `agent_send`, `agent_status`, `agent_stop`, `session_send`, `session_read`, `approval_answer`. Judged as on one machine. |
 | `capabilities` | What a runner offers: its projects, its agents signed in, its free slots ("Roles"). |
-| `share` | A vault entry or a connection the user shared, signed by their device ("Sharing"): `{"request", "entry", "secret"}`, the device's signed `vault.share` as the client wrote it, the entry's metadata, its secret. |
+| `share` | A vault entry or a connection the user shared, signed by their device ("Sharing"): `{"request", "entry", "secret"}`, the device's signed `vault.share` as the client wrote it, the entry's metadata, its secret; for a connection (`share_connection`), `{"request", "connection", "entries": [{"entry", "secret"}]}`, the signed `connection.share`, the declaration, and each entry the request names with its secret. |
 | `addresses` | Every address the sender may be reached at now: kept for it, so that the two link again without the hub ("The transport"). |
 
 Nothing else: no user method, no `approval.approve`, no `agent.mode`, no `agent.send` as the user, no
@@ -864,6 +864,32 @@ and removes its workspace as today, through `call`.
   flow as today, and its one-shot loopback redirect is reached through a tunnel the client opens on
   the same port of its own `127.0.0.1`, so that the browser's redirect lands on the machine that
   waits for it.
+- **Built (#833)**: `connection.share {name, machine, entries}` (`protocol.md`), `flottille
+  connection share <name> --machine <m> [--entry <e>]…`, and Settings, Connections, a row's
+  **Share with…**. It is a signed user request on the machine that holds the connection, as
+  `vault.share` is: that daemon refuses a command, an `http://` URL and an `https://` URL of this
+  machine (`localhost`, a loopback address, a name under `.localhost`), saying `the connection
+  <name> is this machine's own`; it refuses an entry the connection does not name, and its sign-in's
+  tokens (`<name>.oauth`) whoever asks (`OAuth tokens are never shared: <m> signs in for itself`).
+  The `share` message then carries the declaration and each entry the request names, with its
+  secret (`{"request", "connection", "entries": [{"entry", "secret"}]}`). The other runner checks the
+  request as it checks a vault entry's (member, signature, time, nonce, role, the sender a runner's
+  or a controller's machine), then that the connection is the one the request names, that the
+  entries are exactly the ones it names, and the declaration and the entries as its own Save would:
+  the entries are kept as shared ones (`shared from pc`), then the connection is declared as the
+  user's Save declares it (given at once while Connections and it are on). A connection of the same
+  name there is never replaced (`server has its own connection notes: remove or rename it there
+  first`).
+- **The sign-in from a client (#833)**: `flottille --machine server connection login <name>`, or the
+  window's **Sign in on server** of a connection it shared. The client signs `connection.login` for
+  that machine, whose daemon begins the sign-in as for its own client and notes the member whose
+  device asked; then `tunnel.open {sign_in: <name>}`, whose answer is the tunnel; then the browser
+  opens the address. That tunnel reaches no run: the machine serves it only while a sign-in of that
+  connection waits there, only for the device that began it, and only to its one-shot loopback
+  listener, whose port its redirect names; each connection is checked again (the very sign-in
+  still waits), and the tunnel ends with the sign-in, its last word saying whether it signed in.
+  The client's side listens on that very port of `127.0.0.1` or refuses (the redirect names it).
+  What `tunnel.open {run}` may reach is unchanged.
 
 ## The repository
 
@@ -936,6 +962,16 @@ on a real phone, by hand, and reported.
 - A launch an agent aims at a runner that cannot take it is refused, naming the runners that could;
   the agent's tool description lists no machine.
 - A notification waits 30 seconds and is dropped when a client had an input in the last 2 minutes.
+- A connection shared (#833) is declared on the other machine as the user's own Save declares it:
+  no mark of where it came from (its entries carry `shared from`), and a connection of the same
+  name there is refused, never replaced, even one shared earlier from the same machine: the user
+  removes it there and shares again.
+- **Share with…** of a connection leaves its vault entries behind unless the user turns on **Share
+  its vault entries too**: secrets leave the machine only on a gesture of their own.
+- The window has no switcher of machines yet: the **Sign in on <machine>** of another machine's
+  connection is offered for a connection this window shared (its toast, its row's menu), and the
+  row says the copy's state there (`On server: not signed in yet`, `signing in`, `signed in`) for
+  as long as the window runs.
 
 - The link listens nowhere until the user sets `[remote] listen` (an IP address and a port,
   `0.0.0.0:7447` in the examples): how a machine is reached is the user's business, and a laptop
