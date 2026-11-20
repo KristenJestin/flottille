@@ -70,10 +70,7 @@ fn reader_cpu_seconds() -> u64 {
 
 /// Never more than `READER_CPU_SECONDS`: the sandbox does not widen with the clock.
 fn cpu_seconds_for(time: Duration) -> u64 {
-    match time {
-        time if time == Duration::from_secs(25) => READER_CPU_SECONDS,
-        time => time.as_secs().saturating_sub(1).max(1),
-    }
+    READER_CPU_SECONDS.min(time.as_secs().saturating_sub(1).max(1))
 }
 const READER_ANSWER_BYTES: u64 = 4 * 1024 * 1024;
 /// The hidden subcommand the reader runs as.
