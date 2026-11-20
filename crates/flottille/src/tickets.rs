@@ -4188,7 +4188,7 @@ mod tests {
 
         assert_eq!(
             document_text(&document),
-            "## Goal\n\nLet users **log in**\n[@alice](mention:1)\n\n- form\n- session\n\n1. ship\n\n\
+            "## Goal\n\nLet users **log in**\n@alice\n\n- form\n- session\n\n1. ship\n\n\
              [file: unnamed, not shown]"
         );
         assert_eq!(

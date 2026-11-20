@@ -831,6 +831,15 @@ mod tests {
     }
 
     #[test]
+    fn a_mention_whose_id_is_no_account_id_reads_as_its_text() {
+        // An id that holds `)` or a space would break the link it is written into, and is no
+        // account a mention could be written back with.
+        let adf = json!({"type": "doc", "version": 1, "content": [{"type": "paragraph",
+            "content": [{"type": "mention", "attrs": {"id": "ana) x", "text": "@Ana Example"}}]}]});
+        assert_eq!(to_markdown(&adf), "@Ana Example");
+    }
+
+    #[test]
     fn a_mention_link_is_a_mention_node_and_an_at_name_stays_text() {
         let adf = from_markdown("Hi [@Ana Example](mention:5b10ac8d82e05b22cc7d4ef5), and @Ben");
         assert_eq!(
