@@ -95,6 +95,16 @@ impl Place {
     /// `pc` adds `device` as `name`, a runner, and declares `machine` for it, as members sign
     /// them.
     async fn add(&self, device: &DeviceKey, machine: &MachineKey, name: &str) {
+        // The device's join request, answered on the hub: joining itself is tested elsewhere.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        self.served.with_hub(|hub| {
+            let ask = InvitationAsk::sign(&hub.key(), now, &self.pc).unwrap();
+            let token = hub.invite(&ask).unwrap();
+            hub.join(&token, device.public()).unwrap();
+        });
         let head = self.served.with_hub(|hub| hub.list().head());
         let added = Change::sign(
             head,
@@ -382,7 +392,7 @@ async fn one_device_cannot_fill_the_hub() {
     }
     assert_eq!(answered, 20);
 
-    let (sent, took, mut pc_port) = flooding.await.unwrap();
+    let (sent, took, pc_port) = flooding.await.unwrap();
     let forwarded = counting.await.unwrap();
     // The hub forwarded no more than the bound lets through, and the rest was dropped: the pc
     // was slowed, not given the hub's memory.
