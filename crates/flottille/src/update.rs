@@ -568,10 +568,14 @@ fn unpack(file: &Path, work: &Path, name: &str) -> Result<PathBuf> {
     Ok(work.join(name.trim_end_matches("-x86_64-linux.tar.gz")))
 }
 
+/// The start of the name of the folder a download is unpacked in, beside the binary: an agent
+/// never writes there (the gate).
+pub const WORK_PREFIX: &str = ".flottille-update-";
+
 /// A folder of its own beside the binary, so that the rename stays on one file system.
 fn tempfile_dir(dir: &Path) -> Result<PathBuf> {
     for n in 0..100 {
-        let path = dir.join(format!(".flottille-update-{}-{n}", std::process::id()));
+        let path = dir.join(format!("{WORK_PREFIX}{}-{n}", std::process::id()));
         match std::fs::create_dir(&path) {
             Ok(()) => return Ok(path),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,

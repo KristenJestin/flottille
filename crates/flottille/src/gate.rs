@@ -163,7 +163,7 @@ pub(crate) const AGENT_LOGINS: [&str; 2] = [".credentials.json", "auth.json"];
 const SYSTEM_SENSITIVE: [&str; 3] = ["/etc/shadow", "/etc/sudoers", "/etc/sudoers.d"];
 /// What runs at the user's next login or command, or starts a process later, from the home
 /// folder (`docs/design.md` §7.1): an agent never writes it.
-const STARTUP: [&str; 20] = [
+const STARTUP: [&str; 21] = [
     ".bashrc",
     ".bash_profile",
     ".bash_login",
@@ -184,9 +184,13 @@ const STARTUP: [&str; 20] = [
     ".local/share/systemd/user",
     ".local/bin",
     "bin",
+    // Read by every `curl` of the user, the update's included (`update::curl_command` reads
+    // none, but the user's own do).
+    ".curlrc",
 ];
 /// What is read from the user's configuration folder, wherever it is: [`STARTUP`]'s.
-const CONFIG_STARTUP: [&str; 8] = [
+const CONFIG_STARTUP: [&str; 9] = [
+    "curlrc",
     "fish",
     "git",
     "autostart",
@@ -4767,9 +4771,22 @@ pub fn forbidden(
             .iter()
             .map(|program| crate::update::staging_of(program))
             .collect();
+        // And the folder a download is unpacked in beside it, before it is staged.
+        let unpacking = |path: &Path| {
+            program.iter().filter_map(|p| p.parent()).any(|dir| {
+                path.strip_prefix(dir).is_ok_and(|rest| {
+                    rest.components().next().is_some_and(|first| {
+                        first
+                            .as_os_str()
+                            .to_string_lossy()
+                            .starts_with(crate::update::WORK_PREFIX)
+                    })
+                })
+            })
+        };
         if seen(path)
             .iter()
-            .any(|path| staging.iter().any(|staging| path.starts_with(staging)))
+            .any(|path| staging.iter().any(|staging| path.starts_with(staging)) || unpacking(path))
         {
             return Some(format!(
                 "refused: {} is where a build of Flottille is staged, which becomes its program at \
@@ -4809,9 +4826,14 @@ pub fn forbidden(
     })
 }
 
-/// The paths of the daemon's program, which runs from `exe`.
+/// The paths of the daemon's program, which runs from `exe`: once an update renamed a build
+/// over it, `/proc/self/exe` names it with ` (deleted)`, and the program is the file at its path.
 fn programs(exe: &Path) -> Vec<PathBuf> {
-    [place::real_path(exe).ok(), Some(exe.to_owned())]
+    let exe = exe
+        .to_str()
+        .and_then(|path| path.strip_suffix(" (deleted)"))
+        .map_or_else(|| exe.to_owned(), PathBuf::from);
+    [place::real_path(&exe).ok(), Some(exe)]
         .into_iter()
         .flatten()
         .collect()
