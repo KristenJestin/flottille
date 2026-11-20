@@ -1421,8 +1421,8 @@ impl ConnectionsSection {
                 }
             }
             Then::SignInOpened { name, machine } => match answer {
-                Ok(url) => {
-                    let url = url.as_str().unwrap_or_default().to_owned();
+                Ok(begun) => {
+                    let url = begun["url"].as_str().unwrap_or_default().to_owned();
                     match sign_in_address(&url) {
                         Ok(()) => {
                             let shell = self.shell.clone();
