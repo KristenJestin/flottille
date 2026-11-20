@@ -895,8 +895,9 @@ fn settings_show_the_hub_and_whether_it_is_reachable(cx: &mut TestAppContext) {
     until(&shell, cx, "the hub is unreachable", |cx| {
         label(cx, HUB_TAG).is_some_and(|tag| tag.starts_with("unreachable since "))
     });
-    until(&shell, cx, "the reason unfolds", |cx| {
-        present(cx, HUB_REASON)
+    // The session's end is said first, then the first try that fails names the address.
+    until(&shell, cx, "the reason names the address tried", |cx| {
+        label(cx, HUB_REASON).is_some_and(|said| said.starts_with("tried "))
     });
     settle(&shell, cx);
     let reason = label(cx, HUB_REASON).unwrap();
