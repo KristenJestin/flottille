@@ -1344,6 +1344,8 @@ pub struct Actions {
     appearance: Sender<Command>,
     keeper: Sender<Keep>,
     connect: Connect,
+    /// This machine's daemon, whichever machine the window shows.
+    local: Connect,
     updates: UnboundedSender<Update>,
     bounds: Bounds,
 }
@@ -1402,7 +1404,7 @@ impl Actions {
         // What the window keeps is written one request at a time, in the order it was asked: a
         // draft written, then forgotten, must not reach the daemon the other way round.
         let (keeper, kept) = channel();
-        let (to, updates_to) = (local, updates.clone());
+        let (to, updates_to) = (local.clone(), updates.clone());
         std::thread::Builder::new()
             .name("flottille-keeper".into())
             .spawn(move || keep(to, kept, updates_to, bounds))
@@ -1412,6 +1414,7 @@ impl Actions {
             appearance,
             keeper,
             connect,
+            local,
             updates,
             bounds,
         }
@@ -1445,7 +1448,13 @@ impl Actions {
             let _ = self.appearance.send(command);
             return;
         }
-        let (connect, updates, bounds) = (self.connect.clone(), self.updates.clone(), self.bounds);
+        // Sharing is this machine's vault going to another machine, signed by this device: it is
+        // asked of this machine's daemon, never of the machine the window shows.
+        let connect = match command {
+            Command::VaultShare { .. } | Command::ShareMachines => self.local.clone(),
+            _ => self.connect.clone(),
+        };
+        let (updates, bounds) = (self.updates.clone(), self.bounds);
         std::thread::Builder::new()
             .name("flottille-action".into())
             .spawn(move || {
