@@ -518,7 +518,13 @@ async fn the_core_joins_through_the_hub_from_a_qr_and_links_to_the_runner() {
             .is_some_and(|presence| presence.active)
     );
     place.runner.watched().await;
-    assert!(!taken.batches().is_empty());
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while taken.batches().is_empty() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("a batch within 10 s");
 
     // A new core over the same folder, as at the app's next start, is the same member.
     let fingerprint = phone.fingerprint();
@@ -602,7 +608,10 @@ async fn a_list_change_no_member_signed_is_refused_by_the_core() {
 
     let phone = place.phone();
     let taken = Arc::new(Taken::default());
-    phone.connect(taken.clone()).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(10), phone.connect(taken.clone()))
+        .await
+        .expect("connected within 10 s")
+        .unwrap();
     let view = until(&phone, "the list refused", |view| !view.said.is_empty()).await;
     assert!(
         view.said[0].contains("refused") && view.said[0].contains("not a member"),
