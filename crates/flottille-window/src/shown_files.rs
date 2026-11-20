@@ -21,6 +21,8 @@ use crate::shell::Shell;
 
 /// How long one chunk may take: half a megabyte, paced by the machine that serves it.
 const CHUNK_WITHIN: Duration = Duration::from_secs(30);
+/// How many times a chunk is asked again of a machine that is busy, half a second apart.
+const BUSY_TRIES: u32 = 20;
 /// The most of a picture read for its thumbnail, as for a picture of this machine.
 const MOST_PICTURE: u64 = 20 * 1024 * 1024;
 
@@ -40,8 +42,10 @@ pub fn is_video(target: &str) -> bool {
 pub struct ShownFiles {
     connect: Connect,
     shell: WeakEntity<Shell>,
-    /// A folder of this window's own, readable by the user alone, removed with the window.
-    folder: PathBuf,
+    /// A folder of this window's own, readable by the user alone, removed with the window; none
+    /// when no private folder could be made: nothing is then copied.
+    folder: Option<PathBuf>,
+    copies: Arc<std::sync::Mutex<Copies>>,
 }
 
 impl gpui_kit::Global for ShownFiles {}
@@ -51,19 +55,29 @@ impl ShownFiles {
         let stamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |since| since.as_nanos());
-        let folder =
-            std::env::temp_dir().join(format!("flottille-shown-{}-{stamp}", std::process::id()));
+        let runtime = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from);
+        let temp = std::env::temp_dir();
+        // What earlier runs left, in every place a window of Flottille ever wrote: its own
+        // naming only, and only what is the user's.
+        let base = temp.join(format!("flottille-{}", unsafe { libc::geteuid() }));
+        for parent in runtime.iter().chain([&base, &temp]) {
+            sweep(parent, running);
+        }
+        let folder = private_folder(runtime.as_deref(), &temp, std::process::id(), stamp).ok();
         ShownFiles {
             connect,
             shell,
             folder,
+            copies: Arc::default(),
         }
     }
 }
 
 impl Drop for ShownFiles {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.folder);
+        if let Some(folder) = &self.folder {
+            let _ = std::fs::remove_dir_all(folder);
+        }
     }
 }
 
@@ -83,11 +97,21 @@ fn fetch(
 ) -> Result<u64, String> {
     use base64::Engine as _;
     loop {
-        let answer: Value = conn.ask_within(
-            "agent.file",
-            json!({"agent": link.agent, "shown": link.seq, "offset": offset}),
-            CHUNK_WITHIN,
-        )??;
+        // A machine that is serving as much as it takes says it is busy: asked again shortly.
+        let mut tries = 0;
+        let answer: Value = loop {
+            match conn.ask_within(
+                "agent.file",
+                json!({"agent": link.agent, "shown": link.seq, "offset": offset}),
+                CHUNK_WITHIN,
+            )? {
+                Err(why) if why.contains("busy:") && tries < BUSY_TRIES => {
+                    tries += 1;
+                    std::thread::sleep(Duration::from_millis(500));
+                }
+                answer => break answer?,
+            }
+        };
         let size = answer["size"].as_u64().ok_or("the machine sent no size")?;
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(answer["data"].as_str().unwrap_or_default())
@@ -132,19 +156,14 @@ struct Begun {
     size: u64,
 }
 
-/// Writes the first chunk of `link` into `path`, made for the user alone.
+/// Writes the first chunk of `link` into `path`, a new file made for the user alone: one that is
+/// there already, or a link in its place, is an error, never written through.
 fn begin(connect: &Connect, link: &ShownLink, path: &Path) -> Result<Begun, String> {
-    use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
-    let folder = path.parent().ok_or("no folder")?;
-    std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(folder)
-        .map_err(|error| error.to_string())?;
+    use std::os::unix::fs::OpenOptionsExt as _;
     let mut file = std::fs::OpenOptions::new()
         .write(true)
-        .create(true)
-        .truncate(true)
+        .create_new(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
         .mode(0o600)
         .open(path)
         .map_err(|error| error.to_string())?;
@@ -185,18 +204,38 @@ fn rest(begun: Begun, link: &ShownLink) -> Result<(), String> {
 
 /// Open (a picture) or Play (a video) of a file of another machine: a copy is written on this
 /// machine, the system's handler is given it once its first chunk is in, and the rest follows.
+/// A link opened again is given the copy it has, never written over or fetched again.
 pub fn open(link: &ShownLink, cx: &mut App) {
     let Some(files) = cx.try_global::<ShownFiles>() else {
         return;
     };
-    let (connect, shell) = (files.connect.clone(), files.shell.clone());
+    if !is_plain_agent(&link.agent) {
+        crate::tunnels::failed("that machine named a session in a way that is no name", cx);
+        return;
+    }
+    let Some(folder) = files.folder.clone() else {
+        crate::tunnels::failed("no private folder to copy it into", cx);
+        return;
+    };
+    let (connect, shell, copies) = (
+        files.connect.clone(),
+        files.shell.clone(),
+        files.copies.clone(),
+    );
     let name = Path::new(&link.target)
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("file");
-    let path = files
-        .folder
-        .join(format!("{}-{}-{name}", link.agent, link.seq));
+    let path = folder.join(format!("{}-{}-{name}", link.agent, link.seq));
+    let claim = copies.lock().unwrap().claim(&path);
+    match claim {
+        Claim::Wait => return,
+        Claim::Open => {
+            shell.update(cx, |shell, _| shell.open_local(&path)).ok();
+            return;
+        }
+        Claim::Fetch => {}
+    }
     let link = link.clone();
     let executor = cx.background_executor().clone();
     cx.spawn(async move |cx| {
@@ -210,71 +249,176 @@ pub fn open(link: &ShownLink, cx: &mut App) {
         let begun = match begun {
             Ok(begun) => begun,
             Err(why) => {
+                copies.lock().unwrap().failed(&path);
+                let _ = std::fs::remove_file(&path);
                 cx.update(|cx| crate::tunnels::failed(&why, cx));
                 return;
             }
         };
+        copies.lock().unwrap().begun(&path);
         shell.update(cx, |shell, _| shell.open_local(&path)).ok();
-        if let Err(why) = executor.spawn(async move { rest(begun, &link) }).await {
-            cx.update(|cx| {
-                gpui_design_system::toast(
-                    gpui_design_system::Toast::failure(format!(
-                        "Not all of {name} arrived: {why}",
-                        name = path.file_name().and_then(|n| n.to_str()).unwrap_or("it")
-                    )),
-                    cx,
-                )
-            });
+        match executor.spawn(async move { rest(begun, &link) }).await {
+            Ok(()) => copies.lock().unwrap().complete(&path),
+            Err(why) => {
+                copies.lock().unwrap().failed(&path);
+                let _ = std::fs::remove_file(&path);
+                cx.update(|cx| {
+                    gpui_design_system::toast(
+                        gpui_design_system::Toast::failure(format!(
+                            "Not all of {name} arrived: {why}",
+                            name = path.file_name().and_then(|n| n.to_str()).unwrap_or("it")
+                        )),
+                        cx,
+                    )
+                });
+            }
         }
     })
     .detach();
 }
 
-/// A machine's agent id goes into a file name only when it is a plain name.
-pub fn is_plain_agent(_agent: &str) -> bool {
-    todo!("round 2, point 5")
+/// A machine's agent id goes into a file name only when it is a plain name: what the remote
+/// sends is never taken as a path.
+pub fn is_plain_agent(agent: &str) -> bool {
+    (1..=64).contains(&agent.len())
+        && agent
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+}
+
+/// What this window's folders are called, followed by the pid and a stamp.
+const FOLDER: &str = "flottille-shown-";
+
+/// A folder of `parent` made now, for the user alone: made one level only, never through a link.
+fn make_private(parent: &Path, name: &str) -> std::io::Result<PathBuf> {
+    use std::os::unix::fs::DirBuilderExt as _;
+    let path = parent.join(name);
+    std::fs::DirBuilder::new().mode(0o700).create(&path)?;
+    Ok(path)
+}
+
+/// Whether `path` is a real folder (no link) of the user, closed to everyone else.
+fn is_the_users_alone(path: &Path) -> bool {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+    std::fs::symlink_metadata(path).is_ok_and(|meta| {
+        meta.is_dir()
+            && meta.uid() == unsafe { libc::geteuid() }
+            && meta.permissions().mode() & 0o077 == 0
+    })
 }
 
 /// The folder this window writes its copies in, made now: in `runtime` (`$XDG_RUNTIME_DIR`) when
-/// the user has one, else in a folder of `temp` made for the user alone.
+/// the user has one, else in a folder of `temp` made for the user alone (made, or checked to be
+/// a folder of the user's that nobody else can enter), never one another user could have
+/// prepared.
 pub fn private_folder(
-    _runtime: Option<&Path>,
-    _temp: &Path,
-    _pid: u32,
-    _stamp: u128,
+    runtime: Option<&Path>,
+    temp: &Path,
+    pid: u32,
+    stamp: u128,
 ) -> std::io::Result<PathBuf> {
-    todo!("round 2, point 3")
+    let name = format!("{FOLDER}{pid}-{stamp}");
+    if let Some(runtime) = runtime.filter(|runtime| is_the_users_alone(runtime)) {
+        return make_private(runtime, &name);
+    }
+    let base = temp.join(format!("flottille-{}", unsafe { libc::geteuid() }));
+    match make_private(temp, &format!("flottille-{}", unsafe { libc::geteuid() })) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error),
+    }
+    if !is_the_users_alone(&base) {
+        return Err(std::io::Error::other(format!(
+            "{} is not a folder of yours that no one else can enter",
+            base.display()
+        )));
+    }
+    make_private(&base, &name)
 }
 
-/// Removes, in `parent`, the folders of this window's naming that earlier runs left.
-pub fn sweep(_parent: &Path, _alive: impl Fn(u32) -> bool) {
-    todo!("round 2, point 4")
+/// Removes, in `parent`, the folders of this window's naming that earlier runs left: real folders
+/// of the user's, of a window that is not running any more (`alive` tells by its pid). A link, a
+/// file and everything of another name stay.
+pub fn sweep(parent: &Path, alive: impl Fn(u32) -> bool) {
+    use std::os::unix::fs::MetadataExt as _;
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return;
+    };
+    let me = unsafe { libc::geteuid() };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(rest) = name.to_str().and_then(|name| name.strip_prefix(FOLDER)) else {
+            continue;
+        };
+        let Some(pid) = rest
+            .split('-')
+            .next()
+            .and_then(|pid| pid.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        let owned = entry
+            .metadata()
+            .is_ok_and(|meta| meta.is_dir() && meta.uid() == me);
+        if owned && !alive(pid) {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
+/// Whether a process of that pid runs.
+fn running(pid: u32) -> bool {
+    pid == std::process::id() || Path::new(&format!("/proc/{pid}")).exists()
 }
 
 /// What an Open of a link finds: its copy to fetch, being fetched, or there.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Claim {
+    /// Nobody made it: this Open does, and opens it once its first chunk is in.
     Fetch,
+    /// Its first chunk is not in yet: the Open that began it will open it.
     Wait,
+    /// It is there, whole or arriving: open it as it is, write nothing.
     Open,
 }
 
-/// The copies this window made or is making.
+#[derive(Clone, Copy)]
+enum State {
+    Starting,
+    Writing,
+    Complete,
+}
+
+/// The copies this window made or is making, so two Opens of a link share one and a whole one is
+/// not fetched again.
 #[derive(Default)]
-pub struct Copies;
+pub struct Copies(std::collections::HashMap<PathBuf, State>);
 
 impl Copies {
-    pub fn claim(&mut self, _path: &Path) -> Claim {
-        todo!("round 2, point 4")
+    pub fn claim(&mut self, path: &Path) -> Claim {
+        match self.0.get(path) {
+            None => {
+                self.0.insert(path.to_owned(), State::Starting);
+                Claim::Fetch
+            }
+            Some(State::Starting) => Claim::Wait,
+            Some(State::Writing | State::Complete) => Claim::Open,
+        }
     }
-    pub fn begun(&mut self, _path: &Path) {
-        todo!("round 2, point 4")
+
+    /// The first chunk is written.
+    pub fn begun(&mut self, path: &Path) {
+        self.0.insert(path.to_owned(), State::Writing);
     }
-    pub fn complete(&mut self, _path: &Path) {
-        todo!("round 2, point 4")
+
+    /// Every chunk is written.
+    pub fn complete(&mut self, path: &Path) {
+        self.0.insert(path.to_owned(), State::Complete);
     }
-    pub fn failed(&mut self, _path: &Path) {
-        todo!("round 2, point 4")
+
+    /// The copy is not whole and will not be: the next Open makes it again.
+    pub fn failed(&mut self, path: &Path) {
+        self.0.remove(path);
     }
 }
 
