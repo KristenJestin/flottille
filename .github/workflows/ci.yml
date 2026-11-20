@@ -373,7 +373,7 @@ jobs:
       - uses: rui314/setup-mold@v1
       - uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: v1-rust
+          prefix-key: v2-rust
           shared-key: verify
           save-if: false
       - name: Have the window's system libraries
@@ -427,7 +427,7 @@ jobs:
       - uses: rui314/setup-mold@v1
       - uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: v1-rust
+          prefix-key: v2-rust
           shared-key: verify
           save-if: false
       - name: Have the window's system libraries
