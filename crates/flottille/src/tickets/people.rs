@@ -8,6 +8,7 @@
 use serde_json::Value;
 
 use super::{TicketsCall, acli, issues_of, jira_site, said, searched};
+use crate::daemon::Daemon;
 use crate::forge;
 use crate::forge::Gh;
 use crate::forge::masked;
@@ -160,8 +161,58 @@ fn with_account(person: &Person) -> String {
     }
 }
 
-/// `tickets people {query?}`: who can be named as an assignee on the project's tracker.
-pub(super) async fn people(project: &Project, asked: &TicketsCall) -> Outcome {
+/// The people of the site matching `query`, as Jira's own picker offers them (`GET
+/// /rest/api/3/user/search`): with a `ticket`, only those who can see it (`GET
+/// /rest/api/3/user/viewissue/search`), so a mention reaches someone who can read it. Through the
+/// project's tracker entry, which is the one credential here and goes to the site alone. A person
+/// the site gives no account id is not one to mention, and a deactivated one is not notified.
+async fn site_people(
+    daemon: &Daemon,
+    project: &Project,
+    site: &str,
+    query: &str,
+    ticket: Option<&str>,
+) -> Result<Vec<Person>, String> {
+    let key = match ticket {
+        Some(ticket) => Some(
+            super::accepted(project, ticket).map_err(|why| format!("refused: ticket: {why}"))?,
+        ),
+        None => None,
+    };
+    let none = super::worklog::no_entry_to("search the site's people with", "searches the site");
+    let (jira, _, _) = super::worklogs::signed_in(daemon, project, site, none).await?;
+    let found = match &key {
+        Some(key) => {
+            let key = key.text();
+            jira.get(
+                "user/viewissue/search",
+                &[("issueKey", &key), ("query", query)],
+            )
+            .await?
+        }
+        None => jira.get("user/search", &[("query", query)]).await?,
+    };
+    Ok(found
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|user| user["active"] != false)
+        .filter_map(|user| {
+            let account = said(&user["accountId"]);
+            let mail = jira.clean(&said(&user["emailAddress"]));
+            let name = jira.clean(&said(&user["displayName"]));
+            if account.is_empty() {
+                return None;
+            }
+            let handle = if mail.is_empty() { &account } else { &mail };
+            Some(Person::new(&name, handle, &account, &[&account, &mail]))
+        })
+        .collect())
+}
+
+/// `tickets people {query?, ticket?}`: who can be named on the project's tracker: as an assignee,
+/// and on Jira in a mention. A Jira query is searched on the site too, with the tracker's entry.
+pub(super) async fn people(daemon: &Daemon, project: &Project, asked: &TicketsCall) -> Outcome {
     let listing = match read(project).await {
         Ok(listing) => listing,
         Err(why) => return Outcome::Refused(why),
@@ -176,17 +227,46 @@ pub(super) async fn people(project: &Project, asked: &TicketsCall) -> Outcome {
         text.push_str(&format!(", matching {query:?}"));
     }
     text.push_str(":\n");
-    if listing.people.is_empty() {
-        return Outcome::Done(match listing.why {
-            Some(why) => format!("{text}\nnone: they cannot be listed: {why}."),
-            None => format!("{text}\nnone in {}.", listing.looked),
-        });
-    }
-    let found: Vec<&Person> = match query {
+    let local: Vec<&Person> = match query {
         Some(query) => listing.people.matching(query),
         None => listing.people.all().iter().collect(),
     };
-    text.push_str(&format!("\n{} in {}:\n", found.len(), listing.looked));
+    let mut people = People::default();
+    for person in local {
+        people.add(person.clone());
+    }
+    let mut looked = listing.looked.clone();
+    let mut note = String::new();
+    if let (Some(ProjectTracker::Jira { site, .. }), Some(query)) = (&project.tracker, query) {
+        let ticket = asked
+            .ticket
+            .as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty());
+        match site_people(daemon, project, site, query, ticket).await {
+            Ok(found) => {
+                for person in found {
+                    people.add(person);
+                }
+                looked.push_str(&match ticket {
+                    Some(ticket) => format!(" and the site's people who can see {ticket}"),
+                    None => " and the site's people".into(),
+                });
+            }
+            Err(why) => {
+                let why = why.strip_prefix("refused: ").unwrap_or(&why);
+                note = format!("\nOnly the assignees were searched, not the site: {why}.");
+            }
+        }
+    }
+    if people.is_empty() {
+        return Outcome::Done(match listing.why {
+            Some(why) => format!("{text}\nnone: they cannot be listed: {why}.{note}"),
+            None => format!("{text}\nnone in {looked}.{note}"),
+        });
+    }
+    let found: Vec<&Person> = people.all().iter().collect();
+    text.push_str(&format!("\n{} in {looked}:\n", found.len()));
     let jira = matches!(project.tracker, Some(ProjectTracker::Jira { .. }));
     text.push_str(&match jira {
         true => crate::people::lines_saying(&found, with_account),
@@ -204,6 +284,7 @@ pub(super) async fn people(project: &Project, asked: &TicketsCall) -> Outcome {
             " A mention in a text is [@Display Name](mention:<accountId>), with the account id.",
         );
     }
+    text.push_str(&note);
     Outcome::Done(text)
 }
 

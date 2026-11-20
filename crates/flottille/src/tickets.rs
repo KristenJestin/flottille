@@ -1511,7 +1511,7 @@ pub async fn tickets(daemon: &Arc<Daemon>, agent: &str, place: &Place, args: Val
         }
     }
     let outcome = match asked.action.as_str() {
-        "people" => people::people(&project, &asked).await,
+        "people" => people::people(daemon, &project, &asked).await,
         "list" | "search" => listed(daemon, &project, &asked).await,
         "show" => match show(daemon, place, &project, &asked).await {
             Outcome::Done(text) => Outcome::Done(text + &events::subscriptions_text(daemon, agent)),

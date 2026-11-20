@@ -533,6 +533,17 @@ ticket itself.
     account id 5b10…`, once when it is already how they are named), and `show` with `detail
     full` says the author's account id on each Jira comment's line (`[comment 20000, author
     account 5b10…]`), so an agent answering someone can mention them.
+  - **A person seen nowhere yet is searched on the site.** `people {query, ticket?}` on Jira also
+    asks the site, with the project's tracker entry (REST, signed as the rest of the calls, the
+    secret in no argument, log nor answer): with a `ticket`, `GET
+    /rest/api/3/user/viewissue/search?issueKey=&query=` (only the people who can see it, what
+    Jira's own picker offers, so a mention reaches someone who can read the ticket), else `GET
+    /rest/api/3/user/search?query=`. A deactivated account and one with no account id are left
+    out. Each line gives the name, the account id and the e-mail when Jira shows it; people of the
+    same name are all listed, never one chosen silently. What `acli` shows (the assignees) comes
+    first and is not repeated. Without the entry, or when the site cannot be reached, `people`
+    answers from the assignees and says so (`Only the assignees were searched, not the site: …`,
+    with how to set the entry). No query: no search (Jira's takes words).
   - A mention reads back as `[@Display Name](mention:<accountId>)`, the form the agent writes, so
     one read can be repeated (a mention with no account id reads as its text). GitHub is unchanged: an `@login` notifies, and a `mention:` link is left as
     a link. A raw ADF given in `fields` is the agent's own document: its mention nodes are not
