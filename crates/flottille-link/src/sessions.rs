@@ -4,6 +4,8 @@
 //! again when it changes. The other machine keeps it, so that its clients list the sessions of a
 //! machine that is off.
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 /// The most sessions a list may hold: past it, the sender keeps those of the latest exchange.
@@ -83,6 +85,31 @@ impl SessionList {
             }
             if !STATES.contains(&session.state.as_str()) {
                 return Err(format!("a state of a list is one of {}", STATES.join(", ")));
+            }
+        }
+        let mut pilots = HashMap::new();
+        for session in &self.sessions {
+            if pilots
+                .insert(session.id.as_str(), session.pilot.as_deref())
+                .is_some()
+            {
+                return Err(format!("the id {} is in a list twice", session.id));
+            }
+        }
+        // A session under its own pilot, directly or through others, shows under no row.
+        for session in &self.sessions {
+            let mut at = session.pilot.as_deref();
+            for _ in 0..pilots.len() {
+                at = match at.and_then(|id| pilots.get(id)) {
+                    Some(pilot) => *pilot,
+                    None => break,
+                };
+            }
+            if at.is_some_and(|id| pilots.contains_key(id)) {
+                return Err(format!(
+                    "the pilots of a list make a cycle at {}",
+                    session.id
+                ));
             }
         }
         Ok(())
