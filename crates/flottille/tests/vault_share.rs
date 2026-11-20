@@ -592,7 +592,7 @@ fn a_share_does_not_replace_the_other_machine_s_own_entry() {
 fn with_a_viewer() -> (remote::TestHub, Machine, Machine, Machine) {
     let (hub, pc, server) = pc_and_server(User::new());
     let phone = Machine::new();
-    pair(&pc, &phone, "phone", "viewer");
+    pair(&hub, &phone, "phone", "viewer");
     server.wait_for_member("phone", true);
     pc.wait_for("phone", "online");
     pc.user

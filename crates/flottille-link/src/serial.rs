@@ -1,4 +1,4 @@
-//! A key as bytes and as text: what the member list and the invitation carry. A key travels in
+//! A key as bytes and as text: what the member list and the pair code carry. A key travels in
 //! hexadecimal, and one that is not a point of the curve, or a weak one, is refused when it is
 //! read. Also the text a person reads in them: the characters that show nothing.
 

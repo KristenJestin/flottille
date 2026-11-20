@@ -132,14 +132,10 @@ pub const METHODS: &[(&str, Class)] = &[
     ("remote.address.remove", Drive),
     ("remote.members", Read),
     ("remote.launches", Read),
-    ("remote.requests", Read),
-    ("remote.invite", Drive),
-    ("remote.refuse", Drive),
     ("remote.change", Drive),
-    // It points this machine at a hub and a root of its own: the machine's user only.
-    ("remote.setup", Local),
-    // As `remote.setup`: a join, then the declaration of this machine by the device that joined.
-    ("remote.join", Local),
+    // It points this machine at a hub, with the code its host printed: the machine's user only.
+    ("remote.pair", Local),
+    // As `remote.pair`: the declaration of this machine by the device that paired.
     ("remote.declare", Local),
     // It opens a port on the client's machine for a run's port on this one: a user's act.
     ("tunnel.open", Drive),

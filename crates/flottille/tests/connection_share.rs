@@ -776,9 +776,9 @@ fn a_crafted_share_is_refused_by_the_receiver_and_keeps_nothing() {
 
 #[test]
 fn a_share_signed_by_a_viewer_is_refused_by_the_receiver() {
-    let (_hub, pc, server) = pc_and_server(server_user());
+    let (hub, pc, server) = pc_and_server(server_user());
     let phone = Machine::new();
-    remote::pair(&pc, &phone, "phone", "viewer");
+    remote::pair(&hub, &phone, "phone", "viewer");
     server.wait_for_member("phone", true);
     pc_stopped(&pc, &server);
 

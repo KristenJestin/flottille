@@ -829,7 +829,17 @@ impl Remote {
             .control
             .get()
             .map_or(Value::Null, |control| control.seen());
-        let mut machines = json!({"this": this, "machines": machines, "hub": hub});
+        let proposed = self
+            .daemon
+            .get()
+            .and_then(std::sync::Weak::upgrade)
+            .map_or(Value::Null, |daemon| crate::hub_session::proposed(&daemon));
+        let mut machines = json!({
+            "this": this,
+            "machines": machines,
+            "hub": hub,
+            "proposed": proposed,
+        });
         // Starting a session from a client: the runners that would take it, this machine first.
         if project.is_some() {
             machines["offered"] = json!(offered);
@@ -2133,46 +2143,9 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Result<Va
                 )
             })
         }
-        "remote.setup" => {
-            #[derive(Deserialize)]
-            #[serde(deny_unknown_fields)]
-            struct Setup {
-                url: String,
-                code: String,
-                changes: Vec<flottille_link::Change>,
-                /// Set up again on a machine that pinned a hub already.
-                #[serde(default)]
-                replace: bool,
-            }
-            let setup: Setup = serde_json::from_value(params).map_err(|error| {
-                Failure::new(flottille_protocol::code::INVALID_PARAMS, error.to_string())
-            })?;
-            let control = remote.control.get().cloned().ok_or_else(|| {
-                Failure::new(flottille_protocol::code::UNAVAILABLE, "the link is not up")
-            })?;
-            control
-                .setup(&setup.url, &setup.code, setup.changes, setup.replace)
-                .await
-                .map_err(Failure::refused)
-        }
         "remote.launches" => crate::across::launched(&daemon)
             .map_err(|why| Failure::new(flottille_protocol::code::UNAVAILABLE, why)),
         "remote.members" => control_of(&remote)?.members().map_err(Failure::refused),
-        "remote.requests" => control_of(&remote)?.requests().map_err(Failure::refused),
-        "remote.invite" => {
-            let ask: flottille_link::InvitationAsk = param(&params, "ask")?;
-            control_of(&remote)?
-                .invite(ask)
-                .await
-                .map_err(Failure::refused)
-        }
-        "remote.refuse" => {
-            let request: String = param(&params, "request")?;
-            control_of(&remote)?
-                .refuse(&request)
-                .await
-                .map_err(Failure::refused)
-        }
         "remote.change" => {
             let change: flottille_link::Change = param(&params, "change")?;
             control_of(&remote)?
@@ -2180,16 +2153,14 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Result<Va
                 .await
                 .map_err(Failure::refused)
         }
-        "remote.join" => {
-            let key: PublicKey = param(&params, "key")?;
-            let control = control_of(&remote)?;
-            // The answer of the join accepted for `key`, which a command gone did not take; no
-            // join is asked.
-            if params["resume"] == json!(true) {
-                return Ok(control.accepted(&key).await);
-            }
+        "remote.pair" => {
             let code: String = param(&params, "code")?;
-            control.join(&code, key).await.map_err(Failure::refused)
+            let proposed: flottille_link::Proposed = param(&params, "proposed")?;
+            let replace = params["replace"] == json!(true);
+            control_of(&remote)?
+                .pair(&code, proposed, replace)
+                .await
+                .map_err(Failure::refused)
         }
         "remote.declare" => {
             let change: flottille_link::Change = param(&params, "change")?;
