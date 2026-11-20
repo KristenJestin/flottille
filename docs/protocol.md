@@ -728,12 +728,16 @@ at all), and downloads or applies nothing unless asked.
 
 - `update.show` answers `{"version", "full", "build_channel", "commit", "channel", "branch",
   "check", "latest", "failed", "checking", "staged", "downloading", "download_failed", "restart",
-  "refused"}`: this build's version alone, its `--version` whole, the channel it was built on and
-  its commit; the channel checked (and an alpha's branch); `"automatically"` or `"never"`; the
+  "refused", "stops"}`: this build's version alone, its `--version` whole, the channel it was built on and
+  its commit; the channel checked (and an alpha's branch); `"automatically"` or `"never"` (an
+  `updates.toml` that cannot be read is `"never"`, and `failed` says why); the
   channel's latest build when it is newer than this one; why the last check failed; whether a
   check runs; the version staged beside the binary; the download's `{"done", "total"}` in bytes
   (`total` null when the server does not say it); why the last download failed; `"idle"` while a
-  restart waits for no agent to run; what this daemon's start refused of a staged build.
+  restart waits for no agent to run; what this daemon's start refused of a staged build; and the
+  sessions a restart stops, `[{"id", "title", "project"}]` (each root whose agent or one of its
+  sub-agents has a process, whatever its state), oldest first. The download's progress is told at
+  most once a second.
 - `update.set {check}` writes `updates.toml` (`"automatically"` checks at once) and answers as
   `update.show`.
 - `update.check` checks once now, whatever `check` says.

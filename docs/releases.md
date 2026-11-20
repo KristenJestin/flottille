@@ -513,21 +513,28 @@ is the old one or the new one, never half of one.
 
 - **The daemon checks** the channel a plain `flottille update` would take (the same rules: its
   line, the channel remembered, an alpha's branch), at its start and every 6 hours, with the
-  user's `curl` spawned without a shell, by the code of `flottille update`. A failure (offline,
+  user's `curl` spawned without a shell, by the code of `flottille update`. That `curl` reads no
+  `curlrc` (`-q`, its first argument: a `proxy`, `resolve` or `insecure` there would serve another
+  build with a matching sum) and follows only `https`, redirections included (but for the tests'
+  server, `FLOTTILLE_RELEASES`). A failure (offline,
   GitHub) is said once in the update's place, never a toast each time. **The check can be turned
   off**: `check = "never"` in `updates.toml` of Flottille's configuration folder
   (`$XDG_CONFIG_HOME/flottille/updates.toml`), or **Check for updates: Never** in Settings,
   General, Version; `check = "automatically"`, or no file, is the default. With never, the daemon
-  makes no request at all, at its start or later; **Check now** checks once. **Nothing is ever
+  makes no request at all, at its start or later; **Check now** checks once. A file that cannot
+  be read (not TOML, or another value) means never too, and the section says why. **Nothing is ever
   downloaded or applied without the user's click** (Download, Restart to update), whatever the
   setting.
-- **The window says it**: the foot of the sidebar (`0.4.0-beta.124 is available`, which opens the
-  section) and Settings, General, **Version**: this build's version, channel and commit, the
+- **The window says it**: the foot of the sidebar (`0.4.0-beta.124 is available`, then
+  `Downloading…`, then `Ready to restart`; it opens the section) and Settings, General, **Version**: this build's version, channel and commit, the
   channel checked, the state of the update and its actions.
 - **Download** (or `flottille update --stage`): the daemon downloads the archive and its sum,
-  checks the sum (a wrong one stages nothing), and unpacks it beside the installed binary under
+  checks the sum (a wrong one stages nothing), and unpacks it, from the bytes it checked, in a
+  folder of its own beside the binary (`.flottille-update-<pid>-<n>`, which no agent may write),
+  then moves it beside the installed binary under
   `<binary>.next/` (`flottille.next/`): the binary, the package's `share/` (the launcher entry and
-  the icons) and `staged.json`, which says the version, the SHA-256 sum of the binary, the channel
+  the icons) and `staged.json`, which says the version, the SHA-256 sum of the binary (written
+  again from the archive checked, so the sum is of the archive's binary), the channel
   and `notes`, the release notes of every release of the staged one's kind after this build up to
   it (`[{"version", "published_at", "body"}]`, oldest first). A link at the staging name is
   refused and left as it is; only a build newer than this one is staged. Nothing running is
@@ -542,8 +549,9 @@ is the old one or the new one, never half of one.
   started from the old file starts again from the new one once it sees the daemon's build differ
   from its own, on the page it showed; a window whose binary was not replaced goes on as it is.
 - **Restart to update**: with no agent running, the daemon stops, starts again from its binary
-  (which applies the build) and the window comes back on its page. With agents running, the one
-  confirmation dialog says which sessions stop (they are resumed as after any daemon restart) and
+  (which applies the build) and the window comes back on its page. When a session's agent has a
+  process (working, or waiting with its process kept), the one confirmation dialog says which
+  sessions stop, as the daemon lists them (`update.show`'s `stops`) (they are resumed as after any daemon restart) and
   offers **Restart now** and **Restart when idle**: the daemon then restarts itself once no agent
   runs.
 - `install.sh` and `flottille update` stay as they are; `flottille update` while a build is
