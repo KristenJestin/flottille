@@ -120,9 +120,12 @@ command), never a failure, and `ready` stays the providers'. `--json` adds `"for
 and trackers that use it (`"shop: api"`, `"shop: tracker"`) and its `warning` (`null` when
 nothing is wrong), the warnings also being in `"warnings"`.
 
-The sandbox's state is the daemon's, asked of it (and the daemon started when none runs):
-`--json` adds `"sandbox"`, as `daemon.status` gives it (`docs/protocol.md`), and each gap it says
-(no private mount namespace, an SSH agent lent to nothing and why) is a warning.
+The sandbox's state is the daemon's, asked of it; doctor starts no daemon (one that will not start
+is what it may be run to find out about). `--json` adds `"sandbox"`, as `daemon.status` gives it
+(`docs/protocol.md`), and each gap it says (no private mount namespace, a kernel without
+`mount_setattr`, an SSH agent lent to nothing and why, a restart of the daemon to lend it again)
+is a warning. With no daemon running, doctor's own process probes what one would find, and
+`"sandbox"` says so: `"probed": "no daemon running: probed by doctor"`.
 
 ```
 $ flottille doctor
