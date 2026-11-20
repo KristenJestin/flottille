@@ -453,6 +453,8 @@ pub struct LinkShown {
     pub title: Option<String>,
     /// The address's host, or the file's path in the place.
     pub whence: String,
+    /// The number of the event: what names a file to the machine that serves it.
+    pub seq: u64,
 }
 
 impl LinkShown {
@@ -467,6 +469,7 @@ impl LinkShown {
             target: text("target")?.to_owned(),
             title: text("title").map(str::to_owned),
             whence: text("host").or_else(|| text("shown"))?.to_owned(),
+            seq: event.seq,
         })
     }
 
