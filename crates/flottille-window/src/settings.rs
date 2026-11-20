@@ -362,6 +362,7 @@ pub const JUDGE_USAGE: &str = "Used by sessions in **Auto**, chosen in each sess
 pub const JUDGE_QUOTA: &str = "Each decision is a turn of this model, on your own quota.";
 
 impl SettingsPage {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         shell: WeakEntity<Shell>,
         rules: Entity<RulesEditor>,
