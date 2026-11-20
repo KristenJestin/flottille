@@ -6192,7 +6192,7 @@ impl Render for Row {
                     )
                     .child(
                         div().flex_none().child(
-                            Button::secondary(id("time-logging-setup"), "Set up time logging")
+                            Button::secondary(id("time-logging-setup"), "Set up Jira API access")
                                 .on_click(move |_, window, cx| {
                                     if let Some((shell, project)) = &opened {
                                         shell

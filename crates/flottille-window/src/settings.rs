@@ -58,6 +58,15 @@ const AGENTS_BLOCKS: [&str; 5] = [
     "sessions",
 ];
 
+/// The blocks of the General tab, top to bottom.
+const GENERAL_BLOCKS: [&str; 5] = [
+    "appearance",
+    "workspaces",
+    "developer",
+    "machines",
+    "version",
+];
+
 /// The blocks of the Approvals tab: the Auto judge, then what it is told.
 const APPROVALS_BLOCKS: [&str; 2] = ["judge", "guidance"];
 
@@ -190,6 +199,8 @@ pub enum Reveal {
     Vault,
     /// The page of a feature, by its name: its row of Features opened.
     Feature(String),
+    /// This build's version and its update (the sidebar's foot): General, scrolled to it.
+    Version,
 }
 
 impl Reveal {
@@ -200,6 +211,7 @@ impl Reveal {
             Reveal::Judge | Reveal::Guidance => "approvals",
             Reveal::Compaction | Reveal::Feature(_) => "features",
             Reveal::Vault => "vault",
+            Reveal::Version => "general",
         };
         SECTIONS
             .iter()
@@ -274,6 +286,8 @@ pub struct SettingsPage {
     /// The vault's entries, set and removed on this page.
     vault: Entity<VaultSection>,
     connections: Entity<ConnectionsSection>,
+    /// This build's version and its update.
+    version: Entity<crate::version::VersionSection>,
     /// A judge chosen, until the daemon lists it.
     judge_pending: bool,
     /// The judge's switch flipped, until the daemon answers: what it was asked to become.
@@ -371,9 +385,11 @@ impl SettingsPage {
         vault: Entity<VaultSection>,
         connections: Entity<ConnectionsSection>,
         machines: Entity<crate::machines_page::MachinesSection>,
+        version: Entity<crate::version::VersionSection>,
     ) -> Self {
         Self {
             machines,
+            version,
             rules,
             judge_guidance,
             compaction_guidance,
@@ -462,6 +478,7 @@ impl SettingsPage {
             }
             Reveal::Judge | Reveal::Providers => self.scroll.set_offset(Point::default()),
             Reveal::Vault => {}
+            Reveal::Version => self.scroll_to(&GENERAL_BLOCKS, "version"),
         }
         cx.notify();
     }
@@ -2326,6 +2343,7 @@ impl Render for SettingsPage {
                 ("developer", self.developer_section(cx).into_any_element()),
                 // The user's machines (#814): Set up a hub, Devices, Add a device, Addresses.
                 ("machines", self.machines.clone().into_any_element()),
+                ("version", self.version.clone().into_any_element()),
             ],
         };
         let vault = self.vault.read(cx).entries().map(<[_]>::len);

@@ -594,6 +594,20 @@ fn inline(nodes: &[Value], hard: &str) -> String {
                 runs.push((hard.to_owned(), vec![&Value::Null]));
                 continue;
             }
+            // The form an agent writes back, so a mention read can be repeated: a name alone
+            // would notify no one. An id that is no account id is not put into a link, where its
+            // characters could break the text around it.
+            "mention"
+                if crate::tickets::is_account(node["attrs"]["id"].as_str().unwrap_or_default()) =>
+            {
+                let name = node["attrs"]["text"].as_str().unwrap_or("@");
+                let id = node["attrs"]["id"].as_str().unwrap_or_default();
+                runs.push((
+                    format!("[{}]({MENTION}{id})", escaped(name)),
+                    vec![&Value::Null],
+                ));
+                continue;
+            }
             "mention" | "emoji" => node["attrs"]["text"]
                 .as_str()
                 .or(node["attrs"]["shortName"].as_str())
@@ -803,6 +817,29 @@ mod tests {
             round_trip("First line\nsecond line\n\nThird block"),
             "First line\nsecond line\n\nThird block"
         );
+    }
+
+    #[test]
+    fn a_mention_read_in_a_comment_keeps_its_account_id() {
+        let adf = json!({"type": "doc", "version": 1, "content": [{"type": "paragraph",
+            "content": [{"type": "text", "text": "Hi "},
+                {"type": "mention", "attrs": {"id": "5b10ac8d82e05b22cc7d4ef5",
+                    "text": "@Ana Example"}}]}]});
+        assert_eq!(
+            to_markdown(&adf),
+            "Hi [@Ana Example](mention:5b10ac8d82e05b22cc7d4ef5)"
+        );
+        // What was read is what is written back: the same node.
+        assert_eq!(from_markdown(&to_markdown(&adf)), adf);
+    }
+
+    #[test]
+    fn a_mention_whose_id_is_no_account_id_reads_as_its_text() {
+        // An id that holds `)` or a space would break the link it is written into, and is no
+        // account a mention could be written back with.
+        let adf = json!({"type": "doc", "version": 1, "content": [{"type": "paragraph",
+            "content": [{"type": "mention", "attrs": {"id": "ana) x", "text": "@Ana Example"}}]}]});
+        assert_eq!(to_markdown(&adf), "@Ana Example");
     }
 
     #[test]

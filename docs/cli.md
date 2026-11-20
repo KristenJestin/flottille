@@ -225,6 +225,10 @@ one is refused, unless `--force`, which says that the store is not migrated down
 `flottille --version` says the channel installed. It also writes the launcher entry and the icon
 again when they changed, and points the entry at the binary it ran from (`docs/releases.md`, "The
 launcher entry").
+`--stage` downloads the same build and stages it beside the binary instead, while Flottille
+runs: nothing that runs is touched, and the daemon's next start applies it (`docs/releases.md`,
+"Updating"); it stages only a build newer than this one. A plain `flottille update` while a build
+is staged installs the channel's latest and removes the staged one.
 
 ```
 $ flottille update --channel beta
@@ -235,6 +239,8 @@ $ flottille update --version 0.3.0-beta.11
 0.3.0-beta.11 is older than this 0.3.0-beta.12: --force goes back to it (the store is not migrated down, and an older build refuses a store a newer one migrated).
 $ flottille update --channel alpha --branch feat/specs
 ~/.local/bin/flottille is now 0.3.1-alpha.feat-specs.4.
+$ flottille update --stage
+0.3.1-alpha.feat-specs.5 is staged beside ~/.local/bin/flottille: applied at the next start of the daemon.
 ```
 
 ### `flottille remote setup <hub URL> [--name <name>] [--replace] [--json]`

@@ -91,13 +91,17 @@ const HARNESS_FILE: &str = "tool-results.toml";
 /// user's own keyring (`docs/vault.md`).
 const KEYRING_FILE: &str = "keyring.toml";
 
+/// And this one: the daemon never checks for an update on its own (`docs/releases.md`,
+/// "Updating"), so that no test reaches the network; `with_update_check` lets it.
+const UPDATES_FILE: &str = "updates.toml";
+
 /// The names in a folder, without the file the harness itself wrote there: what a test asks is
 /// what the daemon left, not what `User::new` put.
 pub fn names_in(dir: &Path) -> Vec<String> {
     let mut names: Vec<String> = std::fs::read_dir(dir)
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-        .filter(|name| name != HARNESS_FILE && name != KEYRING_FILE)
+        .filter(|name| ![HARNESS_FILE, KEYRING_FILE, UPDATES_FILE].contains(&name.as_str()))
         .collect();
     names.sort();
     names
@@ -231,6 +235,7 @@ impl User {
             .unwrap();
         std::fs::write(file.join(HARNESS_FILE), "limit = \"off\"\n").unwrap();
         std::fs::write(file.join(KEYRING_FILE), "backend = \"memory\"\n").unwrap();
+        std::fs::write(file.join(UPDATES_FILE), "check = \"never\"\n").unwrap();
         user
     }
 
@@ -238,6 +243,13 @@ impl User {
     /// daemon does not.
     pub fn with_cut_results(self) -> User {
         std::fs::remove_file(self.dir.path().join("config/flottille").join(HARNESS_FILE)).unwrap();
+        self
+    }
+
+    /// This user's daemon checks for updates as it does for everyone (at its start, then every 6
+    /// hours): every other test's daemon never does.
+    pub fn with_update_check(self) -> User {
+        std::fs::remove_file(self.dir.path().join("config/flottille").join(UPDATES_FILE)).unwrap();
         self
     }
 
@@ -984,6 +996,9 @@ fn command_for(program: &Path, dir: &Path, env: &[(String, String)], args: &[&st
         .env("FLOTTILLE_CHECKS_WAIT_MS", "0")
         // No round of the items unless a test asks for it (`with_fetcher`).
         .env("FLOTTILLE_TEST_NO_FETCH", "1")
+        // Never GitHub's releases: nothing listens there. A test of the update serves its own
+        // (`with_env("FLOTTILLE_RELEASES", ..)`).
+        .env("FLOTTILLE_RELEASES", "http://127.0.0.1:9/repos/none")
         .env_remove("TMUX")
         // Never the machine's SSH agent: a test that lends one sets its own (`with_env`).
         .env_remove("SSH_AUTH_SOCK");

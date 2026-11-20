@@ -52,6 +52,12 @@ pub const METHODS: &[(&str, Class)] = &[
     ("compaction.noticed", Drive),
     ("developer.show", Read),
     ("developer.set", Drive),
+    ("update.show", Read),
+    ("update.set", Drive),
+    ("update.check", Drive),
+    // They replace this machine's binary and restart its daemon: asked on the machine only.
+    ("update.download", Local),
+    ("update.restart", Local),
     ("extension.list", Read),
     ("extension.set", Drive),
     ("extension.act", Drive),

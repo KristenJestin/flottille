@@ -816,6 +816,10 @@ impl Remote {
                     "state": seen.state.to_string(),
                     "since": seen.since,
                     "reason": seen.reason,
+                    // Where the live link goes (`dialled`) or came from.
+                    "reached": seen.link.as_ref().map(|(_, link, dialled)| {
+                        json!({"address": link.remote().to_string(), "dialled": dialled})
+                    }),
                     "addresses": peer.known(),
                 })
             })

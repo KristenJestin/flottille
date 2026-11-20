@@ -13,6 +13,8 @@ mod remote;
 
 #[path = "../window_appearance.rs"]
 mod window_appearance;
+#[path = "../window_clicks.rs"]
+mod window_clicks;
 #[path = "../window_code_copy.rs"]
 mod window_code_copy;
 #[path = "../window_composer_tokens.rs"]
@@ -71,6 +73,8 @@ mod window_setup_output;
 mod window_sidebar;
 #[path = "../window_switcher.rs"]
 mod window_switcher;
+#[path = "../window_update.rs"]
+mod window_update;
 #[path = "../window_vault.rs"]
 mod window_vault;
 #[path = "../window_vault_ask.rs"]

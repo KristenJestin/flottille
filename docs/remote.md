@@ -1300,7 +1300,7 @@ on a real phone, by hand, and reported.
   (`remote.disconnected`, `it was removed from the member list`). The removed machine's own session
   to the hub is refused, so it never sees the removal itself; its links are cut by the others.
 - `remote.connected` and `remote.disconnected` are the machines' links, not the hub's session
-  (its state is `remote.machines`' `hub`).
+  (its state is `remote.machines`' `hub`, and `remote.hub` says it changed).
 - The formats of #820 changed without a version of their own, nothing being released: the
   device's proof has `join`, the asks `invite` and `refuse`, an answer `token`, and the hub sends
   `requests`.

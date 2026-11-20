@@ -1148,8 +1148,8 @@ Jira: their account id, else their e-mail). The card shows the names as given.
   notifies, and is left as written. **On Jira an `@Name` in the text stays text and notifies no
   one** (Jira rewrites nothing): only a mention node with the account id does, so in a Jira
   `comment`, `comment_edit`, `reply`, `log_time` comment, `create` or `edit` description the agent
-  writes `[@Display Name](mention:<accountId>)` (`people` gives the account ids), which becomes the
-  node. Each account is looked up on the site with the project's tracker entry: an id the site
+  writes `[@Display Name](mention:<accountId>)` (`people` gives the account ids, and `show` each
+  comment author's; the `body` field's description says so), which becomes the node. Each account is looked up on the site with the project's tracker entry: an id the site
   does not know, or one that holds no account id, is refused before the user is asked, and the
   card says who is notified by the name Jira returns and the id, whatever the text says. Every
   such text goes through Jira's API with the entry (never `acli`), so it is refused without one
@@ -1193,7 +1193,10 @@ Jira: their account id, else their e-mail). The card shows the names as given.
 - **`people {query?}`** (a read): who can be named as an assignee, each as `- Anne Example
   (anne@example.org)`: GitHub the tracker repository's assignable users and collaborators, as
   `forge people`; Jira the assignees of the project's newest work items, `acli` having no way to
-  list the site's users ("People" under "The forge"). `query` narrows them.
+  list the site's users ("People" under "The forge"). `query` narrows them. On Jira a `query` is
+  searched on the site too, with the tracker's entry (`ticket`: only who can see it, and then the
+  site's answer alone); each person's account id is said, a person found only on the site is named
+  by account id for `assignee`, and a full page of 50 says there may be more.
 - **`list {state?, label?, assignee?, updated_within?}`**: every ticket of a state, in one call, a
   line each (`- #12 open: The login fails [bug] (ana)  <link>`): `state` is `open` (the default),
   `closed` or `all`; up to 200, the newest, and the answer says when there may be more.

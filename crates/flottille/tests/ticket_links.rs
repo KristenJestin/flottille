@@ -1254,6 +1254,57 @@ fn a_ticket_shows_the_ids_of_every_comment() {
 }
 
 #[test]
+fn show_gives_each_comment_author_s_account_id() {
+    let user = user();
+    on_jira(&user);
+    jira_script(
+        &user,
+        json!({"items": {"ABC-1": commented("ABC-1", json!([
+            person_with_account("20000", "I can reproduce"),
+            person("20001", "Same here")]))}}),
+    );
+    let mcp = root_in(&user);
+    let shown = read(
+        &user,
+        &mcp,
+        json!({"action": "show", "ticket": "ABC-1", "detail": "full"}),
+    );
+    // The account id is on the comment's line, so an agent answering Ana can mention her.
+    let line = shown
+        .lines()
+        .find(|l| l.contains("I can reproduce"))
+        .unwrap();
+    assert!(line.contains("5b10ac8d82e05b22cc7d4ef5"), "{shown}");
+    // A comment whose author Jira gives no account for says none.
+    let line = shown.lines().find(|l| l.contains("Same here")).unwrap();
+    assert!(!line.contains("account"), "{shown}");
+}
+
+#[test]
+fn a_mention_read_in_a_comment_keeps_its_account_id() {
+    let user = user();
+    on_jira(&user);
+    let mut comment = person("20000", "");
+    comment["body"] = json!({"type": "doc", "version": 1, "content": [{"type": "paragraph",
+        "content": [{"type": "text", "text": "Thanks "},
+            {"type": "mention", "attrs": {"id": "5b10ac8d82e05b22cc7d4ef5", "text": "@Ana Example"}}]}]});
+    jira_script(
+        &user,
+        json!({"items": {"ABC-1": commented("ABC-1", json!([comment]))}}),
+    );
+    let mcp = root_in(&user);
+    let shown = read(
+        &user,
+        &mcp,
+        json!({"action": "show", "ticket": "ABC-1", "detail": "full"}),
+    );
+    assert!(
+        shown.contains("Thanks [@Ana Example](mention:5b10ac8d82e05b22cc7d4ef5)"),
+        "{shown}"
+    );
+}
+
+#[test]
 fn a_reply_to_a_jira_comment_that_is_not_there_or_restricted_writes_nothing() {
     let user = user();
     on_jira_with_entry(&user);

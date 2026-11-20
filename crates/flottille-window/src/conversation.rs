@@ -386,12 +386,12 @@ pub fn in_sight(block: &Block) -> bool {
     }
 }
 
-/// The kind of the line that says a time was not logged for want of the project's vault entry,
+/// The kind of the line that says a call was refused for want of the project's Jira API vault entry,
 /// with the button that opens its Settings at Tracker.
-pub const TIME_LOGGING_KIND: &str = "time logging";
+pub const TIME_LOGGING_KIND: &str = "jira api";
 
 /// What that line says: the window first, the file second (`docs/tickets.md`, "Logging time").
-const TIME_LOGGING_TEXT: &str = "Not logged: this project has no vault entry to log time with. \
+const TIME_LOGGING_TEXT: &str = "Not done: this project has no Jira API vault entry. \
     Choose one in its Settings, Tracker, or write worklog_token in its file.";
 
 /// The kind of the line that says the session runs on another model or effort than the one it

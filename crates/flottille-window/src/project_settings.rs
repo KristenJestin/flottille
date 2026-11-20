@@ -1310,7 +1310,7 @@ impl ProjectSettingsPage {
         seen
     }
 
-    /// What the `Log time with` select offers, each as its key and its label: none first, then
+    /// What the `Jira API access with` select offers, each as its key and its label: none first, then
     /// the entries the project sees (its own and the global ones) and no other use is bound to,
     /// by name, with their username. The entry the file names stays in the list when the project
     /// does not see it, said so.
@@ -2447,7 +2447,7 @@ impl ProjectSettingsPage {
         }
     }
 
-    /// `Log time with`: the vault entry whose token logs time on Jira, and the way to add one.
+    /// `Jira API access with`: the vault entry whose token logs time on Jira, and the way to add one.
     fn worklog_field(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let p = palette(cx);
         let options = self.worklog_options();
@@ -2476,8 +2476,8 @@ impl ProjectSettingsPage {
             .flex_col()
             .gap(space::SM)
             .child(
-                Field::new("tracker-worklog-field", "Log time with", select)
-                    .hint("A Jira API token in the vault, its username your Jira e-mail."),
+                Field::new("tracker-worklog-field", "Jira API access with", select)
+                    .hint("A Jira API token in the vault, its username your Jira e-mail: it logs time, replies, mentions and finds people."),
             )
             .child(
                 div().flex().child(hoverable(
