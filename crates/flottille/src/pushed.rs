@@ -801,7 +801,7 @@ fn included(file: &Path, home: Option<&Path>, seen: &mut Vec<PathBuf>) -> Result
 /// them (`git config --file`, not what they include).
 fn include_paths(file: &Path) -> Vec<String> {
     let listed = crate::children::spawn_std(
-        std::process::Command::new("git")
+        std::process::Command::new(crate::git::own())
             .args(["config", "--null", "--file"])
             .arg(file)
             .args(["--get-regexp", r"^include(if\..*)?\.path$"])

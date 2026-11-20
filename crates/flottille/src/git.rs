@@ -129,7 +129,7 @@ pub fn find_helpers() {
             .into_iter()
             .flat_map(|scope| {
                 let listed = crate::children::spawn_std(
-                    std::process::Command::new("git")
+                    std::process::Command::new(own())
                         .args(["config", scope, "--includes", "--null", "--get-regexp"])
                         .arg(r"^credential\.(.*\.)?helper$")
                         .stdin(Stdio::null())
@@ -189,10 +189,21 @@ pub const UNFOUND: &str = "no git of the daemon's PATH is owned by root in a fol
      root, and a push goes outside the sandbox only through one: install git from the system's \
      packages, then restart the daemon";
 
-/// Finds the `git` of [`GIT`], at the daemon's start, before anything runs.
+/// The `git` the daemon runs for itself (statuses, worktrees, its fetch), confined: the one
+/// only root may change when there is one, else the first of its `PATH`, found at its start and
+/// its links followed. Never one a run put in the `PATH` since. `None` where none was found.
+static OWN: OnceLock<Option<PathBuf>> = OnceLock::new();
+
+/// The `git` a test build runs for itself in place of [`OWN`]'s, to watch what the daemon asks
+/// of it. Never read by a release build, never the git of a push the gate let through.
+const TEST_GIT: &str = "FLOTTILLE_TEST_GIT";
+
+/// Finds the `git` of [`GIT`] and [`OWN`], at the daemon's start, before anything runs.
 pub fn find_git() {
+    let chosen = crate::ssh_agent::chosen(crate::ssh_agent::candidates("git"));
     GIT.get_or_init(|| {
-        let found = crate::ssh_agent::chosen(crate::ssh_agent::candidates("git"))
+        let found = chosen
+            .clone()
             .filter(|(_, rooted)| *rooted)
             .map(|(git, _)| git);
         if found.is_none() {
@@ -200,6 +211,26 @@ pub fn find_git() {
         }
         found
     });
+    OWN.get_or_init(|| {
+        if cfg!(debug_assertions)
+            && let Some(git) = std::env::var_os(TEST_GIT)
+        {
+            return Some(PathBuf::from(git));
+        }
+        chosen.map(|(git, _)| git)
+    });
+}
+
+/// The `git` the daemon runs for itself: [`OWN`]'s, `git` of the `PATH` where nothing was
+/// searched (the command line, the crate's own tests), and none where the daemon found none.
+pub fn own() -> &'static OsStr {
+    match OWN.get() {
+        None => OsStr::new("git"),
+        Some(Some(git)) => git.as_os_str(),
+        // A path that is no program: the call says git is missing, and nothing planted since
+        // in the `PATH` runs.
+        Some(None) => OsStr::new("/nonexistent/flottille-found-no-git"),
+    }
 }
 
 /// The `git` found at the start, if one only root may change was.
@@ -316,7 +347,7 @@ pub fn blocking<S: AsRef<OsStr>>(git: &OsStr, dir: &Path, args: &[S]) -> std::pr
 }
 
 fn command<S: AsRef<OsStr>>(dir: &Path, args: &[S]) -> tokio::process::Command {
-    command_of(OsStr::new("git"), dir, args)
+    command_of(own(), dir, args)
 }
 
 fn command_of<S: AsRef<OsStr>>(git: &OsStr, dir: &Path, args: &[S]) -> tokio::process::Command {
