@@ -6152,14 +6152,7 @@ impl Render for Row {
             // where it leads and Open (a thumbnail for a picture), so that a toast missed is not
             // lost. Nothing opens until the click.
             Block::Links { links } => {
-                let page = self.page.clone();
-                let open: Open = Rc::new(move |target, cx| {
-                    let target = target.to_owned();
-                    page.update(cx, |page, cx| {
-                        crate::open::shown(&page.follow.opener, &target, cx)
-                    })
-                    .ok();
-                });
+                let open: Open = Rc::new(crate::tunnels::open_shown);
                 self.links.draw(self.at, links, &open, cx)
             }
             // A time not logged for want of the project's vault entry: the line, and the way to

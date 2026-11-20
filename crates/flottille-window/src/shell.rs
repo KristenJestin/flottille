@@ -327,6 +327,11 @@ type Work = (
     Vec<(String, Option<AgentState>)>,
 );
 
+/// Whether what an agent showed is an address of the web, not a file.
+fn is_address(target: &str) -> bool {
+    target.starts_with("http://") || target.starts_with("https://")
+}
+
 /// What a row's dot says: `New since you looked: opened a pull request`.
 fn unread_words(said: &str) -> String {
     let mut letters = said.chars();
@@ -397,6 +402,7 @@ impl Shell {
         };
         let actions = Actions::spawn_aimed(aim.clone(), local, sender);
         let this = cx.entity().downgrade();
+        cx.set_global(crate::tunnels::Tunnels::new(this.clone()));
         let top = cx.new(|_| TopBar::new(this.clone()));
         let sidebar = cx.new(|_| Sidebar::new(this.clone()));
         let rules = cx.new(|_| RulesEditor::new(this.clone(), None));
@@ -1082,6 +1088,99 @@ impl Shell {
     /// Opens a link (a pull request) with the system's default handler.
     pub fn open_link(&self, url: &str) {
         (self.follow.opener)(std::path::Path::new(url));
+    }
+
+    /// Opens an address of the machine shown, with the system's default handler: this machine's
+    /// own as it is. On another machine, an address of that machine itself (a run's, or a
+    /// `localhost` link) opens through a tunnel, then the handler is given the local address; one
+    /// of the web opens as it is; a path of that machine opens nowhere here (`docs/remote.md`,
+    /// "Tunnels"). `run` is the run whose address it is, when the row knows it.
+    pub fn open_address(&mut self, run: Option<&str>, url: &str, cx: &mut Context<Self>) {
+        use crate::tunnels::{Ask, Tunnels, failed};
+        let Some(machine) = self.aim.machine() else {
+            self.open_link(url);
+            return;
+        };
+        if !(url.starts_with("http://") || url.starts_with("https://")) {
+            failed(&format!("{url} is a file of {machine}"), cx);
+            return;
+        }
+        if !flottille_core::address::is_local(url) {
+            self.open_link(url);
+            return;
+        }
+        let port = flottille_core::address::local_port(url);
+        // A link has no run: it names a port, and the machine's runs say which one serves it.
+        let (run, port) = match (run, port) {
+            (Some(run), _) => (Some(run.to_owned()), None),
+            (None, Some(port)) => (None, Some(port)),
+            (None, None) => {
+                failed(
+                    &format!(
+                        "{url} names no port, so nothing of {machine} can be reached through it"
+                    ),
+                    cx,
+                );
+                return;
+            }
+        };
+        let ask = Ask {
+            machine,
+            run,
+            port,
+            url: url.to_owned(),
+        };
+        let held = cx.global::<Tunnels>();
+        if let Some(tunnel) = held.reaching(&ask) {
+            let local = flottille_core::address::through(url, tunnel.local_port);
+            (self.follow.opener)(std::path::Path::new(&local));
+            return;
+        }
+        if held.is_opening(&ask) {
+            return;
+        }
+        cx.global_mut::<Tunnels>().begin(ask.clone());
+        self.perform(Command::TunnelOpen(ask));
+    }
+
+    /// Opens what an agent showed (`show_link`) after the checks Open makes: of this machine, as
+    /// it is; of another, through [`Shell::open_address`].
+    pub fn open_shown(&mut self, target: &str, cx: &mut Context<Self>) {
+        match self.aim.machine() {
+            None => crate::open::shown(&self.follow.opener, target, cx),
+            Some(_) => self.open_address(None, target, cx),
+        }
+    }
+
+    /// Closes one of the tunnels the window holds; its connection says when it is closed.
+    pub fn close_tunnel(&mut self, tunnel: &str, _cx: &mut Context<Self>) {
+        self.perform(Command::TunnelClose {
+            tunnel: tunnel.to_owned(),
+        });
+    }
+
+    /// What a connection that holds a tunnel said: the local address is opened once it is open, a
+    /// failure is a toast with its reason, an ended tunnel leaves its row.
+    fn tunnel_news(&mut self, news: crate::tunnels::News, cx: &mut Context<Self>) {
+        use crate::tunnels::{News, Tunnels, failed};
+        match news {
+            News::Opened { ask, tunnel } => {
+                let local = flottille_core::address::through(&ask.url, tunnel.local_port);
+                cx.global_mut::<Tunnels>().opened(&ask, tunnel);
+                (self.follow.opener)(std::path::Path::new(&local));
+            }
+            News::Refused { ask, why } => {
+                cx.global_mut::<Tunnels>().refused(&ask);
+                failed(&why, cx);
+            }
+            News::Closed { tunnel, .. } => cx.global_mut::<Tunnels>().closed(&tunnel),
+            News::NotClosed { why } => {
+                gpui_design_system::toast(
+                    gpui_design_system::Toast::failure(format!("Not closed: {why}")),
+                    cx,
+                );
+            }
+        }
     }
 
     /// Whether the session's composer holds a draft: what the field holds once its page was
@@ -2160,6 +2259,7 @@ impl Shell {
                 self.settings
                     .update(cx, |page, cx| page.developer_answered(shown, written, cx));
             }
+            Outcome::Tunnel(news) => self.tunnel_news(news, cx),
             Outcome::Asked {
                 then: crate::extensions::Then::Connections(then),
                 answer,
@@ -3281,17 +3381,21 @@ impl Shell {
         let toast = match sharing.links.as_slice() {
             [only] => {
                 let target = only.target.clone();
-                gpui_design_system::Toast::success(format!(
-                    "The agent shares a link: {}",
-                    only.name()
-                ))
-                .action("Open", move |_, cx| {
-                    shell
-                        .update(cx, |shell, cx| {
-                            crate::open::shown(&shell.follow.opener, &target, cx)
-                        })
-                        .ok();
-                })
+                match self.aim.machine().filter(|_| !is_address(&target)) {
+                    // A file of another machine is shown where it is, never opened here.
+                    Some(machine) => gpui_design_system::Toast::success(format!(
+                        "The agent shares a file of {machine}: {target}"
+                    )),
+                    None => gpui_design_system::Toast::success(format!(
+                        "The agent shares a link: {}",
+                        only.name()
+                    ))
+                    .action("Open", move |_, cx| {
+                        shell
+                            .update(cx, |shell, cx| shell.open_shown(&target, cx))
+                            .ok();
+                    }),
+                }
             }
             shared => gpui_design_system::Toast::success(format!(
                 "The agent shares {} links",

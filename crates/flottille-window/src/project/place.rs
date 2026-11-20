@@ -174,6 +174,8 @@ pub struct PlaceBlock {
     times_open: bool,
     session_rows: Listing<SessionLine>,
     run_rows: Listing<CommandRow>,
+    /// The tunnels held to the runs, each said under its run's row.
+    tunnels: crate::tunnels::TunnelLines,
     /// Each session row's "⋯" menu, made when the row is first drawn.
     session_menus: HashMap<String, (Entity<Menu>, Subscription)>,
     /// Its "⋯" and ▶, made again when what they offer changes.
@@ -233,6 +235,7 @@ impl PlaceBlock {
             times_open: false,
             session_rows: Listing::default(),
             run_rows: Listing::default(),
+            tunnels: crate::tunnels::TunnelLines::default(),
             session_menus: HashMap::new(),
             menu,
             run_menu: None,
@@ -1278,6 +1281,7 @@ impl PlaceBlock {
         let runs = self.runs.clone();
         self.run_rows
             .sync(runs.into_iter().map(|r| (r.run.clone(), r)), at, reduce);
+        self.tunnels.sync(cx);
         let drawn: Vec<(CommandRow, Placement)> = self
             .run_rows
             .rows()
@@ -1305,20 +1309,17 @@ impl PlaceBlock {
                 let task = row.name.clone().unwrap_or_else(|| row.line.clone());
                 let tasks = self.tasks.clone();
                 let link = row.address().map(|url| {
-                    let tasks = tasks.clone();
+                    let run = row.run.clone();
                     address_link(
                         ElementId::Name(format!("place-run-link-{}", row.run).into()),
                         url,
                         11.5,
-                        move |url, cx| {
-                            if let Some(tasks) = tasks.upgrade() {
-                                tasks.read(cx).open_link(url, cx);
-                            }
-                        },
+                        move |url, cx| crate::tunnels::open_address(Some(&run), url, cx),
                         window,
                         cx,
                     )
                 });
+                let tunnels = self.tunnels.of_run(&row.run, p);
                 let stop = {
                     let (tasks, run) = (tasks.clone(), row.run.clone());
                     Button::icon(
@@ -1375,7 +1376,12 @@ impl PlaceBlock {
                 Item::new(
                     ElementId::Name(format!("place-run-item-{}", row.run).into()),
                     placement,
-                    hoverable(line, move |d, t| d.bg(p.hover.opacity(t))),
+                    div()
+                        .flex()
+                        .flex_col()
+                        .child(hoverable(line, move |d, t| d.bg(p.hover.opacity(t))))
+                        // The tunnels held to the run, each said under its row.
+                        .when(!tunnels.is_empty(), |d| d.px(space::MD).children(tunnels)),
                 )
                 .into_any_element()
             })
