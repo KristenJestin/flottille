@@ -39,20 +39,70 @@ const CALLED: [&str; 5] = [
 ];
 
 /// The kinds of delivery a session on another machine sends the agent that started it.
-const KINDS: [&str; 9] = [
+const KINDS: [&str; 8] = [
     "child-report",
     "child-question",
     "child-failed",
     "child-idle",
     "child-stuck",
-    "child-asks",
+    "child-replaced",
     "child-ended",
     "session-turn-ended",
-    "led-integrated",
 ];
 
 /// The longest body of a delivery or text of a call another machine sends, in characters.
 const LONGEST: usize = 64_000;
+
+/// How many messages wait for one machine at most: one more is refused.
+const MOST_KEPT: usize = 100;
+
+/// How long a message the other machine could not take now waits before it is sent again, when
+/// no new link or new message sends it sooner.
+const RETRY: Duration = Duration::from_secs(30);
+
+/// Why a message from another machine is not taken: never, or not now (its sender keeps it and
+/// sends it again).
+enum Refused {
+    Never(String),
+    Now(String),
+}
+
+impl From<String> for Refused {
+    fn from(why: String) -> Refused {
+        Refused::Never(why)
+    }
+}
+
+/// The answer to another machine of `answer`: a refusal for now is an answer saying `later`.
+fn answer_of(answer: Result<Value, Refused>, what: &str) -> Result<Value, String> {
+    match answer {
+        Ok(value) => Ok(value),
+        Err(Refused::Never(why)) => {
+            eprintln!("flottille daemon: {what} from another machine was refused: {why}");
+            Err(why)
+        }
+        Err(Refused::Now(why)) => {
+            eprintln!("flottille daemon: {what} from another machine is taken later: {why}");
+            Ok(json!({"later": why}))
+        }
+    }
+}
+
+/// Whether a test plays a daemon that is stopping: in a test build, while the file
+/// `FLOTTILLE_TEST_STOPPING_FILE` names exists.
+fn playing_stopping() -> bool {
+    cfg!(debug_assertions)
+        && std::env::var_os("FLOTTILLE_TEST_STOPPING_FILE")
+            .is_some_and(|file| std::path::Path::new(&file).exists())
+}
+
+/// The daemon `remote` serves, unless it is stopping.
+fn serving(remote: &Remote) -> Result<Arc<Daemon>, Refused> {
+    remote
+        .daemon()
+        .filter(|_| !playing_stopping())
+        .ok_or_else(|| Refused::Now("the daemon is stopping".to_owned()))
+}
 
 /// The machines whose kept messages are being sent now, each with whether more were kept since.
 static SENDING: Mutex<BTreeMap<String, bool>> = Mutex::new(BTreeMap::new());
@@ -132,33 +182,77 @@ pub(crate) fn tell(
         .as_str()
         .unwrap_or("another machine")
         .to_owned();
-    keep(daemon, &launch, &name, id, message, back);
+    let length = body.chars().count();
+    let kept = match length > LONGEST {
+        true => Err(format!(
+            "a delivery to another machine is {LONGEST} characters at most, this one {length}"
+        )),
+        false => keep(daemon, &launch, &name, id, &message, back),
+    };
+    if let Err(why) = kept {
+        eprintln!("flottille daemon: a {kind} for {name} is dropped: {why}");
+        let outgoing = outgoing(&launch, &name, String::new(), &message, back);
+        let _ = daemon.emit(
+            "remote.delivery_dropped",
+            dropped(&outgoing, None, Some(&why)),
+        );
+    }
     true
 }
 
-fn keep(
-    daemon: &Arc<Daemon>,
+fn outgoing(
     launch: &Launch,
     name: &str,
     id: String,
-    message: MachineMessage,
+    message: &MachineMessage,
     back: bool,
-) {
-    let outgoing = Outgoing {
+) -> Outgoing {
+    Outgoing {
         seq: 0,
         id,
         machine: launch.machine.clone(),
         name: name.to_owned(),
         launch: launch.launch.clone(),
-        message: serde_json::to_value(&message).unwrap_or_default(),
+        message: serde_json::to_value(message).unwrap_or_default(),
         back,
         at: now_ms(),
-    };
-    if let Err(error) = daemon.write(|store| store.keep_outgoing(&outgoing).map(|()| ((), None))) {
-        eprintln!("flottille daemon: a message for {name} cannot be kept: {error}");
-        return;
     }
+}
+
+/// Keeps `message` for the machine of `launch`, and sends it when it can; refused when as many
+/// wait for that machine as may.
+fn keep(
+    daemon: &Arc<Daemon>,
+    launch: &Launch,
+    name: &str,
+    id: String,
+    message: &MachineMessage,
+    back: bool,
+) -> Result<(), String> {
+    let outgoing = outgoing(launch, name, id, message, back);
+    let waiting = daemon
+        .read(|store| store.outgoing(Some(&launch.machine)))
+        .map_err(|error| format!("it cannot be kept: {error}"))?
+        .len();
+    if waiting >= MOST_KEPT {
+        return Err(format!("{MOST_KEPT} messages wait for {name} already"));
+    }
+    daemon
+        .write(|store| store.keep_outgoing(&outgoing).map(|()| ((), None)))
+        .map_err(|error| format!("it cannot be kept: {error}"))?;
     send_kept(daemon, &launch.machine);
+    Ok(())
+}
+
+/// Sends what is kept for `machine` again in a while: it could not take it now.
+fn retry(daemon: &Arc<Daemon>, machine: &str) {
+    let (daemon, machine) = (Arc::downgrade(daemon), machine.to_owned());
+    tokio::spawn(async move {
+        tokio::time::sleep(RETRY).await;
+        if let Some(daemon) = daemon.upgrade() {
+            send_kept(&daemon, &machine);
+        }
+    });
 }
 
 /// Sends what is kept for the machine `machine` (its key) while it is linked, in order: at once
@@ -236,6 +330,16 @@ async fn send_each(daemon: &Arc<Daemon>, machine: &str) {
                 }
             };
             match link.send(&Message::Machine(message)).await {
+                // Not taken now (that machine is stopping, or cannot store it): kept, in order.
+                Ok(answer) if answer["later"].is_string() => {
+                    eprintln!(
+                        "flottille daemon: {name} cannot take a message kept for it now, which is \
+                         sent again later: {}",
+                        answer["later"].as_str().unwrap_or_default()
+                    );
+                    retry(daemon, machine);
+                    return;
+                }
                 Ok(_) => forget(daemon, &outgoing.id),
                 // Never taken there, whatever the times it is sent: dropped, and said.
                 Err(LinkError::Declined { reason, .. }) => {
@@ -244,8 +348,10 @@ async fn send_each(daemon: &Arc<Daemon>, machine: &str) {
                          dropped: {reason}"
                     );
                     forget(daemon, &outgoing.id);
-                    let _ =
-                        daemon.emit("remote.delivery_dropped", dropped(&outgoing, Some(&reason)));
+                    let _ = daemon.emit(
+                        "remote.delivery_dropped",
+                        dropped(&outgoing, Some(&reason), None),
+                    );
                 }
                 // The link went: what is left goes when it comes back.
                 Err(_) => return,
@@ -289,15 +395,16 @@ fn with_commits(message: Value, name: &str, came: Result<Value, String>) -> Valu
     serde_json::to_value(MachineMessage::Deliver(deliver)).unwrap_or(message)
 }
 
-/// What the inbox says of a message dropped: for whom, what, since when, and why.
-fn dropped(outgoing: &Outgoing, refused: Option<&str>) -> Value {
+/// What the inbox says of a message dropped: for whom, what, since when, and why: refused by the
+/// other machine, or not kept by this one (`unkept`).
+fn dropped(outgoing: &Outgoing, refused: Option<&str>, unkept: Option<&str>) -> Value {
     let (kind, agent) = match serde_json::from_value::<MachineMessage>(outgoing.message.clone()) {
         Ok(MachineMessage::Deliver(deliver)) => (deliver.kind, deliver.agent),
         Ok(MachineMessage::Call(call)) => (call.tool, call.agent),
         _ => (String::new(), String::new()),
     };
     json!({"machine": outgoing.name, "launch": outgoing.launch, "kind": kind, "agent": agent,
-        "kept_at": outgoing.at, "refused": refused})
+        "kept_at": outgoing.at, "refused": refused, "unkept": unkept})
 }
 
 /// Drops what waited for its machine for 30 days, each with an entry in the inbox.
@@ -311,7 +418,7 @@ pub(crate) fn drop_old(daemon: &Daemon) {
             "flottille daemon: a message kept 30 days for {} is dropped",
             outgoing.name
         );
-        let _ = daemon.emit("remote.delivery_dropped", dropped(&outgoing, None));
+        let _ = daemon.emit("remote.delivery_dropped", dropped(&outgoing, None, None));
     }
 }
 
@@ -323,6 +430,9 @@ pub(crate) fn dropped_text(data: &Value) -> String {
         kind => format!("A {kind}"),
     };
     let agent = data["agent"].as_str().unwrap_or_default();
+    if let Some(why) = data["unkept"].as_str() {
+        return format!("{what} for agent {agent} of {machine} was not sent: {why}.");
+    }
     match data["refused"].as_str() {
         Some(why) => format!(
             "{what} for agent {agent} of {machine} was dropped: {machine} refused it ({why})."
@@ -342,14 +452,8 @@ pub(crate) async fn serve_deliver(
     received: Received,
     deliver: Box<Deliver>,
 ) {
-    let answer = match remote.daemon() {
-        None => Err("the daemon is stopping".to_owned()),
-        Some(daemon) => delivered(&daemon, &remote, &from, *deliver),
-    };
-    if let Err(why) = &answer {
-        eprintln!("flottille daemon: a delivery from another machine was refused: {why}");
-    }
-    received.answer(answer);
+    let answer = serving(&remote).and_then(|daemon| delivered(&daemon, &remote, &from, *deliver));
+    received.answer(answer_of(answer, "a delivery"));
 }
 
 fn delivered(
@@ -357,17 +461,19 @@ fn delivered(
     remote: &Remote,
     from: &PublicKey,
     deliver: Deliver,
-) -> Result<Value, String> {
+) -> Result<Value, Refused> {
     let name = remote
         .name_of(from)
         .ok_or_else(|| "it is no machine of the user's".to_owned())?;
     let machine = hex(from.as_bytes());
     if !an_id(&deliver.id) || !an_id(&deliver.launch) {
-        return Err("a delivery and its launch are named by short words".to_owned());
+        return Err("a delivery and its launch are named by short words"
+            .to_owned()
+            .into());
     }
     let launch = daemon
         .read(|store| store.launches("out", Some(&machine), LaunchFilter::Named(&deliver.launch)))
-        .map_err(|error| error.to_string())?
+        .map_err(|error| Refused::Now(error.to_string()))?
         .into_iter()
         .find(|launch| launch.caller == deliver.agent && launch.state != "refused")
         .ok_or_else(|| {
@@ -382,16 +488,17 @@ fn delivered(
         return Err(format!(
             "no delivery of kind {:?} is taken from another machine",
             deliver.kind
-        ));
+        )
+        .into());
     }
     if ![approval::URGENT, approval::BETWEEN_TURNS].contains(&deliver.urgency.as_str()) {
-        return Err(format!("there is no urgency {:?}", deliver.urgency));
+        return Err(format!("there is no urgency {:?}", deliver.urgency).into());
     }
     let length = deliver.body.chars().count();
     if length > LONGEST {
-        return Err(format!(
-            "a delivery is {LONGEST} characters at most, this one {length}"
-        ));
+        return Err(
+            format!("a delivery is {LONGEST} characters at most, this one {length}").into(),
+        );
     }
     deliveries::deliver(
         daemon,
@@ -401,7 +508,7 @@ fn delivered(
         &deliver.body,
         &deliver.urgency,
     )
-    .ok_or_else(|| "the delivery could not be stored".to_owned())?;
+    .ok_or_else(|| Refused::Now("the delivery could not be stored".to_owned()))?;
     if deliver.ended {
         daemon
             .write(|store| {
@@ -409,7 +516,7 @@ fn delivered(
                     .end_launch(&machine, &launch.launch)
                     .map(|()| ((), None))
             })
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| Refused::Now(error.to_string()))?;
     }
     Ok(json!({}))
 }
@@ -422,14 +529,8 @@ pub(crate) async fn serve_call(
     received: Received,
     call: Box<Call>,
 ) {
-    let answer = match remote.daemon() {
-        None => Err("the daemon is stopping".to_owned()),
-        Some(daemon) => called(&daemon, &remote, &from, *call),
-    };
-    if let Err(why) = &answer {
-        eprintln!("flottille daemon: a call from another machine was refused: {why}");
-    }
-    received.answer(answer);
+    let answer = serving(&remote).and_then(|daemon| called(&daemon, &remote, &from, *call));
+    received.answer(answer_of(answer, "a call"));
 }
 
 fn called(
@@ -437,18 +538,20 @@ fn called(
     remote: &Remote,
     from: &PublicKey,
     call: Call,
-) -> Result<Value, String> {
+) -> Result<Value, Refused> {
     let name = remote
         .name_of(from)
         .ok_or_else(|| "it is no machine of the user's".to_owned())?;
     let machine = hex(from.as_bytes());
     if !an_id(&call.id) || !an_id(&call.launch) {
-        return Err("a call and its launch are named by short words".to_owned());
+        return Err("a call and its launch are named by short words"
+            .to_owned()
+            .into());
     }
     let caller = call.caller.chars().take(64).collect::<String>();
     let launch = daemon
         .read(|store| store.launches("in", Some(&machine), LaunchFilter::Named(&call.launch)))
-        .map_err(|error| error.to_string())?
+        .map_err(|error| Refused::Now(error.to_string()))?
         .into_iter()
         .find(|launch| {
             launch.caller == call.caller
@@ -465,17 +568,15 @@ fn called(
     if launch.kind == "handed" {
         return Err(format!(
             "the session was handed to the user: agent {caller} of {name} calls it no more"
-        ));
+        )
+        .into());
     }
     if !CALLED.contains(&call.tool.as_str()) {
-        return Err(format!(
-            "{:?} is not a tool another machine calls",
-            call.tool
-        ));
+        return Err(format!("{:?} is not a tool another machine calls", call.tool).into());
     }
     let agent = daemon
         .read(|store| store.agent(&call.agent))
-        .map_err(|error| error.to_string())?
+        .map_err(|error| Refused::Now(error.to_string()))?
         .ok_or_else(|| format!("there is no agent {}", call.agent))?;
     let args: Value = serde_json::from_str(&call.arguments)
         .map_err(|_| "the call's arguments are not JSON".to_owned())?;
@@ -492,17 +593,18 @@ fn called(
                     named(&agent),
                     if child { "a child" } else { "a session" },
                     call.tool
-                ));
+                )
+                .into());
             }
             let text = args[field].as_str().unwrap_or_default();
             if text.trim().is_empty() {
-                return Err("the message is empty".to_owned());
+                return Err("the message is empty".to_owned().into());
             }
             if text.chars().count() > LONGEST {
-                return Err(format!("a message is {LONGEST} characters at most"));
+                return Err(format!("a message is {LONGEST} characters at most").into());
             }
             if agent.state.is_final() {
-                return Err(format!("{} has {}", named(&agent), agent.state.as_str()));
+                return Err(format!("{} has {}", named(&agent), agent.state.as_str()).into());
             }
             let id = Some(format!("{}-{}", launch.launch, call.id));
             match child {
@@ -521,7 +623,7 @@ fn called(
                     approval::URGENT,
                 ),
             }
-            .ok_or_else(|| "the message could not be stored".to_owned())?;
+            .ok_or_else(|| Refused::Now("the message could not be stored".to_owned()))?;
             format!("Sent to {} on this machine.", named(&agent))
         }
         "agent_status" | "session_read" => {
@@ -664,18 +766,31 @@ pub(crate) async fn call(
                     }
                 ));
             }
-            if args[field].as_str().unwrap_or_default().trim().is_empty() {
+            let text = args[field].as_str().unwrap_or_default();
+            if text.trim().is_empty() {
                 return refused("refused: the message is empty".to_owned());
             }
+            let length = text.chars().count();
+            if length > LONGEST {
+                return refused(format!(
+                    "refused: a message to another machine is {LONGEST} characters at most, this \
+                     one {length}: put the rest in a file of its place"
+                ));
+            }
             let id = flottille_core::agent::new_id().unwrap_or_default();
-            keep(
+            let kept = keep(
                 daemon,
                 &launch,
                 &name,
                 format!("call-{id}"),
-                message(format!("call-{id}")),
+                &message(format!("call-{id}")),
                 false,
             );
+            if let Err(why) = kept {
+                return refused(format!(
+                    "refused: {why}: send it again once {name} took them"
+                ));
+            }
             Some(Outcome::Done(match link {
                 Ok(_) => format!(
                     "Sent to agent {agent} on {name}: it reaches it on its next tool result, or as \
@@ -702,6 +817,11 @@ pub(crate) async fn call(
                 flottille_core::agent::new_id().unwrap_or_default()
             );
             match link.send(&Message::Machine(message(id))).await {
+                Ok(answer) if answer["later"].is_string() => refused(format!(
+                    "refused: {name} cannot answer now ({}): agent {agent} cannot be reached now. \
+                     You will be woken by what comes back from it.",
+                    answer["later"].as_str().unwrap_or_default()
+                )),
                 Ok(answer) => {
                     if tool == "agent_stop" {
                         let _ = daemon.write(|store| {
