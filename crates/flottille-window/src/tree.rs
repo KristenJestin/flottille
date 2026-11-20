@@ -639,7 +639,8 @@ impl Render for Sidebar {
                         .border_color(p.line)
                         .px(space::SM)
                         .py(space::XS)
-                        .child(
+                        // Its one change (downloading, then ready) fades.
+                        .child(changing("sidebar-version-label", line, move |line| {
                             Button::quiet("sidebar-version", line)
                                 .full_width()
                                 .on_click(move |_, window, cx| {
@@ -652,8 +653,9 @@ impl Render for Sidebar {
                                             )
                                         })
                                         .ok();
-                                }),
-                        )
+                                })
+                                .into_any_element()
+                        }))
                         .into_any_element()
                 },
             ))

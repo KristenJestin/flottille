@@ -196,7 +196,27 @@ fn the_version_section_and_the_sidebar_s_foot_say_a_build_staged(cx: &mut TestAp
     assert!(visible(cx, "version-restart-button"));
     until(&shell, cx, "the sidebar's foot says it", |cx| {
         visible(cx, "sidebar-version")
+            && label(cx, "sidebar-version").as_deref() == Some("Ready to restart")
     });
+}
+
+#[test]
+fn the_download_s_progress_moves_its_amount_not_its_lines() {
+    let at = |done: u64| {
+        flottille_window::version::Shown::of(&json!({
+            "latest": NEWER,
+            "downloading": {"done": done, "total": 40_000_000},
+        }))
+    };
+    let (start, later) = (at(1_000_000), at(20_000_000));
+    // The sidebar's foot says it once, not every amount.
+    assert_eq!(start.foot_line().as_deref(), Some("Downloading…"));
+    assert_eq!(later.foot_line(), start.foot_line());
+    // The section says the amount, in place: what fades is the state, not each amount.
+    assert_eq!(start.state_line(), "Downloading… 1.0 MB of 40.0 MB");
+    assert_eq!(later.state_line(), "Downloading… 20.0 MB of 40.0 MB");
+    assert_eq!(start.state_said(), "Downloading…");
+    assert_eq!(later.state_said(), start.state_said());
 }
 
 #[gpui_kit::test]

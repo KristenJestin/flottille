@@ -27,7 +27,7 @@ const EVERY: Duration = Duration::from_secs(6 * 60 * 60);
 const IDLE_POLL: Duration = Duration::from_millis(500);
 
 /// How often the progress of a download is told, at most.
-const PROGRESS_EVERY: Duration = Duration::from_millis(500);
+const PROGRESS_EVERY: Duration = Duration::from_secs(1);
 
 /// What the start of this daemon refused of a staged build, said in the update's place.
 static REFUSED: OnceLock<String> = OnceLock::new();

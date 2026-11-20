@@ -4,7 +4,8 @@
 //! The window decides nothing: each action is a request of the daemon's (`update.*`), and the
 //! section shows what the daemon says next (`update.show`, `update.changed`).
 //!
-//! What moves: the version line and the state line fade when their text changes (`changing`),
+//! What moves: the version line and the state line fade when their text changes (`changing`;
+//! the amount a download read moves in place, at most once a second, and does not fade),
 //! the message of a download, a failure or a refusal unfolds and folds away (`presence_of`), the
 //! buttons are the kit's (their hover and press fade), the check's choice is the kit's
 //! `Segmented`, and the restart is asked in the one confirmation dialog (`Confirm`).
@@ -24,6 +25,8 @@ use crate::shell::Shell;
 
 /// What the section says once a build is staged.
 pub const READY: &str = "Ready: applied at the next start";
+
+const DOWNLOADING: &str = "Downloading…";
 
 /// What `update.show` says.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -89,8 +92,7 @@ impl Shown {
         }
     }
 
-    /// The line of the update's state: what the sidebar's foot says too, when there is
-    /// something to do.
+    /// The line of the update's state, with the amount downloaded.
     pub fn state_line(&self) -> String {
         if self.when_idle {
             return "Restarts to update once no agent runs".to_owned();
@@ -101,9 +103,9 @@ impl Shown {
         if let Some((done, total)) = self.downloading {
             return match total {
                 Some(total) if total > 0 => {
-                    format!("Downloading… {} of {}", megabytes(done), megabytes(total))
+                    format!("{DOWNLOADING} {} of {}", megabytes(done), megabytes(total))
                 }
-                _ => format!("Downloading… {}", megabytes(done)),
+                _ => format!("{DOWNLOADING} {}", megabytes(done)),
             };
         }
         if let Some(latest) = &self.latest {
@@ -118,9 +120,22 @@ impl Shown {
         "Up to date".to_owned()
     }
 
-    /// What the sidebar's foot says: only something to act on.
+    /// The state line without the amount downloaded: what fades when it changes, while the
+    /// amount moves in place.
+    pub fn state_said(&self) -> String {
+        if self.downloading.is_some() && !self.when_idle && self.staged.is_none() {
+            return DOWNLOADING.to_owned();
+        }
+        self.state_line()
+    }
+
+    /// What the sidebar's foot says: only something to act on, and never the amount, which
+    /// would change its line every second.
     pub fn foot_line(&self) -> Option<String> {
-        (self.latest.is_some() || self.staged.is_some()).then(|| self.state_line())
+        if self.staged.is_some() && !self.when_idle {
+            return Some("Ready to restart".to_owned());
+        }
+        (self.latest.is_some() || self.staged.is_some()).then(|| self.state_said())
     }
 }
 
@@ -389,11 +404,13 @@ impl Render for VersionSection {
                 .into_any_element()
         })
         .into_any_element();
-        let state = changing("version-state", shown.state_line(), |text| {
+        // The state fades when it changes; the amount downloaded moves in place.
+        let line = SharedString::from(shown.state_line());
+        let state = changing("version-state", shown.state_said(), move |_| {
             div()
                 .id("version-state-text")
-                .aria_label(text.clone())
-                .child(text)
+                .aria_label(line.clone())
+                .child(line)
                 .test_support()
                 .into_any_element()
         })
