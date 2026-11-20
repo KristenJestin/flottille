@@ -425,13 +425,16 @@ fn an_allowed_push_runs_the_user_s_global_ssh_command() {
     let (user, _agent, _bus) = user();
     let own = user.path("own/ssh");
     marker(&user, &own);
-    // The user's own, for several accounts of a forge: in their global settings.
+    // The user's own, for several accounts of a forge: in their global settings (the test's,
+    // which the harness otherwise empties).
     std::fs::create_dir_all(user.path("home")).unwrap();
+    let global = user.path("home/.gitconfig");
     std::fs::write(
-        user.path("home/.gitconfig"),
+        &global,
         format!("[core]\n\tsshCommand = {}\n", own.display()),
     )
     .unwrap();
+    let user = user.with_env("GIT_CONFIG_GLOBAL", global.to_str().unwrap());
     let mcp = session(&user, SSH_REMOTE);
 
     let pushed = done(mcp.call(
