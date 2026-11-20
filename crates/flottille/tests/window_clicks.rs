@@ -4,7 +4,7 @@
 use crate::common::User;
 use crate::common::mcp::Mcp;
 
-use std::path::PathBuf;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -38,7 +38,7 @@ fn issue(number: u64, title: &str, state: &str, milestone: Option<(u64, &str)>) 
 }
 
 /// A throwaway repository at `folder`, its `origin` `remote` when there is one.
-fn repository(user: &User, folder: &PathBuf, remote: Option<&str>) {
+fn repository(user: &User, folder: &Path, remote: Option<&str>) {
     user.git_init(folder);
     std::fs::write(folder.join("README.md"), "text\n").unwrap();
     user.git(folder, &["add", "."]);
