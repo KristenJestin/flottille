@@ -605,6 +605,15 @@ async fn a_device_paired_again_with_the_same_key_keeps_its_card() {
     let entry = members.get(&pc.public()).unwrap();
     assert_eq!((entry.name.as_str(), entry.role), ("pc", Role::Runner));
     assert_eq!(entry.machine, Some(machine.public()));
+    // Its machine a member's already, the pairing spent pair mode all the same: its command says
+    // the device paired again, and returns.
+    served.with_hub(|hub| {
+        assert_eq!(hub.pairing_left(), None);
+        let Some(flottille_hub::PairEnd::Paired(end)) = hub.pairing_ended(2) else {
+            panic!("pair mode is still open");
+        };
+        assert!(end.again);
+    });
     served.stop().await;
 }
 
