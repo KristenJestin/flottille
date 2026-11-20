@@ -648,7 +648,7 @@ impl Shell {
     /// the window shows that machine, then that session once its first read came. The switch's
     /// own wait applies: past it, the window is back on this machine and says why.
     pub fn open_elsewhere(&mut self, machine: String, agent: String, cx: &mut Context<Self>) {
-        self.choose(Some(machine.clone()), Some((machine, agent)), cx);
+        self.choose_then(Some(machine.clone()), Some((machine, agent)), cx);
     }
 
     /// The Machines section of Settings.
@@ -664,12 +664,12 @@ impl Shell {
     /// Shows the machine `name` (`None`: this one): its projects and its sessions, every request
     /// signed with the device key. One that is off, or needs an update, is said so and not shown.
     pub fn choose_machine(&mut self, name: Option<String>, cx: &mut Context<Self>) {
-        self.choose(name, None, cx);
+        self.choose_then(name, None, cx);
     }
 
     /// Shows the machine `name`, then the session `then` of it once its first read holds it: only
     /// once the switch starts, never for a machine that is off or whose key could not be read.
-    fn choose(
+    fn choose_then(
         &mut self,
         name: Option<String>,
         then: Option<(String, String)>,
