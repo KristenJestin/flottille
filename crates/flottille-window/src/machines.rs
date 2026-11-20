@@ -10,6 +10,7 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
@@ -703,7 +704,12 @@ pub fn shown_on(cx: &gpui_kit::App) -> Option<String> {
 /// and carried by this machine's daemon. Choosing another machine cuts them all, and each part of
 /// the window connects again, to the new one, as after any broken connection.
 #[derive(Clone, Default)]
-pub struct Aim(Arc<Mutex<Aiming>>);
+pub struct Aim {
+    aiming: Arc<Mutex<Aiming>>,
+    /// How many times a machine was chosen: what the window's link stamps on what it reads, so
+    /// that a read of the machine shown before is told from one of the machine shown now.
+    generation: Arc<AtomicU64>,
+}
 
 #[derive(Default)]
 struct Aiming {
@@ -728,7 +734,7 @@ impl Pair {
 impl Aim {
     /// The machine shown, when it is not this one.
     pub fn machine(&self) -> Option<String> {
-        self.0
+        self.aiming
             .lock()
             .unwrap()
             .machine
@@ -740,13 +746,27 @@ impl Aim {
     /// the one shown before.
     pub fn set(&self, machine: Option<(String, Arc<DeviceKey>)>) {
         let made = {
-            let mut aiming = self.0.lock().unwrap();
+            let mut aiming = self.aiming.lock().unwrap();
             aiming.machine = machine;
+            // Under the lock that `open` reads the machine under: a connection opened between a
+            // read of the generation and the next one that finds it unchanged goes to the
+            // machine of that generation.
+            self.generation.fetch_add(1, Ordering::SeqCst);
             std::mem::take(&mut aiming.made)
         };
         for pair in made.iter().filter_map(Weak::upgrade) {
             pair.cut();
         }
+    }
+
+    /// The generation of the machine shown: one more at each choice.
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::SeqCst)
+    }
+
+    /// [`Aim::generation`], for the link to read beside each connection it opens.
+    pub fn generations(&self) -> Arc<AtomicU64> {
+        self.generation.clone()
     }
 
     /// `local`'s connections, made to the machine shown.
@@ -763,7 +783,7 @@ impl Aim {
             daemon,
         });
         let machine = {
-            let mut aiming = self.0.lock().unwrap();
+            let mut aiming = self.aiming.lock().unwrap();
             aiming.made.retain(|made| made.strong_count() > 0);
             aiming.made.push(Arc::downgrade(&pair));
             aiming.machine.clone()

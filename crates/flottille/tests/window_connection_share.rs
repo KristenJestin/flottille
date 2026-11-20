@@ -11,12 +11,14 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
-use crate::remote::{Machine, NoKeyring, pc_and_server};
+use crate::remote::{Machine, NoKeyring, pair, pc_and_server};
 use common::User;
 use flottille_link::{DeviceKey, Request};
 use flottille_window::Shell;
+use flottille_window::device::Device;
 use flottille_window::extensions::connections::ConnectionsSection;
 use flottille_window::link::{Connect, Sign};
+use gpui_design_system::omarchy::Environment;
 use gpui_kit::test::TestWindowExt;
 use gpui_kit::{Entity, TestAppContext, VisualTestContext, px, size};
 use serde_json::json;
@@ -379,6 +381,193 @@ fn share_and_sign_in_a_connection_of_another_machine(cx: &mut TestAppContext) {
             .iter()
             .any(|entry| entry["name"] == "notes.oauth")
     );
+    let _ = process.kill();
+    let _ = process.wait();
+}
+
+/// A window of `machine` that holds its device key and shows `shown`, another of the user's
+/// machines: every request of its pages goes there, signed.
+fn window_showing<'a>(
+    machine: &Machine,
+    shown: &str,
+    cx: &'a mut TestAppContext,
+) -> (Entity<Shell>, &'a mut VisualTestContext) {
+    std::fs::write(machine.user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
+    let env = Environment {
+        os_release: machine.user.path("os-release"),
+        state_home: machine.user.path("state"),
+    };
+    cx.update(|cx| flottille_window::init_with(env, cx));
+    let connect: Connect = Arc::new(machine.user.connector());
+    let device = Some(Device::in_folder(machine.folder()));
+    let (shell, cx) = cx.add_window_view(|window, cx| {
+        Shell::new_polled_with(connect.clone(), device.clone(), window, cx)
+    });
+    cx.simulate_resize(size(px(1280.), px(2000.)));
+    shell.update(cx, |s, _| s.sign_with(signing(machine)));
+    until(&shell, cx, "this machine's tree is read", |cx| {
+        shell.read_with(cx, |s, cx| s.machines().read(cx).machines().is_some())
+    });
+    let name = shown.to_owned();
+    shell.update(cx, |s, cx| s.choose_machine(Some(name), cx));
+    until(&shell, cx, "the machine is shown", |cx| {
+        shell.read_with(cx, |s, _| s.machine_shown()).as_deref() == Some(shown)
+            && !present(cx, "sidebar-loading")
+    });
+    settle(cx);
+    (shell, cx)
+}
+
+/// The connection `notes` of `machine`, off, and the vault entry it names.
+fn notes_on(machine: &Machine) {
+    machine
+        .user
+        .call(
+            "vault.set",
+            json!({"name": "notes-key", "secret": SECRET, "url": "https://notes.example.com"}),
+        )
+        .unwrap();
+    machine
+        .user
+        .call(
+            "connection.add",
+            json!({"name": "notes", "about": "The user's notes.", "enabled": false,
+                "url": "https://notes.example.com/mcp",
+                "secrets": [{"in": "header", "name": "Authorization", "prefix": "Bearer ",
+                    "entry": "notes-key"}]}),
+        )
+        .unwrap();
+    machine
+        .user
+        .call(
+            "extension.set",
+            json!({"name": "connections", "enabled": true}),
+        )
+        .unwrap();
+}
+
+#[gpui_kit::test]
+fn share_a_connection_of_the_machine_shown(cx: &mut TestAppContext) {
+    let (_hub, pc, server) = pc_and_server(User::new());
+    notes_on(&server);
+    let (shell, cx) = window_showing(&pc, "server", cx);
+    open_page(&shell, cx);
+    until(&shell, cx, "the server's connection is listed", |cx| {
+        present(cx, "connection-notes")
+    });
+    let section = section(&shell, cx);
+
+    click("connection-more-notes", cx);
+    click("share-connection-notes", cx);
+    until(&shell, cx, "the machines are listed", |cx| {
+        section.read_with(cx, |s, _| s.share_machines().is_some())
+    });
+    // The shown machine's runners: this one.
+    assert_eq!(
+        section.read_with(cx, |s, _| s.share_machines().cloned()),
+        Some(Ok(vec!["pc".to_owned()]))
+    );
+    settle(cx);
+    click("connection-share-entries", cx);
+    click("connection-share-to-pc", cx);
+    until(&shell, cx, "the toast says what came of it", |cx| {
+        toasts(&shell, cx)
+            .iter()
+            .any(|t| t.starts_with("Connection notes"))
+    });
+    assert!(
+        toasts(&shell, cx)
+            .iter()
+            .any(|t| t.starts_with("Connection notes shared with pc")),
+        "{:?}",
+        toasts(&shell, cx)
+    );
+    let copy = pc.user.call("connection.list", json!({})).unwrap()["connections"][0].clone();
+    assert_eq!(copy["name"], "notes", "{copy}");
+    let entry = pc.user.call("vault.list", json!({})).unwrap()["entries"][0].clone();
+    assert_eq!(entry["name"], "notes-key", "{entry}");
+    assert_eq!(entry["shared_from"], "server", "{entry}");
+}
+
+#[gpui_kit::test]
+fn sign_in_on_a_machine_while_another_is_shown(cx: &mut TestAppContext) {
+    let (_hub, pc, server) = pc_and_server(User::new());
+    // A third machine, a runner, whose copy of the server's connection is signed in.
+    let laptop = Machine::of(User::new().with_env("FLOTTILLE_TEST_SIGN_IN_LOOPBACK", "127.0.0.2"));
+    pair(&pc, &laptop, "laptop", "runner");
+    server.wait_for_member("laptop", true);
+    pc.wait_for("laptop", "online");
+    server.wait_for("laptop", "online");
+    notes_on(&server);
+    let shared = server.user.run(&[
+        "connection",
+        "share",
+        "notes",
+        "--machine",
+        "laptop",
+        "--entry",
+        "notes-key",
+    ]);
+    assert!(
+        shared.status.success(),
+        "{}",
+        String::from_utf8_lossy(&shared.stderr)
+    );
+    let (mut process, url) = protected_server(&laptop.user);
+    laptop
+        .user
+        .call(
+            "extension.set",
+            json!({"name": "connections", "enabled": true}),
+        )
+        .unwrap();
+    laptop
+        .user
+        .call(
+            "connection.edit",
+            json!({"name": "notes", "url": url, "secrets": null, "enabled": true}),
+        )
+        .unwrap();
+
+    let (shell, cx) = window_showing(&pc, "server", cx);
+    let opened = Arc::new(Mutex::new(Vec::<String>::new()));
+    {
+        let opened = opened.clone();
+        shell.update(cx, |s, _| {
+            s.set_opener(Arc::new(move |path: &Path| {
+                opened.lock().unwrap().push(path.display().to_string());
+            }))
+        });
+    }
+    open_page(&shell, cx);
+    until(&shell, cx, "the server's connection is listed", |cx| {
+        present(cx, "connection-notes")
+    });
+    let section = section(&shell, cx);
+
+    // The sign-in of the laptop's copy: its redirect comes back to this machine's 127.0.0.1,
+    // whichever machine the window shows.
+    section.update(cx, |s, cx| s.sign_in_on("notes", "laptop", cx));
+    until(&shell, cx, "the browser is opened on the sign-in", |cx| {
+        assert!(
+            toasts(&shell, cx)
+                .iter()
+                .all(|t| !t.contains("not signed in")),
+            "{:?}",
+            toasts(&shell, cx)
+        );
+        !opened.lock().unwrap().is_empty()
+    });
+    let address = opened.lock().unwrap()[0].clone();
+    let (status, location) = browse(&address);
+    assert_eq!(status, 302);
+    let (status, _) = browse(&location.unwrap());
+    assert_eq!(status, 200);
+    until(&shell, cx, "it says it is signed in", |cx| {
+        toasts(&shell, cx)
+            .iter()
+            .any(|t| t.starts_with("Signed in to notes on laptop"))
+    });
     let _ = process.kill();
     let _ = process.wait();
 }
