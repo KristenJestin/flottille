@@ -979,6 +979,7 @@ fn a_machine_that_goes_down_before_its_first_read_is_given_up(cx: &mut TestAppCo
     shell.update(cx, |shell, cx| {
         shell.choose_machine(Some("server".to_owned()), cx)
     });
+    cx.run_until_parked();
     assert_eq!(
         shell.read_with(cx, |s, _| s.machine_shown()),
         Some("server".to_owned())
@@ -1016,6 +1017,103 @@ fn a_machine_that_goes_down_before_its_first_read_is_given_up(cx: &mut TestAppCo
         why.as_deref()
             .is_some_and(|why| why.starts_with("server is offline since ")),
         "{why:?}"
+    );
+}
+
+/// The project `name` on `user`'s machine, a throwaway repository.
+fn project(user: &User, name: &str) {
+    let folder = user.path(&format!("work/{name}"));
+    user.git_init(&folder);
+    std::fs::write(folder.join("README.md"), format!("{name}\n")).unwrap();
+    user.git(&folder, &["add", "README.md"]);
+    user.git(&folder, &["commit", "--quiet", "-m", "start"]);
+    user.call("project.add", json!({"folder": folder, "name": name}))
+        .unwrap();
+}
+
+/// Waits until the link has sent more reads of the shell than `before`, without the window
+/// taking them: they wait in its queue.
+fn queued(shell: &Entity<Shell>, before: u64, cx: &mut VisualTestContext) {
+    let deadline = Instant::now() + WAIT;
+    while snapshots(shell, cx) <= before {
+        assert!(Instant::now() < deadline, "no read was sent");
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+fn snapshots(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> u64 {
+    shell.read_with(cx, |s, _| {
+        s.seen().snapshots.load(std::sync::atomic::Ordering::SeqCst)
+    })
+}
+
+#[gpui_kit::test]
+fn a_read_of_this_machine_queued_before_the_switch_does_not_end_the_wait(cx: &mut TestAppContext) {
+    let (_hub, pc, server) = pc_and_server(User::new());
+    let (shell, cx) = window(&pc, cx);
+    until(&shell, cx, "the switcher shows", |cx| visible(cx, SWITCHER));
+    settle(&shell, cx);
+
+    assert!(server.user.run(&["daemon", "stop"]).status.success());
+    pc.wait_for("server", "offline");
+    // A read of this machine, sent and not yet taken, when the server is chosen.
+    let before = snapshots(&shell, cx);
+    project(&pc.user, "anchor");
+    queued(&shell, before, cx);
+    shell.update(cx, |shell, cx| {
+        shell.choose_machine(Some("server".to_owned()), cx)
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        shell.read_with(cx, |s, _| s.machine_shown()),
+        Some("server".to_owned())
+    );
+
+    // That read is this machine's, not the server's: the wait goes on, and ends in a toast.
+    step(&shell, Duration::from_millis(16), cx);
+    step(&shell, flottille_window::link::NOT_ANSWERING / 2, cx);
+    step(&shell, flottille_window::link::NOT_ANSWERING, cx);
+    assert_eq!(shell.read_with(cx, |s, _| s.machine_shown()), None);
+    assert!(
+        toasts(&shell, cx).contains(&"server cannot be shown".to_owned()),
+        "{:?}",
+        toasts(&shell, cx)
+    );
+}
+
+#[gpui_kit::test]
+fn a_read_of_the_machine_given_up_is_not_shown(cx: &mut TestAppContext) {
+    let (_hub, pc, server) = pc_and_server(User::new());
+    project(&server.user, "harbor");
+    let (shell, cx) = window(&pc, cx);
+    until(&shell, cx, "the switcher shows", |cx| visible(cx, SWITCHER));
+    settle(&shell, cx);
+
+    // The server's first read is sent, and the limit passes before the window takes it.
+    let before = snapshots(&shell, cx);
+    shell.update(cx, |shell, cx| {
+        shell.choose_machine(Some("server".to_owned()), cx)
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        shell.read_with(cx, |s, _| s.machine_shown()),
+        Some("server".to_owned())
+    );
+    queued(&shell, before, cx);
+    cx.executor()
+        .advance_clock(flottille_window::link::NOT_ANSWERING + Duration::from_secs(1));
+    cx.run_until_parked();
+    assert_eq!(shell.read_with(cx, |s, _| s.machine_shown()), None);
+
+    // Back on this machine, the server's late read is not drawn as this machine's.
+    shell.update_in(cx, |shell, window, cx| shell.poll(window, cx));
+    assert!(
+        shell.read_with(cx, |s, _| s
+            .snapshot()
+            .projects
+            .iter()
+            .all(|project| project.name != "harbor")),
+        "the server's project is in this machine's tree"
     );
 }
 

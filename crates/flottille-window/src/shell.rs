@@ -262,6 +262,8 @@ pub struct Shell {
     /// The wait for that first read: past [`link::NOT_ANSWERING`] the window is back on this
     /// machine.
     switch_wait: Option<Task<()>>,
+    /// The machine chosen while its key is read.
+    choosing: Option<Task<()>>,
     /// The link's updates, until a task takes them.
     updates: Option<UnboundedReceiver<Update>>,
     _link: Task<()>,
@@ -341,13 +343,13 @@ impl Shell {
         let aim = crate::machines::Aim::default();
         let local = connect.clone();
         let connect = aim.connect(connect);
-        let seen = link::spawn_into(connect.clone(), sender.clone());
+        let seen = link::spawn_aimed_into(connect.clone(), aim.generations(), sender.clone());
         let follow = Follow {
             connect: connect.clone(),
             updates: sender.clone(),
             opener: crate::open::system(),
         };
-        let actions = Actions::spawn_aimed(connect, local, sender);
+        let actions = Actions::spawn_aimed(aim.clone(), local, sender);
         let this = cx.entity().downgrade();
         let top = cx.new(|_| TopBar::new(this.clone()));
         let sidebar = cx.new(|_| Sidebar::new(this.clone()));
@@ -584,6 +586,7 @@ impl Shell {
             machines,
             switching: false,
             switch_wait: None,
+            choosing: None,
             updates: Some(updates),
             _link: Task::ready(()),
             _clock,
@@ -626,42 +629,59 @@ impl Shell {
     /// Shows the machine `name` (`None`: this one): its projects and its sessions, every request
     /// signed with the device key. One that is off, or needs an update, is said so and not shown.
     pub fn choose_machine(&mut self, name: Option<String>, cx: &mut Context<Self>) {
+        // A choice still reading the key gives way to this one.
+        self.choosing = None;
         if name == self.aim.machine() {
             return;
         }
-        let aimed = match name {
-            None => None,
-            Some(name) => {
-                let read: Option<Machines> = self.machines.read(cx).machines().cloned();
-                let machine = read.as_ref().and_then(|read| read.machine(&name)).cloned();
-                if let Some(machine) = machine.filter(|machine| !machine.online()) {
-                    let detail = machine.reason.clone().unwrap_or_else(|| {
-                        format!("{} is {}", machine.name, machine.state_words())
-                    });
-                    gpui_design_system::toast(
-                        gpui_design_system::Toast::failure(format!("{name} cannot be shown"))
-                            .detail(detail),
-                        cx,
-                    );
-                    return;
-                }
-                match self.remote.key() {
-                    Ok(key) => Some((name, Arc::new(key))),
-                    Err(why) => {
-                        gpui_design_system::toast(
-                            gpui_design_system::Toast::failure(format!("{name} cannot be shown"))
-                                .detail(why),
-                            cx,
-                        );
-                        return;
-                    }
-                }
-            }
+        let Some(name) = name else {
+            self.switch_to(None, cx);
+            return;
         };
+        let read: Option<Machines> = self.machines.read(cx).machines().cloned();
+        let machine = read.as_ref().and_then(|read| read.machine(&name)).cloned();
+        if let Some(machine) = machine.filter(|machine| !machine.online()) {
+            let detail = machine
+                .reason
+                .clone()
+                .unwrap_or_else(|| format!("{} is {}", machine.name, machine.state_words()));
+            gpui_design_system::toast(
+                gpui_design_system::Toast::failure(format!("{name} cannot be shown"))
+                    .detail(detail),
+                cx,
+            );
+            return;
+        }
+        // Read off the UI thread: a locked keyring holds the read until it is unlocked.
+        let remote = self.remote.clone();
+        self.choosing = Some(cx.spawn(async move |this, cx| {
+            let key = cx.background_spawn(async move { remote.key() }).await;
+            this.update(cx, |shell, cx| match key {
+                Ok(key) => shell.switch_to(Some((name, Arc::new(key))), cx),
+                Err(why) => gpui_design_system::toast(
+                    gpui_design_system::Toast::failure(format!("{name} cannot be shown"))
+                        .detail(why),
+                    cx,
+                ),
+            })
+            .ok();
+        }));
+    }
+
+    /// Shows `aimed` (`None`: this machine), and waits for its first read.
+    fn switch_to(
+        &mut self,
+        aimed: Option<(String, Arc<flottille_link::DeviceKey>)>,
+        cx: &mut Context<Self>,
+    ) {
         self.switching = true;
         self.aim_at(aimed, cx);
-        // A machine that went down before its first read would leave the window on a skeleton:
-        // the wait has the limit the window gives a daemon that does not answer.
+        self.wait_for_the_first_read(cx);
+    }
+
+    /// A machine that went down before its first read would leave the window on a skeleton: the
+    /// wait has the limit the window gives a daemon that does not answer.
+    fn wait_for_the_first_read(&mut self, cx: &mut Context<Self>) {
         self.switch_wait = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(link::NOT_ANSWERING).await;
             this.update(cx, |shell, cx| shell.give_up_switching(cx))
@@ -694,11 +714,12 @@ impl Shell {
     /// says why.
     fn give_up_switching(&mut self, cx: &mut Context<Self>) {
         self.switch_wait = None;
-        if !std::mem::take(&mut self.switching) {
+        if !self.switching {
             return;
         }
         // This machine itself gave no read: its own disconnections are said again from now on.
         let Some(name) = self.aim.machine() else {
+            self.switching = false;
             return;
         };
         let why = self
@@ -709,7 +730,8 @@ impl Shell {
             .filter(|machine| !machine.online())
             .map(|machine| format!("{} is {}", machine.name, machine.state_words()))
             .unwrap_or_else(|| format!("{name} did not answer"));
-        self.aim_at(None, cx);
+        // Still switching, back to this machine: the connections cut for it are no broken link.
+        self.switch_to(None, cx);
         gpui_design_system::toast(
             gpui_design_system::Toast::failure(format!("{name} cannot be shown")).detail(why),
             cx,
@@ -1331,9 +1353,12 @@ impl Shell {
 
     fn apply(&mut self, update: Update, window: &mut Window, cx: &mut Context<Self>) {
         match update {
-            Update::Disconnected(_) if self.switching => {}
+            // Read or cut on a connection made for the machine shown before: not this one's.
+            Update::Snapshot(_, aimed) | Update::Disconnected(_, aimed)
+                if aimed != self.aim.generation() => {}
+            Update::Disconnected(..) if self.switching => {}
             Update::Machines(news) => self.machines_news(*news, window, cx),
-            Update::Disconnected(_) => {
+            Update::Disconnected(..) => {
                 self.set_online(false, cx);
                 self.waiting_for_the_daemon(false, cx);
                 self.texts_due = true;
@@ -1343,7 +1368,7 @@ impl Shell {
                 .update(cx, |main, cx| main.set_not_answering(since, cx)),
             // The link subscribed to the events before it read: an edit made before that is in
             // what the pages read, not in the events, so they read it again.
-            Update::Snapshot(snapshot) => {
+            Update::Snapshot(snapshot, _) => {
                 self.switching = false;
                 self.switch_wait = None;
                 self.set_online(true, cx);

@@ -517,7 +517,10 @@ and Refuse. Every new member is a toast, `New device: pixel (control only), adde
 pc`, with Remove. The machine switcher at the top of the sidebar shows this machine first, then
 each runner with its state; choosing one shows its projects and sessions, every request of the
 window signed with the device key, as the command line signs it, and carried by this machine's
-daemon. Choosing a machine that is off or needs an update is a failure toast that says why, and
+daemon. Sharing a vault entry or a connection from the machine shown shares that machine's: the
+request goes to it with the device's signature for it, which it checks and sends on with the
+secret, as when it is asked on that machine; the sign-in of a copy on another machine comes back
+to this machine's `127.0.0.1` whichever machine is shown. Choosing a machine that is off or needs an update is a failure toast that says why, and
 the window stays on the machine it shows. The window reads the device key from the same keyring
 item, or the same file, as the command line.
 
