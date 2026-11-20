@@ -62,6 +62,7 @@ pub mod tokens;
 pub mod tree;
 pub mod vault;
 pub mod vault_ask;
+pub mod version;
 pub mod waiting;
 pub mod workspaces_folder;
 
@@ -115,7 +116,15 @@ pub use shell::Shell;
 /// Opens the window and runs until it is closed. `connect` opens a connection to the daemon,
 /// starting it when nobody listens. The window comes to the front when `instance` is asked to
 /// raise it (`instance.rs`).
-pub fn run(connect: Connect, instance: Option<Instance>) {
+/// What the binary tells the window of itself: its `--version`, how it starts again from the
+/// binary that replaced it, and the page to open first.
+pub struct Build {
+    pub full: String,
+    pub reexec: shell::Reexec,
+    pub open: Option<String>,
+}
+
+pub fn run(connect: Connect, instance: Option<Instance>, build: Build) {
     gpui_kit::application()
         .with_assets(glyphs::Assets)
         .run(move |cx| {
@@ -137,7 +146,14 @@ pub fn run(connect: Connect, instance: Option<Instance>) {
                 ..Default::default()
             };
             let window = gpui_kit::open_window(options, cx, |window, cx| {
-                let shell = cx.new(|cx| Shell::new(connect, window, cx));
+                let shell = cx.new(|cx| {
+                    let mut shell = Shell::new(connect, window, cx);
+                    shell.set_build(build.full, build.reexec);
+                    if let Some(page) = &build.open {
+                        shell.reopen(page);
+                    }
+                    shell
+                });
                 // Closing the window ends the program (GPUI Fast differs from GPUI on
                 // `on_window_closed`), once what its composers hold is with the daemon.
                 let closing = shell.clone();
