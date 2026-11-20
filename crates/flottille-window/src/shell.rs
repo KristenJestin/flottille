@@ -714,6 +714,12 @@ impl Shell {
         self.settings.update(cx, |page, cx| page.choose(tab, cx));
     }
 
+    /// How this window signs what only the user's device may ask, rather than with the process's
+    /// signer (`link::sign_with`): a window of its own device, as a test's two machines have.
+    pub fn sign_with(&mut self, sign: crate::link::Sign) {
+        self.actions.sign_with(sign);
+    }
+
     /// What opens a folder in the user's editor, for the session pages opened from now on.
     pub fn set_opener(&mut self, opener: Opener) {
         self.follow.opener = opener;
