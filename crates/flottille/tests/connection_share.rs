@@ -428,6 +428,21 @@ fn login_from_pc(
     (child, out, url)
 }
 
+/// The redirect lands on pc's tunnel to the server's sign-in: pc carries one, on the very port
+/// the redirect names.
+fn carried_by_pc(pc: &Machine, redirect: &str) {
+    let port = url::Url::parse(redirect).unwrap().port().unwrap();
+    let tunnels = pc.user.call("tunnel.list", json!({})).unwrap()["tunnels"].clone();
+    assert!(
+        tunnels.as_array().unwrap().iter().any(|tunnel| {
+            tunnel["sign_in"] == "notes"
+                && tunnel["machine"] == "server"
+                && tunnel["local_port"] == port
+        }),
+        "{tunnels}"
+    );
+}
+
 #[test]
 fn sign_in_from_a_client_lands_the_redirect_on_the_other_machine() {
     let (_hub, pc, server) = pc_and_server(server_user());
@@ -440,6 +455,7 @@ fn sign_in_from_a_client_lands_the_redirect_on_the_other_machine() {
     // The redirect is the server's one-shot listener's address, on pc's own loopback: pc's
     // tunnel holds that port there, and the server's listener is not on it (`127.0.0.2`).
     assert!(redirect.starts_with("http://127.0.0.1:"), "{redirect}");
+    carried_by_pc(&pc, &redirect);
     let (status, _, body) = browse(&redirect);
     assert_eq!(status, 200, "{body}");
     assert!(body.contains("signed in"), "{body}");
@@ -484,6 +500,7 @@ fn a_redirect_with_another_state_is_still_refused_through_the_tunnel() {
     let (child, mut out, url) = login_from_pc(&pc);
     let (_, location, _) = browse(&url);
     let redirect = location.unwrap();
+    carried_by_pc(&pc, &redirect);
     // Another state, through the tunnel: refused by the server's listener, its code never
     // exchanged, and the sign-in still waits.
     let (status, _, body) = browse(&with_state(&redirect, "forged-state"));
