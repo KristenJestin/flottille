@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use gpui_design_system::{
     Button, Card, Confirm, EmptyLine, Field, Icon, ListCard, ListRow, Listing, Menu, Modal, QrCode,
-    RadioChoices, Section, Toast, changed, enter, palette, presence, presence_of, space,
+    RadioChoices, Section, Toast, changed, changing, enter, palette, presence, presence_of, space,
     tipped_when_cut, toast,
 };
 use gpui_kit::base::input::{Input, InputEvent, InputState};
@@ -711,14 +711,18 @@ impl MachinesSection {
                 .child(spaced(space::MD, ListCard::new("hub-card").row(row)))
                 .child(
                     presence_of("hub-reason-block", reason, move |said| {
-                        div()
-                            .id("hub-reason")
-                            .aria_label(said.clone())
-                            .text_size(px(12.5))
-                            .text_color(p.mute)
-                            .child(said)
-                            .test_support()
-                            .into_any_element()
+                        // A reason that changes while it is shown fades back in.
+                        changing("hub-reason-text", said, move |said| {
+                            div()
+                                .id("hub-reason")
+                                .aria_label(said.clone())
+                                .text_size(px(12.5))
+                                .text_color(p.mute)
+                                .child(said)
+                                .test_support()
+                                .into_any_element()
+                        })
+                        .into_any_element()
                     })
                     .space(space::MD),
                 ),
@@ -912,14 +916,17 @@ impl MachinesSection {
                             "devices-hub-down",
                             hub_down.map(SharedString::from),
                             move |said| {
-                                div()
-                                    .id("devices-hub-down-line")
-                                    .aria_label(said.clone())
-                                    .text_size(px(12.5))
-                                    .text_color(p.mute)
-                                    .child(said)
-                                    .test_support()
-                                    .into_any_element()
+                                changing("devices-hub-down-text", said, move |said| {
+                                    div()
+                                        .id("devices-hub-down-line")
+                                        .aria_label(said.clone())
+                                        .text_size(px(12.5))
+                                        .text_color(p.mute)
+                                        .child(said)
+                                        .test_support()
+                                        .into_any_element()
+                                })
+                                .into_any_element()
                             },
                         )
                         .space(space::MD),
