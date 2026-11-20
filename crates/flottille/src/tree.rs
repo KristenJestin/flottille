@@ -1953,12 +1953,24 @@ fn ask(daemon: &Arc<Daemon>, caller: &Agent, tool: &str, args: Value) -> Done {
         .collect();
     let question = question::text(&questions);
     let pilot = pilot_of(daemon, caller);
-    let parented = caller.parent.is_some() || crate::across::remote_child(daemon, caller);
+    // The machine of the agent of another machine that started it, while it is off: the question
+    // goes to the user instead.
+    let offline = ["child", "led"]
+        .into_iter()
+        .find_map(|kind| crate::across::starter(daemon, caller, kind))
+        .and_then(Result::err);
+    let parented = caller.parent.is_some()
+        || (crate::across::remote_child(daemon, caller) && offline.is_none());
     let to = match (parented, &pilot) {
         (true, _) => "parent",
         (false, Some(_)) => "pilot",
         (false, None) => "user",
     };
+    let mut asked = json!({"agent": caller.id, "question": question, "questions": questions,
+        "to": to, "pilot": pilot});
+    if let Some(machine) = &offline {
+        asked["offline"] = json!(machine);
+    }
     daemon
         .write(|store| {
             let (_, event) = store.change_agent(
@@ -1967,11 +1979,7 @@ fn ask(daemon: &Arc<Daemon>, caller: &Agent, tool: &str, args: Value) -> Done {
                     waiting_on_answer: Some(true),
                     ..AgentChange::default()
                 },
-                Some((
-                    "agent.asked",
-                    json!({"agent": caller.id, "question": question, "questions": questions,
-                        "to": to, "pilot": pilot}),
-                )),
+                Some(("agent.asked", asked.clone())),
             )?;
             Ok(((), event))
         })
@@ -1981,6 +1989,17 @@ fn ask(daemon: &Arc<Daemon>, caller: &Agent, tool: &str, args: Value) -> Done {
             "Your question went to agent {pilot}, which leads this session: it is told when your \
              turn ends, and its answer comes later as [flottille:session]. Go on with what does \
              not depend on it, or end your turn saying what you wait for."
+        )));
+    }
+    if let Some(machine) = &offline {
+        let whose = match crate::across::remote_child(daemon, caller) {
+            true => "your parent",
+            false => "the agent that leads this session",
+        };
+        return Ok(Outcome::Done(format!(
+            "Your question was given to the user, as {machine} is offline, the machine of {whose}; \
+             the answer comes later as a message. Go on with what does not depend on it, or end \
+             your turn saying what you wait for."
         )));
     }
     if !parented {
@@ -2012,6 +2031,10 @@ fn ask(daemon: &Arc<Daemon>, caller: &Agent, tool: &str, args: Value) -> Done {
 /// (`docs/tools.md`, "Where a question goes"). A pilot that ended its subscription, or whose
 /// following is paused, is not woken, so the session's questions go to the user.
 pub fn pilot_of(daemon: &Daemon, agent: &Agent) -> Option<String> {
+    // An agent of another machine leads it while the link to that machine is up.
+    if let Some(Ok(pilot)) = crate::across::starter(daemon, agent, "led") {
+        return Some(pilot);
+    }
     let pilot = agent.launched_by.as_ref().filter(|_| agent.led)?;
     crate::subscriptions::following(daemon, pilot, Some(&agent.id))
         .iter()
@@ -2068,7 +2091,7 @@ pub fn detach(daemon: &Arc<Daemon>, id: &str) -> Result<Agent, Failure> {
         Ok(((), events))
     })?;
     daemon.mcp.detached(&session.id);
-    let moved = questions_to_user(daemon, &session, &starter);
+    let moved = questions_to_user(daemon, &session, &starter, None);
     let title = session.title.clone().unwrap_or_else(|| session.id.clone());
     let starter_alive = daemon
         .read(|store| store.agent(&starter))
@@ -2112,23 +2135,29 @@ pub fn detach(daemon: &Arc<Daemon>, id: &str) -> Result<Agent, Failure> {
 /// The pilot no longer reads `session` (it stopped following it, it ended, or the user detached
 /// the session): the questions still open to it are asked again of the user (`agent.asked` to
 /// the user, `moved_from` the pilot), which closes the pilot's, so that the session waits on the
-/// user and the inbox shows them. How many went.
-pub fn questions_to_user(daemon: &Daemon, session: &Agent, pilot: &str) -> usize {
+/// user and the inbox shows them. How many went. `offline` names the pilot's machine when they
+/// go because it is off (`docs/remote.md`, "Where a question goes when the parent is off").
+pub fn questions_to_user(
+    daemon: &Daemon,
+    session: &Agent,
+    pilot: &str,
+    offline: Option<&str>,
+) -> usize {
     if session.parent.is_some() || !session.waiting_on_answer || session.state.is_final() {
         return 0;
     }
     let open = unanswered_to(daemon, &session.id, "pilot").unwrap_or_default();
     for question in &open {
+        let mut asked = json!({"agent": session.id, "question": question["question"],
+            "questions": question["questions"], "to": "user", "pilot": null, "moved_from": pilot});
+        if let Some(machine) = offline {
+            asked["offline"] = json!(machine);
+        }
         let _ = daemon.write(|store| {
             let (_, event) = store.change_agent(
                 &session.id,
                 AgentChange::default(),
-                Some((
-                    "agent.asked",
-                    json!({"agent": session.id, "question": question["question"],
-                        "questions": question["questions"], "to": "user",
-                        "pilot": null, "moved_from": pilot}),
-                )),
+                Some(("agent.asked", asked.clone())),
             )?;
             Ok(((), event))
         });
@@ -2161,7 +2190,7 @@ pub fn unfollowed(daemon: &Arc<Daemon>, following: &Subscription) {
     {
         return;
     }
-    let moved = questions_to_user(daemon, &session, &following.agent);
+    let moved = questions_to_user(daemon, &session, &following.agent, None);
     let name = match daemon.read(|store| store.agent(&following.agent)) {
         Ok(Some(pilot)) => named(&pilot),
         _ => format!("agent {}", following.agent),
@@ -2253,6 +2282,8 @@ struct Answer {
     request_id: u64,
     decision: Choice,
     why: String,
+    /// The machine a child of the caller runs on, which holds the request.
+    machine: Option<String>,
 }
 
 #[derive(Deserialize, PartialEq)]
@@ -2265,6 +2296,15 @@ enum Choice {
 fn answer(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
     let asked: Answer = arguments("approval_answer", args)?;
     let number = asked.request_id;
+    // A request of another machine is answered there (`across::call`): none of the caller's
+    // children runs on this one.
+    if let Some(machine) = &asked.machine {
+        return Err(refused(format!(
+            "refused: no child of yours runs on {}: request #{number} is not held by this \
+             agent there; leave machine out for a request of this machine",
+            machine.chars().take(64).collect::<String>()
+        )));
+    }
     daemon
         .read(|store| store.request(number))
         .map_err(failed)?
@@ -2310,10 +2350,12 @@ fn answer(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
             "Request #{number} is refused; the agent that asked is told why."
         )));
     }
-    let to = caller
+    // A child an agent of another machine launched forwards to it.
+    let above = caller
         .parent
         .clone()
-        .unwrap_or_else(|| approval::USER.to_owned());
+        .or_else(|| crate::across::caller_of(daemon, caller, "child"));
+    let to = above.clone().unwrap_or_else(|| approval::USER.to_owned());
     let forwarded = daemon
         .write(|store| {
             Ok(match store.forward(number, &caller.id, &why, &to)? {
@@ -2323,7 +2365,7 @@ fn answer(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
         })
         .map_err(failed)?
         .ok_or_else(|| refused(format!("refused: request #{number} was answered meanwhile")))?;
-    if caller.parent.is_none() {
+    if above.is_none() {
         return Ok(Outcome::Done(format!(
             "Request #{number} went to the user, with your why. Its answer comes to the agent \
              that asked."
@@ -2337,6 +2379,10 @@ fn answer(daemon: &Arc<Daemon>, caller: &Agent, args: Value) -> Done {
 
 /// Tells the agent that holds the request, a parent, that it is held for it (`child-asks`).
 pub fn asks_parent(daemon: &Arc<Daemon>, request: &Request) {
+    // A parent of another machine is told there.
+    if crate::across::asks_parent(daemon, request) {
+        return;
+    }
     let Ok(Some(holder)) = daemon.read(|store| store.agent(&request.held_by)) else {
         return;
     };

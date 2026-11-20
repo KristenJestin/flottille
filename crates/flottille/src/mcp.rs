@@ -882,7 +882,8 @@ const SERVED: [Definition; 33] = [
         description: "Answers a request held for you by one of your children's calls \
             ([flottille:child-asks]): deny it, or forward it to your own parent (to the user when \
             you are the root) when it should decide. No agent can allow a request. why is one \
-            sentence, passed on with it.",
+            sentence, passed on with it. machine is for a request of a child on another machine, \
+            as its [flottille:child-asks] names it; forwarded, it goes to the user there.",
         read_only: false,
         idempotent: false,
         destructive: false,
@@ -890,7 +891,8 @@ const SERVED: [Definition; 33] = [
             json!({"type": "object", "properties": {
                 "request_id": {"type": "integer", "minimum": 1, "description": "The request's number, #n."},
                 "decision": {"type": "string", "enum": ["forward", "deny"]},
-                "why": {"type": "string", "description": "One sentence."}
+                "why": {"type": "string", "description": "One sentence."},
+                "machine": {"type": "string", "description": "The machine of the child that asks, when it is not this one."}
             }, "required": ["request_id", "decision", "why"], "additionalProperties": false})
         },
     },
@@ -1000,6 +1002,15 @@ fn question_schema() -> Value {
 fn ask_goes(daemon: &Daemon, agent: &str) -> String {
     let agent = daemon.read(|store| store.agent(agent)).ok().flatten();
     let goes = match agent {
+        Some(agent) if crate::across::remote_child(daemon, &agent) => {
+            "Yours goes to your parent, the agent that launched you from another machine, which \
+             answers with [flottille:parent]; while that machine is off, to the user, in their \
+             inbox."
+        }
+        Some(agent) if crate::across::remote_led(daemon, &agent) => {
+            "Yours goes to the agent that leads your session from another machine, which answers \
+             with session_send; while that machine is off, to the user, in their inbox."
+        }
         Some(agent) if agent.parent.is_some() => {
             "Yours goes to your parent, the agent that launched you, which answers with \
              [flottille:parent]: what you need from it goes here."
