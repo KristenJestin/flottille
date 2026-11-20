@@ -124,12 +124,12 @@ pub fn run(paths: &Paths) -> Result<()> {
     let _lock = take_lock(paths)?;
     // Before anything else, holding the lock: no other daemon runs from the binary it replaces.
     match crate::update::apply_staged(paths) {
-        crate::update::Applied::Nothing => {}
-        crate::update::Applied::Refused(why) => {
+        crate::update::Staged::Nothing => {}
+        crate::update::Staged::Refused(why) => {
             eprintln!("flottille daemon: {why}");
             crate::updates::refused_at_start(why);
         }
-        crate::update::Applied::Applied(binary) => {
+        crate::update::Staged::Applied(binary) => {
             eprintln!(
                 "flottille daemon: the build staged is applied: starting again from {}",
                 binary.display()

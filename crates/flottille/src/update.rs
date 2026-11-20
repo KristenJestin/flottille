@@ -804,7 +804,7 @@ fn notes(this: &Version, new: &Version) -> Vec<Value> {
 }
 
 /// What the daemon's start found staged.
-pub enum Applied {
+pub enum Staged {
     /// No staging.
     Nothing,
     /// The staged build is now the binary, at that path: the daemon starts again from it.
@@ -823,15 +823,15 @@ pub fn updated_file(paths: &Paths) -> PathBuf {
 /// one and whose binary has the sum it was downloaded with: it is renamed over the binary, the
 /// launcher entry written as `flottille update` writes it. What is not is removed. Only the
 /// daemon's start calls it, holding the daemon's lock: no other daemon runs from the binary.
-pub fn apply_staged(paths: &Paths) -> Applied {
+pub fn apply_staged(paths: &Paths) -> Staged {
     let Ok(binary) = binary() else {
-        return Applied::Nothing;
+        return Staged::Nothing;
     };
     let staging = staging_of(&binary);
     let meta = match std::fs::symlink_metadata(&staging) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Applied::Nothing,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Staged::Nothing,
         Err(error) => {
-            return Applied::Refused(format!("{} cannot be read: {error}", staging.display()));
+            return Staged::Refused(format!("{} cannot be read: {error}", staging.display()));
         }
         Ok(meta) => meta,
     };
@@ -846,7 +846,7 @@ pub fn apply_staged(paths: &Paths) -> Applied {
             Ok(()) => "removed".to_owned(),
             Err(error) => format!("not removed ({error})"),
         };
-        Applied::Refused(format!(
+        Staged::Refused(format!(
             "the build staged at {} was {removed}: {why}",
             staging.display()
         ))
@@ -906,7 +906,7 @@ pub fn apply_staged(paths: &Paths) -> Applied {
         eprintln!("flottille daemon: what was applied was not kept: {error}");
     }
     let _ = std::fs::remove_dir_all(&staging);
-    Applied::Applied(binary)
+    Staged::Applied(binary)
 }
 
 #[cfg(test)]
