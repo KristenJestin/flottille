@@ -22,8 +22,10 @@ starting a child or a led or handed session on another machine, judged by that m
 its code sent by itself (#816), the deliveries and calls between a session and the agent that
 started it on another machine, kept for a machine that is off, with the commits coming back (#817),
 where a question and a held request go while the parent's machine is off (#818), the tunnels
-to the ports of a run's server (#829) and a vault entry shared with another machine (#832). What
-is decided is said as such; the defaults taken are in "Defaults taken, to confirm"; what is open
+to the ports of a run's server (#829), a vault entry shared with another machine (#832), a
+connection shared the same way (#833) and the window's machines, in Settings, General, Machines
+(#814). What is decided is said as such; the defaults taken are in "Defaults taken, to confirm";
+what is open
 is in "Open questions". It replaces the proposal of 2026-11-03 (a relay
 every device connects to, on a private network) and the review that put Tailscale and SSH at the
 centre: Flottille stays generic (`AGENTS.md`), and depends on no one network and no account of a
@@ -213,7 +215,7 @@ client link`).
 configuration (`[remote] listen`; none until the user sets one, and a device that listens nowhere
 still dials the others). It tells the hub those addresses
 whenever they change, and the hub tells the other members; the user may also give an address by
-hand (`flottille remote address add 100.64.0.7`, Settings, Machines): a tailnet address, a DNS name,
+hand (`flottille remote address add 100.64.0.7`, Settings, General, Machines): a tailnet address, a DNS name,
 a forwarded port, a public address. Members linked to each other tell each other too, so that two
 devices that have linked once can link again without the hub. A peer dials the addresses it knows
 for a key, whoever told it; the hub's list is a help, not a path.
@@ -373,7 +375,7 @@ minutes, or are told again when a device connects.
 At its first start, with an empty member list, the hub prints a **setup code** in its log, once:
 `setup code: 7KQ2-M4XP-9TRW-H3CD, valid until a first member joins`. `flottille-hub setup-code` prints
 it again while no member exists. The first device (usually the computer) joins with it:
-`flottille remote setup <hub URL> <code>`, or Settings, Machines, **Set up a hub** in the window. It
+`flottille remote setup <hub URL> <code>`, or Settings, General, Machines, **Set up a hub** in the window. It
 becomes the first member, a `runner`, its entry signed by itself; it is the **root** of the list, and
 every device that joins later pins it. The code is 80 random bits in Crockford's base32, read in
 any case and with or without its hyphens. The command reads it on its standard input (it asks
@@ -441,7 +443,7 @@ close both: not built.
 A device is added by a member, through the hub, the user checking on both screens that they talk to
 each other.
 
-1. **An existing member asks the hub for an invitation**: Settings, Machines, **Add a device** in the
+1. **An existing member asks the hub for an invitation**: Settings, General, Machines, **Add a device** in the
    window, `flottille remote invite`, or the phone's **Add a device**. It is a user action, signed by
    that member's device key (an ask, `crates/flottille-link/src/invitation.rs`: for this hub, within
    5 minutes of the hub's time, taken once). The hub answers with a token, valid **5 minutes,
@@ -469,7 +471,7 @@ at its prompt), never on the command line, which other users' `ps` and the shell
 the code comes from an invitation opened on a human device. It prints the four words, and the user accepts on the device
 that invited it, with the role `runner` chosen there.
 
-**Removing** (Settings, Machines, the row's Remove, `flottille remote remove <name>`) is the same
+**Removing** (Settings, General, Machines, the row's Remove, `flottille remote remove <name>`) is the same
 kind of signed change, by any member that may add one: every device that hears it removes the
 member and cuts its links at once; one that was off hears it from the hub when it connects again,
 before anything else is exchanged: at start, a machine accepts and dials no link until it has the
@@ -502,7 +504,25 @@ that wait for this machine's member with their words; `flottille remote accept <
 remote refuse <request>`; `flottille remote members`, `rename <name> <new name>` and `remove
 <name>`. A request is named by the new device's fingerprint. The clients sign, with the device key;
 the daemon carries what they signed (`remote.*`, `protocol.md`) and says what changed as events
-(`remote.*`, `events.md`). The window's and the phone's parts are not built.
+(`remote.*`, `events.md`). The phone's part is not built.
+
+**Built (#814), in the window**: Settings, General, Machines offers **Set up a hub** while this machine is
+in no member list (the hub's address, and its setup code in a field that hides what is typed);
+then the devices of the list (each row its name, its machine's state, its role and who added
+it; Rename and Remove… in its "⋯", Remove asking once), **Add a device** (the invitation's QR
+and its code, with the time it expires, folding away then), and this machine's addresses, found
+or declared (New address, Remove…). A join request opens its dialog over any page: the four
+words, the device's name, **This device can: Run agents / Control only / View only**, Accept
+and Refuse. Every new member is a toast, `New device: pixel (control only), added at 18:42 from
+pc`, with Remove. The machine switcher at the top of the sidebar shows this machine first, then
+each runner with its state; choosing one shows its projects and sessions, every request of the
+window signed with the device key, as the command line signs it, and carried by this machine's
+daemon. Sharing a vault entry or a connection from the machine shown shares that machine's: the
+request goes to it with the device's signature for it, which it checks and sends on with the
+secret, as when it is asked on that machine; the sign-in of a copy on another machine comes back
+to this machine's `127.0.0.1` whichever machine is shown. Choosing a machine that is off or needs an update is a failure toast that says why, and
+the window stays on the machine it shows. The window reads the device key from the same keyring
+item, or the same file, as the command line.
 
 A machine that joins is no member yet: it reaches the hub with its machine key, pinning the hub's
 key the code holds, and says in its proof the invitation's token and the new device's key. The hub
@@ -810,7 +830,7 @@ As built (#818):
   opened at a client). When the hub is unreachable, the runner counts the user as away and pushes.
 - **Dismissal follows**: what is answered or seen elsewhere sends `dismissed` with its ids, and the
   phone removes its notification. A request answered at the desk never stays on the lock screen.
-- One setting, Settings, Machines: **Notify the phone**: `when I am away` (the default) or `always`.
+- One setting, Settings, General, Machines: **Notify the phone**: `when I am away` (the default) or `always`.
 - No push service of Google's in the first version; an embedded FCM distributor is a later option if
   the app is ever distributed.
 
@@ -1400,6 +1420,17 @@ on a real phone, by hand, and reported.
   back is taken only for a repository of a launch this machine sent to that very machine, into the
   repository it was sent from, under the name this machine gives that machine; the way back sends
   the commits past the sender's tip, its snapshot, and what came back already.
+- The window's Machines are a section of Settings, General (Set up a hub, Devices, Add a device,
+  Addresses), not a tab of their own: the five tabs of Settings stay five (`docs/reference/gpui.md`,
+  rule 13). Its switcher offers the runners, and the machines whose role is not known yet (linked
+  with no hub's list), never a controller or a viewer. The device a window sets a hub up from is
+  named by the host's name, as `flottille remote setup` names it without `--name`. A join request
+  whose dialog the user closed without answering is not opened again by that window until it is
+  restarted; it waits until it expires, and `flottille remote requests` still lists it. While the
+  window shows another machine, what it keeps of itself (its folds, the drafts, its appearance)
+  stays with this machine. A member's row says its role, who added it and its machine's state:
+  `remote.members` says neither when it was added nor when it was last seen, which the toast of a
+  new member says from its event.
 - A test build run with `FLOTTILLE_TEST_STOPPING_FILE` set answers every `deliver` and `call`, while
   the file it names exists, as a daemon that is stopping does (`later`).
 - A test build run with `FLOTTILLE_TEST_TRAVEL` set answers `test.travel {machine, project,
