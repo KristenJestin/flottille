@@ -430,6 +430,8 @@ pub struct ProjectSettingsPage {
     forms: Vec<RepositoryForm>,
     tracker: Option<ProjectTracker>,
     obsolete: Vec<String>,
+    /// Why the user's SSH agent is lent to no push, as the daemon judges it now.
+    pushes_unlent: Option<String>,
     /// The repositories as their checkouts stand, added, removed and detected again.
     repositories: Entity<ProjectRepositories>,
     /// The command lines its forges and tracker need, checked (`docs/protocol.md`).
@@ -579,6 +581,7 @@ impl ProjectSettingsPage {
             forms: Vec::new(),
             tracker: None,
             obsolete: Vec::new(),
+            pushes_unlent: None,
             repositories,
             programs,
             repository_rows: Listing::default(),
@@ -882,6 +885,7 @@ impl ProjectSettingsPage {
         self.skills
             .update(cx, |section, _| section.set_folder(&folder));
         self.obsolete = strings(&settings["obsolete"]);
+        self.pushes_unlent = settings["pushes_unlent"].as_str().map(str::to_owned);
         let forge = |value: &Value| serde_json::from_value::<RepositoryForge>(value.clone()).ok();
         self.forms = settings["repositories"]
             .as_array()
@@ -2884,6 +2888,14 @@ fn shown_folder(folder: &str) -> String {
     }
 }
 
+/// What the settings say when the user's SSH agent is lent to no push: why, and what to do.
+fn unlent_said(why: &str) -> SharedString {
+    SharedString::from(format!(
+        "Pushes over SSH are refused: your SSH agent is lent to no push, since {why}. Fix that \
+         and the next push is lent it again; flottille doctor says the same."
+    ))
+}
+
 impl Render for ProjectSettingsPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
@@ -2927,6 +2939,23 @@ impl Render for ProjectSettingsPage {
                     move |line| {
                         div()
                             .id("project-settings-unread")
+                            .aria_label(line.clone())
+                            .text_size(px(12.5))
+                            .text_color(p.wait)
+                            .child(line)
+                            .test_support()
+                            .into_any_element()
+                    },
+                )
+                .space(space::MD),
+            )
+            .child(
+                presence_of(
+                    "project-settings-unlent-block",
+                    self.pushes_unlent.as_deref().map(unlent_said),
+                    move |line| {
+                        div()
+                            .id("project-settings-unlent")
                             .aria_label(line.clone())
                             .text_size(px(12.5))
                             .text_color(p.wait)
