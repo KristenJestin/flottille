@@ -23,7 +23,7 @@ use flottille_link::{
 use serde_json::{Value, json};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
-use crate::join::{Pairing, start};
+use crate::join::pair;
 use crate::keys::{Sealed, Sealer, endpoint_key, write_private};
 use crate::view::{View, ViewState};
 use crate::{MobileError, link};
@@ -194,15 +194,23 @@ impl Core {
         self.fingerprint().is_some()
     }
 
-    /// Starts joining the hub of the QR's `code`: the pairing shows the words, then waits for the
-    /// member's answer.
-    pub async fn join(&self, code: String) -> Result<Arc<Pairing>, MobileError> {
+    /// Pairs with the hub whose pair code the QR holds, as `name` with `role` (`controller` or
+    /// `viewer`), both proposed by the app and confirmed by the user: once it returns, the phone
+    /// is a member, its endpoint declared and its device key kept.
+    pub async fn join(&self, code: String, name: String, role: String) -> Result<(), MobileError> {
         let inner = self.inner.clone();
         self.inner
             .on(async move {
-                let (words, started) =
-                    start(&inner.folder, &inner.sealed, &inner.endpoint, &code).await?;
-                Ok(Arc::new(Pairing::new(words, started, inner)))
+                let (device, key) = pair(
+                    &inner.folder,
+                    &inner.sealed,
+                    &inner.endpoint,
+                    &code,
+                    &name,
+                    &role,
+                )
+                .await?;
+                inner.joined(device, key)
             })
             .await
     }
@@ -352,7 +360,7 @@ impl Inner {
     }
 
     /// The join accepted: the hub and the key kept, the view told.
-    pub(crate) fn joined(&self, device: Device, key: DeviceKey) -> Result<(), MobileError> {
+    fn joined(&self, device: Device, key: DeviceKey) -> Result<(), MobileError> {
         write_json(&self.folder.join(HUB_FILE), &device)?;
         let mut state = self.state();
         if let Ok(members) = device.members() {
@@ -614,6 +622,13 @@ async fn connect(inner: Arc<Inner>, listener: Arc<dyn Listener>) -> Result<(), M
         .map_err(said)?;
     let asker = session.asker();
     asker
+        .ask(Ask::About {
+            device: "phone".to_owned(),
+            system: "android".to_owned(),
+        })
+        .await
+        .map_err(said)?;
+    asker
         .ask(Ask::Presence {
             active: true,
             last_input: now_seconds(),
@@ -652,7 +667,7 @@ async fn control(inner: Arc<Inner>, mut session: Session) {
         match pushed {
             Pushed::List(list) => inner.took_list(list),
             Pushed::Addresses(told) => inner.told(told),
-            Pushed::Presence(_) | Pushed::Requests(_) => {}
+            Pushed::Presence(_) | Pushed::Facts(_) => {}
         }
     }
     let why = session.ended();

@@ -3,7 +3,8 @@
 //!
 //! - the device key, sealed by a key the app holds in the Android Keystore (`Sealer`), and the
 //!   key of the phone's endpoint;
-//! - joining through the hub (`Core::join`), and the member list checked back to its root;
+//! - pairing with the hub's pair code (`Core::join`), and the member list checked back to the
+//!   hub's key and its root;
 //! - the control session to the hub (presence), a link to each runner, requests signed with the
 //!   device key, and each runner's events resumed after the last one seen;
 //! - a view state computed here (`ViewState`), handed with each batch of events (`Listener`);
@@ -18,7 +19,6 @@ mod mobile;
 mod panic;
 mod view;
 
-pub use join::Pairing;
 pub use keys::Sealer;
 pub use mobile::{Batch, Core, Event, Listener};
 pub use panic::{PANIC_FILE, keep_panics, last_panic};
