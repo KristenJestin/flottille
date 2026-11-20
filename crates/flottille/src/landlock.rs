@@ -87,10 +87,12 @@ fn runtime_folders() -> Vec<PathBuf> {
     folders
 }
 
-/// X11's socket folder: `/tmp/.X11-unix`, or the tests' own (`FLOTTILLE_X11_SOCKETS`). The one
-/// place it is named, for the private mount namespace to empty (`mounts.rs`).
+/// X11's socket folder: `/tmp/.X11-unix`, or in a test build the tests' own
+/// (`FLOTTILLE_X11_SOCKETS`). The one place it is named, for the private mount namespace to empty
+/// (`mounts.rs`).
 fn x11_folder() -> Option<PathBuf> {
     std::env::var_os("FLOTTILLE_X11_SOCKETS")
+        .filter(|_| cfg!(debug_assertions))
         .map_or_else(|| PathBuf::from("/tmp/.X11-unix"), PathBuf::from)
         .canonicalize()
         .ok()
@@ -169,11 +171,18 @@ fn confine<'a>(
                         .map(Path::to_owned),
                 )
                 .collect();
+            // The session bus's socket outside the emptied folders, hidden where it is.
+            let masked: Vec<PathBuf> = crate::mounts::bus()
+                .filter(|bus| !emptied.iter().any(|folder| bus.starts_with(folder)))
+                .map(Path::to_owned)
+                .into_iter()
+                .collect();
             let cwd = command.as_std().get_current_dir().map(Path::to_owned);
             crate::mounts::plan(
                 &emptied,
                 &kept,
-                &crate::mounts::ssh_read_only(),
+                &crate::mounts::ssh(),
+                &masked,
                 cwd.as_deref(),
             )
         })

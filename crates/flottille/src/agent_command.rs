@@ -650,17 +650,25 @@ pub fn doctor(paths: &Paths, json: bool) -> Result<ExitCode> {
             .push(warning.into());
     }
     report["forges_and_trackers"] = programs.into();
-    let private_mounts = crate::mounts::available();
-    report["sandbox"] = serde_json::json!({
-        "landlock_abi": crate::landlock::abi(),
-        "private_mounts": private_mounts,
-    });
-    if !private_mounts {
-        report["warnings"]
-            .as_array_mut()
-            .expect("a list of warnings")
-            .push(crate::mounts::REFUSED_GAP.into());
+    // The sandbox as the daemon has it: what confines its commands is its own state, not this
+    // process's.
+    let sandbox = crate::client::Client::connect_or_start(paths)
+        .and_then(|mut client| client.request("daemon.status", Value::Null))
+        .map(|status| status["sandbox"].clone());
+    let warnings = report["warnings"]
+        .as_array_mut()
+        .expect("a list of warnings");
+    match &sandbox {
+        Ok(sandbox) => warnings.extend(
+            sandbox["warnings"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .cloned(),
+        ),
+        Err(error) => warnings.push(format!("the daemon did not say its sandbox: {error}").into()),
     }
+    report["sandbox"] = sandbox.unwrap_or(Value::Null);
     if json {
         println!("{report}");
     } else {

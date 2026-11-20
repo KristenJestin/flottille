@@ -841,6 +841,11 @@ fn defend(env: &mut BTreeMap<OsString, OsString>, empty: &Path) {
 fn lifted() -> BTreeMap<OsString, OsString> {
     let mut env = std::env::vars_os().collect();
     configure(&mut env, "core.hooksPath", "/dev/null");
+    // Not the SSH agent while a file its `ssh` reads could have been written by a confined
+    // command (`mounts::Ssh::unlent`).
+    if crate::mounts::ssh().unlent.is_some() {
+        env.remove(&OsString::from(crate::ssh_agent::VARIABLE));
+    }
     env
 }
 
