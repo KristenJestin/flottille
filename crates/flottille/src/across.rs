@@ -629,10 +629,9 @@ fn with_commits(message: Value, name: &str, came: Result<Value, String>) -> Valu
             for repository in came["repositories"].as_array().into_iter().flatten() {
                 let path = repository["path"].as_str().unwrap_or(".");
                 match repository["ref"].as_str() {
-                    Some(reference) => lines.push(format!(
-                        "Its commits came back to you on {reference} of {path}: review and merge \
-                         them as a local child's work; nothing moved your branch."
-                    )),
+                    Some(reference) => {
+                        lines.push(flottille_core::prompt::came_back(reference, path))
+                    }
                     None => lines.push(format!("It made no new commit in {path}.")),
                 }
             }
@@ -1115,6 +1114,35 @@ pub(crate) fn says(
         _ => return Some(Vec::new()),
     };
     Some(vec![says])
+}
+
+/// The sessions and children this machine's agents started on other machines, as the window
+/// shows them under their pilot (`remote.launches`, `Store::launches_shown`), each with what its
+/// machine last said of it, the kind and time of its last delivery here. Never a delivery's text.
+pub(crate) fn launched(daemon: &Daemon) -> Result<Value, String> {
+    let launches = daemon
+        .read(|store| store.launches_shown())
+        .map_err(|error| error.to_string())?;
+    let listed: Vec<Value> = launches
+        .iter()
+        .map(|(launch, heard)| {
+            json!({
+                "machine": machine_name(daemon, launch),
+                "launch": launch.launch,
+                "caller": launch.caller,
+                "kind": launch.kind,
+                "project": launch.project,
+                "title": launch.asked["title"],
+                "agent": launch.agent,
+                "state": launch.state,
+                "request": launch.request,
+                "heard": heard.as_ref().map(|(kind, _)| kind),
+                "heard_at": heard.as_ref().map(|(_, at)| at),
+                "at": launch.at,
+            })
+        })
+        .collect();
+    Ok(json!({"launches": listed}))
 }
 
 fn machine_name(daemon: &Daemon, launch: &Launch) -> String {

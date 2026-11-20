@@ -2155,6 +2155,8 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Result<Va
                 .await
                 .map_err(Failure::refused)
         }
+        "remote.launches" => crate::across::launched(&daemon)
+            .map_err(|why| Failure::new(flottille_protocol::code::UNAVAILABLE, why)),
         "remote.members" => control_of(&remote)?.members().map_err(Failure::refused),
         "remote.requests" => control_of(&remote)?.requests().map_err(Failure::refused),
         "remote.invite" => {

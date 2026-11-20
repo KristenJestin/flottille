@@ -731,6 +731,18 @@ Nothing moves the user's branch: the agent or the user reviews and merges it (a 
 judged as any), as a local child's work. The pilot of a led session on another machine stops it
 and removes its workspace as today, through `call`.
 
+**Built (#819), in the window.** While the window shows this machine, each led session and each
+child an agent of this machine started on another (`remote.launches`, `protocol.md`) has a row
+under its pilot's session, or the session whose tree holds its parent: its title, then the
+machine's name and its state as last known, `server · running` (no delivery came yet),
+`waiting` (held for the user there, or its last delivery a turn's end, a question or a request),
+`reported`, `failed`, or the machine's own state while it is off (`offline since 22:14`, `needs an
+update`). Clicking it switches the window to that machine (the switcher's own switch and its bounded
+wait) and opens that session there, its header and its composer entering staggered. A report whose
+commits came back names the ref under its step's title, folded or not (`Branch back:
+refs/flottille/machines/server/<launch>/feat/export`). While another machine is shown, its inbox
+items say `· on server` after their session, and its question cards `· on server` after their time.
+
 ### Deliveries across machines
 
 - **Stored before sent**, as every delivery (`design.md` §5.2): a delivery for an agent of another
@@ -1492,6 +1504,21 @@ on a real phone, by hand, and reported.
   launch for as long as its parent lives, until its report or failure comes back or its parent
   stops it (the `out` launch is then `ended`); in the receiving machine's cap from its launch
   until it ends.
+
+- A row of a session on another machine says its state as last known from what that machine
+  delivered here, not a live read: `running` once launched until its first delivery, `waiting`
+  after a turn's end, a question or a request, until the next delivery says otherwise (a message
+  the pilot sends does not make it `running` again here). An ended launch leaves its pilot's
+  rows unless its last delivery was a report: a reported child stays, `reported`, under its pilot
+  while the pilot lives. A session handed to the user is not shown under the agent that started it.
+  The daemon leaves them out of `remote.launches` itself, in one read, and also a reported launch
+  whose caller ended: an old launch is never read again. A launch held for the user there is
+  `waiting` until something of it is heard here (its approval there sends nothing back).
+- Those rows are rows of the tree only (`Snapshot.elsewhere`): this machine's daemon does not know
+  those sessions, so a project's page, search, a session's page and the inbox do not list them,
+  and nothing offers to end them from here.
+- Those rows are shown only while the window shows this machine: another machine's tree is its own,
+  and lists what its agents started elsewhere on its own machine only.
 
 ## Open questions
 

@@ -976,6 +976,9 @@ const AGENT_COLUMNS: &str = "id, provider, role, project, workspace, folder, sta
 const DELIVERY_COLUMNS: &str =
     "id, agent, kind, body, urgency, state, created_at, sent_at, images, typed, commands";
 
+/// The kind and the time of the last delivery a launch on another machine sent here.
+pub type Heard = (String, u64);
+
 /// What changes on an agent; what is left `None` stays as it is.
 #[derive(Clone, Debug, Default)]
 pub struct AgentChange {
@@ -3258,6 +3261,53 @@ impl Store {
             let (mut launch, asked) = row?;
             launch.asked = serde_json::from_str(&asked)?;
             Ok(launch)
+        })
+        .collect()
+    }
+
+    /// The launches `out` the tree of this machine shows under their pilot, oldest first, each with
+    /// the kind and the time of the last delivery it sent its caller here (stored under
+    /// `<launch>-…`): those that started a session there, not refused, not handed to the user,
+    /// and not ended, unless it ended on a report and the agent that started it lives. In one
+    /// read: every launch ever made is never read.
+    pub fn launches_shown(&self) -> Result<Vec<(Launch, Option<Heard>)>> {
+        let mut statement = self.connection.prepare_cached(
+            "SELECT l.way, l.machine, l.launch, l.caller, l.kind, l.project, l.state, l.request, \
+             l.agent, l.workspace, l.workspace_id, l.asked, l.at, h.kind, h.created_at \
+             FROM launches l LEFT JOIN deliveries h ON h.rowid = (SELECT d.rowid FROM deliveries d \
+             WHERE d.agent = l.caller AND substr(d.id, 1, length(l.launch) + 1) = l.launch || '-' \
+             ORDER BY d.created_at DESC, d.rowid DESC LIMIT 1) \
+             WHERE l.way = 'out' AND l.agent IS NOT NULL AND l.state != 'refused' \
+             AND l.kind != 'handed' AND (l.state != 'ended' OR (h.kind = 'child-report' \
+             AND NOT EXISTS (SELECT 1 FROM agents a WHERE a.id = l.caller \
+             AND a.state IN ('ended', 'failed')))) ORDER BY l.at, l.launch",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                Launch {
+                    way: row.get(0)?,
+                    machine: row.get(1)?,
+                    launch: row.get(2)?,
+                    caller: row.get(3)?,
+                    kind: row.get(4)?,
+                    project: row.get(5)?,
+                    state: row.get(6)?,
+                    request: row.get::<_, Option<i64>>(7)?.map(|n| n as u64),
+                    agent: row.get(8)?,
+                    workspace: row.get(9)?,
+                    workspace_id: row.get(10)?,
+                    asked: Value::Null,
+                    at: row.get::<_, i64>(12)? as u64,
+                },
+                row.get::<_, String>(11)?,
+                row.get::<_, Option<String>>(13)?
+                    .zip(row.get::<_, Option<i64>>(14)?.map(|at| at as u64)),
+            ))
+        })?;
+        rows.map(|row| {
+            let (mut launch, asked, heard) = row?;
+            launch.asked = serde_json::from_str(&asked)?;
+            Ok((launch, heard))
         })
         .collect()
     }

@@ -298,6 +298,12 @@ pub struct Shell {
     /// The wait for that first read: past [`link::NOT_ANSWERING`] the window is back on this
     /// machine.
     switch_wait: Option<Task<()>>,
+    /// The session of another machine to open once that machine's first read came: the machine
+    /// and its id there.
+    open_there: Option<(String, String)>,
+    /// The daemon's last read as it gave it, before the sessions on other machines are added
+    /// under their pilots.
+    read: Option<Snapshot>,
     /// The machine chosen while its key is read.
     choosing: Option<Task<()>>,
     /// The link's updates, until a task takes them.
@@ -628,6 +634,8 @@ impl Shell {
             machines,
             switching: false,
             switch_wait: None,
+            open_there: None,
+            read: None,
             choosing: None,
             updates: Some(updates),
             _link: Task::ready(()),
@@ -651,11 +659,38 @@ impl Shell {
         if let crate::machines::News::Read(read) = &news {
             let shown = self.aim.machine();
             self.sidebar.update(cx, |sidebar, cx| {
-                sidebar.set_machines(read.clone(), shown, cx)
+                sidebar.set_machines((**read).clone(), shown, cx)
             });
         }
+        let read = matches!(news, crate::machines::News::Read(_));
         self.machines
             .update(cx, |section, cx| section.news(news, window, cx));
+        // The sessions on other machines, or their state, may have changed: their rows follow.
+        if read
+            && !self.switching
+            && let Some(last) = self.read.clone()
+        {
+            let merged = self.with_elsewhere(last, cx);
+            if merged != self.snapshot {
+                self.show(merged, window, cx);
+            }
+        }
+    }
+
+    /// `read` with the sessions this machine's agents started on other machines under their
+    /// pilots, while this machine is shown: another machine's tree is its own.
+    fn with_elsewhere(&self, read: Snapshot, cx: &App) -> Snapshot {
+        match (self.aim.machine(), self.machines.read(cx).machines()) {
+            (None, Some(machines)) => read.with_elsewhere(machines),
+            _ => read,
+        }
+    }
+
+    /// Opens the session `agent` of `machine`, a session an agent of this machine started there:
+    /// the window shows that machine, then that session once its first read came. The switch's
+    /// own wait applies: past it, the window is back on this machine and says why.
+    pub fn open_elsewhere(&mut self, machine: String, agent: String, cx: &mut Context<Self>) {
+        self.choose_then(Some(machine.clone()), Some((machine, agent)), cx);
     }
 
     /// The Machines section of Settings.
@@ -671,11 +706,23 @@ impl Shell {
     /// Shows the machine `name` (`None`: this one): its projects and its sessions, every request
     /// signed with the device key. One that is off, or needs an update, is said so and not shown.
     pub fn choose_machine(&mut self, name: Option<String>, cx: &mut Context<Self>) {
+        self.choose_then(name, None, cx);
+    }
+
+    /// Shows the machine `name`, then the session `then` of it once its first read holds it: only
+    /// once the switch starts, never for a machine that is off or whose key could not be read.
+    fn choose_then(
+        &mut self,
+        name: Option<String>,
+        then: Option<(String, String)>,
+        cx: &mut Context<Self>,
+    ) {
         // A choice still reading the key gives way to this one.
         self.choosing = None;
         if name == self.aim.machine() {
             return;
         }
+        self.open_there = None;
         let Some(name) = name else {
             self.switch_to(None, cx);
             return;
@@ -699,7 +746,10 @@ impl Shell {
         self.choosing = Some(cx.spawn(async move |this, cx| {
             let key = cx.background_spawn(async move { remote.key() }).await;
             this.update(cx, |shell, cx| match key {
-                Ok(key) => shell.switch_to(Some((name, Arc::new(key))), cx),
+                Ok(key) => {
+                    shell.switch_to(Some((name, Arc::new(key))), cx);
+                    shell.open_there = then;
+                }
                 Err(why) => gpui_design_system::toast(
                     gpui_design_system::Toast::failure(format!("{name} cannot be shown"))
                         .detail(why),
@@ -740,9 +790,12 @@ impl Shell {
     ) {
         // The other machine's events start from its own first: none of this one's is resumed.
         let shown = aimed.as_ref().map(|(name, _)| name.clone());
+        // What the machine left said is not merged with what the next one says.
+        self.read = None;
         self.seen.last_seq.store(0, Ordering::SeqCst);
         self.seen.connections.store(0, Ordering::SeqCst);
         self.aim.set(aimed);
+        cx.set_global(crate::machines::Shown(shown.clone()));
         self.seen.last_seq.store(0, Ordering::SeqCst);
         self.seen.connections.store(0, Ordering::SeqCst);
         self.waiting_for_the_daemon(true, cx);
@@ -752,10 +805,33 @@ impl Shell {
         }
     }
 
+    /// The session of another machine asked for, once that machine's read holds it: its page is
+    /// opened, on the agent asked for.
+    fn open_there_now(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((machine, agent)) = self.open_there.clone() else {
+            return;
+        };
+        let root = self.snapshot.root_of(&agent);
+        if self.aim.machine().as_ref() != Some(&machine) || self.snapshot.session(&root).is_none() {
+            return;
+        }
+        self.open_there = None;
+        self.open(Selection::Session(root.clone()), window, cx);
+        if let Some(page) = self.session_page.clone() {
+            page.update(cx, |page, cx| {
+                page.arrive(cx);
+                if root != agent {
+                    page.show(&agent, cx);
+                }
+            });
+        }
+    }
+
     /// The machine chosen gave no first read in time: the window is on this machine again, and
     /// says why.
     fn give_up_switching(&mut self, cx: &mut Context<Self>) {
         self.switch_wait = None;
+        self.open_there = None;
         if !self.switching {
             return;
         }
@@ -1423,7 +1499,10 @@ impl Shell {
                     let connections = self.settings.read(cx).connections().clone();
                     connections.update(cx, |section, cx| section.read(cx));
                 }
+                self.read = Some(snapshot.clone());
+                let snapshot = self.with_elsewhere(snapshot, cx);
                 self.show(snapshot, window, cx);
+                self.open_there_now(window, cx);
                 if let Some((page, tab)) = self.reopen.take()
                     && self.page_of(&page, cx) != Page::Empty
                 {
@@ -2973,15 +3052,18 @@ impl Shell {
                 row.set_scope(scope, cx);
                 row.set_place(&session.place, cx);
                 row.set_pull(pull.as_ref(), cx);
+                // A session on another machine is ended or detached there, not from here.
+                let there = session.elsewhere.is_some();
                 row.set_actions(
-                    session.ended,
-                    session.resumable,
+                    session.ended || there,
+                    session.resumable && !there,
                     session.started_by.as_deref(),
                     cx,
                 );
                 if session.ended {
                     row.set_led_by(None, cx);
                 }
+                row.set_elsewhere(session.elsewhere.as_ref(), cx);
             });
             marks.extend(session.mark);
             shown.push(row.clone());
@@ -3062,8 +3144,10 @@ impl Shell {
             let (started_by, led_by) = (found.started_by.clone(), found.led_by.clone());
             page.update(cx, |page, cx| page.set_by(started_by, led_by, cx));
         }
+        // The sessions on other machines are found there, not here: they are not in `sessions`.
+        let read = self.snapshot.clone();
         self.switcher
-            .update(cx, |switcher, cx| switcher.set_snapshot(&self.snapshot, cx));
+            .update(cx, |switcher, cx| switcher.set_snapshot(&read, cx));
         self.ring(cx);
 
         // What was open is shown as it is now; the first project opens when nothing is.
@@ -3216,16 +3300,21 @@ impl Shell {
                 row.update(cx, |row, cx| row.set_unread(said, cx));
             }
         }
+        // What waits on another machine says which: the inbox is that machine's.
+        let there = self.aim.machine();
         let items: Vec<(BellItem, String)> = bell
             .into_iter()
             .map(|item| {
-                let title = snapshot
+                let mut title = snapshot
                     .session(&item.session)
                     .map(|s| match &s.started_by {
                         Some(by) => format!("{} · started by {by}", s.title),
                         None => s.title.clone(),
                     })
                     .unwrap_or_default();
+                if let Some(machine) = &there {
+                    title = format!("{title} · on {machine}");
+                }
                 (item, title)
             })
             .collect();

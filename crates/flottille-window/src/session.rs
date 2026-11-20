@@ -356,6 +356,8 @@ pub struct SessionPage {
     resume_error: Option<SharedString>,
     /// A reload of the root's tools was asked and not answered yet.
     reloading: bool,
+    /// It was opened by a switch to its machine: its sections enter, one after the other.
+    arrived: bool,
     renders: usize,
     _status: Subscription,
     _run_drawer: Subscription,
@@ -486,6 +488,7 @@ impl SessionPage {
             resuming: false,
             resume_error: None,
             reloading: false,
+            arrived: false,
             renders: 0,
             _status,
             _run_drawer,
@@ -1244,6 +1247,15 @@ impl SessionPage {
 
     /// [`SessionPage::select`], for the window's history going back to a place: it does not
     /// record it again.
+    /// Opened by a switch to the machine it runs on: its header, its conversation and its
+    /// composer enter staggered, as a page that shows up.
+    pub fn arrive(&mut self, cx: &mut Context<Self>) {
+        if !self.arrived {
+            self.arrived = true;
+            cx.notify();
+        }
+    }
+
     pub fn show(&mut self, agent: &str, cx: &mut Context<Self>) {
         self.drawer.update(cx, |drawer, cx| drawer.close(cx));
         // An agent that left the tree has no conversation to show: the session's is. Before the
@@ -2271,7 +2283,7 @@ impl Render for SessionPage {
             .flex()
             .flex_col()
             .child(self.room.watch(crate::ask_dock::Part::Column))
-            .child(header)
+            .child(self.section(0, header))
             // The conversation gives up its room to the dock first, down to what it keeps: past
             // that the questions of the card scroll.
             .child(
@@ -2324,7 +2336,7 @@ impl Render for SessionPage {
                     .child(self.ask_dock.clone())
                     .test_support(),
             )
-            .child(dock)
+            .child(self.section(2, dock))
             .test_support();
         div()
             .id("session-page")
@@ -2353,6 +2365,20 @@ impl Render for SessionPage {
 }
 
 impl SessionPage {
+    /// The section `index` of the page: it enters, after those before it, once the page arrived
+    /// by a switch to its machine (the conversation's rows, section 1, enter as their own).
+    fn section(&self, index: usize, section: impl IntoElement) -> AnyElement {
+        match self.arrived {
+            true => enter(
+                ElementId::Name(format!("session-section-{}-{index}", self.opened.id).into()),
+                index,
+                section,
+            )
+            .into_any_element(),
+            false => section.into_any_element(),
+        }
+    }
+
     /// The confirmation of ending the session: it names how many agents end.
     fn end_modal(&self, cx: &mut Context<Self>) -> Modal {
         let p = palette(cx);
@@ -4029,6 +4055,13 @@ impl Render for ConversationView {
     }
 }
 
+/// The refs a delivery names its commits came back into from another machine: the daemon's own
+/// lines (`flottille_core::prompt::came_back`), never an agent's words.
+fn returned_refs(text: &str) -> impl Iterator<Item = &str> {
+    text.lines()
+        .filter_map(flottille_core::prompt::returned_ref)
+}
+
 /// A child in the sub-agents list.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SubAgent {
@@ -4463,6 +4496,20 @@ impl Row {
         if self.asking != asking {
             self.asking = asking;
             cx.notify();
+        }
+    }
+
+    /// The refs a report says its commits came back into from another machine, in words:
+    /// `Branch back: refs/flottille/machines/server/<launch>/feat/export`.
+    fn branches_back(&self) -> Option<String> {
+        let Block::Report { text, .. } = &*self.block else {
+            return None;
+        };
+        let refs: Vec<&str> = returned_refs(text).collect();
+        match refs.as_slice() {
+            [] => None,
+            [one] => Some(format!("Branch back: {one}")),
+            many => Some(format!("Branches back: {}", many.join(", "))),
         }
     }
 
@@ -6069,6 +6116,19 @@ impl Render for Row {
                                     })),
                                 move |d, t| d.text_color(mix(p.mute, p.text, t)),
                             ))
+                            // A branch that came back from another machine is named folded too:
+                            // the ref to review and merge.
+                            .child(div().children(self.branches_back().map(|branches| {
+                                div()
+                                    .id(id("report-branch"))
+                                    .aria_label(SharedString::from(branches.clone()))
+                                    .px(space::LG)
+                                    .pb(space::SM)
+                                    .text_size(px(12.))
+                                    .text_color(p.mute)
+                                    .child(SharedString::from(branches))
+                                    .test_support()
+                            })))
                             .child(presence(
                                 id("report-body"),
                                 self.open,

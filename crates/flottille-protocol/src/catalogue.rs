@@ -125,6 +125,7 @@ pub const METHODS: &[(&str, Class)] = &[
     ("remote.address.add", Drive),
     ("remote.address.remove", Drive),
     ("remote.members", Read),
+    ("remote.launches", Read),
     ("remote.requests", Read),
     ("remote.invite", Drive),
     ("remote.refuse", Drive),
