@@ -996,6 +996,9 @@ fn command_for(program: &Path, dir: &Path, env: &[(String, String)], args: &[&st
         .env("FLOTTILLE_CHECKS_WAIT_MS", "0")
         // No round of the items unless a test asks for it (`with_fetcher`).
         .env("FLOTTILLE_TEST_NO_FETCH", "1")
+        // Never GitHub's releases: nothing listens there. A test of the update serves its own
+        // (`with_env("FLOTTILLE_RELEASES", ..)`).
+        .env("FLOTTILLE_RELEASES", "http://127.0.0.1:9/repos/none")
         .env_remove("TMUX")
         // Never the machine's SSH agent: a test that lends one sets its own (`with_env`).
         .env_remove("SSH_AUTH_SOCK");

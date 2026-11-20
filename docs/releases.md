@@ -555,7 +555,10 @@ is the old one or the new one, never half of one.
 `https://api.github.com/repos/KristenJestin/flottille`, for `install.sh` and `flottille update`
 alike: the tests serve a fake one on `127.0.0.1` (`crates/flottille/tests/release.rs`). The tests'
 daemons never check for an update on their own: the harness writes `check = "never"` in their
-`updates.toml`, and a test of the check removes it.
+`updates.toml`, and a test of the check removes it. And no test reaches GitHub: the harness gives
+every command a `FLOTTILLE_RELEASES` where nothing listens, which a test of the update replaces
+with its own server (a test that calls every method, `update.download` included, would otherwise
+download the latest release beside the test binary).
 
 ## What only a real push proves
 
