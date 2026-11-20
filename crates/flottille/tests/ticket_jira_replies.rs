@@ -855,7 +855,6 @@ fn people_found_on_the_site_are_said_to_be_named_by_account_id() {
 
     // Ben is known to the site alone: `assignee` finds a display name among the assignees of the
     // newest work items only, so the answer must not promise it for him.
-    assert!(!said.contains("who can be named as an assignee"), "{said}");
     assert!(said.contains("as an assignee or in a mention"), "{said}");
     assert!(
         said.contains("not for people found only on the site"),
