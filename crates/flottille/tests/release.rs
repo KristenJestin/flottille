@@ -4847,6 +4847,75 @@ binary(=families)"
     );
 }
 
+/// The `#[path = "../<name>.rs"]` files each group main of `tests/group/` declares: `(group, file)`.
+fn declared_by_the_groups() -> Vec<(String, String)> {
+    let tests = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
+    let mut declared = Vec::new();
+    for entry in std::fs::read_dir(tests.join("group")).unwrap() {
+        let main = entry.unwrap().path();
+        let group = main.file_stem().unwrap().to_string_lossy().into_owned();
+        for line in std::fs::read_to_string(&main).unwrap().lines() {
+            if let Some(path) = line
+                .strip_prefix("#[path = \"../")
+                .and_then(|rest| rest.strip_suffix("\"]"))
+            {
+                declared.push((group.clone(), path.to_owned()));
+            }
+        }
+    }
+    declared
+}
+
+#[test]
+fn every_test_file_is_declared_by_exactly_one_group() {
+    // `autotests = false`: a file no group declares is never built nor run, and nothing says so.
+    let tests = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
+    let declared = declared_by_the_groups();
+    let mut missing = Vec::new();
+    let mut twice = Vec::new();
+    for entry in std::fs::read_dir(&tests).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_none_or(|ext| ext != "rs") {
+            continue;
+        }
+        let file = path.file_name().unwrap().to_string_lossy().into_owned();
+        let groups: Vec<&str> = declared
+            .iter()
+            .filter(|(_, declared)| *declared == file)
+            .map(|(group, _)| group.as_str())
+            .collect();
+        let stem = file.trim_end_matches(".rs");
+        match groups.len() {
+            0 => missing.push(format!(
+                "tests/{file} is declared by no group, so it is never built nor run: add \
+                 `#[path = \"../{file}\"]` and `mod {stem};` to the group in tests/group/ that fits \
+                 (AGENTS.md, \"Adding a test file\")"
+            )),
+            1 => {}
+            _ => twice.push(format!(
+                "tests/{file} is declared by {} groups ({}): keep one",
+                groups.len(),
+                groups.join(", ")
+            )),
+        }
+    }
+    assert!(missing.is_empty(), "{}", missing.join("\n"));
+    assert!(twice.is_empty(), "{}", twice.join("\n"));
+}
+
+#[test]
+fn every_path_a_group_declares_is_a_file_that_exists() {
+    let tests = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
+    let gone: Vec<String> = declared_by_the_groups()
+        .into_iter()
+        .filter(|(_, file)| !tests.join("group").join("..").join(file).exists())
+        .map(|(group, file)| {
+            format!("tests/group/{group}.rs declares ../{file}, which does not exist")
+        })
+        .collect();
+    assert!(gone.is_empty(), "{}", gone.join("\n"));
+}
+
 #[test]
 fn a_file_a_group_does_not_declare_selects_no_test() {
     let base = grouped_crate();
