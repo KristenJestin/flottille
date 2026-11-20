@@ -165,6 +165,13 @@ pub enum Command {
     },
     /// Reads the providers again: `providers.toml` is the user's to edit by hand too.
     ReadProviders,
+    /// What the user says of themselves, which every agent reads (`about.show`).
+    AboutRead,
+    /// Saves what the user says of themselves (name, how to refer to them, notes), or with no
+    /// text forgets it (`about.set`, `about.reset`).
+    AboutWrite {
+        text: Option<(String, String, String)>,
+    },
     /// The developer mode (`developer.show`).
     DeveloperRead,
     /// Switches the developer mode (`developer.set`).
@@ -1042,6 +1049,12 @@ pub enum Outcome {
         project: String,
         name: String,
         read: Result<SkillInfo, String>,
+    },
+    /// What the user says of themselves as the daemon says it, after a read (`written` false) or a
+    /// save or a reset.
+    About {
+        written: bool,
+        shown: Result<crate::about::Shown, String>,
     },
     /// The developer mode as the daemon says it, after a read (`written` false) or a switch.
     Developer {
@@ -2099,6 +2112,26 @@ fn perform(connect: &Connect, sign: Option<Sign>, command: Command, bounds: Boun
             Outcome::JudgeGuidance {
                 shown: shown.and_then(|shown| shown).map(|shown| Shown::of(&shown)),
                 written: true,
+            }
+        }
+        Command::AboutRead => Outcome::About {
+            written: false,
+            shown: answer(ask_alone(connect, "about.show", json!({}), bounds.quick))
+                .map(|shown| crate::about::Shown::of(&shown)),
+        },
+        Command::AboutWrite { text } => {
+            let asked = match &text {
+                Some((name, pronouns, notes)) => ask_alone(
+                    connect,
+                    "about.set",
+                    json!({"name": name, "pronouns": pronouns, "notes": notes}),
+                    bounds.quick,
+                ),
+                None => ask_alone(connect, "about.reset", json!({}), bounds.quick),
+            };
+            Outcome::About {
+                written: true,
+                shown: answer(asked).map(|shown| crate::about::Shown::of(&shown)),
             }
         }
         Command::DeveloperRead | Command::DeveloperSet { .. } => {

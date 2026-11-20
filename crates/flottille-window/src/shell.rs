@@ -401,6 +401,7 @@ impl Shell {
         let top = cx.new(|_| TopBar::new(this.clone()));
         let sidebar = cx.new(|_| Sidebar::new(this.clone()));
         let rules = cx.new(|_| RulesEditor::new(this.clone(), None));
+        let about = cx.new(|_| crate::about::AboutEditor::new(this.clone()));
         let judge_guidance = cx.new(|_| RulesEditor::judge(this.clone()));
         let compaction_guidance = cx.new(|_| RulesEditor::compaction(this.clone()));
         let workspaces = cx.new(|_| WorkspacesFolder::new(this.clone(), None));
@@ -429,6 +430,7 @@ impl Shell {
             SettingsPage::new(
                 this.clone(),
                 rules.clone(),
+                about.clone(),
                 judge_guidance.clone(),
                 compaction_guidance.clone(),
                 workspaces.clone(),
@@ -1535,6 +1537,7 @@ impl Shell {
             Update::Done(outcome) => self.done(outcome, window, cx),
             Update::Providers(read, providers) => self.set_providers(read, providers, cx),
             Update::TextChanged { judge: true, .. } => self.actions.send(Command::JudgeRead),
+            Update::AboutChanged => self.actions.send(Command::AboutRead),
             Update::DeveloperChanged => self.actions.send(Command::DeveloperRead),
             Update::UpdateShown(shown) => self.update_shown(&shown, cx),
             Update::WhatsNewShown(shown) => self.whats_new_shown(&shown, cx),
@@ -2143,6 +2146,10 @@ impl Shell {
                 }
                 self.version
                     .update(cx, |section, cx| section.answered(method, answer, cx));
+            }
+            Outcome::About { written, shown } => {
+                let editor = self.settings.read(cx).about().clone();
+                editor.update(cx, |editor, cx| editor.answered(shown, written, window, cx));
             }
             Outcome::Developer { written, shown } => {
                 self.settings
@@ -2843,6 +2850,7 @@ impl Shell {
     /// Asks the daemon for what the settings page edits.
     fn read_settings(&mut self) {
         self.actions.send(Command::RulesRead { project: None });
+        self.actions.send(Command::AboutRead);
         self.actions.send(Command::JudgeRead);
         self.actions.send(Command::CompactionRead);
         self.actions.send(Command::DeveloperRead);

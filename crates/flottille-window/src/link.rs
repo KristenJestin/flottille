@@ -79,6 +79,8 @@ pub enum Update {
     /// What the daemon says is new since the version last run (`whatsnew.show`,
     /// `whatsnew.changed`).
     WhatsNewShown(Value),
+    /// What the user says of themselves changed, from any client: the settings page reads it again.
+    AboutChanged,
     /// The developer mode was switched, from any client: the settings page reads it again.
     DeveloperChanged,
     /// The window's appearance was chosen, from any client: the window reads it again.
@@ -377,6 +379,9 @@ fn follow(
         }
         if event.name == "whatsnew.changed" {
             let _ = updates.unbounded_send(Update::WhatsNewShown(event.data.clone()));
+        }
+        if event.name == "about.changed" {
+            let _ = updates.unbounded_send(Update::AboutChanged);
         }
         if event.name == "developer.changed" {
             let _ = updates.unbounded_send(Update::DeveloperChanged);
