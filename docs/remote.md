@@ -562,6 +562,10 @@ them (flottille update)`. The window and the app show the machine as **needs an 
 offline. At first each side speaks one version; the list lets the Android app, published apart,
 speak two.
 
+Pair mode (#1146) raised it from 1 to 2: its frames and its changes (`hub`, `pair`, `role`,
+`look`) are ones a build of before cannot read, so that a device and a hub of different builds say
+to update rather than refuse each other's frames without saying why.
+
 ## Requests from another machine's clients
 
 - A request for another machine carries `machine` and a signature: `{"id", "machine", "signed":
