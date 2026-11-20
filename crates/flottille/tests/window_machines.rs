@@ -724,28 +724,30 @@ fn every_change_of_the_machines_page_is_animated(cx: &mut TestAppContext) {
         present(cx, "settings-tabs-machines")
     });
 
-    // The sections show up one after the other, each rising into place.
+    // The sections show up one after the other, each rising into place: the second measured
+    // from the first's bottom, which moves as the first's rows unfold.
     cx.update(|window, cx| window.click("settings-tabs-machines", cx));
-    let mut tops = Vec::new();
+    let mut offsets = Vec::new();
     for _ in 0..60 {
         step(&shell, Duration::from_millis(16), cx);
         if present(cx, "enter-machines-devices") && present(cx, "enter-machines-addresses") {
-            tops.push((
-                top(cx, "enter-machines-devices"),
-                top(cx, "enter-machines-addresses"),
-            ));
+            let devices = top(cx, "enter-machines-devices");
+            let below = devices + height(cx, "enter-machines-devices");
+            offsets.push((devices, top(cx, "enter-machines-addresses") - below));
         }
     }
-    let (devices, addresses) = *tops.last().unwrap();
-    assert!(tops[0].0 > devices, "the first section rises: {tops:?}");
-    assert!(tops[0].1 > addresses, "the second rises: {tops:?}");
-    // The last frame each one still moved: the second arrives after the first.
+    let (devices, addresses) = *offsets.last().unwrap();
+    assert!(
+        offsets[0].0 > devices,
+        "the first section rises: {offsets:?}"
+    );
+    assert!(offsets[0].1 > addresses, "the second rises: {offsets:?}");
     let moved = |of: fn(&(f32, f32)) -> f32, last: f32| {
-        tops.iter().rposition(|top| of(top) != last).unwrap_or(0)
+        offsets.iter().rposition(|at| of(at) != last).unwrap_or(0)
     };
     assert!(
         moved(|t| t.0, devices) <= moved(|t| t.1, addresses),
-        "the second section arrives after the first: {tops:?}"
+        "the second section arrives after the first: {offsets:?}"
     );
     settle(&shell, cx);
 
