@@ -743,14 +743,15 @@ impl Members {
                 self.members[at].role = *role;
             }
             Action::Remove { key } => self.remove(key)?,
-            Action::Look { key, icon, colour } => self.look(key, *icon, *colour)?,
             Action::Add { .. }
             | Action::Rename { .. }
+            | Action::Look { .. }
             | Action::Machine { .. }
             | Action::Hub { .. } => {
                 return Err(format!(
-                    "is the hub's and would {} a member: the hub pairs a device, changes a role, \
-                     restyles or removes a member, nothing else",
+                    "is the hub's and would {} a member: the hub pairs a device, changes a role \
+                     or removes a member, nothing else (what a device says of itself, its name \
+                     and its look, is its members' to change)",
                     change.action.verb()
                 ));
             }
