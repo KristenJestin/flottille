@@ -790,12 +790,26 @@ fn called(
         .name_of(from)
         .ok_or_else(|| "it is no machine of the user's".to_owned())?;
     let machine = hex(from.as_bytes());
-    if !an_id(&call.id) || !an_id(&call.launch) {
+    // An answer to a request names no launch: the request's tree says which of the caller's.
+    let answer = call.tool == "approval_answer";
+    if !an_id(&call.id) || !(answer || an_id(&call.launch)) {
         return Err("a call and its launch are named by short words"
             .to_owned()
             .into());
     }
     let caller = call.caller.chars().take(64).collect::<String>();
+    if answer {
+        let args: Value = serde_json::from_str(&call.arguments)
+            .map_err(|_| "the call's arguments are not JSON".to_owned())?;
+        let launch = holding(daemon, &machine, &call.caller, &args).ok_or_else(|| {
+            format!(
+                "request #{} is not held by agent {caller} of {name}: it answers only the pending \
+                 requests that reached it as [flottille:child-asks]",
+                args["request_id"]
+            )
+        })?;
+        return answered_request(daemon, &launch, &name, &args).map(|text| json!({"text": text}));
+    }
     let launch = daemon
         .read(|store| store.launches("in", Some(&machine), LaunchFilter::Named(&call.launch)))
         .map_err(|error| Refused::Now(error.to_string()))?
@@ -910,19 +924,32 @@ fn called(
                 }
             }
         }
-        "approval_answer" => {
-            if !child {
-                return Err(format!(
-                    "{} is a session: it holds no request of yours",
-                    named(&agent)
-                )
-                .into());
-            }
-            answered_request(daemon, &launch, &name, &args)?
-        }
         _ => unreachable!("the tools are checked above"),
     };
     Ok(json!({"text": text}))
+}
+
+/// The live launch, from the machine `machine`, of `caller`'s child whose tree asked the request
+/// an `approval_answer` names. `None` when the request is of no such tree.
+fn holding(daemon: &Daemon, machine: &str, caller: &str, args: &Value) -> Option<Launch> {
+    let number = args["request_id"].as_u64()?;
+    let request = daemon.read(|store| store.request(number)).ok()??;
+    let root = crate::tree::root_of(daemon, &request.agent);
+    let live = daemon
+        .read(|store| store.agent(&root))
+        .ok()
+        .flatten()
+        .is_some_and(|agent| !agent.state.is_final());
+    if !live {
+        return None;
+    }
+    daemon
+        .read(|store| store.launches("in", Some(machine), LaunchFilter::Agent(&root)))
+        .ok()?
+        .into_iter()
+        .find(|launch| {
+            launch.caller == caller && launch.kind == "child" && launch.state != "refused"
+        })
 }
 
 /// What an agent's `approval_answer` says, checked: the request's number, the decision (`deny`
@@ -1030,7 +1057,8 @@ pub(crate) fn aimed(daemon: &Daemon, caller: &str, tool: &str, args: &Value) -> 
     if !CALLED.contains(&tool) {
         return None;
     }
-    // A request held for it on another machine: named by that machine, the child's.
+    // A request held for it on another machine: named by that machine, the child's. Any launch
+    // of its children there names the machine; which one holds the request, that machine says.
     if tool == "approval_answer" {
         let name = args["machine"].as_str()?;
         return daemon
@@ -1106,12 +1134,19 @@ pub(crate) async fn call(
     let name = machine_name(daemon, &launch);
     let refused = |text: String| Some(Outcome::Refused(text));
     let child = launch.kind == "child";
+    // An answer to a request names the request and the machine only: which child's tree it is,
+    // that machine finds from the request.
+    let answer = tool == "approval_answer";
     let message = |id: String| {
         MachineMessage::Call(Box::new(Call {
             id,
-            launch: launch.launch.clone(),
+            launch: if answer {
+                String::new()
+            } else {
+                launch.launch.clone()
+            },
             caller: caller.id.clone(),
-            agent: agent.clone(),
+            agent: if answer { String::new() } else { agent.clone() },
             tool: tool.to_owned(),
             arguments: args.to_string(),
         }))
