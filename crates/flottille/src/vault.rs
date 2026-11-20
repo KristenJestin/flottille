@@ -194,7 +194,7 @@ impl Keyring {
 
 /// Whether the configuration chooses the memory keyring, and this build is a test's: then a
 /// client that keeps a key of its own has no keyring (the daemon's memory is not its), and keeps
-/// it in a file as on a machine without one (`flottille remote setup`).
+/// it in a file as on a machine without one (`flottille remote pair`).
 pub fn memory_chosen(paths: &Paths) -> bool {
     cfg!(debug_assertions)
         && setting(&paths.config.join(CHOICE), "backend").as_deref() == Some("memory")

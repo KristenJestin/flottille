@@ -801,7 +801,7 @@ jobs:
           mkdir -p "$context/lib/flottille-hub"
           install -m 0755 "$BINARY" "$context/flottille-hub"
           docker build --platform linux/${{ matrix.platform }} --build-arg SOURCE=https://github.com/${{ github.repository }} -f crates/flottille-hub/Dockerfile -t flottille-hub:linux-${{ matrix.platform }} "$context"
-      - name: the_image_starts_prints_a_setup_code_and_answers_on_its_port
+      - name: the_image_starts_says_how_to_pair_and_answers_on_its_port
         if: matrix.arch == 'x86_64'
         run: tools/check-hub-image.sh flottille-hub:linux-amd64
       - name: the_compose_example_is_valid

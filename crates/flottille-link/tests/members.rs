@@ -1,11 +1,14 @@
-//! The member list (`docs/remote.md`, "The hub", "The first member", "Pairing", "Roles"): an
-//! ordered log of signed changes that every device checks back to the root it pinned.
+//! The member list (`docs/remote.md`, "The hub", "Pairing", "Roles"): an ordered log of signed
+//! changes that every device checks back to the root and the hub's key it pinned. A list made before
+//! pair mode starts with the first member's own entry (`MemberList::start`), one made since with the
+//! hub's (`MemberList::start_hub`).
 
 use std::path::Path;
+use std::sync::OnceLock;
 
 use flottille_link::{
-    Action, Change, ChangeHash, DeviceKey, Keyring, KeyringError, ListError, MANAGING_HEADROOM,
-    MOST_CHANGES, MachineKey, MemberList, Role,
+    Action, Change, ChangeHash, Colour, DeviceKey, HubKey, Icon, Keyring, KeyringError, ListError,
+    MANAGING_HEADROOM, MOST_CHANGES, MachineKey, MemberList, PublicKey, Role,
 };
 use zeroize::Zeroizing;
 
@@ -35,6 +38,31 @@ fn key(n: u8) -> DeviceKey {
     DeviceKey::load_or_make(&Seeded([n; 32]), Path::new("/nonexistent")).unwrap()
 }
 
+/// The hub's key, the same for every test of this file: made once in a folder kept for the run.
+fn hub_key() -> &'static HubKey {
+    static HUB: OnceLock<(tempfile::TempDir, HubKey)> = OnceLock::new();
+    &HUB.get_or_init(|| {
+        let folder = tempfile::tempdir().unwrap();
+        let key = HubKey::load_or_make(&folder.path().join("hub")).unwrap();
+        (folder, key)
+    })
+    .1
+}
+
+fn hub() -> PublicKey {
+    hub_key().public()
+}
+
+fn pair(key: &DeviceKey, name: &str, role: Role) -> Action {
+    Action::Pair {
+        key: key.public(),
+        name: name.to_owned(),
+        role,
+        icon: Icon::Laptop,
+        colour: Colour::Teal,
+    }
+}
+
 fn add(key: &DeviceKey, name: &str, role: Role) -> Action {
     Action::Add {
         key: key.public(),
@@ -58,7 +86,7 @@ fn three() -> (DeviceKey, DeviceKey, DeviceKey, MemberList) {
 
 /// The refusal's sentence, for a list that must be refused.
 fn refused(list: &MemberList, root: &DeviceKey) -> String {
-    match list.check(&root.public()) {
+    match list.check(&root.public(), &hub()) {
         Ok(members) => panic!("accepted: {:?}", members.members()),
         Err(error) => error.to_string(),
     }
@@ -78,7 +106,7 @@ fn a_weak_key_is_refused_in_an_entry() {
         let error = serde_json::from_value::<MemberList>(json).unwrap_err();
         assert!(error.to_string().contains("weak key"), "{error}");
     }
-    assert!(list.check(&pc.public()).is_ok());
+    assert!(list.check(&pc.public(), &hub()).is_ok());
 }
 
 #[test]
@@ -92,7 +120,7 @@ fn a_list_checks_back_to_the_pinned_root() {
         &pc,
     );
 
-    let members = list.check(&pc.public()).unwrap();
+    let members = list.check(&pc.public(), &hub()).unwrap();
 
     assert_eq!(members.root(), pc.public());
     assert_eq!(members.head(), list.head());
@@ -129,7 +157,7 @@ fn a_change_no_member_signed_is_refused() {
     signed_by_a_stranger.sign(add(&key(4), "intruder", Role::Runner), &stranger);
     let why = refused(&signed_by_a_stranger, &pc);
     assert!(
-        why.contains("change 4 is signed by a key that is not a member"),
+        why.contains("change 4 is signed by a key that is neither a member nor the hub"),
         "{why}"
     );
 
@@ -186,7 +214,7 @@ fn a_viewer_cannot_add_or_remove_a_member() {
     // A device that wants to leave removes itself, whatever its role.
     let mut leaves = list.clone();
     leaves.sign(remove(&tablet), &tablet);
-    let members = leaves.check(&pc.public()).unwrap();
+    let members = leaves.check(&pc.public(), &hub()).unwrap();
     assert!(members.get(&tablet.public()).is_none());
 }
 
@@ -194,7 +222,7 @@ fn a_viewer_cannot_add_or_remove_a_member() {
 fn a_removed_key_cannot_be_added_again() {
     let (pc, pixel, _, mut list) = three();
     list.sign(remove(&pixel), &pc);
-    assert!(list.check(&pc.public()).is_ok());
+    assert!(list.check(&pc.public(), &hub()).is_ok());
 
     list.sign(add(&pixel, "pixel", Role::Controller), &pc);
     let why = refused(&list, &pc);
@@ -212,7 +240,7 @@ fn a_removed_member_cannot_sign() {
 
     let why = refused(&list, &pc);
     assert!(
-        why.contains("change 5 is signed by a key that is not a member"),
+        why.contains("change 5 is signed by a key that is neither a member nor the hub"),
         "{why}"
     );
 }
@@ -224,16 +252,16 @@ fn a_list_with_another_root_is_refused_saying_it_was_reset() {
     let mut reset = MemberList::start("pc", &other).unwrap();
     reset.sign(add(&pc, "pc", Role::Runner), &other);
 
-    let error = reset.check(&pc.public()).unwrap_err();
+    let error = reset.check(&pc.public(), &hub()).unwrap_err();
     assert!(matches!(error, ListError::Reset));
     assert_eq!(
         error.to_string(),
-        "the hub's member list was reset: set this device up again"
+        "the hub's member list was reset: pair this device again"
     );
 
     // An emptied list, before a first member joins again, is a reset too.
     let error = MemberList::from_changes(Vec::new())
-        .check(&pc.public())
+        .check(&pc.public(), &hub())
         .unwrap_err();
     assert!(matches!(error, ListError::Reset));
 }
@@ -249,7 +277,7 @@ fn the_root_entry_is_a_runner_that_signed_itself() {
     )]);
     let why = refused(&viewer, &pc);
     assert!(
-        why.contains("change 1 is not the root's own entry as a runner"),
+        why.contains("change 1 is neither the hub's own nor the root's own entry as a runner"),
         "{why}"
     );
 
@@ -260,13 +288,13 @@ fn the_root_entry_is_a_runner_that_signed_itself() {
     )]);
     let why = refused(&signed_by_another, &pc);
     assert!(
-        why.contains("change 1 is not the root's own entry as a runner"),
+        why.contains("change 1 is neither the hub's own nor the root's own entry as a runner"),
         "{why}"
     );
 }
 
 #[test]
-fn the_role_is_in_the_signed_entry_and_cannot_change_without_a_new_entry() {
+fn the_role_is_in_the_signed_entry_and_no_member_changes_it() {
     let (pc, _, tablet, list) = three();
 
     // The hub turns the viewer into a runner: the signature no longer matches.
@@ -290,11 +318,11 @@ fn the_role_is_in_the_signed_entry_and_cannot_change_without_a_new_entry() {
         },
         &pc,
     );
-    let members = renamed.check(&pc.public()).unwrap();
+    let members = renamed.check(&pc.public(), &hub()).unwrap();
     assert_eq!(members.get(&tablet.public()).unwrap().role, Role::Viewer);
 
-    // Adding the key again with another role, while it is a member, is refused: a role changes by
-    // removing the device, which then joins again with a new key.
+    // Adding the key again with another role, while it is a member, is refused: the hub changes
+    // a role (`only_the_hub_pairs_a_device_or_changes_a_role`).
     let mut again = list.clone();
     again.sign(add(&tablet, "tablet", Role::Controller), &pc);
     let why = refused(&again, &pc);
@@ -354,7 +382,7 @@ fn a_list_that_lost_changes_this_device_has_is_refused() {
     known.sign(add(&key(4), "laptop", Role::Runner), &pc);
 
     // The hub sends back the list as it was before the laptop: whole, but behind.
-    let error = list.check_update(&pc.public(), &known).unwrap_err();
+    let error = list.check_update(&pc.public(), &hub(), &known).unwrap_err();
     assert!(
         error
             .to_string()
@@ -364,7 +392,7 @@ fn a_list_that_lost_changes_this_device_has_is_refused() {
 
     let mut newer = known.clone();
     newer.sign(add(&key(5), "server", Role::Runner), &pc);
-    let members = newer.check_update(&pc.public(), &known).unwrap();
+    let members = newer.check_update(&pc.public(), &hub(), &known).unwrap();
     assert_eq!(members.members().len(), 5);
 }
 
@@ -377,8 +405,8 @@ fn a_list_that_forked_from_the_one_this_device_has_is_refused() {
     // As long as the known one, each change signed, but another fourth change.
     let mut fork = list.clone();
     fork.sign(add(&key(5), "server", Role::Runner), &pc);
-    assert!(fork.check(&pc.public()).is_ok());
-    let error = fork.check_update(&pc.public(), &known).unwrap_err();
+    assert!(fork.check(&pc.public(), &hub()).is_ok());
+    let error = fork.check_update(&pc.public(), &hub(), &known).unwrap_err();
     assert!(
         error
             .to_string()
@@ -442,7 +470,7 @@ fn a_name_is_unique_among_the_members() {
     let mut freed = list.clone();
     freed.sign(remove(&pixel), &pc);
     freed.sign(add(&key(4), "pixel", Role::Controller), &pc);
-    assert!(freed.check(&pc.public()).is_ok());
+    assert!(freed.check(&pc.public(), &hub()).is_ok());
 }
 
 #[test]
@@ -488,7 +516,7 @@ fn a_list_travels_as_json_and_still_checks() {
 
     let back: MemberList = serde_json::from_value(json).unwrap();
     assert_eq!(back, list);
-    assert!(back.check(&pc.public()).is_ok());
+    assert!(back.check(&pc.public(), &hub()).is_ok());
 
     // A key that is not one is refused when read.
     for not_a_key in [
@@ -525,7 +553,7 @@ fn a_member_declares_its_own_machine_and_no_other() {
     let (desk, other) = (machine(&dir, "desk"), machine(&dir, "other"));
     // The daemon's key of `pc`, declared by pc itself and claimed by the machine.
     list.declare(&pc, &desk);
-    let members = list.check(&pc.public()).unwrap();
+    let members = list.check(&pc.public(), &hub()).unwrap();
     assert_eq!(
         members.get(&pc.public()).unwrap().machine,
         Some(desk.public())
@@ -563,7 +591,7 @@ fn a_member_declares_its_own_machine_and_no_other() {
     list.declare(&tablet, &other);
     let moved = machine(&dir, "moved");
     list.declare(&pc, &moved);
-    let members = list.check(&pc.public()).unwrap();
+    let members = list.check(&pc.public(), &hub()).unwrap();
     assert!(members.by_machine(&desk.public()).is_none());
     assert_eq!(members.by_machine(&moved.public()).unwrap().name, "pc");
     assert_eq!(members.by_machine(&other.public()).unwrap().name, "tablet");
@@ -571,7 +599,7 @@ fn a_member_declares_its_own_machine_and_no_other() {
     // A member removed takes its machine with it.
     list.sign(remove(&tablet), &pc);
     assert!(
-        list.check(&pc.public())
+        list.check(&pc.public(), &hub())
             .unwrap()
             .by_machine(&other.public())
             .is_none()
@@ -656,5 +684,254 @@ fn a_member_cannot_declare_a_machine_it_does_not_hold() {
     // Held, it is taken.
     let mut held = list.clone();
     held.declare(&tablet, &desk);
-    assert!(held.check(&pc.public()).is_ok());
+    assert!(held.check(&pc.public(), &hub()).is_ok());
+}
+
+/// A list made since pair mode: the hub's root, then `pc`, a runner, and `pixel`, a controller,
+/// both paired by the hub.
+fn paired() -> (DeviceKey, DeviceKey, MemberList) {
+    let (pc, pixel) = (key(1), key(2));
+    let mut list = MemberList::start_hub(hub_key()).unwrap();
+    list.sign_as_hub(pair(&pc, "pc", Role::Runner), hub_key());
+    list.sign_as_hub(pair(&pixel, "pixel", Role::Controller), hub_key());
+    (pc, pixel, list)
+}
+
+#[test]
+fn the_hub_pairs_each_device_of_a_list_that_starts_with_its_key() {
+    let (pc, pixel, list) = paired();
+    let members = list.check(&hub(), &hub()).unwrap();
+    assert_eq!(members.root(), hub());
+    let names: Vec<_> = members.members().iter().map(|m| m.name.as_str()).collect();
+    assert_eq!(names, ["pc", "pixel"]);
+    let entry = members.get(&pixel.public()).unwrap();
+    assert_eq!(entry.role, Role::Controller);
+    assert_eq!(entry.added_by, hub());
+    assert_eq!(entry.icon, Some(Icon::Laptop));
+    assert_eq!(entry.colour, Some(Colour::Teal));
+    assert!(members.get(&pc.public()).is_some());
+}
+
+#[test]
+fn a_list_of_another_hub_than_the_one_pinned_is_refused() {
+    let (_, _, list) = paired();
+    // The device pinned another hub's key: the root names a hub it does not know.
+    let other = key(9).public();
+    let error = list.check(&hub(), &other).unwrap_err().to_string();
+    assert!(
+        error.contains("change 1 names the hub")
+            && error.contains("not the hub this device pinned"),
+        "{error}"
+    );
+    // And a change signed by a hub whose key is not the pinned one is no hub's: refused.
+    let (pc, _, _, mut old) = three();
+    let stranger = {
+        let folder = tempfile::tempdir().unwrap();
+        HubKey::load_or_make(&folder.path().join("hub")).unwrap()
+    };
+    old.sign_as_hub(pair(&key(5), "intruder", Role::Runner), &stranger);
+    let why = refused(&old, &pc);
+    assert!(
+        why.contains("change 4 is signed by a key that is neither a member nor the hub"),
+        "{why}"
+    );
+}
+
+#[test]
+fn no_member_adds_a_device_once_the_hub_pairs() {
+    // A list made since pair mode: a member's addition is refused from the start.
+    let (pc, _, mut list) = paired();
+    list.sign(add(&key(5), "laptop", Role::Runner), &pc);
+    let why = match list.check(&hub(), &hub()) {
+        Ok(_) => panic!("a member added a device"),
+        Err(error) => error.to_string(),
+    };
+    assert!(
+        why.contains("change 4 adds a device, signed by pc: a device is paired on the hub"),
+        "{why}"
+    );
+
+    // A list made before: its members' additions still check, until the hub pairs a device.
+    let (pc, _, _, mut old) = three();
+    old.sign(add(&key(5), "laptop", Role::Runner), &pc);
+    assert!(old.check(&pc.public(), &hub()).is_ok());
+    old.sign_as_hub(pair(&key(6), "phone", Role::Controller), hub_key());
+    assert!(old.check(&pc.public(), &hub()).is_ok());
+    old.sign(add(&key(7), "late", Role::Runner), &pc);
+    let why = refused(&old, &pc);
+    assert!(
+        why.contains("change 6 adds a device, signed by pc: a device is paired on the hub"),
+        "{why}"
+    );
+}
+
+#[test]
+fn a_list_made_before_pair_mode_carries_over_and_the_hub_pairs_after_it() {
+    // The list of a hub set up the old way, with its machine declared: as a device pinned it.
+    let folder = tempfile::tempdir().unwrap();
+    let pc = key(1);
+    let pc_machine = machine(&folder, "pc");
+    let mut old = MemberList::start("pc", &pc).unwrap();
+    old.declare(&pc, &pc_machine);
+    let known = old.clone();
+    assert!(known.check(&pc.public(), &hub()).is_ok());
+
+    // The hub pairs a phone after it: the device that pinned the old list takes the new one.
+    let mut newer = old.clone();
+    newer.sign_as_hub(pair(&key(2), "phone", Role::Controller), hub_key());
+    let members = newer.check_update(&pc.public(), &hub(), &known).unwrap();
+    assert_eq!(members.root(), pc.public());
+    assert_eq!(members.get(&key(2).public()).unwrap().added_by, hub());
+    assert_eq!(
+        members.get(&pc.public()).unwrap().machine,
+        Some(pc_machine.public())
+    );
+    // The old member keeps its entry, with no icon nor colour until one is chosen.
+    assert_eq!(members.get(&pc.public()).unwrap().icon, None);
+}
+
+#[test]
+fn only_the_hub_pairs_a_device_or_changes_a_role() {
+    let (pc, pixel, list) = paired();
+
+    let mut by_member = list.clone();
+    by_member.sign(pair(&key(5), "laptop", Role::Runner), &pc);
+    let why = match by_member.check(&hub(), &hub()) {
+        Ok(_) => panic!("a member paired a device"),
+        Err(error) => error.to_string(),
+    };
+    assert!(
+        why.contains("change 4 is signed by pc, a member: only the hub may pair a device"),
+        "{why}"
+    );
+
+    let mut role_by_member = list.clone();
+    role_by_member.sign(
+        Action::Role {
+            key: pixel.public(),
+            role: Role::Runner,
+        },
+        &pc,
+    );
+    assert!(role_by_member.check(&hub(), &hub()).is_err());
+
+    let mut role_by_hub = list.clone();
+    role_by_hub.sign_as_hub(
+        Action::Role {
+            key: pixel.public(),
+            role: Role::Viewer,
+        },
+        hub_key(),
+    );
+    let members = role_by_hub.check(&hub(), &hub()).unwrap();
+    assert_eq!(members.get(&pixel.public()).unwrap().role, Role::Viewer);
+
+    // The hub signs no member's own changes: a name, a machine.
+    let mut renamed_by_hub = list.clone();
+    renamed_by_hub.sign_as_hub(
+        Action::Rename {
+            key: pixel.public(),
+            name: "phone".to_owned(),
+        },
+        hub_key(),
+    );
+    assert!(renamed_by_hub.check(&hub(), &hub()).is_err());
+}
+
+#[test]
+fn a_device_paired_again_after_its_removal_keeps_its_key() {
+    let (pc, pixel, mut list) = paired();
+    list.sign(remove(&pixel), &pc);
+    let members = list.check(&hub(), &hub()).unwrap();
+    assert!(members.was_removed(&pixel.public()));
+    // A member cannot bring it back; the hub, pairing it again, can.
+    let mut by_member = list.clone();
+    by_member.sign(add(&pixel, "pixel", Role::Controller), &pc);
+    assert!(by_member.check(&hub(), &hub()).is_err());
+    list.sign_as_hub(pair(&pixel, "pixel", Role::Controller), hub_key());
+    let members = list.check(&hub(), &hub()).unwrap();
+    assert!(members.get(&pixel.public()).is_some());
+    assert!(!members.was_removed(&pixel.public()));
+}
+
+#[test]
+fn the_hub_removes_a_device_and_any_member_restyles_one() {
+    let (pc, pixel, mut list) = paired();
+    list.sign(
+        Action::Look {
+            key: pc.public(),
+            icon: Icon::Server,
+            colour: Colour::Orange,
+        },
+        &pixel,
+    );
+    let members = list.check(&hub(), &hub()).unwrap();
+    assert_eq!(members.get(&pc.public()).unwrap().icon, Some(Icon::Server));
+    assert_eq!(
+        members.get(&pc.public()).unwrap().colour,
+        Some(Colour::Orange)
+    );
+    list.sign_as_hub(remove(&pixel), hub_key());
+    let members = list.check(&hub(), &hub()).unwrap();
+    assert!(members.get(&pixel.public()).is_none());
+}
+
+#[test]
+fn the_hub_does_not_restyle_a_device_a_member_does() {
+    let (pc, pixel, mut list) = paired();
+    // The hub cannot change what a device says of itself, its look any more than its name.
+    list.sign_as_hub(
+        Action::Look {
+            key: pc.public(),
+            icon: Icon::Server,
+            colour: Colour::Orange,
+        },
+        hub_key(),
+    );
+    let refused = list.check(&hub(), &hub()).unwrap_err().to_string();
+    assert!(
+        refused.contains("is the hub's and would change the icon and colour of a member"),
+        "{refused}"
+    );
+    // A member's restyle of the same device is taken.
+    let (_, _, mut list) = paired();
+    list.sign(
+        Action::Look {
+            key: pc.public(),
+            icon: Icon::Server,
+            colour: Colour::Orange,
+        },
+        &pixel,
+    );
+    assert!(list.check(&hub(), &hub()).is_ok());
+}
+
+#[test]
+fn the_hubs_changes_have_their_documented_encoding() {
+    let pixel = key(2);
+    let change = Change::sign_as_hub(
+        ChangeHash([7; 32]),
+        pair(&pixel, "px", Role::Controller),
+        hub_key(),
+    );
+    let mut expected = b"flottille-member-change-v1\0".to_vec();
+    expected.extend_from_slice(&[7; 32]);
+    expected.extend_from_slice(hub().as_bytes());
+    expected.push(6);
+    expected.extend_from_slice(pixel.public().as_bytes());
+    expected.extend_from_slice(&[0, 0, 0, 2, b'p', b'x', 2, 2, 6]);
+    assert_eq!(change.signed_bytes(), expected);
+
+    let role = Change::sign_as_hub(
+        ChangeHash([7; 32]),
+        Action::Role {
+            key: pixel.public(),
+            role: Role::Viewer,
+        },
+        hub_key(),
+    );
+    assert_eq!(
+        role.signed_bytes()[27 + 64..],
+        [&[7u8][..], pixel.public().as_bytes(), &[3]].concat()[..]
+    );
 }

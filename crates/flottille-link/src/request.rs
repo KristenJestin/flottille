@@ -379,9 +379,7 @@ fn deed(method: &str) -> String {
         "agent.stop" => "stop a session",
         "agent.cancel" => "stop a turn",
         "agent.mode" => "switch the mode",
-        "remote.invite" => "invite a device",
-        "remote.refuse" => "refuse a device",
-        "remote.change" => "add, remove or rename a device",
+        "remote.change" => "remove, rename or restyle a device",
         "tunnel.open" => "open a tunnel",
         _ => return format!("call {method}"),
     };

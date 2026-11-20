@@ -1580,7 +1580,7 @@ to the front.
 ## 12. Later: remote
 
 Designed for, not built before the milestone "Remote": the user's machines and devices, members
-of their own hub (a control plane: the signed member list, invitations, presence and addresses;
+of their own hub (a control plane: the signed member list, pair mode, presence and addresses;
 it never carries a link's bytes), linked peer to peer, directly, by their own keys over an
 end-to-end encrypted transport, over whatever network the user has (Flottille handles no network
 channel: no relay, no NAT traversal), each with a

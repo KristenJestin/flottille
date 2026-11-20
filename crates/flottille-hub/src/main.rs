@@ -1,25 +1,35 @@
-//! `flottille-hub` (`docs/remote.md`, "The hub"): the user's hub. A start makes its state (its key
-//! and, with no member, the setup code it prints once), reads it back, and serves the devices'
-//! control sessions on its listen address until it is stopped.
+//! `flottille-hub` (`docs/remote.md`, "The hub"): the user's hub. A start makes its state (its
+//! key) or reads it back, and serves the devices' control sessions on its listen address, and the
+//! commands of its host on its socket, until it is stopped. Those commands (`pair`, `role`,
+//! `remove`, `devices`) talk to the hub that runs, beside it: in a container, `docker exec`.
 
+use std::io::{BufRead, BufReader, Write};
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::os::unix::net::UnixStream;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use flottille_hub::{Hub, LISTEN, SystemClock};
+use flottille_hub::{Hub, LISTEN, SOCKET_FILE, SystemClock};
 use flottille_link::Hello;
+use serde_json::{Value, json};
 
 #[derive(Parser)]
 #[command(
     name = "flottille-hub",
     version,
-    about = "Flottille's hub: the user's member list, invitations and presence"
+    about = "Flottille's hub: the user's member list, pair mode and presence"
 )]
 struct Cli {
     /// The hub's state folder [default: $XDG_STATE_HOME/flottille-hub]
     #[arg(long, value_name = "DIR", global = true)]
     state: Option<PathBuf>,
+    /// The address the devices reach the hub at, which a pair code holds: through a reverse
+    /// proxy mostly (https://hub.example.net). Given to the hub, it is the default of `pair`;
+    /// without it, the address the hub listens on, unless that is a loopback or a wildcard
+    /// address, which no other device dials: then `pair` asks for one
+    #[arg(long, value_name = "URL", global = true)]
+    public_url: Option<String>,
     /// Where the hub listens: an IP address and a port. Another address than loopback takes TLS,
     /// or --plain
     #[arg(long, value_name = "ADDRESS", default_value = LISTEN)]
@@ -44,12 +54,31 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Prints the setup code again, while no member exists
-    SetupCode {
-        /// Empties the member list and makes a new setup code: every device must be set up again
-        #[arg(long)]
-        reset: bool,
+    /// Pair mode: prints a code and its QR for one device to pair with, then waits until it has,
+    /// or until the code's minutes pass. Run beside the hub that runs
+    Pair {
+        /// How long the code is valid, in minutes: 1 to 15
+        #[arg(long, default_value_t = flottille_hub::PAIR_MINUTES)]
+        minutes: u64,
     },
+    /// Changes the role of a device: runner, controller or viewer
+    Role {
+        /// The device: its name, or its key's fingerprint
+        device: String,
+        role: String,
+    },
+    /// Removes a device: every other device cuts its links to it
+    Remove {
+        /// The device: its name, or its key's fingerprint
+        device: String,
+    },
+    /// The devices paired, with their roles
+    Devices {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Empties the member list, with the hub stopped: every device must be paired again
+    Reset,
 }
 
 fn main() -> ExitCode {
@@ -69,12 +98,45 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         None => default_state()?,
     };
     match cli.command {
-        Some(Command::SetupCode { reset: true }) => {
-            println!("{}", flottille_hub::reset(&folder)?);
+        Some(Command::Reset) => {
+            flottille_hub::reset(&folder)?;
+            println!(
+                "The member list is empty: every device must be paired again (flottille-hub pair)"
+            );
             return Ok(());
         }
-        Some(Command::SetupCode { reset: false }) => {
-            println!("{}", flottille_hub::setup_code(&folder)?);
+        Some(Command::Pair { minutes }) => return pair(&folder, cli.public_url, minutes),
+        Some(Command::Role { device, role }) => {
+            let done = ask(&folder, json!({"role": {"device": device, "role": role}}))?;
+            println!(
+                "{} is now a {}",
+                done["name"].as_str().unwrap_or_default(),
+                done["role"].as_str().unwrap_or_default()
+            );
+            return Ok(());
+        }
+        Some(Command::Remove { device }) => {
+            let done = ask(&folder, json!({"remove": {"device": device}}))?;
+            println!(
+                "{} was removed: every device cuts its links to it",
+                done["name"].as_str().unwrap_or_default()
+            );
+            return Ok(());
+        }
+        Some(Command::Devices { json }) => {
+            let devices = ask(&folder, json!({"devices": {}}))?;
+            if json {
+                println!("{devices}");
+            }
+            for device in devices.as_array().into_iter().flatten().filter(|_| !json) {
+                println!(
+                    "{}  {}  {}  added by {}",
+                    device["name"].as_str().unwrap_or_default(),
+                    device["role"].as_str().unwrap_or_default(),
+                    device["fingerprint"].as_str().unwrap_or_default(),
+                    device["added_by"].as_str().unwrap_or_default(),
+                );
+            }
             return Ok(());
         }
         None => {}
@@ -99,14 +161,18 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         )
         .into());
     }
-    let mut hub = Hub::open(&folder, SystemClock)?;
+    let hub = Hub::open(&folder, SystemClock)?;
     eprintln!(
         "flottille-hub: state in {}; the hub's key is {}",
         folder.display(),
         hub.key().fingerprint()
     );
-    if let Some(line) = hub.take_announcement() {
-        eprintln!("flottille-hub: {line}");
+    if hub.members().is_none() {
+        eprintln!(
+            "flottille-hub: no device is paired yet: run flottille-hub --state {} pair beside \
+             this hub, as its user (in a container, with docker exec)",
+            folder.display()
+        );
     }
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -122,6 +188,13 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         };
         let served =
             flottille_hub::serve(hub, listener, tls, Hello::ours(env!("CARGO_PKG_VERSION")))?;
+        if let Some(url) = cli.public_url {
+            served.set_public_url(url);
+        }
+        let socket = folder.join(SOCKET_FILE);
+        served
+            .serve_local(&socket)
+            .map_err(|error| format!("{} cannot be listened on: {error}", socket.display()))?;
         let stopped = stops()?;
         eprintln!("flottille-hub: listening on {} ({how})", served.address());
         stopped.await;
@@ -129,6 +202,102 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         served.stop().await;
         Ok::<(), Box<dyn std::error::Error>>(())
     })
+}
+
+/// The socket of the hub that runs with the state `folder`, or why there is none to reach.
+fn reach(folder: &Path) -> Result<UnixStream, String> {
+    let socket = folder.join(SOCKET_FILE);
+    UnixStream::connect(&socket).map_err(|error| {
+        format!(
+            "no flottille-hub runs with {} ({error}): these commands talk to the hub that runs; \
+             start it first, then run this beside it (in a container, docker exec)",
+            folder.display()
+        )
+    })
+}
+
+/// One command to the hub that runs, and the line it answers.
+fn say(stream: &mut UnixStream, asked: &Value) -> Result<(), String> {
+    writeln!(stream, "{asked}").map_err(|error| format!("the hub did not take it: {error}"))
+}
+
+fn hear(reader: &mut impl BufRead) -> Result<Value, String> {
+    let mut line = String::new();
+    reader
+        .read_line(&mut line)
+        .map_err(|error| format!("the hub did not answer: {error}"))?;
+    serde_json::from_str(&line).map_err(|_| "the hub stopped before it answered".to_owned())
+}
+
+/// `asked` to the hub that runs: what it did, or its refusal.
+fn ask(folder: &Path, asked: Value) -> Result<Value, Box<dyn std::error::Error>> {
+    let mut stream = reach(folder)?;
+    say(&mut stream, &asked)?;
+    let answer = hear(&mut BufReader::new(stream))?;
+    match answer.get("refused") {
+        Some(reason) => Err(reason.as_str().unwrap_or_default().to_owned().into()),
+        None => Ok(answer["ok"].clone()),
+    }
+}
+
+/// `flottille-hub pair`: pair mode, opened on the hub that runs; its code and QR printed, then how
+/// it ended. Stopping the command closes it.
+fn pair(
+    folder: &Path,
+    url: Option<String>,
+    minutes: u64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut stream = reach(folder)?;
+    say(
+        &mut stream,
+        &json!({"pair": {"url": url, "minutes": minutes}}),
+    )?;
+    let mut reader = BufReader::new(stream.try_clone()?);
+    let opened = hear(&mut reader)?;
+    if let Some(reason) = opened.get("refused") {
+        return Err(reason.as_str().unwrap_or_default().to_owned().into());
+    }
+    let code = opened["code"].as_str().unwrap_or_default();
+    let mut out = std::io::stdout().lock();
+    writeln!(
+        out,
+        "Pair mode is open for {} s, for one device, with the hub at {}:\n\n{code}\n",
+        opened["left"].as_u64().unwrap_or_default(),
+        opened["url"].as_str().unwrap_or_default(),
+    )?;
+    if let Some(drawn) = flottille_hub::qr(code) {
+        writeln!(out, "{drawn}")?;
+    }
+    writeln!(
+        out,
+        "On the device: Connect to your hub, then paste the code or scan the QR; on a computer's \
+         command line, flottille remote pair, then give it the code. Whoever has this code can \
+         pair a device until it is used: keep it to yourself. Waiting..."
+    )?;
+    out.flush()?;
+    let ended = hear(&mut reader)?;
+    if let Some(paired) = ended.get("paired") {
+        let name = paired["name"].as_str().unwrap_or_default();
+        if paired["again"] == json!(true) {
+            println!(
+                "{name} ({}) is paired already: it keeps its card, a {}",
+                paired["fingerprint"].as_str().unwrap_or_default(),
+                paired["role"].as_str().unwrap_or_default()
+            );
+        } else {
+            println!(
+                "{name} ({}) is paired, a {}",
+                paired["fingerprint"].as_str().unwrap_or_default(),
+                paired["role"].as_str().unwrap_or_default()
+            );
+        }
+        return Ok(());
+    }
+    Err(ended["over"]
+        .as_str()
+        .unwrap_or("pair mode ended")
+        .to_owned()
+        .into())
 }
 
 /// Until the hub is asked to stop: an interrupt, or a termination. Listened for before the hub

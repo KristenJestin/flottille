@@ -86,9 +86,11 @@ impl TestHub {
         format!("http://{}", self.address)
     }
 
+    /// Pair mode opened, as `flottille-hub pair` opens it on the hub's host: its code.
     fn code(&self) -> String {
+        let url = self.url();
         self.served
-            .with_hub(|hub| hub.setup_code().unwrap().to_owned())
+            .with_hub(|hub| hub.open_pairing(&url, None).unwrap().1.code().unwrap())
     }
 }
 
@@ -175,67 +177,27 @@ impl Machine {
     }
 }
 
-/// `pc` set up as the hub's first member.
+/// `pc` paired as the hub's first device, a runner.
 fn set_up(hub: &TestHub, pc: &Machine) {
-    let output = pc.user.run_with_input(
-        &["remote", "setup", &hub.url(), "--name", "pc"],
-        &format!("{}\n", hub.code()),
+    pair(hub, pc, "pc", "runner");
+}
+
+/// `machine` paired with `hub` as the user pairs it, as `name` with `role`.
+fn pair(hub: &TestHub, machine: &Machine, name: &str, role: &str) {
+    let output = machine.user.run_with_input(
+        &["remote", "pair", "--name", name, "--role", role],
+        &format!(
+            "{}
+",
+            hub.code()
+        ),
     );
     assert!(
         output.status.success(),
-        "{}\n{}",
+        "the pairing failed: {}
+{}",
         String::from_utf8_lossy(&output.stderr),
-        pc.log()
-    );
-}
-
-/// `joiner` joins the hub of `inviter` as the user pairs them, as `name` with `role`.
-fn pair(inviter: &Machine, joiner: &Machine, name: &str, role: &str) {
-    let invited = inviter.user.run(&["remote", "invite", "--json"]);
-    assert!(invited.status.success(), "{}", inviter.log());
-    let invited: Value = serde_json::from_slice(&invited.stdout).unwrap();
-    let code = invited["code"].as_str().unwrap().to_owned();
-    let mut joining = joiner
-        .user
-        .command(&["remote", "join"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    {
-        let mut input = joining.stdin.take().unwrap();
-        input.write_all(format!("{code}\n").as_bytes()).unwrap();
-    }
-    let mut out = BufReader::new(joining.stdout.take().unwrap());
-    let mut first = String::new();
-    out.read_line(&mut first).unwrap();
-    let deadline = Instant::now() + WAIT;
-    let request = loop {
-        let requests = inviter.user.call("remote.requests", json!({})).unwrap();
-        if let Some(first) = requests.as_array().and_then(|all| all.first()) {
-            break first.clone();
-        }
-        assert!(Instant::now() < deadline, "no join request came");
-        std::thread::sleep(Duration::from_millis(200));
-    };
-    let id = request["request"].as_str().unwrap();
-    let accepted = inviter
-        .user
-        .run(&["remote", "accept", id, "--name", name, "--role", role]);
-    assert!(
-        accepted.status.success(),
-        "{}",
-        String::from_utf8_lossy(&accepted.stderr)
-    );
-    let mut rest = String::new();
-    std::io::Read::read_to_string(&mut out, &mut rest).unwrap();
-    let ended = joining.wait_with_output().unwrap();
-    assert!(
-        ended.status.success(),
-        "the join failed: {}\n{}",
-        String::from_utf8_lossy(&ended.stderr),
-        joiner.log()
+        machine.log()
     );
 }
 
@@ -249,7 +211,7 @@ fn pc_and_server_on(pc: Machine, server_user: User) -> (TestHub, Machine, Machin
     let hub = TestHub::new();
     let server = Machine::of(server_user);
     set_up(&hub, &pc);
-    pair(&pc, &server, "server", "runner");
+    pair(&hub, &server, "server", "runner");
     pc.wait_for("server", "online");
     server.wait_for("pc", "online");
     (hub, pc, server)
@@ -320,7 +282,7 @@ fn pc_server_and(
 ) -> (TestHub, Machine, Machine, Machine) {
     let (hub, pc, server) = pc_and_server(server_user);
     let third = Machine::of(third_user);
-    pair(&pc, &third, name, role);
+    pair(&hub, &third, name, role);
     pc.wait_for(name, "online");
     server.wait_for(name, "online");
     third.wait_for("server", "online");
