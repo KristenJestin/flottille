@@ -728,11 +728,15 @@ fn every_change_of_the_machines_page_is_animated(cx: &mut TestAppContext) {
     let (shell, cx) = window(&pc, cx);
     // Tall enough for the whole of General, the invitation's QR and the rows under it.
     cx.simulate_resize(size(px(1280.), px(3000.)));
-    until(&shell, cx, "the project is read", |cx| {
+    // Read whole before the page is measured: what the daemon answers later moves the sections.
+    until(&shell, cx, "the machines are read", |cx| {
         shell.read_with(cx, |s, cx| {
-            s.machines().read(cx).machines().is_some_and(|m| m.member())
+            s.machines().read(cx).machines().is_some_and(|m| {
+                m.member() && m.members.iter().any(|member| member.name == "laptop")
+            })
         })
     });
+    settle(&shell, cx);
     click(&shell, cx, "settings");
     until(&shell, cx, "the settings page is shown", |cx| {
         present(cx, "settings-tabs-general")
@@ -783,7 +787,8 @@ fn every_change_of_the_machines_page_is_animated(cx: &mut TestAppContext) {
     settle(&shell, cx);
     click(&shell, cx, "member-more-laptop");
     click(&shell, cx, "member-remove-laptop");
-    click(&shell, cx, "member-removal-action");
+    // Not through `click`, which settles: the daemon's answer must not fold the row unseen.
+    cx.update(|window, cx| window.click("member-removal-action", cx));
     let deadline = Instant::now() + WAIT;
     let mut folding = None;
     while folding.is_none() {
