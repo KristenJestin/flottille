@@ -399,19 +399,22 @@ impl Render for VersionSection {
             .p(space::LG)
             .flex()
             .flex_col()
-            .gap(space::SM)
             .rounded(px(12.))
             .bg(p.card)
             .border_1()
             .border_color(p.line)
             .child(Self::line("version-this", "This build", this_build, cx))
-            .child(Self::line(
+            .child(div().pt(space::SM).child(Self::line(
                 "version-channel",
                 "Channel",
                 SharedString::from(shown.channel.clone()).into_any_element(),
                 cx,
-            ))
-            .child(Self::line("version-latest", "Update", state, cx))
+            )))
+            .child(
+                div()
+                    .pt(space::SM)
+                    .child(Self::line("version-latest", "Update", state, cx)),
+            )
             .child(
                 presence_of("version-message-line", message, move |why| {
                     div()
@@ -425,7 +428,7 @@ impl Render for VersionSection {
                 })
                 .space(space::SM),
             )
-            .child(div().pt(space::SM).child(check))
+            .child(div().pt(space::MD).child(check))
             .child(actions)
             .test_support();
         Section::new("version", "Version")
