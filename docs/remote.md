@@ -19,7 +19,8 @@ carried by its daemon and checked by the machine they are for (`--machine`, #813
 code sent to another machine over the link and its new commits brought back (#815), the roles
 bounding what each device may do, with what each runner offers its peers (#862), `agent_launch`
 starting a child or a led or handed session on another machine, judged by that machine's gate,
-its code sent by itself (#816; the deliveries that come back, #817, are not built), the tunnels
+its code sent by itself (#816), the deliveries and calls between a session and the agent that
+started it on another machine, kept for a machine that is off, with the commits coming back (#817), the tunnels
 to the ports of a run's server (#829) and a vault entry shared with another machine (#832). What
 is decided is said as such; the defaults taken are in "Defaults taken, to confirm"; what is open
 is in "Open questions". It replaces the proposal of 2026-11-03 (a relay
@@ -962,13 +963,28 @@ on a real phone, by hand, and reported.
   id: a launch whose workspace was removed names none, and a launch refused or forgotten removes
   only the workspace made of its code, never one of the user's of the same name.
 - A child on another machine counts in its parent's cap on the parent's machine while its parent
-  lives, until its end is told back (#817); a launch whose code never came holds a slot of the
+  lives, until its report or its failure comes back, or its parent stops it; a launch whose code never came holds a slot of the
   receiving machine's cap until it is forgotten, an hour after it was asked.
 - A machine may leave 4 launches waiting for their code on another.
 - The returned commits go to `refs/flottille/machines/<machine>/<launch>/<branch>`, never onto
   the user's branch.
 - Deliveries between machines are kept 30 days by the sender; the user's requests to an offline
   machine are refused.
+- What crosses machines (#817): a child's report, question, failure, idle and stuck notices, and
+  a led session's `session-turn-ended` (when a turn reported or asked, and when it ends or fails
+  unless its pilot ended it). Not yet: a child's held request (`child-asks`, with
+  `approval_answer` across machines) and `led-integrated`, whose check reads the forge and the
+  base on the session's machine; a remote led session's `ask` still goes to that machine's user
+  (#818), and its pilot is told at the turn's end that it asked the user.
+- `agent_send` and `session_send` to a session on another machine are kept and sent in the
+  background even while that machine is on: the caller is answered at once (`Sent to agent … on
+  server`), and a refusal there is not told back to it; it is dropped with an inbox entry of the
+  sending machine (`dropped`), as a message kept 30 days is.
+- `session_read` of a led session on another machine answers what `agent_status` gives: the
+  session's line and its last messages, not its paged conversation.
+- `agent_status` without `agent_id` lists the children of this machine only; a child on another
+  machine is read by its id.
+- A delivery is stored there under `<launch>-<its id>`: sent again, it is stored once.
 - An invitation lasts 5 minutes, works once; a request's signature is valid 5 minutes.
 - The verification words are four, from a fixed list of 2048 words.
 - The first member, the one that used the setup code, is the root every device pins; a reset of the
@@ -1299,8 +1315,11 @@ on a real phone, by hand, and reported.
   the commits past the sender's tip, its snapshot, and what came back already.
 - A test build run with `FLOTTILLE_TEST_TRAVEL` set answers `test.travel {machine, project,
   launch, workspace?, corrupt?, hold_ms?}` and `test.travel_back {launch}`, so that two daemons
-  can be made to send code to each other without an agent; nothing else sends the commits back
-  until the deliveries cross machines (#817).
+  can be made to send code to each other without an agent. Otherwise the commits go back before a
+  child's report, or a led session's end of turn that reported, is sent (`crates/flottille/src/across.rs`),
+  and the delivery names the ref they came into. A bundle coming back is taken only for a launch
+  this machine recorded as sent to that very machine (`launch l1 was not sent to server: no commits
+  come back for it`).
 - `agent_launch {machine}` (`crates/flottille/src/launches.rs`): the caller's machine refuses it
   at once when `machine` is no machine of the user's, is this one, is not a runner, is offline, or
   its offer lacks the project, the caller's provider or, for a child, a free slot, naming the
@@ -1324,8 +1343,24 @@ on a real phone, by hand, and reported.
   in the mode the launch took, its role the caller's choice (`worker` for a child, `lead` for a
   session by default). A child's first message is its brief; a session's says `agent <id> of
   <machine> started this session for the user with this message:` above the brief, never the
-  user's words. `agent_status`, `agent_send`, reports, questions and the way back of the commits
-  across machines are #817's and #818's.
+  user's words.
+- Across machines (`crates/flottille/src/across.rs`), the session's machine sends the agent that
+  started it a `deliver` (its id, the launch, that agent, the kind, the body, the urgency, whether
+  the session ended with it), and that agent's machine sends a `call` (its id, the launch, the
+  calling agent, the session, the tool and its arguments). A `deliver` is taken only for the agent
+  of an `out` launch of that name to the sending machine; a `call` only from the `caller` of an
+  `in` launch of that name from the sending machine, for the agent it started, never for a
+  handed one, and only for `agent_send` (a child), `session_send` (a led session),
+  `agent_status`, `session_read` and `agent_stop`; anything else is refused (`agent … of pc did
+  not start agent …`). A call is judged on the caller's machine as one to a session it started
+  there (ending a led session as `end_led`).
+- What goes to another machine is kept in the sender's store (`outbox`) before it is sent: in
+  order, one at a time, when the link to that machine is made and whenever a message is kept
+  while it is up; forgotten once the other machine answered it. `agent_status`, `session_read`
+  and `agent_stop` are sent at once, and refused at once while the machine is off (`refused: server
+  is offline since 22:14: agent … cannot be reached now. You will be woken by what comes back
+  from it.`). The sweep drops a message kept 30 days, with a `remote.delivery_dropped` event, an
+  entry of kind `dropped` in the inbox.
 - The user's switch to Full is kept by the caller's machine when `agent.mode {mode: full}` came
   from another machine's client, signed by a device: the request whole, as it was signed. Any
   other switch of that tree's mode forgets it. The receiving machine takes it only signed by a
@@ -1334,8 +1369,9 @@ on a real phone, by hand, and reported.
   Full. A switch made in the window or the command line of the caller's own machine is signed by
   no device: a launch from such a tree starts in Auto.
 - A child on another machine counts in its parent's project cap on the parent's machine from its
-  launch for as long as its parent lives, since its end is not told back yet (#817); in the
-  receiving machine's cap from its launch until it ends.
+  launch for as long as its parent lives, until its report or failure comes back or its parent
+  stops it (the `out` launch is then `ended`); in the receiving machine's cap from its launch
+  until it ends.
 
 ## Open questions
 
