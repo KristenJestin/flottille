@@ -991,6 +991,65 @@ fn the_services_page_is_still_at_rest(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn the_window_draws_no_frame_at_rest_on_a_service_dialog_with_chips(cx: &mut TestAppContext) {
+    let user = User::with_fake_agent();
+    idle_session(&user);
+    std::fs::create_dir_all(user.path("bin")).unwrap();
+    let server = user.path("bin/fake-server");
+    std::os::unix::fs::symlink(common::fake_server(), &server).unwrap();
+    let folder = user.path("home/tools");
+    std::fs::create_dir_all(&folder).unwrap();
+    let service = |name: &str| {
+        format!(
+            "[services.{name}]\nfolder = \"{}\"\nline = \"{} --listen 0\"\n",
+            folder.display(),
+            server.display()
+        )
+    };
+    std::fs::write(
+        user.path("config/flottille/services.toml"),
+        ["mongo", "redis", "relay"].map(service).concat(),
+    )
+    .unwrap();
+    let (shell, cx) = window(&user, cx);
+    until(&shell, cx, "the project is known", |cx| {
+        shell.read_with(cx, |s, _| !s.snapshot().projects.is_empty())
+    });
+    cx.update(|window, cx| window.click("services", cx));
+    until(&shell, cx, "the services are listed", |cx| {
+        shell.read_with(cx, |s, cx| {
+            s.main()
+                .read(cx)
+                .services_page()
+                .is_some_and(|page| page.read(cx).services().is_some_and(|l| l.len() == 3))
+        })
+    });
+    settle(&shell, cx);
+
+    // The dialog opened, two needs chosen with the picker, the caret back in the name field.
+    cx.update(|window, cx| window.click("add-service", cx));
+    settle(&shell, cx);
+    for name in ["mongo", "redis"] {
+        cx.update(|window, cx| window.click("service-needs-search", cx));
+        settle(&shell, cx);
+        cx.update(|window, cx| window.click(format!("service-needs-item-{name}"), cx));
+        settle(&shell, cx);
+    }
+    cx.update(|window, cx| window.click("service-name", cx));
+    settle(&shell, cx);
+    cx.update(|window, _| {
+        assert!(window.find("service-needs-chip-mongo").visible());
+        assert!(window.find("service-needs-chip-redis").visible());
+    });
+
+    assert_eq!(
+        frames_at_rest(&shell, cx),
+        (0, 0),
+        "(frames drawn, frames asked)"
+    );
+}
+
+#[gpui_kit::test]
 fn leaving_the_services_page_with_an_output_open_leaves_the_window_at_rest(
     cx: &mut TestAppContext,
 ) {

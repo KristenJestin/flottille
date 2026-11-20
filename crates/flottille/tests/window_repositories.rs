@@ -771,6 +771,27 @@ fn settings_page(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Entity<Pr
         .expect("the project's settings are open")
 }
 
+/// Opens the menu of the "Depends on" picker, as a click on its field does: the caret goes in it.
+fn open_dependencies(cx: &mut VisualTestContext) {
+    cx.update(|window, cx| window.click("depends-on-search", cx));
+    settle(cx);
+}
+
+/// Adds the repository `path` to what the dialog's repository depends on, with the picker.
+fn depend_on(path: &str, cx: &mut VisualTestContext) {
+    open_dependencies(cx);
+    let item = format!("depends-on-item-{path}");
+    cx.update(|window, cx| window.click(item, cx));
+    settle(cx);
+}
+
+/// Takes `path` out of what it depends on, with the remove button of its chip.
+fn stop_depending_on(path: &str, cx: &mut VisualTestContext) {
+    let button = format!("depends-on-chip-{path}-remove");
+    cx.update(|window, cx| window.click(button, cx));
+    settle(cx);
+}
+
 fn toast_said(shell: &Entity<Shell>, what: &str, cx: &mut VisualTestContext) {
     until(shell, cx, &format!("a toast says {what}"), |cx| {
         shell.read_with(cx, |s, cx| {
@@ -1010,7 +1031,7 @@ fn a_longer_dependency_cycle_is_said_through_the_repositories_it_crosses(cx: &mu
     let page = settings_page(&shell, cx);
     cx.update(|window, cx| window.click("repository-api", cx));
     settle(cx);
-    cx.update(|window, cx| window.click("depends-on-web", cx));
+    depend_on("web", cx);
     cx.update(|window, cx| window.click("save-settings-modal", cx));
     settle(cx);
 
@@ -1055,7 +1076,7 @@ fn the_dialog_of_a_repository_with_many_siblings_scrolls_in_a_small_window(
         bounds("settings-modal-title", cx),
         bounds("save-settings-modal", cx),
         bounds("settings-modal-cancel", cx),
-        bounds("depends-on-extra-13", cx),
+        bounds("forge-kind-field", cx),
     );
     assert!(
         panel.top() >= px(0.) && panel.bottom() <= viewport.height,
@@ -1069,7 +1090,7 @@ fn the_dialog_of_a_repository_with_many_siblings_scrolls_in_a_small_window(
     );
     assert!(
         last.top() > panel.bottom(),
-        "the last sibling is further down"
+        "the last section is further down"
     );
 
     cx.update(|window, cx| {
@@ -1082,12 +1103,12 @@ fn the_dialog_of_a_repository_with_many_siblings_scrolls_in_a_small_window(
     settle(cx);
     assert_eq!(bounds("settings-modal-title", cx), title, "the title stays");
     assert_eq!(bounds("save-settings-modal", cx), save, "Save stays");
-    let last = bounds("depends-on-extra-13", cx);
+    let last = bounds("forge-kind-field", cx);
     assert!(
         last.bottom() <= save.top() && last.top() >= title.bottom(),
-        "the last sibling is now between the title and the buttons: {last:?}"
+        "the last section is now between the title and the buttons: {last:?}"
     );
-    cx.update(|window, cx| window.click("depends-on-extra-13", cx));
+    depend_on("extra-13", cx);
     let page = settings_page(&shell, cx);
     page.read_with(cx, |page, _| assert_eq!(page.depends(), ["extra-13"]));
     settle(cx);
@@ -1124,11 +1145,10 @@ fn a_refusal_stays_in_sight_when_the_dialog_is_scrolled_to_the_end(cx: &mut Test
         )
     });
     settle(cx);
-    cx.update(|window, cx| window.click("depends-on-web", cx));
-    settle(cx);
+    depend_on("web", cx);
     cx.update(|window, cx| {
         window.scroll(
-            "depends-on-extra-00",
+            "base-field-label",
             gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(-4000.))),
             cx,
         )
@@ -1172,14 +1192,14 @@ fn a_dependency_cycle_is_refused_in_the_dialog(cx: &mut TestAppContext) {
     let page = settings_page(&shell, cx);
     cx.update(|window, cx| window.click("repository-api", cx));
     settle(cx);
+    open_dependencies(cx);
     assert!(
-        has("depends-on-web", cx) && has("depends-on-lib", cx),
-        "the other repositories, as switches"
+        has("depends-on-item-web", cx) && has("depends-on-item-lib", cx),
+        "the other repositories, in the picker's menu"
     );
-    assert!(!has("depends-on-api", cx), "never itself");
+    assert!(!has("depends-on-item-api", cx), "never itself");
 
-    cx.update(|window, cx| window.click("depends-on-web", cx));
-    settle(cx);
+    depend_on("web", cx);
     page.read_with(cx, |page, _| assert_eq!(page.depends(), ["web"]));
     cx.update(|window, cx| window.click("save-settings-modal", cx));
     until(&shell, cx, "the refusal is shown", |cx| {
@@ -1199,9 +1219,9 @@ fn a_dependency_cycle_is_refused_in_the_dialog(cx: &mut TestAppContext) {
         text,
         "nothing was written"
     );
-    // Turned off again, the dependencies the dialog opened with save.
-    cx.update(|window, cx| window.click("depends-on-web", cx));
-    cx.update(|window, cx| window.click("depends-on-lib", cx));
+    // Taken out again and another chosen, what the dialog holds saves.
+    stop_depending_on("web", cx);
+    depend_on("lib", cx);
     cx.update(|window, cx| window.click("save-settings-modal", cx));
     until(&shell, cx, "the dialog closes", |cx| {
         page.read_with(cx, |page, _| page.dialog().is_none())
@@ -1218,11 +1238,69 @@ fn a_dependency_cycle_is_refused_in_the_dialog(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn adding_and_removing_a_dependency_with_the_picker(cx: &mut TestAppContext) {
+    let user = user();
+    let (shell, cx, page) = open_dialog(&user, "api", cx);
+
+    // Nothing depended on: a line says so, no count.
+    assert!(has("depends-on-none", cx));
+    assert!(!has("depends-on-count", cx));
+
+    // The menu offers the other repositories, with their remote; never the repository itself.
+    open_dependencies(cx);
+    assert!(
+        has("depends-on-item-web", cx)
+            && has("depends-on-item-lib", cx)
+            && has("depends-on-item-docs", cx)
+    );
+    assert!(!has("depends-on-item-api", cx), "never itself");
+    cx.update(|window, cx| window.click("depends-on-item-web", cx));
+    settle(cx);
+    assert!(has("depends-on-chip-web", cx));
+    assert_eq!(label_of("depends-on-count", cx).as_deref(), Some("1"));
+    assert!(!has("depends-on-none", cx));
+    assert!(!has("depends-on-item-web", cx), "chosen, no longer offered");
+
+    // Typing narrows the menu; the chips keep the order they were added in.
+    let search = page.read_with(cx, |page, _| page.depends_search().unwrap().clone());
+    cx.update(|window, cx| search.update(cx, |f, cx| f.set_value("li", window, cx)));
+    settle(cx);
+    assert!(has("depends-on-item-lib", cx) && !has("depends-on-item-docs", cx));
+    cx.update(|window, cx| window.click("depends-on-item-lib", cx));
+    settle(cx);
+    page.read_with(cx, |page, _| assert_eq!(page.depends(), ["web", "lib"]));
+    assert_eq!(label_of("depends-on-count", cx).as_deref(), Some("2"));
+
+    // A chip's button takes it out: it folds away and is offered again.
+    stop_depending_on("web", cx);
+    assert!(!has("depends-on-chip-web", cx));
+    page.read_with(cx, |page, _| assert_eq!(page.depends(), ["lib"]));
+    assert_eq!(label_of("depends-on-count", cx).as_deref(), Some("1"));
+    open_dependencies(cx);
+    assert!(has("depends-on-item-web", cx));
+
+    cx.update(|window, cx| window.click("save-settings-modal", cx));
+    until(&shell, cx, "the dialog closes", |cx| {
+        page.read_with(cx, |page, _| page.dialog().is_none())
+    });
+    let after = user
+        .call("project.settings", json!({"name": "trio"}))
+        .unwrap();
+    assert_eq!(
+        after["repositories"][0]["depends_on"],
+        json!(["lib"]),
+        "{after}"
+    );
+    settle(cx);
+    assert_eq!(pending_frames(cx), 0, "nothing moves at rest");
+}
+
+#[gpui_kit::test]
 fn the_dependencies_chosen_in_the_dialog_are_saved_and_the_row_says_them(cx: &mut TestAppContext) {
     let user = user();
     let (shell, cx, page) = open_dialog(&user, "web", cx);
 
-    cx.update(|window, cx| window.click("depends-on-api", cx));
+    depend_on("api", cx);
     cx.update(|window, cx| window.click("save-settings-modal", cx));
     until(&shell, cx, "the dialog closes", |cx| {
         page.read_with(cx, |page, _| page.dialog().is_none())

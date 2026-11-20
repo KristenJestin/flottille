@@ -365,6 +365,8 @@ struct Fields {
     keys: Entity<InputState>,
     /// The base branch to add.
     branch: Entity<InputState>,
+    /// What the picker of dependencies searches the other repositories with.
+    depends: Entity<InputState>,
 }
 
 /// A row of the Repositories section: a repository of the project, or one found in its folder.
@@ -1081,6 +1083,7 @@ impl ProjectSettingsPage {
                 site: line("acme.atlassian.net", window, cx),
                 keys: line("ABC, DEF", window, cx),
                 branch: line("develop", window, cx),
+                depends: line("Add a repository…", window, cx),
             };
             self._subscriptions.push(cx.subscribe_in(
                 &fields.branch,
@@ -1219,6 +1222,11 @@ impl ProjectSettingsPage {
         }
         self.dialog_error = None;
         cx.notify();
+    }
+
+    /// The field the picker of dependencies searches the other repositories with.
+    pub fn depends_search(&self) -> Option<&Entity<InputState>> {
+        self.fields.as_ref().map(|f| &f.depends)
     }
 
     pub fn branch_field(&self) -> Option<&Entity<InputState>> {

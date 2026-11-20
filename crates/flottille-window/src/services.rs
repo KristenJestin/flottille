@@ -182,6 +182,8 @@ struct Fields {
     name: Entity<InputState>,
     line: Entity<InputState>,
     folder: Entity<InputState>,
+    /// What the picker of needs searches the services with.
+    needs: Entity<InputState>,
     ready: ReadyFields,
 }
 
@@ -235,6 +237,16 @@ impl ServiceForm {
         self.fields.as_ref().map(|f| &f.folder)
     }
 
+    /// The field the picker of needs searches the services with.
+    pub fn needs_field(&self) -> Option<&Entity<InputState>> {
+        self.fields.as_ref().map(|f| &f.needs)
+    }
+
+    /// The services the form says it needs, in the order they were added.
+    pub fn needs(&self) -> &[String] {
+        &self.shown.needs
+    }
+
     pub fn ready_field(&self, kind: ReadyKind) -> Option<&Entity<InputState>> {
         let at = ReadyKind::ALL.iter().position(|k| *k == kind)?;
         self.fields.as_ref().map(|f| &f.ready.ready[at])
@@ -250,6 +262,7 @@ impl ServiceForm {
             let name = line_field("mongo", window, cx);
             let line = line_field("docker compose up", window, cx);
             let folder = line_field("~/tools/docker/mongo", window, cx);
+            let needs = line_field("Add a service…", window, cx);
             let ready = ReadyFields::new(true, window, cx);
             // Typing clears what a refusal said.
             for input in [&name, &line, &folder].into_iter().chain(ready.inputs()) {
@@ -264,6 +277,7 @@ impl ServiceForm {
                 name,
                 line,
                 folder,
+                needs,
                 ready,
             });
         }

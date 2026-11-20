@@ -300,6 +300,8 @@ impl Flag {
 struct Fields {
     name: Entity<InputState>,
     line: Entity<InputState>,
+    /// What the picker of needs searches the services with.
+    needs: Entity<InputState>,
     ready: ReadyFields,
 }
 
@@ -495,6 +497,11 @@ impl TasksSection {
         }
     }
 
+    /// The field the picker of needs searches the services with.
+    pub fn needs_field(&self) -> Option<&Entity<InputState>> {
+        self.fields.as_ref().map(|f| &f.needs)
+    }
+
     /// The task needs the service, or no longer does.
     pub fn toggle_need(&mut self, service: &str, cx: &mut Context<Self>) {
         toggle_name(&mut self.flags.needs, service);
@@ -566,6 +573,7 @@ impl TasksSection {
         if self.fields.is_none() {
             let name = line_field("test", window, cx);
             let line = line_field("pnpm test", window, cx);
+            let needs = line_field("Add a service…", window, cx);
             let ready = ReadyFields::new(false, window, cx);
             // Typing clears what a refusal said.
             for input in [&name, &line].into_iter().chain(ready.inputs()) {
@@ -576,7 +584,12 @@ impl TasksSection {
                         }
                     }));
             }
-            self.fields = Some(Fields { name, line, ready });
+            self.fields = Some(Fields {
+                name,
+                line,
+                needs,
+                ready,
+            });
         }
         self.fields.as_ref().expect("made above")
     }

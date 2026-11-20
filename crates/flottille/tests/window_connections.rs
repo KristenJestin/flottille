@@ -957,6 +957,110 @@ fn every_control_of_the_form_has_a_visible_label(cx: &mut TestAppContext) {
     );
 }
 
+#[gpui_kit::test]
+fn the_form_scrolls_once_in_the_dialog_and_its_footer_stays_in_view(cx: &mut TestAppContext) {
+    let user = user();
+    turn_on(&user);
+    let (shell, cx) = window(&user, cx);
+    open_page(&shell, cx);
+    click(cx, "new-connection");
+    click(cx, "connection-new-variable");
+    cx.simulate_resize(size(px(1280.), px(480.)));
+    settle(cx);
+
+    let bounds = |cx: &mut VisualTestContext, id: &str| {
+        let id = id.to_owned();
+        cx.update(|window, _| window.find(id).bounds())
+    };
+    let viewport = cx.update(|window, _| window.viewport_size());
+    let (panel, title, form, save) = (
+        bounds(cx, "connection-modal"),
+        bounds(cx, "connection-modal-title"),
+        bounds(cx, "connection-form"),
+        bounds(cx, "save-connection"),
+    );
+    assert!(
+        panel.top() >= px(0.) && panel.bottom() <= viewport.height,
+        "the dialog fits the window: {panel:?} in {viewport:?}"
+    );
+    assert!(
+        save.bottom() <= panel.bottom() && save.top() >= title.bottom(),
+        "the buttons are in it: {save:?}"
+    );
+    // One scroll, the dialog's: the form is as tall as what it holds, and goes on under the
+    // buttons instead of scrolling inside a box of its own.
+    assert!(
+        form.bottom() > save.top(),
+        "the form is cut by the dialog's scroll: {form:?} against {save:?}"
+    );
+
+    cx.update(|window, cx| {
+        window.scroll(
+            "connection-name-field-label",
+            gpui_kit::ScrollDelta::Pixels(gpui_kit::point(px(0.), px(-4000.))),
+            cx,
+        )
+    });
+    settle(cx);
+    assert_eq!(bounds(cx, "save-connection"), save, "Save stays");
+    let last = bounds(cx, "connection-headed");
+    assert!(
+        last.bottom() <= save.top() && last.top() >= title.bottom(),
+        "the last switch is now between the title and the buttons: {last:?}"
+    );
+    assert_eq!(
+        cx.update(|window, cx| window.simulate_next_frame(cx)),
+        0,
+        "nothing is redrawn at rest"
+    );
+}
+
+#[gpui_kit::test]
+fn the_form_says_what_is_required_and_what_is_optional_once(cx: &mut TestAppContext) {
+    let user = user();
+    turn_on(&user);
+    let (shell, cx) = window(&user, cx);
+    open_page(&shell, cx);
+    click(cx, "new-connection");
+    settle(cx);
+
+    assert_eq!(
+        label(cx, "connection-optional").as_deref(),
+        Some("Optional: everything below can stay empty")
+    );
+    let bounds = |cx: &mut VisualTestContext, id: &str| {
+        let id = id.to_owned();
+        cx.update(|window, _| window.find(id).bounds())
+    };
+    let line = bounds(cx, "connection-optional");
+    for required in [
+        "connection-name-field",
+        "connection-reach",
+        "connection-command-field",
+    ] {
+        assert!(
+            bounds(cx, required).bottom() <= line.top(),
+            "{required} is above the line"
+        );
+    }
+    for optional in [
+        "connection-variables-field",
+        "connection-limits-field",
+        "connection-headed",
+    ] {
+        assert!(
+            bounds(cx, optional).top() >= line.bottom(),
+            "{optional} is below the line"
+        );
+    }
+    // The first part says it is required, once.
+    assert_eq!(
+        label(cx, "connection-section-what-tag").as_deref(),
+        Some("required")
+    );
+    assert!(!visible(cx, "connection-section-reach-tag"));
+}
+
 // ── The form of a browser ────────────────────────────────────────────────────────────────────
 
 /// The form of the connection `name`, open on its declaration.
