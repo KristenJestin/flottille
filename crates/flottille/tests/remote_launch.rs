@@ -1461,13 +1461,14 @@ fn an_old_allowed_launch_lets_no_held_launch_of_the_same_name_set_up() {
 }
 
 #[test]
-fn refusing_a_launch_never_removes_a_workspace_of_the_user_s_of_the_same_name() {
+fn a_forgotten_launch_never_removes_a_workspace_of_the_user_s_of_the_same_name() {
     let (_hub, pc, server) = pc_and_server(server_user(None), Some(""));
     pc.wait_for_offer("server", 12);
-    let (_root, mcp) = pc.root("ask");
-    let number = held_launch(&pc, &server, &mcp, "Refused later");
-    let held = titled(&server, "Refused later");
-    // The user removes what the launch made, and makes a workspace of their own of that name.
+    let (root, mcp) = pc.root("ask");
+    held_launch(&pc, &server, &mcp, "Forgotten later");
+    let held = titled(&server, "Forgotten later");
+    // The user ends the held agent (its request goes with it), removes what its launch made, and
+    // makes a workspace of their own of that name.
     let name = removed_by_the_user(&server, &held);
     let kept = server.git(
         &server.folder(),
@@ -1488,12 +1489,30 @@ fn refusing_a_launch_never_removes_a_workspace_of_the_user_s_of_the_same_name() 
     let mine = PathBuf::from(made["folder"].as_str().unwrap());
     eventually("the user's workspace", || mine.join(".git").exists());
     std::fs::write(mine.join("mine.txt"), "mine\n").unwrap();
+    let key = pc.stand_in();
+    // Its launch, an hour old and its agent gone: what the sweep forgets the next time that
+    // machine asks for a launch, removing what was made of its code.
+    let stopped = server.user.run(&["daemon", "stop"]);
+    assert!(stopped.status.success(), "{}", server.log());
+    {
+        let store =
+            rusqlite::Connection::open(server.user.path("state/flottille/flottille.db")).unwrap();
+        store
+            .execute(
+                "UPDATE launches SET agent = NULL, request = NULL, at = 0 WHERE way = 'in'",
+                [],
+            )
+            .unwrap();
+    }
+    server.user.status();
 
-    server
-        .user
-        .call("approval.deny", json!({"number": number}))
-        .unwrap();
+    let answers = sent_with(
+        &key,
+        &server,
+        vec![MachineMessage::Launch(Box::new(launch_ask("next", &root)))],
+    );
 
+    assert!(answers[0].is_ok(), "{answers:?}");
     a_while();
     assert_eq!(workspaces(&server), vec![name]);
     assert_eq!(
