@@ -480,6 +480,8 @@ fn a_pull_request_opened_by_a_session_marks_its_row_and_notifies(cx: &mut TestAp
     assert_eq!(said.len(), 1);
     assert_eq!(said[0].1, "Add the login page");
     assert_eq!(said[0].2, BRIEF);
+    // The bell's count may have changed in the last look: its badge moves, then rests.
+    settle(cx);
     assert_eq!(
         cx.update(|window, cx| window.simulate_next_frame(cx)),
         0,
