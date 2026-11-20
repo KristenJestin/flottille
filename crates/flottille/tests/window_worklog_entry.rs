@@ -183,7 +183,10 @@ fn the_jira_tracker_shows_the_worklog_entry_and_saves_it(cx: &mut TestAppContext
     );
     assert_eq!(
         label("tracker-worklog-field-hint", cx).as_deref(),
-        Some("A Jira API token in the vault, its username your Jira e-mail.")
+        Some(
+            "A Jira API token in the vault, its username your Jira e-mail: it logs time, \
+             replies, mentions and finds people."
+        )
     );
     assert_eq!(
         label("tracker-worklog-add", cx).as_deref(),
