@@ -84,14 +84,14 @@ fn rows(user: &User, params: Value) -> Vec<Value> {
 
 /// The notification a title says, once the daemon wrote it.
 fn titled(user: &User, title: &str) -> Value {
-    let mut found = None;
+    let found = std::cell::RefCell::new(None);
     eventually(title, || {
-        found = rows(user, json!({}))
+        *found.borrow_mut() = rows(user, json!({}))
             .into_iter()
             .find(|row| row["title"] == title);
-        found.is_some()
+        found.borrow().is_some()
     });
-    found.unwrap()
+    found.into_inner().unwrap()
 }
 
 /// A root that asks the user one question as soon as it is told `ask`.
