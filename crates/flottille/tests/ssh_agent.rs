@@ -381,6 +381,35 @@ fn an_allowed_push_reaches_the_users_ssh_agent() {
 }
 
 #[test]
+fn an_allowed_push_runs_no_planted_ssh_command() {
+    let (user, _agent, _bus) = user();
+    project(&user, SSH_REMOTE);
+    let planted = user.path("planted/ssh");
+    script(
+        &planted,
+        &format!(
+            "echo ran >> '{}'\nexit 1\n",
+            user.path("planted-ran").display()
+        ),
+    );
+    // As a run could write it in the repository's settings.
+    user.git(
+        &user.path("work/app"),
+        &["config", "core.sshCommand", planted.to_str().unwrap()],
+    );
+    let mcp = agent(&user);
+
+    let pushed = done(mcp.call(
+        "run",
+        json!({"line": "git push origin HEAD:refs/heads/planted"}),
+    ));
+
+    assert!(!user.path("planted-ran").exists(), "the planted ssh ran");
+    assert!(pushed.contains("exited with code 0"), "{pushed}");
+    assert!(remote_has(&user, "planted"));
+}
+
+#[test]
 fn an_allowed_push_gets_no_ssh_agent_where_an_include_cannot_be_made_read_only() {
     let (user, _agent, _bus) = user();
     // A file of the home itself, which a run writes.

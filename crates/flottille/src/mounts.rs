@@ -1075,6 +1075,133 @@ mod tests {
     }
 
     #[test]
+    fn a_home_behind_a_link_is_the_home_it_leads_to() {
+        let dir = tempfile::tempdir().unwrap();
+        let top = dir.path().canonicalize().unwrap();
+        let home = top.join("real/home");
+        std::fs::create_dir_all(home.join(".ssh")).unwrap();
+        std::fs::write(home.join(".ssh/config"), "Include ~/forge.conf\n").unwrap();
+        std::os::unix::fs::symlink(&home, top.join("home")).unwrap();
+
+        let walked = walked(&top.join("home"));
+
+        assert!(!walked.read_only.contains(&home), "{walked:?}");
+        assert!(
+            walked
+                .unlent
+                .as_deref()
+                .unwrap_or("")
+                .contains("holds the home"),
+            "{walked:?}"
+        );
+    }
+
+    #[test]
+    fn a_link_in_the_wildcard_part_of_an_include_is_followed() {
+        let dir = tempfile::tempdir().unwrap();
+        let top = dir.path().canonicalize().unwrap();
+        let home = top.join("home");
+        std::fs::create_dir_all(home.join(".ssh")).unwrap();
+        std::fs::create_dir_all(top.join("dots")).unwrap();
+        std::fs::create_dir_all(top.join("elsewhere")).unwrap();
+        std::os::unix::fs::symlink(top.join("elsewhere"), top.join("dots/one")).unwrap();
+        std::fs::write(
+            home.join(".ssh/config"),
+            format!("Include {}/dots/*/forge.conf\n", top.display()),
+        )
+        .unwrap();
+
+        let walked = walked(&home);
+
+        assert!(
+            walked.read_only.contains(&top.join("elsewhere")),
+            "{walked:?}"
+        );
+        assert_eq!(walked.unlent, None);
+    }
+
+    #[test]
+    fn a_folder_the_user_owns_but_cannot_write_now_is_pinned() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let top = dir.path().canonicalize().unwrap();
+        let home = top.join("home");
+        std::fs::create_dir_all(home.join(".ssh")).unwrap();
+        std::fs::create_dir_all(top.join("dots/a/conf.d")).unwrap();
+        std::fs::write(
+            home.join(".ssh/config"),
+            format!("Include {}/dots/a/conf.d/*.conf\n", top.display()),
+        )
+        .unwrap();
+        let mode = |m| std::fs::Permissions::from_mode(m);
+        std::fs::set_permissions(top.join("dots"), mode(0o555)).unwrap();
+
+        let walked = walked(&home);
+        std::fs::set_permissions(top.join("dots"), mode(0o755)).unwrap();
+
+        // A command may `chmod u+w` the folder, and rename what is in it.
+        assert!(walked.pinned.contains(&top.join("dots/a")), "{walked:?}");
+    }
+
+    #[test]
+    fn read_only_reaches_the_mounts_below_a_protected_folder() {
+        use std::os::unix::process::CommandExt;
+        if !available() {
+            eprintln!("skipped: this kernel refuses user namespaces to this user");
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let ssh = temp.path().canonicalize().unwrap().join("ssh");
+        std::fs::create_dir_all(ssh.join("below")).unwrap();
+        let ssh_c = CString::new(ssh.join("below").as_os_str().as_bytes()).unwrap();
+        let protected = Ssh {
+            read_only: vec![ssh.clone()],
+            ..Ssh::default()
+        };
+        let mut plan = plan(&[], &[], &protected, &[], None).unwrap();
+        let mut outer = super::plan(&[], &[], &Ssh::default(), &[], None).unwrap();
+        let mut command = std::process::Command::new("python3");
+        command
+            .args([
+                "-c",
+                "import sys\n\
+                 try:\n\
+                 \x20   open(sys.argv[1] + '/x', 'w')\n\
+                 \x20   print('done')\n\
+                 except OSError as e:\n\
+                 \x20   print(e.errno)",
+            ])
+            .arg(ssh.join("below"));
+        // SAFETY: as in `landlock::confine`; the outer namespace mounts a tmpfs below the folder,
+        // as a user's own mount there would be, before the command's namespace is made in it.
+        unsafe {
+            command.pre_exec(move || {
+                outer.enter()?;
+                let tmpfs = c"tmpfs";
+                if libc::mount(
+                    tmpfs.as_ptr(),
+                    ssh_c.as_ptr(),
+                    tmpfs.as_ptr(),
+                    0,
+                    std::ptr::null(),
+                ) != 0
+                {
+                    return Err(io::Error::last_os_error());
+                }
+                plan.enter()
+            })
+        };
+        let output = command.output().unwrap();
+
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            libc::EROFS.to_string(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
     fn a_fifo_or_a_huge_file_is_not_read_as_a_configuration() {
         let dir = tempfile::tempdir().unwrap();
         let pipe = dir.path().join("pipe");

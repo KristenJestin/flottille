@@ -536,8 +536,10 @@ fn a_run_cannot_replace_the_ssh_link() {
     assert_eq!(out["config"], "Host forge\n  User git\n", "{out}");
 }
 
-/// What `flottille doctor` says of the SSH agent: the daemon's `sandbox.ssh_agent`.
+/// What `flottille doctor` says of the SSH agent: the daemon's `sandbox.ssh_agent`, the daemon
+/// started first (doctor starts none).
 fn ssh_agent_said(user: &User) -> Value {
+    user.status();
     let doctor = user.run(&["doctor", "--json"]);
     let report: Value = serde_json::from_slice(&doctor.stdout).unwrap();
     report["sandbox"]["ssh_agent"].clone()
@@ -604,6 +606,9 @@ fn peak_memory(pid: u32) -> u64 {
 
 #[test]
 fn a_fifo_or_a_huge_file_in_an_include_does_not_hold_a_run() {
+    if skipped_without_user_namespaces() {
+        return;
+    }
     let user = User::with_fake_agent().with_allowing_judge();
     let ssh = user.path("home/.ssh");
     std::fs::create_dir_all(&ssh).unwrap();
@@ -678,4 +683,162 @@ fn a_run_cannot_connect_to_a_session_bus_outside_the_runtime_folder() {
     let out = ran(&mcp, &place, &connect("bus", bus.to_str().unwrap()));
 
     assert_ne!(out["bus"], "connected", "{out}");
+}
+
+#[test]
+fn a_run_starts_once_the_session_bus_s_socket_is_gone() {
+    if skipped_without_user_namespaces() {
+        return;
+    }
+    let bus_folder = tempfile::tempdir().unwrap();
+    let bus = bus_folder.path().join("dbus-test");
+    let listening = std::os::unix::net::UnixListener::bind(&bus).unwrap();
+    let user = User::with_fake_agent().with_allowing_judge().with_env(
+        "DBUS_SESSION_BUS_ADDRESS",
+        &format!("unix:path={},guid=0123456789abcdef", bus.display()),
+    );
+    let (mcp, place) = session(&user);
+    // The bus the daemon found at its start ends, its socket removed.
+    drop(listening);
+    std::fs::remove_file(&bus).unwrap();
+
+    let out = ran(&mcp, &place, "out['started'] = True");
+
+    assert_eq!(out["started"], true, "{out}");
+}
+
+/// An SSH agent listening in the test's folder, for the daemon to lend: the user given it.
+fn with_agent(user: User) -> (User, std::os::unix::net::UnixListener) {
+    let agent = user.path("agent.sock");
+    let listening = std::os::unix::net::UnixListener::bind(&agent).unwrap();
+    (
+        user.with_env("SSH_AUTH_SOCK", agent.to_str().unwrap()),
+        listening,
+    )
+}
+
+#[test]
+fn the_daemon_makes_a_missing_ssh_folder_at_its_start() {
+    use std::os::unix::fs::PermissionsExt;
+    let (user, _agent) = with_agent(User::with_fake_agent());
+    std::fs::create_dir_all(user.path("home")).unwrap();
+
+    let said = ssh_agent_said(&user);
+
+    let made = std::fs::metadata(user.path("home/.ssh")).unwrap();
+    assert!(made.is_dir());
+    assert_eq!(made.permissions().mode() & 0o777, 0o700);
+    assert_eq!(said["lent"], true, "{said}");
+}
+
+#[test]
+fn the_ssh_agent_stays_lent_to_nothing_once_it_was() {
+    let (user, _agent) = with_agent(User::with_fake_agent());
+    let ssh = user.path("home/.ssh");
+    std::fs::create_dir_all(&ssh).unwrap();
+    std::fs::write(
+        ssh.join("config"),
+        format!("Include {}/nowhere/*.conf\n", user.path("dots").display()),
+    )
+    .unwrap();
+    assert_eq!(ssh_agent_said(&user)["lent"], false);
+
+    // A run made the folder, and the file in it: what it wrote is protected from now on, and
+    // what it wrote before is not undone.
+    std::fs::create_dir_all(user.path("dots/nowhere")).unwrap();
+    std::fs::write(user.path("dots/nowhere/forge.conf"), "Host forge\n").unwrap();
+
+    let said = ssh_agent_said(&user);
+    assert_eq!(said["lent"], false, "{said}");
+    assert!(said["why"].to_string().contains("restart"), "{said}");
+}
+
+#[test]
+fn the_ssh_agent_is_lent_to_nothing_where_user_namespaces_are_refused() {
+    let (user, _agent) =
+        with_agent(User::with_fake_agent().with_env("FLOTTILLE_TEST_NO_USER_NAMESPACES", "1"));
+    std::fs::create_dir_all(user.path("home/.ssh")).unwrap();
+
+    let said = ssh_agent_said(&user);
+
+    assert_eq!(said["lent"], false, "{said}");
+    assert!(
+        said["why"].to_string().contains("no user namespace"),
+        "{said}"
+    );
+}
+
+#[test]
+fn the_ssh_agent_is_lent_to_nothing_where_an_include_s_folder_is_shared() {
+    use std::os::unix::fs::PermissionsExt;
+    let (user, _agent) = with_agent(User::with_fake_agent());
+    let ssh = user.path("home/.ssh");
+    std::fs::create_dir_all(&ssh).unwrap();
+    // As `/tmp` is: everyone's, sticky.
+    let shared = user.path("shared");
+    std::fs::create_dir_all(&shared).unwrap();
+    std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o1777)).unwrap();
+    std::fs::write(
+        ssh.join("config"),
+        format!("Include {}/forge.conf\n", shared.display()),
+    )
+    .unwrap();
+
+    let said = ssh_agent_said(&user);
+
+    assert_eq!(said["lent"], false, "{said}");
+    assert!(said["why"].to_string().contains("shared"), "{said}");
+}
+
+#[test]
+fn the_ssh_agent_is_lent_to_nothing_where_an_include_s_folder_holds_the_work() {
+    let (user, _agent) = with_agent(User::with_fake_agent());
+    let folder = user.path("work/app");
+    user.git_init(&folder);
+    user.call("project.add", json!({"folder": folder, "name": "app"}))
+        .unwrap();
+    let ssh = user.path("home/.ssh");
+    std::fs::create_dir_all(&ssh).unwrap();
+    std::fs::write(
+        ssh.join("config"),
+        format!("Include {}/*.conf\n", user.path("work").display()),
+    )
+    .unwrap();
+
+    let said = ssh_agent_said(&user);
+
+    assert_eq!(said["lent"], false, "{said}");
+    assert!(said["why"].to_string().contains("work"), "{said}");
+}
+
+/// Whether a daemon of the user's runs.
+fn daemon_runs(user: &User) -> bool {
+    let program = std::fs::canonicalize(env!("CARGO_BIN_EXE_flottille")).unwrap();
+    let state = format!("XDG_STATE_HOME={}", user.path("state").display());
+    std::fs::read_dir("/proc")
+        .unwrap()
+        .filter_map(|entry| entry.ok()?.file_name().to_str()?.parse::<u32>().ok())
+        .any(|pid| {
+            std::fs::read_link(format!("/proc/{pid}/exe")).is_ok_and(|exe| exe == program)
+                && std::fs::read(format!("/proc/{pid}/environ")).is_ok_and(|environ| {
+                    environ
+                        .split(|byte| *byte == 0)
+                        .any(|variable| variable == state.as_bytes())
+                })
+        })
+}
+
+#[test]
+fn doctor_starts_no_daemon() {
+    let user = User::with_fake_agent();
+
+    let doctor = user.run(&["doctor", "--json"]);
+
+    let report: Value = serde_json::from_slice(&doctor.stdout).unwrap();
+    assert_eq!(
+        report["sandbox"]["probed"], "no daemon running: probed by doctor",
+        "{report}"
+    );
+    assert!(report["sandbox"]["landlock_abi"].is_number(), "{report}");
+    assert!(!daemon_runs(&user), "doctor started a daemon");
 }
