@@ -301,6 +301,8 @@ fn share_and_sign_in_a_connection_of_another_machine(cx: &mut TestAppContext) {
             .iter()
             .any(|t| t.starts_with("Connection notes shared with server"))
     });
+    // Under the row, the copy's state on the server unfolds.
+    let partway = height(cx, "connection-elsewhere-block-notes");
     settle(cx);
     assert!(!section.read_with(cx, |s, _| s.is_sharing()), "it closed");
     let copy = server.user.call("connection.list", json!({})).unwrap()["connections"][0].clone();
@@ -309,9 +311,8 @@ fn share_and_sign_in_a_connection_of_another_machine(cx: &mut TestAppContext) {
     assert_eq!(entry["name"], "notes-key", "{entry}");
     assert_eq!(entry["shared_from"], "pc", "{entry}");
 
-    // Under the row, the copy's state on the server unfolds.
     let whole = height(cx, "connection-elsewhere-block-notes");
-    assert!(whole > 0., "the line is shown");
+    assert!(partway < whole, "the line unfolds: {partway} then {whole}");
     assert_eq!(
         label(cx, "connection-elsewhere-notes").as_deref(),
         Some("On server: not signed in yet")
