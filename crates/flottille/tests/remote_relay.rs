@@ -8,7 +8,7 @@
 use crate::common;
 use crate::remote_deliveries::{child_on_server, release, script};
 use crate::remote_launch::{
-    Machine, allowing, eventually, pair, prompted, runner_user, server_user, sign_in,
+    Machine, allowing, eventually, prompted, runner_user, server_user, sign_in,
 };
 
 use std::io::{BufRead, BufReader, Read, Write};
@@ -204,9 +204,12 @@ impl TestHub {
         format!("http://{}", self.proxy.address)
     }
 
+    /// Pair mode opened, as `flottille-hub pair` opens it on the hub's host: its code, which holds
+    /// the proxy's URL.
     fn code(&self) -> String {
+        let url = self.url();
         self.served
-            .with_hub(|hub| hub.setup_code().unwrap().to_owned())
+            .with_hub(|hub| hub.open_pairing(&url, None).unwrap().1.code().unwrap())
     }
 }
 
@@ -221,16 +224,17 @@ fn machine(user: User) -> Machine {
     Machine { user }
 }
 
-fn set_up(hub: &TestHub, pc: &Machine) {
-    let output = pc.user.run_with_input(
-        &["remote", "setup", &hub.url(), "--name", "pc"],
+/// `machine` paired with `hub` as the user pairs it, as `name`, a runner.
+fn pair(hub: &TestHub, machine: &Machine, name: &str) {
+    let output = machine.user.run_with_input(
+        &["remote", "pair", "--name", name, "--role", "runner"],
         &format!("{}\n", hub.code()),
     );
     assert!(
         output.status.success(),
-        "{}\n{}",
+        "the pairing failed: {}\n{}",
         String::from_utf8_lossy(&output.stderr),
-        pc.log()
+        machine.log()
     );
 }
 
@@ -239,9 +243,9 @@ fn set_up(hub: &TestHub, pc: &Machine) {
 fn pc_and_server(pc_user: User, server_user: User) -> (TestHub, Machine, Machine) {
     let hub = TestHub::new();
     let pc = machine(pc_user);
-    set_up(&hub, &pc);
+    pair(&hub, &pc, "pc");
     let server = machine(server_user);
-    pair(&pc, &server, "server", "runner");
+    pair(&hub, &server, "server");
     pc.wait_for("server");
     server.wait_for("pc");
     (hub, pc, server)

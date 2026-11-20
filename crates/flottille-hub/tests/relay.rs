@@ -10,8 +10,8 @@ use std::time::{Duration, Instant};
 
 use flottille_hub::{Hub, RELAY_BURST, RELAY_RATE, Served, SystemClock};
 use flottille_link::{
-    Action, Change, Device, DeviceKey, Hello, Invitation, InvitationAsk, Joined, Keyring,
-    KeyringError, MachineKey, MemberList, PublicKey, RelayPort, Role, Session, Tls,
+    Action, Change, Colour, Device, DeviceKey, Hello, Icon, Keyring, KeyringError, MachineKey,
+    PairCode, Paired, Proposed, PublicKey, RelayPort, Role, Session, Tls,
 };
 use zeroize::Zeroizing;
 
@@ -47,11 +47,10 @@ fn url(address: SocketAddr) -> String {
     format!("http://{address}")
 }
 
-/// A hub, `pc` its root with its machine's session open, and the folder of the machines' keys.
+/// A hub, `pc` paired with it, its machine's session open, and the folder of the machines' keys.
 struct Place {
     dir: tempfile::TempDir,
     served: Served<SystemClock>,
-    pc: DeviceKey,
     pc_device: Device,
     pc_machine: MachineKey,
     pc_session: Session,
@@ -63,25 +62,13 @@ impl Place {
         let hub = Hub::open(&dir.path().join("hub"), SystemClock).unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let served = flottille_hub::serve(hub, listener, None, hello()).unwrap();
-        let code = served.with_hub(|hub| hub.setup_code().unwrap().to_owned());
-        let pc = device_key(1);
         let pc_machine = machine_in(dir.path(), "pc");
-        let mut list = MemberList::start("pc", &pc).unwrap();
-        list.declare(&pc, &pc_machine);
-        let (pc_device, pc_session) = Device::setup(
-            &url(served.address()),
-            &code,
-            list.changes().to_vec(),
-            &pc_machine,
-            &hello(),
-            &Tls::System,
-        )
-        .await
-        .unwrap();
+        let mut paired = pair(&served, &device_key(1), &pc_machine, "pc").await;
+        let (pc_device, _) = paired.listed().await.unwrap();
+        let pc_session = declare(pc_device.clone(), paired, &device_key(1), &pc_machine).await;
         Place {
             dir,
             served,
-            pc,
             pc_device,
             pc_machine,
             pc_session,
@@ -92,93 +79,68 @@ impl Place {
         machine_in(self.dir.path(), name)
     }
 
-    /// `pc` adds `device` as `name`, a runner, and declares `machine` for it, as members sign
-    /// them.
-    async fn add(&self, device: &DeviceKey, machine: &MachineKey, name: &str) {
-        // The device's join request, answered on the hub: joining itself is tested elsewhere.
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        self.served.with_hub(|hub| {
-            let ask = InvitationAsk::sign(&hub.key(), now, &self.pc).unwrap();
-            let token = hub.invite(&ask).unwrap();
-            hub.join(&token, device.public()).unwrap();
-        });
-        let head = self.served.with_hub(|hub| hub.list().head());
-        let added = Change::sign(
-            head,
-            Action::Add {
-                key: device.public(),
-                name: name.to_owned(),
-                role: Role::Runner,
-            },
-            &self.pc,
-        );
-        self.pc_session
-            .ask(flottille_link::Ask::Submit {
-                change: added.clone(),
-            })
-            .await
-            .unwrap();
-        let declared = Change::sign(
-            added.hash(),
-            Action::Machine {
-                key: device.public(),
-                machine: machine.public(),
-            },
-            device,
-        )
-        .claimed_by(machine);
-        self.pc_session
-            .ask(flottille_link::Ask::Submit { change: declared })
-            .await
-            .unwrap();
+    /// `device` pairs as `name`, a runner, and declares `machine`: its machine's session, a
+    /// member's machine's now.
+    async fn add(&self, device: &DeviceKey, machine: &MachineKey, name: &str) -> Session {
+        let mut paired = pair(&self.served, device, machine, name).await;
+        let (pinned, _) = paired.listed().await.unwrap();
+        declare(pinned, paired, device, machine).await
     }
 
-    /// `pc` removes the member `device`.
-    async fn remove(&self, device: &DeviceKey) {
-        let head = self.served.with_hub(|hub| hub.list().head());
-        let removed = Change::sign(
-            head,
-            Action::Remove {
-                key: device.public(),
-            },
-            &self.pc,
-        );
-        self.pc_session
-            .ask(flottille_link::Ask::Submit { change: removed })
-            .await
-            .unwrap();
+    /// The member `name` removed on the hub's host.
+    fn remove(&self, name: &str) {
+        self.served.with_hub(|hub| hub.remove(name).unwrap());
     }
 
-    /// A session of `machine` to the hub `pc` set up, as a member's machine opens it.
+    /// A session of `machine` to the hub `pc` paired with, as a member's machine opens it.
     async fn connect(&self, machine: &MachineKey) -> Session {
         self.pc_device
             .connect(machine, &hello(), &Tls::System)
             .await
             .unwrap()
     }
+}
 
-    /// An invitation of `pc`'s, as the code it shows decodes.
-    async fn invite(&self) -> Invitation {
-        let hub = self.served.with_hub(|hub| hub.key());
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        let ask = InvitationAsk::sign(&hub, now, &self.pc).unwrap();
-        let token = self.pc_session.asker().invite(ask).await.unwrap();
-        let code = Invitation {
-            hub_url: self.pc_device.url.clone(),
-            hub_key: hub,
-            token,
-            inviter: self.pc.public(),
-        }
-        .code()
-        .unwrap();
-        Invitation::from_code(&code).unwrap()
-    }
+/// Pair mode opened on the hub, and `device` paired with its code through `machine`'s session,
+/// its machine not declared yet.
+async fn pair(
+    served: &Served<SystemClock>,
+    device: &DeviceKey,
+    machine: &MachineKey,
+    name: &str,
+) -> Paired {
+    let code: PairCode =
+        served.with_hub(|hub| hub.open_pairing(&url(served.address()), None).unwrap().1);
+    let proposed = Proposed {
+        key: device.public(),
+        name: name.to_owned(),
+        role: Role::Runner,
+        icon: Icon::Desktop,
+        colour: Colour::of(&device.public()),
+    };
+    Device::pair(&code, proposed, machine, &hello(), &Tls::System)
+        .await
+        .unwrap()
+}
+
+/// The device of `paired` declares `machine`, through its session: that session.
+async fn declare(
+    mut pinned: Device,
+    mut paired: Paired,
+    device: &DeviceKey,
+    machine: &MachineKey,
+) -> Session {
+    let declared = Change::sign(
+        pinned.list.head(),
+        Action::Machine {
+            key: device.public(),
+            machine: machine.public(),
+        },
+        device,
+    )
+    .claimed_by(machine);
+    pinned.submit(&mut paired.session, declared).await.unwrap();
+    paired.session
 }
 
 fn machine_in(dir: &Path, name: &str) -> MachineKey {
@@ -229,10 +191,9 @@ async fn the_hub_forwards_only_between_members() {
     let mut place = Place::new().await;
     let (server, server_machine) = (device_key(2), place.machine("server"));
     let (laptop, laptop_machine) = (device_key(3), place.machine("laptop"));
-    place.add(&server, &server_machine, "server").await;
-    place.add(&laptop, &laptop_machine, "laptop").await;
+    let mut server_session = place.add(&server, &server_machine, "server").await;
+    drop(place.add(&laptop, &laptop_machine, "laptop").await);
     let mut pc_port = port(&mut place.pc_session);
-    let mut server_session = place.connect(&server_machine).await;
     let mut server_port = port(&mut server_session);
     let _server_session = drain(server_session);
     online(
@@ -275,20 +236,11 @@ async fn the_hub_forwards_only_between_members() {
     );
     assert!(!pc_port.online().contains(&stranger.public()));
 
-    // A machine that joins and is not accepted yet is welcome, and is no member: nothing goes to
-    // it or from it, and it is not said online.
-    let (phone, phone_machine) = (device_key(4), place.machine("phone"));
-    let invitation = place.invite().await;
-    let mut joined: Joined = Device::join(
-        &invitation,
-        &phone.public(),
-        &phone_machine,
-        &hello(),
-        &Tls::System,
-    )
-    .await
-    .unwrap();
-    let mut phone_port = port(&mut joined.session);
+    // A machine that pairs and has not declared itself yet is welcome, and is no member's: nothing
+    // goes to it or from it, and it is not said online.
+    let phone_machine = place.machine("phone");
+    let mut paired = pair(&place.served, &device_key(4), &phone_machine, "phone").await;
+    let mut phone_port = port(&mut paired.session);
     phone_port
         .send(&server_machine.public(), b"from a joiner".to_vec())
         .await;
@@ -308,7 +260,7 @@ async fn the_hub_forwards_only_between_members() {
     assert!(!pc_port.online().contains(&phone_machine.public()));
 
     // A member removed is cut, and nothing goes to its machine any more.
-    place.remove(&laptop).await;
+    place.remove("laptop");
     let waited = tokio::time::timeout(Duration::from_secs(10), async {
         while pc_port.online().contains(&laptop_machine.public()) {
             pc_port.online_changed().await;
@@ -331,13 +283,14 @@ async fn one_device_cannot_fill_the_hub() {
     let (server, server_machine) = (device_key(2), place.machine("server"));
     let (laptop, laptop_machine) = (device_key(3), place.machine("laptop"));
     let (tablet, tablet_machine) = (device_key(4), place.machine("tablet"));
-    place.add(&server, &server_machine, "server").await;
-    place.add(&laptop, &laptop_machine, "laptop").await;
-    place.add(&tablet, &tablet_machine, "tablet").await;
     let pc_port = port(&mut place.pc_session);
     let mut ports = Vec::new();
-    for machine in [&server_machine, &laptop_machine, &tablet_machine] {
-        let mut session = place.connect(machine).await;
+    for (device, machine, name) in [
+        (&server, &server_machine, "server"),
+        (&laptop, &laptop_machine, "laptop"),
+        (&tablet, &tablet_machine, "tablet"),
+    ] {
+        let mut session = place.add(device, machine, name).await;
         ports.push(port(&mut session));
         drain(session);
     }

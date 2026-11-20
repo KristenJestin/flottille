@@ -7,10 +7,8 @@
 
 use crate::common;
 
-use std::io::{BufRead, BufReader, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use common::User;
@@ -61,9 +59,11 @@ impl TestHub {
         format!("http://{}", self.address)
     }
 
+    /// Pair mode opened, as `flottille-hub pair` opens it on the hub's host: its code.
     fn code(&self) -> String {
+        let url = self.url();
         self.served
-            .with_hub(|hub| hub.setup_code().unwrap().to_owned())
+            .with_hub(|hub| hub.open_pairing(&url, None).unwrap().1.code().unwrap())
     }
 }
 
@@ -201,67 +201,27 @@ impl Machine {
     }
 }
 
-/// `pc` set up as the hub's first member.
+/// `pc` paired as the hub's first device, a runner.
 fn set_up(hub: &TestHub, pc: &Machine) {
-    let output = pc.user.run_with_input(
-        &["remote", "setup", &hub.url(), "--name", "pc"],
-        &format!("{}\n", hub.code()),
+    pair(hub, pc, "pc", "runner");
+}
+
+/// `machine` paired with `hub` as the user pairs it, as `name` with `role`.
+fn pair(hub: &TestHub, machine: &Machine, name: &str, role: &str) {
+    let output = machine.user.run_with_input(
+        &["remote", "pair", "--name", name, "--role", role],
+        &format!(
+            "{}
+",
+            hub.code()
+        ),
     );
     assert!(
         output.status.success(),
-        "{}\n{}",
+        "the pairing failed: {}
+{}",
         String::from_utf8_lossy(&output.stderr),
-        pc.log()
-    );
-}
-
-/// `joiner` joins the hub of `inviter` as the user pairs them, as `name` with `role`.
-fn pair(inviter: &Machine, joiner: &Machine, name: &str, role: &str) {
-    let invited = inviter.user.run(&["remote", "invite", "--json"]);
-    assert!(invited.status.success(), "{}", inviter.log());
-    let invited: Value = serde_json::from_slice(&invited.stdout).unwrap();
-    let code = invited["code"].as_str().unwrap().to_owned();
-    let mut joining = joiner
-        .user
-        .command(&["remote", "join"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    {
-        let mut input = joining.stdin.take().unwrap();
-        input.write_all(format!("{code}\n").as_bytes()).unwrap();
-    }
-    let mut out = BufReader::new(joining.stdout.take().unwrap());
-    let mut first = String::new();
-    out.read_line(&mut first).unwrap();
-    let deadline = Instant::now() + WAIT;
-    let request = loop {
-        let requests = inviter.user.call("remote.requests", json!({})).unwrap();
-        if let Some(first) = requests.as_array().and_then(|all| all.first()) {
-            break first.clone();
-        }
-        assert!(Instant::now() < deadline, "no join request came");
-        std::thread::sleep(Duration::from_millis(200));
-    };
-    let id = request["request"].as_str().unwrap();
-    let accepted = inviter
-        .user
-        .run(&["remote", "accept", id, "--name", name, "--role", role]);
-    assert!(
-        accepted.status.success(),
-        "{}",
-        String::from_utf8_lossy(&accepted.stderr)
-    );
-    let mut rest = String::new();
-    std::io::Read::read_to_string(&mut out, &mut rest).unwrap();
-    let ended = joining.wait_with_output().unwrap();
-    assert!(
-        ended.status.success(),
-        "the join failed: {}\n{}",
-        String::from_utf8_lossy(&ended.stderr),
-        joiner.log()
+        machine.log()
     );
 }
 
@@ -341,7 +301,7 @@ fn pc_and_server_with(server: Machine) -> (TestHub, Machine, Machine) {
     let hub = TestHub::new();
     let pc = Machine::new();
     set_up(&hub, &pc);
-    pair(&pc, &server, "server", "runner");
+    pair(&hub, &server, "server", "runner");
     pc.wait_for("server");
     server.wait_for("pc");
     pc.register();
@@ -669,10 +629,10 @@ fn returned_work_lands_in_the_machines_ref_never_on_the_user_s_branch() {
 
 #[test]
 fn a_machine_the_launch_was_not_sent_to_brings_nothing_back_and_reads_no_bundle() {
-    let (_hub, pc, server) = pc_and_server();
+    let (hub, pc, server) = pc_and_server();
     // Another machine of the user's, a runner too: l1 is offered to the server, not to it.
     let laptop = Machine::new();
-    pair(&pc, &laptop, "laptop", "runner");
+    pair(&hub, &laptop, "laptop", "runner");
     pc.wait_for("laptop");
     server.wait_for("pc");
     let repo = pc.folder();
@@ -727,9 +687,9 @@ fn a_machine_the_launch_was_not_sent_to_brings_nothing_back_and_reads_no_bundle(
 
 #[test]
 fn a_viewer_s_machine_and_a_machine_of_no_member_can_neither_offer_nor_place_code() {
-    let (_hub, pc, server) = pc_and_server();
+    let (hub, _pc, server) = pc_and_server();
     let tablet = Machine::new();
-    pair(&pc, &tablet, "tablet", "viewer");
+    pair(&hub, &tablet, "tablet", "viewer");
     server.wait_for("tablet");
     // A machine the server trusts, by its peers' file, that is no member's.
     let folder = tempfile::tempdir().unwrap();

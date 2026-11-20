@@ -201,10 +201,10 @@ fn share_with_lists_the_online_machines_and_says_the_result(cx: &mut TestAppCont
 
 #[gpui_kit::test]
 fn share_with_lists_only_the_runners(cx: &mut TestAppContext) {
-    let (_hub, pc, server) = pc_and_server(common::User::new());
+    let (hub, pc, server) = pc_and_server(common::User::new());
     // A laptop that drives without running agents, online too: a share there would be refused.
     let laptop = Machine::new();
-    pair(&pc, &laptop, "laptop", "controller");
+    pair(&hub, &laptop, "laptop", "controller");
     server.wait_for_member("laptop", true);
     pc.wait_for("laptop", "online");
     pc.user

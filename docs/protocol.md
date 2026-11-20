@@ -104,7 +104,7 @@ Every method the daemon answers is in the catalogue of `flottille-protocol`
 (`crates/flottille-protocol/src/catalogue.rs`), each with its class: `read` for one that changes
 nothing (a list, a show, a read, `events.watch`), `drive` for any other (`docs/remote.md`,
 "Roles"), and `local` for one answered to the machine's own clients only, never over a link,
-whatever the caller's role (`remote.setup`). A method the catalogue does not name is answered `unknown-method` before anything reads
+whatever the caller's role (`remote.pair`). A method the catalogue does not name is answered `unknown-method` before anything reads
 it.
 
 ### The classes
@@ -222,12 +222,8 @@ no device calls a `local` one over a link (`docs/remote.md`, "Roles").
 | `remote.address.remove` | drive |
 | `remote.members` | read |
 | `remote.launches` | read |
-| `remote.requests` | read |
-| `remote.invite` | drive |
-| `remote.refuse` | drive |
 | `remote.change` | drive |
-| `remote.setup` | local |
-| `remote.join` | local |
+| `remote.pair` | local |
 | `remote.declare` | local |
 | `tunnel.open` | drive |
 | `tunnel.list` | local |
@@ -333,7 +329,7 @@ No parameters. The result:
 ```json
 {
   "version": "0.1.0 (local, dd939a5ec692)",
-  "protocol": 1,
+  "protocol": 2,
   "pid": 4242,
   "uptime_s": 192,
   "agents": {"running": 0, "waiting_for_user": 0, "failed": 0},
@@ -1357,19 +1353,6 @@ with the reason. No method answers a private key.
   `offered`: the names of the runners linked (this machine first) that would take a session of
   `project` on `agent` (any agent signed in, when none is named): the project there, the agent
   signed in, a slot free.
-- `remote.setup {url, code, changes, replace?}` makes this machine the first member of the hub at
-  `url` (`docs/remote.md`, "The first member"), with the setup `code` the hub printed. `changes`
-  are what the client signed with the device key, which the daemon never holds: the device's own
-  entry as the root, a `runner`, after a new list id, then the declaration of this machine's key
-  (`flottille_link::Action`, `machine`), which the daemon claims with the machine's key. The
-  daemon reaches the hub, proves the code without sending it, pins the hub's key once the hub
-  proved it too, keeps the list once the hub sent it back holding the setup, and keeps the
-  session; it answers `{"url", "hub", "root"}` (the hub's URL as written, the fingerprints of the
-  hub's key and of the root). `refused` with the sentence: a code that is not the hub's, a hub
-  that has a member already, a hub that did not prove the code or withheld the setup, a machine
-  set up already without `replace: true`, a hub that cannot be reached (`the hub at
-  192.0.2.10:7448 is unreachable: tried 192.0.2.10:7448: Connection refused`). Its class is
-  `Local`: answered to this machine's own clients only, never over a link.
 - `remote.address.add {address}` declares an address of this machine: a host name or an IP
   address, and its port when it is not the link's own (`100.64.0.7`, `server.example.net:7447`).
   It answers `this` as above, and is told at once to the machines linked to this one.
@@ -1377,11 +1360,15 @@ with the reason. No method answers a private key.
 - `remote.address.remove {address}` removes one, answers and tells as `add` does; `not-found` when
   it was not declared.
 - `remote.members` answers the member list as this machine last checked it: `{"hub", "root",
-  "head", "this", "members": [{"name", "key", "fingerprint", "role", "added_by", "machine"}]}`,
-  `head` the hash of its last change (what a client signs its next change after), `this` the name
-  of the member whose machine this is (`null` when none is), `added_by` the name of the member
-  whose signature added it, `machine` the fingerprint of the machine it declared, or `null`.
-  `refused` when this machine is not set up with a hub.
+  "head", "this", "members": [{"name", "key", "fingerprint", "role", "icon", "colour", "added_by",
+  "machine", "kind", "system", "version", "paired_at", "last_seen"}]}`, `head` the hash of its last
+  change (what a client signs its next change after), `this` the name of the member whose machine
+  this is (`null` when none is), `added_by` the name of the member whose signature added it, or
+  `the hub` for a device paired, `machine` the fingerprint of the machine it declared, or `null`;
+  `icon` and `colour` as the list signs them (`null` for a member added before pair mode), and what
+  the hub knows of the device (`docs/remote.md`, "A device's card"): `kind` and `system` as it said
+  them, `version` its Flottille's, `paired_at` and `last_seen` in seconds since the Unix epoch, each
+  `null` until told. `refused` when this machine is paired with no hub.
 - `remote.launches` answers the sessions and children this machine's agents started on other
   machines (`docs/remote.md`, "A tree across machines"), as the window's tree shows them under
   their pilot: those that started a session there, not refused, not handed to the user, and not
@@ -1393,33 +1380,26 @@ with the reason. No method answers a private key.
   there, `request` its number), `started`, or `ended` once its end came back; `heard` the kind of
   the last delivery it sent here (`child-report`, `session-turn-ended`, `child-question`…) and
   `heard_at` when, `null` before any: what the window shows as its state as last known.
-- `remote.invite {ask}` carries a member's signed ask for an invitation
-  (`flottille_link::InvitationAsk`, signed by the client with the device key) to the hub, and
-  answers `{"code", "url", "hub", "inviter", "fingerprint", "expires"}`: the invitation's code,
-  which is also the QR's text (`docs/remote.md`, "Pairing"), valid 5 minutes, once, `expires` in
-  milliseconds since the Unix epoch. `refused` with the hub's sentence (a viewer may not invite,
-  an ask signed more than 5 minutes from the hub's time, or taken already).
-- `remote.requests` answers the join requests that wait for this machine's member: `[{"request",
-  "key", "words", "inviter"}]`, `request` the new device's fingerprint, which names it, `words`
-  the four verification words the new device shows too.
-- `remote.refuse {request}` refuses one; it answers `{"refused": <request>}`.
 - `remote.change {change}` carries a member's signed change of the list (`flottille_link::Change`:
-  an addition, which accepts a join request with the new device's name and role, a removal or a
-  renaming), signed by the client after `remote.members`' `head`. It answers `remote.members` once
+  a removal, a renaming, an icon and colour), signed by the client after `remote.members`' `head`.
+  A member's addition is refused: a device is paired on the hub. It answers `remote.members` once
   the hub sent back a list that holds it and this machine checked it; `refused` with the hub's
   sentence, or when the hub withheld it (`the hub withheld this change: …`).
-- `remote.join {code, key}` makes this machine, set up with no hub, join with the invitation
-  `code`, `key` being the new device's public key, which its client made. The daemon reaches the
-  invitation's hub with its machine key, pinning the hub's key the code holds, and waits until the
-  member that invited accepts or refuses the request, 5 minutes at most. It answers once a list
-  came that checks back to its own root and holds the device's entry, signed by the member of the
-  invitation: `{"head", "name", "role", "added_by", "hub"}`. `refused` when the request was refused
-  or expired, when the code is not one, when the key was removed from the list, or when the
-  machine is set up already. With `{key, "resume": true}`, no join is asked: the answer of the
-  join this daemon accepted for `key`, which a command gone did not take (a join still waiting is
-  waited for), `null` when none holds it as a member. Its class is `Local`.
+- `remote.pair {code, proposed, replace?}` pairs this machine's device with the hub of `code`, what
+  `flottille-hub pair` printed on the hub's host (`docs/remote.md`, "Pairing"); `proposed` is the
+  card the user confirmed (`flottille_link::Proposed`: `{"key", "name", "role", "icon",
+  "colour"}`), `key` the device's public key, which its client made once. The daemon reaches the
+  code's hub with its machine key, pinning the hub's key the code holds, proves it holds the code's
+  secret without sending it, and answers once a list came that checks back to its root and to that
+  key and holds the device: `{"head", "name", "role", "added_by", "hub", "url"}`, the entry as the
+  list holds it (a device that was a member already keeps its own). `refused` when the code is not
+  one, when the hub has another key than the code says, when pair mode is not open or its code
+  served already, when the proof does not check, or when the machine is paired already without
+  `replace: true`. Its class is `Local`. `remote.machines` says what this machine proposes for
+  itself, `proposed`: `{"name", "icon", "role"}` (its host's name; a laptop with a battery, a desktop
+  with a screen, a server; a runner with an agent signed in, a controller otherwise).
 - `remote.declare {change}` then carries the declaration of this machine (`machine`), signed by
-  the device that joined after `head`; the daemon claims it with the machine key, pins the hub
+  the device that paired after `head` (a machine declared already declares nothing again); the daemon claims it with the machine key, pins the hub
   (`remote/hub.json`) once the hub sent it back, and keeps the session. It answers `{"url", "hub",
   "root", "name"}`. `Local`.
 

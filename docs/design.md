@@ -1580,7 +1580,7 @@ to the front.
 ## 12. Later: remote
 
 Designed for, not built before the milestone "Remote": the user's machines and devices, members
-of their own hub (the signed member list, invitations, presence, and the links' packets, which it
+of their own hub (the signed member list, pair mode, presence, and the links' packets, which it
 forwards between members and can neither read nor change), linked by their own keys over an
 end-to-end encrypted transport through that hub, so that only the hub needs to be reachable (no
 NAT traversal, no relay of anyone else's), each with a
