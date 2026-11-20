@@ -356,7 +356,9 @@ tell them where the agent is, and lend it to a tool that spawns.
 
 **The daemon's own git is walled like a run's.** Every `git` the daemon runs for itself on a
 repository (its status and log reads, its worktrees, the `ls-remote` and `fetch` that find a
-workspace's base) is bound by the same Landlock rules, gets no `SSH_AUTH_SOCK`, and is given what a
+workspace's base) is the one found at its start, as its `ssh` is (below): the first of its `PATH`
+that root owns in a folder root owns, else the first one, its links followed then, never one a
+run put first in the `PATH` since. It is bound by the same Landlock rules, gets no `SSH_AUTH_SOCK`, and is given what a
 repository's settings could otherwise turn into a program of theirs: `core.hooksPath=/dev/null`,
 `core.fsmonitor=false`, `fetch.recurseSubmodules=false` and `submodule.recurse=false` on its line
 (the command's scope, which wins over the repository's settings and what they include: git cannot
@@ -408,6 +410,41 @@ fails on the path. Outside the sandbox, only these are added:
 - the `git` of the daemon's `PATH` that root owns in a folder root owns, found at the daemon's
   start, its links followed, never one a run put first in the `PATH` since; without one, the
   push is refused, saying why (and the daemon's log says it at its start);
+- **none of the repository's settings but which refs go where.** A run can write the
+  repository's settings, and git has no switch that leaves them unread; a setting given on the
+  push's own line does not win over a more specific one of the repository's either
+  (`http.<url>.sslVerify` over `http.sslVerify`, `http.<url>.proxy` over `http.proxy`), so
+  overriding the dangerous keys one by one cannot hold. The push runs from a git folder the
+  daemon makes for it instead, in its own runtime folder (out of every confined command's reach,
+  above), and removes once the push ended: `GIT_DIR` names it, so git reads no repository's
+  settings but its file, which holds the repository's format alone (`core.repositoryformatversion`
+  and its `extensions.*`, each a plain word or refused; refs kept in a `reftable` are refused).
+  Its `HEAD` is the repository's as it is then, and `refs`, `packed-refs` and `shallow` lead to
+  the repository's own, with `GIT_OBJECT_DIRECTORY` its objects: the push reads its branches and
+  moves its remote-tracking refs in place. Its settings are then, in git's order: the system's
+  (root's); the user's own (`GIT_CONFIG_GLOBAL=/dev/null`, and in their place the files found at
+  the daemon's start as they apply to the repository, an `includeIf "gitdir:…"` or
+  `"onbranch:…"` included, read with the repository's folder but never its settings, given on
+  the command's scope); then, of the repository's own settings and its worktree's (read in the
+  sandbox, with what they include), only `remote.<name>.url`, `pushurl`, `push`, `fetch` and
+  `mirror`, `branch.<name>.remote`, `pushRemote` and `merge`, `remote.pushDefault`,
+  `push.default` and `push.autoSetupRemote`; then the daemon's own below, which win over them
+  all. Each of those kept is a remote's name, a URL or a refspec: which refs go to which remote,
+  which a run could change by pushing from a line of its own anyway, never how the remote is
+  reached (`http.*`, `url.*.insteadOf` and `pushInsteadOf`, `remote.<name>.proxy`,
+  `remote.<name>.vcs`, `core.*`, `include.*` are not given). A URL a run wrote sends the push
+  to that host, with only the sign-in the user's own helper gives that host, over git's own
+  transports (below), as the push's line could. The user's own `http.*` and `url.*` settings
+  still apply: they are theirs. An upstream the push sets (`-u`, `push.autoSetupRemote`), which
+  git writes in the folder's settings, is written back to the repository's once it ended. A
+  push line that names another git folder (`--git-dir`, `--work-tree`) is refused, and one that
+  moves (`-C`) is made from the repository it moves to;
+- `PATH` made of the folders of the daemon's `PATH` that only root may change (each of them and
+  every folder on the way is root's, and no one else may write it), found at the daemon's
+  start: a program the user's settings name by a bare name (a credential helper's `!gh auth
+  git-credential`, `ssh` inside a wrapper) is root's, never one a run put first in a folder it
+  can write (`~/.local/bin`, `~/bin`). One the system's folders do not hold is not found, and
+  the helper fails: name it by its path, in a folder only root may change;
 - `core.hooksPath=/dev/null`;
 - `credential.helper=` and then the user's own credential helpers (the system's and the user's
   settings, read at the daemon's start), as for the daemon's own git (above): a helper a run wrote
@@ -552,22 +589,19 @@ The gaps, where the platform does not allow more:
 - `/proc/<pid>/root` leads to the mounts of another process: Landlock keeps a confined process
   from every process outside its domain, so it is closed wherever Landlock is used (its second
   ABI or later), and open without it: the user's SSH agent is then lent to no push (above);
-- a push the gate let through runs with what the repository's settings say, as the user's own
-  push from that folder would: a script the gate never read may have changed them before
-  (`url.*.insteadOf`, `http.proxy`, `http.sslVerify`, `http.sslCAInfo`, `http.extraHeader`; not
-  `core.sshCommand`, a credential helper, a signing program nor a helper URL, the transport's
-  programs, above), and that
-  applies to the push, outside the sandbox, with the user's credentials. The gate judges the
-  push's line, not the repository it runs in: an accepted risk, decided so that a push the user
-  allowed signs in as theirs does;
-- a push the gate let through finds the programs the user's settings name by a bare name
-  (`!gh auth git-credential`, a helper, `ssh` inside the user's own command) through the
-  daemon's `PATH`: a folder of it that a confined command can write (`~/.local/bin`, `~/bin`)
-  can hold one of a run's before the system's, which then runs outside the sandbox. Its `git`
-  and the `ssh` Flottille names itself are the ones found at the start, whose links were followed
-  then, as is the daemon's own git when it is lent the agent (its fetch of an SSH remote). Its
-  other git, which runs confined and with nothing of the user's, is still found through the
-  `PATH`;
+- a push the gate let through still goes where the repository's remotes say (`remote.<name>.url`,
+  `pushurl`, the branch's `pushRemote`, above): a run that rewrote a URL sends the push to another
+  host, over git's own transports and with the sign-in the user's own helper gives that host. The
+  gate judges the push's line, not the repository it runs in: an accepted risk, as a push the
+  line names by its URL would go there too;
+- a program the user's own settings name by its path, in a folder a confined command can write
+  (a credential helper `~/.local/bin/helper`), runs outside the sandbox as written there: the
+  settings are the user's, and only a bare name is looked for in the folders only root may
+  change (above);
+- the daemon runs every git of its own (its statuses, worktrees and fetches, the reads of the
+  user's settings) from the `git` found at its start: root's when there is one, else the first
+  of its `PATH` then. Where root owns none, a `git` a run left in a folder of that `PATH` before
+  the daemon started is the one it runs, confined and with nothing of the user's;
 - what the system's `ssh` configuration (`/etc/ssh/ssh_config` and what it includes) runs is
   root's to say, and not judged;
 - `~/.ssh` being read-only to every confined command, the `ssh` of the daemon's own fetch adds no
