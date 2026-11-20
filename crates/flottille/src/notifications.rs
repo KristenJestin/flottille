@@ -106,16 +106,16 @@ fn read(daemon: &Daemon, asked: Read) -> Result<Value, Failure> {
         }
     };
     let changed = daemon.read(|store| store.read_notifications(which, now_ms()))?;
-    changed_event(daemon, &changed, false);
+    changed_event(daemon, &changed, false, "read");
     Ok(json!({"read": changed}))
 }
 
-/// Tells the clients which notifications were added or changed.
-fn changed_event(daemon: &Daemon, ids: &[u64], pruned: bool) {
+/// Tells the clients which notifications were added, resolved or read.
+fn changed_event(daemon: &Daemon, ids: &[u64], pruned: bool, how: &str) {
     if !ids.is_empty() || pruned {
         let _ = daemon.emit(
             "notifications.changed",
-            json!({"ids": ids, "pruned": pruned}),
+            json!({"ids": ids, "pruned": pruned, "how": how}),
         );
     }
 }
@@ -164,12 +164,9 @@ pub fn keep(daemon: &Arc<Daemon>) {
     else {
         return;
     };
-    // The centre starts with the events that come after it: what was told before it existed is
-    // in the inbox and the window's rail, not in rows.
-    let Some(cursor) = cursor else {
-        let _ = daemon.read(|store| store.set_notification_cursor(upto));
-        return;
-    };
+    // The migration set it: the centre starts with the events that come after it, what was told
+    // before it existed is in the inbox and the window's rail, not in rows.
+    let cursor = cursor.unwrap_or(upto);
     let mut names: Vec<&str> = EVENTS.to_vec();
     names.extend(["agent.tool_served"]);
     let extensions = crate::extensions::needs_you();
@@ -187,7 +184,7 @@ pub fn keep(daemon: &Arc<Daemon>) {
     let _ = daemon.read(|store| store.set_notification_cursor(upto.max(cursor)));
     changed.sort_unstable();
     changed.dedup();
-    changed_event(daemon, &changed, pruned);
+    changed_event(daemon, &changed, pruned, "kept");
 }
 
 /// The root of the agent's tree, its project and its workspace: the session a row belongs to.
@@ -261,7 +258,8 @@ fn resolve(daemon: &Daemon, source: &str, at: u64) -> Vec<u64> {
 /// A root agent: the session itself. A child's report, question and failure go to its parent, never
 /// to the user.
 fn root(daemon: &Daemon, id: Option<&str>) -> Option<String> {
-    let agent = daemon.read(|store| store.agent(id?)).ok().flatten()?;
+    let id = id?;
+    let agent = daemon.read(|store| store.agent(id)).ok().flatten()?;
     agent.parent.is_none().then_some(agent.id)
 }
 
@@ -297,7 +295,7 @@ fn note(
                     event,
                     "request",
                     format!("request:{number}"),
-                    Some(&request.agent),
+                    Some(request.agent.as_str()),
                     format!("Request #{number} waits for you"),
                     notification::excerpt(&notification::asked(&request.tool, &request.shown)),
                 ),
@@ -322,7 +320,7 @@ fn note(
                 event,
                 "question",
                 format!("question:{id}:{}", event.seq),
-                Some(&id),
+                Some(id.as_str()),
                 "Asks you a question",
                 notification::first_line(asked),
             )
@@ -334,7 +332,7 @@ fn note(
                     event,
                     "failure",
                     format!("event:{}", event.seq),
-                    Some(&id),
+                    Some(id.as_str()),
                     "Failed",
                     notification::first_line(data["reason"].as_str().unwrap_or_default()),
                 ),
@@ -351,7 +349,7 @@ fn note(
                 event,
                 "report",
                 format!("event:{}", event.seq),
-                Some(&id),
+                Some(id.as_str()),
                 "Reported",
                 notification::first_line(data["text"].as_str().unwrap_or_default()),
             ),
@@ -442,7 +440,7 @@ fn note(
                     "pull_request"
                 },
                 format!("event:{}", event.seq),
-                Some(&forged.agent),
+                Some(forged.agent.as_str()),
                 forged.said,
                 forged.excerpt,
             ),

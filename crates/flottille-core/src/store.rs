@@ -968,11 +968,13 @@ const MIGRATIONS: &[&str] = &[
         resolved  INTEGER NOT NULL DEFAULT 0
     ) STRICT;
     CREATE INDEX notifications_by_session ON notifications (session);
-    -- The last event the centre made rows of.
+    -- The last event the centre made rows of: the last there is, the centre starting with the
+    -- events that come after it.
     CREATE TABLE notification_cursor (
         id  INTEGER PRIMARY KEY CHECK (id = 1),
         seq INTEGER NOT NULL
     ) STRICT;
+    INSERT INTO notification_cursor (id, seq) SELECT 1, coalesce(max(seq), 0) FROM events;
 ",
 ];
 

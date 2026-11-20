@@ -182,7 +182,9 @@ fn opening_the_session_marks_its_notifications_read() {
     assert_eq!(theirs["read_at"], Value::Null, "{theirs}");
     // A request waits until it is answered: reading it does not answer it.
     assert_eq!(ours["resolved"], false, "{ours}");
-    let seen = watch.until(|event| event["name"] == "notifications.changed");
+    // The event says who was marked read, to every client that follows.
+    let seen = watch
+        .until(|event| event["name"] == "notifications.changed" && event["data"]["how"] == "read");
     assert_eq!(
         seen.last().unwrap()["data"]["ids"],
         json!([ours["id"]]),

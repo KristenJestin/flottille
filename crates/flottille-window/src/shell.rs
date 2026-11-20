@@ -3,7 +3,7 @@
 //! again only the parts a change touches.
 
 use crate::glyphs;
-use crate::state::{AgentState, StateIcon, Status};
+use crate::state::AgentState;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};

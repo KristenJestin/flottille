@@ -371,6 +371,7 @@ reads on after the last number it saw.
 |---|---|
 | `ids` | The numbers of the notifications added, resolved or marked read, sorted; empty when only the old ones went. |
 | `pruned` | `true` when notifications older than 30 days, or beyond the newest 1,000, were forgotten. |
+| `how` | `read` when a client marked them read (`notifications.read`), `kept` when the daemon added or resolved them from the events, or forgot the old. |
 
 ### `remote.join_requested`
 
