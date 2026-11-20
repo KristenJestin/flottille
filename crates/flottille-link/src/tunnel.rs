@@ -69,6 +69,7 @@ mod tests {
     use std::net::{IpAddr, SocketAddr};
     use std::time::Duration;
 
+    use super::*;
     use crate::{Endpoint, Hello, MachineKey, Traffic};
 
     /// A client link from one machine to another, both ends, on the loopback.

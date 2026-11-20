@@ -1013,15 +1013,6 @@ fn a_v6_listener_beside_a_foreign_v4_one_is_refused() {
 }
 
 #[test]
-fn a_run_listening_on_the_ipv6_loopback_alone_is_reached_there() {
-    let (_hub, pc, server) = pc_and_server(User::new());
-    let (run, port) = web_with(&server.user, "--listen 0 --host ::1");
-    let tunnel = open(&pc, "server", &run, &[]);
-    assert_eq!(tunnel.answer["port"], port, "{}", tunnel.answer);
-    assert!(get(tunnel.local_port()).starts_with("HTTP/1.1 204"));
-}
-
-#[test]
 fn an_address_port_no_process_of_the_run_listens_on_is_refused() {
     let (_hub, pc, server) = pc_and_server(User::new());
     app_on(&server.user);

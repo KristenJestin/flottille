@@ -977,6 +977,34 @@ mod tests {
     }
 
     #[test]
+    fn the_kernel_s_tables_say_which_loopback_address_reaches_a_real_listener() {
+        // Both families, on this machine's own tables: the words of the addresses are as the
+        // kernel prints them, which no copied line proves. (A test of the daemon cannot do it
+        // with a run: the client's own listener takes the same port on 127.0.0.1.)
+        let Ok(v6) = std::net::TcpListener::bind((Ipv6Addr::LOCALHOST, 0)) else {
+            return;
+        };
+        let v4 = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let mut all = Vec::new();
+        for (table, v6) in [("/proc/net/tcp", false), ("/proc/net/tcp6", true)] {
+            all.extend(listeners(&std::fs::read_to_string(table).unwrap(), v6));
+        }
+        let ours = sockets_of(&[std::process::id()]);
+        let reach = reach(None, &ours, &all);
+        let (port6, port4) = (
+            v6.local_addr().unwrap().port(),
+            v4.local_addr().unwrap().port(),
+        );
+        assert_eq!(reach.target(port6), Some(Ipv6Addr::LOCALHOST.into()));
+        assert_eq!(reach.target(port4), Some(Ipv4Addr::LOCALHOST.into()));
+        // And the address it names is the one that answers.
+        assert!(
+            std::net::TcpStream::connect(SocketAddr::new(reach.target(port6).unwrap(), port6))
+                .is_ok()
+        );
+    }
+
+    #[test]
     fn a_tunnel_takes_at_most_its_connections() {
         let count = AtomicUsize::new(0);
         let held: Vec<_> = (0..MOST_CONNECTIONS)
