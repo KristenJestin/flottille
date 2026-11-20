@@ -593,6 +593,134 @@ fn a_socket_made_at_the_session_bus_s_path_gets_no_client() {
     );
 }
 
+/// The output of the Python `body` run by `mcp`'s agent, confined, from a file of the user's.
+fn python(user: &User, mcp: &Mcp, body: &str) -> String {
+    let probe = user.path("probe.py");
+    std::fs::write(&probe, format!("import os, socket, sys\n{body}\n")).unwrap();
+    done(mcp.call(
+        "run",
+        json!({"line": format!("python3 {}", probe.display())}),
+    ))
+}
+
+/// What a confined run of `mcp` gets connecting to the socket at `path`: `connected`, or the
+/// error's class.
+fn run_connects(user: &User, mcp: &Mcp, path: &Path) -> String {
+    let out = python(
+        user,
+        mcp,
+        &format!(
+            "s = socket.socket(socket.AF_UNIX)\n\
+             try:\n\
+             \x20   s.connect({path:?})\n\
+             \x20   print('outcome=connected')\n\
+             except OSError as e:\n\
+             \x20   print('outcome=' + type(e).__name__)\n",
+            path = path.to_str().unwrap()
+        ),
+    );
+    out.lines()
+        .find_map(|line| line.trim().strip_prefix("outcome="))
+        .unwrap_or_else(|| panic!("{out}"))
+        .to_owned()
+}
+
+#[test]
+fn a_replaced_bus_is_still_masked() {
+    if !common::user_namespaces() {
+        eprintln!("skipped: this kernel refuses user namespaces to this user");
+        return;
+    }
+    let (user, _agent, bus) = user_with_bus_outside();
+    let mcp = session(&user, SSH_REMOTE);
+    confined_runs(&mcp).unwrap();
+    // Something else listens at the bus's path now: a bus started there again, or a socket an
+    // unconfined process made.
+    let at = user.path("bus-outside/dbus-test");
+    drop(bus);
+    std::fs::remove_file(&at).unwrap();
+    let replaced = UnixListener::bind(&at).unwrap();
+    replaced.set_nonblocking(true).unwrap();
+
+    let outcome = run_connects(&user, &mcp, &at);
+    let pushed = done(mcp.call(
+        "run",
+        json!({"line": "git push origin HEAD:refs/heads/replaced"}),
+    ));
+
+    assert_ne!(outcome, "connected", "a run reached the bus's path");
+    assert_eq!(
+        replaced.accept().map(|_| ()).unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock,
+        "a run reached the socket at the bus's path"
+    );
+    assert!(pushed.contains("exited with code 0"), "{pushed}");
+    assert!(
+        ssh_said(&user).contains(&"dbus=".to_owned()),
+        "{:?}",
+        ssh_said(&user)
+    );
+}
+
+#[test]
+fn a_bus_whose_folder_was_moved_is_masked_at_its_path() {
+    if !common::user_namespaces() {
+        eprintln!("skipped: this kernel refuses user namespaces to this user");
+        return;
+    }
+    let (user, _agent, _bus) = user_with_bus_outside();
+    let mcp = session(&user, SSH_REMOTE);
+    let folder = user.path("bus-outside");
+    let moved = user.path("bus-moved");
+    // A run moves the bus's folder away: only the masked socket itself is a mount point.
+    let renamed = python(
+        &user,
+        &mcp,
+        &format!(
+            "os.rename({folder:?}, {moved:?})\nprint('renamed')\n",
+            folder = folder.to_str().unwrap(),
+            moved = moved.to_str().unwrap()
+        ),
+    );
+    assert!(renamed.contains("renamed"), "{renamed}");
+    assert!(moved.join("dbus-test").exists());
+    // A socket at the bus's path again, which the next runs must not reach either.
+    std::fs::create_dir(&folder).unwrap();
+    let at = folder.join("dbus-test");
+    let again = UnixListener::bind(&at).unwrap();
+    again.set_nonblocking(true).unwrap();
+
+    let outcome = run_connects(&user, &mcp, &at);
+
+    assert_ne!(outcome, "connected", "a run reached the bus's path");
+    assert_eq!(
+        again.accept().map(|_| ()).unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock,
+        "a run reached the socket at the bus's path"
+    );
+}
+
+#[test]
+fn doctor_says_the_bus_was_replaced() {
+    let (user, _agent, bus) = user_with_bus_outside();
+    let mcp = session(&user, SSH_REMOTE);
+    confined_runs(&mcp).unwrap();
+    let at = user.path("bus-outside/dbus-test");
+    drop(bus);
+    std::fs::remove_file(&at).unwrap();
+    let _replaced = UnixListener::bind(&at).unwrap();
+
+    let doctor = user.run(&["doctor", "--json"]);
+
+    let report: serde_json::Value = serde_json::from_slice(&doctor.stdout).unwrap();
+    assert!(
+        report["warnings"]
+            .to_string()
+            .contains("session bus the daemon found at its start"),
+        "{report}"
+    );
+}
+
 #[test]
 fn an_allowed_push_takes_the_options_it_was_judged_with() {
     let (user, _agent, _bus) = user();
