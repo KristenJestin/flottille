@@ -54,7 +54,14 @@ fn holder(daemon: &Daemon, agent: &str) -> String {
         .read(|store| store.agent(agent))
         .ok()
         .flatten()
-        .and_then(|agent| agent.parent)
+        // A child an agent of another machine launched: that agent holds it, whose machine is
+        // told, or gives it to the user while it is off.
+        .and_then(|agent| {
+            agent
+                .parent
+                .clone()
+                .or_else(|| crate::across::caller_of(daemon, &agent, "child"))
+        })
         .unwrap_or_else(|| approval::USER.to_owned())
 }
 
@@ -161,10 +168,17 @@ pub fn ask(
         }
         Ok(request) => {
             tree::asks_parent(daemon, &request);
-            (
-                Outcome::Held(waiting_on_parent(request.number)),
-                Some(request.number),
-            )
+            // Its parent's machine is off: it went to the user at once.
+            let users = daemon
+                .read(|store| store.request(request.number))
+                .ok()
+                .flatten()
+                .is_some_and(|request| request.held_by == approval::USER);
+            let said = match users {
+                true => waiting(request.number),
+                false => waiting_on_parent(request.number),
+            };
+            (Outcome::Held(said), Some(request.number))
         }
         Err(error) => {
             eprintln!(

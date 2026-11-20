@@ -178,16 +178,21 @@ fn took(daemon: &Daemon, agent: &str, taken: &[(String, String)]) {
     };
     // A led session's pilot answers with `session_send`, whose key names it; another session's
     // message answers nothing.
+    // A pilot of another machine's too, through its daemon.
+    let remote = crate::across::caller_of(daemon, &found, "led");
+    let pilot = match found.led {
+        true => found.launched_by.clone(),
+        false => remote,
+    };
     let from_pilot = |id: &str| {
-        found
-            .launched_by
+        pilot
             .as_ref()
             .is_some_and(|pilot| id.starts_with(&format!("session-{pilot}-")))
     };
     let answering = found.waiting_on_answer
-        && taken.iter().any(|(k, id)| {
-            k == "parent" || k == "user" || (k == "session" && found.led && from_pilot(id))
-        });
+        && taken
+            .iter()
+            .any(|(k, id)| k == "parent" || k == "user" || (k == "session" && from_pilot(id)));
     let open =
         |to| crate::tree::unanswered_to(daemon, agent, to).is_ok_and(|open| !open.is_empty());
     let still = answering && found.parent.is_none() && (open("user") || open("pilot"));

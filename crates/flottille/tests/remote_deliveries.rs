@@ -16,13 +16,17 @@ use flottille_link::{Call, Deliver, MachineMessage};
 use serde_json::{Value, json};
 
 /// The fake agents of `server` play `turns` (`crates/flottille-fake-agent`).
-fn script(server: &Machine, turns: Value) {
+pub(crate) fn script(server: &Machine, turns: Value) {
     server.user.fake_script(json!({"turns": turns}));
 }
 
 /// A child of `pc`'s root started on `server` with `brief`: the child's id there, the launch's
 /// name, and the root's MCP session.
-fn child_on_server(pc: &Machine, server: &Machine, brief: &str) -> (String, String, Mcp) {
+pub(crate) fn child_on_server(
+    pc: &Machine,
+    server: &Machine,
+    brief: &str,
+) -> (String, String, Mcp) {
     pc.wait_for_offer("server", 12);
     let (_root, mcp) = pc.root("auto");
     let answer = launched(
@@ -50,23 +54,23 @@ fn launch_in(text: &str) -> String {
 }
 
 /// `machine`'s daemon stopped: the machine is off until `on`.
-fn off(machine: &Machine) {
+pub(crate) fn off(machine: &Machine) {
     let stopped = machine.user.run(&["daemon", "stop"]);
     assert!(stopped.status.success(), "{}", machine.log());
 }
 
 /// `machine`'s daemon started again on the same folders.
-fn on(machine: &Machine) {
+pub(crate) fn on(machine: &Machine) {
     machine.user.status();
 }
 
 /// Lets the turn the fake agents of `machine` hold go on.
-fn release(machine: &Machine) {
+pub(crate) fn release(machine: &Machine) {
     std::fs::write(machine.user.path("fake/release"), "").unwrap();
 }
 
 /// Waits until a fake agent of `machine` was answered `text` by one of its tools.
-fn answered(machine: &Machine, text: &str) {
+pub(crate) fn answered(machine: &Machine, text: &str) {
     eventually(&format!("a tool answering {text}"), || {
         machine
             .user
@@ -77,7 +81,7 @@ fn answered(machine: &Machine, text: &str) {
 }
 
 /// How many prompts `machine`'s fake agents were sent holding `text`.
-fn prompts_with(machine: &Machine, text: &str) -> usize {
+pub(crate) fn prompts_with(machine: &Machine, text: &str) -> usize {
     machine
         .prompts()
         .iter()
@@ -131,11 +135,15 @@ fn deliveries_kept_for_a_machine_arrive_in_order_and_once() {
     );
     let (_child, _launch, _mcp) = child_on_server(&pc, &server, "Write the tests of the export.");
     prompted(&server, "Write the tests of the export.");
+    // pc stays linked, so the question goes to it, but takes nothing until it starts again: both
+    // wait on server, kept (a question asked while pc is off would go to server's user).
+    std::fs::write(pc.user.path("stopping"), "").unwrap();
 
-    off(&pc);
     release(&server);
     answered(&server, "Your report went to your parent");
     a_while();
+    off(&pc);
+    std::fs::remove_file(pc.user.path("stopping")).unwrap();
     on(&pc);
 
     pc.wait_for("server");

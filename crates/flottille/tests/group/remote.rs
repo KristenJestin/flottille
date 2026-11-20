@@ -19,6 +19,8 @@ mod connection_share;
 mod connections;
 #[path = "../mcp.rs"]
 mod mcp;
+#[path = "../remote_asks.rs"]
+mod remote_asks;
 #[path = "../remote_code.rs"]
 mod remote_code;
 #[path = "../remote_deliveries.rs"]
