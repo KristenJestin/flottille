@@ -391,7 +391,30 @@ pub(crate) async fn serve(remote: Arc<Remote>, link: Link, received: Received, g
     let launch = named
         .as_deref()
         .and_then(|named| crate::launches::open(&daemon, &hex(from.as_bytes()), named));
-    if launch.is_none() && !on() {
+    // Commits coming back: only for a launch this machine sent to that very machine.
+    let back = match &git {
+        Git::Offer(offer) if offer.back => Some(offer.launch.clone()),
+        _ => None,
+    };
+    if let Some(back) = &back
+        && !on()
+    {
+        let sent = daemon
+            .read(|store| {
+                store.launches(
+                    "out",
+                    Some(&hex(from.as_bytes())),
+                    flottille_core::store::LaunchFilter::Named(back),
+                )
+            })
+            .is_ok_and(|sent| sent.iter().any(|launch| launch.state != "refused"));
+        if !sent {
+            received.answer(Err(format!(
+                "launch {back} was not sent to {name}: no commits come back for it"
+            )));
+            return;
+        }
+    } else if launch.is_none() && !on() {
         received.answer(Err(match named {
             Some(named) => {
                 format!(

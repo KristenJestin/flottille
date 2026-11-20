@@ -52,7 +52,7 @@ pub struct Launch {
     pub caller: String,
     pub kind: String,
     pub project: String,
-    /// `held`, `accepted`, `started` or `refused`.
+    /// `held`, `accepted`, `started` or `refused`; `ended`, for `out`, once its end came back.
     pub state: String,
     pub request: Option<u64>,
     pub agent: Option<String>,
@@ -61,6 +61,25 @@ pub struct Launch {
     /// workspace is removed, as a later one may take its name and its id.
     pub workspace_id: Option<i64>,
     pub asked: Value,
+    pub at: u64,
+}
+
+/// A message kept for another machine until it takes it (`outbox`): a delivery for one of its
+/// agents, or a message to a session there (`docs/remote.md`, "Deliveries across machines").
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Outgoing {
+    /// Its order among those kept: they are sent in it.
+    pub seq: i64,
+    /// The idempotent id the other machine stores it under.
+    pub id: String,
+    /// The other machine's key, and its name when the message was kept.
+    pub machine: String,
+    pub name: String,
+    pub launch: String,
+    /// The machine message, as JSON.
+    pub message: Value,
+    /// Whether the commits of the launch go back first, the message then naming where they came.
+    pub back: bool,
     pub at: u64,
 }
 
@@ -912,6 +931,22 @@ const MIGRATIONS: &[&str] = &[
     -- The store's id of the workspace a launch's code was made into (`workspace` is its name),
     -- until that workspace is removed: a later one may take the name, and the id.
     ALTER TABLE launches ADD COLUMN workspace_id INTEGER;
+",
+    "
+    -- What this machine keeps for another until it takes it (`docs/remote.md`, \"Deliveries
+    -- across machines\"): a delivery for an agent there, or a message to a session there, sent in
+    -- the order of `seq`, once each (`id`), and forgotten once taken, or after 30 days.
+    CREATE TABLE outbox (
+        seq     INTEGER PRIMARY KEY AUTOINCREMENT,
+        id      TEXT NOT NULL UNIQUE,
+        machine TEXT NOT NULL,
+        name    TEXT NOT NULL,
+        launch  TEXT NOT NULL,
+        message TEXT NOT NULL,
+        back    INTEGER NOT NULL DEFAULT 0,
+        at      INTEGER NOT NULL
+    ) STRICT;
+    CREATE INDEX outbox_by_machine ON outbox (machine, seq);
 ",
 ];
 
@@ -3227,6 +3262,94 @@ impl Store {
         .collect()
     }
 
+    /// Ends the launch `out` `launch` to `machine`: the session it started there ended, and counts
+    /// in no cap here any more.
+    pub fn end_launch(&mut self, machine: &str, launch: &str) -> Result<()> {
+        self.connection.execute(
+            "UPDATE launches SET state = 'ended' WHERE way = 'out' AND machine = ?1 \
+             AND launch = ?2 AND state != 'refused'",
+            params![machine, launch],
+        )?;
+        Ok(())
+    }
+
+    /// Keeps a message for another machine, after those kept before it; one of an id kept already
+    /// is not kept again.
+    pub fn keep_outgoing(&mut self, outgoing: &Outgoing) -> Result<()> {
+        self.connection.execute(
+            "INSERT OR IGNORE INTO outbox (id, machine, name, launch, message, back, at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                outgoing.id,
+                outgoing.machine,
+                outgoing.name,
+                outgoing.launch,
+                outgoing.message.to_string(),
+                outgoing.back,
+                outgoing.at as i64,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// The messages kept for `machine` (any, when `None`), in the order they are sent.
+    pub fn outgoing(&self, machine: Option<&str>) -> Result<Vec<Outgoing>> {
+        let mut statement = self.connection.prepare_cached(
+            "SELECT seq, id, machine, name, launch, message, back, at FROM outbox \
+             WHERE ?1 IS NULL OR machine = ?1 ORDER BY seq",
+        )?;
+        let rows = statement.query_map(params![machine], |row| {
+            Ok((
+                Outgoing {
+                    seq: row.get(0)?,
+                    id: row.get(1)?,
+                    machine: row.get(2)?,
+                    name: row.get(3)?,
+                    launch: row.get(4)?,
+                    message: Value::Null,
+                    back: row.get(6)?,
+                    at: row.get::<_, i64>(7)? as u64,
+                },
+                row.get::<_, String>(5)?,
+            ))
+        })?;
+        rows.map(|row| {
+            let (mut outgoing, message) = row?;
+            outgoing.message = serde_json::from_str(&message)?;
+            Ok(outgoing)
+        })
+        .collect()
+    }
+
+    /// The message kept as `id` is now `message`, its commits gone back already.
+    pub fn sent_back_outgoing(&mut self, id: &str, message: &Value) -> Result<()> {
+        self.connection.execute(
+            "UPDATE outbox SET message = ?2, back = 0 WHERE id = ?1",
+            params![id, message.to_string()],
+        )?;
+        Ok(())
+    }
+
+    /// Forgets the message kept as `id`: the other machine took it.
+    pub fn forget_outgoing(&mut self, id: &str) -> Result<()> {
+        self.connection
+            .execute("DELETE FROM outbox WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    /// Forgets the messages kept since before `before`, and gives them.
+    pub fn drop_outgoing_before(&mut self, before: u64) -> Result<Vec<Outgoing>> {
+        let old: Vec<Outgoing> = self
+            .outgoing(None)?
+            .into_iter()
+            .filter(|outgoing| outgoing.at < before)
+            .collect();
+        for outgoing in &old {
+            self.forget_outgoing(&outgoing.id)?;
+        }
+        Ok(old)
+    }
+
     /// Forgets a launch.
     pub fn forget_launch(&mut self, way: &str, machine: &str, launch: &str) -> Result<()> {
         self.connection.execute(
@@ -3871,8 +3994,8 @@ impl Store {
     pub fn live_children(&self, project: &str) -> Result<usize> {
         // A child another machine launched here has no parent here (one whose code is on its way
         // counts already), and one an agent of this machine launched on another counts while its
-        // parent lives (`docs/remote.md`, "Starting
-        // a session on another machine").
+        // parent lives, until its end comes back (`docs/remote.md`, "Starting a session on another
+        // machine").
         let count: u64 = self.connection.query_row(
             "SELECT (SELECT count(*) FROM agents WHERE project = ?1 \
              AND state NOT IN ('ended', 'failed') AND (parent IS NOT NULL OR id IN \
@@ -3881,7 +4004,8 @@ impl Store {
              AND project = ?1 AND agent IS NULL AND state IN ('held', 'accepted')) \
              + (SELECT count(*) FROM launches JOIN agents ON agents.id = launches.caller \
              WHERE launches.way = 'out' AND launches.kind = 'child' AND launches.project = ?1 \
-             AND launches.state != 'refused' AND agents.state NOT IN ('ended', 'failed'))",
+             AND launches.state NOT IN ('refused', 'ended') \
+             AND agents.state NOT IN ('ended', 'failed'))",
             params![project],
             |row| row.get(0),
         )?;
@@ -8183,7 +8307,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("flottille.db");
         let old = Connection::open(&path).unwrap();
-        let previous = MIGRATIONS.len() - 1;
+        let previous = MIGRATIONS
+            .iter()
+            .position(|migration| migration.contains("ADD COLUMN workspace_id"))
+            .unwrap();
         for migration in &MIGRATIONS[..previous] {
             old.execute_batch(migration).unwrap();
         }
@@ -8210,6 +8337,46 @@ mod tests {
         let read = store.launches("in", None, LaunchFilter::All).unwrap();
         assert_eq!(read.len(), 1);
         assert_eq!(read[0].workspace_id, None);
+    }
+
+    fn kept(id: &str, machine: &str, at: u64) -> Outgoing {
+        Outgoing {
+            seq: 0,
+            id: id.into(),
+            machine: machine.into(),
+            name: "pc".into(),
+            launch: "l1".into(),
+            message: json!({"deliver": {"id": id}}),
+            back: false,
+            at,
+        }
+    }
+
+    #[test]
+    fn messages_kept_for_a_machine_are_given_in_order_and_kept_once() {
+        let mut store = Store::open_in_memory().unwrap();
+        store.keep_outgoing(&kept("b", "m1", 1)).unwrap();
+        store.keep_outgoing(&kept("a", "m1", 2)).unwrap();
+        store.keep_outgoing(&kept("c", "m2", 3)).unwrap();
+        // The same id again: kept once, at its first place.
+        store.keep_outgoing(&kept("b", "m1", 4)).unwrap();
+
+        let ids = |store: &Store, machine| {
+            store
+                .outgoing(machine)
+                .unwrap()
+                .into_iter()
+                .map(|outgoing| outgoing.id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids(&store, Some("m1")), ["b", "a"]);
+        assert_eq!(ids(&store, None), ["b", "a", "c"]);
+        store.forget_outgoing("b").unwrap();
+        assert_eq!(ids(&store, Some("m1")), ["a"]);
+        let dropped = store.drop_outgoing_before(3).unwrap();
+        assert_eq!(dropped.len(), 1);
+        assert_eq!(dropped[0].id, "a");
+        assert_eq!(ids(&store, None), ["c"]);
     }
 
     #[test]

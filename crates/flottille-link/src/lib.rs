@@ -40,9 +40,9 @@ pub use control::{
 pub use hello::{Hello, NeedsUpdate, PeerState, choose};
 pub use invitation::{Invitation, InvitationAsk, InvitationError, Token};
 pub use link::{
-    Accepting, Answers, ConnectionShare, Endpoint, FRAME_LIMIT, Git, GitFetch, GitOffer, GitPlace,
-    GitRepository, LaunchAsk, Link, LinkError, MachineMessage, Message, Received, Secret, Share,
-    SharedEntry, Streamed, Traffic,
+    Accepting, Answers, Call, ConnectionShare, Deliver, Endpoint, FRAME_LIMIT, Git, GitFetch,
+    GitOffer, GitPlace, GitRepository, LaunchAsk, Link, LinkError, MachineMessage, Message,
+    Received, Secret, Share, SharedEntry, Streamed, Traffic,
 };
 pub use members::{
     Action, Change, ChangeHash, ListError, MANAGING_HEADROOM, MOST_CHANGES, Member, MemberList,

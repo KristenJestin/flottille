@@ -662,6 +662,11 @@ impl Remote {
         tokio::spawn(tell(link.clone(), self.told_addresses()));
         tokio::spawn(offer(link.clone(), self.offered.subscribe()));
         self.offer_now.notify_one();
+        // What was kept for that machine while it was off goes now, in order.
+        if let Some(daemon) = self.daemon() {
+            let machine: String = key.iter().map(|byte| format!("{byte:02x}")).collect();
+            crate::across::send_kept(&daemon, &machine);
+        }
         tokio::spawn(serve(self.clone(), link, name, generation));
     }
 
@@ -1191,6 +1196,24 @@ async fn serve(remote: Arc<Remote>, link: Link, name: String, generation: u64) {
                     link.peer(),
                     received,
                     asked,
+                ));
+            }
+            Message::Machine(MachineMessage::Deliver(deliver)) => {
+                let deliver = deliver.clone();
+                tokio::spawn(crate::across::serve_deliver(
+                    remote.clone(),
+                    link.peer(),
+                    received,
+                    deliver,
+                ));
+            }
+            Message::Machine(MachineMessage::Call(call)) => {
+                let call = call.clone();
+                tokio::spawn(crate::across::serve_call(
+                    remote.clone(),
+                    link.peer(),
+                    received,
+                    call,
                 ));
             }
             // Kept apart by the link's protocol name: a client's request on a machine link is

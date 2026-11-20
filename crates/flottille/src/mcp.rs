@@ -2371,7 +2371,12 @@ async fn played_in(
     };
     // A session named by its title is the session of its id from here on, for the gate, the leave
     // and the request alike (`session_name`).
-    let (args, unnamed) = if grant.tools.contains(&tool) && !replaced && removed.is_none() {
+    // A session this agent started on another machine is named by its id, which is not here.
+    let (args, unnamed) = if grant.tools.contains(&tool)
+        && !replaced
+        && removed.is_none()
+        && crate::across::aimed(daemon, &grant.agent, tool, &args).is_none()
+    {
         match crate::session_name::resolve(daemon, grant, tool, args.clone()) {
             Ok(named) => (named, None),
             Err(refused) => (args, Some(refused)),
@@ -2744,14 +2749,22 @@ fn verdict_of(
     if tool == "web" {
         return crate::web::classify(daemon, grant, args);
     }
-    if tool == "session_send" {
+    // A session this agent started on another machine: judged as one it started here.
+    let across = crate::across::aimed(daemon, &grant.agent, tool, args);
+    if tool == "agent_stop" && across.as_ref().is_some_and(|launch| launch.kind == "led") {
+        return gate::end_led();
+    }
+    if tool == "session_send" && across.is_none() {
         match crate::tree::needs_leave(daemon, grant, args) {
             Err(why) => return gate::Verdict::Deny(why),
             Ok(true) => return gate::session_leave(grant, args),
             Ok(false) => {}
         }
     }
-    if tool == "session_read" && crate::session_read::needs_leave(daemon, grant, args) {
+    if tool == "session_read"
+        && across.is_none()
+        && crate::session_read::needs_leave(daemon, grant, args)
+    {
         return gate::read_leave();
     }
     if tool == "agent_stop" && crate::tree::ends_session(daemon, grant, args) {

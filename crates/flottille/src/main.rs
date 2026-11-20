@@ -2,6 +2,7 @@
 #![recursion_limit = "256"]
 
 mod acp;
+mod across;
 mod actions;
 mod adf;
 mod agent_command;

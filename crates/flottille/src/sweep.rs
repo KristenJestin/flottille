@@ -43,6 +43,7 @@ pub async fn run(daemon: Arc<Daemon>, mut stopping: watch::Receiver<bool>) {
 
 pub fn sweep(daemon: &Arc<Daemon>) {
     deliveries::fall_back(daemon);
+    crate::across::drop_old(daemon);
     tree::end_late_reporters(daemon);
     tree::remind_integrated_due(daemon);
     crate::subscriptions::sweep(daemon);

@@ -2581,7 +2581,9 @@ entry, its project and the agent's reason) or `unchecked` (`run.agent_folders_un
 the agent, a child's too, ended in a place too large for the daemon to check all its agent folders
 after it, `text` says which and where) or `put_back` (`run.agent_folders_put_back`: the put-back
 of a run's place, a child's too, put back or could not put back what was written in its agent
-folders, `text` says which and where they are kept). The daemon's own `unchecked` and `put_back`
+folders, `text` says which and where they are kept) or `dropped` (`remote.delivery_dropped`: a
+message kept for another machine was dropped, `text` says for whom and why; `agent`, `project` and
+`workspace` `null`). The daemon's own `unchecked` and `put_back`
 come with `agent` and `workspace` `null` when no agent of the store ran it. A pause that resumed since is `"resolved": true`, its
 `text` ending `It has resumed since.`; a request for a vault entry the user answered is
 `"resolved": true` too.
