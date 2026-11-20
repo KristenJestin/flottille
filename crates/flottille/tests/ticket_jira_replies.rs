@@ -679,6 +679,24 @@ fn a_mention_in_a_jira_comment_without_a_tracker_entry_is_refused() {
     assert!(jira.received().is_empty(), "{:?}", jira.received());
 }
 
+#[test]
+fn the_refusal_without_a_tracker_entry_says_how_to_get_one() {
+    let jira = Jira::with_comments(json!([]));
+    let user = user(&jira);
+    jira_with(&user, None);
+    script(&user, json!([]));
+    let mcp = root_in(&user);
+
+    let said = refused_at_once(
+        &user,
+        &mcp,
+        json!({"action": "comment", "ticket": "ABC-1",
+            "body": format!("[@Ana Example](mention:{ANA}) fixed")}),
+    );
+
+    assert!(said.contains("vault ask"), "{said}");
+}
+
 /// The requests of the fake site that were `method`, on a path that ends with `end`.
 fn sent(jira: &Jira, method: &str, end: &str) -> Vec<Received> {
     jira.received()
