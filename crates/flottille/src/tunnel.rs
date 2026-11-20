@@ -411,8 +411,10 @@ pub(crate) async fn serve(
     from: &str,
 ) {
     let id = accepted.id.clone();
-    let device = accepted.device.name.clone();
-    let signer = accepted.device.key;
+    // A peer's public key, the one that signed the request: not this machine's device key.
+    let peer = &accepted.device;
+    let device = peer.name.clone();
+    let signer = peer.key;
     let refuse = |code: &str, why: String| Answer::error(Some(id.clone()), code, why);
     let Some(daemon) = remote.daemon() else {
         let _ = answer
