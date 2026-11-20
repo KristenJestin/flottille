@@ -184,3 +184,33 @@ fn nothing_is_toasted_for_the_session_the_window_shows(cx: &mut TestAppContext) 
     );
     assert!(!has("toast-2", cx));
 }
+
+#[gpui_kit::test]
+fn settings_say_when_this_desktop_shows_no_notifications(cx: &mut TestAppContext) {
+    // The harness's bus is a path nobody listens on: no session bus.
+    let user = user();
+    project(&user);
+    let (_, mcp) = session(&user, "hello");
+    let (shell, cx) = window(&user, cx);
+    cx.update(|window, _| window.activate_window());
+    held_number(mcp.call("fs_read", json!({"path": ".env"})));
+    eventually("the daemon knows it has no desktop", || {
+        user.call("notifications.status", json!({})).unwrap()["desktop"]["shows"] == false
+    });
+
+    cx.update(|window, cx| window.click("settings", cx));
+    until(&shell, cx, "the settings page is shown", |cx| {
+        shell.read_with(cx, |s, cx| s.main().read(cx).settings_page().is_some())
+    });
+    cx.update(|window, cx| window.click("settings-tabs-general", cx));
+
+    until(&shell, cx, "the line of the desktop", |cx| {
+        has("desktop-notifications", cx)
+    });
+    assert_eq!(
+        label("desktop-notifications", cx).as_deref(),
+        Some("This desktop shows no notifications")
+    );
+    settle(cx);
+    assert_eq!(frames_pending(cx), 0, "at rest with the line shown");
+}
