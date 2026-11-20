@@ -563,6 +563,8 @@ pub(crate) async fn copy_of(
     daemon: &Daemon,
     name: &str,
 ) -> Result<(Value, zeroize::Zeroizing<String>), Failure> {
+    // Its metadata and its secret of one moment: a Save of it in progress ends first.
+    let _writing = writing(name).await;
     let Some(entry) = daemon
         .read(|store| store.vault_entries())?
         .into_iter()
@@ -730,7 +732,7 @@ pub async fn receive(
 
 /// The user's Share of the entry `name` from an agent's connection request: every project's from
 /// now on, the rest of it as it was. A worklog's entry stays its project's alone.
-pub fn shared(daemon: &Daemon, name: &str) -> Result<Value, Failure> {
+pub async fn shared(daemon: &Daemon, name: &str) -> Result<Value, Failure> {
     rewritten(daemon, name, |entry| {
         if let Some(bound) = entry.bound.as_deref().filter(|b| b.starts_with("worklog:")) {
             return Err(Failure::refused(format!(
@@ -742,24 +744,29 @@ pub fn shared(daemon: &Daemon, name: &str) -> Result<Value, Failure> {
         entry.project = None;
         Ok(())
     })
+    .await
 }
 
 /// The user's Bind of the entry `name` from an agent's connection request: its `url` becomes
 /// `origin`, the address the request's connection sends it to, read by the daemon; the rest of
 /// it as it was.
-pub fn bound_to(daemon: &Daemon, name: &str, origin: &str) -> Result<Value, Failure> {
+pub async fn bound_to(daemon: &Daemon, name: &str, origin: &str) -> Result<Value, Failure> {
     rewritten(daemon, name, |entry| {
         entry.url = Some(origin.to_owned());
         Ok(())
     })
+    .await
 }
 
-/// The entry `name`'s metadata changed by `change` and written, its secret untouched.
-fn rewritten(
+/// The entry `name`'s metadata changed by `change` and written, its secret untouched; after a
+/// Save of the same entry in progress, never between its read and its write (which would undo
+/// this change).
+async fn rewritten(
     daemon: &Daemon,
     name: &str,
     change: impl FnOnce(&mut Entry) -> Result<(), Failure>,
 ) -> Result<Value, Failure> {
+    let _writing = writing(name).await;
     let mut entry = daemon
         .read(|store| store.vault_entries())?
         .into_iter()
@@ -1968,9 +1975,10 @@ mod tests {
             json!({"name": "tracker", "secret": "new-t0ken-Qd52"}),
         ));
         assert!(futures::poll!(set.as_mut()).is_pending());
-        let bound = bound_to(&daemon, "tracker", "https://notes.example.com");
+        let mut bound = std::pin::pin!(bound_to(&daemon, "tracker", "https://notes.example.com"));
+        assert!(futures::poll!(bound.as_mut()).is_pending());
         ok(set.await);
-        ok(bound);
+        ok(bound.await);
 
         let entries = listed(&daemon).await;
         assert_eq!(

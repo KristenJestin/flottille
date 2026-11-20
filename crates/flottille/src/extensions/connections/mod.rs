@@ -2065,7 +2065,7 @@ fn call(daemon: Arc<Daemon>, method: String, params: Value) -> super::Answered {
             "connection.login" => login(&daemon, params).await,
             "connection.proposed" => requests::proposed(&daemon, &params),
             "connection.share_entry" | "connection.bind_entry" => {
-                requests::widened(&daemon, &method, &params)
+                requests::widened(&daemon, &method, &params).await
             }
             method => Err(Failure::new(
                 "unknown-method",
