@@ -54,6 +54,9 @@ struct Found {
     read_only: Vec<(PathBuf, (u64, u64))>,
     /// The folders kept where they are, outermost first.
     pinned: Vec<PathBuf>,
+    /// Whether the daemon found it, and made `~/.ssh` (not `flottille doctor`, which probes
+    /// what a daemon would find: one would make a missing `~/.ssh`).
+    made: bool,
 }
 
 static FOUND: OnceLock<Option<Found>> = OnceLock::new();
@@ -111,6 +114,7 @@ pub fn find(make: bool) {
             git,
             read_only,
             pinned,
+            made: make,
         })
     });
 }
@@ -279,7 +283,11 @@ pub async fn judged(folder: &Path) -> Judged {
 fn folder_unlent(found: &Found) -> Option<String> {
     let ssh = &found.ssh;
     let shown = ssh.display();
-    if !std::fs::symlink_metadata(ssh).is_ok_and(|m| m.is_dir()) {
+    let meta = std::fs::symlink_metadata(ssh);
+    if !found.made && meta.is_err() {
+        return None;
+    }
+    if !meta.is_ok_and(|m| m.is_dir()) {
         return Some(format!(
             "{shown} is not a folder (a link, or missing): make it a folder of its own"
         ));
@@ -850,6 +858,7 @@ mod tests {
             git: Vec::new(),
             read_only: Vec::new(),
             pinned: Vec::new(),
+            made: false,
         };
         let wrapper = temp.path().join(".ssh/wrap");
         assert!(checked("ssh -i ~/.ssh/work -o IdentitiesOnly=yes", Some(&found)).is_ok());
