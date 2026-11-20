@@ -15,8 +15,10 @@ pub struct Snapshot {
     pub sessions: Vec<Session>,
     /// By project, then name.
     pub workspaces: Vec<Workspace>,
-    /// Oldest first.
+    /// The notification centre, oldest first, read and unread.
     pub bell: Vec<BellItem>,
+    /// How many are unread: those that need the user, and the others.
+    pub unread: (usize, usize),
     /// How many `project.changed` events the link has seen: a project's file was edited when it
     /// grows.
     pub project_changes: u64,
@@ -288,16 +290,50 @@ pub struct Session {
     pub led_from_elsewhere: bool,
 }
 
-/// One thing that waits for the user. Choosing it opens its session.
+/// One notification of the centre the daemon keeps (`notifications.list`, `docs/protocol.md`).
+/// Choosing it opens its session and marks it read.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BellItem {
-    /// `request-<n>`.
+    /// The daemon's number for it.
+    pub id: u64,
+    /// `n-<id>`: what its elements are named by.
     pub key: String,
-    /// The root agent of the session it belongs to.
-    pub session: String,
+    pub kind: String,
+    /// The root agent of the session it belongs to; none for what is no session's.
+    pub session: Option<String>,
+    /// Why it is there: `Request #3 waits for you`.
     pub label: String,
+    /// What about, one line, masked by the daemon.
     pub detail: String,
     pub at: u64,
+    pub read: bool,
+    /// What it waited for was answered.
+    pub resolved: bool,
+    /// It waits for the user's answer, rather than tells them of something.
+    pub needs_you: bool,
+}
+
+impl BellItem {
+    pub fn of(row: &Value) -> Option<BellItem> {
+        let id = row["id"].as_u64()?;
+        Some(BellItem {
+            id,
+            key: format!("n-{id}"),
+            kind: text(row, "kind"),
+            session: row["session"].as_str().map(str::to_owned),
+            label: text(row, "title"),
+            detail: text(row, "excerpt"),
+            at: number(row, "at"),
+            read: !row["read_at"].is_null(),
+            resolved: row["resolved"] == true,
+            needs_you: row["needs_you"] == true,
+        })
+    }
+
+    /// It waits for the user and has not been read.
+    pub fn waits(&self) -> bool {
+        self.needs_you && !self.read
+    }
 }
 
 /// A ticket or a pull request an agent created or changed: what `agent.tool_served` says of a
@@ -317,86 +353,17 @@ pub struct Forged {
     pub at: u64,
 }
 
-/// The longest an excerpt of a ticket's or a pull request's text is kept, on one line.
-const EXCERPT: usize = 120;
-
 impl Forged {
-    /// What an event says was done to a ticket or a pull request, when it says it: a read, a
-    /// call refused, failed or held, and the re-run of a pull request's checks are none.
+    /// What an event says was done to a ticket or a pull request, when it says it: the daemon's
+    /// reading of it, which is also what its notification says (`flottille_core::notification`).
     pub fn of(event: &flottille_protocol::Event) -> Option<Forged> {
-        let data = &event.data;
-        if event.name != "agent.tool_served" || data["outcome"] != "ok" {
-            return None;
-        }
-        let arguments = &data["arguments"];
-        let field = |name: &str| arguments[name].as_str().unwrap_or_default();
-        let number = arguments["number"]
-            .as_u64()
-            .map(|n| format!("#{n}"))
-            .unwrap_or_default();
-        let run = arguments["run"]
-            .as_u64()
-            .map(|n| format!("run {n}"))
-            .unwrap_or_default();
-        let ticket = match field("ticket") {
-            "" => "its ticket",
-            key => key,
-        };
-        // What it acted on, then the words it posted when it did.
-        let on = |what: &str, words: &[&str]| {
-            std::iter::once(what)
-                .chain(words.iter().copied().find(|w| !w.trim().is_empty()))
-                .filter(|part| !part.is_empty())
-                .collect::<Vec<_>>()
-                .join(": ")
-        };
-        let tool = data["tool"].as_str()?;
-        let (said, excerpt) = match (tool, field("action")) {
-            ("forge", "create") => ("Opened a pull request", field("title").to_owned()),
-            ("forge", "merge") => ("Merged a pull request", field("repository").to_owned()),
-            ("forge", "run") => ("Ran a pipeline", field("pipeline").to_owned()),
-            ("forge", "stop") => ("Stopped a pipeline", on(&run, &[field("repository")])),
-            ("forge", "step") if field("do") == "rerun" => {
-                ("Ran a job again", on(&run, &[field("step")]))
-            }
-            ("forge", "comment") => ("Commented on a pull request", on(&number, &[field("body")])),
-            ("forge", "reply") => ("Replied in a review thread", on(&number, &[field("body")])),
-            ("forge", "resolve") => match arguments["resolved"].as_bool() {
-                Some(false) => ("Opened a review thread again", number.clone()),
-                _ => ("Resolved a review thread", number.clone()),
-            },
-            ("forge", "edit") => (
-                "Edited a pull request",
-                on(&number, &[field("title"), field("body")]),
-            ),
-            ("tickets", "create") => ("Created a ticket", field("title").to_owned()),
-            ("tickets", "comment") => ("Commented on a ticket", on(ticket, &[field("body")])),
-            ("tickets", "edit") => (
-                "Edited a ticket",
-                on(ticket, &[field("title"), field("body")]),
-            ),
-            ("tickets", "close") => ("Closed a ticket", ticket.to_owned()),
-            ("tickets", "reopen") => ("Reopened a ticket", ticket.to_owned()),
-            ("tickets", "status") => ("Moved a ticket", on(ticket, &[field("status")])),
-            _ => return None,
-        };
-        let excerpt = excerpt.split_whitespace().collect::<Vec<_>>().join(" ");
-        let excerpt = match excerpt.char_indices().nth(EXCERPT) {
-            Some((cut, _)) => format!("{}…", &excerpt[..cut]),
-            None => excerpt,
-        };
-        // A pipeline's run is told with its link, which the daemon puts in the event when the
-        // forge gave it; it is added after the cut, which would lose its end.
-        let excerpt = match data["link"].as_str().filter(|_| said == "Ran a pipeline") {
-            Some(link) => format!("{excerpt} {link}"),
-            None => excerpt,
-        };
+        let forged = flottille_core::notification::forged(event)?;
         Some(Forged {
             seq: event.seq,
-            agent: data["agent"].as_str()?.to_owned(),
-            ticket: tool == "tickets",
-            said: said.to_owned(),
-            excerpt,
+            agent: forged.agent,
+            ticket: forged.ticket,
+            said: forged.said.to_owned(),
+            excerpt: forged.excerpt,
             at: event.at,
         })
     }
@@ -637,9 +604,8 @@ impl Snapshot {
     /// What waits for the user is the daemon's to say, as `flottille status` shows it:
     ///
     /// - a session is a root agent and its tree, in its root's place;
-    /// - the bell lists every request the user holds (`approval.list`), which opens the session of
-    ///   the root of the agent that asked, and every root's question waiting for the user's answer
-    ///   (`waiting_on_answer`), which opens its session;
+    /// - the bell is the daemon's notification centre (`set_notifications`), never made of the
+    ///   requests and questions here: what the rows of a session say it waits on is read from them;
     /// - a session needs the user (`NEEDS YOU`) when the daemon says its root `needs_user`;
     ///   otherwise it is running when an agent of its tree starts or works; otherwise it shows no
     ///   mark.
@@ -655,52 +621,24 @@ impl Snapshot {
             })
             .collect();
 
-        let mut bell = Vec::new();
+        // What each session waits on, for its row's words: the bell is the daemon's.
+        let mut asks: Vec<(String, &'static str)> = Vec::new();
         for request in list(answers.approvals, "requests") {
             let asker = request["agent"].as_str().unwrap_or_default();
-            let n = number(request, "number");
-            bell.push(BellItem {
-                key: format!("request-{n}"),
-                session: root_of(&parents, asker).to_owned(),
-                label: format!("Request #{n} waits for you"),
-                detail: crate::session_link::Request::of(request).asked(),
-                at: number(request, "created_at"),
-            });
+            asks.push((root_of(&parents, asker).to_owned(), "a permission"));
         }
         // An agent's request for a vault entry waits for the user as a held request does: its
-        // session's row says it and the bell rings, the card being in the rail's "Waiting for you".
+        // session's row says it, the card being in the rail's "Waiting for you".
         let mut needs_user = answers.needs_user.clone();
         for ask in list(answers.vault_asks, "asks") {
             let asker = ask["agent"].as_str().unwrap_or_default();
             let session = root_of(&parents, asker).to_owned();
             needs_user.insert(session.clone());
-            bell.push(BellItem {
-                key: format!("vault-{}", number(ask, "ask")),
-                session,
-                label: "Asks you for a vault entry".into(),
-                detail: text(ask, "name"),
-                at: number(ask, "at"),
-            });
+            asks.push((session, "a vault entry"));
         }
         for root in agents.iter().filter(|agent| asks_the_user(agent)) {
-            let id = text(root, "id");
-            let open = answers.questions.get(&id).map_or(&[][..], Vec::as_slice);
-            // Its open questions each, or one item while the tree has not been read yet.
-            let open = match open {
-                [] => &[OpenQuestion::default()][..],
-                open => open,
-            };
-            for question in open {
-                bell.push(BellItem {
-                    key: format!("question-{id}-{}", question.seq),
-                    label: "Asks you a question".into(),
-                    detail: question.text.clone(),
-                    at: question.at,
-                    session: id.clone(),
-                });
-            }
+            asks.push((text(root, "id"), "a question"));
         }
-        bell.sort_by_key(|item| item.at);
 
         let ended = |agent: &Value| matches!(agent["state"].as_str(), Some("ended" | "failed"));
         let final_ids: HashSet<&str> = agents
@@ -871,14 +809,8 @@ impl Snapshot {
                         .get(id.as_str())
                         .map(|(said, _)| said.clone())
                         .unwrap_or_else(|| "Waiting".to_owned()),
-                    Some(_) => match bell.iter().find(|item| item.session == id) {
-                        Some(item) if item.key.starts_with("request-") => {
-                            "Needs you: a permission".to_owned()
-                        }
-                        Some(item) if item.key.starts_with("vault-") => {
-                            "Needs you: a vault entry".to_owned()
-                        }
-                        Some(_) => "Needs you: a question".to_owned(),
+                    Some(_) => match asks.iter().find(|(session, _)| session == id) {
+                        Some((_, what)) => format!("Needs you: {what}"),
                         None => "Needs you".to_owned(),
                     },
                 };
@@ -962,13 +894,24 @@ impl Snapshot {
             projects,
             sessions,
             workspaces,
-            bell,
+            bell: Vec::new(),
+            unread: (0, 0),
             project_changes: 0,
             roots: parents
                 .keys()
                 .map(|id| ((*id).to_owned(), root_of(&parents, id).to_owned()))
                 .collect(),
         }
+    }
+
+    /// Takes the notification centre as `notifications.list` answered it.
+    pub fn set_notifications(&mut self, answer: &Value) {
+        self.bell = list(answer, "notifications")
+            .iter()
+            .filter_map(BellItem::of)
+            .collect();
+        let unread = |key: &str| number(&answer["unread"], key) as usize;
+        self.unread = (unread("needs_you"), unread("new"));
     }
 
     /// The session an agent belongs to: its tree's root, itself when it is not known.
@@ -1062,6 +1005,30 @@ mod tests {
     }
 
     #[test]
+    fn the_bell_is_the_notifications_the_daemon_kept_with_their_counts() {
+        let mut snapshot = Snapshot::default();
+        snapshot.set_notifications(&json!({"unread": {"needs_you": 2, "new": 5},
+            "notifications": [
+            {"id": 7, "at": 30, "kind": "request", "session": "r1", "project": "app",
+                "workspace": null, "title": "Request #3 waits for you",
+                "excerpt": "Read .env", "read_at": null, "resolved": false,
+                "needs_you": true},
+            {"id": 8, "at": 40, "kind": "report", "session": null, "project": null,
+                "workspace": null, "title": "Reported", "excerpt": "", "read_at": 41,
+                "resolved": false, "needs_you": false}]}));
+        assert_eq!(snapshot.unread, (2, 5));
+        assert_eq!(snapshot.bell.len(), 2);
+        let first = &snapshot.bell[0];
+        assert_eq!(first.key, "n-7");
+        assert_eq!(first.session.as_deref(), Some("r1"));
+        assert_eq!(first.label, "Request #3 waits for you");
+        assert_eq!(first.detail, "Read .env");
+        assert!(first.waits() && !first.read && !first.resolved);
+        let second = &snapshot.bell[1];
+        assert!(second.read && second.session.is_none() && !second.waits());
+    }
+
+    #[test]
     fn a_session_whose_root_ended_or_failed_is_ended() {
         let snapshot = build(
             json!({"agents": [agent("r1", None, "ended", Some("login")),
@@ -1079,7 +1046,7 @@ mod tests {
     }
 
     #[test]
-    fn a_request_of_a_child_marks_its_root_and_rings_the_bell() {
+    fn a_request_of_a_child_marks_its_root_and_says_what_it_waits_on() {
         let snapshot = build(
             json!({"agents": [agent("r1", None, "idle", Some("login")),
                 agent("c1", Some("r1"), "idle", Some("login"))]}),
@@ -1091,10 +1058,7 @@ mod tests {
         assert_eq!(snapshot.sessions.len(), 1, "a child is not a session");
         assert_eq!(snapshot.sessions[0].mark, Some(AgentState::NeedsYou));
         assert_eq!(snapshot.sessions[0].title, "Fix the login");
-        assert_eq!(snapshot.bell.len(), 1);
-        assert_eq!(snapshot.bell[0].session, "r1");
-        assert_eq!(snapshot.bell[0].label, "Request #3 waits for you");
-        assert_eq!(snapshot.bell[0].detail, "Read .env");
+        assert_eq!(snapshot.sessions[0].mark_said, "Needs you: a permission");
         assert_eq!(snapshot.root_of("c1"), "r1");
     }
 
@@ -1330,7 +1294,7 @@ mod tests {
         let agents = json!({"agents": [agent("r1", None, "idle", None)]});
         let said = build(agents.clone(), json!({"requests": []}), &["r1"]);
         assert_eq!(said.sessions[0].mark, Some(AgentState::NeedsYou));
-        assert!(said.bell.is_empty(), "the bell lists the requests only");
+        assert!(said.bell.is_empty(), "the bell is the centre's, set apart");
         let not_said = build(agents, json!({"requests": []}), &[]);
         assert_eq!(not_said.sessions[0].mark, None);
     }

@@ -649,6 +649,9 @@ pub enum Command {
         writer: String,
         leave_session: String,
     },
+    /// Marks notifications of the centre read (`notifications.read`): the window follows the
+    /// daemon's `notifications.changed`, not this command's answer.
+    ReadNotifications(Reading),
     /// Resumes a paused following of the session's agents, as a message of the user's does.
     ResumeFollowing {
         session: String,
@@ -769,6 +772,25 @@ pub enum CommandWrite {
     Remove {
         name: String,
     },
+}
+
+/// Which notifications of the centre are marked read.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Reading {
+    Ids(Vec<u64>),
+    /// Those of a session, by its root.
+    Session(String),
+    All,
+}
+
+impl Reading {
+    fn params(&self) -> Value {
+        match self {
+            Reading::Ids(ids) => json!({"ids": ids}),
+            Reading::Session(session) => json!({"session": session}),
+            Reading::All => json!({"all": true}),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1315,6 +1337,8 @@ pub enum Outcome {
         session: String,
         answer: RunAnswer,
     },
+    /// Notifications were marked read: nothing to draw, the centre's own event says it.
+    NotificationsRead,
     /// A subscription was cancelled, or a following resumed, as asked, or the daemon refused with
     /// why.
     SubscriptionCancelled {
@@ -3119,6 +3143,15 @@ fn perform(connect: &Connect, sign: Option<Sign>, command: Command, bounds: Boun
                 Ok(Err(why)) | Err(why) => Some(why),
             };
             Outcome::LeaveWithdrawn { session, refused }
+        }
+        Command::ReadNotifications(reading) => {
+            let _ = ask_alone(
+                connect,
+                "notifications.read",
+                reading.params(),
+                bounds.quick,
+            );
+            Outcome::NotificationsRead
         }
         Command::ResumeFollowing {
             session,
