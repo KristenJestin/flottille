@@ -2487,3 +2487,52 @@ fn the_window_draws_no_frame_at_rest_on_a_session_whose_rail_holds_a_vault_ask(
     assert_eq!(asked, 0, "no animation frame asked");
     assert_eq!(frames, 0, "the card and the line draw no frame at rest");
 }
+
+#[gpui_kit::test]
+fn what_is_new_and_its_mark_are_still_at_rest(cx: &mut TestAppContext) {
+    let user = User::new();
+    let this = std::process::Command::new(env!("CARGO_BIN_EXE_flottille"))
+        .arg("--version")
+        .output()
+        .unwrap();
+    let this = String::from_utf8_lossy(&this.stdout)
+        .split_whitespace()
+        .nth(1)
+        .unwrap()
+        .to_owned();
+    let folder = user.path("state/flottille");
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(
+        folder.join("whats-new.json"),
+        json!({"version": this, "since": "0.4.0-beta.103", "seen": false, "notes": [{
+            "version": this, "published_at": "2026-11-10T10:00:00Z",
+            "body": "### Features\n\n- **gui**: a mark (#1)\n\n### Fixes\n\n- **cli**: a fix (#2)"
+        }]})
+        .to_string(),
+    )
+    .unwrap();
+    let (shell, cx) = window(&user, cx);
+    let found = |cx: &mut VisualTestContext, id: &'static str| {
+        cx.update(|window, _| window.try_find(id.to_owned()).is_some_and(|f| f.visible()))
+    };
+    until(&shell, cx, "the mark appears", |cx| {
+        found(cx, "sidebar-whats-new")
+    });
+    settle(&shell, cx);
+    assert_eq!(
+        frames_at_rest(&shell, cx),
+        (0, 0),
+        "the mark, (frames drawn, frames asked)"
+    );
+
+    cx.update(|window, cx| window.click("sidebar-whats-new", cx));
+    until(&shell, cx, "the page lists the changes", |cx| {
+        found(cx, "whats-new-change-1")
+    });
+    settle(&shell, cx);
+    assert_eq!(
+        frames_at_rest(&shell, cx),
+        (0, 0),
+        "the page, (frames drawn, frames asked)"
+    );
+}
