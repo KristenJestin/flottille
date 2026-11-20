@@ -468,33 +468,7 @@ fn share_a_connection_of_the_machine_shown(cx: &mut TestAppContext) {
     notes_on(&server);
     let (shell, cx) = window_showing(&pc, "server", cx);
     open_page(&shell, cx);
-    let started = Instant::now();
-    let seen = std::cell::Cell::new(0u64);
     until(&shell, cx, "the server's connection is listed", |cx| {
-        // DIAGNOSTIC (#1134): what the page holds while it waits, every five seconds.
-        let now = started.elapsed().as_secs() / 5;
-        if now > seen.get() {
-            seen.set(now);
-            let section = section(&shell, cx);
-            let (listed, on) = section.read_with(cx, |s, _| {
-                (s.servers().map(|servers| servers.len()), s.on_count())
-            });
-            let machine = shell.read_with(cx, |s, _| s.machine_shown());
-            let ids: Vec<_> = [
-                "connections-switch",
-                "connection-servers",
-                "connection-blocks",
-                "connection-list-block",
-                "connection-list",
-                "connection-item-notes",
-                "connection-notes",
-                "connection-problem",
-            ]
-            .into_iter()
-            .map(|id| (id, present(cx, id), shown(cx, id), height(cx, id)))
-            .collect();
-            eprintln!("DIAG {now}: machine {machine:?} listed {listed:?} on {on:?} {ids:?}");
-        }
         present(cx, "connection-notes")
     });
     let section = section(&shell, cx);
