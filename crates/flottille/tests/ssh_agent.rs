@@ -47,8 +47,8 @@ fn socket_at(user: &User, agent: &str) -> PathBuf {
 
 /// A fake `ssh` first in the user's `PATH`: each call adds to `ssh-said` whether it reached the
 /// socket its `SSH_AUTH_SOCK` names (`reached <path>`, `refused <path>`, `no agent`), the value
-/// of `FLOTTILLE_PLANTED` it was given (`planted=…`), whether it could list the runtime folder
-/// (`runtime listed`, `runtime unlisted`) and connect to its bus (`bus reached`, `bus refused`),
+/// of `FLOTTILLE_PLANTED` it was given (`planted=…`), the session bus's address (`dbus=…`),
+/// whether it could list the runtime folder (`runtime listed`, `runtime unlisted`) and connect to its bus (`bus reached`, `bus refused`),
 /// and what git asked it to run on the remote (`asked git-upload-pack '…'`), and serves git's
 /// own call from
 /// `remotes/<name>`, whatever the host.
@@ -63,6 +63,7 @@ fn fake_ssh(user: User) -> User {
          elif {connect} \"$SSH_AUTH_SOCK\" 2>/dev/null; then echo \"reached $SSH_AUTH_SOCK\" >> '{said}'\n\
          else echo \"refused $SSH_AUTH_SOCK\" >> '{said}'; fi\n\
          echo \"planted=$FLOTTILLE_PLANTED\" >> '{said}'\n\
+         echo \"dbus=$DBUS_SESSION_BUS_ADDRESS\" >> '{said}'\n\
          if ls '{runtime}' >/dev/null 2>&1; then echo 'runtime listed' >> '{said}'\n\
          else echo 'runtime unlisted' >> '{said}'; fi\n\
          if {connect} '{runtime}/bus' 2>/dev/null; then echo 'bus reached' >> '{said}'\n\
@@ -405,6 +406,188 @@ fn an_allowed_push_runs_no_planted_ssh_command() {
     assert!(!user.path("planted-ran").exists(), "the planted ssh ran");
     assert!(pushed.contains("exited with code 0"), "{pushed}");
     assert!(remote_has(&user, "planted"));
+}
+
+/// A script at `path` that notes it ran in `<path>-ran`, then is the fake `ssh` of the user.
+fn marker(user: &User, path: &Path) {
+    script(
+        path,
+        &format!(
+            "echo ran >> '{}-ran'\nexec '{}' \"$@\"\n",
+            path.display(),
+            user.path("ssh-bin/ssh").display()
+        ),
+    );
+}
+
+#[test]
+fn an_allowed_push_runs_the_user_s_global_ssh_command() {
+    let (user, _agent, _bus) = user();
+    let own = user.path("own/ssh");
+    marker(&user, &own);
+    // The user's own, for several accounts of a forge: in their global settings.
+    std::fs::create_dir_all(user.path("home")).unwrap();
+    std::fs::write(
+        user.path("home/.gitconfig"),
+        format!("[core]\n\tsshCommand = {}\n", own.display()),
+    )
+    .unwrap();
+    let mcp = session(&user, SSH_REMOTE);
+
+    let pushed = done(mcp.call(
+        "run",
+        json!({"line": "git push origin HEAD:refs/heads/own"}),
+    ));
+
+    assert!(pushed.contains("exited with code 0"), "{pushed}");
+    assert!(
+        user.path("own/ssh-ran").exists(),
+        "the user's ssh did not run"
+    );
+    assert!(remote_has(&user, "own"));
+}
+
+#[test]
+fn an_allowed_push_keeps_the_daemon_s_git_ssh_command() {
+    let (user, _agent, _bus) = user();
+    let own = user.path("own/ssh");
+    marker(&user, &own);
+    let user = user.with_env("GIT_SSH_COMMAND", own.to_str().unwrap());
+    let mcp = session(&user, SSH_REMOTE);
+
+    let pushed = done(mcp.call(
+        "run",
+        json!({"line": "git push origin HEAD:refs/heads/own"}),
+    ));
+
+    assert!(pushed.contains("exited with code 0"), "{pushed}");
+    assert!(
+        user.path("own/ssh-ran").exists(),
+        "the user's ssh did not run"
+    );
+    assert!(remote_has(&user, "own"));
+}
+
+#[test]
+fn an_allowed_push_runs_no_ext_remote_a_run_set() {
+    let (user, _agent, _bus) = user();
+    project(&user, SSH_REMOTE);
+    let planted = user.path("planted/ext");
+    script(
+        &planted,
+        &format!("echo ran >> '{}'\nexit 1\n", user.path("ext-ran").display()),
+    );
+    // As a run could write them in the repository's settings.
+    let folder = user.path("work/app");
+    user.git(&folder, &["config", "protocol.ext.allow", "always"]);
+    user.git(
+        &folder,
+        &[
+            "config",
+            "remote.origin.pushurl",
+            &format!("ext::{}", planted.display()),
+        ],
+    );
+    let mcp = agent(&user);
+
+    let pushed = mcp.call(
+        "run",
+        json!({"line": "git push origin HEAD:refs/heads/ext"}),
+    );
+
+    assert!(
+        !user.path("ext-ran").exists(),
+        "the ext remote ran: {}",
+        pushed.text
+    );
+    assert!(!remote_has(&user, "ext"));
+}
+
+/// [`user`], whose daemon's session bus listens at `bus-outside/dbus-test`, outside the runtime
+/// folders (as `dbus-launch` makes one): the listening bus.
+fn user_with_bus_outside() -> (User, UnixListener, UnixListener) {
+    let (user, agent, _bus) = user();
+    let at = user.path("bus-outside/dbus-test");
+    std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+    let bus = UnixListener::bind(&at).unwrap();
+    let user = user.with_env(
+        "DBUS_SESSION_BUS_ADDRESS",
+        &format!("unix:path={},guid=0123456789abcdef", at.display()),
+    );
+    (user, agent, bus)
+}
+
+/// Whether a confined run of `mcp` starts and ends well.
+fn confined_runs(mcp: &Mcp) -> Result<(), String> {
+    let answer = mcp.call("run", json!({"line": "git status --short"}));
+    match !answer.error && answer.text.contains("exited with code 0") {
+        true => Ok(()),
+        false => Err(answer.text),
+    }
+}
+
+#[test]
+fn a_folder_at_the_session_bus_s_path_holds_no_later_run() {
+    if !common::user_namespaces() {
+        eprintln!("skipped: this kernel refuses user namespaces to this user");
+        return;
+    }
+    let (user, _agent, bus) = user_with_bus_outside();
+    let mcp = session(&user, SSH_REMOTE);
+    confined_runs(&mcp).unwrap();
+    // As a run that reaches the bus's folder could do: the socket made a folder.
+    let at = user.path("bus-outside/dbus-test");
+    drop(bus);
+    std::fs::remove_file(&at).unwrap();
+    std::fs::create_dir(&at).unwrap();
+
+    confined_runs(&mcp).unwrap();
+    let pushed = done(mcp.call(
+        "run",
+        json!({"line": "git push origin HEAD:refs/heads/folder"}),
+    ));
+
+    assert!(pushed.contains("exited with code 0"), "{pushed}");
+    assert!(
+        ssh_said(&user).contains(&"dbus=".to_owned()),
+        "{:?}",
+        ssh_said(&user)
+    );
+}
+
+#[test]
+fn a_socket_made_at_the_session_bus_s_path_gets_no_client() {
+    if !common::user_namespaces() {
+        eprintln!("skipped: this kernel refuses user namespaces to this user");
+        return;
+    }
+    let (user, _agent, bus) = user_with_bus_outside();
+    let mcp = session(&user, SSH_REMOTE);
+    confined_runs(&mcp).unwrap();
+    // As a run that reaches the bus's folder could do: a socket of its own in the bus's place.
+    let at = user.path("bus-outside/dbus-test");
+    drop(bus);
+    std::fs::remove_file(&at).unwrap();
+    let fake = UnixListener::bind(&at).unwrap();
+    fake.set_nonblocking(true).unwrap();
+
+    confined_runs(&mcp).unwrap();
+    let pushed = done(mcp.call(
+        "run",
+        json!({"line": "git push origin HEAD:refs/heads/fake"}),
+    ));
+
+    assert!(pushed.contains("exited with code 0"), "{pushed}");
+    assert!(
+        ssh_said(&user).contains(&"dbus=".to_owned()),
+        "{:?}",
+        ssh_said(&user)
+    );
+    assert_eq!(
+        fake.accept().map(|_| ()).unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock,
+        "a client reached the socket made in the bus's place"
+    );
 }
 
 #[test]
