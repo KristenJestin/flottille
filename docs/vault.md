@@ -397,15 +397,29 @@ helper and the forge command line's sign-in are theirs. Only these are added:
 
 - `core.hooksPath=/dev/null`;
 - `GIT_SSH_COMMAND`, so that a `core.sshCommand` a run wrote in the repository is not what signs
-  in: the user's own when they have one (the daemon's `GIT_SSH_COMMAND`, else their global
-  `core.sshCommand`, read at the daemon's start, for several accounts of one forge), else the
-  `ssh` found at the daemon's start, as for its own fetch (above);
+  in: the user's own when they have one (the daemon's `GIT_SSH_COMMAND`, else the
+  `core.sshCommand` of their own git settings as they apply to the repository pushed, an
+  `includeIf "gitdir:…"` or `"onbranch:…"` for several accounts of one forge included, read from
+  the files of those settings found at the daemon's start and never from the repository's), else
+  the `ssh` found at the daemon's start, as for its own fetch (above). A command of the user's
+  that names `ssh` alone runs that one; one that names another program runs it only when it is
+  in `~/.ssh` or only root may change it and its folders, and one with `-F` (another
+  configuration), `-I` (a library), an option that runs a program or anything the shell would
+  read as more than words lends the agent to no push (below);
 - `GIT_ALLOW_PROTOCOL` set to git's own transports (`ssh:https:http:git:file`), which wins over
   the `protocol.*.allow` settings: a URL a run set through a helper (`ext::<command>`, a
   `git-remote-<name>`) is not run. The push's remote is git's to resolve (the line's options, the
   branch's `pushRemote`, `remote.pushDefault`), and its URL a setting a run can write, so the
   transports allowed are git's own five rather than the one protocol of a remote. A push through
   a remote helper of the user's own is refused too;
+- what the repository's settings may name as a program of its transport is not run: an empty
+  `GIT_PROXY_COMMAND` and `GIT_ASKPASS`, which win over `core.gitProxy` (a `git://` remote) and
+  `core.askPass` (an HTTPS sign-in with no helper), `--receive-pack=git-receive-pack` on the
+  push's line, right after `push` (git takes the first `remote.<name>.receivepack` it reads, the
+  repository's, and runs it on this machine for a remote reached by its path; the gate refuses
+  the option on the agent's own line), and `push.negotiate=false`, so that no fetch runs the
+  remote's `uploadpack` first. The user's own `core.gitProxy` and `core.askPass` are not used by
+  such a push either;
 - no `DBUS_SESSION_BUS_ADDRESS` once the bus the daemon found at its start by a path outside the
   runtime folders is gone or replaced (above): what is at that path now may be a run's. The
   daemon's own use of the keyring (the vault) is unchanged: it still reaches the bus its
@@ -414,6 +428,47 @@ helper and the forge command line's sign-in are theirs. Only these are added:
 The project's and the workspace's variables are not applied (`docs/commands.md`, "The
 environment"). The other git reads made for a push, and the probes of a push's task (its `ready`
 and `url` commands), run in the sandbox.
+
+**What such a push reads is read-only to every confined command.** The push runs the user's `ssh`,
+with their agent, outside the sandbox: whatever a run could write into what `ssh` reads
+(`ProxyCommand`, `Match exec`, an `Include`d file) would run there with the user's keys. So in the
+private mount namespace of every command Flottille confines (above), `~/.ssh` is read-only whole,
+with what is below it, and so are the files of the user's own git settings found at the daemon's
+start (`GIT_CONFIG_GLOBAL` when set, else `$XDG_CONFIG_HOME/git/config` and `~/.gitconfig`) and
+those they include (`include.path`, `includeIf.*.path`, whatever their condition): those git
+reads at every push, and the daemon reads its user's `core.sshCommand` from. Each folder on the
+way to them that a command could rename or remove (its own folder is the user's, or one they may
+write) is bound onto itself there: a mount point is neither moved nor removed, so no folder on
+the way is renamed to put another file at the path. `~/.ssh` is the account's (the home of the
+user database, which `ssh` reads `~` as, whatever `HOME` says); the daemon makes it at its start
+(`0700`, as `ssh` would) when it is missing, since a folder that is not there could not be kept
+read-only. A command started at any time has them read-only from its start, and nothing it runs
+can unmount them (above).
+
+What that cannot hold is not protected file by file: the user's SSH agent is then **lent to no
+push**, no `SSH_AUTH_SOCK` and no `ssh` among the transports allowed (a push over SSH fails, saying
+why on its result), and, when it is what `ssh` itself reads, the daemon's own fetch is not lent
+the agent either. It is judged at each push, from the files as they are then, and `flottille
+doctor` says it in its warnings with how to fix it (`sandbox.ssh_lent` false in `--json`):
+
+- `~/.ssh` is not a folder of its own (a link), or no longer the one found at the daemon's start;
+- a link anywhere in `~/.ssh` (`ssh` follows it to a file a run can write: put the file itself in
+  `~/.ssh`), a file with a hard link elsewhere, or more than 10,000 entries;
+- an `Include` of `~/.ssh/config`, or of a file it includes, outside `~/.ssh` (`~` read as the
+  account's home, a relative path in `~/.ssh`, no `..`), or that names a variable, a token
+  (`%d`) or a class of characters, which Flottille does not read: move the file into `~/.ssh`;
+- a program the configuration runs or loads (`ProxyCommand`, `LocalCommand`, `KnownHostsCommand`,
+  `Match exec`, `PKCS11Provider`, `SecurityKeyProvider`, `XAuthLocation`; `none` is none), which
+  may itself be, or be found through the `PATH` in, a file a run writes. `ProxyJump` is not one;
+- the git settings include a file that is not there (a run could make it), one that was not there
+  at the daemon's start, or one with a hard link; a file of them is no longer the one found at the
+  start (git replaces the file it edits: `git config --global` is followed by a restart of the
+  daemon);
+- another mount of the same files (a bind mount of the home elsewhere, the top of a Btrfs volume
+  mounted beside its subvolumes), or a mount below them, which stays writable;
+- the kernel gives no user namespace to the commands Flottille confines (above);
+- the user's own `ssh` command runs a program a run could change, or reads another configuration
+  (above).
 
 The daemon's own runtime folder is denied with the rest: a `flottille daemon stop` run for an
 agent cannot read the daemon's lock, and refuses itself when the daemon does not answer, as a
@@ -466,16 +521,31 @@ The gaps, where the platform does not allow more:
 - a push the gate let through runs with what the repository's settings say, as the user's own
   push from that folder would: a script the gate never read may have changed them before
   (`credential.helper`, `core.fsmonitor`, `url.*.insteadOf`; not `core.sshCommand` nor a helper
-  URL, above), and that applies to the push, outside the sandbox, with the user's credentials. So
-  does what the user's `~/.ssh/config` runs (`ProxyCommand`, `Match exec`, an `Include`d file),
-  which **a confined command can still write**: `~/.ssh` is not read-only to it, and protecting
-  every file `ssh` reads against a hostile run is left to #1138. The gate judges the push's
-  line, not the repository it runs in: an accepted risk, decided so that a push the user allowed
-  signs in as theirs does;
+  URL, the transport's programs, above; `gpg.program` with `push.gpgSign` neither), and that
+  applies to the push, outside the sandbox, with the user's credentials. The gate judges the
+  push's line, not the repository it runs in: an accepted risk, decided so that a push the user
+  allowed signs in as theirs does;
+- a push the gate let through finds `git`, and the programs its settings name by a bare name
+  (`!gh auth git-credential`, a helper, `ssh` inside the user's own command), through the
+  daemon's `PATH`: a folder of it that a confined command can write (`~/.local/bin`, `~/bin`)
+  can hold one of a run's before the system's, which then runs outside the sandbox. The `ssh`
+  Flottille names itself is the one found at the start, whose links were followed then;
+- what the system's `ssh` configuration (`/etc/ssh/ssh_config` and what it includes) runs is
+  root's to say, and not judged;
+- `~/.ssh` being read-only to every confined command, the `ssh` of the daemon's own fetch adds no
+  host to `known_hosts` (`StrictHostKeyChecking accept-new` warns and goes on) and makes no
+  `ControlMaster` socket there, and a run cannot make a key or write the user's git settings
+  (`git config --global`); a push the gate let through, outside the sandbox, writes them as the
+  user's own;
+- a file protected at the daemon's start is protected at the path it had then: a command started
+  before the user replaced it (an editor that writes a new file, `git config --global`) still sees
+  the new one writable, so the push is lent nothing until the daemon restarts, which ends every
+  run. A process a run of an older Flottille left behind, outside its session and without its
+  marker, is not ended at the start, and has `~/.ssh` as that version left it;
 - the daemon's own fetch or listing of an SSH remote runs the user's `~/.ssh/config` with the
-  lent agent (`ProxyCommand`, `Match exec`), as a push does; and the remote's URL is read just
-  before the call, so a run that rewrites it in between sends that call to another host of the
-  same protocol;
+  lent agent, as a push does, under the same judgement; and the remote's URL is read just before
+  the call, so a run that rewrites it in between sends that call to another host of the same
+  protocol;
 - the daemon's own git still runs the filters and the `textconv` a repository's attributes and
   settings name (`filter.<name>.smudge`, `clean`, `process`, `diff.<name>.textconv`) when it
   checks a worktree out or reads a file: git has no switch that keeps them all off. They run
