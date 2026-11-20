@@ -296,14 +296,15 @@ async fn accept<C: Clock + Send + 'static>(
             let (welcome, member) = {
                 let mut hub = shared.hub.lock().unwrap();
                 let welcome = hub.welcome(&device, arriving.pinned());
-                // A device that is no member pairs. In a place kept for members it is not taken,
-                // and pair mode stays open.
+                // A device that pairs: one that is no member, or whose machine is a member's
+                // already (its hub forgotten on it), which spends pair mode all the same. In a place
+                // kept for members it is not taken, and pair mode stays open.
                 let welcome = match (welcome, arriving.pairing()) {
-                    (Err(_), Some(_)) if members_only => Err(Box::new((
+                    (_, Some(_)) if members_only => Err(Box::new((
                         "the hub is busy: try again in a moment".to_owned(),
                         false,
                     ))),
-                    (Err(_), Some(pairing)) => {
+                    (_, Some(pairing)) => {
                         let transcript = *arriving.transcript();
                         hub.pair(
                             &pairing.proposed,
