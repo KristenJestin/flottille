@@ -4114,6 +4114,7 @@ impl Render for BellList {
                                         .child(SharedString::from(project.clone())),
                                 )
                             })
+                            .test_support()
                             .into_any_element()
                     }
                     Entry::Row(BellRow { item, .. }) => {
