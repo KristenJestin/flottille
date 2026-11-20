@@ -1253,8 +1253,9 @@ fn code_sent_for_another_project_than_the_launch_s_is_refused() {
 
 #[test]
 fn a_launch_the_judge_denies_is_held_for_the_user_and_never_started() {
+    // A judge that will not allow it says to ask the user: it has no verdict that refuses.
     let denying = json!([{"say":
-        "{\"verdict\": \"deny\", \"reason\": \"Not for tonight.\"}"}]);
+        "{\"verdict\": \"ask\", \"reason\": \"Not for tonight.\"}"}]);
     let (_hub, pc, server) = pc_and_server(server_user(Some(denying)), Some(""));
     pc.wait_for_offer("server", 12);
     let (_root, mcp) = pc.root("auto");

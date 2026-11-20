@@ -30,8 +30,18 @@ use crate::tree::{LaunchKind, Slot};
 /// refused, so that a machine that sends launches and never their code fills no disk.
 const MOST_WAITING: usize = 4;
 
+/// The most launches of one machine, of any kind, that may wait here for the user's answer: past
+/// them, its next is refused, so that a machine fills no list of requests.
+const MOST_HELD: usize = 4;
+
 /// How long a launch may wait for its code before it is forgotten, with what came of it.
 const WAITING_FOR_CODE: Duration = Duration::from_secs(60 * 60);
+
+/// The longest title a launch of another machine may have, in characters: it is shown on a card.
+const LONGEST_TITLE: usize = 200;
+
+/// The longest branch name a launch of another machine may give, in bytes.
+const LONGEST_BRANCH: usize = 255;
 
 /// What an agent asked `agent_launch` to start on another machine.
 pub struct Asked {
@@ -56,6 +66,22 @@ fn kind_word(kind: LaunchKind) -> &'static str {
         LaunchKind::Led => "led",
         LaunchKind::Handed => "handed",
     }
+}
+
+/// Whether `id` is an agent's id as a machine names one: 1 to 64 letters, digits, dashes or
+/// underscores.
+fn agent_id(id: &str) -> bool {
+    (1..=64).contains(&id.len())
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// The agent a switch to Full the user signed names: one of the tree it switched.
+fn switched(switch: &str) -> Option<String> {
+    let request: flottille_link::Request = serde_json::from_str(switch).ok()?;
+    let params: Value = serde_json::from_str(&request.signed.params).ok()?;
+    params["agent"].as_str().map(str::to_owned)
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -141,12 +167,19 @@ pub async fn launch(daemon: &Arc<Daemon>, caller: &Agent, machine: &str, asked: 
     };
     let place = place_of(daemon, caller, &project)?;
     let branch = branch_of(&place[0].1).await.map_err(refused)?;
-    let tree = crate::tree::root_of(daemon, &caller.id);
+    let mut tree = crate::tree::root_of(daemon, &caller.id);
     let (mode, switch) = match crate::judge::mode(daemon, &caller.id) {
         GateMode::Ask => ("ask", None),
         GateMode::Auto => ("auto", None),
         GateMode::Full => match daemon.read(|store| store.full_switch(&tree)).ok().flatten() {
-            Some(switch) => ("full", Some(switch)),
+            Some(switch) => {
+                // Kept on the root, it may name any agent of the tree: the tree is named by
+                // that agent, which the other machine checks the switch against.
+                if let Some(named) = switched(&switch) {
+                    tree = named;
+                }
+                ("full", Some(switch))
+            }
             // Only the user's signed switch raises a launch on another machine to Full.
             None => ("auto", None),
         },
@@ -400,6 +433,30 @@ async fn judged(
             "the launch names no agent of {sender}'s: only an agent launches"
         ));
     }
+    // What the sender says goes on a card and to the judge: bounded before either reads it.
+    for id in [&asked.caller, &asked.tree] {
+        if !agent_id(id) {
+            return Err(format!(
+                "{:?} is not an agent's id: 1 to 64 letters, digits, dashes or underscores",
+                id.chars().take(64).collect::<String>()
+            ));
+        }
+    }
+    if asked.title.contains(|c: char| c.is_control()) {
+        return Err("a title is one line, of no control character".to_owned());
+    }
+    let chars = asked.title.chars().count();
+    if chars > LONGEST_TITLE {
+        return Err(format!(
+            "a title is at most {LONGEST_TITLE} characters, this one has {chars}"
+        ));
+    }
+    if asked.branch.len() > LONGEST_BRANCH || !crate::forge::branch_name(&asked.branch) {
+        return Err(format!(
+            "{:?} is not a branch name: git's rules, at most {LONGEST_BRANCH} bytes",
+            asked.branch.chars().take(64).collect::<String>()
+        ));
+    }
     let kind = match asked.kind.as_str() {
         "child" => LaunchKind::Child,
         "led" => LaunchKind::Led,
@@ -416,16 +473,27 @@ async fn judged(
     }
     let machine = hex(from.as_bytes());
     sweep(daemon, &machine).await;
-    let waiting = daemon
+    let launches = daemon
         .read(|store| store.launches("in", Some(&machine), LaunchFilter::All))
-        .map_err(|error| error.to_string())?
-        .into_iter()
+        .map_err(|error| error.to_string())?;
+    let waiting = launches
+        .iter()
         .filter(|launch| launch.agent.is_none() && launch.state != "refused")
         .count();
     if waiting >= MOST_WAITING {
         return Err(format!(
             "{sender} has {MOST_WAITING} launches waiting for their code already: send their \
              code first"
+        ));
+    }
+    let held = launches
+        .iter()
+        .filter(|launch| launch.state == "held")
+        .count();
+    if held >= MOST_HELD {
+        return Err(format!(
+            "{sender} has {MOST_HELD} launches waiting for the user already: the user answers \
+             them first"
         ));
     }
     let project = projects::load_project(daemon, &asked.project).map_err(|_| {
@@ -482,7 +550,14 @@ async fn judged(
         "ask" => GateMode::Ask,
         "full" => match &asked.switch {
             Some(switch)
-                if flottille_link::full_switch(switch, sender, &asked.tree, members).is_ok() =>
+                if flottille_link::full_switch(
+                    switch,
+                    sender,
+                    &asked.tree,
+                    members,
+                    crate::link::wall_now(),
+                )
+                .is_ok() =>
             {
                 GateMode::Full
             }
@@ -575,7 +650,7 @@ fn words(kind: LaunchKind, asked: &LaunchAsk, from: &str) -> Vec<String> {
 
 /// Forgets the launches of the machine `machine` that waited for their code too long, with what
 /// came of it.
-async fn sweep(daemon: &Daemon, machine: &str) {
+async fn sweep(daemon: &Arc<Daemon>, machine: &str) {
     let launches = daemon
         .read(|store| store.launches("in", Some(machine), LaunchFilter::All))
         .unwrap_or_default();
@@ -603,7 +678,106 @@ async fn sweep(daemon: &Daemon, machine: &str) {
                 .forget_launch("in", machine, &launch.launch)
                 .map(|()| ((), None))
         });
+        // Nothing of it is set up: what was made of its code goes with it.
+        if let Some(workspace) = launch.workspace.clone() {
+            remove_workspace(daemon, launch.project.clone(), workspace, None);
+        }
     }
+}
+
+/// Removes the workspace made of a launch's code that was refused or forgotten, once `agent`, its
+/// agent, has ended: what it holds is a copy of the sender's work, never this machine's.
+fn remove_workspace(daemon: &Arc<Daemon>, project: String, name: String, agent: Option<String>) {
+    let daemon = daemon.clone();
+    tokio::spawn(async move {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        while let Some(agent) = &agent
+            && tokio::time::Instant::now() < deadline
+            && !daemon
+                .read(|store| store.agent(agent))
+                .ok()
+                .flatten()
+                .is_none_or(|agent| {
+                    agent.state.is_final() && !crate::agents::stopping(&daemon, &agent.id)
+                })
+        {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let removed = async {
+            let workspace = daemon
+                .read(|store| store.workspace(&project, &name))
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "it is gone already".to_owned())?;
+            let losses = crate::workspaces::losses(&daemon, &project, &name)
+                .await
+                .map_err(|failure| failure.message)?;
+            let digest = crate::workspaces::digest(&workspace)
+                .await
+                .map_err(|failure| failure.message)?;
+            crate::workspaces::remove_with_project(
+                daemon.clone(),
+                &workspace,
+                Some((&losses, &digest)),
+            )
+            .await
+            .map_err(|failure| failure.message)
+        };
+        if let Err(why) = removed.await {
+            eprintln!(
+                "flottille daemon: the workspace {name} of project {project}, made of a launch \
+                 that did not start, is kept: {why}"
+            );
+        }
+    });
+}
+
+/// Refused when what `git` says of the code it sends is not the launch's: its project, one of its
+/// repositories, its branch.
+pub(crate) fn refuse_other_code(launch: &Launch, git: &flottille_link::Git) -> Result<(), String> {
+    use flottille_link::Git;
+    let asked: LaunchAsk = serde_json::from_value(launch.asked["asked"].clone())
+        .map_err(|error| format!("the launch cannot be read: {error}"))?;
+    let name = &launch.launch;
+    let (project, repositories, branch): (&str, Vec<&String>, Option<&str>) = match git {
+        Git::Has(has) => (&has.project, vec![&has.repository], None),
+        Git::Offer(offer) => (&offer.project, vec![&offer.repository], None),
+        Git::Place(place) => (
+            &place.project,
+            place.repositories.iter().collect(),
+            Some(&place.branch),
+        ),
+        Git::Fetch(_) => return Ok(()),
+    };
+    if project != launch.project {
+        return Err(format!(
+            "launch {name} is for project {}, not {project}: no code of another is taken for it",
+            launch.project
+        ));
+    }
+    let whole = matches!(git, Git::Place(_));
+    let mut given: Vec<&String> = repositories.clone();
+    given.sort();
+    let mut taken: Vec<&String> = asked.repositories.iter().collect();
+    taken.sort();
+    if repositories
+        .iter()
+        .any(|path| !asked.repositories.contains(path))
+        || (whole && given != taken)
+    {
+        return Err(format!(
+            "launch {name} takes the repositories {}, no other",
+            asked.repositories.join(", ")
+        ));
+    }
+    if let Some(branch) = branch
+        && branch != asked.branch
+    {
+        return Err(format!(
+            "launch {name} is on {}, not {branch}",
+            asked.branch
+        ));
+    }
+    Ok(())
 }
 
 /// The launch `launch` the machine `machine` sent, while it waits for its code: its gate did not
@@ -618,26 +792,19 @@ pub(crate) fn open(daemon: &Daemon, machine: &str, launch: &str) -> Option<Launc
         })
 }
 
-/// Keeps the name of the workspace made of `launch`'s code, before it is made: its setup is held
-/// while the launch is (`holds`).
-pub(crate) fn set_workspace(
-    daemon: &Daemon,
-    launch: &Launch,
-    workspace: &str,
-) -> Result<(), String> {
-    let mut launch = launch.clone();
-    launch.workspace = Some(workspace.to_owned());
-    write(daemon, &launch)
-}
-
-/// Whether `workspace` is made of the code of a launch held for the user: its setup waits.
+/// Whether the setup of `workspace` waits: made of code another machine sent, it runs its setup
+/// only as the launch that workspace was made for, once it is allowed (accepted by the gate or
+/// by the user). Held by default: a launch held, refused or forgotten, or none, runs nothing.
 pub(crate) fn holds(daemon: &Daemon, workspace: &flottille_core::workspace::Workspace) -> bool {
-    daemon
+    if workspace.repositories.iter().all(|r| r.laid.is_none()) {
+        return false;
+    }
+    !daemon
         .read(|store| store.launches("in", None, LaunchFilter::All))
         .unwrap_or_default()
         .iter()
         .any(|launch| {
-            launch.state == "held"
+            matches!(launch.state.as_str(), "accepted" | "started")
                 && launch.project == workspace.project
                 && launch.workspace.as_deref() == Some(workspace.name.as_str())
         })
@@ -647,6 +814,23 @@ pub(crate) fn holds(daemon: &Daemon, workspace: &flottille_core::workspace::Work
 /// it, or made to wait, with the user's request, when it is held. What `placed` says, with the
 /// agent's id and the request's number.
 pub(crate) async fn placed(
+    daemon: &Arc<Daemon>,
+    launch: Launch,
+    placed: Value,
+) -> Result<Value, String> {
+    let (project, workspace) = (
+        launch.project.clone(),
+        placed["workspace"].as_str().unwrap_or_default().to_owned(),
+    );
+    let started = with_agent(daemon, launch, placed).await;
+    // A workspace whose launch has no agent would wait for nothing: it goes.
+    if started.is_err() && !workspace.is_empty() {
+        remove_workspace(daemon, project, workspace, None);
+    }
+    started
+}
+
+async fn with_agent(
     daemon: &Arc<Daemon>,
     mut launch: Launch,
     mut placed: Value,
@@ -727,11 +911,27 @@ pub(crate) async fn placed(
         placed["request"] = request.number.into();
     } else {
         launch.state = "started".into();
-        tokio::spawn(crate::tree::brief_once_ready(daemon.clone(), agent.clone()));
     }
     write(daemon, &launch)?;
+    if launch.state == "started" {
+        go_on(daemon, &launch, &agent.id);
+    }
     placed["session"] = agent.id.clone().into();
     Ok(placed)
+}
+
+/// The setup of the workspace of `launch`, allowed now, goes on, and its agent `agent` is sent its
+/// first message once it is ready.
+fn go_on(daemon: &Arc<Daemon>, launch: &Launch, agent: &str) {
+    let workspace = launch.workspace.clone().unwrap_or_default();
+    if let Ok(Some(made)) = daemon.read(|store| store.workspace(&launch.project, &workspace))
+        && made.state() == flottille_core::workspace::State::Preparing
+    {
+        crate::workspaces::go_on_preparing(daemon, made.id);
+    }
+    if let Ok(Some(agent)) = daemon.read(|store| store.agent(agent)) {
+        tokio::spawn(crate::tree::brief_once_ready(daemon.clone(), agent));
+    }
 }
 
 /// The launch held by the user's request `number`, when it is one.
@@ -744,7 +944,8 @@ pub(crate) fn held_by_request(daemon: &Daemon, number: u64) -> Option<Launch> {
 }
 
 /// The user answered the request of a launch held for them: allowed, its workspace's setup goes
-/// on and its agent is sent its first message once it is ready; refused, its agent ends.
+/// on and its agent is sent its first message once it is ready; refused, its agent ends and its
+/// workspace is removed.
 pub(crate) fn decided(daemon: &Arc<Daemon>, mut launch: Launch, request: &Request, allowed: bool) {
     let Some(agent) = launch.agent.clone() else {
         return;
@@ -772,17 +973,13 @@ pub(crate) fn decided(daemon: &Arc<Daemon>, mut launch: Launch, request: &Reques
     }
     if !allowed {
         crate::tree::stop_tree(daemon, &agent, "the user refused its launch");
+        // Its setup never runs: the workspace made of its code goes once its agent ended.
+        if let Some(workspace) = launch.workspace.clone() {
+            remove_workspace(daemon, launch.project.clone(), workspace, Some(agent));
+        }
         return;
     }
-    let workspace = launch.workspace.clone().unwrap_or_default();
-    if let Ok(Some(made)) = daemon.read(|store| store.workspace(&launch.project, &workspace))
-        && made.state() == flottille_core::workspace::State::Preparing
-    {
-        crate::workspaces::go_on_preparing(daemon, made.id);
-    }
-    if let Ok(Some(agent)) = daemon.read(|store| store.agent(&agent)) {
-        tokio::spawn(crate::tree::brief_once_ready(daemon.clone(), agent));
-    }
+    go_on(daemon, &launch, &agent);
 }
 
 /// For an agent started here for an agent of another machine: that agent, its machine's name,

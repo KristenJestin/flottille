@@ -404,6 +404,13 @@ pub(crate) async fn serve(remote: Arc<Remote>, link: Link, received: Received, g
         }));
         return;
     }
+    // Only the launch's own code: its project, its repositories, its branch.
+    if let Some(launch) = &launch
+        && let Err(refused) = crate::launches::refuse_other_code(launch, &git)
+    {
+        received.answer(Err(refused));
+        return;
+    }
     if let Err(refused) = may_send_code(&remote, &from, &name) {
         received.answer(Err(refused));
         return;
@@ -695,10 +702,6 @@ async fn place_travels(
     }
     let branch = free_everywhere(&folders, &place.branch).await?;
     let workspace = free_name(daemon, &place.project, &branch)?;
-    // Known before it is made: a launch held for the user holds its setup from the first step.
-    if let Some(launch) = launch {
-        crate::launches::set_workspace(daemon, launch, &workspace)?;
-    }
     let asked = flottille_core::protocol::WorkspaceCreate {
         project: place.project.clone(),
         name: workspace.clone(),

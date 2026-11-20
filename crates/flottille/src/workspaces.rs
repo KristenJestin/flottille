@@ -719,8 +719,8 @@ pub struct Travelled {
     /// The machine it came from, as the base's note says it.
     pub from: String,
     pub repositories: BTreeMap<String, (String, String)>,
-    /// Whether its setup comes with it: only for a launch this machine's gate judged, which then
-    /// holds it until the launch is allowed (`launches::holds`).
+    /// Whether its setup comes with it: only for a launch this machine's gate judged, which runs
+    /// it only once the launch is allowed (`launches::holds`).
     pub setup: bool,
 }
 
@@ -1555,8 +1555,8 @@ async fn prepare_steps(
             })?;
             return Ok(());
         };
-        // The setup of another machine's launch held for the user waits for their answer, a
-        // start of the daemon included.
+        // Code another machine sent runs its setup only once its launch is allowed, a start of
+        // the daemon included: held otherwise, whatever became of the launch.
         if step.action != Action::Worktree && crate::launches::holds(daemon, &workspace) {
             return Ok(());
         }

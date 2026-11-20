@@ -1234,7 +1234,7 @@ impl ForgeCall {
 
 /// Whether `name` is one branch name by git's rules for a reference (`git check-ref-format`), and
 /// fit to be a path of the forge's API: the base is read there before it is written.
-fn branch_name(name: &str) -> bool {
+pub(crate) fn branch_name(name: &str) -> bool {
     !name.is_empty()
         && !name.starts_with(['-', '/'])
         && !name.ends_with(['/', '.'])
