@@ -1135,7 +1135,6 @@ fn address_line(
         .overflow_hidden()
         .whitespace_nowrap()
         .text_ellipsis()
-        .child(said.clone())
-        .test_support();
+        .child(said.clone());
     tipped_when_cut(line, said, window, cx)
 }
