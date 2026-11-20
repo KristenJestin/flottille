@@ -4798,6 +4798,109 @@ fn a_pull_request_runs_a_grouped_binary_for_any_file_of_its_folder() {
     );
 }
 
+/// The files of a crate with grouped test binaries: `Cargo.toml` names the binaries, each main of
+/// `tests/group/` declares the files it holds (`#1106`).
+fn grouped_crate() -> Vec<&'static str> {
+    vec![
+        "crates/flottille/Cargo.toml::[package]\nname = \"flottille\"\n\n[[test]]\nname = \"group_window_session\"\npath = \"tests/group/window_session.rs\"\n\n[[test]]\nname = \"group_agents\"\npath = \"tests/group/agents.rs\"\n",
+        "crates/flottille/tests/group/window_session.rs::#[path = \"../common/mod.rs\"]\nmod common;\n#[path = \"../window_conversation.rs\"]\nmod window_conversation;\n#[path = \"../window_cards.rs\"]\nmod window_cards;\n",
+        "crates/flottille/tests/group/agents.rs::#[path = \"../common/mod.rs\"]\nmod common;\n#[path = \"../agents.rs\"]\nmod agents;\n",
+        "crates/flottille/tests/common/mod.rs",
+        "crates/flottille/tests/window_conversation.rs",
+        "crates/flottille/tests/window_cards.rs",
+        "crates/flottille/tests/agents.rs",
+        "crates/flottille/tests/orphan.rs",
+        "crates/flottille-core/tests/families.rs",
+    ]
+}
+
+#[test]
+fn a_pull_request_runs_only_the_file_it_changes_of_a_grouped_binary() {
+    let base = grouped_crate();
+    assert_eq!(
+        selected_tests(
+            &base,
+            &["crates/flottille/tests/window_conversation.rs"],
+            &[],
+            ""
+        ),
+        "--test group_window_session -E binary(=group_window_session)&(test(/^window_conversation::/))"
+    );
+    // Two files of one binary share its filter; a file of another binary has its own, and a binary
+    // of another crate, run whole, is in the same expression.
+    assert_eq!(
+        selected_tests(
+            &base,
+            &[
+                "crates/flottille/tests/window_conversation.rs",
+                "crates/flottille/tests/agents.rs",
+                "crates/flottille/tests/window_cards.rs",
+                "crates/flottille-core/tests/families.rs",
+            ],
+            &[],
+            ""
+        ),
+        "--test families --test group_agents --test group_window_session -E \
+binary(=group_agents)&(test(/^agents::/))|\
+binary(=group_window_session)&(test(/^window_cards::/)|test(/^window_conversation::/))|\
+binary(=families)"
+    );
+}
+
+#[test]
+fn a_file_a_group_does_not_declare_selects_no_test() {
+    let base = grouped_crate();
+    assert_eq!(
+        selected_tests(&base, &["crates/flottille/tests/orphan.rs"], &[], ""),
+        ""
+    );
+    // The helpers every group shares are no test either: a change of them selects nothing (the
+    // description says what to run, `Tests:`).
+    assert_eq!(
+        selected_tests(&base, &["crates/flottille/tests/common/mod.rs"], &[], ""),
+        ""
+    );
+}
+
+#[test]
+fn a_file_a_group_gains_is_run_and_the_rest_of_its_main_is_not() {
+    let base = grouped_crate();
+    // The main of the group now declares one more file: that file's tests run, not the group's.
+    let main = "crates/flottille/tests/group/agents.rs::#[path = \"../common/mod.rs\"]\nmod common;\n#[path = \"../agents.rs\"]\nmod agents;\n#[path = \"../orphan.rs\"]\nmod orphan;\n";
+    assert_eq!(
+        selected_tests(&base, &[main, "crates/flottille/tests/orphan.rs"], &[], ""),
+        "--test group_agents -E binary(=group_agents)&(test(/^orphan::/))"
+    );
+    // The main changed and no file with it, a file moved there from another group.
+    assert_eq!(
+        selected_tests(&base, &[main], &[], ""),
+        "--test group_agents -E binary(=group_agents)&(test(/^orphan::/))"
+    );
+    // A main that only lost a line selects nothing.
+    let less = "crates/flottille/tests/group/window_session.rs::#[path = \"../common/mod.rs\"]\nmod common;\n#[path = \"../window_cards.rs\"]\nmod window_cards;\n";
+    assert_eq!(selected_tests(&base, &[less], &[], ""), "");
+}
+
+#[test]
+fn the_tests_line_names_a_grouped_file_or_a_group() {
+    let base = grouped_crate();
+    // A file's name, as the issues and the descriptions of before the groups say it.
+    assert_eq!(
+        selected_tests(&base, &["docs/a.md"], &[], "Tests: window_conversation"),
+        "--test group_window_session -E binary(=group_window_session)&(test(/^window_conversation::/))"
+    );
+    // A group's name runs the whole binary, and a file of it adds nothing to it.
+    assert_eq!(
+        selected_tests(
+            &base,
+            &["crates/flottille/tests/window_cards.rs"],
+            &[],
+            "Tests: group_window_session"
+        ),
+        "--test group_window_session -E binary(=group_window_session)"
+    );
+}
+
 #[test]
 fn a_test_file_added_is_run_and_one_deleted_is_not() {
     let base = [
