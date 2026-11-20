@@ -19,6 +19,8 @@ mod daemon;
 mod daemon_at_rest;
 #[path = "../desktop_entry.rs"]
 mod desktop_entry;
+#[path = "../desktop_notifications.rs"]
+mod desktop_notifications;
 #[path = "../developer.rs"]
 mod developer;
 #[path = "../fake_records.rs"]

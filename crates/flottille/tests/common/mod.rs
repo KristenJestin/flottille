@@ -3,6 +3,7 @@
 // Each test file uses its own part of it.
 #![allow(dead_code)]
 
+pub mod desktop;
 pub mod mcp;
 
 use std::io::{BufRead, BufReader, Write};
@@ -1004,6 +1005,16 @@ fn command_for(program: &Path, dir: &Path, env: &[(String, String)], args: &[&st
         .env_remove("SSH_AUTH_SOCK");
     // No display of the machine's: a test that wants one gives its own.
     for name in ["WAYLAND_DISPLAY", "DISPLAY", "XAUTHORITY"] {
+        command.env_remove(name);
+    }
+    // No sound server of the machine's: the daemon rings what needs the user, and a test never
+    // plays a sound on the machine (`desktop::with_fake_audio` records them instead).
+    for name in [
+        "PULSE_SERVER",
+        "PULSE_RUNTIME_PATH",
+        "PULSE_COOKIE",
+        "PULSE_SINK",
+    ] {
         command.env_remove(name);
     }
     // No sign-in of the machine: a provider is signed in only where a test says so, and the

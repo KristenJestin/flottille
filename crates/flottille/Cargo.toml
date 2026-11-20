@@ -77,6 +77,9 @@ gpui-kit = { version = "=0.8.0", default-features = false, features = ["assets",
 rmcp = { version = "3.7.0", default-features = false, features = ["client", "transport-streamable-http-client-reqwest", "reqwest-tls-no-provider"] }
 # Only to give reqwest, under rmcp's test client, the crypto provider it insists on even for http.
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std"] }
+# The notification server and the private bus the desktop scenarios talk to (#1002): the same
+# library the daemon sends its notifications with.
+zbus = "5.19.0"
 # To take a store back to what an older version wrote (the scenarios of #519).
 rusqlite = { version = "0.41.0", features = ["bundled", "fallible_uint"] }
 # The hub of the remote scenarios runs on a runtime of the test's own.
