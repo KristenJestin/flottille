@@ -1376,8 +1376,7 @@ impl Shell {
                 self.main.update(cx, |main, cx| main.set_read(cx));
                 // What the machine now shown lists: the read made when the window opened went to
                 // the machine it was on then.
-                self.extensions
-                    .update(cx, |registry, cx| registry.read(cx));
+                self.extensions.update(cx, |registry, cx| registry.read(cx));
                 self.show(snapshot, window, cx);
                 if std::mem::take(&mut self.texts_due) {
                     self.read_texts(cx);
