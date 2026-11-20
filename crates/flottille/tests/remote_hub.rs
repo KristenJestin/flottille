@@ -742,7 +742,12 @@ fn a_request_for_a_token_this_member_never_issued_is_dropped() {
 
 #[test]
 fn a_request_for_an_expired_invitation_is_dropped() {
-    let pc = Machine::new(None);
+    let user = User::new();
+    let ahead = user.path("wall-ahead");
+    let pc = Machine::of(
+        user.with_env("FLOTTILLE_TEST_WALL_AHEAD_FILE", ahead.to_str().unwrap()),
+        None,
+    );
     let hub = FakeHub::pushing(list_for(&pc), |_| Some(None), lying_requests);
     pin(&pc, &hub);
     pc.wait_until("the pc does not take the hub's list", |seen| {
@@ -752,13 +757,15 @@ fn a_request_for_an_expired_invitation_is_dropped() {
             .iter()
             .any(|machine| machine["name"] == "laptop")
     });
-    // An invitation asked 270 s ago: valid 30 s more, room enough to see its request first.
-    let ask = InvitationAsk::sign(&hub.key, unix_now() - 270, &pc.device()).unwrap();
+    // An invitation just asked: valid for five minutes, room enough to see its request first.
+    let ask = InvitationAsk::sign(&hub.key, unix_now(), &pc.device()).unwrap();
     pc.user.call("remote.invite", json!({"ask": ask})).unwrap();
     let request = pc.wait_until_requested();
     assert_eq!(request["key"], json!(seeded(41).public()));
 
-    // Past its 5 minutes, the request for it is no longer shown, though the hub still tells it.
+    // Past its 5 minutes (the daemon's wall clock moved by six), the request for it is no longer
+    // shown, though the hub still tells it.
+    std::fs::write(&ahead, "360").unwrap();
     let deadline = Instant::now() + Duration::from_secs(60);
     while pc.user.call("remote.requests", json!({})).unwrap() != json!([]) {
         assert!(
