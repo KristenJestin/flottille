@@ -108,7 +108,7 @@ impl Device {
 }
 
 const ANOTHER_CLIENT: &str = "another client kept a device key at the same moment: Settings, \
-                              Machines lists the members";
+                              General, Machines lists the members";
 
 fn said(error: KeyError) -> String {
     error.to_string()
