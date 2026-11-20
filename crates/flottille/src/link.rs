@@ -1503,10 +1503,7 @@ impl Remote {
         let (member, agent) = tokio::task::spawn_blocking(move || {
             let (remote, request) = checking;
             let (members, name) = remote.listed().map_err(Refused::Now)?;
-            if members
-                .get(&request.signed.device)
-                .is_none_or(|_| !request.signed())
-            {
+            if members.get(&request.signed.device).is_none() {
                 return Err(Refused::Now(
                     "the close is not signed by a member this machine knows yet".to_owned(),
                 ));
