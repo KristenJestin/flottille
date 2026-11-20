@@ -142,7 +142,7 @@ impl Invitation {
         let root = list
             .root()
             .ok_or_else(|| ListError::Refused("it is empty".to_owned()))?;
-        let members = list.check(&root)?;
+        let members = list.check(&root, &self.hub_key)?;
         let Some(entry) = members.get(own) else {
             return Err(ListError::Refused("this device is not in it".to_owned()));
         };

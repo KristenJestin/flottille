@@ -45,8 +45,8 @@ pub use link::{
     Received, Secret, Share, SharedEntry, Streamed, Traffic,
 };
 pub use members::{
-    Action, Change, ChangeHash, ListError, MANAGING_HEADROOM, MOST_CHANGES, Member, MemberList,
-    Members, Role, Signature,
+    Action, Change, ChangeHash, Colour, Icon, ListError, MANAGING_HEADROOM, MOST_CHANGES, Member,
+    MemberList, Members, Role, Signature, check_name,
 };
 pub use offers::{Capabilities, MOST_AGENTS, MOST_PROJECTS, Offered};
 pub use request::{

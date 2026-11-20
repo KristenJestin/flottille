@@ -645,7 +645,7 @@ pub struct Device {
 impl Device {
     /// The members of the list this device last checked.
     pub fn members(&self) -> Result<Members, ListError> {
-        self.list.check(&self.root)
+        self.list.check(&self.root, &self.hub)
     }
 
     /// A list the hub sent: kept when every change checks back to the root this device pinned
@@ -653,7 +653,7 @@ impl Device {
     /// as it was. A hub that forges, drops, reorders or plays a change again, or was set up again,
     /// is refused here, whatever the hub itself checked.
     pub fn take(&mut self, list: MemberList) -> Result<Members, ListError> {
-        let members = list.check_update(&self.root, &self.list)?;
+        let members = list.check_update(&self.root, &self.hub, &self.list)?;
         self.list = list;
         Ok(members)
     }
@@ -690,7 +690,8 @@ impl Device {
             .map(|first| first.signer)
             .ok_or_else(|| refused("there is no entry to set up with"))?;
         let list = MemberList::from_changes(changes.clone());
-        list.check(&root)
+        // The hub's key is not known before the session: a setup's changes are none of the hub's.
+        list.check(&root, &root)
             .map_err(|error| refused(&error.to_string()))?;
         let mut session = Session::open(&parsed, None, &machine.0, hello, tls, None, None).await?;
         if let Some((reason, _)) = &session.refused {
