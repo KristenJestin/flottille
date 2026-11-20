@@ -128,7 +128,6 @@ pub fn run(paths: &Paths) -> Result<()> {
     // Before anything runs: where the SSH agent's socket is, which every run is kept from.
     crate::ssh_agent::find();
     crate::mounts::find_bus();
-    crate::mounts::make_ssh_folders();
     if crate::mounts::namespaces() == crate::mounts::Namespaces::Refused {
         eprintln!("flottille daemon: {}", crate::mounts::REFUSED_GAP);
     }

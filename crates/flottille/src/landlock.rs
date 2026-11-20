@@ -178,13 +178,7 @@ fn confine<'a>(
                 .into_iter()
                 .collect();
             let cwd = command.as_std().get_current_dir().map(Path::to_owned);
-            crate::mounts::plan(
-                &emptied,
-                &kept,
-                &crate::mounts::ssh(),
-                &masked,
-                cwd.as_deref(),
-            )
+            crate::mounts::plan(&emptied, &kept, &masked, cwd.as_deref())
         })
         .flatten();
     if let Some(mut plan) = namespace {

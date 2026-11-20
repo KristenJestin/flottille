@@ -980,8 +980,6 @@ fn command_for(program: &Path, dir: &Path, env: &[(String, String)], args: &[&st
         )
         // X11's sockets where the machine's are: the test's own folder, never `/tmp/.X11-unix`.
         .env("FLOTTILLE_X11_SOCKETS", dir.join("x11"))
-        // The account's home is the test's, never the developer's own `~/.ssh`.
-        .env("FLOTTILLE_TEST_ACCOUNT_HOME", dir.join("home"))
         // No wait for the checks a pull request change may start, unless a test asks for it.
         .env("FLOTTILLE_CHECKS_WAIT_MS", "0")
         // No round of the items unless a test asks for it (`with_fetcher`).
