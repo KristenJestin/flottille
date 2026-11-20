@@ -1256,7 +1256,7 @@ async fn serve_clients(remote: Arc<Remote>, link: Link, from: String) {
                 answer.end().await;
                 return;
             }
-            match remote.start(accepted, &from).await {
+            match remote.start(accepted, request.to_string(), &from).await {
                 Err(refused) => {
                     let _ = answer.send(&message_bytes(&refused)).await;
                 }
@@ -1392,7 +1392,7 @@ impl Remote {
         from: &str,
     ) -> Result<Serving, Box<flottille_core::protocol::Message>> {
         let accepted = self.accept(request)?;
-        self.start(accepted, from).await
+        self.start(accepted, request.to_string(), from).await
     }
 
     /// `request` as a link or a client of this machine carried it, checked
@@ -1419,10 +1419,12 @@ impl Remote {
     }
 
     /// A request `accept` took, served on a connection of its own as one of a local client's, the
-    /// member that signed it named in the log and in the events its serving emits.
+    /// member that signed it named in the log and in the events its serving emits; `signed` is the
+    /// request as it was signed, which a method that carries the user's consent further sends on.
     async fn start(
         &self,
         accepted: flottille_link::Accepted,
+        signed: String,
         from: &str,
     ) -> Result<Serving, Box<flottille_core::protocol::Message>> {
         use flottille_core::protocol::Message as Answer;
@@ -1451,7 +1453,7 @@ impl Remote {
             theirs,
             crate::daemon::Asked {
                 device: accepted.device.name.clone(),
-                signed: text,
+                signed,
             },
         ));
         let (read, mut write) = ours.into_split();
