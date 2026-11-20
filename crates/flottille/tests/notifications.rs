@@ -139,11 +139,12 @@ fn an_excerpt_is_one_line_cut_and_masked_never_a_whole_call() {
     project(&user);
     let (_, mcp) = root(&user, "hello");
 
-    let line = format!(
-        "echo ghp_0123456789abcdefghijklmnopqrstuvwxyz01 {}",
-        "and a long argument ".repeat(30)
+    // A sensitive file, named by a path that carries a token and runs long.
+    let path = format!(
+        "config/ghp_0123456789abcdefghijklmnopqrstuvwxyz01/{}/.env",
+        "a-long-folder-name/".repeat(12)
     );
-    let number = held_number(mcp.call("run", json!({"line": line, "timeout": 5})));
+    let number = held_number(mcp.call("fs_read", json!({"path": path})));
 
     let row = titled(&user, &format!("Request #{number} waits for you"));
     let excerpt = row["excerpt"].as_str().unwrap();
