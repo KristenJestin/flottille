@@ -56,8 +56,9 @@ fn three() -> (DeviceKey, DeviceKey, DeviceKey, MemberList) {
     (pc, pixel, tablet, list)
 }
 
+/// The list's members, its hub's key that of no member: the list was made before pair mode.
 fn members(list: &MemberList) -> Members {
-    list.check(&key(1).public()).unwrap()
+    list.check(&key(1).public(), &key(9).public()).unwrap()
 }
 
 /// A fixed moment, the time of the tests.
@@ -550,8 +551,7 @@ fn a_refusal_says_which_role_allows_it() {
         ("agent.stop", "stop a session"),
         ("agent.cancel", "stop a turn"),
         ("agent.mode", "switch the mode"),
-        ("remote.invite", "invite a device"),
-        ("remote.change", "add, remove or rename a device"),
+        ("remote.change", "remove, rename or restyle a device"),
         // A method with no words of its own is named.
         ("project.add", "call project.add"),
     ] {
