@@ -650,6 +650,17 @@ pub fn doctor(paths: &Paths, json: bool) -> Result<ExitCode> {
             .push(warning.into());
     }
     report["forges_and_trackers"] = programs.into();
+    let private_mounts = crate::mounts::available();
+    report["sandbox"] = serde_json::json!({
+        "landlock_abi": crate::landlock::abi(),
+        "private_mounts": private_mounts,
+    });
+    if !private_mounts {
+        report["warnings"]
+            .as_array_mut()
+            .expect("a list of warnings")
+            .push(crate::mounts::REFUSED_GAP.into());
+    }
     if json {
         println!("{report}");
     } else {

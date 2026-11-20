@@ -50,6 +50,7 @@ mod locks;
 mod mcp;
 mod message_checks;
 mod models;
+mod mounts;
 mod nofollow;
 mod opencode;
 mod people;

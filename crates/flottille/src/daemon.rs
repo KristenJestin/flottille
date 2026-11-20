@@ -127,6 +127,9 @@ pub fn run(paths: &Paths) -> Result<()> {
     crate::display::clean(paths);
     // Before anything runs: where the SSH agent's socket is, which every run is kept from.
     crate::ssh_agent::find();
+    if !crate::mounts::available() {
+        eprintln!("flottille daemon: {}", crate::mounts::REFUSED_GAP);
+    }
     // Before any repository is read: the user's own credential helpers, the only ones it runs.
     crate::git::find_helpers();
     let machine_key = crate::remote::machine_key(paths)?;

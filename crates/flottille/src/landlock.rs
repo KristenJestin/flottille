@@ -8,8 +8,9 @@
 //! X11's display is kept out by its abstract name, unless the program is given it (a
 //! [`crate::display::Folder`] made for X11): an X11 client reads the keys typed in other windows.
 //! The sixth ABI's scope keeps out every abstract socket made outside the program. Its sockets by
-//! their path under `/tmp/.X11-unix` stay open: a rule on `/tmp` would take from a program what
-//! it makes there, and #976 masks the folder instead (`docs/vault.md`, "The gaps").
+//! their path under `/tmp/.X11-unix` stay open to Landlock: a rule on `/tmp` would take from a
+//! program what it makes there, and the private mount namespace empties the folder instead
+//! (`mounts.rs`).
 
 use std::ffi::{CStr, CString};
 use std::io;
@@ -87,8 +88,7 @@ fn runtime_folders() -> Vec<PathBuf> {
 }
 
 /// X11's socket folder: `/tmp/.X11-unix`, or the tests' own (`FLOTTILLE_X11_SOCKETS`). The one
-/// place it is named, for the private mount namespace (#976) to mask.
-#[allow(dead_code)]
+/// place it is named, for the private mount namespace to empty (`mounts.rs`).
 fn x11_folder() -> Option<PathBuf> {
     std::env::var_os("FLOTTILLE_X11_SOCKETS")
         .map_or_else(|| PathBuf::from("/tmp/.X11-unix"), PathBuf::from)
@@ -150,6 +150,38 @@ fn confine<'a>(
 ) -> &'a mut tokio::process::Command {
     let abi = abi();
     let mut denied = runtime_folders();
+    // The private mount namespace first: the runtime folders and, unless it is given X11,
+    // X11's socket folder emptied, with what the daemon gives the command put back.
+    let given_x11 = open.is_some_and(crate::display::Folder::x11);
+    let namespace = crate::mounts::available()
+        .then(|| {
+            let emptied: Vec<PathBuf> = denied
+                .iter()
+                .cloned()
+                .chain(x11_folder().filter(|_| !given_x11))
+                .collect();
+            let kept: Vec<PathBuf> = open
+                .and_then(|folder| folder.path().canonicalize().ok())
+                .into_iter()
+                .chain(
+                    crate::ssh_agent::socket()
+                        .filter(|_| lent)
+                        .map(Path::to_owned),
+                )
+                .collect();
+            let cwd = command.as_std().get_current_dir().map(Path::to_owned);
+            crate::mounts::plan(
+                &emptied,
+                &kept,
+                &crate::mounts::ssh_read_only(),
+                cwd.as_deref(),
+            )
+        })
+        .flatten();
+    if let Some(mut plan) = namespace {
+        // SAFETY: `Plan::enter` makes system calls alone on what the plan allocated before.
+        unsafe { command.pre_exec(move || plan.enter()) };
+    }
     let rights = rights(abi);
     let connecting = rights & RESOLVE_UNIX != 0;
     // The user's SSH agent's socket outside the runtime folders: denied by its own path, and each
@@ -171,7 +203,6 @@ fn confine<'a>(
         denied.push(socket.to_owned());
     }
     // X11's abstract sockets too, unless given, where the kernel has the scope.
-    let given_x11 = open.is_some_and(crate::display::Folder::x11);
     let scoped = match !given_x11 && abi >= 6 {
         true => SCOPE_ABSTRACT_UNIX_SOCKET,
         false => 0,
