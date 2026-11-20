@@ -529,17 +529,21 @@ fn the_description_says_the_child_works_on_a_copy_and_its_commits_come_back_on_a
         .unwrap();
 
     let description = tool["description"].as_str().unwrap();
+    for said in ["machine", "copy of your place"] {
+        assert!(description.contains(said), "{said}: {description}");
+    }
+    // The description holds a limit; the parameter says the rest.
+    let machine = &tool["inputSchema"]["properties"]["machine"];
+    assert_eq!(machine["type"], "string", "{tool:#}");
+    let said_of_machine = machine["description"].as_str().unwrap();
     for said in [
-        "machine",
         "copy of your place",
         "uncommitted changes",
         "refs/flottille/machines/<machine>/<launch>/<branch>",
         "nothing moves your branch",
     ] {
-        assert!(description.contains(said), "{said}: {description}");
+        assert!(said_of_machine.contains(said), "{said}: {said_of_machine}");
     }
-    let machine = &tool["inputSchema"]["properties"]["machine"];
-    assert_eq!(machine["type"], "string", "{tool:#}");
     let docs =
         std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/tools.md"))
             .unwrap();

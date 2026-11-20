@@ -719,27 +719,26 @@ const SERVED: [Definition; 33] = [
     Definition {
         name: "agent_launch",
         title: "Launch a child, or start a session",
-        description: "kind (required): child, a part of your own task, in your place, that \
-            reports to you (no workspace; refused above the children cap); led, an \
-            autonomous job of its own that you pilot, a real session the user sees under you, \
-            which asks you and wakes you when it asks, reports or ends; \
+        description: "kind (required): child, a part of your own task, in your place, that you \
+            direct and that reports to you (no workspace; refused above the children cap); led, an \
+            autonomous job of its own that you pilot, a real session the user sees under you and \
+            may talk to, which asks you its questions and wakes you when it asks, reports or ends; \
             handed, a session you start for the user and let go, of which you hear nothing more \
-            unless it writes to you. led and handed: a root only, judged, in workspace or \
-            new_workspace; you and it write with session_send. Answered at \
+            unless it writes to you. led and handed: a root only, judged, in workspace (main is \
+            the project folder) or new_workspace; you and it write with session_send. Answered at \
             once with its id; never poll. The brief is all it knows: the task, what to read, the \
-            checks, the deliverable. {\"kind\": \"handed\", \"title\": \"Add API\", \
-            \"brief\": \"...\", \"new_workspace\": \"api\", \"repositories\": [\"api\"]}. \
-            machine starts it on another of the user's machines, judged there, on a copy of \
-            your place (your branch and uncommitted changes go with it); its commits come back \
-            on refs/flottille/machines/<machine>/<launch>/<branch>, for you to merge; \
-            nothing moves your branch.",
+            checks, the deliverable. {\"kind\": \"child\", \"title\": \"Write the tests\", \
+            \"brief\": \"...\"}; {\"kind\": \"led\", \"title\": \"Fix login\", \"brief\": \
+            \"...\", \"workspace\": \"login\"}; {\"kind\": \"handed\", \"title\": \"Add API\", \
+            \"brief\": \"...\", \"new_workspace\": \"api\", \"repositories\": [\"api\"]} \
+            machine: another machine, in a copy of your place.",
         read_only: false,
         idempotent: false,
         destructive: false,
         schema: || {
             json!({"type": "object", "properties": {
                 "kind": {"type": "string", "enum": ["child", "led", "handed"], "description": "child: a part of your task, in your place, that reports to you. led: an autonomous session you pilot, which asks you and wakes you. handed: a session you start for the user and let go."},
-                "machine": {"type": "string", "description": "Another of the user's machines, by name, to start it on, in a copy of your place there; this machine when left out."},
+                "machine": {"type": "string", "description": "Another of the user's machines, by name, to start it on, judged there, in a copy of your place (your branch and uncommitted changes are sent with it); this machine when left out. Its commits come back to you on a branch of their own, refs/flottille/machines/<machine>/<launch>/<branch>, which you review and merge as you would a local child's work; nothing moves your branch."},
                 "project": {"type": "string", "description": "With led or handed: another registered project to start the session in, a full lead of its own there; yours when left out. Always held for the user."},
                 "title": {"type": "string", "description": "The task in a few words: how you and the user will name this session or child."},
                 "brief": {"type": "string", "description": "Everything the session or the child needs to know."},
