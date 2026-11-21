@@ -127,6 +127,15 @@ fn user(jira: &Jira) -> User {
 
 /// A project `app` over a throwaway repository, its Jira tracker with or without the entry.
 fn fixture(user: &User, entry: bool) {
+    let mut tracker = json!({"kind": "jira", "site": SITE, "projects": ["ABC"]});
+    if entry {
+        tracker["worklog_token"] = "jira-time".into();
+    }
+    project(user, tracker, entry);
+}
+
+/// The project over `tracker`; the vault's entry `jira-time` is set when `entry`.
+fn project(user: &User, tracker: Value, entry: bool) {
     let folder = user.path("work/app");
     user.git_init(&folder);
     std::fs::write(folder.join("README.md"), "app\n").unwrap();
@@ -138,9 +147,7 @@ fn fixture(user: &User, entry: bool) {
     );
     user.call("project.add", json!({"folder": folder, "name": "app"}))
         .unwrap();
-    let mut tracker = json!({"kind": "jira", "site": SITE, "projects": ["ABC"]});
     if entry {
-        tracker["worklog_token"] = "jira-time".into();
         user.call(
             "vault.set",
             json!({"name": "jira-time", "secret": SECRET, "username": "casey@example.org",
@@ -405,4 +412,39 @@ fn the_account_of_the_user_needs_the_connection_s_entry() {
 
     assert!(answer.text.contains("entry"), "{}", answer.text);
     assert_eq!(jira.asked("/rest/api/3/myself"), 0);
+}
+
+#[test]
+fn the_tool_says_which_github_account_is_the_user() {
+    let jira = Jira::serving();
+    let user = user(&jira);
+    project(&user, json!({"kind": "github", "repository": "."}), false);
+    user.gh_script(json!({"user": {"login": "casey-example"}}));
+    let mcp = root_in(&user);
+
+    let said = read(&mcp, json!({"action": "me"}));
+
+    assert!(said.contains("casey-example"), "{said}");
+}
+
+#[test]
+fn a_list_takes_no_detail_full_nor_limit_and_github_no_full_search() {
+    let (_jira, _user, mcp) = setup(false, review_script());
+    for args in [
+        json!({"action": "list", "detail": "full"}),
+        json!({"action": "list", "limit": 5}),
+    ] {
+        let answer = mcp.call("tickets", args);
+        assert!(answer.text.contains("search"), "{}", answer.text);
+    }
+
+    let jira = Jira::serving();
+    let user = user(&jira);
+    project(&user, json!({"kind": "github", "repository": "."}), false);
+    let mcp = root_in(&user);
+    let answer = mcp.call(
+        "tickets",
+        json!({"action": "search", "query": "login", "detail": "full"}),
+    );
+    assert!(answer.text.contains("Jira"), "{}", answer.text);
 }
