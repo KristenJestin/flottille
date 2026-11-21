@@ -1637,6 +1637,7 @@ impl Shell {
             Update::TextChanged { judge: true, .. } => self.actions.send(Command::JudgeRead),
             Update::AboutChanged => self.actions.send(Command::AboutRead),
             Update::DeveloperChanged => self.actions.send(Command::DeveloperRead),
+            Update::FindingsChanged => self.actions.send(Command::FindingsRead),
             Update::UpdateShown(shown) => self.update_shown(&shown, cx),
             Update::WhatsNewShown(shown) => self.whats_new_shown(&shown, cx),
             Update::ToolResultsChanged => self.actions.send(Command::ToolResultsRead),
@@ -2258,6 +2259,14 @@ impl Shell {
             Outcome::Developer { written, shown } => {
                 self.settings
                     .update(cx, |page, cx| page.developer_answered(shown, written, cx));
+            }
+            Outcome::Findings(listed) => {
+                self.settings
+                    .update(cx, |page, cx| page.findings_answered(listed, cx));
+            }
+            Outcome::FindingsExported(done) => {
+                self.settings
+                    .update(cx, |page, cx| page.findings_exported(done, cx));
             }
             Outcome::Tunnel(news) => self.tunnel_news(news, cx),
             Outcome::Asked {
@@ -2968,6 +2977,7 @@ impl Shell {
         self.actions.send(Command::JudgeRead);
         self.actions.send(Command::CompactionRead);
         self.actions.send(Command::DeveloperRead);
+        self.actions.send(Command::FindingsRead);
         self.actions.send(Command::ToolResultsRead);
         self.actions.send(Command::SessionsRead);
         self.actions

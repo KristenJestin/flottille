@@ -15,9 +15,10 @@ use std::collections::HashMap;
 use gpui_design_system::appearance::{self, Appearance, Source};
 use gpui_design_system::theme::Shade;
 use gpui_design_system::{
-    Button, Chosen, Field, Fold, Icon, ModelChoice, PageHeader, Section, Segmented, Select,
-    SelectOption, Skeleton, Subpage, Switch, Tabs, Toast, Type as _, awaiting, enter, hoverable,
-    icon, palette, presence, presence_of, space, tipped, toast, turning,
+    Button, Chosen, EmptyLine, Field, Fold, Icon, ListCard, Listing, ModelChoice, PageHeader,
+    Section, Segmented, Select, SelectOption, Skeleton, Subpage, Switch, Tabs, Toast, Type as _,
+    awaiting, enter, hoverable, icon, palette, presence, presence_of, space, tipped, toast,
+    turning,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -263,6 +264,10 @@ pub const RESUME_HINT: &str = "A session stopped by its quota goes on at the res
 pub const DEVELOPER_HINT: &str = "Why each call was allowed, held or refused, one JSON line each, \
      secrets masked. For working on Flottille.";
 
+/// What the findings say under their title.
+const FINDINGS_HINT: &str = "What agents reported about Flottille itself, one finding per bug. \
+     Export them for the agent that files the issues.";
+
 pub struct SettingsPage {
     shell: WeakEntity<Shell>,
     /// The user's machines: the hub, its devices, this machine's addresses.
@@ -304,6 +309,11 @@ pub struct SettingsPage {
     developer: Option<Developer>,
     /// The developer mode's switch flipped, until the daemon answers: what it was asked to become.
     developer_pending: Option<bool>,
+    /// The findings agents filed about Flottille itself, once the daemon said them.
+    findings: Option<Vec<crate::findings::Finding>>,
+    finding_rows: Listing<crate::findings::Finding>,
+    /// The export asked, until the daemon answers.
+    exporting: bool,
     /// The limit above which a tool result is cut, once the daemon said it (`Some(None)` is Off).
     tool_results: Option<Option<usize>>,
     /// A limit chosen, until the daemon answers: what it was asked to become.
@@ -415,6 +425,9 @@ impl SettingsPage {
             new_session_pending: false,
             developer: None,
             developer_pending: None,
+            findings: None,
+            finding_rows: Listing::default(),
+            exporting: false,
             tool_results: None,
             tool_results_pending: None,
             unchanged: None,
@@ -1261,6 +1274,121 @@ impl SettingsPage {
         cx.notify();
     }
 
+    /// The daemon's list of the findings: the rows that came unfold, those that left fold away.
+    pub fn findings_answered(
+        &mut self,
+        listed: Result<Vec<crate::findings::Finding>, String>,
+        cx: &mut Context<Self>,
+    ) {
+        let Ok(listed) = listed else { return };
+        let now = cx.background_executor().now();
+        let reduce = cx.reduce_motion();
+        self.finding_rows.sync(
+            listed
+                .iter()
+                .map(|finding| (finding.id.to_string(), finding.clone())),
+            now,
+            reduce,
+        );
+        self.findings = Some(listed);
+        cx.notify();
+    }
+
+    /// The findings as they are listed.
+    pub fn findings(&self) -> &[crate::findings::Finding] {
+        self.findings.as_deref().unwrap_or_default()
+    }
+
+    fn export_findings(&mut self, cx: &mut Context<Self>) {
+        if self.exporting {
+            return;
+        }
+        self.exporting = true;
+        self.shell
+            .update(cx, |shell, _| shell.perform(Command::FindingsExport))
+            .ok();
+        cx.notify();
+    }
+
+    /// Where the findings were written, or why they were not: a toast says it.
+    pub fn findings_exported(&mut self, done: Result<String, String>, cx: &mut Context<Self>) {
+        self.exporting = false;
+        match done {
+            Ok(file) => toast(Toast::success("Findings exported").detail(file), cx),
+            Err(why) => toast(Toast::failure("Findings were not exported").detail(why), cx),
+        }
+        cx.notify();
+    }
+
+    /// What the findings add under the developer mode's switch: the list, and the export that
+    /// writes it for the lead agent. It comes with the switch and folds away with it.
+    fn findings_block(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = palette(cx);
+        let mut list = ListCard::new("findings-list");
+        let drawn: Vec<_> = self
+            .finding_rows
+            .rows()
+            .map(|row| (row.key.to_owned(), row.placement, row.value.clone()))
+            .collect();
+        for (key, placement, finding) in drawn {
+            let row = crate::findings::row(&finding, cx);
+            list = list.item(
+                ElementId::Name(format!("findings-item-{key}").into()),
+                placement,
+                row,
+            );
+        }
+        let count = self.finding_rows.len();
+        let empty = self.findings.as_ref().is_some_and(Vec::is_empty);
+        div()
+            .id("findings")
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(space::MD)
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .text_size(px(13.))
+                                    .child(format!("Findings · {count}")),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(12.5))
+                                    .text_color(p.mute)
+                                    .child(FINDINGS_HINT),
+                            ),
+                    )
+                    .child(
+                        Button::secondary("findings-export", "Export findings")
+                            .leading(Icon::File)
+                            .disabled(count == 0 || self.exporting)
+                            .on_click(cx.listener(|this, _, _, cx| this.export_findings(cx))),
+                    ),
+            )
+            .child(presence("findings-list-block", count > 0, list).space(space::MD))
+            .child(
+                presence(
+                    "no-findings-block",
+                    empty,
+                    EmptyLine::new(
+                        "no-findings",
+                        Icon::Warning,
+                        "No finding yet. An agent files one when Flottille itself got \
+                         something wrong.",
+                    ),
+                )
+                .space(space::MD),
+            )
+    }
+
     fn developer_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
         let switch = Switch::new(
@@ -1306,6 +1434,14 @@ impl SettingsPage {
                         .test_support()
                         .into_any_element()
                 })
+                .space(space::MD),
+            )
+            .child(
+                presence(
+                    "developer-findings-block",
+                    self.developer_on(),
+                    self.findings_block(cx),
+                )
                 .space(space::MD),
             )
             .test_support();

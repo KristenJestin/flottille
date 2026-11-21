@@ -17,6 +17,7 @@ pub mod conversation;
 pub mod device;
 pub mod end_led;
 pub mod extensions;
+pub mod findings;
 pub mod glyphs;
 pub mod history;
 pub mod instance;
