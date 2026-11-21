@@ -19,9 +19,6 @@ use serde_json::{Value, json};
 const MINUTE: u64 = 60_000;
 const HOUR: u64 = 60 * MINUTE;
 
-/// A time ahead of any cursor: what every round lists again.
-const NEW: &str = "2999-01-01T00:00:00Z";
-
 /// The prompts of the routines, and what the fake agent does on each.
 const NIGHTLY: &str = "Read why the nightly failed";
 const BRANCH: &str = "Open a branch for the fix";
@@ -654,6 +651,12 @@ fn new_session_starts_another_beside_the_open_one() {
     eventually("a second session", || started(&user, "Fix each").len() == 2);
 }
 
+/// When GitHub says an item changed last, the `n`th time: asking a review or commenting moves it,
+/// and a round reads the details of an item whose time moved.
+fn updated(n: u32) -> String {
+    format!("2999-01-01T00:00:{n:02}Z")
+}
+
 /// What `gh pr view --json` answers of the pull request 12 of `acme/app`, its review asked of
 /// `requested`.
 fn pull(requested: &[&str]) -> Value {
@@ -663,7 +666,7 @@ fn pull(requested: &[&str]) -> Value {
         "headRefOid": "0123456789abcdef0123456789abcdef01234567",
         "url": "https://github.com/acme/app/pull/12",
         "author": {"login": "other"}, "assignees": [], "labels": [],
-        "updatedAt": NEW, "createdAt": "2026-11-01T10:00:00Z",
+        "updatedAt": updated(requested.len() as u32), "createdAt": "2026-11-01T10:00:00Z",
         "mergeable": "MERGEABLE", "reviewDecision": "REVIEW_REQUIRED",
         "reviewRequests": requested.iter().map(|login| json!({"login": login}))
             .collect::<Vec<_>>(),
@@ -709,7 +712,8 @@ fn issue(comments: &[&str], assignees: &[&str]) -> Value {
         "url": "https://github.com/acme/app/issues/7",
         "author": {"login": "other"},
         "assignees": assignees.iter().map(|login| json!({"login": login})).collect::<Vec<_>>(),
-        "labels": [], "updatedAt": NEW, "createdAt": "2026-11-01T10:00:00Z",
+        "labels": [], "updatedAt": updated(comments.len() as u32),
+        "createdAt": "2026-11-01T10:00:00Z",
         "comments": comments.iter().enumerate().map(|(n, body)| json!({
             "author": {"login": "dana"}, "body": body, "createdAt": "2026-11-20T10:00:00Z",
             "url": format!("https://github.com/acme/app/issues/7#issuecomment-{}", n + 1)}))
