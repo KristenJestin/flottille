@@ -7,6 +7,7 @@ pub mod actions;
 pub mod add_project;
 pub mod ask_dock;
 pub mod attachments;
+pub mod check;
 pub mod claude;
 pub mod commands;
 pub mod commit_checks;

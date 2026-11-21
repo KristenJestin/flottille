@@ -59,6 +59,34 @@ impl Tunnel {
     }
 }
 
+impl Tunnel {
+    /// A tunnel as `tunnel.list` says it: the ones this machine carries, whoever opened them.
+    pub fn listed(value: &Value) -> Option<Tunnel> {
+        let port = |key: &str| {
+            value[key]
+                .as_u64()
+                .and_then(|port| u16::try_from(port).ok())
+        };
+        Some(Tunnel {
+            id: value["tunnel"].as_str()?.to_owned(),
+            machine: value["machine"].as_str()?.to_owned(),
+            run: value["run"].as_str().unwrap_or_default().to_owned(),
+            asked: None,
+            port: port("port")?,
+            local_port: port("local_port")?,
+        })
+    }
+}
+
+/// What to do with the daemon's answer to a request of the Tunnels section.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Then {
+    /// `tunnel.list`: every tunnel this machine carries.
+    Listed,
+    /// `tunnel.close` of the tunnel.
+    Closed { id: String },
+}
+
 /// What the user wants to reach on a machine, and what to open once it is reached.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Ask {

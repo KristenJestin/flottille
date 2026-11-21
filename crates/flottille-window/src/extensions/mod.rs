@@ -258,6 +258,16 @@ pub enum Then {
     Connections(connections::Then),
     /// The dialog of an agent's request to write a connection: the shell gives it the answer.
     ConnectionRequest(connection_request::Then),
+    /// The findings' own: the shell gives the answer to the dialog that marks one filed.
+    Findings(crate::findings::Then),
+    /// `remote.machines` of the composer of `project`: the machines that can run it.
+    Runners {
+        project: String,
+    },
+    /// The health check's own: the shell gives the answer to Check Flottille in Settings.
+    Check(crate::check::Then),
+    /// The tunnels' own: the shell gives the answer to the Tunnels section of the services page.
+    Tunnels(crate::tunnels::Then),
 }
 
 /// How long the events that change what is listed must stop before it is read again: a switch
@@ -615,7 +625,12 @@ impl Registry {
             }
             Then::Specs(then) => specs::answered(self, then, answer, cx),
             Then::Review(then) => review::answered(self, then, answer, cx),
-            Then::Connections(_) | Then::ConnectionRequest(_) => {}
+            Then::Connections(_)
+            | Then::ConnectionRequest(_)
+            | Then::Findings(_)
+            | Then::Runners { .. }
+            | Then::Check(_)
+            | Then::Tunnels(_) => {}
         }
     }
 
