@@ -107,11 +107,6 @@ impl Projects {
     }
 }
 
-/// How many levels under the home `project.folders` looks for repositories, and how many it says
-/// at most: a home holds far more folders than a list can offer.
-const FOLDERS_DEPTH: usize = 3;
-const FOLDERS_LIMIT: usize = 200;
-
 /// Answers a `project.*` request.
 pub fn call(daemon: &Daemon, method: &str, params: Value) -> std::result::Result<Value, Failure> {
     let mut projects = daemon.projects.lock().unwrap();
@@ -131,26 +126,8 @@ pub fn call(daemon: &Daemon, method: &str, params: Value) -> std::result::Result
             Ok(serde_json::to_value(load(projects, &name)?)?)
         }
         "project.folders" => {
-            let home = std::env::var_os("HOME").map(PathBuf::from).ok_or_else(|| {
-                Failure::refused("the daemon has no HOME to look for repositories in")
-            })?;
-            let known: Vec<&Path> = projects
-                .known
-                .values()
-                .map(|project| project.folder.as_path())
-                .collect();
-            let folders: Vec<Value> = detect::candidates(&home, FOLDERS_DEPTH, FOLDERS_LIMIT)
-                .into_iter()
-                .filter(|folder| !known.contains(&folder.as_path()))
-                .map(|folder| {
-                    let shown = match folder.strip_prefix(&home) {
-                        Ok(rest) => format!("~/{}", rest.display()),
-                        Err(_) => folder.display().to_string(),
-                    };
-                    json!({"path": folder, "shown": shown})
-                })
-                .collect();
-            Ok(json!({"home": home, "folders": folders}))
+            let asked: FoldersAsked = serde_json::from_value(params)?;
+            folders(projects, asked.path.as_deref())
         }
         "project.detect" => {
             let plan = plan(projects, serde_json::from_value(params)?)?;
@@ -1720,6 +1697,67 @@ fn home_expanded(typed: &str) -> Option<PathBuf> {
     }
     let home = PathBuf::from(std::env::var_os("HOME")?);
     Some(home.join(rest.trim_start_matches('/')))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FoldersAsked {
+    path: Option<String>,
+}
+
+/// The folders inside `path` (the home when none), for a client that picks where a project is
+/// added rather than typing it (`docs/remote.md`, "Paths are picked, not typed"): each with how
+/// many repositories it holds as `project.detect` finds them, and the project already registered
+/// there.
+fn folders(projects: &Projects, path: Option<&str>) -> std::result::Result<Value, Failure> {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let folder = match path {
+        None => home
+            .clone()
+            .ok_or_else(|| Failure::refused("the daemon has no HOME to start from: give a path"))?,
+        Some(typed) => home_expanded(typed).unwrap_or_else(|| PathBuf::from(typed)),
+    };
+    if !folder.is_absolute() {
+        return Err(Failure::refused(format!(
+            "the folder must be an absolute path, not {}",
+            folder.display()
+        )));
+    }
+    let names = detect::folders(&folder).map_err(|error| {
+        Failure::refused(format!("{} cannot be read: {error}", folder.display()))
+    })?;
+    let project_of = |path: &Path| {
+        projects
+            .known
+            .values()
+            .find(|project| project.folder == path)
+            .map(|project| project.name.clone())
+    };
+    let shown = |path: &Path| match home.as_deref().map(|home| path.strip_prefix(home)) {
+        Some(Ok(rest)) if rest.as_os_str().is_empty() => "~".to_owned(),
+        Some(Ok(rest)) => format!("~/{}", rest.display()),
+        _ => path.display().to_string(),
+    };
+    let listed: Vec<Value> = names
+        .iter()
+        .map(|name| {
+            let path = folder.join(name);
+            let found = detect::repositories(&path).unwrap_or_default();
+            json!({
+                "name": name,
+                "path": path,
+                "repository": found.first().is_some_and(|first| first == "."),
+                "repositories": found.len(),
+                "project": project_of(&path),
+            })
+        })
+        .collect();
+    Ok(json!({
+        "path": folder,
+        "shown": shown(&folder),
+        "parent": folder.parent(),
+        "folders": listed,
+    }))
 }
 
 fn plan(projects: &Projects, asked: ProjectFolder) -> std::result::Result<Plan, Failure> {

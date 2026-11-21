@@ -1,7 +1,7 @@
 //! Which folders of a project are git repositories.
 
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// The repositories of `folder`, as paths relative to it: `.` when it is one itself (first), then
 /// the folders one or two levels down that hold a `.git`, a folder or a file (a worktree or a
@@ -30,30 +30,12 @@ pub fn repositories(folder: &Path) -> io::Result<Vec<String>> {
     Ok(found)
 }
 
-/// The folders under `home` a project may be added from: each one that holds a `.git`, down to
-/// `depth` levels, never looked into further (a repository inside it is its own), in alphabetical
-/// order, `limit` at most. Hidden folders and links are not looked into, as for
-/// [`repositories`]; a folder that cannot be read has none to offer.
-pub fn candidates(home: &Path, depth: usize, limit: usize) -> Vec<PathBuf> {
-    let mut found = Vec::new();
-    let mut level = vec![home.to_path_buf()];
-    for _ in 0..depth {
-        let mut next = Vec::new();
-        for folder in level {
-            for name in subfolders(&folder).unwrap_or_default() {
-                let path = folder.join(name);
-                if holds_git(&path) {
-                    found.push(path);
-                } else {
-                    next.push(path);
-                }
-            }
-        }
-        level = next;
-    }
-    found.sort();
-    found.truncate(limit);
-    found
+/// The folders inside `folder` a client may open or pick, by name, in alphabetical order: hidden
+/// folders and links are left out, as for [`repositories`].
+pub fn folders(folder: &Path) -> io::Result<Vec<String>> {
+    let mut names = subfolders(folder)?;
+    names.sort();
+    Ok(names)
 }
 
 fn holds_git(folder: &Path) -> bool {

@@ -430,13 +430,14 @@ folder is what `workspaces_root` then is. `not-found` when there is none,
 
 #### `project.folders`
 
-`{}`. The folders a project may be added from, for a client that picks one rather than typing a
-path (`docs/remote.md`, "Paths are picked, not typed"): `{"home", "folders": [{"path", "shown"}]}`,
-each folder under the home of the user the daemon runs for (`HOME`) that holds a `.git` (a folder
-or a file), three levels down at most and never looked into further, in alphabetical order, 200 at
-most; hidden folders and links are not looked into, and the folder of a project already registered
-is left out. `shown` is the path from `~` (`~/code/app`). `refused` when the daemon has no `HOME`.
-It is `drive`: only what adds a project needs it.
+`{"path"?}`. The folders inside `path` (absolute, or `~` or starting with `~/`; the home of the
+user the daemon runs for, `HOME`, when left out), for a client that picks where a project is added
+rather than typing it (`docs/remote.md`, "Paths are picked, not typed"): `{"path", "shown",
+"parent", "folders": [{"name", "path", "repository", "repositories", "project"}]}`. `shown` is the path from `~`
+(`~/code`); `parent` is `null` at `/`. The folders are in alphabetical order, hidden folders and
+links left out; `repository` says whether the folder is a Git repository itself, `repositories` how many `project.detect` would find in each, and `project` the
+name of the project already registered there, `null` when none. `refused` when the path is not
+absolute or cannot be read. It is `drive`: only what adds a project needs it.
 
 #### `project.detect`
 
