@@ -453,12 +453,12 @@ fn a_run_under_way_shows_its_session_state_branch_and_pull_request(cx: &mut Test
     );
     assert_eq!(
         label(cx, "result-status-pull").as_deref(),
-        Some("No pull request yet"),
+        Some("Pull request No pull request yet"),
         "its pull request, none here"
     );
     assert_eq!(
         label(cx, "result-status-requests").as_deref(),
-        Some("No request waits for you")
+        Some("Requests No request waits for you")
     );
     assert!(
         label(cx, "result-status-last")
@@ -598,9 +598,9 @@ fn the_form_shows_the_event_fields_when_an_event_is_chosen(cx: &mut TestAppConte
     );
     // The kind chosen first: a workflow run ends.
     for field in [
-        "routine-event-repository",
-        "routine-event-workflow",
-        "routine-event-branch",
+        "routine-event-repository-box",
+        "routine-event-workflow-box",
+        "routine-event-branch-box",
         "routine-event-started-by",
         "routine-event-outcome",
     ] {
@@ -608,7 +608,7 @@ fn the_form_shows_the_event_fields_when_an_event_is_chosen(cx: &mut TestAppConte
     }
     // Every kind: not before, at most once, a new session.
     for field in [
-        "routine-event-not-before",
+        "routine-event-not-before-box",
         "routine-event-at-most-once",
         "routine-event-new-session",
     ] {
@@ -618,20 +618,20 @@ fn the_form_shows_the_event_fields_when_an_event_is_chosen(cx: &mut TestAppConte
     click(cx, "routine-event-kind");
     click(cx, "routine-event-kind-review_requested");
     until(&shell, cx, "the fields follow the kind", |cx| {
-        !present(cx, "routine-event-workflow")
+        !present(cx, "routine-event-workflow-box")
     });
     assert!(
-        present(cx, "routine-event-repository"),
+        present(cx, "routine-event-repository-box"),
         "a review's repository"
     );
 
     click(cx, "routine-event-kind");
     click(cx, "routine-event-kind-assigned");
     until(&shell, cx, "the fields follow the kind", |cx| {
-        present(cx, "routine-event-tracker-type")
+        present(cx, "routine-event-tracker-type-box")
     });
-    assert!(present(cx, "routine-event-tracker-project"));
-    assert!(!present(cx, "routine-event-repository"));
+    assert!(present(cx, "routine-event-tracker-project-box"));
+    assert!(!present(cx, "routine-event-repository-box"));
 }
 
 #[gpui_kit::test]

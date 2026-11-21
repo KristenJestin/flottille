@@ -502,18 +502,17 @@ impl RoutinesTab {
             .flatten()
             .collect::<Vec<_>>()
             .join(" / ");
-        let link =
-            |id: &'static str, words: String, on_click: Box<dyn Fn(&mut Window, &mut App)>| {
-                hoverable(
-                    div()
-                        .id(id)
-                        .aria_label(SharedString::from(words.clone()))
-                        .cursor_pointer()
-                        .child(SharedString::from(words))
-                        .on_click(move |_, window, cx| on_click(window, cx)),
-                    move |d, hover| d.text_color(mix(p.faint, p.text, hover)),
-                )
-            };
+        let link = |id: &'static str, words: String, on_click: Go| {
+            hoverable(
+                div()
+                    .id(id)
+                    .aria_label(SharedString::from(words.clone()))
+                    .cursor_pointer()
+                    .child(SharedString::from(words))
+                    .on_click(move |_, window, cx| on_click(window, cx)),
+                move |d, hover| d.text_color(mix(p.faint, p.text, hover)),
+            )
+        };
         let list = cx.entity().downgrade();
         let routine = cx.entity().downgrade();
         let to_routine = match &self.at {
@@ -529,6 +528,8 @@ impl RoutinesTab {
             .mono(12.)
             .text_color(p.faint)
             .whitespace_nowrap()
+            .overflow_hidden()
+            .text_ellipsis()
             .child(link(
                 "routines-back",
                 "Routines".into(),
@@ -623,6 +624,8 @@ impl RoutinesTab {
             .mono(11.)
             .text_color(p.faint)
             .whitespace_nowrap()
+            .overflow_hidden()
+            .text_ellipsis()
             .child(SharedString::from(last))
             .test_support();
         let unread = routine.unread > 0;
@@ -961,7 +964,8 @@ impl RoutinesTab {
             .aria_label(SharedString::from(summary.clone()))
             .text_size(px(15.))
             .text_color(p.text)
-            .child(SharedString::from(summary));
+            .child(SharedString::from(summary))
+            .test_support();
         let report = div()
             .id("result-report")
             .aria_label(SharedString::from(report_text))
