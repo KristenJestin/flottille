@@ -1064,8 +1064,60 @@ core behind it, the screens' tests play a fake) and never the generated bindings
   real core by an instrumentation test on the emulator (`app/src/androidTest`); the Rust side by
   `crates/flottille-mobile/tests`. A real phone proves what none of those can: the camera reading a
   QR, and how it feels.
-- **Not here**: Needs you, the session page, the foreground service and the notifications (#826
-  and its followers); closing a session of an offline machine (#1157's kept close).
+- **Not here**: Needs you, the foreground service and the notifications (#826's followers);
+  closing a session of an offline machine (#1157's kept close).
+
+**The session page, as built (#826).** Tapping a session opens `SessionPage`; its one entry point is
+a `SessionKey` (machine and agent), which an intent can carry too (`MainActivity` reads the extras
+`org.flottille.app.MACHINE` and `AGENT`), so that a notification opens a session by those two ids.
+
+- **Reading**: the page follows its session through the core (`follow`: the latest page of the
+  conversation, `agent.show` with a `before` past every event, and the tree, `agent.tree`) **only
+  while it is on screen and the machine is linked**, and drops it when it is left (`unfollow`). A
+  conversation is never loaded whole: **Earlier messages** asks the page before the oldest one held
+  (`older`). The thoughts and tool calls between two messages are one line (`3 steps`) until a tap
+  unfolds them; a message that arrives unfolds and fades in, what the page held when it opened is
+  simply there. A picture sent in a message is read back (`agent.image`) and shown above its words,
+  a placeholder fading into it.
+- **Writing**: the composer sends text and pictures (`send`: `agent.send` with `images`). Pictures
+  come from the gallery (the system's photo picker, no storage permission), the camera (it writes one
+  shot into a file of the app's cache that a `FileProvider` gives the camera app alone, then the
+  file is deleted) and the share sheet (an intent filter for `image/*` only: the pictures wait in
+  the composer of the session the user picks, and are never sent without a tap). The window's limits
+  hold in the composer and again in the core, before anything is sent: 20 pictures a message, 5
+  MiB each, png, jpeg, gif or webp; a camera shot over 5 MiB is scaled to 2000 px on its long side,
+  as the daemon scales what it is given. Nothing of a picture is logged. A message to a machine
+  that is off is refused, said as a toast with since when (`server is offline since 22:14`) and kept
+  in the composer: nothing is queued.
+- **Answering**: the ask card docks above the composer, one question at a time (Previous, `2 of 4`,
+  a dot per question, Next), its options as rows, **Something else…** with its field, a note once a
+  choice is made, one **Answer** once every question has a choice or words (`answer_ask`:
+  `agent.answer`). A request is a card with the call **as the daemon gave it** (the same one line
+  the window shows: a command's line, else the tool and its arguments, computed in the core, never
+  summarised by the app), the judge's reason or the first reason it was held, **Allow** and
+  **Deny**, and, for a base request, the tag `Always asks` and the strong warning. An answer the
+  machine refuses (already answered, gone, the ask answered) is said on the card, which then folds.
+- **Controls**: the mode as three choices (Ask, Auto, Full; Full's fill is the alarm colour), Stop
+  in Send's place while a turn runs and there is nothing to send (`agent.cancel`: the agent
+  stays), and the session's tree read only. **A child's page has no composer**, no mode and no
+  Stop; an ended session says it has ended in place of the composer.
+- **A `viewer` reads only**: the page draws no composer, no pictures buttons, no answer (the
+  ask card is read, its options are text), no Allow or Deny, no mode, no Stop, and says `View only`.
+  That is the app's half: **the machine refuses a viewer's write too** (`Roles`, `read` and
+  `drive`), which `remote_requests` and the catalogue's tests pin for each write this page makes.
+- **The core gained**, for the page: `follow` reads a page and the tree, `unfollow`, `older`, `send`
+  (checks the pictures' limits), `answer_ask`, `set_mode`, `image`; the conversation of the view
+  state carries the title, the mode, `working`, `child`, `ended`, `more`, each entry's number and
+  picture names, and the tree; a request carries the call line, its class (`base`), what it says
+  and the reason; an ask carries each question with its options.
+- **Motion**, each with the kit's durations: a message or a tree row unfolds and fades in
+  (`ENTER`); the steps fold and unfold, with their chevron turning (`PANEL`); the ask card and the
+  request cards dock, slide into place and fade away (`animateItem`); a question slides in from
+  the side of the move, the dots and the option rows move their fill and ring (`PANEL`), the field
+  of "Something else…" and the note unfold and fold; a refusal comes in on its card; the mode's
+  fill and ink move (`PANEL`) and Full's turns to the alarm colour; Send and Stop cross-fade; the
+  attached pictures unfold in the composer and fold away; a picture fades in once read; the page
+  and the banner for a shared picture come in and out as Settings does.
 
 ## Notifications
 
@@ -1850,14 +1902,25 @@ on a real phone, by hand, and reported.
   the app opens on Sessions. In a project, the sessions that wait for the user come first and the
   ended ones last, then the most recent; the groups stay by project name as the core gives them.
   An ended session stays in its project, said **Ended**, rather than disappearing. Tapping a
-  session of an online machine calls the app's `onOpenSession`, which does nothing until the
-  session page exists. The app connects to the hub only while it is on screen (the foreground
+  session of an online machine opens its page (#826). The app connects to the hub only while it is on screen (the foreground
   service comes later) and dials it again after a wait that grows (1 s, up to 30 s) when it cannot
   be reached. A phone proposes its model's name, as a computer proposes its host's. The QR reader is
   ZXing over CameraX, not Google's ML Kit: no proprietary library in a public repository's app.
   A pull request's APK is debug-signed (the release key is never given to the run of a pull
   request, which runs the branch's own scripts); only a push, which runs merged code, signs with
   it. The launcher icon is Android's default until the brand's is added.
+
+- The session page (#826): a request's call is the window's `call_line` computed again in the
+  mobile core (a few lines, the same words), not moved to a shared crate (`flottille-core` carries
+  SQLite, which the phone does not need): a follow-up may move both to `flottille-protocol`. A
+  question that waits when the page opens is read from the tree (`agent.tree`), so a question asked
+  before the phone linked shows on the page; the sessions' list marks it waiting from the events
+  only, as before. Pictures shown by an agent (`agent.file`) and the request lines inside the
+  conversation, the queued messages (Send now, Edit, Cancel) and Resume of an ended session are not
+  on the page yet: this page shows the pictures of the user's messages, the live conversation, the
+  cards and the controls. Full needs no confirmation, as in the window. A shared picture asks the
+  user to pick the session in the list (a banner, with Discard) rather than a picker of its own. The
+  answered card folds 2.5 s after a refusal, long enough to be read.
 
 ## Open questions
 
