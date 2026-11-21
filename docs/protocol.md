@@ -153,6 +153,9 @@ no device calls a `local` one over a link (`docs/remote.md`, "Roles").
 | `compaction.noticed` | drive |
 | `developer.show` | read |
 | `developer.set` | drive |
+| `developer.reports` | read |
+| `developer.report_filed` | drive |
+| `developer.reports_export` | drive |
 | `update.show` | read |
 | `update.set` | drive |
 | `update.check` | drive |
@@ -760,6 +763,18 @@ configuration folder.
 
 `developer.set` emits `developer.changed`. The user's door alone reaches them: no tool of an agent
 does.
+
+The findings agents filed about Flottille itself (`docs/developer.md`, "The findings") are read and
+marked by three more, whether or not the mode is on:
+
+- `developer.reports` answers `{"findings": [...]}`, each `{id, title, expected, count, first_at,
+  last_at, filed, occurrences: [{id, at, session, called, happened, differs}]}`, the oldest first.
+- `developer.report_filed {id, issue}` marks a finding filed with its issue's address and answers
+  `{id, filed}`; `not-found` for a finding there is not, `invalid-params` for an empty address.
+- `developer.reports_export` writes `developer.reports`' answer to `findings.json` in the state
+  folder (`$XDG_STATE_HOME/flottille/`) and answers `{file, count}`.
+
+An agent's report, and the marking, emit `developer.reported`.
 
 ### The update methods
 

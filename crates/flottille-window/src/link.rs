@@ -90,6 +90,8 @@ pub enum Update {
     AboutChanged,
     /// The developer mode was switched, from any client: the settings page reads it again.
     DeveloperChanged,
+    /// An agent filed a finding, or one was marked filed: the settings page lists them again.
+    FindingsChanged,
     /// The window's appearance was chosen, from any client: the window reads it again.
     AppearanceChanged,
     /// The limit of tool results was chosen, from any client: the settings page reads it again.
@@ -392,6 +394,9 @@ fn follow(
         }
         if event.name == "developer.changed" {
             let _ = updates.unbounded_send(Update::DeveloperChanged);
+        }
+        if event.name == "developer.reported" {
+            let _ = updates.unbounded_send(Update::FindingsChanged);
         }
         if event.name == "appearance.changed" {
             let _ = updates.unbounded_send(Update::AppearanceChanged);
