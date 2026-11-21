@@ -8,7 +8,8 @@ use crate::{Error, Result};
 
 const ROUTINE: &str = "id, name, project, prompt, provider, model, effort, schedule, zone, mode, \
     rings, paused, missed_hours, next_at, delayed, created_at, updated_at";
-const RUN: &str = "id, routine, due_at, started_at, ended_at, session, mode, outcome, summary, why";
+const RUN: &str = "id, routine, due_at, started_at, ended_at, session, mode, outcome, summary, why, \
+    opened_at";
 
 fn routine_row(row: &rusqlite::Row) -> rusqlite::Result<Routine> {
     Ok(Routine {
@@ -44,6 +45,7 @@ fn run_row(row: &rusqlite::Row) -> rusqlite::Result<Run> {
         outcome: row.get(7)?,
         summary: row.get(8)?,
         why: row.get(9)?,
+        opened_at: row.get(10)?,
     })
 }
 
@@ -229,6 +231,31 @@ impl Store {
         ))?;
         let rows = statement.query_map(params![routine, limit as i64], run_row)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Marks the run's result opened, once: `None` when there is no such run.
+    pub fn open_routine_run(&self, run: u64, at: u64) -> Result<Option<Run>> {
+        Ok(self
+            .connection
+            .query_row(
+                &format!(
+                    "UPDATE routine_runs SET opened_at = coalesce(opened_at, ?2) WHERE id = ?1 \
+                     RETURNING {RUN}"
+                ),
+                params![run, at],
+                run_row,
+            )
+            .optional()?)
+    }
+
+    /// How many results of the routine have something to say and were not opened.
+    pub fn routine_unread(&self, routine: &str) -> Result<u64> {
+        Ok(self.connection.query_row(
+            "SELECT count(*) FROM routine_runs WHERE routine = ?1 AND opened_at IS NULL \
+             AND outcome IN ('something', 'goes_on')",
+            params![routine],
+            |row| row.get(0),
+        )?)
     }
 
     /// The run whose session this is, if it is one.

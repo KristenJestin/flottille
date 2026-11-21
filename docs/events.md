@@ -422,6 +422,16 @@ notification centre makes a row of a run with something to say whose routine rin
 | `run` | The run, its `outcome`, `summary`, `why` and `session`. |
 | `project` | The routine's project. |
 
+### `routine.opened`
+
+The user opened a run's result (`routine.open`): its routine has one result less unread.
+
+| Field | |
+|---|---|
+| `routine` | `{"id", "name"}`. |
+| `run` | The run, with `opened` true. |
+| `project` | The routine's project. |
+
 ### `remote.member_added`, `remote.member_removed`, `remote.member_renamed`, `remote.member_role`
 
 The member list this machine checked changed (`docs/remote.md`, "Pairing"), whoever changed it and

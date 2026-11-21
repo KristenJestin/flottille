@@ -255,6 +255,7 @@ pub const METHODS: &[(&str, Class)] = &[
     ("routine.pause", Drive),
     ("routine.resume", Drive),
     ("routine.remove", Drive),
+    ("routine.open", Drive),
     ("provider.list", Read),
     ("provider.enable", Drive),
     ("provider.disable", Drive),

@@ -105,6 +105,9 @@ pub struct Run {
     pub summary: Option<String>,
     /// Why it was skipped or failed.
     pub why: Option<String>,
+    /// When the user opened its result, if they did: a result with something to say that was not
+    /// opened is unread.
+    pub opened_at: Option<u64>,
 }
 
 impl Run {
@@ -120,6 +123,7 @@ impl Run {
             "outcome": self.outcome,
             "summary": self.summary,
             "why": self.why,
+            "opened": self.opened_at.is_some(),
         })
     }
 }

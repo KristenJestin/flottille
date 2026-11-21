@@ -1022,9 +1022,10 @@ const MIGRATIONS: &[&str] = &[
 /// here and never to `MIGRATIONS`: dev's own are merged forward into it numbered, and the number a
 /// next build had taken would be the one of dev's later migration, which a store of that build
 /// would then never run. Never renamed nor edited once released, and never moved to `MIGRATIONS`.
-const NAMED_MIGRATIONS: &[(&str, &str)] = &[(
-    "routines",
-    r#"
+const NAMED_MIGRATIONS: &[(&str, &str)] = &[
+    (
+        "routines",
+        r#"
     -- The routines (`docs/design.md`, "Routines"): work the daemon starts by itself, as a new
     -- root session, at its time. `next_at` is when its next run is due, null while it is paused;
     -- `delayed` why that is later than its schedule says (a spent quota).
@@ -1067,7 +1068,17 @@ const NAMED_MIGRATIONS: &[(&str, &str)] = &[(
     -- it makes: the gate reads it on the session's own row, whatever becomes of its routine.
     ALTER TABLE agents ADD COLUMN read_only INTEGER NOT NULL DEFAULT 0;
 "#,
-)];
+    ),
+    (
+        "routine_opened",
+        r#"
+    -- When the user opened a run's result: the windows' dot says a result with something to say
+    -- is not opened yet. The runs that ended before this column are taken as opened.
+    ALTER TABLE routine_runs ADD COLUMN opened_at INTEGER;
+    UPDATE routine_runs SET opened_at = COALESCE(ended_at, started_at);
+"#,
+    ),
+];
 
 /// How many of each extension's own migrations were applied (`docs/extensions.md`, "Data"): its
 /// tables, `ext_<name>_…`, are brought up to date as the store's are, and kept when it is turned
