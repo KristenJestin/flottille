@@ -89,24 +89,24 @@ data class SessionKey(val machine: String, val agent: String) {
 private const val REFUSED_MILLIS = 2_500L
 
 /** What the page is made of, in the order it is drawn: a message, or the steps between two. */
-private sealed interface Line {
+private sealed interface Block {
     val key: String
 
-    data class Message(val entry: Entry) : Line {
+    data class Message(val entry: Entry) : Block {
         override val key get() = "m:${entry.seq}"
     }
 
-    data class Steps(val steps: List<Entry>) : Line {
+    data class Steps(val steps: List<Entry>) : Block {
         override val key get() = "s:${steps.first().seq}"
     }
 }
 
 /** The conversation's entries as lines: the thoughts and the tool calls between two messages fold into one. */
-private fun toLines(entries: List<Entry>): List<Line> {
-    val out = mutableListOf<Line>()
+private fun toLines(entries: List<Entry>): List<Block> {
+    val out = mutableListOf<Block>()
     val steps = mutableListOf<Entry>()
     fun flush() {
-        if (steps.isNotEmpty()) out += Line.Steps(steps.toList())
+        if (steps.isNotEmpty()) out += Block.Steps(steps.toList())
         steps.clear()
     }
     for (entry in entries) {
@@ -114,7 +114,7 @@ private fun toLines(entries: List<Entry>): List<Line> {
             steps += entry
         } else {
             flush()
-            out += Line.Message(entry)
+            out += Block.Message(entry)
         }
     }
     flush()
@@ -333,8 +333,8 @@ private fun ConversationList(phone: Phone, key: SessionKey, page: Conversation, 
             val move = Modifier.animateItem(placementSpec = Motion.spec(Motion.PANEL))
             Unfold(animated, move) {
                 when (line) {
-                    is Line.Message -> MessageView(phone, key, line.entry)
-                    is Line.Steps -> StepsView(line.steps, open = line.key in unfolded) {
+                    is Block.Message -> MessageView(phone, key, line.entry)
+                    is Block.Steps -> StepsView(line.steps, open = line.key in unfolded) {
                         if (line.key in unfolded) unfolded -= line.key else unfolded += line.key
                     }
                 }
