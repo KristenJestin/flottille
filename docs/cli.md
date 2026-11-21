@@ -295,7 +295,7 @@ Fixes
 $ flottille changes --since 0.4.0-beta.104
 ```
 
-### `flottille remote on [--listen <address>|tailnet|nowhere] [--json]`, `off`, `listen <address>`
+### `flottille remote on [--listen <address>|tailnet|nowhere] [--json]`
 
 Remote is off until it is turned on (`docs/remote.md`, "Identity and keys"): `remote on` turns
 it on, `remote off` closes the links and keeps this machine paired with its hub, and `remote listen` says where this
@@ -312,6 +312,14 @@ Remote is on. This machine is reached at 100.64.0.7:7447.
 $ flottille remote off
 Remote is off: the links are closed, this machine stays paired with its hub.
 ```
+
+### `flottille remote off [--json]`
+
+As `remote on` above: closes the links and keeps this machine paired with its hub.
+
+### `flottille remote listen <address> [--json]`
+
+As `remote on` above: says where this machine is reached, with the same addresses as `--listen`.
 
 ### `flottille remote pair [--name <name>] [--role runner|controller|viewer] [--icon <icon>] [--colour <colour>] [--replace] [--json]`
 
