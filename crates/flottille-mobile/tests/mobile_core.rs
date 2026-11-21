@@ -8,7 +8,8 @@
 //! the hub's pair mode (#1146).
 
 use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::io::{BufRead, BufReader, Write};
+use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -17,8 +18,8 @@ use std::time::{Duration, SystemTime};
 use flottille_hub::{Hub, Served, SystemClock};
 use flottille_link::{
     Accepted, Action, Ask, Change, Colour, Device, DeviceKey, Endpoint, Hello, HubKey, Icon,
-    Keyring, KeyringError, Link, MachineKey, Members, Message, PairCode, Proposed, Pushed,
-    Requests, Role, Tls, ToDevice, arrive,
+    Keyring, KeyringError, Link, MachineKey, Members, Message, PairCode, Proposed, PublicKey,
+    Pushed, Requests, Role, Tls, ToDevice, arrive,
 };
 use flottille_mobile::{Batch, Core, Listener, MobileError, Sealer, ViewState};
 use serde_json::{Value, json};
@@ -156,10 +157,12 @@ struct Runner {
     /// The phone's links that ended.
     ended: Arc<AtomicUsize>,
     name: String,
+    /// Its endpoint's key: the machine the phone dials.
+    machine: PublicKey,
 }
 
 impl Runner {
-    fn new(name: &str) -> Runner {
+    fn new(name: &str, machine: PublicKey) -> Runner {
         let mut answers = HashMap::new();
         answers.insert("agent.list".to_owned(), json!({"agents": []}));
         answers.insert("approval.list".to_owned(), json!({"requests": []}));
@@ -174,6 +177,7 @@ impl Runner {
             watching: Arc::default(),
             ended: Arc::default(),
             name: name.to_owned(),
+            machine,
         }
     }
 
@@ -362,13 +366,27 @@ struct Place {
     runner: Runner,
 }
 
+/// How a runner is reached: at an address the hub tells, only through the hub (it listens
+/// nowhere, and tells no address), or both, as a daemon that listens is.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Reach {
+    Address,
+    Hub,
+    Both,
+}
+
 impl Place {
     async fn new() -> Place {
+        Place::with(Reach::Address).await
+    }
+
+    /// A place whose runner `server` is reached as `reach` says.
+    async fn with(reach: Reach) -> Place {
         let dir = tempfile::tempdir().unwrap();
         let hub = Hub::open(&dir.path().join("hub"), SystemClock).unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let served = flottille_hub::serve(hub, listener, None, hello()).unwrap();
-        let runner = add_runner(&served, dir.path(), "server", 1).await;
+        let runner = add_runner(&served, dir.path(), "server", 1, reach).await;
         Place {
             dir,
             served,
@@ -378,12 +396,17 @@ impl Place {
 
     /// Another runner paired on the hub, named `name`, its device key made from `seed`.
     async fn runner(&self, name: &str, seed: u8) -> Runner {
-        add_runner(&self.served, self.dir.path(), name, seed).await
+        add_runner(&self.served, self.dir.path(), name, seed, Reach::Address).await
     }
 
     /// Pair mode opened on the hub, as `flottille-hub pair` opens it: the code its QR holds.
     fn pair_code(&self) -> String {
-        let at = url(self.served.address());
+        self.pair_code_at(self.served.address())
+    }
+
+    /// The same code, naming `address` as the hub's: a proxy in front of it.
+    fn pair_code_at(&self, address: SocketAddr) -> String {
+        let at = url(address);
         let code = self
             .served
             .with_hub(|hub| hub.open_pairing(&at, None).unwrap().1);
@@ -400,7 +423,10 @@ impl Place {
 
     /// The phone paired from the QR of the hub's pair mode, as `phone`, a controller.
     async fn joined(&self, phone: &Core) {
-        let code = self.pair_code();
+        self.joined_by(phone, self.pair_code()).await;
+    }
+
+    async fn joined_by(&self, phone: &Core, code: String) {
         tokio::time::timeout(
             Duration::from_secs(10),
             phone.join(code, "phone".to_owned(), "controller".to_owned()),
@@ -422,7 +448,13 @@ impl Place {
 
 /// A runner paired on the hub as a computer pairs: its machine's session, then its machine
 /// declared; its endpoint serving the phone's links.
-async fn add_runner(served: &Served<SystemClock>, dir: &Path, name: &str, seed: u8) -> Runner {
+async fn add_runner(
+    served: &Served<SystemClock>,
+    dir: &Path,
+    name: &str,
+    seed: u8,
+    reach: Reach,
+) -> Runner {
     let server = device_key(seed);
     let machine = MachineKey::load_or_make(&dir.join(format!("machines/{name}-{seed}"))).unwrap();
     let code = served.with_hub(|hub| hub.open_pairing(&url(served.address()), None).unwrap().1);
@@ -454,16 +486,27 @@ async fn add_runner(served: &Served<SystemClock>, dir: &Path, name: &str, seed: 
     device.submit(&mut paired.session, declared).await.unwrap();
     let mut session = paired.session;
 
-    let runner = Runner::new(name);
+    let runner = Runner::new(name, machine.public());
     *runner.members.lock().unwrap() = Some(device.members().unwrap());
-    let endpoint = Endpoint::bind(&machine, "127.0.0.1:0".parse().unwrap()).unwrap();
-    let at: SocketAddr = endpoint.listening().unwrap();
-    session
-        .ask(Ask::Addresses {
-            addresses: vec![at.to_string()],
-        })
-        .await
-        .unwrap();
+    let endpoint = match reach {
+        // Listens nowhere and tells no address: only the hub reaches it.
+        Reach::Hub => Endpoint::dialler(&machine).unwrap(),
+        Reach::Address | Reach::Both => {
+            let endpoint = Endpoint::bind(&machine, "127.0.0.1:0".parse().unwrap()).unwrap();
+            let at: SocketAddr = endpoint.listening().unwrap();
+            session
+                .ask(Ask::Addresses {
+                    addresses: vec![at.to_string()],
+                })
+                .await
+                .unwrap();
+            endpoint
+        }
+    };
+    // As the daemon does: the links to this machine go through its session to the hub too.
+    if reach != Reach::Address {
+        endpoint.through(session.relay().expect("the session's relay"));
+    }
     tokio::spawn(runner.clone().serve(endpoint));
     // From then on the runner takes every list the hub sends, as its daemon does.
     let members = runner.members.clone();
@@ -1241,5 +1284,215 @@ async fn an_event_not_handed_over_before_the_app_was_killed_comes_at_the_next_st
         .await;
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert_eq!(again.texts(), ["1", "2", "3"]);
+    place.served.stop().await;
+}
+
+/// The view's line of the runner `name`.
+fn machine(view: &ViewState, name: &str) -> flottille_mobile::MachineView {
+    view.machines
+        .iter()
+        .find(|machine| machine.name == name)
+        .unwrap_or_else(|| panic!("{name} in the view: {view:#?}"))
+        .clone()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_phone_links_to_a_runner_through_the_hub() {
+    // The runner listens nowhere and told the hub no address: the phone has none to dial.
+    let place = Place::with(Reach::Hub).await;
+    assert!(
+        place
+            .served
+            .with_hub(|hub| hub.members().unwrap().clone())
+            .members()
+            .iter()
+            .any(|member| member.name == "server")
+    );
+    let (phone, taken) = place.linked().await;
+
+    let view = phone.view();
+    let server = machine(&view, "server");
+    assert!(server.online, "{view:#?}");
+    assert!(server.through_hub, "{view:#?}");
+    // What the phone asks goes over that link, signed and answered as on any other.
+    place.runner.watched().await;
+    assert!(!place.runner.taken("agent.list").is_empty());
+    assert!(
+        place
+            .runner
+            .taken("agent.list")
+            .iter()
+            .all(|(_, checked)| checked.is_ok())
+    );
+    assert!(!taken.batches().is_empty() || phone.view().machines.len() == 1);
+    place.served.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_phone_prefers_an_address_it_can_reach() {
+    // The runner listens at an address the hub tells, and is on the hub too: the address first.
+    let place = Place::with(Reach::Both).await;
+    let (phone, _taken) = place.linked().await;
+
+    let view = phone.view();
+    let server = machine(&view, "server");
+    assert!(server.online, "{view:#?}");
+    assert!(!server.through_hub, "{view:#?}");
+    place.served.stop().await;
+}
+
+/// A proxy between the phone and its hub, as a hub that lies would be: what the phone sends for
+/// the runner `real` it sends for `other`, and what the hub says is from `other` it says is from
+/// `real`. Both are members, and `other` answers, with its own key.
+struct Lying {
+    address: SocketAddr,
+    /// The keys `(real, other)` swapped, while it lies.
+    swap: Arc<Mutex<Option<(Value, Value)>>>,
+    /// The frames it changed.
+    changed: Arc<AtomicUsize>,
+}
+
+impl Lying {
+    fn to(hub: SocketAddr, real: &PublicKey, other: &PublicKey) -> Lying {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let lying = Lying {
+            address: listener.local_addr().unwrap(),
+            swap: Arc::new(Mutex::new(Some((json!(real), json!(other))))),
+            changed: Arc::default(),
+        };
+        let (swap, changed) = (lying.swap.clone(), lying.changed.clone());
+        std::thread::spawn(move || {
+            for phone in listener.incoming() {
+                let Ok(phone) = phone else { return };
+                let Ok(hub) = TcpStream::connect(hub) else {
+                    continue;
+                };
+                let (swap_up, changed_up) = (swap.clone(), changed.clone());
+                let (phone_in, mut hub_out) =
+                    (phone.try_clone().unwrap(), hub.try_clone().unwrap());
+                std::thread::spawn(move || {
+                    // Up, what the phone sends: its packets for `real` go to `other`.
+                    pass(phone_in, &mut hub_out, |frame| {
+                        let swapped = swap_up.lock().unwrap().clone();
+                        if let Some((real, other)) = swapped
+                            && frame["relay"]["to"] == real
+                        {
+                            frame["relay"]["to"] = other;
+                            changed_up.fetch_add(1, Ordering::SeqCst);
+                        }
+                    });
+                    let _ = hub_out.shutdown(Shutdown::Both);
+                });
+                let (swap_down, changed_down) = (swap.clone(), changed.clone());
+                std::thread::spawn(move || {
+                    let mut phone_out = phone;
+                    // Down, what the hub sends: the packets of `other` are said to be `real`'s.
+                    pass(hub, &mut phone_out, |frame| {
+                        let swapped = swap_down.lock().unwrap().clone();
+                        if let Some((real, other)) = swapped
+                            && frame["relayed"]["from"] == other
+                        {
+                            frame["relayed"]["from"] = real;
+                            changed_down.fetch_add(1, Ordering::SeqCst);
+                        }
+                    });
+                    let _ = phone_out.shutdown(Shutdown::Both);
+                });
+            }
+        });
+        lying
+    }
+
+    /// From now on it tells the truth.
+    fn tells_truth(&self) {
+        self.swap.lock().unwrap().take();
+    }
+
+    fn changed(&self) -> usize {
+        self.changed.load(Ordering::SeqCst)
+    }
+}
+
+/// Copies the lines of `from` to `to`, `change` applied to each one that is a JSON frame.
+fn pass(from: TcpStream, to: &mut TcpStream, change: impl Fn(&mut Value)) {
+    let mut lines = BufReader::new(from);
+    let mut line = Vec::new();
+    while lines
+        .read_until(b'\n', &mut line)
+        .is_ok_and(|read| read > 0)
+    {
+        if let Ok(mut frame) = serde_json::from_slice::<Value>(&line) {
+            change(&mut frame);
+            line = serde_json::to_vec(&frame).unwrap();
+            line.push(b'\n');
+        }
+        if to.write_all(&line).is_err() {
+            return;
+        }
+        line.clear();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_link_through_the_hub_checks_the_runner_s_key() {
+    // `server` is reached only through the hub; `other` is a member too, and answers on its
+    // own address.
+    let place = Place::with(Reach::Hub).await;
+    let other = add_runner(&place.served, place.dir.path(), "other", 2, Reach::Both).await;
+    let lying = Lying::to(
+        place.served.address(),
+        &place.runner.machine,
+        &other.machine,
+    );
+    let phone = place.phone();
+    place
+        .joined_by(&phone, place.pair_code_at(lying.address))
+        .await;
+    let taken = Arc::new(Taken::default());
+    phone.connect(taken).await.unwrap();
+
+    // The hub hands the phone `other`'s packets as `server`'s: the link it dials does not
+    // check, `server`'s key is not the one the answer proves, and nothing is asked of it.
+    let within = |what: &'static str, holds: Box<dyn Fn(&ViewState) -> bool>| {
+        let phone = phone.clone();
+        async move {
+            for _ in 0..1500 {
+                let view = phone.view();
+                if holds(&view) {
+                    return view;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            panic!("{what} within 30 s: the view is {:#?}", phone.view());
+        }
+    };
+    let view = within(
+        "the link to server failed through the hub",
+        Box::new(|view| {
+            machine(view, "server").why.contains("through the hub") && lying.changed() > 0
+        }),
+    )
+    .await;
+    assert!(!machine(&view, "server").online, "{view:#?}");
+    assert!(place.runner.taken("agent.list").is_empty());
+    assert_eq!(place.runner.watching.load(Ordering::SeqCst), 0);
+    // `other` is linked at its own address all along: the lie does not break what it does not
+    // touch.
+    let view = within(
+        "other online at its address",
+        Box::new(|view| machine(view, "other").online),
+    )
+    .await;
+    assert!(!machine(&view, "other").through_hub, "{view:#?}");
+
+    // The hub tells the truth: the same dial, through the hub, links.
+    lying.tells_truth();
+    let view = within(
+        "server linked through the hub once it is told apart",
+        Box::new(|view| machine(view, "server").online),
+    )
+    .await;
+    assert!(machine(&view, "server").through_hub, "{view:#?}");
+    place.runner.watched().await;
     place.served.stop().await;
 }
