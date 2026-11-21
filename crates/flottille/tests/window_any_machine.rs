@@ -288,7 +288,7 @@ fn the_window_s_own_settings_stay_this_machine_s_and_say_so(cx: &mut TestAppCont
         "the line says what stays this machine's",
         |cx| {
             label(cx, "settings-own")
-                .is_some_and(|said| said.contains("this window's") && said.contains("pc"))
+                .is_some_and(|said| said.starts_with("This window") && said.contains("pc"))
         },
     );
     let theirs = server.user.call("appearance.show", json!({})).unwrap();
@@ -311,23 +311,36 @@ fn a_project_is_added_on_another_machine_with_its_folder_picked_there(cx: &mut T
     shell.update_in(cx, |s, window, cx| s.add_project(window, cx));
     settle(&shell, cx);
 
-    // On which machine first: this one, then the runners.
-    click(&shell, "add-project-machine", cx);
-    assert!(present(cx, "add-project-machine-here"));
+    // On which machine first: this one, then the runners, each with its role and state.
+    assert_eq!(
+        label(cx, "add-project-machine-here").as_deref(),
+        Some("pc"),
+        "this machine first"
+    );
     click(&shell, "add-project-machine-server", cx);
     until(&shell, cx, "the server is shown", |cx| {
         shell.read_with(cx, |s, _| s.machine_shown()).as_deref() == Some("server")
     });
-    // The folder is picked in the server's folders, never typed.
-    until(&shell, cx, "the server's folders are listed", |cx| {
-        present(cx, "add-project-folders")
+    click(&shell, "add-project-step-next", cx);
+    // The folder is picked in the server's folders, opened one after the other, never typed.
+    until(&shell, cx, "the server's home is listed", |cx| {
+        present(cx, "add-project-folder-code")
     });
     assert!(
         !present(cx, "add-project-browse"),
         "no dialog of this machine's"
     );
-    click(&shell, "add-project-folders", cx);
-    click(&shell, "add-project-folders-~/code/reports", cx);
+    assert!(!present(cx, "add-project-folder"), "no path typed");
+    assert_eq!(label(cx, "add-project-path").as_deref(), Some("server: ~"));
+    click(&shell, "add-project-folder-code", cx);
+    until(&shell, cx, "its code folder is listed", |cx| {
+        present(cx, "add-project-folder-reports")
+    });
+    assert_eq!(
+        label(cx, "add-project-path").as_deref(),
+        Some("server: ~/code")
+    );
+    click(&shell, "add-project-folder-reports", cx);
     until(&shell, cx, "the folder is detected there", |cx| {
         shell.read_with(cx, |s, cx| {
             s.add_project_form()
@@ -597,8 +610,8 @@ fn every_request_of_a_page_goes_to_its_machine_signed(cx: &mut TestAppContext) {
     });
     settle(&shell, cx);
     shell.update_in(cx, |s, window, cx| s.add_project(window, cx));
-    until(&shell, cx, "the server's folders are listed", |cx| {
-        present(cx, "add-project-folders")
+    until(&shell, cx, "the server's folders are asked", |_| {
+        server.log().contains("project.folders asked by pc")
     });
 
     let log = server.log();

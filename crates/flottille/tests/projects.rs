@@ -2088,33 +2088,47 @@ mod removal {
 }
 
 #[test]
-fn the_folders_a_project_may_be_added_from_are_the_repositories_under_home() {
+fn the_folders_a_project_may_be_added_from_are_listed_from_home() {
     let user = User::new();
     let app = user.path("home/code/app");
     user.git_init(&app);
-    // A repository inside another is the outer one's: it is not offered on its own.
     user.git_init(&app.join("web"));
-    user.git_init(&user.path("home/notes"));
-    user.git_init(&user.path("home/a/b/deep"));
-    user.git_init(&user.path("home/a/b/c/too-deep"));
-    user.git_init(&user.path("home/.hidden/repo"));
     user.git_init(&user.path("home/code/shop"));
     add(&user, &user.path("home/code/shop"));
+    std::fs::create_dir_all(user.path("home/notes")).unwrap();
+    std::fs::create_dir_all(user.path("home/.hidden/repo")).unwrap();
 
-    let listed = user.call("project.folders", json!({})).unwrap();
-
-    assert_eq!(listed["home"], user.path("home").to_str().unwrap());
-    let shown: Vec<&str> = listed["folders"]
+    let home = user.call("project.folders", json!({})).unwrap();
+    assert_eq!(home["path"], user.path("home").to_str().unwrap());
+    assert_eq!(home["shown"], "~");
+    let names: Vec<&str> = home["folders"]
         .as_array()
         .unwrap()
         .iter()
-        .map(|folder| folder["shown"].as_str().unwrap())
+        .map(|folder| folder["name"].as_str().unwrap())
         .collect();
-    // Up to three levels down, hidden folders left out, a project's folder too.
-    assert_eq!(shown, ["~/a/b/deep", "~/code/app", "~/notes"]);
+    // Hidden folders left out, in alphabetical order.
+    assert_eq!(names, ["code", "notes"]);
+
+    let code = user
+        .call("project.folders", json!({"path": "~/code"}))
+        .unwrap();
+    assert_eq!(code["shown"], "~/code");
+    assert_eq!(code["parent"], user.path("home").to_str().unwrap());
+    assert_eq!(code["folders"][0]["name"], "app");
+    assert_eq!(code["folders"][0]["path"], app.to_str().unwrap());
+    // As many repositories as `project.detect` finds there.
+    assert_eq!(code["folders"][0]["repositories"], 2);
+    assert_eq!(code["folders"][0]["repository"], true);
     assert_eq!(
-        listed["folders"][1]["path"],
-        app.to_str().unwrap(),
-        "{listed}"
+        home["folders"][0]["repository"], false,
+        "code holds repositories, is none"
     );
+    assert_eq!(code["folders"][0]["project"], Value::Null);
+    assert_eq!(code["folders"][1]["project"], "shop");
+
+    let (kind, message) = user
+        .call("project.folders", json!({"path": "code"}))
+        .unwrap_err();
+    assert_eq!(kind, "refused", "{message}");
 }
