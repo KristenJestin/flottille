@@ -195,7 +195,7 @@ fn the_developer_section_lists_the_findings(cx: &mut TestAppContext) {
 fn the_export_button_writes_the_findings_to_a_file(cx: &mut TestAppContext) {
     let (user, _mcp) = user_with_findings(&["Tickets list answers empty"]);
     let (shell, cx) = window(&user, cx);
-    open_developer(&shell, cx);
+    let page = open_developer(&shell, cx);
     until(&shell, cx, "the findings are listed", |cx| {
         present(cx, "finding-1")
     });
@@ -220,9 +220,11 @@ fn the_export_button_writes_the_findings_to_a_file(cx: &mut TestAppContext) {
         cx.update(|window, cx| window.simulate_next_frame(cx));
         assert!(
             Instant::now() < deadline,
-            "the file was never written; toasts: {:?}; export button label: {:?}",
+            "the file was never written; toasts: {:?}; exporting: {}; findings: {}; button: {:?}",
             shown(cx),
-            label(cx, "findings-export")
+            page.read_with(cx, |p, _| p.exporting()),
+            page.read_with(cx, |p, _| p.findings().len()),
+            cx.update(|window, _| window.find("findings-export").bounds())
         );
         std::thread::sleep(Duration::from_millis(25));
     }

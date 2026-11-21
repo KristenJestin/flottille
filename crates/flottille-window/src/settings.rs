@@ -1299,6 +1299,11 @@ impl SettingsPage {
         self.findings.as_deref().unwrap_or_default()
     }
 
+    /// Whether an export was asked and the daemon has not answered.
+    pub fn exporting(&self) -> bool {
+        self.exporting
+    }
+
     fn export_findings(&mut self, cx: &mut Context<Self>) {
         if self.exporting {
             return;
