@@ -9,7 +9,7 @@
 # description of each feat, fix and perf pull request (read through the API, `gh`), grouped by area
 # from the commit's scope (Remote, Window, Agents, Tools, Projects, Other), the fixes in a Fixed
 # group of their own, each with the number of its pull request. A pull request without a note is
-# not there. Then, under `### All changes`, the raw list of the subjects, grouped by type.
+# not there, nor is one whose author is not a maintainer; one that cannot be read fails the script. Then, under `### All changes`, the raw list of the subjects, grouped by type.
 #   tools/changelog.sh [--at <rev> [--branch <name>] | <range>]
 set -euo pipefail
 
@@ -42,14 +42,22 @@ area_of() { # <scope> <text>
   esac
 }
 
-# The `Note:` line of a pull request's description, nothing when it has none. A pull request that
-# cannot be read has none, and it is said.
+# The `Note:` line of a pull request's description, nothing when it has none. The description is
+# read now, after the merge, and its author can have edited it since: only a maintainer's note (the
+# author is the OWNER, a MEMBER or a COLLABORATOR) goes into a release's notes, which no one can
+# edit. A pull request that cannot be read stops the script: a release made without its notes
+# cannot be mended.
 note_of() { # <number>
-  local body line
-  if ! body=$(gh api "repos/{owner}/{repo}/pulls/$1" --jq .body 2>/dev/null); then
-    echo "changelog.sh: #$1 could not be read from the API: it has no note." >&2
-    return 0
+  local answer body line
+  if ! answer=$(gh api "repos/{owner}/{repo}/pulls/$1" --jq '.author_association + "\n" + (.body // "")'); then
+    echo "changelog.sh: #$1 could not be read from the API." >&2
+    return 1
   fi
+  case ${answer%%$'\n'*} in
+    OWNER | MEMBER | COLLABORATOR) ;;
+    *) return 0 ;;
+  esac
+  body=${answer#*$'\n'}
   body=${body//$'\r'/}
   while IFS= read -r line; do
     if [[ $line == "Note: "* ]]; then
@@ -75,7 +83,7 @@ while IFS= read -r -d '' message; do
     feat | fix | perf)
       if [[ $text =~ \(#([0-9]+)\)$ ]]; then
         number=${BASH_REMATCH[1]}
-        note=$(note_of "$number")
+        note=$(note_of "$number") || exit 1
         if [ -n "$note" ]; then
           if [ "$type" = fix ]; then key=fixed; else key=$(area_of "$scope" "$text"); fi
           NOTES[$key]+="- $note (#$number)"$'\n'

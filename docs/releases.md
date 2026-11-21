@@ -618,7 +618,11 @@ unreadable to the one it is for.
   product (`crates/` but the fakes and tests, `apps/`) has none (`.github/scripts/pr-note.sh`).
 - **The body of a release** is built by `tools/changelog.sh` from the notes, read from the merged
   `feat`, `fix` and `perf` pull requests through the API (`gh api`, by the number their squash
-  kept; one that cannot be read has no note, and the script says so): `### Remote` (scopes `link`,
+  kept). A description can be edited after the merge, and a release's body cannot: only a note
+  written by a pull request whose author is the repository's OWNER, a MEMBER or a COLLABORATOR
+  (`author_association`) is read, any other pull request has no note (its subject stays in the raw
+  list); and one that cannot be read makes the script fail, so the build fails instead of
+  publishing a release without its notes. The groups are: `### Remote` (scopes `link`,
   `hub`, `mobile`, `android`, and a change that speaks of remote), `### Window` (`gui`),
   `### Agents` (`agents`, `acp`, `sessions`), `### Tools` (`tools`, `mcp`, `gate`), `### Projects`
   (`workspace`, `git`, `store`), `### Other`, each line `- <the note> (#123)`, oldest first, then
