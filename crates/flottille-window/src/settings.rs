@@ -267,12 +267,12 @@ pub const SESSIONS_HINT: &str =
 pub const RESUME_HINT: &str = "A session stopped by its quota goes on at the reset. Each session \
      can change it in its composer.";
 
-/// What the developer mode's switch logs, under its label.
 /// What the Notifications section says of what rings.
 pub const NOTIFICATIONS_HINT: &str = "A request, a question, a failure or a report rings with a \
     short sound: as a notification of this desktop when the window is not focused, as a toast \
     in the window when it is.";
 
+/// What the developer mode's switch logs, under its label.
 pub const DEVELOPER_HINT: &str = "Why each call was allowed, held or refused, one JSON line each, \
      secrets masked. For working on Flottille.";
 
