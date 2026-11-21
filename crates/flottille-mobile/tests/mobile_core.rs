@@ -91,6 +91,31 @@ impl Taken {
         self.0.lock().unwrap().clone()
     }
 
+    /// The texts of the events of every batch, in order.
+    fn texts(&self) -> Vec<String> {
+        self.batches()
+            .iter()
+            .flat_map(|batch| batch.events.iter())
+            .map(|event| {
+                serde_json::from_str::<Value>(&event.data).unwrap()["text"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned()
+            })
+            .collect()
+    }
+
+    /// Until `holds` says yes of the texts, within 10 s.
+    async fn until(&self, what: &str, holds: impl Fn(&[String]) -> bool) {
+        for _ in 0..500 {
+            if holds(&self.texts()) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("{what} within 10 s: the texts are {:?}", self.texts());
+    }
+
     /// The events of every batch, in order: `(seq, name)`.
     fn events(&self) -> Vec<(u64, String)> {
         self.batches()
@@ -128,10 +153,13 @@ struct Runner {
     requests: Arc<Mutex<Requests>>,
     /// The watches subscribed, which no new event can miss from then on.
     watching: Arc<AtomicUsize>,
+    /// The phone's links that ended.
+    ended: Arc<AtomicUsize>,
+    name: String,
 }
 
 impl Runner {
-    fn new() -> Runner {
+    fn new(name: &str) -> Runner {
         let mut answers = HashMap::new();
         answers.insert("agent.list".to_owned(), json!({"agents": []}));
         answers.insert("approval.list".to_owned(), json!({"requests": []}));
@@ -144,6 +172,8 @@ impl Runner {
             links: Arc::default(),
             requests: Arc::new(Mutex::new(Requests::new(SystemTime::now()))),
             watching: Arc::default(),
+            ended: Arc::default(),
+            name: name.to_owned(),
         }
     }
 
@@ -180,15 +210,19 @@ impl Runner {
             .collect()
     }
 
-    /// Once the phone's watch is subscribed.
-    async fn watched(&self) {
+    /// Once the phone's watch is subscribed: one more than the `before` already were.
+    async fn watched_after(&self, before: usize) {
         tokio::time::timeout(Duration::from_secs(10), async {
-            while self.watching.load(Ordering::SeqCst) == 0 {
+            while self.watching.load(Ordering::SeqCst) <= before {
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
         })
         .await
         .expect("the phone watches within 10 s");
+    }
+
+    async fn watched(&self) {
+        self.watched_after(0).await;
     }
 
     /// Ends every client link it holds.
@@ -225,6 +259,7 @@ impl Runner {
                 };
                 runner.links.lock().unwrap().push(link.clone());
                 runner.serve_link(link).await;
+                runner.ended.fetch_add(1, Ordering::SeqCst);
             });
         }
     }
@@ -242,7 +277,12 @@ impl Runner {
                 .requests
                 .lock()
                 .unwrap()
-                .check(&request.to_string(), "server", &members, SystemTime::now())
+                .check(
+                    &request.to_string(),
+                    &self.name,
+                    &members,
+                    SystemTime::now(),
+                )
                 .map_err(|error| error.to_string());
             self.taken
                 .lock()
@@ -328,65 +368,17 @@ impl Place {
         let hub = Hub::open(&dir.path().join("hub"), SystemClock).unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let served = flottille_hub::serve(hub, listener, None, hello()).unwrap();
-        // `server` pairs as a computer does: its machine's session, then its machine declared.
-        let server = device_key(1);
-        let machine = MachineKey::load_or_make(&dir.path().join("machines/server")).unwrap();
-        let code = served.with_hub(|hub| hub.open_pairing(&url(served.address()), None).unwrap().1);
-        let mut paired = Device::pair(
-            &code,
-            Proposed {
-                key: server.public(),
-                name: "server".to_owned(),
-                role: Role::Runner,
-                icon: Icon::Server,
-                colour: Colour::of(&server.public()),
-            },
-            &machine,
-            &hello(),
-            &Tls::System,
-        )
-        .await
-        .unwrap();
-        let (mut device, _) = paired.listed().await.unwrap();
-        let declared = Change::sign(
-            device.list.head(),
-            Action::Machine {
-                key: server.public(),
-                machine: machine.public(),
-            },
-            &server,
-        )
-        .claimed_by(&machine);
-        device.submit(&mut paired.session, declared).await.unwrap();
-        let mut session = paired.session;
-
-        let runner = Runner::new();
-        *runner.members.lock().unwrap() = Some(device.members().unwrap());
-        let endpoint = Endpoint::bind(&machine, "127.0.0.1:0".parse().unwrap()).unwrap();
-        let at: SocketAddr = endpoint.listening().unwrap();
-        session
-            .ask(Ask::Addresses {
-                addresses: vec![at.to_string()],
-            })
-            .await
-            .unwrap();
-        tokio::spawn(runner.clone().serve(endpoint));
-        // From then on the runner takes every list the hub sends, as its daemon does.
-        let members = runner.members.clone();
-        tokio::spawn(async move {
-            while let Some(pushed) = session.next().await {
-                if let Pushed::List(list) = pushed
-                    && let Ok(checked) = device.take(list)
-                {
-                    *members.lock().unwrap() = Some(checked);
-                }
-            }
-        });
+        let runner = add_runner(&served, dir.path(), "server", 1).await;
         Place {
             dir,
             served,
             runner,
         }
+    }
+
+    /// Another runner paired on the hub, named `name`, its device key made from `seed`.
+    async fn runner(&self, name: &str, seed: u8) -> Runner {
+        add_runner(&self.served, self.dir.path(), name, seed).await
     }
 
     /// Pair mode opened on the hub, as `flottille-hub pair` opens it: the code its QR holds.
@@ -423,16 +415,84 @@ impl Place {
         let phone = self.phone();
         self.joined(&phone).await;
         let taken = Arc::new(Taken::default());
-        phone.connect(taken.clone()).await.unwrap();
-        until(&phone, "server online", |view| {
-            view.machines
-                .iter()
-                .any(|machine| machine.name == "server" && machine.online)
-        })
-        .await;
-        self.runner.watched().await;
+        connected(&phone, taken.clone(), &self.runner).await;
         (phone, taken)
     }
+}
+
+/// A runner paired on the hub as a computer pairs: its machine's session, then its machine
+/// declared; its endpoint serving the phone's links.
+async fn add_runner(served: &Served<SystemClock>, dir: &Path, name: &str, seed: u8) -> Runner {
+    let server = device_key(seed);
+    let machine = MachineKey::load_or_make(&dir.join(format!("machines/{name}-{seed}"))).unwrap();
+    let code = served.with_hub(|hub| hub.open_pairing(&url(served.address()), None).unwrap().1);
+    let mut paired = Device::pair(
+        &code,
+        Proposed {
+            key: server.public(),
+            name: name.to_owned(),
+            role: Role::Runner,
+            icon: Icon::Server,
+            colour: Colour::of(&server.public()),
+        },
+        &machine,
+        &hello(),
+        &Tls::System,
+    )
+    .await
+    .unwrap();
+    let (mut device, _) = paired.listed().await.unwrap();
+    let declared = Change::sign(
+        device.list.head(),
+        Action::Machine {
+            key: server.public(),
+            machine: machine.public(),
+        },
+        &server,
+    )
+    .claimed_by(&machine);
+    device.submit(&mut paired.session, declared).await.unwrap();
+    let mut session = paired.session;
+
+    let runner = Runner::new(name);
+    *runner.members.lock().unwrap() = Some(device.members().unwrap());
+    let endpoint = Endpoint::bind(&machine, "127.0.0.1:0".parse().unwrap()).unwrap();
+    let at: SocketAddr = endpoint.listening().unwrap();
+    session
+        .ask(Ask::Addresses {
+            addresses: vec![at.to_string()],
+        })
+        .await
+        .unwrap();
+    tokio::spawn(runner.clone().serve(endpoint));
+    // From then on the runner takes every list the hub sends, as its daemon does.
+    let members = runner.members.clone();
+    tokio::spawn(async move {
+        while let Some(pushed) = session.next().await {
+            if let Pushed::List(list) = pushed
+                && let Ok(checked) = device.take(list)
+            {
+                *members.lock().unwrap() = Some(checked);
+            }
+        }
+    });
+    runner
+}
+
+/// `phone` connected, `listener` taking its batches, and linked to `runner`, which it watches.
+async fn connected(phone: &Core, listener: Arc<dyn Listener>, runner: &Runner) {
+    let before = runner.watching.load(Ordering::SeqCst);
+    tokio::time::timeout(Duration::from_secs(10), phone.connect(listener))
+        .await
+        .expect("connected within 10 s")
+        .unwrap();
+    until(phone, "the runner online", |view| {
+        view.machines
+            .iter()
+            .any(|machine| machine.name == runner.name && machine.online)
+    })
+    .await;
+    runner.watched_after(before).await;
 }
 
 fn url(address: SocketAddr) -> String {
@@ -458,9 +518,16 @@ async fn the_core_joins_through_the_hub_from_a_qr_and_links_to_the_runner() {
     assert_eq!(Some(member.key.fingerprint()), phone.fingerprint());
     assert!(member.machine.is_some());
 
-    // The device key is kept sealed by the app's key, never in clear.
+    // The device key is kept sealed by the app's key, never in clear, and no other copy of it is
+    // left in the folder: neither the pending one nor a file half written.
     let sealed = std::fs::read(Path::new(&place.phone_folder()).join("device.sealed")).unwrap();
     assert!(sealed.starts_with(MARK));
+    let mut files: Vec<String> = std::fs::read_dir(place.phone_folder())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    files.sort();
+    assert_eq!(files, ["device.sealed", "endpoint", "hub.json"]);
 
     // Connected: present on the hub, linked to the runner, its role in the view.
     let taken = Arc::new(Taken::default());
@@ -840,5 +907,332 @@ async fn the_view_state_follows_a_conversation_in_batches() {
         view.requests.is_empty() && view.asks.is_empty()
     })
     .await;
+    place.served.stop().await;
+}
+
+/// `text` from the runner's daemon, as an agent's message.
+fn say(runner: &Runner, text: &str) -> u64 {
+    runner.emit("agent.message", json!({"agent": "a1", "text": text}))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_runner_removed_from_the_list_is_unlinked_at_once() {
+    let place = Place::new().await;
+    let (phone, taken) = place.linked().await;
+    say(&place.runner, "before");
+    taken
+        .until("the first event", |texts| texts == ["before"])
+        .await;
+
+    // The user removes the runner: its link ends at once, nothing of it reaches the phone any
+    // more, and nothing of the phone's reaches it.
+    place
+        .served
+        .with_hub(|hub| hub.remove("server").map(drop))
+        .unwrap();
+    until(&phone, "the runner gone from the view", |view| {
+        view.machines.is_empty()
+    })
+    .await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while place.runner.ended.load(Ordering::SeqCst) == 0 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the removed runner's link ends within 5 s");
+    say(&place.runner, "after");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(taken.texts(), ["before"]);
+    let refused = phone
+        .answer("server".to_owned(), 1, true)
+        .await
+        .unwrap_err();
+    assert!(refused.to_string().contains("server"), "{refused}");
+    assert!(place.runner.taken("approval.approve").is_empty());
+    let view = phone.view();
+    assert!(view.projects.is_empty() && view.requests.is_empty() && view.asks.is_empty());
+    place.served.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_phone_joins_again_after_it_was_removed() {
+    let place = Place::new().await;
+    let (phone, _taken) = place.linked().await;
+    let before = phone.fingerprint();
+    place
+        .served
+        .with_hub(|hub| hub.remove("phone").map(drop))
+        .unwrap();
+    // Its own entry gone, the phone says so and claims no role.
+    let view = until(&phone, "the removal said", |view| {
+        view.role.is_empty() && view.said.iter().any(|said| said.contains("removed"))
+    })
+    .await;
+    assert!(view.name.is_empty(), "{view:#?}");
+
+    // Paired again: the key the hub admitted is the one that signs.
+    place.joined(&phone).await;
+    assert_ne!(phone.fingerprint(), before);
+    let member = place.served.with_hub(|hub| {
+        hub.members()
+            .unwrap()
+            .members()
+            .iter()
+            .find(|member| member.name == "phone")
+            .cloned()
+            .unwrap()
+    });
+    assert_eq!(Some(member.key.fingerprint()), phone.fingerprint());
+    let taken = Arc::new(Taken::default());
+    connected(&phone, taken, &place.runner).await;
+    phone
+        .request(
+            "server".to_owned(),
+            "project.list".to_owned(),
+            "{}".to_owned(),
+        )
+        .await
+        .unwrap();
+    let (_, checked) = place.runner.taken("project.list").pop().unwrap();
+    assert_eq!(
+        Some(checked.unwrap().device.key.fingerprint()),
+        phone.fingerprint()
+    );
+    place.served.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_phone_joins_again_after_its_hub_was_reset() {
+    let place = Place::new().await;
+    let phone = place.phone();
+    place.joined(&phone).await;
+    let before = phone.fingerprint();
+    drop(phone);
+
+    // A hub started anew, with a runner of its own: the phone, over the same folder, pairs with it.
+    let reset = Place::new().await;
+    let phone = place.phone();
+    reset.joined(&phone).await;
+    assert_ne!(phone.fingerprint(), before);
+    let taken = Arc::new(Taken::default());
+    connected(&phone, taken, &reset.runner).await;
+    phone
+        .request(
+            "server".to_owned(),
+            "project.list".to_owned(),
+            "{}".to_owned(),
+        )
+        .await
+        .unwrap();
+    let (_, checked) = reset.runner.taken("project.list").pop().unwrap();
+    assert_eq!(
+        Some(checked.unwrap().device.key.fingerprint()),
+        phone.fingerprint()
+    );
+    // At the next start, the same member.
+    let fingerprint = phone.fingerprint();
+    drop(phone);
+    assert_eq!(place.phone().fingerprint(), fingerprint);
+    place.served.stop().await;
+    reset.served.stop().await;
+}
+
+/// Another Keystore's key, as after a restore on a new phone: it opens nothing the first sealed.
+struct OtherSealer;
+
+const OTHER: &[u8] = b"other:";
+
+impl Sealer for OtherSealer {
+    fn seal(&self, plain: Vec<u8>) -> Result<Vec<u8>, MobileError> {
+        let mut sealed = OTHER.to_vec();
+        sealed.extend(plain.iter().map(|byte| byte ^ 0x33));
+        Ok(sealed)
+    }
+
+    fn open(&self, sealed: Vec<u8>) -> Result<Vec<u8>, MobileError> {
+        let Some(body) = sealed.strip_prefix(OTHER) else {
+            return Err(MobileError::Refused {
+                why: "the Keystore has no such key".to_owned(),
+            });
+        };
+        Ok(body.iter().map(|byte| byte ^ 0x33).collect())
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_device_key_that_will_not_open_at_start_leaves_the_phone_not_joined() {
+    let place = Place::new().await;
+    let phone = place.phone();
+    place.joined(&phone).await;
+    drop(phone);
+
+    // The app starts and its Keystore cannot open the key: the phone is not joined, and says so.
+    let phone = Core::new(place.phone_folder(), Arc::new(OtherSealer)).unwrap();
+    assert!(!phone.joined());
+    assert_eq!(phone.fingerprint(), None);
+    let view = phone.view();
+    assert!(
+        view.said.iter().any(|said| said.contains("pair it again")),
+        "{:?}",
+        view.said
+    );
+    assert!(view.role.is_empty() && view.machines.is_empty());
+
+    // Paired again, it is a member with a key this Keystore sealed.
+    place.joined(&phone).await;
+    assert!(phone.joined());
+    let sealed = std::fs::read(Path::new(&place.phone_folder()).join("device.sealed")).unwrap();
+    assert!(sealed.starts_with(OTHER));
+    let taken = Arc::new(Taken::default());
+    connected(&phone, taken, &place.runner).await;
+    place.served.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn events_of_a_new_runner_on_a_freed_name_are_all_shown() {
+    let place = Place::new().await;
+    let (phone, taken) = place.linked().await;
+    for text in ["a1", "a2", "a3"] {
+        say(&place.runner, text);
+    }
+    taken
+        .until("the old runner's events", |texts| texts.len() == 3)
+        .await;
+
+    // The runner removed, another machine paired under its name: its events start at 1 again.
+    place
+        .served
+        .with_hub(|hub| hub.remove("server").map(drop))
+        .unwrap();
+    until(&phone, "the old runner gone", |view| {
+        view.machines.is_empty()
+    })
+    .await;
+    let new = place.runner("server", 2).await;
+    until(&phone, "the new runner online", |view| {
+        view.machines
+            .iter()
+            .any(|machine| machine.name == "server" && machine.online)
+    })
+    .await;
+    new.watched().await;
+    say(&new, "b1");
+    say(&new, "b2");
+    taken
+        .until("the new runner's events", |texts| texts.len() == 5)
+        .await;
+    assert_eq!(taken.texts(), ["a1", "a2", "a3", "b1", "b2"]);
+    place.served.stop().await;
+}
+
+/// The seen numbers the core kept in its folder.
+fn seen_file(place: &Place) -> HashMap<String, u64> {
+    std::fs::read(Path::new(&place.phone_folder()).join("seen.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn events_resume_after_the_last_seen_at_the_next_start() {
+    let place = Place::new().await;
+    let (phone, taken) = place.linked().await;
+    for text in ["1", "2", "3"] {
+        say(&place.runner, text);
+    }
+    taken.until("three events", |texts| texts.len() == 3).await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !seen_file(&place).values().any(|seen| *seen == 3) {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the third event kept as seen within 10 s");
+    // Kept by the runner's machine key, never by its name, which another runner may take.
+    assert!(!seen_file(&place).contains_key("server"));
+
+    // The app is gone; the runner's daemon goes on; the app starts again.
+    drop(phone);
+    say(&place.runner, "4");
+    say(&place.runner, "5");
+    let phone = place.phone();
+    let again = Arc::new(Taken::default());
+    connected(&phone, again.clone(), &place.runner).await;
+    again
+        .until("the two missed events", |texts| texts.len() >= 2)
+        .await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(again.texts(), ["4", "5"]);
+    place.served.stop().await;
+}
+
+/// An app that dies as its first batch with events comes, before it took it: the batch never
+/// reaches the screens, nor does any after it.
+#[derive(Default)]
+struct Dying(std::sync::atomic::AtomicBool);
+
+impl Listener for Dying {
+    fn batch(&self, batch: Batch) {
+        if !batch.events.is_empty() || self.0.load(Ordering::SeqCst) {
+            self.0.store(true, Ordering::SeqCst);
+            panic!("the app died before it took the batch");
+        }
+    }
+}
+
+/// The phone joined and connected, its batches to an app that dies at the first event; three
+/// events sent, which it never took.
+async fn three_events_never_taken(place: &Place) -> Arc<Core> {
+    let phone = place.phone();
+    place.joined(&phone).await;
+    let dying = Arc::new(Dying::default());
+    connected(&phone, dying.clone(), &place.runner).await;
+    for text in ["1", "2", "3"] {
+        say(&place.runner, text);
+    }
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !dying.0.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the app dies within 10 s");
+    // What is still on its way reaches the core meanwhile.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    phone
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_event_not_handed_over_at_disconnect_is_sent_again() {
+    let place = Place::new().await;
+    let phone = three_events_never_taken(&place).await;
+    phone.disconnect();
+
+    // Connected again: what the app never took comes, once.
+    let again = Arc::new(Taken::default());
+    connected(&phone, again.clone(), &place.runner).await;
+    again
+        .until("the three events", |texts| texts.len() >= 3)
+        .await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(again.texts(), ["1", "2", "3"]);
+    place.served.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_event_not_handed_over_before_the_app_was_killed_comes_at_the_next_start() {
+    let place = Place::new().await;
+    let phone = three_events_never_taken(&place).await;
+    drop(phone);
+
+    let phone = place.phone();
+    let again = Arc::new(Taken::default());
+    connected(&phone, again.clone(), &place.runner).await;
+    again
+        .until("the three events", |texts| texts.len() >= 3)
+        .await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(again.texts(), ["1", "2", "3"]);
     place.served.stop().await;
 }
