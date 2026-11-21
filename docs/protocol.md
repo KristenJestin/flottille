@@ -120,6 +120,7 @@ no device calls a `local` one over a link (`docs/remote.md`, "Roles").
 | `events.watch` | read |
 | `project.list` | read |
 | `project.show` | read |
+| `project.folders` | drive |
 | `project.detect` | drive |
 | `project.add` | drive |
 | `project.removal` | read |
@@ -426,6 +427,16 @@ When the project follows a default that cannot be followed (`workspaces.toml` is
 `workspaces_folder.show`), the result also holds `workspaces_default_error`, the reason; the data
 folder is what `workspaces_root` then is. `not-found` when there is none,
 `invalid-config` when its file cannot be used.
+
+#### `project.folders`
+
+`{}`. The folders a project may be added from, for a client that picks one rather than typing a
+path (`docs/remote.md`, "Paths are picked, not typed"): `{"home", "folders": [{"path", "shown"}]}`,
+each folder under the home of the user the daemon runs for (`HOME`) that holds a `.git` (a folder
+or a file), three levels down at most and never looked into further, in alphabetical order, 200 at
+most; hidden folders and links are not looked into, and the folder of a project already registered
+is left out. `shown` is the path from `~` (`~/code/app`). `refused` when the daemon has no `HOME`.
+It is `drive`: only what adds a project needs it.
 
 #### `project.detect`
 

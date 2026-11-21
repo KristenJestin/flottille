@@ -107,6 +107,11 @@ impl Projects {
     }
 }
 
+/// How many levels under the home `project.folders` looks for repositories, and how many it says
+/// at most: a home holds far more folders than a list can offer.
+const FOLDERS_DEPTH: usize = 3;
+const FOLDERS_LIMIT: usize = 200;
+
 /// Answers a `project.*` request.
 pub fn call(daemon: &Daemon, method: &str, params: Value) -> std::result::Result<Value, Failure> {
     let mut projects = daemon.projects.lock().unwrap();
@@ -124,6 +129,28 @@ pub fn call(daemon: &Daemon, method: &str, params: Value) -> std::result::Result
         "project.show" => {
             let ProjectName { name } = serde_json::from_value(params)?;
             Ok(serde_json::to_value(load(projects, &name)?)?)
+        }
+        "project.folders" => {
+            let home = std::env::var_os("HOME").map(PathBuf::from).ok_or_else(|| {
+                Failure::refused("the daemon has no HOME to look for repositories in")
+            })?;
+            let known: Vec<&Path> = projects
+                .known
+                .values()
+                .map(|project| project.folder.as_path())
+                .collect();
+            let folders: Vec<Value> = detect::candidates(&home, FOLDERS_DEPTH, FOLDERS_LIMIT)
+                .into_iter()
+                .filter(|folder| !known.contains(&folder.as_path()))
+                .map(|folder| {
+                    let shown = match folder.strip_prefix(&home) {
+                        Ok(rest) => format!("~/{}", rest.display()),
+                        Err(_) => folder.display().to_string(),
+                    };
+                    json!({"path": folder, "shown": shown})
+                })
+                .collect();
+            Ok(json!({"home": home, "folders": folders}))
         }
         "project.detect" => {
             let plan = plan(projects, serde_json::from_value(params)?)?;
