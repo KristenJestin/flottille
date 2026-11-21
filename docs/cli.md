@@ -1474,9 +1474,13 @@ Changes what is given, nothing else.
 
 Starts a run now. Refused while its last run is under way: a routine never runs twice at once.
 
-### `flottille routine pause <name>`, `flottille routine resume <name>`
+### `flottille routine pause <name>`
 
-No run starts while it is paused; resumed, its next run is its schedule's next.
+No run starts while it is paused.
+
+### `flottille routine resume <name>`
+
+Its next run is its schedule's next again.
 
 ### `flottille routine remove <name>`
 
