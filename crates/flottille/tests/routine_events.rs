@@ -234,8 +234,8 @@ fn an_event_routine_has_an_event_and_no_schedule() {
         let mut params = params;
         params["project"] = json!("app");
         params["prompt"] = json!(NIGHTLY);
-        let error = user.call("routine.add", params).unwrap_err();
-        assert_eq!(error["code"], "invalid-params", "{error}");
+        let (code, message) = user.call("routine.add", params).unwrap_err();
+        assert_eq!(code, "invalid-params", "{message}");
     };
     invalid(json!({"name": "Both", "schedule": "every day 07:00", "event": nightly(json!({}))}));
     invalid(json!({"name": "Neither"}));
@@ -272,7 +272,7 @@ fn an_event_routine_has_an_event_and_no_schedule() {
         json!({"routine": "Nightly fix", "event": {"kind": "mentioned"},
             "schedule": "every day 07:00"}),
     );
-    assert_eq!(both.unwrap_err()["code"], "invalid-params");
+    assert_eq!(both.unwrap_err().0, "invalid-params");
 }
 
 #[test]
