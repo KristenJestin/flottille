@@ -51,7 +51,8 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         val phone = (application as FlottilleApplication).phone
-        taken(intent)
+        // A recreated activity (a rotation) holds the same intent: what it shared is not read again.
+        taken(intent, recreated = savedInstanceState != null)
         setContent {
             FlottilleApp(
                 phone = phone,
@@ -67,14 +68,14 @@ class MainActivity : ComponentActivity() {
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
-        taken(intent)
+        setIntent(intent)
+        taken(intent, recreated = false)
     }
 
-    private fun taken(intent: Intent) {
-        val machine = intent.getStringExtra(EXTRA_MACHINE)
-        val agent = intent.getStringExtra(EXTRA_AGENT)
-        if (machine != null && agent != null) open = SessionKey(machine, agent)
-        if (intent.action == Intent.ACTION_SEND || intent.action == Intent.ACTION_SEND_MULTIPLE) {
+    private fun taken(intent: Intent, recreated: Boolean) {
+        val asked = asked(intent, packageName, recreated)
+        asked.open?.let { open = it }
+        if (asked.share) {
             // Read off the main thread: a picture can be megabytes. Nothing is sent: the pictures
             // wait for the user to say which session they go to.
             lifecycleScope.launch {

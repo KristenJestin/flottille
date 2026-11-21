@@ -34,6 +34,13 @@
                 <data android:mimeType="image/*" />
             </intent-filter>
         </activity>
+        <!-- The entry point of the app's own PendingIntents (a notification's): not exported, so no
+             other app can name it. A session's machine and agent are taken from an intent that came
+             through it, and from no other. -->
+        <activity-alias
+            android:name=".OpenSession"
+            android:exported="false"
+            android:targetActivity=".MainActivity" />
         <!-- The camera's shot: one file of the app's cache, handed to the camera app alone. -->
         <provider
             android:name="androidx.core.content.FileProvider"

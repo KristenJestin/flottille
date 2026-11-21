@@ -1070,6 +1070,11 @@ core behind it, the screens' tests play a fake) and never the generated bindings
 **The session page, as built (#826).** Tapping a session opens `SessionPage`; its one entry point is
 a `SessionKey` (machine and agent), which an intent can carry too (`MainActivity` reads the extras
 `org.flottille.app.MACHINE` and `AGENT`), so that a notification opens a session by those two ids.
+**Only the app's own intents do**: the main activity is exported (the launcher, the share sheet),
+so any app could name a session in it; the extras are honoured only on an intent that came through
+`org.flottille.app.OpenSession`, an alias of the activity that is not exported, which a
+notification's PendingIntent targets. What is shared is read once, not again when the activity is
+recreated.
 
 - **Reading**: the page follows its session through the core (`follow`: the latest page of the
   conversation, `agent.show` with a `before` past every event, and the tree, `agent.tree`) **only
@@ -1090,6 +1095,11 @@ a `SessionKey` (machine and agent), which an intent can carry too (`MainActivity
   binds.** The core refuses a message that does not fit, saying so, and the app scales a jpeg, png
   or webp over 230 KB down to 2000 px and re-encodes it, so that a camera shot fits (the window's
   own messages to another machine meet the same frame: a follow-up may carry pictures in chunks).
+  What another app hands over is never trusted: a uri the app has no grant for, one that fails or
+  one whose extra is of another type is left out (said once), a picture is refused before it is
+  held when it is over 5 MiB and is never sent cut short, and reading stops when the pictures held
+  pass the frame's 700 KB; the frame is measured on the signed request itself, escapes included. A
+  camera shot is read, then deleted, and what a dead process left is cleared at the start.
   Nothing of a picture is logged. A message to a machine
   that is off is refused, said as a toast with since when (`server is offline since 22:14`) and kept
   in the composer: nothing is queued.
@@ -1098,10 +1108,19 @@ a `SessionKey` (machine and agent), which an intent can carry too (`MainActivity
   choice is made, one **Answer** once every question has a choice or words (`answer_ask`:
   `agent.answer`). A request is a card with the call **as the daemon gave it** (the same one line
   the window shows: a command's line, else the tool and its arguments, computed in the core, never
-  summarised by the app), the judge's reason or the first reason it was held, **Allow** and
-  **Deny**, and, for a base request, the tag `Always asks` and the strong warning. An answer the
-  machine refuses (already answered, gone, the ask answered) is said on the card, which then folds.
-- **Controls**: the mode as three choices (Ask, Auto, Full; Full's fill is the alarm colour), Stop
+  summarised by the app), what the judge said, **every** reason it was held and every agent that
+  forwarded it, which agent of the tree asked (`asked by the conversation · #4`), **Allow** and
+  **Deny**, and, for a base request, the tag `Always asks` and the window's own warning (the first
+  message of a session to another says what it leaves, not the generic one). Those sentences are
+  the window's, shared in `flottille-protocol` (`words`), never written twice. **A proposal to
+  write a connection** (the tool `connections`, kind `action`) has **Deny** only and says to open
+  it on a computer, as the window never offers Allow on it: what it would write is read in its
+  dialog. An answer the machine refuses because the request is decided already or gone (or the ask
+  is answered) is said on the card, which then folds; any other refusal (a link that ended, a time
+  out) is a toast and the card stays, to answer again.
+- **Controls**: the mode as three choices (Ask, Auto, Full; Full's fill is the alarm colour; **Full
+  asks for a confirmation on the phone**, the one confirmation dialog, since one tap in a pocket
+  must not give the agents the run of the machine), Stop
   in Send's place while a turn runs and there is nothing to send (`agent.cancel`: the agent
   stays), and the session's tree read only. **A child's page has no composer**, no mode and no
   Stop; an ended session says it has ended in place of the composer.
@@ -1112,8 +1131,8 @@ a `SessionKey` (machine and agent), which an intent can carry too (`MainActivity
 - **The core gained**, for the page: `follow` reads a page and the tree, `unfollow`, `older`, `send`
   (checks the pictures' limits), `answer_ask`, `set_mode`, `image`; the conversation of the view
   state carries the title, the mode, `working`, `child`, `ended`, `more`, each entry's number and
-  picture names, and the tree; a request carries the call line, its class (`base`), what it says
-  and the reason; an ask carries each question with its options.
+  picture names, and the tree; a request carries the call line, its kind and class (`base`), what it
+  says, the judge's sentence, every reason and forward, who asked and the warning; an ask carries each question with its options.
 - **Motion**, each with the kit's durations: a message or a tree row unfolds and fades in
   (`ENTER`); the steps fold and unfold, with their chevron turning (`PANEL`); the ask card and the
   request cards dock, slide into place and fade away (`animateItem`); a question slides in from
@@ -1922,7 +1941,7 @@ on a real phone, by hand, and reported.
   only, as before. Pictures shown by an agent (`agent.file`) and the request lines inside the
   conversation, the queued messages (Send now, Edit, Cancel) and Resume of an ended session are not
   on the page yet: this page shows the pictures of the user's messages, the live conversation, the
-  cards and the controls. Full needs no confirmation, as in the window. A shared picture asks the
+  cards and the controls. Full asks for a confirmation on the phone (the window has none: a tap in a pocket is not a click). A shared picture asks the
   user to pick the session in the list (a banner, with Discard) rather than a picker of its own. The
   answered card folds 2.5 s after a refusal, long enough to be read.
 
