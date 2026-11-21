@@ -277,103 +277,40 @@ Fixes
 $ flottille changes --since 0.4.0-beta.104
 ```
 
-### `flottille remote setup <hub URL> [--name <name>] [--replace] [--json]`
+### `flottille remote pair [--name <name>] [--role runner|controller|viewer] [--icon <icon>] [--colour <colour>] [--replace] [--json]`
 
-Makes this machine the first member of a new hub (`docs/remote.md`, "The first member"), with the
-setup code the hub printed in its log (or `flottille-hub setup-code` on the hub's machine), read on
-the standard input, asked for on a terminal: never an argument, which other users of the machine
-and the shell's history would see. The command makes this user session's device key (in the
-session's keyring, or `remote/device.key` when there is no Secret Service; any other failure of
-the keyring is said, and stops it), signs its own entry as the root of the member list, a
-`runner` named `--name` (the host's name by default), and the declaration of this machine's key;
-the daemon claims it with the machine's key, reaches the hub, proves the code without sending it,
-pins the hub's key once the hub proved it too, and keeps a session to it. A machine set up already
-is refused unless `--replace` is given. `remote.setup`.
-
-```
-$ flottille remote setup https://hub.example.net --name pc
-The hub's setup code: 7KQ2-M4XP-9TRW-H3CD
-pc is the first member of the hub at https://hub.example.net:443/, whose key is 3f2a-91bc-0d4e-77a1: the root every device that joins pins
-```
-
-### `flottille remote invite [--json]`
-
-Asks the hub for an invitation (`docs/remote.md`, "Pairing"): an ask signed by this user session's
-device key, which must be a member's that may invite (a `runner` or a `controller`). The hub
-answers with a token, valid 5 minutes, once; the command prints the code that holds it, with the
-hub's URL and key and this member's fingerprint, on a line of its own (the QR holds the same
-text), and how to join with it. The code is never part of a command it prints: it is given to
-`flottille remote join` on its standard input. `remote.invite`.
+Pairs this machine with the user's hub (`docs/remote.md`, "Pairing"), the first machine and the
+others alike, with the code `flottille-hub pair` printed on the hub's host, read on the standard
+input, asked for on a terminal: never an argument, which other users of the machine and the shell's
+history would see. The code holds the hub's address and key: nothing else is typed, and a hub that
+answers with another key is refused. The command uses this user session's device key, made once
+(in the session's keyring, or `remote/device.key` when there is no Secret Service; any other
+failure of the keyring is said, and stops it), and proposes this device's card, which the options
+change: its name (the host's), its role (`runner` with an agent signed in, `controller` without),
+its icon (`desktop`, `laptop`, `server`, `phone`, `tablet`: a laptop with a battery, a desktop with
+a screen, a server without either) and its colour (`grey`, `red`, `orange`, `yellow`, `green`,
+`teal`, `blue`, `purple`: one of its key's). The daemon proves the code without sending it; once
+the hub paired the device, the command signs the declaration of this machine, which the daemon
+claims with the machine's key, and the machine pins the hub. A device that is a member already
+keeps its entry and its card. A machine paired already is refused unless `--replace` is given.
+`remote.machines`, `remote.pair`, `remote.declare`.
 
 ```
-$ flottille remote invite
-An invitation to the hub at https://hub.example.net:443/, valid 5 minutes, once, from pc (3f2a-91bc-0d4e-77a1):
-
-0ZJ7X3K2M9QH4V…  (about 150 characters)
-
-The QR holds the same text. On the new device: flottille remote join, then give it the code
+$ flottille remote pair --role runner
+The pair code: 0ZJ7X3K2M9QH4V…
+server is paired with the hub at https://hub.example.net:443/ as a runner
 ```
-
-### `flottille remote join [--json]`
-
-Joins the hub with an invitation's code, read on the standard input, asked for on a terminal:
-never an argument, which other users of the machine and the shell's history would see. The
-command makes this user session's device key, prints the four verification words, drawn from the
-new key, the inviting member's and the invitation's token, and waits until the member that invited
-accepts or refuses the request (5 minutes at most). Once it is accepted, it signs the declaration
-of this machine, which the daemon claims with the machine's key, and the machine pins the hub. A
-machine set up with a hub already is refused. A join the hub recorded spends the invitation, even
-when the connection then drops: ask a new one. The new key is pending until the join succeeded: a
-join whose command was gone (a closed terminal) and that the member accepted all the same goes on,
-given the code again, with the key the hub took; any other pending key is removed and a new one
-made. `remote.join`, `remote.declare`.
-
-```
-$ flottille remote join
-The invitation's code: 0ZJ7X3K2M9QH4V…
-Verification words: maple orbit violet canyon
-The device that invited shows them too: accept there only if they are the same. Waiting for it...
-server joined the hub at https://hub.example.net:443/ as a runner, added by pc
-```
-
-### `flottille remote requests [--json]`
-
-The join requests that wait for this machine's member, each named by the new device's fingerprint,
-with its four words. Only a request for an invitation this machine asked for, and still valid, is
-shown, its words drawn from the token the hub gave this machine. `remote.requests`.
-
-```
-$ flottille remote requests
-8c41-77d0-a2e9-5b13  maple orbit violet canyon
-```
-
-### `flottille remote accept <request> --name <name> --role runner|controller|viewer [--json]`
-
-Accepts a join request, once its four words are those the new device shows: prints the words, then
-signs with this session's device key the addition of the new device, named `--name`, with the role
-chosen (`runner`: it runs agents; `controller`: it controls only; `viewer`: it views only), and
-waits until the hub sent back a list holding it. `remote.requests`, `remote.members`,
-`remote.change`.
-
-```
-$ flottille remote accept 8c41-77d0-a2e9-5b13 --name server --role runner
-Verification words: maple orbit violet canyon
-server was added, its entry signed by this device
-```
-
-### `flottille remote refuse <request> [--json]`
-
-Refuses a join request: the invitation ends, and the new device is told. `remote.refuse`.
 
 ### `flottille remote members [--json]`
 
-The members of the hub's list, as this machine last checked it back to the root it pinned: each
-one's name, role, fingerprint and who added it, this machine's own marked. `remote.members`.
+The members of the hub's list, as this machine last checked it back to the root and the hub's key
+it pinned: each one's name, role, fingerprint and who added it, this machine's own marked; with
+`--json`, each one's card too (`docs/protocol.md`, `remote.members`). `remote.members`.
 
 ```
 $ flottille remote members
-pc  runner  3f2a-91bc-0d4e-77a1  added by pc  (this machine)
-server  runner  8c41-77d0-a2e9-5b13  added by pc
+pc  runner  3f2a-91bc-0d4e-77a1  added by the hub  (this machine)
+server  runner  8c41-77d0-a2e9-5b13  added by the hub
 ```
 
 ### `flottille remote members --runners [--project <name> [--agent <provider>]] [--json]`
@@ -393,12 +330,17 @@ server  projects: app (12 free), site (none free)  agents: claude
 
 Renames a member: a change signed by this session's device key. `remote.change`.
 
+### `flottille remote icon <name> <icon> [--json]`, `flottille remote colour <name> <colour> [--json]`
+
+Changes how a member is drawn, its icon or its colour, the other kept: a change signed by this
+session's device key. A role is changed on the hub's host only (`flottille-hub role`).
+`remote.change`.
+
 ### `flottille remote remove <name> [--json]`
 
 Removes a member: a change signed by this session's device key. Every machine that hears it cuts
-its links to the removed member's machine at once, and its open invitations close; a machine that
-was off hears it from the hub before it links to anything. The removed device key never joins
-again. `remote.change`.
+its links to the removed member's machine at once; a machine that was off hears it from the hub
+before it links to anything. The device comes back only paired again on the hub. `remote.change`.
 
 ### `flottille remote address list [--json]`
 

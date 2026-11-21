@@ -396,22 +396,17 @@ toast of its own. `id` (the notification's number, `notifications.list`), `in` (
 for the others). A notification that rings with no window focused is sent to the desktop and says
 no event. Its sound is played by the daemon in either case.
 
-### `remote.join_requested`
-
-A new device answered an invitation of this machine's member, and waits for it to accept or refuse
-(`docs/remote.md`, "Pairing"): `request` (the new device's fingerprint, which names it), `key`,
-`words` (the four verification words the new device shows too) and `inviter` (the member's
-fingerprint).
-
-### `remote.member_added`, `remote.member_removed`, `remote.member_renamed`
+### `remote.member_added`, `remote.member_removed`, `remote.member_renamed`, `remote.member_role`
 
 The member list this machine checked changed (`docs/remote.md`, "Pairing"), whoever changed it and
 whenever this machine heard it: a machine off when it happened says it when it connects to the hub
 again. `name`, `fingerprint` and `at` (when this machine heard it, in milliseconds since the Unix
-epoch), then: `role` (`runner`, `controller` or `viewer`) and `added_by` (the name of the member
-whose signature added it) for an addition, which a client announces as `New device: pixel (control
-only), added at 18:42 from pc`; `removed_by` for a removal; `from` (the name before) and
-`renamed_by` for a renaming. The machine that joined says its own addition.
+epoch), then: `role` (`runner`, `controller` or `viewer`) and `added_by` (`the hub` for a device
+it paired, the name of the member whose signature added it before pair mode) for an addition, which
+a client announces as `New device: pixel (control only), added at 18:42 by the hub`; `removed_by`
+for a removal (`the hub` for one made on its host); `from` (the name before) and `renamed_by` for a
+renaming; `role`, the new one, for a role the hub's host changed. The machine that paired says its
+own addition.
 
 ### `remote.connected`, `remote.disconnected`
 

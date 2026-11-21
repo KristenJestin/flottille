@@ -521,9 +521,9 @@ fn a_delivery_for_an_unrelated_agent_or_another_launch_is_refused() {
 
 #[test]
 fn a_call_from_a_third_machine_for_a_launch_it_did_not_make_is_refused() {
-    let (_hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
+    let (hub, pc, server) = pc_and_server(server_user(allowing()), Some(""));
     let laptop = Machine::of(server_user(None));
-    pair(&pc, &laptop, "laptop", "runner");
+    pair(&hub, &laptop, "laptop", "runner");
     let (child, launch, _mcp) = child_on_server(&pc, &server, "Write the tests of the export.");
     let caller = pc
         .agents()
