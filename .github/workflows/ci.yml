@@ -508,33 +508,90 @@ jobs:
           tool: cargo-ndk@4.1.2
       - run: apps/android/ci.sh
       # The APK (`docs/releases.md`, "The version"), on every pull request that touches the app and
-      # every push, for every channel: the version of `tools/version.sh`, signed with the release
-      # key when the repository's secrets hold it and debug-signed (and said so) when they do not.
-      # A pull request's APK is an artefact to install on a phone for a test.
+      # every push, for every channel: the version of `tools/version.sh`. This job runs the
+      # branch's own code and holds no secret: the APK it builds is unsigned, and a copy of it is
+      # signed with a key made for the run, to install on a phone for a test. The release key
+      # signs it in `android-sign`, a job of its own.
       - name: The APK, with the version
         id: apk
         env:
           HEAD_REF: ${{ github.head_ref }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          # Never in a pull request's run, which runs the branch's own scripts: its APK is
-          # debug-signed. A push runs code that was merged.
-          KEYSTORE_BASE64: ${{ github.event_name != 'pull_request' && secrets.ANDROID_KEYSTORE_BASE64 || '' }}
-          FLOTTILLE_KEYSTORE_PASSWORD: ${{ github.event_name != 'pull_request' && secrets.ANDROID_KEYSTORE_PASSWORD || '' }}
-          FLOTTILLE_KEY_ALIAS: ${{ github.event_name != 'pull_request' && secrets.ANDROID_KEY_ALIAS || '' }}
-          FLOTTILLE_KEY_PASSWORD: ${{ github.event_name != 'pull_request' && secrets.ANDROID_KEY_PASSWORD || '' }}
           APK_OUT: ${{ runner.temp }}/apk
         run: apps/android/apk.sh
-      - name: Keep the APK
+      - name: Keep the APK to try
         if: steps.apk.outputs.dir != ''
         uses: actions/upload-artifact@v4
         with:
           name: android-apk
           path: ${{ steps.apk.outputs.dir }}
           retention-days: 14
+      # What `android-sign` signs: the same build, unsigned.
+      - name: Keep the unsigned APK
+        if: steps.apk.outputs.unsigned != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-unsigned
+          path: ${{ steps.apk.outputs.unsigned }}
+          retention-days: 1
       - name: Disk left
         if: always()
         run: df -h /
         continue-on-error: true
+
+  # The release key signs the APK here and nowhere else (`docs/releases.md`, "The version"). The
+  # job runs on a push to a protected branch only, in the environment `android-release`, whose
+  # deployment branches are the maintainer's to set: no other branch's code, no pull request and no
+  # run started by hand reaches the key. It runs no third-party action and no script of the
+  # repository: it takes the unsigned APK of `android`, signs it with the runner's own
+  # `apksigner`, and keeps it for `publish`. Without the secrets it signs nothing and says so.
+  android-sign:
+    needs: [android]
+    if: ${{ !cancelled() && github.event_name == 'push' && needs.android.result == 'success' }}
+    runs-on: ubuntu-latest
+    environment: android-release
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: android-unsigned
+          path: unsigned
+      - name: Sign the APK
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          shopt -s nullglob
+          apks=(unsigned/flottille-*-unsigned.apk)
+          if [ "${#apks[@]}" -eq 0 ]; then echo "::notice::no APK was built: nothing to sign."; exit 0; fi
+          if [ -z "$KEYSTORE_BASE64" ] || [ -z "$KEYSTORE_PASSWORD" ] || [ -z "$KEY_ALIAS" ] || [ -z "$KEY_PASSWORD" ]; then
+            echo "::notice::the release key is not in this environment's secrets: no signed APK."
+            exit 0
+          fi
+          umask 077
+          ks=$(mktemp)
+          trap 'rm -f "$ks"' EXIT
+          printf '%s' "$KEYSTORE_BASE64" | base64 -d > "$ks"
+          apksigner=$(ls "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -n 1)
+          mkdir signed
+          for unsigned in "${apks[@]}"; do
+            name=${unsigned##*/}
+            signed=signed/${name%-unsigned.apk}.apk
+            "$apksigner" sign --ks "$ks" --ks-key-alias "$KEY_ALIAS" \
+              --ks-pass env:KEYSTORE_PASSWORD --key-pass env:KEY_PASSWORD --out "$signed" "$unsigned"
+            "$apksigner" verify "$signed"
+          done
+          echo "::notice::signed with the release key."
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-signed
+          path: signed
+          if-no-files-found: ignore
+          retention-days: 1
 
   # The required check: one job that always ends, success or failure, whatever happened to the
   # partitions (failed, cancelled, never started), so that it never waits on a job skipped.
@@ -860,7 +917,7 @@ jobs:
           retention-days: 1
 
   publish:
-    needs: [verified-on-dev, changes, verify, build, hub, android]
+    needs: [verified-on-dev, changes, verify, build, hub, android, android-sign]
     # `verify` passed here, or was skipped because this commit passed it on dev: never on a commit
     # no `verify` passed on. A failed or skipped `build` publishes nothing.
     if: >-
@@ -870,6 +927,7 @@ jobs:
       && needs.build.result == 'success' && needs.build.outputs.skip != 'true'
       && needs.hub.result == 'success'
       && (needs.android.result == 'success' || needs.android.result == 'skipped')
+      && (needs.android-sign.result == 'success' || needs.android-sign.result == 'skipped')
       && (needs.verify.result == 'success'
         || (needs.verify.result == 'skipped' && needs.verified-on-dev.outputs.verified == 'true'))
     runs-on: ubuntu-latest
@@ -896,12 +954,15 @@ jobs:
           pattern: hub-assets-*
           path: hub
           merge-multiple: true
-      # The app's APK (`android`): attached to the release of its version when it is signed with the
-      # release key. One that is debug-signed, or none (the job was skipped), attaches nothing.
-      - uses: actions/download-artifact@v4
+      # The app's APK: the signed one of `android-sign`, which only a push run has (its job runs on
+      # a push, in its environment). A pull request's run, or one without the release key,
+      # attaches none: no APK of a build job is ever attached.
+      - name: The signed APK
+        if: github.event_name == 'push'
+        uses: actions/download-artifact@v4
         continue-on-error: true
         with:
-          name: android-apk
+          name: android-signed
           path: android
       - name: Publish
         id: publish
@@ -925,13 +986,8 @@ jobs:
             cat "$RUNNER_TEMP/tip.err" >&2; exit 1
           fi
           title="Flottille v$VERSION"
-          apk=()
-          for file in android/flottille-*.apk; do
-            case "$file" in
-              *-debug-signed.apk | 'android/flottille-*.apk') ;;
-              *) apk+=("$file") ;;
-            esac
-          done
+          shopt -s nullglob
+          apk=(android/flottille-*.apk)
           # Nothing is replaced, ever (releases are immutable): a version already published, of any
           # channel, stays as it is; a draft left by a failed upload is made again.
           if draft=$(gh release view "$TAG" --json isDraft --jq .isDraft 2> /dev/null); then

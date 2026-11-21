@@ -10,8 +10,6 @@ plugins {
 
 val appVersion: String = providers.gradleProperty("flottille.version").getOrElse("0.0.0-local")
 val appVersionCode: Int = providers.gradleProperty("flottille.versionCode").map(String::toInt).getOrElse(1)
-/** The release key's file, written by CI from the repository's secrets; none on a computer. */
-val keystore: String? = System.getenv("FLOTTILLE_KEYSTORE")?.takeIf { it.isNotEmpty() }
 
 android {
     namespace = "org.flottille.app"
@@ -24,21 +22,11 @@ android {
         versionCode = appVersionCode
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
-    signingConfigs {
-        if (keystore != null) {
-            create("release") {
-                storeFile = file(keystore)
-                storePassword = System.getenv("FLOTTILLE_KEYSTORE_PASSWORD")
-                keyAlias = System.getenv("FLOTTILLE_KEY_ALIAS")
-                keyPassword = System.getenv("FLOTTILLE_KEY_PASSWORD")
-            }
-        }
-    }
     buildTypes {
         release {
             isMinifyEnabled = false
-            // Signed with the release key when CI has it, debug-signed otherwise: CI says which.
-            signingConfig = signingConfigs.findByName("release") ?: signingConfigs.getByName("debug")
+            // Unsigned: the build holds no key. `apk.sh` debug-signs a copy to try on a phone, and
+            // CI's signing job (its own environment) signs the release's.
         }
     }
     buildFeatures { compose = true }
