@@ -278,6 +278,15 @@ impl ProjectPage {
             .update(cx, |routines, cx| routines.open_result(routine, run, cx));
     }
 
+    /// Shows the Routines tab on the result of the run a notification is about (`session` is
+    /// the run's, `name` its routine's).
+    pub fn show_routine_notified(&mut self, session: &str, name: &str, cx: &mut Context<Self>) {
+        self.switched = true;
+        self.choose(PageTab::Routines, cx);
+        self.routines
+            .update(cx, |routines, cx| routines.open_run_of(session, name, cx));
+    }
+
     pub fn ended(&self) -> &Entity<EndedRuns> {
         &self.ended
     }

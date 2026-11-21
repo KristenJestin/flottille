@@ -4096,6 +4096,27 @@ impl Shell {
         {
             page.update(cx, |page, cx| page.show_routine_result(routine, run, cx));
         }
+        self.history.show_tab(project, Some(PageTab::Routines));
+    }
+
+    /// Opens the result of the run a routine's notification is about, in place of its session's
+    /// page: the notification is read, as opening the session would read it.
+    fn open_routine_notified(
+        &mut self,
+        project: &str,
+        session: &str,
+        name: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open(Selection::Project(project.to_owned()), window, cx);
+        self.read_session(session);
+        if let Some(page) = self.main.read(cx).project_page().cloned()
+            && page.read(cx).name() == project
+        {
+            page.update(cx, |page, cx| page.show_routine_notified(session, name, cx));
+        }
+        self.history.show_tab(project, Some(PageTab::Routines));
     }
 
     /// Opens a project's page or a session's: a choice made in a drawer closes it.
@@ -4381,10 +4402,17 @@ impl Shell {
         else {
             return;
         };
-        match item.session {
-            Some(session) if self.snapshot.session(&session).is_some() => {
-                self.open(Selection::Session(session), window, cx)
+        let project = item
+            .session
+            .as_deref()
+            .and_then(|id| self.snapshot.session(id))
+            .map(|s| s.project.clone());
+        match (item.session, project) {
+            // A routine's run is read on its result page, not in the conversation.
+            (Some(session), Some(project)) if item.kind == "routine" => {
+                self.open_routine_notified(&project, &session, &item.label, window, cx)
             }
+            (Some(session), Some(_)) => self.open(Selection::Session(session), window, cx),
             _ if !item.read && self.marked.insert(item.id) => {
                 self.perform(Command::ReadNotifications(Reading::Ids(vec![item.id])))
             }

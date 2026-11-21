@@ -117,6 +117,9 @@ pub struct RoutinesTab {
     branch: Option<String>,
     /// The report of the result shown, drawn as a reply is.
     report: Option<(u64, String, MarkdownText)>,
+    /// A notification's run to open once the list read after it came: the run's session, its
+    /// routine's name, and the read that settles it.
+    waiting: Option<(String, String, u64)>,
 }
 
 impl RoutinesTab {
@@ -160,6 +163,7 @@ impl RoutinesTab {
             status_asked: 0,
             branch: None,
             report: None,
+            waiting: None,
         }
     }
 
@@ -255,6 +259,7 @@ impl RoutinesTab {
                     self.read = Some(read);
                     cx.notify();
                 }
+                self.open_waiting(cx);
             }
             Then::Shown { routine, asked, .. } => {
                 if asked < self.history_asked {
@@ -324,6 +329,40 @@ impl RoutinesTab {
         self.at = Where::Routine(id.to_owned());
         self.read_history(id, cx);
         cx.notify();
+    }
+
+    /// Opens the result of the run a notification is about, known by its session and its
+    /// routine's name: it is found in a list read now. A run that is no longer its routine's last
+    /// opens the routine's page, which lists them all.
+    pub fn open_run_of(&mut self, session: &str, name: &str, cx: &mut Context<Self>) {
+        self.read(cx);
+        self.waiting = Some((session.to_owned(), name.to_owned(), self.asked));
+    }
+
+    fn open_waiting(&mut self, cx: &mut Context<Self>) {
+        let Some((session, name, asked)) = self.waiting.clone() else {
+            return;
+        };
+        if self.applied < asked {
+            return;
+        }
+        self.waiting = None;
+        let Some(Ok(routines)) = &self.read else {
+            return;
+        };
+        let last = routines.iter().find_map(|routine| {
+            let run = routine.last.as_ref()?;
+            (run.session.as_deref() == Some(session.as_str())).then(|| (routine.id.clone(), run.id))
+        });
+        let named = routines
+            .iter()
+            .find(|routine| routine.name == name)
+            .map(|routine| routine.id.clone());
+        match (last, named) {
+            (Some((routine, run)), _) => self.open_result(&routine, run, cx),
+            (None, Some(id)) => self.open_routine(&id, cx),
+            (None, None) => {}
+        }
     }
 
     /// Opens a run's result: it is read by the user from now on, which the daemon is told.
