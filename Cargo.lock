@@ -3107,7 +3107,7 @@ dependencies = [
 [[package]]
 name = "gpui-design-system"
 version = "0.1.0"
-source = "git+https://github.com/KristenJestin/gpui-design-system?tag=v0.3.0-alpha.feat-notice-toast.5#92d79e4c31a36582494412909e63dbe7c74cef6e"
+source = "git+https://github.com/KristenJestin/gpui-design-system?tag=v0.3.0-alpha.feat-notice-toast.8#e5c335a93acdf772cc8c9f2de6510f816c65589d"
 dependencies = [
  "gpui-kit",
  "qrcodegen",
