@@ -144,6 +144,33 @@ mod tests {
     }
 
     #[test]
+    fn an_old_hub_is_told_to_update_on_its_host() {
+        let ours = hello("0.4.0", &[2]);
+        let theirs = hello("0.1.0", &[1]);
+        let refusal = choose_hub(&ours, &theirs).unwrap_err();
+        assert_eq!(
+            refusal.to_string(),
+            "The hub runs 0.1.0 (protocol 1), this machine 0.4.0 (protocol 2): update the hub on \
+             its host."
+        );
+        assert_eq!(refusal.state(), PeerState::NeedsUpdate);
+    }
+
+    #[test]
+    fn a_newer_hub_is_told_to_update_this_machine() {
+        let refusal = choose_hub(&hello("0.4.0", &[2]), &hello("0.5.0", &[3])).unwrap_err();
+        assert_eq!(
+            refusal.to_string(),
+            "The hub runs 0.5.0 (protocol 3), this machine 0.4.0 (protocol 2): update this \
+             machine."
+        );
+        assert_eq!(
+            choose_hub(&hello("0.4.0", &[2]), &hello("0.4.1", &[2])),
+            Ok(2)
+        );
+    }
+
+    #[test]
     fn a_peer_without_a_common_protocol_needs_an_update_not_offline() {
         let refusal = choose(&hello("0.4.1", &[8]), &hello("0.4.3", &[9]), "server").unwrap_err();
         assert_eq!(refusal.state(), PeerState::NeedsUpdate);

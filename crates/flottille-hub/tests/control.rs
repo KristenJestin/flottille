@@ -1653,6 +1653,65 @@ async fn a_stranger_cannot_close_pair_mode() {
     served.stop().await;
 }
 
+/// What a hub of before pair mode (protocol 1) left in its state folder, as `hub.json` read then:
+/// its key, and a list of members whose first change is the first member's own entry.
+fn old_state(place: &Place) -> (DeviceKey, DeviceKey, MachineKey, MemberList) {
+    use std::os::unix::fs::PermissionsExt;
+    let (pc, phone) = (device_key(1), device_key(2));
+    let machine = place.machine("pc");
+    let mut list = MemberList::start("pc", &pc).unwrap();
+    list.declare(&pc, &machine);
+    list.sign(
+        Action::Add {
+            key: phone.public(),
+            name: "phone".to_owned(),
+            role: Role::Controller,
+        },
+        &pc,
+    );
+    let folder = place.hub_folder();
+    drop(HubKey::load_or_make(&folder).unwrap());
+    let state = serde_json::json!({"version": 1, "setup_code": null, "members": list});
+    std::fs::write(folder.join("hub.json"), state.to_string()).unwrap();
+    std::fs::set_permissions(folder.join("hub.json"), PermissionsExt::from_mode(0o600)).unwrap();
+    (pc, phone, machine, list)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_hub_updated_over_its_data_keeps_its_members() {
+    let place = Place::new();
+    let (pc, phone, machine, list) = old_state(&place);
+    let hub_key = hub_signer(&place.hub_folder()).public();
+    // The hub of today starts over the old data folder.
+    let served = place.serve("127.0.0.1:0").await;
+    // A device that pinned the old list is welcome: its machine is a member's, and it takes the
+    // list the hub sends, which holds every member of before.
+    let mut device = Device {
+        url: url(served.address()),
+        hub: hub_key,
+        root: pc.public(),
+        list: list.clone(),
+    };
+    let mut session = device
+        .connect(&machine, &hello(), &Tls::System)
+        .await
+        .expect("a member of before is not refused");
+    let members = device.take(next_list(&mut session).await).unwrap();
+    let names: Vec<_> = members.members().iter().map(|m| m.name.clone()).collect();
+    assert_eq!(names, ["pc", "phone"]);
+    // Its own changes go on: the first member removes the phone.
+    let removal = Change::sign(
+        device.list.head(),
+        Action::Remove {
+            key: phone.public(),
+        },
+        &pc,
+    );
+    let members = device.submit(&mut session, removal).await.unwrap();
+    assert_eq!(members.members().len(), 1);
+    served.stop().await;
+}
+
 /// What a build of before this protocol says first: protocol 1, the frames of before pair mode.
 fn old_hello() -> Hello {
     Hello {
@@ -1677,8 +1736,16 @@ async fn an_old_device_is_told_to_update_by_the_hub() {
     else {
         panic!("an old device is refused");
     };
+    // The hub says it to the device in the device's own words: the hub is the newer, so the
+    // device is the one to update, and the hub is never "this machine".
     assert!(
-        refused.to_string().contains("update one of them"),
+        refused.to_string().contains(
+            "The hub runs 0.4.0 (protocol 2), this machine 0.3.9 (protocol 1): update this machine."
+        ),
+        "{refused}"
+    );
+    assert!(
+        !refused.to_string().contains("flottille update"),
         "{refused}"
     );
     // Nothing was paired, and pair mode is still open for a device that can.
@@ -1715,7 +1782,13 @@ async fn an_old_hub_is_told_to_update_by_the_device() {
     .await
     .unwrap_err();
     assert!(
-        refused.to_string().contains("update one of them"),
+        refused.to_string().contains(
+            "The hub runs 0.3.9 (protocol 1), this machine 0.4.0 (protocol 2): update the hub on its host."
+        ),
+        "{refused}"
+    );
+    assert!(
+        !refused.to_string().contains("flottille update"),
         "{refused}"
     );
 }
@@ -1869,7 +1942,7 @@ fn stranger_at_url(address: SocketAddr, stranger: &DeviceKey) -> Device {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_change_the_hub_withholds_is_said_to_its_submitter() {
+async fn a_change_the_hub_withheld_is_said_in_words() {
     let place = Place::new();
     let served = place.serve("127.0.0.1:0").await;
     let mut two = two(&place, &served).await;
@@ -1916,9 +1989,14 @@ async fn a_change_the_hub_withholds_is_said_to_its_submitter() {
         &two.pc,
     );
     let refused = lied_to.submit(&mut session, removal).await.unwrap_err();
+    let said = refused.to_string();
     assert!(
-        refused.to_string().contains("the hub withheld this change"),
-        "{refused}"
+        said.contains("The hub did not confirm this change") && said.contains("try again"),
+        "{said}"
+    );
+    assert!(
+        !said.contains("withheld") && !said.contains("sent back no list"),
+        "{said}"
     );
     assert_eq!(lied_to.list, two.pc_device.list);
     served.stop().await;
