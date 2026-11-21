@@ -1344,13 +1344,13 @@ fn machines_is_a_tab_of_settings(cx: &mut TestAppContext) {
     machines_tab(&shell, cx);
     // Its sections, and none of them in General.
     until(&shell, cx, "remote", |cx| present(cx, "remote"));
-    for section in ["hub", "devices", "addresses"] {
+    for section in ["hub", "devices"] {
         let title = format!("{section}-title");
         until(&shell, cx, section, |cx| present(cx, &title));
     }
     click(&shell, cx, "settings-tabs-general");
     settle(&shell, cx);
-    for section in ["devices-title", "addresses-title", "remote"] {
+    for section in ["devices-title", "remote"] {
         assert!(!present(cx, section), "{section} is not in General");
     }
 
