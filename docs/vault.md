@@ -649,6 +649,10 @@ The gaps, where the platform does not allow more:
   below Landlock's ninth ABI it connects to the bus and the other sockets of the runtime folder
   by their path, and it reaches X11's by theirs. The daemon's log says so at its start, and `flottille doctor` in its warnings
   (`sandbox.private_mounts` false in `--json`);
+- where a confined command may reach the session bus (the kernel refuses user namespaces, or
+  the bus found at the start was replaced), it could own the notification server's name and say
+  what the user clicked: the desktop's notifications of a request then offer Deny and Open, never
+  Allow (`docs/design.md`, §11), and Allow is given in the window;
 - a session bus outside the runtime folders is hidden at its path only: where its socket is in
   a folder a confined command can write (`/tmp/dbus-…/bus`, say), the command can move that
   folder (only the masked socket itself is a mount point), and the bus found at the start is then

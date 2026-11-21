@@ -116,6 +116,8 @@ pub enum Update {
     News(model::News),
     /// An agent handed the user a link: a toast offers it.
     Link(model::LinkShown),
+    /// The daemon rang a notification in this window, which is focused: a toast tells it.
+    Rang(model::Rang),
     /// An agent was told something (`agent.prompted`): it ends the row of links it was sharing.
     Prompted(String),
     /// An item of the project changed (`item.*`, which names it), or what it declares
@@ -450,6 +452,9 @@ fn follow(
         if let Some(link) = model::LinkShown::of(event) {
             let _ = updates.unbounded_send(Update::Link(link));
         }
+        if let Some(rang) = model::Rang::of(event) {
+            let _ = updates.unbounded_send(Update::Rang(rang));
+        }
         if let Some((project, item)) = items_of(event) {
             let _ = updates.unbounded_send(Update::Items { project, item });
         }
@@ -770,6 +775,17 @@ fn read(conn: &mut Conn, briefs: &mut Briefs, seen: &Seen) -> Result<Snapshot> {
         subscriptions: &subscriptions,
     });
     snapshot.set_notifications(&notifications);
+    // A daemon that does not know the method says nothing of it: the machine shown may be older.
+    snapshot.desktop_why = conn
+        .ask("notifications.status", json!({}))?
+        .ok()
+        .filter(|status| status["desktop"]["shows"] == false)
+        .map(|status| {
+            status["desktop"]["why"]
+                .as_str()
+                .unwrap_or("no notification server answers")
+                .to_owned()
+        });
     snapshot.project_changes = seen.project_changes.load(Ordering::Relaxed);
     Ok(snapshot)
 }

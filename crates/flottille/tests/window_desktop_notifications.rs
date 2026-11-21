@@ -1,0 +1,285 @@
+//! #1002 in the window: while it is focused, what the daemon would have told the desktop is a
+//! toast of the kit at the corner (the same title and excerpt, Allow and Deny for a request, a
+//! click opening the session), unless the session is the one open; the window tells the daemon
+//! its presence. On GPUI's test platform in front of a real daemon, a private bus with a fake
+//! notification server, a fake audio sink. No window opens on a screen.
+
+use crate::common;
+use crate::window_notifications::{
+    eventually, has, held_number, label, project, rect, session, settle, until, user, window,
+};
+
+use common::desktop::{self, Bus, Notifications};
+use serde_json::{Value, json};
+
+use gpui_kit::TestAppContext;
+use gpui_kit::test::TestWindowExt;
+
+fn pending(user: &common::User) -> Vec<Value> {
+    user.call("approval.list", json!({})).unwrap()["requests"]
+        .as_array()
+        .unwrap()
+        .clone()
+}
+
+/// The state of request `number` of the tree of `root`: `pending`, `allowed`, `denied`.
+fn state_of(user: &common::User, root: &str, number: u64) -> String {
+    let requests = user.call("approval.list", json!({"tree": root})).unwrap()["requests"].clone();
+    requests
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|request| request["number"] == number)
+        .and_then(|request| request["state"].as_str())
+        .unwrap_or_else(|| panic!("no request #{number}: {requests}"))
+        .to_owned()
+}
+
+/// What the daemon knows of the window: `{"focused", "session"}`, or null without one.
+fn presence(user: &common::User) -> Value {
+    user.call("notifications.status", json!({})).unwrap()["window"].clone()
+}
+
+/// `until`, with the clock moving: a toast folds away as time passes, and leaves the tree then.
+fn until_folded(
+    shell: &gpui_kit::Entity<flottille_window::Shell>,
+    cx: &mut gpui_kit::VisualTestContext,
+    what: &str,
+    check: impl Fn(&mut gpui_kit::VisualTestContext) -> bool,
+) {
+    until(shell, cx, what, |cx| {
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(16));
+        check(cx)
+    });
+}
+
+fn frames_pending(cx: &mut gpui_kit::VisualTestContext) -> usize {
+    cx.update(|window, cx| window.simulate_next_frame(cx))
+}
+
+#[gpui_kit::test]
+fn the_window_tells_the_daemon_when_it_is_focused_and_what_it_shows(cx: &mut TestAppContext) {
+    let user = user();
+    let Some(_bus) = Bus::start(&user) else {
+        return;
+    };
+    project(&user);
+    let (lead, _) = session(&user, "hello");
+    let (shell, cx) = window(&user, cx);
+    cx.update(|window, _| window.activate_window());
+    until(&shell, cx, "the window says it is focused", |_| {
+        presence(&user)["focused"] == true
+    });
+
+    cx.deactivate_window();
+
+    until(&shell, cx, "the window says it lost the focus", |_| {
+        presence(&user)["focused"] == false
+    });
+    cx.update(|window, _| window.activate_window());
+    crate::window_notifications::open_session(&shell, &lead, cx);
+    until(&shell, cx, "the window says which session is open", |_| {
+        presence(&user)["session"] == lead
+    });
+}
+
+#[gpui_kit::test]
+fn with_the_window_focused_the_notification_is_a_toast_not_a_system_one(cx: &mut TestAppContext) {
+    let user = user();
+    let Some(bus) = Bus::start(&user) else {
+        return;
+    };
+    let server = Notifications::start(&bus, &["actions", "body"]);
+    let played = desktop::with_fake_audio(&user);
+    project(&user);
+    let (lead, mcp) = session(&user, "hello");
+    let (shell, cx) = window(&user, cx);
+    cx.update(|window, _| window.activate_window());
+    until(&shell, cx, "the window says it is focused", |_| {
+        presence(&user)["focused"] == true
+    });
+    settle(cx);
+
+    let number = held_number(mcp.call("fs_read", json!({"path": ".env"})));
+    until(&shell, cx, "the toast", |cx| has("toast-1", cx));
+
+    // It rises into place with the title and the excerpt of the notification.
+    let first = rect("toast-1", cx);
+    settle(cx);
+    let rested = rect("toast-1", cx);
+    assert!(
+        first.origin.y > rested.origin.y,
+        "it rises: {first:?} to {rested:?}"
+    );
+    // The call whole, and why the gate held it: what Allow allows is what the toast says.
+    let said = label("toast-1", cx).unwrap_or_default();
+    assert!(
+        said.starts_with(&format!("Request #{number} waits for you Read .env")),
+        "{said}"
+    );
+    let reasons = pending(&user)[0]["reasons"].clone();
+    for reason in reasons.as_array().unwrap() {
+        let reason = reason.as_str().unwrap();
+        assert!(said.contains(reason), "{reason}: {said}");
+    }
+    assert_eq!(label("toast-1-action", cx).as_deref(), Some("Allow"));
+    assert_eq!(label("toast-1-action-2", cx).as_deref(), Some("Deny"));
+    // The desktop is told nothing, and the sound plays, once, in the daemon.
+    eventually("the sound", || desktop::played(&played) == ["needs-you"]);
+    assert!(server.notified().is_empty(), "{:?}", server.notified());
+
+    // Allow answers the request, and the toast folds away; nothing is drawn at rest.
+    cx.update(|window, cx| window.click("toast-1-action", cx));
+    until(&shell, cx, "the request was decided", |_| {
+        pending(&user).is_empty()
+    });
+    assert_eq!(state_of(&user, &lead, number), "allowed");
+    until_folded(&shell, cx, "the toast left", |cx| !has("toast-1", cx));
+    settle(cx);
+    assert_eq!(frames_pending(cx), 0, "at rest after the toast left");
+    assert!(server.notified().is_empty());
+}
+
+#[gpui_kit::test]
+fn the_toast_of_a_request_too_long_to_read_whole_offers_deny_and_open_only(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    let Some(_bus) = Bus::start(&user) else {
+        return;
+    };
+    project(&user);
+    let (lead, mcp) = session(&user, "hello");
+    let (shell, cx) = window(&user, cx);
+    cx.update(|window, _| window.activate_window());
+    until(&shell, cx, "the window says it is focused", |_| {
+        presence(&user)["focused"] == true
+    });
+    settle(cx);
+
+    let path = format!("{}/.env", ["folder"; 24].join("/"));
+    let number = held_number(mcp.call("fs_read", json!({"path": path})));
+    until(&shell, cx, "the toast", |cx| has("toast-1", cx));
+    settle(cx);
+
+    assert_eq!(label("toast-1-action", cx).as_deref(), Some("Deny"));
+    assert!(!has("toast-1-action-2", cx), "no Allow beside Deny");
+    assert!(has("toast-1-open", cx), "a click opens the session");
+    cx.update(|window, cx| window.click("toast-1-action", cx));
+    until(&shell, cx, "the request was denied", |_| {
+        state_of(&user, &lead, number) == "denied"
+    });
+}
+
+#[gpui_kit::test]
+fn a_toast_opens_its_session_on_a_click(cx: &mut TestAppContext) {
+    let user = user();
+    let Some(_bus) = Bus::start(&user) else {
+        return;
+    };
+    project(&user);
+    let (_, mcp) = session(&user, "hello");
+    let (shell, cx) = window(&user, cx);
+    cx.update(|window, _| window.activate_window());
+    until(&shell, cx, "the window says it is focused", |_| {
+        presence(&user)["focused"] == true
+    });
+    settle(cx);
+
+    held_number(mcp.call("fs_read", json!({"path": ".env"})));
+    until(&shell, cx, "the toast", |cx| has("toast-1-open", cx));
+    cx.update(|window, cx| window.click("toast-1-open", cx));
+
+    until(&shell, cx, "the session's page opens", |cx| {
+        shell.read_with(cx, |s, cx| s.main().read(cx).session_page().is_some())
+    });
+    until_folded(&shell, cx, "the toast left", |cx| !has("toast-1", cx));
+}
+
+#[gpui_kit::test]
+fn the_toast_of_a_request_answered_elsewhere_is_withdrawn(cx: &mut TestAppContext) {
+    let user = user();
+    let Some(_bus) = Bus::start(&user) else {
+        return;
+    };
+    project(&user);
+    let (_, mcp) = session(&user, "hello");
+    let (shell, cx) = window(&user, cx);
+    cx.update(|window, _| window.activate_window());
+    until(&shell, cx, "the window says it is focused", |_| {
+        presence(&user)["focused"] == true
+    });
+    settle(cx);
+    let number = held_number(mcp.call("fs_read", json!({"path": ".env"})));
+    until(&shell, cx, "the toast", |cx| has("toast-1", cx));
+
+    user.call("approval.deny", json!({"number": number}))
+        .unwrap();
+
+    until_folded(&shell, cx, "the toast folded away", |cx| {
+        !has("toast-1", cx)
+    });
+    settle(cx);
+    assert_eq!(frames_pending(cx), 0);
+}
+
+#[gpui_kit::test]
+fn nothing_is_toasted_for_the_session_the_window_shows(cx: &mut TestAppContext) {
+    let user = user();
+    let Some(_bus) = Bus::start(&user) else {
+        return;
+    };
+    project(&user);
+    let (open, open_mcp) = session(&user, "hello");
+    let (_, other_mcp) = session(&user, "hello again");
+    let (shell, cx) = window(&user, cx);
+    cx.update(|window, _| window.activate_window());
+    crate::window_notifications::open_session(&shell, &open, cx);
+    until(&shell, cx, "the window says which session is open", |_| {
+        presence(&user)["session"] == open
+    });
+
+    held_number(open_mcp.call("fs_read", json!({"path": ".env"})));
+    let other = held_number(other_mcp.call("fs_read", json!({"path": ".env"})));
+
+    // The other's toast is the first the window drew: the open session's rang nothing.
+    until(&shell, cx, "the toast", |cx| has("toast-1", cx));
+    let said = label("toast-1", cx).unwrap_or_default();
+    assert!(
+        said.starts_with(&format!("Request #{other} waits for you Read .env")),
+        "{said}"
+    );
+    assert!(!has("toast-2", cx));
+}
+
+#[gpui_kit::test]
+fn settings_say_when_this_desktop_shows_no_notifications(cx: &mut TestAppContext) {
+    // The harness's bus is a path nobody listens on: no session bus.
+    let user = user();
+    project(&user);
+    let (_, mcp) = session(&user, "hello");
+    let (shell, cx) = window(&user, cx);
+    cx.update(|window, _| window.activate_window());
+    held_number(mcp.call("fs_read", json!({"path": ".env"})));
+    eventually("the daemon knows it has no desktop", || {
+        user.call("notifications.status", json!({})).unwrap()["desktop"]["shows"] == false
+    });
+
+    cx.update(|window, cx| window.click("settings", cx));
+    until(&shell, cx, "the settings page is shown", |cx| {
+        shell.read_with(cx, |s, cx| s.main().read(cx).settings_page().is_some())
+    });
+    cx.update(|window, cx| window.click("settings-tabs-general", cx));
+
+    until(&shell, cx, "the line of the desktop", |cx| {
+        has("desktop-notifications", cx)
+    });
+    assert_eq!(
+        label("desktop-notifications", cx).as_deref(),
+        Some("This desktop shows no notifications")
+    );
+    settle(cx);
+    settle(cx);
+    assert_eq!(frames_pending(cx), 0, "at rest with the line shown");
+}
