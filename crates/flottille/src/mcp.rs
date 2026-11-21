@@ -2435,6 +2435,15 @@ async fn played_in(
         refused
     } else if let Some(why) = branch_refused {
         Outcome::Refused(why)
+    } else if let Some(why) = grant
+        .tools
+        .contains(&tool)
+        .then(|| crate::routines::refuses(daemon, &grant.agent, tool, &args))
+        .flatten()
+    {
+        // A read-only run's write is refused before anything is read or asked for it.
+        verdict = Some("deny");
+        Outcome::Refused(why)
     } else if grant.tools.contains(&tool) {
         // A removal's answer to discard covers the state the user was shown: read before its
         // card, so that anything written since tells.
