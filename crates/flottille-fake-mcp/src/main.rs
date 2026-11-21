@@ -93,7 +93,8 @@
 //!
 //! With `AGENT_BROWSER_SOCKET_DIR` set, a login and each tool call reach the browser agent-browser's
 //! daemon runs there, which outlives the command that started it: the file `browser.json` in that
-//! folder, written by the first one with the mode (`headed`, from the configuration) and the
+//! folder, written by the first one with the mode (`headed`: true when it was given a display, `WAYLAND_DISPLAY`
+//! or `DISPLAY`, null without one, as a call of `open` with `headed` is told to show it) and the
 //! `XDG_RUNTIME_DIR` it started in, and found again by the next; the log line `browser` says which
 //! (`by`: `login` or `call`, `started` or not). With `close` among its arguments (and no `mcp`), it
 //! plays `agent-browser close`: the file is removed, and the log line `close` says its arguments.
@@ -275,7 +276,7 @@ fn main() {
                 let tool = params["name"].as_str().unwrap_or_default().to_owned();
                 let started = now_ms();
                 write_log(&log, json!({"event": "received", "tool": tool}));
-                browser(&args, &log, "call");
+                browser(&log, "call");
                 let answer = script["answers"][&tool].clone();
                 if let Some(message) = answer["rpc_error"].as_str() {
                     send(&json!({"jsonrpc": "2.0", "id": id,
@@ -354,7 +355,7 @@ fn display_environment() -> Value {
 
 /// The browser on `AGENT_BROWSER_SOCKET_DIR`, started by this command when none runs there: what
 /// agent-browser's daemon does, which then serves every command of that folder until it is closed.
-fn browser(args: &[String], log: &Option<String>, by: &str) {
+fn browser(log: &Option<String>, by: &str) {
     let Some(folder) = std::env::var_os("AGENT_BROWSER_SOCKET_DIR") else {
         return;
     };
@@ -364,7 +365,9 @@ fn browser(args: &[String], log: &Option<String>, by: &str) {
         .and_then(|text| serde_json::from_str::<Value>(&text).ok());
     let started = running.is_none();
     let browser = running.unwrap_or_else(|| {
-        let browser = json!({"headed": loaded_config(args)["headed"],
+        let shown =
+            std::env::var_os("WAYLAND_DISPLAY").is_some() || std::env::var_os("DISPLAY").is_some();
+        let browser = json!({"headed": shown.then_some(true),
             "XDG_RUNTIME_DIR": std::env::var("XDG_RUNTIME_DIR").ok()});
         std::fs::write(&file, browser.to_string()).unwrap();
         browser
@@ -1052,7 +1055,7 @@ fn login(args: &[String], script: &Value, log: &Option<String>) {
         eprintln!("✗ no credential provider {provider}");
         std::process::exit(1);
     };
-    browser(args, log, "login");
+    browser(log, "login");
     let answer = ask(&plugin);
     let success = answer["success"] == true && answer["protocol"] == "agent-browser.plugin.v1";
     let mut line = json!({"event": "login", "args": args, "config": loaded_config(args),

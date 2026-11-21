@@ -573,7 +573,8 @@ pending requests.
   protocols, and so type into other windows. When the folder cannot be made (the socket cannot be
   linked), the run has no display, never the real folder, and the daemon's log says why. The gate
   judges the run as before: the setting only adds the display. It is the same folder a connection's
-  *Show the browser* uses (`docs/extensions.md`), one per owner.
+  browser uses when a call shows it (`docs/extensions.md`, "The browser can be
+  shown"), one per owner.
 - **A commit's message is checked as the project declares**: with `message_checks` in the
   project's file (`docs/projects.md`, "Message checks"), each `git commit` the line runs, at any of
   its layers, has its message (its `-m`, or its `-F` file) given to each check before the run
@@ -1066,7 +1067,11 @@ agent never talks to the server.
   action's description (cut at 4,000 characters, a line saying so) and its argument schema; with
   `for: "@instructions"` the server's own instructions, cut the same. Answered from what the user
   accepted, never by a call to the server, and harmless. Each text is framed as the server's, in
-  a `<connection_text>` block with every `<` and `&` escaped.
+  a `<connection_text>` block with every `<` and `&` escaped. For a server Flottille has an
+  adapter for, `help` also says Flottille's own words beside the server's: agent-browser's
+  browser is headless, and `agent_browser_open` takes `headed` to show it on the user's screen,
+  only when the user must act in the page (sign in, a captcha) or see it, never to read a page
+  (`extensions.md`, "Adapters", "The browser can be shown").
 - **`arguments`** is the action's own object, checked against the accepted schema (types,
   properties, the required ones, the values taken, items, bounds) and the user's limits before the
   server sees anything: an unknown action, one turned off, arguments that do not fit or a value

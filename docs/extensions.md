@@ -984,7 +984,6 @@ command = ["almanac", "mcp"]
 env     = { ALMANAC_TOKEN = { vault = "almanac-token" } }
 only    = { }                        # limits on arguments, below
 except  = ["client-site"]            # projects whose agents do not get it
-headed  = false                      # an adapter's browser shown on the screen ("Adapters")
 ```
 
 **On, it is given to every agent of every project**, and off to none, **except the projects its
@@ -1543,12 +1542,17 @@ way in:
   sub-resources, WebSocket, EventSource, `sendBeacon` and WebRTC to other domains); a page an
   agent opens on any host can try to make the browser act against the entry's site with the
   signed-in session. The secret itself is typed only into a page of its site.
-- **The browser can be shown.** A connection's server runs with the environment of a run, without
-  `XDG_RUNTIME_DIR` nor the display variables, so its browser is headless and `--headed` fails
-  (no runtime folder, no Wayland display). `headed = true` (`flottille connection edit --headed`
-  or `--headless`, the connection's form in the window, a toggle *Show the browser*, off by
-  default) has the adapter write `"headed": true` in the configuration file it writes and gives
-  the server the session's display, **never the user's real `XDG_RUNTIME_DIR`** (it holds the
+- **The browser can be shown, and the agent chooses at each opening.** A connection's server runs
+  with the environment of a run, without `XDG_RUNTIME_DIR` nor the display variables, so its
+  browser is **headless by default**, always: no setting of the connection shows it (the key
+  `headed` of an older `extensions.toml` is read and ignored, as `sites` is; a connection that was
+  shown is pinned for another declaration, so its review is due once more). The action that opens
+  the browser, `agent_browser_open`, takes `headed` (agent-browser's own argument, a boolean):
+  `false` or left out runs it headless, `true` shows it. The tool's words (`help`, the action's
+  own description, and the line given with the server's instructions) say **when**: when the user
+  must act in the page (sign in, a captcha) or see it; never to read a page. A call with
+  `headed: true` has the adapter write `"headed": true` in the configuration file it writes and
+  gives the server the session's display, **never the user's real `XDG_RUNTIME_DIR`** (it holds the
   session bus, hence the keyring, and the user's other sockets): the daemon makes a runtime folder
   of the connection's own, `$XDG_RUNTIME_DIR/flottille/display/<connection>` (mode 0700, removed
   when the browser started with it is closed), holding a hard link of the session's Wayland
@@ -1560,31 +1564,37 @@ way in:
   private mount namespace, with its display folder alone put back in it, so no process of its
   connects to the bus by its path (`docs/vault.md`, "The runtime folder"). When the folder cannot be made
   (the filesystem refuses the hard link, the socket is not there) the browser runs headless and the
-  daemon says why, in its log and in the form, under the switch (kept there while a call runs),
-  never with the real folder. Off, the server gets no display variable of the daemon's; **whether
+  daemon says why, in its log, in the answer of the call that asked (`Flottille: the browser is
+  not shown, it runs headless: …`) and in the connection's `headless` (kept there while a call
+  runs), never with the real folder, and asking again starts nothing. Headless, the server gets no
+  display variable of the daemon's; **whether
   the browser is shown or not, it is never given `DBUS_SESSION_BUS_ADDRESS`**, and both the server
   and its login run get `AGENT_BROWSER_SOCKET_DIR` naming the connection's own folder
   (agent-browser puts its daemon's socket there, else under `$XDG_RUNTIME_DIR`), so they reach the
   same browser and the removal of a display folder never takes a live socket. One browser per
-  connection, in the mode the switch says: a login uses the server's display folder (the running
-  server's own, else made under the connection's name for the time of the login), and the browser
+  connection, in the mode of the last `agent_browser_open` (any other action goes on in the mode
+  that runs, and a call that asks the other mode **restarts the server and closes the browser**,
+  its profile, the user's command's, left where it is: the user signs in shown, the agent goes on
+  headless): a login never shows a browser by itself, it goes on in the display folder of the
+  shown browser when one runs (the running server's, else the one a stopped server left) and is
+  headless otherwise, and the browser
   agent-browser's daemon runs, which outlives the command that started it (a login's or the
   server's, an idle server's included), keeps the folder it was started with: the next server or
   login is given that folder again, never one made again at its path, which Landlock, holding a
   folder by its inode, would keep out of the browser's reach (#1040). It is closed (`agent-browser close`, on
-  that socket folder) when the server is stopped (an edit of what trust is given to, the switch included, turning it off, removing it) and when
+  that socket folder) when the server is stopped (an edit of what trust is given to, turning it off, removing it), when a call asks the other mode and when
   the daemon stops; one a daemon that died left (an update that killed it, a crash) is closed the
   same way when the next daemon starts, before it serves any tool call, since the folder it was
-  confined with is made again out of its reach; the next start, of the server or of a login, starts a browser in the mode the
-  switch says. **Showing the browser has a risk, said beside the switch and in the review**: with
+  confined with is made again out of its reach; the next start, of the server or of a login, starts a browser in the mode asked.
+  **Showing the browser has a risk, said in the review**: with
   X11 the browser can read the keys typed in other windows and type into them (a terminal's
   included), and on some Wayland compositors a client can capture the screen and the clipboard. The daemon
   removes every display folder when it starts, under its lock, and makes the last folder of a
   connection itself, never taking one over. The folder is
-  made by one function (`display.rs`), which a run that opens windows reuses. It is the user's
-  alone (an agent's request sets no `headed`), **part of what trust is given to** and said in the
-  review, and the user's own edit stops the running server at once, the next start applying it,
-  as an edit of the command does; an edit made in the file waits for its review. **The options that can send a
+  made by one function (`display.rs`), which a run that opens windows reuses. It is the
+  agent's, at each call, **within what trust is given to** (the review says that the browser may be
+  shown and what it risks): an agent's request to add or edit a connection sets no `headed`, and
+  the call is judged by the gate as any call of the server is. **The options that can send a
   signed-in session, and the password a login types, elsewhere** are refused too, in the server's
   command or as their variables in the connection's `env`: a proxy (`--proxy`,
   `AGENT_BROWSER_PROXY`, and `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` in either case, which

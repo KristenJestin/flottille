@@ -446,11 +446,10 @@ leaves it waiting for its first review, `failing` saying why; one added while Co
 connection is off is given when it is turned on (`flottille connection edit <name> --on`, or the
 extension's switch).
 
-### `flottille connection edit <name> [--about S] [--command W... | --url U] [--env…] [--header…] [--only…] [--except…] [--client-id ID] [--headed | --headless] [--on | --off]`
+### `flottille connection edit <name> [--about S] [--command W... | --url U] [--env…] [--header…] [--only…] [--except…] [--client-id ID] [--on | --off]`
 
 Replaces what is given. A change of the command, the URL, the variables, the headers, the
-limits or whether the browser is shown (`--headed` gives an adapter's browser the
-daemon's display, `--headless` takes it away) is another server as far as trust goes: the daemon lists what it announces
+limits is another server as far as trust goes: the daemon lists what it announces
 and pins it again at once, the settings of its actions kept. A connection that was cut off is not
 pinned by an edit, nor one whose server now announces more than another version (changed
 instructions or actions): its diff is read first.
