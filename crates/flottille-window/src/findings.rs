@@ -163,6 +163,11 @@ impl Filing {
         }
     }
 
+    /// The field that takes the address.
+    pub fn address(&self) -> &Entity<InputState> {
+        &self.address
+    }
+
     /// Opens the dialog on finding `id`, its field empty and focused.
     pub fn open_for(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
         self.finding = Some(id);

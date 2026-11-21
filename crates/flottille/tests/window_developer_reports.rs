@@ -340,8 +340,12 @@ fn a_finding_is_marked_filed_with_its_address(cx: &mut TestAppContext) {
             .all(|finding| finding["filed"].is_null())
     );
 
-    click(cx, "finding-filed-address");
-    cx.simulate_input("https://example.com/acme/app/issues/12");
+    let address = page.read_with(cx, |p, cx| p.filing().read(cx).address().clone());
+    cx.update(|window, cx| {
+        address.update(cx, |field, cx| {
+            field.set_value("https://example.com/acme/app/issues/12", window, cx)
+        })
+    });
     click(cx, "finding-filed-save");
     until(&shell, cx, "the dialog closes", |cx| {
         !present(cx, "finding-filed-modal")

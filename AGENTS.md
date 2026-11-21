@@ -122,7 +122,7 @@ stack"). Nothing of Flottille goes into the kit, and no component is drawn here 
 **Everything the command line does has its place in the window**, unless it is a script's
 business alone. A pull request that adds a `flottille <command>` (a heading of `docs/cli.md`)
 adds, in the same pull request, its place in the window: the screen, dialog or menu entry that
-calls the same daemon method, or a line of `crates/flottille-window/src/parity.rs` saying why it is
+calls the same daemon method, or a line of `crates/flottille/tests/window_parity.rs` saying why it is
 for scripts only (what starts the daemon or the window, what a process pipes: a short list, each
 with its reason). The test `every_cli_command_has_its_place_in_the_window` refuses a command that
 has neither. A place needs its animations and its test as any window change does.

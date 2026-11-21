@@ -37,7 +37,6 @@ pub mod mode;
 pub mod model;
 pub mod open;
 pub mod page;
-pub mod parity;
 pub mod picture_viewer;
 pub mod programs;
 pub mod progress;

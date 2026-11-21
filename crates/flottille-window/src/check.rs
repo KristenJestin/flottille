@@ -199,7 +199,18 @@ impl CheckSection {
             }
             Then::Enable { name } => match answer {
                 // The state of the row is read again, as `doctor` would say it.
-                Ok(_) => self.ask("provider.list", json!({}), Then::Providers, cx),
+                // The shell is being updated while it hands the answer: ask after.
+                Ok(_) => {
+                    let this = cx.entity().downgrade();
+                    self.pending += 1;
+                    cx.defer(move |cx| {
+                        this.update(cx, |this, cx| {
+                            this.pending -= 1;
+                            this.ask("provider.list", json!({}), Then::Providers, cx);
+                        })
+                        .ok();
+                    });
+                }
                 Err(why) => toast(
                     Toast::failure(format!("{name} was not turned on")).detail(why),
                     cx,

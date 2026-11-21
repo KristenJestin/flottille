@@ -1515,23 +1515,19 @@ impl SpecPage {
         let this = cx.weak_entity();
         let slug = ticket_slug(ticket);
         let name = ticket.to_owned();
-        menu_of(
-            &mut self.ticket_menus,
-            "spec-ticket-row",
-            &slug,
-            cx,
-            move |slug, menu| {
-                menu.entry(
-                    format!("spec-ticket-row-{slug}-unlink"),
-                    "Unlink",
-                    Some(Icon::Close),
-                    move |_, cx| {
-                        this.update(cx, |this, cx| this.link(name.clone(), false, cx))
-                            .ok();
-                    },
-                )
-            },
-        )
+        if let Some(menu) = self.ticket_menus.get(&slug) {
+            return menu.clone();
+        }
+        let id = ElementId::Name(format!("spec-ticket-row-{slug}-more").into());
+        let entry = format!("spec-ticket-row-{slug}-unlink");
+        let menu = cx.new(|cx| {
+            Menu::new(id, "More", cx).entry(entry, "Unlink", Some(Icon::Close), move |_, cx| {
+                this.update(cx, |this, cx| this.link(name.clone(), false, cx))
+                    .ok();
+            })
+        });
+        self.ticket_menus.insert(slug, menu.clone());
+        menu
     }
 
     /// The tickets the spec covers, each with its ⋯, and Link a ticket…

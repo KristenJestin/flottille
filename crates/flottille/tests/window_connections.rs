@@ -4279,8 +4279,7 @@ fn a_connection_s_client_id_is_set_in_its_dialog(cx: &mut TestAppContext) {
     type_in(&fields.name, "remote", cx);
     type_in(&fields.about, "A notes server elsewhere.", cx);
     type_in(&fields.url, "https://notes.example.com/mcp", cx);
-    click(cx, "connection-client-id");
-    cx.simulate_input("client-123");
+    type_in(&fields.client_id, "client-123", cx);
     click(cx, "save-connection");
     until(&shell, cx, "the dialog closes", |cx| {
         !visible(cx, "connection-modal")
@@ -4304,8 +4303,8 @@ fn a_connection_s_client_id_is_set_in_its_dialog(cx: &mut TestAppContext) {
     assert_eq!(kept["client_id"], "client-123");
     // ... and emptying it takes it away.
     open_the_form_of(&shell, cx, "remote");
-    click(cx, "connection-client-id");
-    cx.simulate_keystrokes("ctrl-a backspace");
+    let fields = section.read_with(cx, |s, _| s.form_fields().unwrap());
+    type_in(&fields.client_id, "", cx);
     click(cx, "save-connection");
     until(&shell, cx, "the dialog closes a last time", |cx| {
         !visible(cx, "connection-modal")

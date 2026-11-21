@@ -119,15 +119,39 @@ fn the_start_dialog_offers_the_machines_that_can_run_the_project(cx: &mut TestAp
     let _turn = ONE_AT_A_TIME
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let user = User::with_fake_agent();
-    user.fake_script(json!({"turns": [{"when": "", "do": [{"say": "ready"}]}]}));
-    std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
+    // The server is a runner whose Claude is signed in (its login file is there), so that it is
+    // offered; the window's machine has the project and the same agent.
+    let user = User::with_fake_agent()
+        .with_env("FLOTTILLE_TEST_OFFER_MS", "300")
+        .with_env("ANTHROPIC_API_KEY", "")
+        .with_env("CLAUDE_CODE_OAUTH_TOKEN", "")
+        .with_env("ANTHROPIC_AUTH_TOKEN", "");
+    let claude = user.path("home/.claude");
+    let user = user.with_env("CLAUDE_CONFIG_DIR", claude.to_str().unwrap());
+    user.write_providers("[claude]\nenabled = true\n");
+    std::fs::create_dir_all(&claude).unwrap();
+    std::fs::write(claude.join(".credentials.json"), "{}").unwrap();
     let (_hub, pc, server) = pc_and_server_on(Machine::new(), user);
     std::fs::write(pc.user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
     // `app` is on both machines; `site` on this one only: the server cannot run it.
     project(&pc.user, "app");
     project(&server.user, "app");
     project(&pc.user, "site");
+    pc.wait_until("the server offers app and claude", |seen| {
+        let offers = seen["machines"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|machine| machine["name"] == "server")
+            .map(|machine| machine["offers"].clone())
+            .unwrap_or_default();
+        offers["projects"]
+            .as_array()
+            .is_some_and(|projects| projects.iter().any(|p| p["name"] == "app"))
+            && offers["agents"]
+                .as_array()
+                .is_some_and(|agents| agents.iter().any(|a| a == "claude"))
+    });
 
     let (shell, cx) = window(&pc, cx);
     until(&shell, cx, "the server is read", |cx| {
