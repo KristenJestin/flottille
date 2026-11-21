@@ -622,10 +622,11 @@ fn a_session_that_needs_the_user_and_has_news_shows_the_state_mark_alone(cx: &mu
     );
     settle(cx);
     assert!(!has(session_unread_id(&lead), cx), "the state mark alone");
-    assert_eq!(
-        label(session_mark_id(&lead), cx).as_deref(),
-        Some("Needs you: a permission")
-    );
+    // What the state needs is known from the asks, which the window reads on a poll of their
+    // own: the mark says "Needs you" first and the reason when they are in.
+    until(&shell, cx, "the mark says what it needs", |cx| {
+        label(session_mark_id(&lead), cx).as_deref() == Some("Needs you: a permission")
+    });
     assert!(
         unread_of(&shell, &lead, cx).is_some(),
         "the news is kept for when the state goes"

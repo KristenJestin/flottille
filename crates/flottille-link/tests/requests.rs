@@ -5,8 +5,9 @@ use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use flottille_link::{
-    Action, DeviceKey, Keyring, KeyringError, MemberList, Members, NONCES_PER_DEVICE, Request,
-    Requests, Role, Signature, full_switch, runs_agents,
+    Action, CLOSES_SERVED_MOST, ClosesServed, DeviceKey, Keyring, KeyringError, MemberList,
+    Members, NONCES_PER_DEVICE, Request, Requests, Role, Signature, full_switch, kept_close,
+    runs_agents,
 };
 use flottille_protocol::{Class, METHODS};
 use serde_json::{Value, json};
@@ -56,8 +57,9 @@ fn three() -> (DeviceKey, DeviceKey, DeviceKey, MemberList) {
     (pc, pixel, tablet, list)
 }
 
+/// The list's members, its hub's key that of no member: the list was made before pair mode.
 fn members(list: &MemberList) -> Members {
-    list.check(&key(1).public()).unwrap()
+    list.check(&key(1).public(), &key(9).public()).unwrap()
 }
 
 /// A fixed moment, the time of the tests.
@@ -515,22 +517,17 @@ fn a_refusal_shows_no_control_character_nor_a_long_text() {
 }
 
 #[test]
-fn remote_setup_is_answered_only_on_its_own_machine() {
+fn remote_pair_is_answered_only_on_its_own_machine() {
     let (_, pixel, _, list) = three();
     let members = members(&list);
     let mut requests = Requests::new(time(0));
-    let text = signed(
-        &pixel,
-        "remote.setup",
-        json!({"url": "http://hub.example.net"}),
-        0,
-    );
+    let text = signed(&pixel, "remote.pair", json!({"code": "0123"}), 0);
     let refused = requests
         .check(&text, "pc", &members, time(0))
         .unwrap_err()
         .to_string();
     assert!(
-        refused.contains("remote.setup is answered only on its own machine"),
+        refused.contains("remote.pair is answered only on its own machine"),
         "{refused}"
     );
 }
@@ -550,8 +547,7 @@ fn a_refusal_says_which_role_allows_it() {
         ("agent.stop", "stop a session"),
         ("agent.cancel", "stop a turn"),
         ("agent.mode", "switch the mode"),
-        ("remote.invite", "invite a device"),
-        ("remote.change", "add, remove or rename a device"),
+        ("remote.change", "remove, rename or restyle a device"),
         // A method with no words of its own is named.
         ("project.add", "call project.add"),
     ] {
@@ -723,4 +719,68 @@ fn a_switch_to_full_counts_for_twelve_hours_from_its_signing() {
         refused.contains("ahead of this machine's clock"),
         "{refused}"
     );
+}
+
+/// `text` as the request it is.
+fn request_of(text: &str) -> Request {
+    serde_json::from_str(text).unwrap()
+}
+
+#[test]
+fn a_close_kept_while_its_machine_was_off_is_taken_from_a_member_that_may_stop() {
+    let (pc, pixel, tablet, list) = three();
+    let members = members(&list);
+    let close = |key: &DeviceKey| request_of(&signed(key, "agent.stop", json!({"agent": "a1"}), 0));
+    let day = 24 * 60 * MINUTE;
+
+    // Hours later, it is still the user's close.
+    let first = close(&pixel);
+    let (member, agent) = kept_close(&first, "pc", &members, time(2 * day)).unwrap();
+    assert_eq!((member.name.as_str(), agent.as_str()), ("pixel", "a1"));
+    assert!(kept_close(&close(&pc), "pc", &members, time(MINUTE)).is_ok());
+
+    // Served once: the same close played again, by the outbox after a lost answer or by a member
+    // that saw it signed, is answered and does nothing.
+    let mut served = ClosesServed::default();
+    assert!(served.serve(&first, time(2 * day)));
+    assert!(!served.serve(&first, time(2 * day + MINUTE)));
+    assert!(served.serve(&close(&pixel), time(2 * day)), "another close");
+    // A close whose service failed for now is served again when it is sent again.
+    let retried = close(&pixel);
+    assert!(served.serve(&retried, time(2 * day)));
+    served.release(&retried);
+    assert!(served.serve(&retried, time(2 * day)));
+    // Remembered for its 30 days, never longer, and bounded: the oldest leave first.
+    assert!(
+        served.serve(&first, time(33 * day)),
+        "forgotten after 30 days"
+    );
+    let mut full = ClosesServed::default();
+    let oldest = close(&pixel);
+    assert!(full.serve(&oldest, time(0)));
+    for _ in 0..CLOSES_SERVED_MOST {
+        assert!(full.serve(&close(&pixel), time(0)));
+    }
+    assert!(full.serve(&oldest, time(0)), "the oldest was let go");
+
+    let refusal = |request: &Request, machine: &str, at: u64| {
+        kept_close(request, machine, &members, time(at))
+            .unwrap_err()
+            .to_string()
+    };
+    assert!(refusal(&close(&tablet), "pc", MINUTE).contains("may only view"));
+    assert!(refusal(&close(&pixel), "server", MINUTE).contains("not for server"));
+    let send = request_of(&signed(&pixel, "agent.send", json!({"agent": "a1"}), 0));
+    assert!(refusal(&send, "pc", MINUTE).contains("not agent.stop"));
+    let none = request_of(&signed(&pixel, "agent.stop", json!({}), 0));
+    assert!(refusal(&none, "pc", MINUTE).contains("names no session"));
+    assert!(refusal(&close(&key(9)), "pc", MINUTE).contains("not signed by a member"));
+    assert!(refusal(&close(&pixel), "pc", 30 * day + MINUTE).contains("older than thirty days"));
+    let ahead = request_of(&signed(
+        &pixel,
+        "agent.stop",
+        json!({"agent": "a1"}),
+        10 * MINUTE,
+    ));
+    assert!(refusal(&ahead, "pc", 0).contains("ahead"));
 }

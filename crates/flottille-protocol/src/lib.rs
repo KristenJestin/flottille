@@ -13,7 +13,7 @@ pub use catalogue::{Class, LAUNCHES, METHODS, class, launches};
 /// The protocol's version, `protocol` in `daemon.status`. Raised by any change of a method, an
 /// answer or an event that an older client would misread (`docs/remote.md`, "The version"); one
 /// it reads right, such as a new method, leaves it.
-pub const PROTOCOL: u32 = 1;
+pub const PROTOCOL: u32 = 2;
 
 /// A client's request. The id is the client's, opaque to the daemon, and comes back on the answer.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -337,6 +337,20 @@ pub struct TextUpload {
 pub struct AgentImage {
     pub agent: String,
     pub name: String,
+}
+
+/// The parameters of `agent.file`: a chunk of a picture or a video the agent showed
+/// (`web` `show_link`), named by the event that showed it, never by a path.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentFile {
+    pub agent: String,
+    /// The number of the `agent.link_shown` event.
+    pub shown: u64,
+    #[serde(default)]
+    pub offset: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub length: Option<u64>,
 }
 
 /// The parameters of `agent.trees`: a page of root agents with their trees, newest first.

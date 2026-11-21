@@ -3,10 +3,11 @@
 //! sides are here: the device's, and the handshake the hub answers with, so that the hub and a
 //! device cannot disagree on the wire.
 //!
-//! The hub is not trusted with the members: it stores and forwards what members signed, and every
-//! device checks every list it is sent back to the root it pinned at setup (`Device::take`). It is
-//! trusted to be the user's own hub only so far as it holds the key the device pinned: a hub that
-//! answers with another key is refused before anything else is said.
+//! The hub adds the devices, behind access to its host (`flottille-hub pair`), and signs their
+//! entries with its key; every device checks every list it is sent back to the root and the hub's
+//! key it pinned (`Device::take`): a change neither the hub nor a member that may make it signed is
+//! refused. A hub that answers with another key than the one pinned is refused before anything
+//! else is said.
 //!
 //! On the wire, a device opens a TCP connection (TLS for an `https://` URL), asks for an HTTP/1.1
 //! upgrade to `flottille-hub`, so that a reverse proxy in front of the hub carries the session as
@@ -15,19 +16,23 @@
 //! ```text
 //! device → hub   {"key": K, "nonce": Nd, "hello": {…}}
 //! hub → device   {"hub": H, "nonce": Nh, "hello": {…}, "proof": sign_H(session, 1, K, Nd, Nh)}
-//! device → hub   {"proof": sign_K(session, 2, H, Nh, Nd), "pinned": P | null, "join"?: J}
+//! device → hub   {"proof": sign_K(session, 2, H, Nh, Nd), "pinned": P | null, "pair"?: {…}}
 //! hub → device   {"welcome": {}}  or  {"refused": {"reason": "…", "reset": true | false}}
 //! then           device → hub {"ask": {"id": n, …}}; hub → device {"answer": {"id": n, …}},
-//!                {"list": […]}, {"addresses": […]}, {"presence": […]}, {"requests": […]}
+//!                {"list": […]}, {"addresses": […]}, {"presence": […]}, {"facts": […]}
+//! and            device → hub {"relay": {"to": K', "packet": P}}; hub → device
+//!                {"relayed": {"from": K, "packet": P}}, {"online": [K, …]}
+//! and each way   {"keepalive": {}}
 //! ```
 //!
-//! A machine that joins through an invitation (`docs/remote.md`, "Pairing") is no member yet: its
-//! proof carries `join`, `{"token": T, "key": K}`, the invitation's token and the new device's key.
-//! The hub welcomes it while the join request waits, and sends it nothing; once the member that
-//! invited added K, it sends the list, which the device checks against the invitation
-//! (`Invitation::check_list`), and takes the declaration of its machine. A refused or expired
-//! request ends the session. The member that invited is sent the requests that wait for it,
-//! `{"requests": [{"token": T, "key": K}]}`, at once and whenever they change.
+//! `relay` carries the links between the user's devices (`docs/remote.md`, "The transport"): `P`
+//! is one QUIC packet of a link, in base64, encrypted end to end between the two devices; the hub
+//! hands it to the session of the member whose key is `K'`, saying it is from `K`, and never
+//! opens it. `online` is the members' keys whose session is open, sent to members whenever it
+//! changes. A side with nothing to say says `keepalive` every `KEEPALIVE`, so that a reverse
+//! proxy on the way does not take the session for idle; a side that hears nothing from the other
+//! for `SILENCE` takes the session as lost, and so does the hub when a device reads nothing it
+//! sends for as long.
 //!
 //! `session` is `flottille-hub-session-v1` and a zero byte: nothing else a key signs starts so.
 //! Each side signs the other's fresh nonce and the other's key, so that a proof cannot be played
@@ -35,18 +40,20 @@
 //! list the device checked, if it has one: a hub that refuses the device says `reset` when its own
 //! list starts otherwise, and tells a device nothing else of its list.
 //!
-//! The setup code never crosses the network. The first member's setup carries a proof that the
-//! device holds it, bound to this session and to the changes it sets up; the hub answers with its
-//! own, and the device pins the hub's key only once it checked it:
+//! A device that pairs (`docs/remote.md`, "Pairing") is no member yet: its proof carries `pair`,
+//! the card it proposes (`Proposed`) and its proof that it holds the pair code's secret, which
+//! never crosses the network:
 //!
 //! ```text
-//! device → hub   {"ask": {"id": n, "kind": "setup", "proof": M2, "changes": […]}}
-//! hub → device   {"answer": {"id": n, "proof": M1}}
-//! Ms = HMAC-SHA256(code's 80 bits, "flottille-hub-setup-v1" 0x00, s, H, K, Nd, Nh, head)
+//! pair = {"proposed": {key, name, role, icon, colour}, "proof": M}
+//! M    = HMAC-SHA256(secret, "flottille-hub-pair-v1" 0x00, H, K, Nd, Nh, proposed)
 //! ```
 //!
-//! where `head` is the hash of the last change set up: someone on the path, who sees neither the
-//! code nor a way to guess its 80 bits, can change neither the changes nor the hub.
+//! where `K` is the session's key (the machine's, for a computer) and `proposed` the bytes
+//! `Proposed::bytes` says. The proof is good for this session and this card only: played again
+//! in another session, or with another card, it fails. The hub, its pair mode open, checks it,
+//! pairs the device (`Action::Pair`, signed with its key) and sends the list; the session then
+//! takes the device's declaration of its machine, as a member's.
 
 use std::fmt;
 use std::net::SocketAddr;
@@ -56,7 +63,7 @@ use std::time::Duration;
 use ed25519_dalek::{Signer, SigningKey};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
@@ -64,8 +71,8 @@ use sha2::Sha256;
 use crate::members::Signature;
 use crate::serial::{from_hex_text, invisible, shown, to_hex};
 use crate::{
-    Change, ChangeHash, Hello, HubKey, Invitation, InvitationAsk, ListError, MachineKey,
-    MemberList, Members, NeedsUpdate, PublicKey, Token, choose,
+    Change, ChangeHash, Hello, HubKey, ListError, MachineKey, MemberList, Members, NeedsUpdate,
+    PairCode, PairSecret, Proposed, PublicKey, choose,
 };
 
 /// The port a hub listens on unless told otherwise.
@@ -74,14 +81,14 @@ pub const HUB_PORT: u16 = 7448;
 const UPGRADE: &str = "flottille-hub";
 /// The start of what each side of a session signs.
 const SESSION: &[u8] = b"flottille-hub-session-v1\0";
-/// The start of what each side of a setup proves with the setup code.
-const SETUP: &[u8] = b"flottille-hub-setup-v1\0";
+/// The start of what a device proves with a pair code's secret.
+const PAIR: &[u8] = b"flottille-hub-pair-v1\0";
 /// The longest line a device takes from its hub: a list of `MOST_CHANGES + MANAGING_HEADROOM`
 /// changes fits.
 pub const LINE_LIMIT: usize = 4 << 20;
 /// The longest line of a handshake, either side's: some hundred bytes each.
 pub const HANDSHAKE_LIMIT: usize = 4 << 10;
-/// The longest ask the hub takes: a setup, a change, or the most addresses a machine tells.
+/// The longest ask the hub takes: a change, or the most addresses a machine tells.
 const ASK_LIMIT: usize = 64 << 10;
 /// The longest text of the hub's a device shows.
 const SHOWN: usize = 400;
@@ -89,6 +96,19 @@ const SHOWN: usize = 400;
 const HEAD_LIMIT: usize = 8 << 10;
 /// How long reaching the hub, or its handshake, may take.
 const WAIT: Duration = Duration::from_secs(10);
+/// How often each side of a session says something when it has nothing to say: under the idle
+/// timeout of the common reverse proxies, 60 s.
+pub const KEEPALIVE: Duration = Duration::from_secs(25);
+/// A side that hears nothing from the other for this long takes the session as lost: a device its
+/// hub's, the hub a device's, which is said offline then rather than left online on a connection
+/// that died.
+pub const SILENCE: Duration = Duration::from_secs(80);
+/// The packets of links waiting in a device's session, each way: past them a packet is dropped,
+/// as a network drops one.
+const RELAY_WAITING: usize = 256;
+/// The longest packet of a link a session carries: QUIC through the hub starts at 1200 bytes, and
+/// its discovery of the path's size goes up to 1452.
+pub const RELAY_PACKET: usize = 1500;
 
 /// Anything a session runs over: a TCP stream, or TLS over one.
 pub trait Stream: AsyncRead + AsyncWrite + Unpin + Send + 'static {}
@@ -171,9 +191,34 @@ impl HubUrl {
         })
     }
 
-    /// `host:port`, as a sentence names the hub.
+    /// `host:port`, which is reached: the port is always there.
     pub fn authority(&self) -> String {
         format!("{}:{}", self.host, self.port)
+    }
+
+    /// The host, with its port only when it is not the scheme's own (80, 443): how a sentence
+    /// names the hub.
+    pub fn host_shown(&self) -> String {
+        let own = if self.tls { 443 } else { 80 };
+        if self.port == own {
+            self.host.clone()
+        } else {
+            self.authority()
+        }
+    }
+
+    /// The URL as a user writes it: `https://hub.example.net`, the port only when it is not the
+    /// scheme's own and the path only when there is one. What is stored and sent is
+    /// [`Display`](fmt::Display)'s, whole.
+    pub fn shown(&self) -> String {
+        let scheme = if self.tls { "https" } else { "http" };
+        let path = if self.path == "/" { "" } else { &self.path };
+        format!("{scheme}://{}{path}", self.host_shown())
+    }
+
+    /// `text` as [`HubUrl::shown`] says it, or as it is when it is no hub URL.
+    pub fn shown_text(text: &str) -> String {
+        HubUrl::parse(text).map_or_else(|_| text.to_owned(), |url| url.shown())
     }
 
     /// The host as TLS names it: an IPv6 address without its brackets.
@@ -232,7 +277,7 @@ impl fmt::Display for ControlError {
             }
             ControlError::AnotherKey { hub } => write!(
                 f,
-                "the hub at {hub} has another key than when this device joined"
+                "the hub at {hub} has another key than the one this device pinned"
             ),
             ControlError::Reset => ListError::Reset.fmt(f),
             ControlError::Refused { hub, reason } => {
@@ -248,90 +293,25 @@ impl fmt::Display for ControlError {
 
 impl std::error::Error for ControlError {}
 
-/// The setup code a hub prints (`7KQ2-M4XP-9TRW-H3CD`): 80 random bits in Crockford's base32, by
-/// groups of four. It is never sent: each side proves it holds it (`Transcript::setup_proof`).
-#[derive(Clone, PartialEq, Eq)]
-pub struct SetupCode([u8; 10]);
-
-const ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
-
-impl SetupCode {
-    /// A new code, from the system's random generator.
-    pub fn new() -> Result<SetupCode, String> {
-        let mut bytes = [0u8; 10];
-        getrandom::fill(&mut bytes).map_err(|error| format!("no random bytes: {error}"))?;
-        Ok(SetupCode(bytes))
-    }
-
-    /// The code as a person may type it: in any case, `O` as `0`, `I` and `L` as `1`, hyphens and
-    /// spaces skipped. `None` when it is not 16 such symbols.
-    pub fn parse(text: &str) -> Option<SetupCode> {
-        let (mut value, mut symbols) = (0u128, 0);
-        for c in text.chars() {
-            if c == '-' || c.is_whitespace() {
-                continue;
-            }
-            let symbol = match c.to_ascii_uppercase() {
-                'O' => 0,
-                'I' | 'L' => 1,
-                upper => ALPHABET
-                    .iter()
-                    .position(|&letter| letter as char == upper)? as u128,
-            };
-            symbols += 1;
-            if symbols > 16 {
-                return None;
-            }
-            value = (value << 5) | symbol;
-        }
-        if symbols != 16 {
-            return None;
-        }
-        value.to_be_bytes()[6..].try_into().ok().map(SetupCode)
-    }
-}
-
-impl fmt::Display for SetupCode {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut value = [0u8; 16];
-        value[6..].copy_from_slice(&self.0);
-        let value = u128::from_be_bytes(value);
-        for at in 0..16 {
-            if at > 0 && at % 4 == 0 {
-                f.write_str("-")?;
-            }
-            let symbol = ALPHABET[((value >> (75 - 5 * at)) & 31) as usize] as char;
-            write!(f, "{symbol}")?;
-        }
-        Ok(())
-    }
-}
-
-impl fmt::Debug for SetupCode {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("SetupCode(…)")
-    }
-}
-
-/// One side's proof that it holds the setup code, for one session and one setup.
+/// A device's proof that it holds a pair code's secret, for one session and one card.
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub struct SetupProof(pub [u8; 32]);
+pub struct PairProof(pub [u8; 32]);
 
-impl fmt::Debug for SetupProof {
+impl fmt::Debug for PairProof {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("SetupProof").field(&to_hex(&self.0)).finish()
+        f.debug_tuple("PairProof").field(&to_hex(&self.0)).finish()
     }
 }
 
-impl Serialize for SetupProof {
+impl Serialize for PairProof {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_str(&to_hex(&self.0))
     }
 }
 
-impl<'de> Deserialize<'de> for SetupProof {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<SetupProof, D::Error> {
-        from_hex_text(deserializer, "a setup proof").map(SetupProof)
+impl<'de> Deserialize<'de> for PairProof {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<PairProof, D::Error> {
+        from_hex_text(deserializer, "a pairing's proof").map(PairProof)
     }
 }
 
@@ -345,37 +325,29 @@ pub struct Transcript {
 }
 
 impl Transcript {
-    /// The proof of `side` (1 the hub's, 2 the device's) that it holds `code`, for the setup
-    /// whose last change's hash is `head`.
-    pub fn setup_proof(&self, code: &SetupCode, side: u8, head: &ChangeHash) -> SetupProof {
+    /// The device's proof that it holds `secret`, for the card `proposed`.
+    pub fn pair_proof(&self, secret: &PairSecret, proposed: &Proposed) -> PairProof {
         let mut proof = [0u8; 32];
-        proof.copy_from_slice(&self.setup_mac(code, side, head).finalize().into_bytes());
-        SetupProof(proof)
+        proof.copy_from_slice(&self.pair_mac(secret, proposed).finalize().into_bytes());
+        PairProof(proof)
     }
 
-    /// Whether `proof` is `side`'s for `code` and `head`, compared in constant time.
-    pub fn proves(
-        &self,
-        code: &SetupCode,
-        side: u8,
-        head: &ChangeHash,
-        proof: &SetupProof,
-    ) -> bool {
-        self.setup_mac(code, side, head)
+    /// Whether `proof` is the device's for `secret` and `proposed`, compared in constant time.
+    pub fn proves_pair(&self, secret: &PairSecret, proposed: &Proposed, proof: &PairProof) -> bool {
+        self.pair_mac(secret, proposed)
             .verify_slice(&proof.0)
             .is_ok()
     }
 
-    fn setup_mac(&self, code: &SetupCode, side: u8, head: &ChangeHash) -> Hmac<Sha256> {
+    fn pair_mac(&self, secret: &PairSecret, proposed: &Proposed) -> Hmac<Sha256> {
         let mut mac =
-            Hmac::<Sha256>::new_from_slice(&code.0).expect("HMAC takes a key of any length");
-        mac.update(SETUP);
-        mac.update(&[side]);
+            Hmac::<Sha256>::new_from_slice(&secret.0).expect("HMAC takes a key of any length");
+        mac.update(PAIR);
         mac.update(self.hub.as_bytes());
         mac.update(self.device.as_bytes());
         mac.update(&self.device_nonce.0);
         mac.update(&self.hub_nonce.0);
-        mac.update(&head.0);
+        mac.update(&proposed.bytes());
         mac
     }
 }
@@ -430,26 +402,18 @@ struct DeviceProof {
     /// The hash of the first change of the list the device checked, when it has one.
     #[serde(default)]
     pinned: Option<ChangeHash>,
-    /// The invitation a machine that is no member yet answers.
+    /// The pairing of a device that is no member yet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    join: Option<Joining>,
+    pair: Option<Pairing>,
 }
 
-/// What a machine that joins says in its proof: the invitation's token, and the key of the new
-/// device, which the member that invited adds.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// What a device that pairs says in its proof: the card it proposes, and its proof that it holds
+/// the pair code's secret.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Joining {
-    pub token: Token,
-    pub key: PublicKey,
-}
-
-/// A join request that waits for the member it is sent to: the token of its invitation, and the
-/// new device's key.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Requested {
-    pub token: Token,
-    pub key: PublicKey,
+pub struct Pairing {
+    pub proposed: Proposed,
+    pub proof: PairProof,
 }
 
 /// What a device asks the hub, once in a session.
@@ -458,19 +422,11 @@ pub struct Requested {
 // A few asks a session, each sent at once: their size costs nothing worth a box.
 #[allow(clippy::large_enum_variant)]
 pub enum Ask {
-    /// The first member, with the proof that the device holds the setup code the hub printed:
-    /// its own entry, then the declaration of the machine that carries it, which must be this
-    /// session's key.
-    Setup {
-        proof: SetupProof,
-        changes: Vec<Change>,
-    },
     /// A member's change of the list.
     Submit { change: Change },
-    /// A member's signed ask for an invitation: answered with its token.
-    Invite { ask: InvitationAsk },
-    /// The member that invited refuses the join request of this token.
-    Refuse { token: Token },
+    /// What this device says of itself: what it is (`computer`, `phone`) and its system
+    /// (`linux`).
+    About { device: String, system: String },
     /// Every address this machine may be reached at now, in place of those told before.
     Addresses { addresses: Vec<String> },
     /// Whether a client of this device is active, and when its last input was.
@@ -500,11 +456,29 @@ pub struct PresenceOf {
     pub last_input: u64,
 }
 
+/// What the hub knows of a member's device besides its entry (`docs/remote.md`, "A device's
+/// card"): what the device says of itself, and when it was paired and last seen, in seconds since
+/// 1970. Unsigned: nothing in it gives a right.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Facts {
+    pub key: PublicKey,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paired_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_seen: Option<u64>,
+}
+
 /// What the hub sends a device once the handshake is done.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToDevice {
-    /// The session is a member's, or a setup's while the list is empty.
+    /// The session is a member's, or a pairing's.
     Welcome {},
     /// The device is not one of the members; `reset` when the list it pinned is not the hub's
     /// any more, the hub having been set up again.
@@ -517,12 +491,6 @@ pub enum ToDevice {
         id: u64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         refused: Option<String>,
-        /// The hub's proof that it holds the setup code, in the answer to a setup.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        proof: Option<SetupProof>,
-        /// The invitation's token, in the answer to an invitation's ask.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        token: Option<Token>,
     },
     /// The member list, whole, as the members signed it.
     List(MemberList),
@@ -530,8 +498,147 @@ pub enum ToDevice {
     Addresses(Vec<Told>),
     /// The presence of the members' clients, for a runner.
     Presence(Vec<PresenceOf>),
-    /// The join requests that wait for the member of this device, in place of those sent before.
-    Requests(Vec<Requested>),
+    /// What the hub knows of each member's device, in place of what it sent before.
+    Facts(Vec<Facts>),
+    /// A packet of a link, as the device of `from` sent it for this one.
+    Relayed { from: PublicKey, packet: LinkPacket },
+    /// The members' keys whose session to the hub is open now: the devices a link reaches.
+    Online(Vec<PublicKey>),
+    /// Nothing to say: the session is alive.
+    Keepalive {},
+}
+
+/// A packet of a link, in base64 in a session's line.
+#[derive(Clone, PartialEq, Eq)]
+pub struct LinkPacket(pub Vec<u8>);
+
+impl fmt::Debug for LinkPacket {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "LinkPacket({} bytes)", self.0.len())
+    }
+}
+
+impl Serialize for LinkPacket {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use base64::Engine;
+        serializer.serialize_str(&base64::engine::general_purpose::STANDARD.encode(&self.0))
+    }
+}
+
+impl<'de> Deserialize<'de> for LinkPacket {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<LinkPacket, D::Error> {
+        use base64::Engine;
+        let text = String::deserialize(deserializer)?;
+        if text.len() > RELAY_PACKET.div_ceil(3) * 4 {
+            return Err(serde::de::Error::custom("a packet is too long"));
+        }
+        base64::engine::general_purpose::STANDARD
+            .decode(text)
+            .map(LinkPacket)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+/// What a device sends the hub for another device: a packet of a link, and the key it is for.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RelayFrame {
+    #[serde(serialize_with = "key_bytes", deserialize_with = "key_of_hex")]
+    to: [u8; 32],
+    packet: LinkPacket,
+}
+
+fn key_bytes<S: Serializer>(key: &[u8; 32], serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str(&to_hex(key))
+}
+
+fn key_of_hex<'de, D: Deserializer<'de>>(deserializer: D) -> Result<[u8; 32], D::Error> {
+    from_hex_text::<_, 32>(deserializer, "a key")
+}
+
+/// A device's end of the links its session to the hub carries (`Session::relay`): the packets it
+/// sends other devices and those they send it, and the members online. It ends with the session.
+pub struct RelayPort {
+    out: mpsc::Sender<crate::transport::Packet>,
+    incoming: mpsc::Receiver<crate::transport::Packet>,
+    online: watch::Receiver<Vec<PublicKey>>,
+}
+
+impl fmt::Debug for RelayPort {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("RelayPort")
+    }
+}
+
+impl RelayPort {
+    /// Sends `packet` to the device of `to` through the hub, once there is room for it: whether
+    /// the session took it.
+    pub async fn send(&self, to: &PublicKey, packet: Vec<u8>) -> bool {
+        self.out.send((*to.as_bytes(), packet)).await.is_ok()
+    }
+
+    /// Sends `packet` to the device of `to` if there is room for it now: whether it was taken.
+    pub fn try_send(&self, to: &PublicKey, packet: Vec<u8>) -> bool {
+        self.out.try_send((*to.as_bytes(), packet)).is_ok()
+    }
+
+    /// The next packet another device sent this one, and its key; `None` once the session ended.
+    pub async fn recv(&mut self) -> Option<(PublicKey, Vec<u8>)> {
+        loop {
+            let (from, packet) = self.incoming.recv().await?;
+            if let Ok(from) = PublicKey::from_bytes(&from) {
+                return Some((from, packet));
+            }
+        }
+    }
+
+    /// The members' keys whose session to the hub is open, as the hub last said.
+    pub fn online(&self) -> Vec<PublicKey> {
+        self.online.borrow().clone()
+    }
+
+    /// Until the hub says another list of the members online; never, once the session ended.
+    pub async fn online_changed(&mut self) {
+        if self.online.changed().await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    }
+
+    /// The packets out, the packets in, and the members online, for the transport.
+    pub(crate) fn split(
+        self,
+    ) -> (
+        mpsc::Sender<crate::transport::Packet>,
+        mpsc::Receiver<crate::transport::Packet>,
+        watch::Receiver<Vec<PublicKey>>,
+    ) {
+        (self.out, self.incoming, self.online)
+    }
+}
+
+/// The session's end of its relay port.
+struct Carried {
+    out: mpsc::Receiver<crate::transport::Packet>,
+    incoming: mpsc::Sender<crate::transport::Packet>,
+    online: watch::Sender<Vec<PublicKey>>,
+}
+
+fn relay_ends() -> (RelayPort, Carried) {
+    let (out, out_taken) = mpsc::channel(RELAY_WAITING);
+    let (incoming_given, incoming) = mpsc::channel(RELAY_WAITING);
+    let (online_given, online) = watch::channel(Vec::new());
+    (
+        RelayPort {
+            out,
+            incoming,
+            online,
+        },
+        Carried {
+            out: out_taken,
+            incoming: incoming_given,
+            online: online_given,
+        },
+    )
 }
 
 /// What the hub pushes to a device, as the session hands it over.
@@ -540,14 +647,7 @@ pub enum Pushed {
     List(MemberList),
     Addresses(Vec<Told>),
     Presence(Vec<PresenceOf>),
-    Requests(Vec<Requested>),
-}
-
-/// What an answer carries besides a yes.
-#[derive(Clone, Copy, Debug, Default)]
-struct Extra {
-    proof: Option<SetupProof>,
-    token: Option<Token>,
+    Facts(Vec<Facts>),
 }
 
 /// What one side signs: the domain, whose proof it is, the other's key, then the other's nonce
@@ -630,8 +730,8 @@ async fn read_frame<T: for<'de> Deserialize<'de>>(
 // ----------------------------------------------------------------------------------------------
 // The device's side.
 
-/// What a device keeps of its hub, pinned when it was set up: the hub's URL and key, the root of
-/// the member list, and the list as this device last checked it.
+/// What a device keeps of its hub, pinned when it paired: the hub's URL and key, the root of the
+/// member list, and the list as this device last checked it.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Device {
@@ -645,87 +745,17 @@ pub struct Device {
 impl Device {
     /// The members of the list this device last checked.
     pub fn members(&self) -> Result<Members, ListError> {
-        self.list.check(&self.root)
+        self.list.check(&self.root, &self.hub)
     }
 
-    /// A list the hub sent: kept when every change checks back to the root this device pinned
-    /// and it holds every change this device checked already; refused otherwise, the list kept
-    /// as it was. A hub that forges, drops, reorders or plays a change again, or was set up again,
-    /// is refused here, whatever the hub itself checked.
+    /// A list the hub sent: kept when every change checks back to the root and the hub's key this
+    /// device pinned and it holds every change this device checked already; refused otherwise,
+    /// the list kept as it was. A hub that forges a member's change, drops, reorders or plays a
+    /// change again, or was reset, is refused here, whatever the hub itself checked.
     pub fn take(&mut self, list: MemberList) -> Result<Members, ListError> {
-        let members = list.check_update(&self.root, &self.list)?;
+        let members = list.check_update(&self.root, &self.hub, &self.list)?;
         self.list = list;
         Ok(members)
-    }
-
-    /// The first member: `changes` (the device's own entry as the root, then its machine's
-    /// declaration, signed by the device and claimed by the machine) and the setup `code`, proved
-    /// through a session `machine` opens, never sent. The hub's key is pinned from this session
-    /// once the hub proved it holds the code too, and the device keeps the list only once the hub
-    /// sent it back holding the setup: a hub that withholds it is refused.
-    pub async fn setup(
-        url: &str,
-        code: &str,
-        changes: Vec<Change>,
-        machine: &MachineKey,
-        hello: &Hello,
-        tls: &Tls,
-    ) -> Result<(Device, Session), ControlError> {
-        let parsed = HubUrl::parse(url).map_err(|why| ControlError::Refused {
-            hub: url.to_owned(),
-            reason: why,
-        })?;
-        let refused = |reason: &str| ControlError::Refused {
-            hub: parsed.authority(),
-            reason: reason.to_owned(),
-        };
-        let code = SetupCode::parse(code).ok_or_else(|| {
-            refused(
-                "this is not a setup code: 16 letters and digits, as the hub printed it \
-                 (7KQ2-M4XP-9TRW-H3CD)",
-            )
-        })?;
-        let root = changes
-            .first()
-            .map(|first| first.signer)
-            .ok_or_else(|| refused("there is no entry to set up with"))?;
-        let list = MemberList::from_changes(changes.clone());
-        list.check(&root)
-            .map_err(|error| refused(&error.to_string()))?;
-        let mut session = Session::open(&parsed, None, &machine.0, hello, tls, None, None).await?;
-        if let Some((reason, _)) = &session.refused {
-            return Err(refused(reason));
-        }
-        let head = list.head();
-        let transcript = session.transcript;
-        let answer = session
-            .asker()
-            .answer(Ask::Setup {
-                proof: transcript.setup_proof(&code, 2, &head),
-                changes,
-            })
-            .await?;
-        if !answer
-            .proof
-            .is_some_and(|proof| transcript.proves(&code, 1, &head, &proof))
-        {
-            return Err(refused(
-                "it did not prove it knows the setup code: it is not the hub that printed it",
-            ));
-        }
-        let mut device = Device {
-            url: parsed.to_string(),
-            hub: session.hub(),
-            root,
-            list,
-        };
-        let withheld =
-            |why: String| refused(&format!("the hub withheld this device's setup: {why}"));
-        device
-            .sent_back(&mut session, &head, true)
-            .await
-            .map_err(withheld)?;
-        Ok((device, session))
     }
 
     /// A member's change, asked through `session`: kept once the hub sent back a list that holds
@@ -737,7 +767,7 @@ impl Device {
     ) -> Result<Members, ControlError> {
         let hash = change.hash();
         session.ask(Ask::Submit { change }).await?;
-        self.sent_back(session, &hash, false)
+        self.sent_back(session, &hash)
             .await
             .map_err(|why| ControlError::Refused {
                 hub: session.authority.clone(),
@@ -746,13 +776,11 @@ impl Device {
     }
 
     /// Takes the lists `session` sends until one holds the change whose hash is `hash`; why not,
-    /// when one is refused or none comes in time. In a `setup`, an empty list is the one the hub
-    /// sent before it.
+    /// when one is refused or none comes in time.
     async fn sent_back(
         &mut self,
         session: &mut Session,
         hash: &ChangeHash,
-        setup: bool,
     ) -> Result<Members, String> {
         let waited = tokio::time::timeout(WAIT, async {
             loop {
@@ -762,9 +790,6 @@ impl Device {
                 let Pushed::List(list) = pushed else {
                     continue;
                 };
-                if setup && list.changes().is_empty() {
-                    continue;
-                }
                 let holds = list.changes().iter().any(|change| change.hash() == *hash);
                 let members = self.take(list).map_err(|error| error.to_string())?;
                 if holds {
@@ -798,80 +823,81 @@ impl Device {
         match session.refused {
             Some((_, true)) => Err(ControlError::Reset),
             Some((reason, false)) => Err(ControlError::Refused {
-                hub: url.authority(),
+                hub: url.host_shown(),
                 reason,
             }),
             None => Ok(session),
         }
     }
 
-    /// The new device's side of a pairing (`docs/remote.md`, "Pairing", 2): `machine` reaches the
-    /// hub of `invitation`, pinning the key the invitation holds, and asks to join with the token
-    /// and the new device's key, `key`. The hub holds the request until the member that invited
-    /// accepts or refuses it (`Joined::accepted`).
-    pub async fn join(
-        invitation: &Invitation,
-        key: &PublicKey,
+    /// A device's side of a pairing (`docs/remote.md`, "Pairing"): `key` (the machine's, for a
+    /// computer; the device's own, for a phone) reaches the hub of `code`, pinning the key the code
+    /// holds, and proves it holds the code's secret for the card `proposed`. The hub pairs the
+    /// device and sends the list (`Paired::listed`).
+    pub async fn pair(
+        code: &PairCode,
+        proposed: Proposed,
         machine: &MachineKey,
         hello: &Hello,
         tls: &Tls,
-    ) -> Result<Joined, ControlError> {
-        let url = HubUrl::parse(&invitation.hub_url).map_err(|why| ControlError::Refused {
-            hub: invitation.hub_url.clone(),
+    ) -> Result<Paired, ControlError> {
+        let url = HubUrl::parse(&code.hub_url).map_err(|why| ControlError::Refused {
+            hub: code.hub_url.clone(),
             reason: why,
         })?;
-        let joining = Joining {
-            token: invitation.token,
-            key: *key,
+        proposed.check().map_err(|why| ControlError::Refused {
+            hub: url.host_shown(),
+            reason: why,
+        })?;
+        let pairing = Pairing {
+            proposed: proposed.clone(),
+            proof: PairProof([0; 32]),
         };
         let session = Session::open(
             &url,
-            Some(&invitation.hub_key),
+            Some(&code.hub_key),
             &machine.0,
             hello,
             tls,
             None,
-            Some(joining),
+            Some((pairing, code.secret)),
         )
         .await?;
         if let Some((reason, _)) = &session.refused {
             return Err(ControlError::Refused {
-                hub: url.authority(),
+                hub: url.host_shown(),
                 reason: reason.clone(),
             });
         }
-        Ok(Joined {
-            invitation: invitation.clone(),
-            key: *key,
+        Ok(Paired {
+            hub: code.hub_key,
+            key: proposed.key,
             url: url.to_string(),
             session,
         })
     }
 }
 
-/// A join request the hub holds, its session open.
+/// A pairing the hub took, its session open.
 #[derive(Debug)]
-pub struct Joined {
-    invitation: Invitation,
+pub struct Paired {
+    hub: PublicKey,
     key: PublicKey,
     url: String,
     pub session: Session,
 }
 
-impl Joined {
-    /// Waits until the member that invited accepted the request: the hub's key pinned, and the
-    /// first list, which checks back to its own root and holds this device's entry, signed by the
-    /// member of the invitation (`Invitation::check_list`). A list that does not is refused, and
-    /// so is the pairing; a refused or expired request ends the session, said.
-    pub async fn accepted(&mut self) -> Result<(Device, Members), ControlError> {
+impl Paired {
+    /// The first list the hub sends once it paired the device: it checks back to its own root and
+    /// to the hub's key the code holds, which the device pins from then on, and holds the device as
+    /// a member. A list that does not is refused, and so is the pairing.
+    pub async fn listed(&mut self) -> Result<(Device, Members), ControlError> {
         let authority = self.session.authority.clone();
         let refused = |reason: String| ControlError::Refused {
             hub: authority.clone(),
             reason,
         };
-        // The hub ends the request with its invitation, 5 minutes at most: this is in case it
-        // does not.
-        let waited = tokio::time::timeout(Duration::from_secs(6 * 60), async {
+        let waited = tokio::time::timeout(WAIT, async {
             loop {
                 let Some(pushed) = self.session.next().await else {
                     return Err(refused(self.session.ended_why()));
@@ -879,35 +905,42 @@ impl Joined {
                 let Pushed::List(list) = pushed else {
                     continue;
                 };
-                let members = self
-                    .invitation
-                    .check_list(&list, &self.key)
-                    .map_err(|error| refused(error.to_string()))?;
+                let root = list
+                    .root()
+                    .ok_or_else(|| refused("it sent an empty member list".to_owned()))?;
+                let members = list
+                    .check(&root, &self.hub)
+                    .map_err(|error| refused(format!("its member list does not check: {error}")))?;
+                if members.get(&self.key).is_none() {
+                    return Err(refused(
+                        "it sent a member list that does not hold this device".to_owned(),
+                    ));
+                }
                 let device = Device {
                     url: self.url.clone(),
-                    hub: self.invitation.hub_key,
-                    root: members.root(),
+                    hub: self.hub,
+                    root,
                     list,
                 };
                 return Ok((device, members));
             }
         });
         waited.await.unwrap_or_else(|_| {
-            Err(refused(
-                "the join request was not answered in 6 minutes".to_owned(),
-            ))
+            Err(refused(format!(
+                "it sent no member list in {} s",
+                WAIT.as_secs()
+            )))
         })
     }
 }
 
-type Answered = oneshot::Sender<Result<Extra, String>>;
+type Answered = oneshot::Sender<Result<(), String>>;
 
 /// A session to the hub, its handshake done.
 pub struct Session {
     hub: PublicKey,
     authority: String,
     protocol: u32,
-    transcript: Transcript,
     asks: mpsc::UnboundedSender<(Ask, Answered)>,
     pushed: mpsc::UnboundedReceiver<Pushed>,
     /// Why the session ended, once it did.
@@ -915,6 +948,8 @@ pub struct Session {
     /// When the hub refused the device: its reason, and whether the list the device pinned was
     /// reset.
     refused: Option<(String, bool)>,
+    /// The device's end of the links the session carries, until it is taken.
+    relay: Option<RelayPort>,
 }
 
 impl fmt::Debug for Session {
@@ -938,28 +973,12 @@ pub struct Asker {
 impl Asker {
     /// Asks the hub, and waits for its answer.
     pub async fn ask(&self, ask: Ask) -> Result<(), ControlError> {
-        self.answer(ask).await.map(|_| ())
-    }
-
-    /// Asks the hub for an invitation, with a member's signed ask: its token.
-    pub async fn invite(&self, ask: InvitationAsk) -> Result<Token, ControlError> {
-        self.answer(Ask::Invite { ask })
-            .await?
-            .token
-            .ok_or_else(|| ControlError::Lost {
-                hub: self.authority.clone(),
-                why: "it answered an invitation's ask without a token".to_owned(),
-            })
-    }
-
-    /// Asks the hub, and waits for its answer, with what it may carry.
-    async fn answer(&self, ask: Ask) -> Result<Extra, ControlError> {
         let (answer, answered) = oneshot::channel();
         if self.asks.send((ask, answer)).is_err() {
             return Err(lost(&self.authority, &self.ended));
         }
         match answered.await {
-            Ok(Ok(extra)) => Ok(extra),
+            Ok(Ok(())) => Ok(()),
             Ok(Err(reason)) => Err(ControlError::Refused {
                 hub: self.authority.clone(),
                 reason,
@@ -988,7 +1007,7 @@ impl Session {
         hello: &Hello,
         tls: &Tls,
         pinned_list: Option<ChangeHash>,
-        join: Option<Joining>,
+        pair: Option<(Pairing, PairSecret)>,
     ) -> Result<Session, ControlError> {
         let authority = url.authority();
         let stream = reach(url, tls).await?;
@@ -1040,12 +1059,22 @@ impl Session {
             let protocol = choose(hello, &theirs.hello, &format!("the hub at {authority}"))
                 .map_err(ControlError::NeedsUpdate)?;
             let proof = sign(key, &proof_bytes(2, &theirs.hub, &theirs.nonce, &nonce));
+            let transcript = Transcript {
+                hub: theirs.hub,
+                device: own,
+                device_nonce: nonce,
+                hub_nonce: theirs.nonce,
+            };
+            let pair = pair.map(|(mut pairing, secret)| {
+                pairing.proof = transcript.pair_proof(&secret, &pairing.proposed);
+                pairing
+            });
             write_line(
                 &mut writer,
                 &DeviceProof {
                     proof,
                     pinned: pinned_list,
-                    join,
+                    pair,
                 },
             )
             .await
@@ -1053,12 +1082,6 @@ impl Session {
             let welcome: ToDevice = read_frame(&mut reader, HANDSHAKE_LIMIT)
                 .await
                 .map_err(lost)?;
-            let transcript = Transcript {
-                hub: theirs.hub,
-                device: own,
-                device_nonce: nonce,
-                hub_nonce: theirs.nonce,
-            };
             Ok((transcript, protocol, welcome))
         };
         let (transcript, protocol, welcome) =
@@ -1071,9 +1094,17 @@ impl Session {
         let (asks, asked) = mpsc::unbounded_channel();
         let (pushing, pushed) = mpsc::unbounded_channel();
         let ended = Arc::new(Mutex::new(None));
+        let (relay, carried) = relay_ends();
         let refused = match welcome {
             ToDevice::Welcome {} => {
-                tokio::spawn(drive(reader, writer, asked, pushing, ended.clone()));
+                tokio::spawn(drive(
+                    reader,
+                    writer,
+                    asked,
+                    pushing,
+                    carried,
+                    ended.clone(),
+                ));
                 None
             }
             ToDevice::Refused { reason, reset } => Some((shown(&reason, SHOWN), reset)),
@@ -1087,12 +1118,18 @@ impl Session {
             hub: transcript.hub,
             authority,
             protocol,
-            transcript,
             asks,
             pushed,
             ended,
             refused,
+            relay: Some(relay),
         })
+    }
+
+    /// This device's end of the links the session carries to the other devices through the hub:
+    /// given once, `None` after.
+    pub fn relay(&mut self) -> Option<RelayPort> {
+        self.relay.take()
     }
 
     /// The hub's key, as it proved it.
@@ -1258,6 +1295,7 @@ async fn drive(
     mut writer: Writer,
     mut asked: mpsc::UnboundedReceiver<(Ask, Answered)>,
     pushing: mpsc::UnboundedSender<Pushed>,
+    mut carried: Carried,
     ended: Arc<Mutex<Option<String>>>,
 ) {
     let (lines_in, mut lines) = mpsc::channel::<Result<ToDevice, String>>(16);
@@ -1272,8 +1310,25 @@ async fn drive(
     });
     let mut waiting: Vec<(u64, Answered)> = Vec::new();
     let mut next_id = 1u64;
+    let mut keepalive = tokio::time::interval(KEEPALIVE);
+    keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut heard = tokio::time::Instant::now();
     let why = loop {
         tokio::select! {
+            Some((to, packet)) = carried.out.recv() => {
+                let frame = serde_json::json!({"relay": RelayFrame { to, packet: LinkPacket(packet) }});
+                if let Err(error) = write_line(&mut writer, &frame).await {
+                    break error.to_string();
+                }
+            }
+            _ = keepalive.tick() => {
+                if heard.elapsed() > SILENCE {
+                    break format!("it said nothing in {} s", SILENCE.as_secs());
+                }
+                if let Err(error) = write_line(&mut writer, &serde_json::json!({"keepalive": {}})).await {
+                    break error.to_string();
+                }
+            }
             ask = asked.recv() => {
                 let Some((ask, answer)) = ask else {
                     break "this device closed it".to_owned();
@@ -1289,17 +1344,24 @@ async fn drive(
                 waiting.push((id, answer));
             }
             line = lines.recv() => {
+                heard = tokio::time::Instant::now();
                 match line {
-                    Some(Ok(ToDevice::Answer { id, refused, proof, token })) => {
+                    Some(Ok(ToDevice::Relayed { from, packet })) => {
+                        // A packet with no room is dropped, as a network drops one.
+                        let _ = carried.incoming.try_send((*from.as_bytes(), packet.0));
+                    }
+                    Some(Ok(ToDevice::Online(keys))) => { carried.online.send_replace(keys); }
+                    Some(Ok(ToDevice::Keepalive {})) => {}
+                    Some(Ok(ToDevice::Answer { id, refused })) => {
                         if let Some(at) = waiting.iter().position(|(waits, _)| *waits == id) {
                             let (_, answer) = waiting.swap_remove(at);
                             let _ = answer.send(match refused {
                                 Some(reason) => Err(shown(&reason, SHOWN)),
-                                None => Ok(Extra { proof, token }),
+                                None => Ok(()),
                             });
                         }
                     }
-                    Some(Ok(ToDevice::Requests(requests))) => { let _ = pushing.send(Pushed::Requests(requests)); }
+                    Some(Ok(ToDevice::Facts(facts))) => { let _ = pushing.send(Pushed::Facts(facts)); }
                     Some(Ok(ToDevice::List(list))) => { let _ = pushing.send(Pushed::List(list)); }
                     Some(Ok(ToDevice::Addresses(told))) => { let _ = pushing.send(Pushed::Addresses(told)); }
                     Some(Ok(ToDevice::Presence(presence))) => { let _ = pushing.send(Pushed::Presence(presence)); }
@@ -1325,7 +1387,8 @@ async fn drive(
 pub struct Arriving {
     transcript: Transcript,
     pinned: Option<ChangeHash>,
-    join: Option<Joining>,
+    pair: Option<Pairing>,
+    version: String,
     protocol: u32,
     reader: Reader,
     writer: Writer,
@@ -1337,9 +1400,20 @@ impl Arriving {
         self.transcript.device
     }
 
-    /// The invitation a machine that is no member yet answers, as it said it.
-    pub fn joining(&self) -> Option<Joining> {
-        self.join
+    /// The pairing of a device that is no member yet, as it said it: its proof is the hub's to
+    /// check (`Transcript::proves_pair`).
+    pub fn pairing(&self) -> Option<&Pairing> {
+        self.pair.as_ref()
+    }
+
+    /// The keys and nonces of the handshake, which a pairing's proof is bound to.
+    pub fn transcript(&self) -> &Transcript {
+        &self.transcript
+    }
+
+    /// The Flottille version the device said in its hello.
+    pub fn version(&self) -> &str {
+        &self.version
     }
 
     /// The hash of the first change of the list the device checked, as it said it.
@@ -1364,14 +1438,42 @@ impl Arriving {
         let _ = self.writer.shutdown().await;
     }
 
-    /// Welcomes the device: the session, whose asks come in on `asks`.
-    pub async fn welcome(mut self) -> std::io::Result<HubSession> {
+    /// Welcomes the device: the session, whose asks come in on `asks`, lost after `SILENCE`
+    /// without a word from the device.
+    pub async fn welcome(self) -> std::io::Result<HubSession> {
+        self.welcome_within(SILENCE).await
+    }
+
+    /// [`Arriving::welcome`], the session lost after `silence` without a word from the device, or
+    /// a line it does not read for as long.
+    pub async fn welcome_within(mut self, silence: Duration) -> std::io::Result<HubSession> {
         write_line(&mut self.writer, &ToDevice::Welcome {}).await?;
         let (sender, asks) = mpsc::channel(16);
+        let (relaying, relays) = mpsc::channel(RELAY_WAITING);
         let mut reader = self.reader;
         let reading = tokio::spawn(async move {
             loop {
-                let frame = read_frame::<serde_json::Value>(&mut reader, ASK_LIMIT).await;
+                let read = read_frame::<serde_json::Value>(&mut reader, ASK_LIMIT);
+                let Ok(frame) = tokio::time::timeout(silence, read).await else {
+                    let why = format!("it said nothing in {} s", silence.as_secs());
+                    let _ = sender.send(Err(why)).await;
+                    return;
+                };
+                if let Ok(frame) = &frame {
+                    if frame.get("keepalive").is_some() {
+                        continue;
+                    }
+                    if let Some(relay) = frame.get("relay") {
+                        if let Ok(RelayFrame { to, packet }) =
+                            serde_json::from_value::<RelayFrame>(relay.clone())
+                            && let Ok(to) = PublicKey::from_bytes(&to)
+                        {
+                            // A packet with no room is dropped: the asks are read on.
+                            let _ = relaying.try_send((to, packet.0));
+                        }
+                        continue;
+                    }
+                }
                 let asked = frame.and_then(|frame| {
                     frame
                         .get("ask")
@@ -1389,9 +1491,24 @@ impl Arriving {
             transcript: self.transcript,
             pinned: self.pinned,
             asks,
+            relays: Some(Relays(relays)),
             writer: self.writer,
+            silence,
             reading,
         })
+    }
+}
+
+/// The packets of links a device sends the hub for other devices, each with the key it is for.
+pub struct Relays(mpsc::Receiver<(PublicKey, Vec<u8>)>);
+
+impl Relays {
+    /// The next one; it waits for ever once the device is gone (`HubSession::ask` says why).
+    pub async fn next(&mut self) -> (PublicKey, Vec<u8>) {
+        match self.0.recv().await {
+            Some(relayed) => relayed,
+            None => std::future::pending().await,
+        }
     }
 }
 
@@ -1400,7 +1517,11 @@ pub struct HubSession {
     transcript: Transcript,
     pinned: Option<ChangeHash>,
     asks: mpsc::Receiver<Result<Asked, String>>,
+    /// The packets of links the device sent for others, until they are taken.
+    relays: Option<Relays>,
     writer: Writer,
+    /// How long a line may wait for the device to read it.
+    silence: Duration,
     /// The task that reads the device's asks: it holds the connection's other half, so it ends
     /// with the session, or the device would not see the hub go.
     reading: tokio::task::JoinHandle<()>,
@@ -1422,11 +1543,6 @@ impl HubSession {
         self.pinned
     }
 
-    /// The keys and nonces of the session's handshake, which a setup's proofs are bound to.
-    pub fn transcript(&self) -> &Transcript {
-        &self.transcript
-    }
-
     /// The device's next ask; why the session ended otherwise.
     pub async fn ask(&mut self) -> Result<Asked, String> {
         self.asks
@@ -1435,8 +1551,19 @@ impl HubSession {
             .unwrap_or_else(|| Err("it closed the connection".to_owned()))
     }
 
+    /// The packets of links the device sends for other devices: given once, `None` after.
+    pub fn relays(&mut self) -> Option<Relays> {
+        self.relays.take()
+    }
+
     pub async fn send(&mut self, frame: &ToDevice) -> std::io::Result<()> {
-        write_line(&mut self.writer, frame).await
+        match tokio::time::timeout(self.silence, write_line(&mut self.writer, frame)).await {
+            Ok(written) => written,
+            Err(_) => Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("it read nothing in {} s", self.silence.as_secs()),
+            )),
+        }
     }
 
     pub async fn close(mut self) {
@@ -1523,15 +1650,22 @@ pub async fn arrive(
             device_nonce: theirs.nonce,
             hub_nonce: nonce,
         };
-        Ok((transcript, proved.pinned, proved.join, protocol))
+        Ok((
+            transcript,
+            proved.pinned,
+            proved.pair,
+            theirs.hello.flottille,
+            protocol,
+        ))
     };
-    let (transcript, pinned, join, protocol) = tokio::time::timeout(WAIT, handshake)
+    let (transcript, pinned, pair, version, protocol) = tokio::time::timeout(WAIT, handshake)
         .await
         .map_err(|_| "the handshake did not finish in time".to_owned())??;
     Ok(Arriving {
         transcript,
         pinned,
-        join,
+        pair,
+        version,
         protocol,
         reader,
         writer,
@@ -1543,11 +1677,47 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_hubs_address_is_shown_without_its_default_port_or_a_trailing_slash() {
+        // What is stored and reached keeps the port and the path whole; what is shown is how a
+        // user writes it.
+        let shown = |text: &str| HubUrl::parse(text).unwrap().shown();
+        assert_eq!(shown("https://hub.example.net"), "https://hub.example.net");
+        assert_eq!(
+            shown("https://Hub.Example.net:443/"),
+            "https://hub.example.net"
+        );
+        assert_eq!(shown("http://hub.example.net:80"), "http://hub.example.net");
+        // A port that is not the scheme's own stays, and so does a path a proxy routes by.
+        assert_eq!(
+            shown("https://hub.example.net:80"),
+            "https://hub.example.net:80"
+        );
+        assert_eq!(shown("http://192.0.2.10:7448/"), "http://192.0.2.10:7448");
+        assert_eq!(
+            shown("http://192.0.2.10:7448/flottille"),
+            "http://192.0.2.10:7448/flottille"
+        );
+        assert_eq!(shown("http://[fd7a::7]:7448"), "http://[fd7a::7]:7448");
+        assert_eq!(
+            HubUrl::parse("https://hub.example.net")
+                .unwrap()
+                .host_shown(),
+            "hub.example.net"
+        );
+        assert_eq!(HubUrl::shown_text("not a url"), "not a url");
+        // Reached as it always was.
+        let url = HubUrl::parse("https://hub.example.net").unwrap();
+        assert_eq!(url.authority(), "hub.example.net:443");
+        assert_eq!(url.to_string(), "https://hub.example.net:443/");
+    }
+
+    #[test]
     fn a_hub_url_says_its_port_or_takes_the_scheme_s() {
         let url = HubUrl::parse("https://Hub.Example.net").unwrap();
         assert_eq!(url.to_string(), "https://hub.example.net:443/");
         let url = HubUrl::parse("http://192.0.2.10:7448/flottille").unwrap();
         assert_eq!(url.authority(), "192.0.2.10:7448");
+
         assert_eq!(url.path, "/flottille");
         let url = HubUrl::parse("http://[fd7a::7]:7448").unwrap();
         assert_eq!(url.tls_name(), "fd7a::7");
@@ -1565,16 +1735,7 @@ mod tests {
     }
 
     #[test]
-    fn a_setup_code_reads_as_a_person_types_it_and_proves_one_setup() {
-        let code = SetupCode::new().unwrap();
-        let text = code.to_string();
-        assert_eq!(text.len(), 19, "{text}");
-        let typed = text.replace('-', "").to_lowercase().replace('0', "o");
-        assert_eq!(SetupCode::parse(&typed), Some(code.clone()));
-        assert_eq!(SetupCode::parse("7KQ2-M4XP-9TRW"), None);
-        assert_eq!(SetupCode::parse("7KQ2-M4XP-9TRW-H3CDX"), None);
-        assert_eq!(SetupCode::parse("7KQ2-M4XP-9TRW-H3CU"), None);
-
+    fn a_pairing_proof_is_for_one_session_one_secret_and_one_card() {
         let key = |n: u8| PublicKey(SigningKey::from_bytes(&[n; 32]).verifying_key());
         let transcript = Transcript {
             hub: key(1),
@@ -1582,18 +1743,33 @@ mod tests {
             device_nonce: Nonce32([3; 32]),
             hub_nonce: Nonce32([4; 32]),
         };
-        let head = ChangeHash([5; 32]);
-        let proof = transcript.setup_proof(&code, 2, &head);
-        assert!(transcript.proves(&code, 2, &head, &proof));
-        // Not as the other side's, not for other changes, another code, another session.
-        assert!(!transcript.proves(&code, 1, &head, &proof));
-        assert!(!transcript.proves(&code, 2, &ChangeHash([6; 32]), &proof));
-        assert!(!transcript.proves(&SetupCode::new().unwrap(), 2, &head, &proof));
+        let secret = PairSecret([5; 16]);
+        let proposed = Proposed {
+            key: key(6),
+            name: "pc".to_owned(),
+            role: crate::Role::Runner,
+            icon: crate::Icon::Desktop,
+            colour: crate::Colour::Blue,
+        };
+        let proof = transcript.pair_proof(&secret, &proposed);
+        assert!(transcript.proves_pair(&secret, &proposed, &proof));
+        // Not with another secret, not for another card, not in another session.
+        assert!(!transcript.proves_pair(&PairSecret([7; 16]), &proposed, &proof));
+        let runner_named_otherwise = Proposed {
+            name: "server".to_owned(),
+            ..proposed.clone()
+        };
+        assert!(!transcript.proves_pair(&secret, &runner_named_otherwise, &proof));
+        let controller = Proposed {
+            role: crate::Role::Controller,
+            ..proposed.clone()
+        };
+        assert!(!transcript.proves_pair(&secret, &controller, &proof));
         let other = Transcript {
-            hub_nonce: Nonce32([7; 32]),
+            hub_nonce: Nonce32([8; 32]),
             ..transcript
         };
-        assert!(!other.proves(&code, 2, &head, &proof));
+        assert!(!other.proves_pair(&secret, &proposed, &proof));
     }
 
     #[test]

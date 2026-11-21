@@ -100,6 +100,7 @@ jobs:
       selected: ${{ steps.tests.outputs.selected }}
       hub: ${{ steps.hub.outputs.hub }}
       alpha: ${{ steps.alpha.outputs.alpha }}
+      android: ${{ steps.android.outputs.android }}
     steps:
       # A feature branch's pull request publishes the branch's alpha, once `verify` passed (`build`,
       # `publish`): it has no push run to do it. Only a branch of this repository, named
@@ -151,6 +152,27 @@ jobs:
           if [ -z "$files" ]; then rust=true; fi
           if [ "$rust" = false ]; then echo "::notice::Only apps/android/ and site/ changed: the Rust suite does not run."; fi
           echo "rust=$rust" >> "$GITHUB_OUTPUT"
+      # The Android job (`android`) runs for a pull request that changes the app, the mobile core
+      # or what the core is built from; every push runs it. A failure here says nothing
+      # (`android` stays empty): it then runs.
+      - name: Does the Android job have to run
+        id: android
+        if: github.event_name == 'pull_request'
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          files=$(git diff --name-only --no-renames "$BASE...$HEAD")
+          android=false
+          while IFS= read -r path; do
+            case "$path" in
+              apps/android/* | crates/flottille-mobile/* | crates/flottille-link/* | Cargo.lock | .github/workflows/ci.yml)
+                android=true
+                break
+                ;;
+            esac
+          done <<< "$files"
+          echo "android=$android" >> "$GITHUB_OUTPUT"
       # A pull request runs a fast check, not the whole suite (docs/releases.md, "What CI checks"):
       # `check`, and the tests it touches (`.github/scripts/pr-tests.sh`), which `test-selected`
       # runs. Only this step says `suite=false`: a failure of it says nothing, and the whole suite
@@ -460,11 +482,38 @@ jobs:
           sudo apt-get install -y pkg-config libfontconfig-dev libfreetype-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libxcb1-dev libvulkan-dev
       - run: cargo test --doc --locked
 
+  # The Android app's job (`docs/remote.md`, "The Android app"): the mobile core built with cargo
+  # ndk for the phone and the emulator, the Gradle unit tests (the bindings on the JVM, the 16 KB
+  # alignment of the libraries) and the instrumentation tests on an emulator (`apps/android/ci.sh`).
+  android:
+    needs: [changes]
+    if: ${{ !cancelled() && needs.changes.outputs.android != 'false' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      CARGO_INCREMENTAL: 0
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup target add aarch64-linux-android x86_64-linux-android
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v2-rust
+          shared-key: android
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-ndk@4.1.2
+      - run: apps/android/ci.sh
+      - name: Disk left
+        if: always()
+        run: df -h /
+        continue-on-error: true
+
   # The required check: one job that always ends, success or failure, whatever happened to the
   # partitions (failed, cancelled, never started), so that it never waits on a job skipped.
   # `check` and the tests skipped are a pass only when `changes` said the suite is not needed.
   verify:
-    needs: [verified-on-dev, changes, check, build-tests, doc-tests, test, test-selected, hub]
+    needs: [verified-on-dev, changes, check, build-tests, doc-tests, test, test-selected, hub, android]
     # Skipped only when this commit passed it on dev (on main, see `verified-on-dev`).
     if: ${{ always() && needs.verified-on-dev.outputs.verified != 'true' }}
     runs-on: ubuntu-latest
@@ -480,7 +529,14 @@ jobs:
           SUITE: ${{ needs.changes.outputs.suite }}
           RUST: ${{ needs.changes.outputs.rust }}
           HUB: ${{ needs.hub.result }}
+          ANDROID: ${{ needs.android.result }}
         run: |
+          # The Android job (the phone's core, its emulator run): skipped when the pull request
+          # leaves the app and the core alone, a pass; red or cancelled, never merged.
+          if [ "$ANDROID" = failure ] || [ "$ANDROID" = cancelled ]; then
+            echo "::error::android: $ANDROID."
+            exit 1
+          fi
           # `publish` needs `hub`: a red hub check merged would stop every release. Skipped (a pull
           # request that leaves the hub alone) is fine.
           if [ "$HUB" = failure ] || [ "$HUB" = cancelled ]; then
@@ -752,7 +808,7 @@ jobs:
           mkdir -p "$context/lib/flottille-hub"
           install -m 0755 "$BINARY" "$context/flottille-hub"
           docker build --platform linux/${{ matrix.platform }} --build-arg SOURCE=https://github.com/${{ github.repository }} -f crates/flottille-hub/Dockerfile -t flottille-hub:linux-${{ matrix.platform }} "$context"
-      - name: the_image_starts_prints_a_setup_code_and_answers_on_its_port
+      - name: the_image_starts_says_how_to_pair_and_answers_on_its_port
         if: matrix.arch == 'x86_64'
         run: tools/check-hub-image.sh flottille-hub:linux-amd64
       - name: the_compose_example_is_valid

@@ -1081,7 +1081,11 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   chooses it, and the pointer marks the row it is on and a click chooses it. Ctrl K waits while
   a dialog or a list is open. It searches what the window already holds from the daemon (the
   tree, the projects), never the content of conversations (that needs an index);
-- left: the sidebar, each project and, under it, **its sessions in one flat list**, sorted by
+- left: the sidebar, each project and, under it, **its sessions in one flat list**, those of every
+  machine of the user together (a project of the same name on several machines is one group; a
+  session of another machine carries that machine's name on its second line, `server`, greyed
+  with `server offline since 22:14` while it is off, `docs/remote.md`, "One list of every
+  machine"), sorted by
   last exchange (the later of the last message the user gave it and the end of its root's last
   turn, its creation before either: the session that last had one on top. Work done during a turn
   never moves a row, so two sessions working at once keep their places; a state is drawn by the
@@ -1258,10 +1262,14 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   unfolding and folding away, and an empty list says so. A field saved
   on its own shows its Save only once it changed (rule 4);
 - Settings, in tabs by subject (`reference/gpui.md`, rule 13): **Agents**, **Approvals**,
-  **Features**, **Vault** and **General**, one shown at a time, as in a project's settings. It
-  opens on Agents; a link to a section opens its tab with the section in view; Usage will be the
-  sixth tab and the last. No part of Flottille adds a tab of its own: what the user turns on or
-  off is a row of Features.
+  **Features**, **Vault**, **Machines** and **General**, one shown at a time, as in a project's
+  settings. It opens on Agents; a link to a section opens its tab with the section in view (an old
+  link to General's machines section, `general#machines`, opens Machines); Usage will be a
+  seventh tab and the last. A part of Flottille gets a tab of its own when it fits: a subject the
+  user goes to on its own, with several sections of its own (Machines now; Usage and
+  Notifications later). A smaller part stays a row of Features, which the user turns on or off,
+  or a section of the tab of its subject. The limit is the mess, not a number: when the tabs are
+  no longer readable at a glance the structure is reviewed (#1145).
   **Agents** holds five sections. **Providers** (a count; "The agent programs Flottille can
   start. Each signs in with its own login."): one row per provider, its switch labelled with its
   name (`Claude`), its version as a tag (the path of its program in the version's tooltip), and
@@ -1319,10 +1327,24 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   ("Where new workspaces are made. A project can choose its own."): **Where**, radios `In
   Flottille's data folder`, `Beside each project` and `A folder you choose`, each line the folder
   it gives relative to `~`, and the **Folder** field unfolding under the last (`docs/projects.md`,
-  "Where the workspaces go"). Later **Machines** (§12) comes under it. Last **Developer mode**,
+  "Where the workspaces go"). Then **Developer mode**,
   with no sentence: a switch, "Log what Flottille decides" ("Why each call was allowed, held or
   refused, one JSON line each, secrets masked. For working on Flottille."), off by default
-  (`developer.md`), and the path of its log unfolding under it;
+  (`developer.md`), and the path of its log unfolding under it. Last **Version** (`releases.md`,
+  "Updating").
+  **Machines** is Remote (`remote.md`), and nothing of it is typed on the page: a section says the
+  state and holds the buttons, and what is typed, or what a request shows, is a dialog of the
+  window's host. First whether remote is on: off, a notice ("Remote is off. This machine can join
+  a hub and link to your other machines.")
+  and **Turn on**; on, a **Remote** switch ("Turn it off and the links close; this machine stays paired with
+  your hub."), whose off asks once, in the one confirmation dialog. The notice folds away and the
+  settings unfold, and back. The window offers no choice of address to listen on, on purpose: the
+  traffic between devices is to go through the hub, so a device needs none (`remote.md`, "Defaults
+  taken"); the daemon's `listen` stays, set from the command line. While this machine is in no hub,
+  **Connect to your hub** opens its dialog (the code `flottille-hub pair` printed and the card this
+  machine proposes, the refusal under its fields, a toast when it is done); a device is added on
+  the hub's host, never from a device. Then the hub's state, **Devices** (Rename is a dialog) and
+  **Addresses** (**New address** is a dialog);
 - a session page: the root's conversation, live (messages, the user's own as selectable as the agent's, thoughts collapsed (their head says how long the thinking lasted, from the event before it
   to the one after it, and no time when it lasted less than a tenth of a second), tool calls with
   their result (a result cut at the source says so on its step, with the number of characters left out), the children launched, a session started for the user as one line, `started the session "<title>"` (it is no sub-agent), reports and an edit's diff, each folded to one line until a click unfolds it), one compact line for each command a
@@ -1580,10 +1602,10 @@ to the front.
 ## 12. Later: remote
 
 Designed for, not built before the milestone "Remote": the user's machines and devices, members
-of their own hub (a control plane: the signed member list, invitations, presence and addresses;
-it never carries a link's bytes), linked peer to peer, directly, by their own keys over an
-end-to-end encrypted transport, over whatever network the user has (Flottille handles no network
-channel: no relay, no NAT traversal), each with a
+of their own hub (the signed member list, pair mode, presence, and the links' packets, which it
+forwards between members and can neither read nor change), linked by their own keys over an
+end-to-end encrypted transport through that hub, so that only the hub needs to be reachable (no
+NAT traversal, no relay of anyone else's), each with a
 role (`runner`, `controller`, `viewer`); sessions started on another machine through the same
 `agent_launch`, the code sent over Flottille's own link and the new commits brought back, with the
 tree spanning machines through deliveries; a native Android app, tunnels to a run's port, and

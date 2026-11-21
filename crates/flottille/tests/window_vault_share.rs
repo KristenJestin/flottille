@@ -17,7 +17,6 @@ use flottille_link::{DeviceKey, Request};
 use flottille_window::Shell;
 use flottille_window::device::Device;
 use flottille_window::link::{Connect, Sign};
-use flottille_window::tree::SWITCHER;
 use flottille_window::vault::{NO_MACHINE, VaultSection};
 use gpui_design_system::omarchy::Environment;
 use gpui_kit::test::TestWindowExt;
@@ -201,10 +200,10 @@ fn share_with_lists_the_online_machines_and_says_the_result(cx: &mut TestAppCont
 
 #[gpui_kit::test]
 fn share_with_lists_only_the_runners(cx: &mut TestAppContext) {
-    let (_hub, pc, server) = pc_and_server(common::User::new());
+    let (hub, pc, server) = pc_and_server(common::User::new());
     // A laptop that drives without running agents, online too: a share there would be refused.
     let laptop = Machine::new();
-    pair(&pc, &laptop, "laptop", "controller");
+    pair(&hub, &laptop, "laptop", "controller");
     server.wait_for_member("laptop", true);
     pc.wait_for("laptop", "online");
     pc.user
@@ -406,14 +405,20 @@ fn share_with_shares_the_entry_of_the_machine_shown(cx: &mut TestAppContext) {
     });
     cx.simulate_resize(size(px(1280.), px(1600.)));
     // Its block unfolds as the clock moves.
-    until(&shell, cx, "the switcher shows", |cx| {
+    until(&shell, cx, "the server is read", |cx| {
         cx.executor().advance_clock(Duration::from_millis(16));
-        shown(SWITCHER, cx)
+        shell.read_with(cx, |s, cx| {
+            s.machines()
+                .read(cx)
+                .machines()
+                .and_then(|read| read.machine("server"))
+                .is_some_and(|server| server.online())
+        })
     });
     settle(cx);
-    click(SWITCHER, cx);
-    settle(cx);
-    click(&format!("{SWITCHER}-server"), cx);
+    shell.update(cx, |shell, cx| {
+        shell.choose_machine(Some("server".to_owned()), cx)
+    });
     until(&shell, cx, "the server is shown", |cx| {
         shell.read_with(cx, |s, _| s.machine_shown()) == Some("server".to_owned())
     });

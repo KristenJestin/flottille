@@ -1,21 +1,22 @@
 //! The daemon's control session to the user's hub (`docs/remote.md`, "The hub", "Architecture"),
-//! with remote on and the machine set up: it keeps the member list, checked back to the root
-//! pinned at setup, and the addresses the hub tells of the members' machines, and writes from them
-//! the machines the link trusts (`remote/peers.json`); it tells the hub this machine's addresses.
+//! with remote on and the machine paired: it keeps the member list, checked back to the root and
+//! the hub's key pinned when it paired, the addresses the hub tells of the members' machines and
+//! what it knows of their devices, and writes from them the machines the link trusts
+//! (`remote/peers.json`); it tells the hub this machine's addresses and what it is.
 //!
-//! The hub is not trusted with the members: a list that does not check is refused here, whatever
-//! the hub said, and the machines trusted stay those of the last list that checked. While the hub
-//! is unreachable, the links and the machines known go on; what needs the hub says so, with since
-//! when.
+//! The hub adds the devices and changes their roles, signed with its key; a list a change of which
+//! neither the hub nor a member that may make it signed is refused here, whatever the hub said, and
+//! the machines trusted stay those of the last list that checked. While the hub is unreachable,
+//! the links and the machines known go on; what needs the hub says so, with since when.
 //!
 //! What the machine pinned is `remote/hub.json` (`flottille_link::Device`): the hub's URL and
-//! key, the list's root, and the list as last checked. `remote.setup` writes it, and so does a
-//! join (`remote.join`, then `remote.declare`), once the member that invited accepted it and this
-//! machine is declared.
+//! key, the list's root, and the list as last checked. A pairing writes it (`remote.pair` with the
+//! code `flottille-hub pair` printed, then `remote.declare`), once the hub paired the device and
+//! this machine is declared.
 //!
-//! The user's actions on the list (an invitation's ask, a change) are signed by the clients with
-//! the device key, which the daemon never holds; the daemon carries them over its session, and
-//! says what changed in the list it checked as events (`docs/events.md`, `remote.*`).
+//! The user's changes of the list (a removal, a name, an icon and a colour) are signed by the
+//! clients with the device key, which the daemon never holds; the daemon carries them over its
+//! session, and says what changed in the list it checked as events (`docs/events.md`, `remote.*`).
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -23,9 +24,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use flottille_link::{
-    Action, Ask, Asker, Change, ControlError, Device, HubUrl, Invitation, InvitationAsk, Joined,
-    ListError, MachineKey, MemberList, Members, PublicKey, Pushed, Requested, Role, Session, Tls,
-    Token, verification_words,
+    Action, Ask, Asker, Change, ControlError, Device, Facts, HubUrl, ListError, MachineKey,
+    MemberList, Members, PairCode, Paired, Proposed, PublicKey, Pushed, Role, Session, Tls,
 };
 use serde_json::{Value, json};
 
@@ -39,8 +39,6 @@ const LONGEST_WAIT: Duration = Duration::from_secs(30);
 const ROUND: Duration = Duration::from_secs(1);
 /// How long the hub may take to answer an ask before it is asked again.
 const ASK_WAIT: Duration = Duration::from_secs(10);
-/// How long an invitation is valid, in seconds (`docs/remote.md`, "Pairing").
-const FIVE_MINUTES: u64 = 5 * 60;
 /// How much further the wall clock may move than the monotonic one between two rounds before the
 /// machine is taken to have slept: a time service steps the clock by less.
 const ASLEEP: Duration = Duration::from_secs(5);
@@ -53,20 +51,11 @@ struct Seen {
     reason: Option<String>,
 }
 
-/// An invitation this machine's member was given by the hub: only a join request for its token is
-/// shown, and its words are drawn from this token, never from one the hub pushes back, which a
-/// hub that lies could have searched so that the words match another key's.
-struct Issued {
-    token: Token,
-    /// Until when it is valid, in seconds since the Unix epoch.
-    until: u64,
-}
-
-/// A join this machine asked for, its session to the hub open.
-struct Joining {
-    joined: Joined,
-    /// The hub pinned and the list checked, once the member that invited accepted it.
-    device: Option<Device>,
+/// A pairing this machine made, its session to the hub open until its machine is declared.
+struct Pairing {
+    paired: Paired,
+    /// The hub pinned and the list checked, once the hub paired the device.
+    device: Device,
 }
 
 /// The control session's side of the daemon.
@@ -80,14 +69,9 @@ pub struct Control {
     asker: tokio::sync::watch::Sender<Option<Asker>>,
     /// The list as last checked, for the changes a client asks to wait for it.
     list: tokio::sync::watch::Sender<MemberList>,
-    /// The join requests that wait for this machine's member, as the hub last told them.
-    requests: Mutex<Vec<Requested>>,
-    /// The invitations given to this machine's member, while they are valid.
-    issued: Mutex<Vec<Issued>>,
-    joining: tokio::sync::Mutex<Option<Joining>>,
-    /// Held by a setup for its whole exchange with the hub: a command that asks after its key
-    /// meanwhile waits for how it ends.
-    setting_up: tokio::sync::Mutex<()>,
+    /// What the hub last told of each member's device.
+    facts: Mutex<Vec<Facts>>,
+    pairing: tokio::sync::Mutex<Option<Pairing>>,
     emit: Emit,
 }
 
@@ -104,10 +88,8 @@ impl Control {
             again: tokio::sync::Notify::new(),
             asker: tokio::sync::watch::Sender::new(None),
             list: tokio::sync::watch::Sender::new(MemberList::default()),
-            requests: Mutex::new(Vec::new()),
-            issued: Mutex::new(Vec::new()),
-            joining: tokio::sync::Mutex::new(None),
-            setting_up: tokio::sync::Mutex::new(()),
+            facts: Mutex::new(Vec::new()),
+            pairing: tokio::sync::Mutex::new(None),
             emit,
         }
     }
@@ -166,74 +148,13 @@ impl Control {
         };
         let seen = self.seen.lock().unwrap();
         json!({
-            "url": device.url,
+            "url": HubUrl::shown_text(&device.url),
             "key": device.hub,
             "fingerprint": device.hub.fingerprint(),
             "state": seen.state,
             "since": seen.since,
             "reason": seen.reason,
         })
-    }
-
-    /// `remote.setup`: this machine, carrying its device's signed changes, becomes the hub's
-    /// first member; the declaration of this machine is claimed here, with the machine's key. The
-    /// hub's key is pinned from this session. A machine set up already is set up again only when
-    /// asked to `replace` the hub it pinned.
-    pub async fn setup(
-        &self,
-        url: &str,
-        code: &str,
-        mut changes: Vec<Change>,
-        replace: bool,
-    ) -> Result<Value, String> {
-        // Held to the end, even when the command that asked is gone: its key's fate is told then.
-        let _setting_up = self.setting_up.lock().await;
-        if !replace && let Some(pinned) = self.pinned() {
-            let url =
-                pinned.map_or_else(|_| self.file().display().to_string(), |device| device.url);
-            return Err(format!(
-                "this machine is set up with the hub at {url} already: give --replace to set it \
-                 up with another (the machines it trusts through that hub are forgotten)"
-            ));
-        }
-        let own = self.key.public();
-        match changes.get_mut(1) {
-            Some(change) if matches!(&change.action, Action::Machine { machine, .. } if *machine == own) =>
-            {
-                *change = change.clone().claimed_by(&self.key);
-            }
-            _ => {
-                return Err(
-                    "the setup's second change must declare this machine, whose key is \
-                     remote.machines' this.key"
-                        .to_owned(),
-                );
-            }
-        }
-        let (device, session) = Device::setup(
-            url,
-            code,
-            changes,
-            &self.key,
-            &crate::link::hello(),
-            &Tls::System,
-        )
-        .await
-        .map_err(|error| error.to_string())?;
-        drop(session);
-        self.keep(&device)
-            .map_err(|error| format!("{} cannot be written: {error}", self.file().display()))?;
-        eprintln!(
-            "flottille daemon: this machine set up the hub at {}, whose key is {}",
-            device.url,
-            device.hub.fingerprint()
-        );
-        self.again.notify_one();
-        Ok(json!({
-            "url": device.url,
-            "hub": device.hub.fingerprint(),
-            "root": device.root.fingerprint(),
-        }))
     }
 
     /// The hub this machine pinned, and the members of the list it last checked.
@@ -247,7 +168,7 @@ impl Control {
     }
 
     /// What asks the hub, once a session is up: a session made again a moment ago (after a
-    /// setup, or a failure) is waited for, a few seconds at most.
+    /// pairing, or a failure) is waited for, a few seconds at most.
     async fn asker(&self) -> Result<Asker, String> {
         let mut watching = self.asker.subscribe();
         let waited = tokio::time::timeout(ASK_WAIT, watching.wait_for(Option::is_some)).await;
@@ -264,84 +185,13 @@ impl Control {
     /// `remote.members`: the members of the list this machine last checked.
     pub fn members(&self) -> Result<Value, String> {
         let (device, members) = self.checked()?;
-        Ok(members_json(&device, &members, &self.key.public()))
+        let facts = self.facts.lock().unwrap().clone();
+        Ok(members_json(&device, &members, &self.key.public(), &facts))
     }
 
-    /// `remote.invite`: a member's signed ask for an invitation, carried to the hub; the code to
-    /// show, which is also the QR's text.
-    pub async fn invite(&self, ask: InvitationAsk) -> Result<Value, String> {
-        let (device, members) = self.checked()?;
-        let Some(member) = members.get(&ask.member) else {
-            return Err(format!(
-                "{} is not a member of this machine's list: set this device up, or join first",
-                ask.member.fingerprint()
-            ));
-        };
-        let name = member.name.clone();
-        let token = tokio::time::timeout(ASK_WAIT, self.asker().await?.invite(ask.clone()))
-            .await
-            .map_err(|_| format!("the hub did not answer in {} s", ASK_WAIT.as_secs()))?
-            .map_err(|error| error.to_string())?;
-        let until = ask.at + FIVE_MINUTES;
-        {
-            let mut issued = self.issued.lock().unwrap();
-            issued.retain(|issued| issued.until > now() / 1000);
-            issued.push(Issued { token, until });
-        }
-        let invitation = Invitation {
-            hub_url: device.url.clone(),
-            hub_key: device.hub,
-            token,
-            inviter: ask.member,
-        };
-        let code = invitation.code().map_err(|error| error.to_string())?;
-        Ok(json!({
-            "code": code,
-            "url": device.url,
-            "hub": device.hub.fingerprint(),
-            "inviter": name,
-            "fingerprint": ask.member.fingerprint(),
-            "expires": until * 1000,
-        }))
-    }
-
-    /// `remote.requests`: the join requests that wait for this machine's member, with the four
-    /// words to compare with the new device's.
-    pub fn requests(&self) -> Result<Value, String> {
-        let (_, members) = self.checked()?;
-        let Some(this) = members.by_machine(&self.key.public()) else {
-            return Ok(json!([]));
-        };
-        let requests = self.issued_requests(self.requests.lock().unwrap().clone());
-        Ok(Value::Array(
-            requests
-                .iter()
-                .map(|request| request_json(request, &this.key))
-                .collect(),
-        ))
-    }
-
-    /// `remote.refuse`: the member refuses the join request of the new device `request`, its key's
-    /// fingerprint.
-    pub async fn refuse(&self, request: &str) -> Result<Value, String> {
-        let token = self
-            .requests
-            .lock()
-            .unwrap()
-            .iter()
-            .find(|waiting| waiting.key.fingerprint() == request)
-            .map(|waiting| waiting.token)
-            .ok_or_else(|| no_request(request))?;
-        tokio::time::timeout(ASK_WAIT, self.asker().await?.ask(Ask::Refuse { token }))
-            .await
-            .map_err(|_| format!("the hub did not answer in {} s", ASK_WAIT.as_secs()))?
-            .map_err(|error| error.to_string())?;
-        Ok(json!({"refused": request}))
-    }
-
-    /// `remote.change`: a member's signed change of the list (an addition that accepts a join
-    /// request, a removal, a renaming), carried to the hub; answered once the hub sent back a
-    /// list that holds it and that this machine checked.
+    /// `remote.change`: a member's signed change of the list (a removal, a name, an icon and a
+    /// colour), carried to the hub; answered once the hub sent back a list that holds it and that
+    /// this machine checked.
     pub async fn change(&self, change: Change) -> Result<Value, String> {
         let hash = change.hash();
         let mut watching = self.list.subscribe();
@@ -362,77 +212,60 @@ impl Control {
         self.members()
     }
 
-    /// `remote.join`: this machine, set up with no hub, joins with the invitation `code` and the
-    /// new device's key, `key`: it reaches the invitation's hub, which holds the request until
-    /// the member that invited accepts or refuses it, and answers once it did, with the list's
-    /// head after which the device declares this machine (`remote.declare`).
-    pub async fn join(&self, code: &str, key: PublicKey) -> Result<Value, String> {
-        if let Some(pinned) = self.pinned() {
-            let url =
-                pinned.map_or_else(|_| self.file().display().to_string(), |device| device.url);
+    /// `remote.pair`: this machine pairs its device with the hub of `code` (what `flottille-hub
+    /// pair` printed), proposing `proposed`: it reaches the hub, pinning the key the code holds,
+    /// proves it holds the code's secret, and answers once the hub paired the device, with the
+    /// list's head after which the device declares this machine (`remote.declare`). A machine
+    /// paired already pairs again only when asked to `replace` the hub it pinned.
+    pub async fn pair(
+        &self,
+        code: &str,
+        proposed: Proposed,
+        replace: bool,
+    ) -> Result<Value, String> {
+        if !replace && let Some(pinned) = self.pinned() {
+            let url = pinned.map_or_else(
+                |_| self.file().display().to_string(),
+                |device| HubUrl::shown_text(&device.url),
+            );
             return Err(format!(
-                "this machine is set up with the hub at {url} already: a machine joins one hub"
+                "this machine is paired with the hub at {url} already: give --replace to pair it \
+                 with another (the machines it trusts through that hub are forgotten)"
             ));
         }
-        let invitation = Invitation::from_code(code).map_err(|error| error.to_string())?;
-        let mut joining = self.joining.lock().await;
-        // A join asked again replaces the one before, whose session ends.
-        *joining = None;
-        let mut joined = Device::join(
-            &invitation,
-            &key,
+        let code = PairCode::from_code(code).map_err(|error| error.to_string())?;
+        let mut pairing = self.pairing.lock().await;
+        // A pairing asked again replaces the one before, whose session ends.
+        *pairing = None;
+        let key = proposed.key;
+        let mut paired = Device::pair(
+            &code,
+            proposed,
             &self.key,
             &crate::link::hello(),
             &Tls::System,
         )
         .await
         .map_err(|error| error.to_string())?;
+        let (device, members) = paired.listed().await.map_err(|error| error.to_string())?;
         eprintln!(
-            "flottille daemon: asked the hub at {} to join, invited by {}",
-            invitation.hub_url,
-            invitation.inviter.fingerprint()
+            "flottille daemon: paired with the hub at {}, whose key is {}",
+            HubUrl::shown_text(&device.url),
+            device.hub.fingerprint()
         );
-        let (device, members) = joined.accepted().await.map_err(|error| error.to_string())?;
-        let answer = accepted_json(&device, &members, &key)
+        let answer = paired_json(&device, &members, &key)
             .expect("the list checked holds the device's entry");
-        *joining = Some(Joining {
-            joined,
-            device: Some(device),
-        });
+        *pairing = Some(Pairing { paired, device });
         Ok(answer)
     }
 
-    /// `remote.join` asked to resume: the answer of the join accepted for the device `key`, which
-    /// its command, gone, did not take; `null` when no join holds it as a member. A join or a
-    /// setup still running is waited for: once it ended, the caller asks the pinned list.
-    pub async fn accepted(&self, key: &PublicKey) -> Value {
-        drop(self.setting_up.lock().await);
-        let joining = self.joining.lock().await;
-        let Some(Joining {
-            device: Some(device),
-            ..
-        }) = joining.as_ref()
-        else {
-            return Value::Null;
-        };
-        device
-            .members()
-            .ok()
-            .and_then(|members| accepted_json(device, &members, key))
-            .unwrap_or(Value::Null)
-    }
-
-    /// `remote.declare`: the declaration of this machine by the device that joined, signed by it
-    /// after the head `remote.join` answered; claimed here with the machine's key and carried to
+    /// `remote.declare`: the declaration of this machine by the device that paired, signed by it
+    /// after the head `remote.pair` answered; claimed here with the machine's key and carried to
     /// the hub. Once the hub sent it back, the hub is pinned (`hub.json`) and the session kept.
     pub async fn declare(&self, change: Change) -> Result<Value, String> {
-        let mut joining = self.joining.lock().await;
-        let Some(Joining {
-            joined,
-            device: Some(device),
-        }) = joining.as_mut()
-        else {
-            return Err("this machine has no join accepted: run flottille remote join".to_owned());
+        let mut pairing = self.pairing.lock().await;
+        let Some(Pairing { paired, device }) = pairing.as_mut() else {
+            return Err("this machine has no pairing going: run flottille remote pair".to_owned());
         };
         let own = self.key.public();
         let declares = matches!(&change.action, Action::Machine { machine, .. } if *machine == own);
@@ -442,25 +275,34 @@ impl Control {
                     .to_owned(),
             );
         }
-        let submitted = device
-            .submit(&mut joined.session, change.claimed_by(&self.key))
-            .await;
-        let members = match submitted {
-            Ok(members) => members,
-            Err(error) => {
-                // A dead session cannot take a declaration: the join is let go, not resumed by
-                // every command after this one.
-                if joined.session.has_ended() {
-                    *joining = None;
+        // Declared once: a device paired again whose machine is declared already declares nothing.
+        let declared = device
+            .members()
+            .ok()
+            .and_then(|members| members.by_machine(&own).map(|member| member.key))
+            == Some(change.signer);
+        let members = if declared {
+            device.members().map_err(|error| error.to_string())?
+        } else {
+            let submitted = device
+                .submit(&mut paired.session, change.claimed_by(&self.key))
+                .await;
+            match submitted {
+                Ok(members) => members,
+                Err(error) => {
+                    // A dead session cannot take a declaration: the pairing is let go.
+                    if paired.session.has_ended() {
+                        *pairing = None;
+                    }
+                    return Err(error.to_string());
                 }
-                return Err(error.to_string());
             }
         };
         self.keep(device)
             .map_err(|error| format!("{} cannot be written: {error}", self.file().display()))?;
         let device = device.clone();
-        *joining = None;
-        drop(joining);
+        *pairing = None;
+        drop(pairing);
         let _ = self.list.send(device.list.clone());
         let this = members.by_machine(&own).cloned();
         if let Some(this) = &this {
@@ -470,12 +312,12 @@ impl Control {
             );
         }
         eprintln!(
-            "flottille daemon: this machine joined the hub at {}",
-            device.url
+            "flottille daemon: this machine is paired with the hub at {}",
+            HubUrl::shown_text(&device.url)
         );
         self.again.notify_one();
         Ok(json!({
-            "url": device.url,
+            "url": HubUrl::shown_text(&device.url),
             "hub": device.hub.fingerprint(),
             "root": device.root.fingerprint(),
             "name": this.as_ref().map(|this| this.name.clone()),
@@ -503,13 +345,17 @@ impl Control {
             .iter()
             .map(|member| (*member.key.as_bytes(), member.name.clone()))
             .collect();
+        names.insert(*before.hub().as_bytes(), HUB.to_owned());
         for change in &list.changes()[from..] {
             let by = names
                 .get(change.signer.as_bytes())
                 .cloned()
                 .unwrap_or_else(|| change.signer.fingerprint());
             match &change.action {
-                Action::Add { key, name, role } => {
+                Action::Add { key, name, role }
+                | Action::Pair {
+                    key, name, role, ..
+                } => {
                     names.insert(*key.as_bytes(), name.clone());
                     (self.emit)(
                         "remote.member_added",
@@ -551,75 +397,65 @@ impl Control {
                         }),
                     );
                 }
-                Action::Machine { .. } => {}
+                Action::Role { key, role } => {
+                    let name = names
+                        .get(key.as_bytes())
+                        .cloned()
+                        .unwrap_or_else(|| key.fingerprint());
+                    (self.emit)(
+                        "remote.member_role",
+                        json!({
+                            "name": name,
+                            "fingerprint": key.fingerprint(),
+                            "role": role,
+                            "at": now(),
+                        }),
+                    );
+                }
+                Action::Machine { .. } | Action::Hub { .. } | Action::Look { .. } => {}
             }
         }
     }
 
-    /// Of the join requests the hub told, those for an invitation this machine's member was given
-    /// and that is still valid, with the token it was given.
-    fn issued_requests(&self, requests: Vec<Requested>) -> Vec<Requested> {
-        let now = now() / 1000;
-        let issued = self.issued.lock().unwrap();
-        requests
-            .into_iter()
-            .filter_map(|request| {
-                let given = issued
-                    .iter()
-                    .find(|issued| issued.until > now && issued.token == request.token)?;
-                Some(Requested {
-                    token: given.token,
-                    key: request.key,
-                })
-            })
-            .collect()
-    }
-
-    /// The join requests the hub told: kept, and each new one said as an event.
-    fn told_requests(&self, requests: Vec<Requested>, members: Option<&Members>) {
-        let requests = self.issued_requests(requests);
-        let mut kept = self.requests.lock().unwrap();
-        let inviter = members.and_then(|members| members.by_machine(&self.key.public()));
-        if let Some(inviter) = inviter {
-            for request in requests.iter().filter(|request| !kept.contains(request)) {
-                (self.emit)("remote.join_requested", request_json(request, &inviter.key));
-            }
-        }
-        *kept = requests;
+    /// What the hub told of the members' devices: kept for `remote.members`.
+    fn told_facts(&self, facts: Vec<Facts>) {
+        *self.facts.lock().unwrap() = facts;
     }
 }
 
-const NOT_SET_UP: &str =
-    "this machine is not set up with a hub: flottille remote setup, or flottille remote join";
+const NOT_SET_UP: &str = "this machine is paired with no hub: flottille remote pair, with the code \
+                          flottille-hub pair prints on the hub's host";
 
-fn no_request(request: &str) -> String {
-    format!(
-        "no join request of {request} waits for this machine: flottille remote requests lists them"
-    )
+/// How a change the hub signed names its signer.
+const HUB: &str = "the hub";
+
+/// The name of the key `key`: a member's, the hub's, or its fingerprint.
+fn name_of(members: &Members, key: &PublicKey) -> String {
+    if *key == members.hub() {
+        return HUB.to_owned();
+    }
+    members
+        .get(key)
+        .map_or_else(|| key.fingerprint(), |member| member.name.clone())
 }
 
-/// What `remote.join` answers once the device `key` was accepted; `None` when the list does not
+/// What `remote.pair` answers once the device `key` was paired; `None` when the list does not
 /// hold it.
-fn accepted_json(device: &Device, members: &Members, key: &PublicKey) -> Option<Value> {
+fn paired_json(device: &Device, members: &Members, key: &PublicKey) -> Option<Value> {
     let entry = members.get(key)?;
-    let added_by = members.get(&entry.added_by).map_or_else(
-        || entry.added_by.fingerprint(),
-        |member| member.name.clone(),
-    );
     Some(json!({
         "head": device.list.head(),
         "name": entry.name,
         "role": entry.role,
-        "added_by": added_by,
+        "added_by": name_of(members, &entry.added_by),
         "hub": device.hub.fingerprint(),
+        "url": HubUrl::shown_text(&device.url),
     }))
 }
 
 /// What is said of a member added.
 fn added_json(name: &str, role: Role, key: &PublicKey, members: &Members, by: &PublicKey) -> Value {
-    let by = members
-        .get(by)
-        .map_or_else(|| by.fingerprint(), |member| member.name.clone());
+    let by = name_of(members, by);
     json!({
         "name": name,
         "fingerprint": key.fingerprint(),
@@ -629,42 +465,82 @@ fn added_json(name: &str, role: Role, key: &PublicKey, members: &Members, by: &P
     })
 }
 
-/// A join request as the methods and events say it: the new device's key, its fingerprint, which
-/// names the request, and the four words both screens show.
-fn request_json(request: &Requested, inviter: &PublicKey) -> Value {
-    json!({
-        "request": request.key.fingerprint(),
-        "key": request.key,
-        "words": verification_words(&request.key, inviter, &request.token),
-        "inviter": inviter.fingerprint(),
-    })
+/// What this machine proposes for itself when it pairs (`docs/remote.md`, "Pairing"): its host's
+/// name, an icon by what it is (a battery: a laptop; a screen connected: a desktop; neither: a
+/// server), and the role of a machine with agents signed in (`runner`) or with none
+/// (`controller`). The user changes them before confirming.
+pub(crate) fn proposed(daemon: &crate::daemon::Daemon) -> Value {
+    let any = |folder: &str, holds: &dyn Fn(&std::path::Path) -> bool| {
+        std::fs::read_dir(folder)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .any(|entry| holds(&entry.path()))
+    };
+    let battery = any("/sys/class/power_supply", &|path| {
+        std::fs::read_to_string(path.join("type")).is_ok_and(|kind| kind.trim() == "Battery")
+    });
+    let screen = any("/sys/class/drm", &|path| {
+        std::fs::read_to_string(path.join("status"))
+            .is_ok_and(|status| status.trim() == "connected")
+    });
+    let icon = match (battery, screen) {
+        (true, _) => flottille_link::Icon::Laptop,
+        (false, true) => flottille_link::Icon::Desktop,
+        (false, false) => flottille_link::Icon::Server,
+    };
+    let role = if crate::link::offered(daemon).agents.is_empty() {
+        Role::Controller
+    } else {
+        Role::Runner
+    };
+    json!({"name": host_name(), "icon": icon, "role": role})
+}
+
+/// The host's name, as a device's name is proposed; `None` when it has none.
+fn host_name() -> Option<String> {
+    let mut buffer = [0u8; 256];
+    // SAFETY: the buffer is as long as said; gethostname writes within it.
+    if unsafe { libc::gethostname(buffer.as_mut_ptr().cast(), buffer.len()) } != 0 {
+        return None;
+    }
+    let end = buffer
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(buffer.len());
+    let name = String::from_utf8_lossy(&buffer[..end]).into_owned();
+    (!name.is_empty()).then_some(name)
 }
 
 /// The members of a checked list, as `remote.members` says them.
-fn members_json(device: &Device, members: &Members, own: &PublicKey) -> Value {
-    let name_of = |key: &PublicKey| {
-        members
-            .get(key)
-            .map_or_else(|| key.fingerprint(), |member| member.name.clone())
-    };
+fn members_json(device: &Device, members: &Members, own: &PublicKey, facts: &[Facts]) -> Value {
     json!({
-        "hub": device.url,
-        "root": name_of(&members.root()),
+        "hub": HubUrl::shown_text(&device.url),
+        "root": name_of(members, &members.root()),
         "head": members.head(),
         "this": members.by_machine(own).map(|member| member.name.clone()),
-        "members": members.members().iter().map(|member| json!({
-            "name": member.name,
-            "key": member.key,
-            "fingerprint": member.key.fingerprint(),
-            "role": member.role,
-            "added_by": name_of(&member.added_by),
-            "machine": member.machine.map(|machine| machine.fingerprint()),
-        })).collect::<Vec<_>>(),
+        "members": members.members().iter().map(|member| {
+            let facts = facts.iter().find(|facts| facts.key == member.key);
+            json!({
+                "name": member.name,
+                "key": member.key,
+                "fingerprint": member.key.fingerprint(),
+                "role": member.role,
+                "icon": member.icon,
+                "colour": member.colour,
+                "added_by": name_of(members, &member.added_by),
+                "machine": member.machine.map(|machine| machine.fingerprint()),
+                "kind": facts.and_then(|facts| facts.kind.clone()),
+                "system": facts.and_then(|facts| facts.system.clone()),
+                "version": facts.and_then(|facts| facts.version.clone()),
+                "paired_at": facts.and_then(|facts| facts.paired_at),
+                "last_seen": facts.and_then(|facts| facts.last_seen),
+            })
+        }).collect::<Vec<_>>(),
     })
 }
 
-/// The wall clock in ms: a test build's, which a test may set ahead (`link::wall_now`), so that
-/// an invitation expires without the test waiting its five minutes.
+/// The wall clock in ms: a test build's, which a test may set ahead (`link::wall_now`).
 fn now() -> u64 {
     crate::link::wall_now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -698,7 +574,7 @@ pub async fn run(
         }
         if let Some(device) = pinned {
             let authority = HubUrl::parse(&device.url)
-                .map(|url| url.authority())
+                .map(|url| url.host_shown())
                 .unwrap_or_else(|_| device.url.clone());
             let hello = crate::link::hello();
             let connected = tokio::select! {
@@ -801,7 +677,7 @@ impl Awake {
 
 enum Ended {
     Stopping,
-    /// A setup wrote another hub: start from it.
+    /// A pairing wrote another hub: start from it.
     Again,
     Lost(String),
 }
@@ -833,8 +709,22 @@ async fn keep_session(
     // The ask of this machine's addresses on its way, at most one: dropped with the session.
     let mut telling = tokio::task::JoinSet::new();
     let mut said: Option<String> = None;
+    // The links to the other machines go through this session while it lasts.
+    if let Some(port) = session.relay() {
+        remote.through(port);
+    }
     let mut awake = Awake::now();
     remote.awake_at(awake);
+    // What this machine is, told once a session: the hub keeps it on the device's card.
+    let about = asker.clone();
+    telling.spawn(async move {
+        let asked = about.ask(Ask::About {
+            device: "computer".to_owned(),
+            system: std::env::consts::OS.to_owned(),
+        });
+        let _ = tokio::time::timeout(ASK_WAIT, asked).await;
+        (None, Ok(()))
+    });
     loop {
         tokio::select! {
             pushed = session.next() => {
@@ -871,8 +761,8 @@ async fn keep_session(
                     }
                     // Read by the notifications, later (`docs/remote.md`, "Notifications").
                     Pushed::Presence(_) => continue,
-                    Pushed::Requests(requests) => {
-                        control.told_requests(requests, members.as_ref());
+                    Pushed::Facts(facts) => {
+                        control.told_facts(facts);
                         continue;
                     }
                 }
@@ -898,15 +788,17 @@ async fn keep_session(
                             Ok(answer) => answer.map_err(|error| error.to_string()),
                             Err(_) => Err(format!("it did not answer in {} s", ASK_WAIT.as_secs())),
                         };
-                        (now, answer)
+                        (Some(now), answer)
                     });
                 }
             }
             Some(Ok((sent, answer))) = telling.join_next() => match answer {
                 // Told only once the hub took them: a refusal is asked again at the next round.
                 Ok(()) => {
-                    told = Some(sent);
-                    said = None;
+                    if let Some(sent) = sent {
+                        told = Some(sent);
+                        said = None;
+                    }
                 }
                 Err(error) => {
                     if said.as_ref() != Some(&error) {
