@@ -314,6 +314,9 @@ pub struct Elsewhere {
     pub listed: bool,
     /// Its machine is off: the row is greyed and does not open.
     pub offline: bool,
+    /// How its machine is drawn, `server in teal`: its icon and its colour, as the member list
+    /// signs them; `None` while the list is not read.
+    pub look: Option<String>,
     /// A session of this machine, listed while another machine's session is open: opening it
     /// brings this machine back in front.
     pub here: bool,
@@ -1080,6 +1083,11 @@ impl Snapshot {
                     state,
                     listed: false,
                     here: false,
+                    look: machines
+                        .members
+                        .iter()
+                        .find(|member| member.name == launched.machine)
+                        .map(crate::machines::Member::look_words),
                 }),
                 tag: None,
             });
@@ -1182,6 +1190,11 @@ impl Snapshot {
                         listed: true,
                         offline: off.is_some(),
                         here: machine.is_none(),
+                        look: machines
+                            .members
+                            .iter()
+                            .find(|member| member.name == name)
+                            .map(crate::machines::Member::look_words),
                     }),
                     tag: machine.map(str::to_owned),
                 });

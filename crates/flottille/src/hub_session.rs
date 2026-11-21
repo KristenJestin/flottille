@@ -49,6 +49,9 @@ struct Seen {
     /// Since when, in milliseconds since the Unix epoch.
     since: u64,
     reason: Option<String>,
+    /// The hub answered that it no longer knows this machine: its list was reset, or it dropped
+    /// this device. A client offers to pair again.
+    forgotten: bool,
 }
 
 /// A pairing this machine made, its session to the hub open until its machine is declared.
@@ -84,6 +87,7 @@ impl Control {
                 state: "none",
                 since: now(),
                 reason: None,
+                forgotten: false,
             }),
             again: tokio::sync::Notify::new(),
             asker: tokio::sync::watch::Sender::new(None),
@@ -121,8 +125,18 @@ impl Control {
 
     /// The hub's state, said once in the log when it changes.
     fn set(&self, state: &'static str, reason: Option<String>) {
+        self.set_as(state, reason, false);
+    }
+
+    /// [`Control::set`], for a hub that no longer knows this machine: a client offers to pair
+    /// again.
+    fn forget(&self, state: &'static str, reason: String) {
+        self.set_as(state, Some(reason), true);
+    }
+
+    fn set_as(&self, state: &'static str, reason: Option<String>, forgotten: bool) {
         let mut seen = self.seen.lock().unwrap();
-        let changed = seen.state != state || seen.reason != reason;
+        let changed = seen.state != state || seen.reason != reason || seen.forgotten != forgotten;
         if changed {
             match &reason {
                 Some(reason) => eprintln!("flottille daemon: {reason}"),
@@ -134,6 +148,7 @@ impl Control {
         }
         seen.state = state;
         seen.reason = reason;
+        seen.forgotten = forgotten;
         drop(seen);
         // The clients that watch read it again at once.
         if changed {
@@ -154,6 +169,7 @@ impl Control {
             "state": seen.state,
             "since": seen.since,
             "reason": seen.reason,
+            "forgotten": seen.forgotten,
         })
     }
 
@@ -177,8 +193,13 @@ impl Control {
         }
         let seen = self.seen.lock().unwrap();
         Err(match &seen.reason {
-            Some(reason) => format!("the hub cannot be asked now: {reason}"),
-            None => "the hub cannot be asked now: this machine has no session to it".to_owned(),
+            Some(reason) => format!(
+                "The hub cannot be asked now: {}. Nothing was changed; try again once it answers.",
+                reason.trim_end_matches('.')
+            ),
+            None => "The hub cannot be asked now: this machine has no session to it yet. Nothing \
+                     was changed; try again in a moment."
+                .to_owned(),
         })
     }
 
@@ -197,18 +218,29 @@ impl Control {
         let mut watching = self.list.subscribe();
         tokio::time::timeout(ASK_WAIT, self.asker().await?.ask(Ask::Submit { change }))
             .await
-            .map_err(|_| format!("the hub did not answer in {} s", ASK_WAIT.as_secs()))?
+            .map_err(|_| {
+                format!(
+                    "The hub did not answer in {} s. Nothing was changed; try again once it \
+                     answers.",
+                    ASK_WAIT.as_secs()
+                )
+            })?
             .map_err(|error| error.to_string())?;
         let holds = |list: &MemberList| list.changes().iter().any(|change| change.hash() == hash);
         tokio::time::timeout(ASK_WAIT, watching.wait_for(holds))
             .await
             .map_err(|_| {
                 format!(
-                    "the hub withheld this change: it sent back no list holding it in {} s",
+                    "The hub did not confirm this change in {} s: it may be busy, or it refused \
+                     it. Nothing was changed; try again once the hub answers.",
                     ASK_WAIT.as_secs()
                 )
             })?
-            .map_err(|_| "the session to the hub ended".to_owned())?;
+            .map_err(|_| {
+                "The connection to the hub closed before it confirmed this change. Nothing was \
+                 changed; try again."
+                    .to_owned()
+            })?;
         self.members()
     }
 
@@ -599,7 +631,11 @@ pub async fn run(
                     }
                 }
                 Err(ControlError::Reset) => {
-                    control.set("reset", Some(ListError::Reset.to_string()));
+                    control.forget("reset", ListError::Reset.to_string());
+                    None
+                }
+                Err(error @ ControlError::NotMember { .. }) => {
+                    control.forget("refused", error.to_string());
                     None
                 }
                 Err(error @ (ControlError::AnotherKey { .. } | ControlError::Refused { .. })) => {
@@ -613,6 +649,8 @@ pub async fn run(
                 Err(ControlError::Unreachable { why, .. } | ControlError::Lost { why, .. }) => {
                     Some(why)
                 }
+                // Said of a change, never of a connection.
+                Err(error @ ControlError::Unconfirmed) => Some(error.to_string()),
             };
             // No list from the hub at start: the links go on with the one kept. After a session
             // was lost, they wait for the bound.

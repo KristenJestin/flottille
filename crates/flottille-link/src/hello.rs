@@ -45,8 +45,23 @@ pub fn choose(ours: &Hello, theirs: &Hello, peer: &str) -> Result<u32, NeedsUpda
             peer: peer.to_owned(),
             theirs: theirs.clone(),
             ours: ours.clone(),
+            hub: false,
         })
 }
+
+/// [`choose`] for a device and its hub: the same refusal, said as the hub is said (`The hub runs
+/// 0.1.0 (protocol 1), this machine 0.4.0 (protocol 2): update the hub on its host.`), which side
+/// to update named by the newer protocol. `ours` is the device's side, whoever says it: the hub
+/// makes the sentence its device reads from the device's hello and its own.
+pub fn choose_hub(ours: &Hello, theirs: &Hello) -> Result<u32, NeedsUpdate> {
+    choose(ours, theirs, HUB).map_err(|mut refusal| {
+        refusal.hub = true;
+        refusal
+    })
+}
+
+/// How the hub is named in a sentence.
+const HUB: &str = "the hub";
 
 /// The refusal: no protocol in common. It displays as the sentence of the doc, which says which
 /// side runs what, so that the user knows which to update.
@@ -55,6 +70,8 @@ pub struct NeedsUpdate {
     peer: String,
     theirs: Hello,
     ours: Hello,
+    /// The peer is the hub: only it is told to be updated on its host.
+    hub: bool,
 }
 
 impl NeedsUpdate {
@@ -66,6 +83,22 @@ impl NeedsUpdate {
 
 impl fmt::Display for NeedsUpdate {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.hub {
+            // The side with the older protocol is the one to update: the hub, on its host, or
+            // this machine.
+            let update = match self.theirs.newest() < self.ours.newest() {
+                true => "the hub on its host",
+                false => "this machine",
+            };
+            return write!(
+                f,
+                "The hub runs {} (protocol {}), this machine {} (protocol {}): update {update}.",
+                self.theirs.flottille,
+                self.theirs.newest(),
+                self.ours.flottille,
+                self.ours.newest(),
+            );
+        }
         write!(
             f,
             "{} runs Flottille {} (protocol {}), this machine {} (protocol {}): update one of \

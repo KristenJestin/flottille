@@ -1,6 +1,6 @@
 //! The user's machines, as this machine's daemon says them (`docs/remote.md`): the hub it is paired
 //! with, the members of the hub's list, the machines it links to and their state, what this
-//! machine proposes for itself when it pairs, and its own addresses. The window reads them on a
+//! machine proposes for itself when it pairs. The window reads them on a
 //! connection of its own to this machine, whichever machine it shows: the list and the pairing are
 //! this machine's, signed with this session's device key ([`crate::device`]).
 //!
@@ -62,6 +62,29 @@ pub const ICONS: [(&str, &str); 5] = [
     ("phone", "Phone"),
     ("tablet", "Tablet"),
 ];
+
+/// The colours a device is drawn in (`docs/remote.md`, "A device's card"): the word the list
+/// signs, its name, and its shade, one for every theme: the marks they colour are small and have
+/// no ink to match.
+pub const COLOURS: [(&str, &str, u32); 8] = [
+    ("grey", "Grey", 0x8b8f98),
+    ("red", "Red", 0xe5534b),
+    ("orange", "Orange", 0xf0883e),
+    ("yellow", "Yellow", 0xe3b341),
+    ("green", "Green", 0x57ab5a),
+    ("teal", "Teal", 0x39c5bb),
+    ("blue", "Blue", 0x4f8cf7),
+    ("purple", "Purple", 0xa371f7),
+];
+
+/// The shade of a colour's word; grey for one it does not know.
+pub fn shade(word: &str) -> gpui_kit::Hsla {
+    let (_, _, hex) = COLOURS
+        .iter()
+        .find(|(key, _, _)| *key == word)
+        .unwrap_or(&COLOURS[0]);
+    gpui_design_system::color::hex(*hex)
+}
 
 /// A role as the toast says it: `control only`.
 pub fn role_words(role: &str) -> String {
@@ -175,13 +198,35 @@ pub struct Member {
     pub added_by: String,
     /// The fingerprint of the machine it declared.
     pub machine: Option<String>,
+    /// How the list signs it; `None` for a member added before pair mode.
+    pub icon: Option<String>,
+    pub colour: Option<String>,
 }
 
-/// An address this machine may be reached at: `found` or `declared` by hand.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Address {
-    pub address: String,
-    pub how: String,
+impl Member {
+    /// Its icon and its colour, as words: what the list signs, else the defaults of its key (a
+    /// desktop, and the colour its key proposes), as the command line draws it.
+    pub fn look(&self) -> (String, String) {
+        let colour = || {
+            serde_json::from_value::<flottille_link::PublicKey>(self.key.clone())
+                .map_or(flottille_link::Colour::Grey, |key| {
+                    flottille_link::Colour::of(&key)
+                })
+        };
+        (
+            self.icon.clone().unwrap_or_else(|| "desktop".to_owned()),
+            self.colour
+                .clone()
+                .unwrap_or_else(|| colour().word().to_owned()),
+        )
+    }
+
+    /// The icon and colour said together, `server in teal`: a row's mark says it for the ones
+    /// who do not see colours.
+    pub fn look_words(&self) -> String {
+        let (icon, colour) = self.look();
+        format!("{icon} in {colour}")
+    }
 }
 
 /// The hub this machine is set up with.
@@ -193,6 +238,9 @@ pub struct Hub {
     /// Since when it is in that state, in milliseconds since the Unix epoch.
     pub since: Option<u64>,
     pub reason: Option<String>,
+    /// The hub answered that it no longer knows this machine: its list was reset, or it dropped
+    /// this device.
+    pub forgotten: bool,
 }
 
 /// A session or a child an agent of this machine started on another (`remote.launches`): what
@@ -299,9 +347,31 @@ impl Hub {
         }
     }
 
-    /// What does not work while it is not usable: its state is the tag's to say, not this line's.
+    /// What does not work while it is not usable, and why: `Changes wait for the hub, which
+    /// cannot be reached now: …`; a hub that answered and refused says so.
     pub fn needs_words(&self) -> Option<String> {
-        (!self.usable()).then(|| "Changing the list waits for the hub.".to_owned())
+        if self.usable() {
+            return None;
+        }
+        let how = match self.state.as_str() {
+            "unreachable" => "cannot be reached now",
+            _ => "refuses now",
+        };
+        let why = self
+            .reason
+            .as_deref()
+            .map(how_it_failed)
+            .unwrap_or("it said no");
+        Some(format!("Changes wait for the hub, which {how}: {why}"))
+    }
+
+    /// The reason a row's item gives for being disabled, in one line.
+    pub fn waits_words(&self) -> &'static str {
+        match (self.forgotten, self.state.as_str()) {
+            (true, _) => "The hub no longer knows this machine",
+            (_, "unreachable") => "The hub cannot be reached now",
+            _ => "The hub refuses now",
+        }
     }
 }
 
@@ -338,7 +408,6 @@ pub struct Machines {
     pub off: Option<String>,
     /// This machine's member's name, when it is one.
     pub this: Option<String>,
-    pub addresses: Vec<Address>,
     pub hub: Option<Hub>,
     pub machines: Vec<Machine>,
     pub members: Vec<Member>,
@@ -356,6 +425,11 @@ impl Machines {
     /// Whether this machine is in a member list: with none, Settings offers to connect to a hub.
     pub fn member(&self) -> bool {
         self.hub.is_some() && self.this.is_some()
+    }
+
+    /// Whether the hub answered that it no longer knows this machine: the list is an old one.
+    pub fn forgotten(&self) -> bool {
+        self.hub.as_ref().is_some_and(|hub| hub.forgotten)
     }
 
     /// The machines beside this one that run agents.
@@ -389,6 +463,8 @@ pub enum Ask {
         name: String,
         icon: String,
         role: String,
+        /// This machine is a member already: the old membership is replaced (`--replace`).
+        replace: bool,
     },
     Rename {
         name: String,
@@ -397,11 +473,16 @@ pub enum Ask {
     Remove {
         name: String,
     },
-    AddressAdd(String),
-    AddressRemove(String),
     /// Turns remote on or off (`remote.configure`).
     Configure {
         on: bool,
+    },
+    /// A member's icon and colour, signed with this device's key as `flottille remote icon` and
+    /// `colour` do.
+    Look {
+        name: String,
+        icon: String,
+        colour: String,
     },
 }
 
@@ -411,9 +492,8 @@ impl Ask {
             Ask::Pair { .. } => Asked::Pair,
             Ask::Rename { new_name, .. } => Asked::Rename(new_name.clone()),
             Ask::Remove { name } => Asked::Remove(name.clone()),
-            Ask::AddressAdd(address) => Asked::AddressAdd(address.clone()),
-            Ask::AddressRemove(address) => Asked::AddressRemove(address.clone()),
             Ask::Configure { on } => Asked::Configure { on: *on },
+            Ask::Look { name, .. } => Asked::Look(name.clone()),
         }
     }
 }
@@ -424,9 +504,8 @@ pub enum Asked {
     Pair,
     Rename(String),
     Remove(String),
-    AddressAdd(String),
-    AddressRemove(String),
     Configure { on: bool },
+    Look(String),
 }
 
 /// What the machines' worker tells the window.
@@ -612,6 +691,7 @@ impl Remote {
                 name,
                 icon,
                 role,
+                replace,
             } => {
                 let device = self
                     .device
@@ -633,7 +713,7 @@ impl Remote {
                 };
                 let paired = request(
                     "remote.pair",
-                    json!({"code": code.as_str(), "proposed": proposed}),
+                    json!({"code": code.as_str(), "proposed": proposed, "replace": replace}),
                 )?;
                 let head: flottille_link::ChangeHash =
                     serde_json::from_value(paired["head"].clone())
@@ -677,16 +757,26 @@ impl Remote {
                 request("remote.change", json!({"change": change}))?;
                 Ok(())
             }
-            Ask::AddressAdd(address) => {
-                request("remote.address.add", json!({"address": address}))?;
-                Ok(())
-            }
-            Ask::AddressRemove(address) => {
-                request("remote.address.remove", json!({"address": address}))?;
-                Ok(())
-            }
             Ask::Configure { on } => {
                 request("remote.configure", json!({"on": on}))?;
+                Ok(())
+            }
+            Ask::Look { name, icon, colour } => {
+                let key = self.key()?;
+                let members = request("remote.members", json!({}))?;
+                let member = member_key(&members, &name)?;
+                let change = signed_after(
+                    &members,
+                    flottille_link::Action::Look {
+                        key: member,
+                        icon: flottille_link::Icon::from_word(&icon)
+                            .ok_or_else(|| format!("{icon} is no icon"))?,
+                        colour: flottille_link::Colour::from_word(&colour)
+                            .ok_or_else(|| format!("{colour} is no colour"))?,
+                    },
+                    &key,
+                )?;
+                request("remote.change", json!({"change": change}))?;
                 Ok(())
             }
         }
@@ -709,19 +799,11 @@ fn read(conn: &mut Conn) -> Result<Machines> {
         state: text(&machines["hub"]["state"]),
         since: machines["hub"]["since"].as_u64(),
         reason: machines["hub"]["reason"].as_str().map(str::to_owned),
+        forgotten: machines["hub"]["forgotten"].as_bool().unwrap_or(false),
     });
     let mut read = Machines {
         off: None,
         this: None,
-        addresses: machines["this"]["addresses"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .map(|address| Address {
-                address: text(&address["address"]),
-                how: text(&address["how"]),
-            })
-            .collect(),
         machines: machines["machines"]
             .as_array()
             .into_iter()
@@ -774,6 +856,8 @@ fn read(conn: &mut Conn) -> Result<Machines> {
                 role: text(&member["role"]),
                 added_by: text(&member["added_by"]),
                 machine: member["machine"].as_str().map(str::to_owned),
+                icon: member["icon"].as_str().map(str::to_owned),
+                colour: member["colour"].as_str().map(str::to_owned),
             })
             .collect();
     }

@@ -534,11 +534,11 @@ impl Shell {
                 cx,
             );
             modals.add(
-                crate::machines_page::ADDRESS_MODAL,
+                crate::machines_page::LOOK_MODAL,
                 &machines,
-                MachinesSection::address_dialog,
-                MachinesSection::address_is_open,
-                MachinesSection::address_focus,
+                MachinesSection::look_dialog,
+                MachinesSection::look_is_open,
+                |_, _| None,
                 cx,
             );
             modals.add_view(

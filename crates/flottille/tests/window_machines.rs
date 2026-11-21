@@ -1885,48 +1885,25 @@ fn the_machine_of_a_session_in_the_sidebar_shows_its_look(cx: &mut TestAppContex
 }
 
 #[gpui_kit::test]
-fn the_listen_address_is_chosen_in_the_window(cx: &mut TestAppContext) {
-    let pc = Machine::new();
+fn the_machines_page_shows_no_addresses(cx: &mut TestAppContext) {
+    // Every link goes through the hub: the page has no Addresses section and no place that asks
+    // where this machine listens. Its devices and its hub are there.
+    let (_hub, pc, _server) = pc_and_server(User::new());
     let (shell, cx) = window(&pc, cx);
     machines_tab(&shell, cx);
-    until(
-        &shell,
-        cx,
-        "where this machine is reached is offered",
-        |cx| present(cx, "listen-nowhere"),
-    );
-    for choice in ["nowhere", "tailnet", "address"] {
-        assert!(present(cx, &format!("listen-{choice}")), "{choice}");
+    until(&shell, cx, "the devices are listed", |cx| {
+        present(cx, "member-pc") && present(cx, "hub-state")
+    });
+    settle(&shell, cx);
+    for id in [
+        "addresses",
+        "add-address",
+        "address-list",
+        "no-address-block",
+        "listen",
+        "listen-nowhere",
+        "listen-save",
+    ] {
+        assert!(!present(cx, id), "{id} is on the page");
     }
-    let settings = |machine: &Machine| machine.user.call("remote.settings", json!({})).unwrap();
-    assert!(settings(&pc)["listen"].is_string());
-
-    // Nowhere: this machine dials the others, nobody dials it.
-    click(&shell, cx, "listen-nowhere");
-    click(&shell, cx, "listen-save");
-    until(&shell, cx, "the daemon took it", |_| {
-        settings(&pc)["listen"].is_null()
-    });
-    until(&shell, cx, "the answer is said", |cx| {
-        label(cx, "listen-said").is_some_and(|said| said.contains("dials the others"))
-    });
-    assert!(
-        toasts(&shell, cx)
-            .iter()
-            .any(|t| t == "Where this machine is reached changed")
-    );
-
-    // An address typed: its port 7447 when it gives none; on loopback here.
-    click(&shell, cx, "listen-address");
-    let field = shell.read_with(cx, |s, cx| {
-        s.machines().read(cx).listen_field().unwrap().clone()
-    });
-    cx.update(|window, cx| field.update(cx, |f, cx| f.set_value("127.0.0.1:0", window, cx)));
-    click(&shell, cx, "listen-save");
-    until(&shell, cx, "the daemon listens there", |_| {
-        settings(&pc)["listen"] == "127.0.0.1:0"
-    });
-    until(&shell, cx, "the answer is said", |cx| {
-        label(cx, "listen-said").is_some_and(|said| said.contains("127.0.0.1"))
-    });
 }
