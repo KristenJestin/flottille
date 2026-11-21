@@ -882,7 +882,14 @@ pub async fn user_settings(folder: &Path) -> Result<Vec<(String, String)>, Strin
         }
         let read = crate::git::run_with(
             folder,
-            &["config", "--global", "--includes", "--null", "--list"],
+            &[
+                "config",
+                "--global",
+                "--includes",
+                "--null",
+                "--show-origin",
+                "--list",
+            ],
             crate::git::Class::Read,
             &[("GIT_CONFIG_GLOBAL", file.as_os_str())],
         )
@@ -894,17 +901,45 @@ pub async fn user_settings(folder: &Path) -> Result<Vec<(String, String)>, Strin
                 read.stderr.trim()
             ));
         }
-        // What they include is listed already: named again, it would be read twice.
-        settings.extend(
-            crate::push_folder::listed_settings(&read.stdout)
-                .into_iter()
-                .filter(|(key, _)| {
-                    key != "include.path"
-                        && !(key.starts_with("includeif.") && key.ends_with(".path"))
-                }),
-        );
+        settings.extend(given(&read.stdout));
     }
     Ok(settings)
+}
+
+/// Of the user's settings as `git config --null --show-origin --list` writes them, with what
+/// they include: those a push is given. What they include is listed already, and named again it
+/// would be read twice; but what an `includeIf "hasconfig:remote.*.url:…"` includes depends on
+/// the URLs of the push's own remotes, which git knows only once it reads them all: it is given
+/// as it is, its file named by its full path (a setting given to a command names no file
+/// relative to another), for git to include where it applies.
+fn given(listed: &str) -> Vec<(String, String)> {
+    let mut parts = listed.split('\0');
+    let mut given = Vec::new();
+    while let (Some(origin), Some(entry)) = (parts.next(), parts.next()) {
+        let (key, value) = entry.split_once('\n').unwrap_or((entry, "true"));
+        if key == "include.path" {
+            continue;
+        }
+        if key.starts_with("includeif.") && key.ends_with(".path") {
+            if !key.starts_with("includeif.hasconfig:") {
+                continue;
+            }
+            let path = match (origin.strip_prefix("file:"), value) {
+                (_, value) if value.starts_with('/') || value.starts_with("~/") => value.to_owned(),
+                (Some(file), value) => Path::new(file)
+                    .parent()
+                    .unwrap_or(Path::new("/"))
+                    .join(value)
+                    .to_string_lossy()
+                    .into_owned(),
+                (None, _) => continue,
+            };
+            given.push((key.to_owned(), path));
+            continue;
+        }
+        given.push((key.to_owned(), value.to_owned()));
+    }
+    given
 }
 
 /// The user's own `ssh` command, as a push may run it: `ssh` named alone is the one found at the
@@ -980,6 +1015,36 @@ fn checked(own: &str, found: Option<&Found>) -> Result<OsString, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_user_s_includes_for_a_remote_s_url_are_given_for_git_to_include() {
+        let listed = [
+            "file:/home/u/.gitconfig\0include.path\nother.gitconfig",
+            "file:/home/u/.gitconfig\0includeif.gitdir:~/work/.path\nwork.gitconfig",
+            "file:/home/u/.gitconfig\0includeif.hasconfig:remote.*.url:git@forge.invalid:**.path\nforge.gitconfig",
+            "file:/home/u/.gitconfig\0includeif.hasconfig:remote.*.url:https://a.invalid/**.path\n~/a.gitconfig",
+            "file:/home/u/work.gitconfig\0user.name\nWork",
+            "file:/home/u/.gitconfig\0core.askpass",
+            "",
+        ]
+        .join("\0");
+
+        assert_eq!(
+            given(&listed),
+            [
+                (
+                    "includeif.hasconfig:remote.*.url:git@forge.invalid:**.path".to_owned(),
+                    "/home/u/forge.gitconfig".to_owned()
+                ),
+                (
+                    "includeif.hasconfig:remote.*.url:https://a.invalid/**.path".to_owned(),
+                    "~/a.gitconfig".to_owned()
+                ),
+                ("user.name".to_owned(), "Work".to_owned()),
+                ("core.askpass".to_owned(), "true".to_owned()),
+            ]
+        );
+    }
 
     #[test]
     fn an_include_outside_ssh_or_not_read_is_refused() {
