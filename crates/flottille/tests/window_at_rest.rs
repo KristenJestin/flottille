@@ -892,6 +892,37 @@ fn the_window_draws_no_frame_at_rest_on_the_vault(cx: &mut TestAppContext) {
     );
 }
 
+/// #1185: the forges' section of Settings, Agents, and a program's sign-in dialog open on its
+/// address and its code.
+#[gpui_kit::test]
+fn the_window_draws_no_frame_at_rest_on_a_sign_in_dialog(cx: &mut TestAppContext) {
+    let user = User::new().with_sign_in_programs(&["gh"]);
+    user.sign_in_script("gh", json!({"signed_in": false}));
+    let (shell, cx) = window(&user, cx);
+    cx.update(|window, cx| window.click("settings", cx));
+    until(&shell, cx, "gh's row offers to sign in", |cx| {
+        cx.update(|window, _| window.try_find("sign-in-gh").is_some_and(|f| f.visible()))
+    });
+    settle(&shell, cx);
+    assert_eq!(
+        frames_at_rest(&shell, cx),
+        (0, 0),
+        "(frames drawn, frames asked) on the section"
+    );
+    cx.update(|window, cx| window.click("sign-in-gh", cx));
+    until(&shell, cx, "the dialog shows the code", |cx| {
+        cx.update(|window, _| window.try_find("sign-in-code").is_some_and(|f| f.visible()))
+    });
+    settle(&shell, cx);
+
+    assert_eq!(
+        frames_at_rest(&shell, cx),
+        (0, 0),
+        "(frames drawn, frames asked) on the dialog"
+    );
+    cx.update(|window, cx| window.click("sign-in-modal-cancel", cx));
+}
+
 #[gpui_kit::test]
 fn the_window_draws_no_frame_at_rest_on_the_vault_form_opened_from_an_ask(cx: &mut TestAppContext) {
     let user = User::new();
