@@ -32,8 +32,9 @@ pub trait Sealer: Send + Sync {
 /// The sealed device key's file, kept or pending (a join on its way).
 pub(crate) const DEVICE_SEALED: &str = "device.sealed";
 pub(crate) const PENDING_SEALED: &str = "device.pending.sealed";
-/// The endpoint key's folder in the core's folder.
+/// The endpoint key's folder in the core's folder, and that of the one a join on its way declares.
 pub(crate) const ENDPOINT_FOLDER: &str = "endpoint";
+pub(crate) const ENDPOINT_PENDING: &str = "endpoint.pending";
 
 /// The link's keyring over the core's folder: each item a file of sealed bytes.
 pub(crate) struct Sealed {
@@ -143,4 +144,21 @@ pub(crate) fn write_private(file: &Path, bytes: &[u8]) -> std::io::Result<()> {
 pub(crate) fn endpoint_key(folder: &Path) -> Result<MachineKey, MobileError> {
     MachineKey::load_or_make(&folder.join(ENDPOINT_FOLDER))
         .map_err(|error| MobileError::new(error.to_string()))
+}
+
+/// The endpoint key a join declares: a new one, as its device key is, kept beside the one in use
+/// until the join succeeded. The machine of a member it replaces may still be listed (a key the
+/// Keystore lost), and a machine is one member's only.
+pub(crate) fn pending_endpoint_key(folder: &Path) -> Result<MachineKey, MobileError> {
+    MachineKey::load_or_make(&folder.join(ENDPOINT_PENDING))
+        .map_err(|error| MobileError::new(error.to_string()))
+}
+
+/// The join succeeded: its endpoint key is the one in use.
+pub(crate) fn promote_endpoint_key(folder: &Path) -> std::io::Result<()> {
+    match std::fs::remove_dir_all(folder.join(ENDPOINT_FOLDER)) {
+        Err(error) if error.kind() != ErrorKind::NotFound => return Err(error),
+        _ => {}
+    }
+    std::fs::rename(folder.join(ENDPOINT_PENDING), folder.join(ENDPOINT_FOLDER))
 }

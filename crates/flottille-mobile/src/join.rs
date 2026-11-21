@@ -14,7 +14,7 @@ use flottille_link::{
 };
 
 use crate::MobileError;
-use crate::keys::Sealed;
+use crate::keys::{Sealed, pending_endpoint_key, promote_endpoint_key};
 
 fn failed_to_keep(error: std::io::Error) -> MobileError {
     MobileError::new(format!(
@@ -27,11 +27,10 @@ fn failed_to_keep(error: std::io::Error) -> MobileError {
 pub(crate) async fn pair(
     folder: &Path,
     sealed: &Sealed,
-    endpoint: &MachineKey,
     code: &str,
     name: &str,
     role: &str,
-) -> Result<(Device, DeviceKey), MobileError> {
+) -> Result<(Device, DeviceKey, MachineKey), MobileError> {
     let code =
         PairCode::from_code(code.trim()).map_err(|error| MobileError::new(error.to_string()))?;
     let role = match Role::from_word(role) {
@@ -58,6 +57,7 @@ pub(crate) async fn pair(
             .and_then(|key| key.keep_pending(sealed, folder))
             .map_err(failed)?,
     };
+    let endpoint = &pending_endpoint_key(folder)?;
     let proposed = Proposed {
         key: key.public(),
         name: name.trim().to_owned(),
@@ -86,6 +86,8 @@ pub(crate) async fn pair(
     // Joined again (after its removal, its hub's reset, a key the Keystore lost): the key the hub
     // just admitted replaces the one kept, which signs for no member any more.
     let admitted = key.public();
+    promote_endpoint_key(folder)
+        .map_err(|error| MobileError::new(format!("the endpoint's key cannot be kept: {error}")))?;
     sealed.forget_kept().map_err(failed_to_keep)?;
     let key = key.promote(sealed, folder).map_err(failed)?;
     if key.public() != admitted {
@@ -93,5 +95,6 @@ pub(crate) async fn pair(
             "another device key was kept while this one joined: join again",
         ));
     }
-    Ok((device, key))
+    let endpoint = crate::keys::endpoint_key(folder)?;
+    Ok((device, key, endpoint))
 }

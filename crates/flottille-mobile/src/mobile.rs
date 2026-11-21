@@ -73,7 +73,6 @@ pub struct Core {
 pub(crate) struct Inner {
     pub(crate) folder: PathBuf,
     pub(crate) sealed: Sealed,
-    pub(crate) endpoint: MachineKey,
     handle: tokio::runtime::Handle,
     state: Mutex<State>,
     ids: AtomicU64,
@@ -81,8 +80,9 @@ pub(crate) struct Inner {
     told_again: tokio::sync::Notify,
 }
 
-#[derive(Default)]
 struct State {
+    /// The key of the phone's endpoint, its machine in the list: a new one each join.
+    endpoint: Arc<MachineKey>,
     device: Option<Device>,
     key: Option<Arc<DeviceKey>>,
     view: View,
@@ -176,9 +176,9 @@ impl Core {
         let inner = Arc::new(Inner {
             folder,
             sealed,
-            endpoint,
             handle: runtime.handle().clone(),
             state: Mutex::new(State {
+                endpoint: Arc::new(endpoint),
                 device,
                 key,
                 view,
@@ -213,16 +213,9 @@ impl Core {
         let inner = self.inner.clone();
         self.inner
             .on(async move {
-                let (device, key) = pair(
-                    &inner.folder,
-                    &inner.sealed,
-                    &inner.endpoint,
-                    &code,
-                    &name,
-                    &role,
-                )
-                .await?;
-                inner.joined(device, key)
+                let (device, key, endpoint) =
+                    pair(&inner.folder, &inner.sealed, &code, &name, &role).await?;
+                inner.joined(device, key, endpoint)
             })
             .await
     }
@@ -373,7 +366,12 @@ impl Inner {
 
     /// The join accepted: the hub and the key kept, the view told. A join again starts anew:
     /// the connection to the hub before, and what the view held of it, end.
-    fn joined(&self, device: Device, key: DeviceKey) -> Result<(), MobileError> {
+    fn joined(
+        &self,
+        device: Device,
+        key: DeviceKey,
+        endpoint: MachineKey,
+    ) -> Result<(), MobileError> {
         write_json(&self.folder.join(HUB_FILE), &device)?;
         let mut state = self.state();
         let ended = state.connection.take();
@@ -383,6 +381,7 @@ impl Inner {
         }
         state.device = Some(device);
         state.key = Some(Arc::new(key));
+        state.endpoint = Arc::new(endpoint);
         drop(state);
         drop(ended);
         Ok(())
@@ -627,14 +626,17 @@ impl Inner {
 async fn connect(inner: Arc<Inner>, listener: Arc<dyn Listener>) -> Result<(), MobileError> {
     let ended = inner.state().connection.take();
     drop(ended);
-    let device = inner
-        .state()
-        .device
-        .clone()
-        .ok_or_else(|| MobileError::new("this phone has joined no hub yet"))?;
+    let (device, machine) = {
+        let state = inner.state();
+        let device = state
+            .device
+            .clone()
+            .ok_or_else(|| MobileError::new("this phone has joined no hub yet"))?;
+        (device, state.endpoint.clone())
+    };
     let said = |error: flottille_link::ControlError| MobileError::new(error.to_string());
     let session = device
-        .connect(&inner.endpoint, &crate::hello(), &Tls::System)
+        .connect(&machine, &crate::hello(), &Tls::System)
         .await
         .map_err(said)?;
     let asker = session.asker();
@@ -653,7 +655,7 @@ async fn connect(inner: Arc<Inner>, listener: Arc<dyn Listener>) -> Result<(), M
         .await
         .map_err(said)?;
     let endpoint =
-        Endpoint::dialler(&inner.endpoint).map_err(|error| MobileError::new(error.to_string()))?;
+        Endpoint::dialler(&machine).map_err(|error| MobileError::new(error.to_string()))?;
     if let Some(name) = Some(inner.state().view.state().name).filter(|name| !name.is_empty()) {
         endpoint.name_as(&name);
     }

@@ -1078,8 +1078,16 @@ async fn a_device_key_that_will_not_open_at_start_leaves_the_phone_not_joined() 
     );
     assert!(view.role.is_empty() && view.machines.is_empty());
 
-    // Paired again, it is a member with a key this Keystore sealed.
-    place.joined(&phone).await;
+    // Paired again, under another name (its old key, which nothing opens now, is still listed),
+    // it is a member with a key this Keystore sealed.
+    phone
+        .join(
+            place.pair_code(),
+            "new phone".to_owned(),
+            "controller".to_owned(),
+        )
+        .await
+        .unwrap();
     assert!(phone.joined());
     let sealed = std::fs::read(Path::new(&place.phone_folder()).join("device.sealed")).unwrap();
     assert!(sealed.starts_with(OTHER));
