@@ -537,10 +537,10 @@ async fn a_dialler_s_socket_takes_no_link_after_its_first_dial() {
     .await
     .expect("the dial ends");
     assert!(tried.is_err(), "the dialler took a link");
-    let accepted = tokio::time::timeout(Duration::from_secs(1), dialler.accept())
-        .await
-        .expect("accept ends at once");
-    assert!(accepted.is_none());
+    // It takes no link on a socket: the links it takes come through the hub, and it has no
+    // session to one.
+    let accepted = tokio::time::timeout(Duration::from_secs(1), dialler.accept()).await;
+    assert!(accepted.ok().flatten().is_none());
 }
 
 #[tokio::test]

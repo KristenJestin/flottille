@@ -30,9 +30,9 @@ what is open
 is in "Open questions". It replaces the proposal of 2026-11-03 (a relay
 every device connects to, on a private network) and the review that put Tailscale and SSH at the
 centre: Flottille stays generic (`AGENTS.md`), and depends on no one network and no account of a
-third party. The user runs one small program of Flottille's, the hub; the data between their
-devices does not go through it. Flottille also handles no network channel: the only thing it asks
-is that two devices can reach each other ("The transport").
+third party. The user runs one small program of Flottille's, the hub, which every device keeps a
+connection to; since 2026-11-20 the links between their devices go through it, encrypted end to
+end, so that nothing but the hub needs to be reachable ("The transport").
 
 ## The cases it serves
 
@@ -61,8 +61,8 @@ is that two devices can reach each other ("The transport").
 | Member list | The list of the user's members: the hub's entries of the devices it paired, signed with its key, and the members' own changes, each signed by its member. Every device keeps a copy and checks every signature itself. |
 | Role | What a member may do, signed in its entry: `runner`, `controller` or `viewer` ("Roles"). |
 | Runner | A member that may run agents: a computer, a headless server. |
-| Hub | `flottille-hub`, the one program the user runs for all their devices, wherever they like: it holds the member list, pair mode, the presence and the members' addresses. A control plane only: it never carries a link's bytes. It adds the devices, behind access to its host. |
-| Link | Flottille's encrypted connection between two devices, peer to peer and always direct: one dials an address the other listens on. |
+| Hub | `flottille-hub`, the one program the user runs for all their devices, wherever they like: it holds the member list, pair mode and the presence, and carries the links' packets between members, which it can neither read nor change. It adds the devices, behind access to its host. |
+| Link | Flottille's encrypted connection between two devices, end to end, its packets carried by the hub over the connection each device keeps to it. |
 | Pair mode | What `flottille-hub pair` opens on the hub's host for one device: a code and its QR, valid a few minutes, once. |
 | Pair code | What pair mode prints: the hub's address, its key and a secret the device proves it knows, never sends. |
 | Tunnel | A TCP connection carried over the link, from a client's local port to a run's port on a machine. |
@@ -78,17 +78,20 @@ window, the command line, the tools and the docs.
    them is the user's. Whether they have a LAN, a VPN, Tailscale, a VPS or a public address is not
    Flottille's concern: the one thing it asks is that two devices can reach each other. A tailnet
    address is one more address, told by the hub or given by the user like a LAN or public one.
-2. **A hub, the user's own.** One `flottille-hub` per user, self-hosted, a control plane only: the
-   members, pair mode, the presence, the addresses, the signed member list. It serves one person,
-   and has no interface of its own (no web page, no login): it runs in a console or a container,
-   and everything is done from the user's devices, but adding one. **No relay**
-   anywhere (not in the hub, not hosted, not public) and no public hub by default.
-3. **Peer to peer, direct, end to end.** The data between two devices goes over a link, encrypted
-   and authenticated by their keys, from one device to an address the other listens on. **The hub
-   never carries a link's bytes**, and Flottille does no NAT traversal, no hole punching, no port
-   mapping and runs no address discovery service. Two devices that cannot reach each other say so
-   plainly ("Paths"); the fix is the user's network. **No queue on the hub**: what waits for a
-   machine that is off waits on the machine that sends it.
+2. **A hub, the user's own** (replaced on 2026-11-20; it said "no relay"). One `flottille-hub` per
+   user, self-hosted: the members, pair mode, the presence, the signed member list, and
+   **the links between the devices, which go through it**, over the connection every device
+   already keeps to it. No relay of anyone else's (not hosted, not public), and no public hub by
+   default.
+3. **End to end, through the hub** (replaced on 2026-11-20; it said "direct only, no NAT
+   traversal"). The data between two devices goes over a link, encrypted and authenticated by
+   their keys; its packets travel in the two devices' control sessions to the hub, which hands each
+   to the device whose key it names and can neither read nor change it. A device needs no address,
+   no port and no `listen`: only the hub is reached. Flottille does no NAT traversal, no hole
+   punching, no port mapping and runs no address discovery service. The direct link (`listen`, a
+   dial to an address) stays in the code, unused by default, until the maintainer decides whether
+   to keep it. **No queue on the hub** beyond the packets in flight: what waits for a machine that
+   is off waits on the machine that sends it.
 4. **The hub adds the devices, behind access to its host** (decided 2026-11-20, in place of the
    devices adding each other). A device pairs in pair mode, which only a command on the hub's host
    opens (`flottille-hub pair`); its entry is signed with the hub's key, which every device pinned
@@ -143,12 +146,10 @@ window, the command line, the tools and the docs.
 ## Architecture
 
 ```
-                         hub (the user's own: members, pair mode, presence, addresses)
-                        ╱        │         ╲        control only: every device keeps a session to it
-                       ╱         │          ╲       it never carries a link's bytes
+                         hub (the user's own: members, pair mode, presence, the links' packets)
+                        ╱        │         ╲        every device keeps one session to it, and its
+                       ╱         │          ╲       links go in it, encrypted end to end
   phone (app + Rust core)        │           machine "server" (daemon, agents)
-           ╲                     │                ╱
-            ╲─ link: direct, end to end ─╱
                                  │
                        machine "pc" (daemon, agents)
                                  ▲ local socket
@@ -158,29 +159,33 @@ window, the command line, the tools and the docs.
 - **The hub** is reached by every device at the URL its pair code holds (with the hub's key, so
   that a device knows it reached its own hub). Each device keeps a control session to it: it
   receives the member list and its changes, what the hub knows of each device, the presence of the
-  user's clients, and the addresses of the other members. The hub carries no link's bytes: it neither forwards nor
-  terminates a link.
-- **Each machine's daemon holds one link endpoint** and listens on it beside its Unix socket, on the
-  addresses it is configured with ("Paths"). The local socket is unchanged, with its refusal of a client an agent started (`protocol.md`,
+  user's clients, and which members are online; and its links' packets go in it ("The
+  transport"). The hub forwards a link's packets and never terminates a link: it holds none of its
+  keys.
+- **Each machine's daemon holds one link endpoint**, whose links go through its session to the hub
+  (and, unused by default, listens on the addresses it is configured with, "Paths"). The local
+  socket is unchanged, with its refusal of a client an agent started (`protocol.md`,
   "Transport").
 - **The window and the command line reach another machine through their own machine's daemon**: a
   request names `machine`, is signed with the device key by the client, and the local daemon
   carries it over its link to that machine and carries the answers and events back. The local
   daemon cannot forge a request: it does not hold the device key.
-- **The phone holds its own endpoint**, whose key is its device key, and links to each machine. It
-  links only while the app is in the foreground; a push wakes it otherwise ("Notifications"). A
-  phone on a mobile network has no address a machine can dial: it dials, and what a machine sends
-  it travels over the link the phone opened.
+- **The phone holds its own endpoint**, whose key is its device key, and links to each machine
+  through the hub, as a machine does. It links only while the app is in the foreground; a push
+  wakes it otherwise ("Notifications").
 - **Two kinds of traffic on a link**, kept apart by the link's protocol name (ALPN or its
   equivalent): `client`, the user's requests (the methods of `protocol.md`, each signed by a
   device), and `machine`, the closed set of messages one machine sends another for its agents
   ("What a machine may send"). A message of one kind on the other is refused.
 - **The protocol is the daemon's** (`protocol.md`), unchanged in its framing: the same requests,
   answers and events, numbered, resumed with `events.watch {after}`. It was written for this.
-- **When the hub is down**, links already open go on, and devices that know each other's addresses
-  link directly; what needs the hub (a pairing, a change of the member list, the
-  addresses of a device that moved, presence) waits for it, and the clients say so (`the hub is
-  unreachable since 22:14`).
+- **When the hub is down**, devices do not link to each other: the links open end, on both sides,
+  and none is made until the hub is back. Each device says so with the hub's own sentence (`the hub
+  at hub.example.net is unreachable since 22:14: …`), for the hub and for each machine it cannot
+  link to (`server cannot be reached: the hub at … is unreachable since 22:14: …`); a request for
+  another machine is refused saying it. What waits for a machine that is off waits on the machine
+  that sends it, as it does for a machine that is off. A machine that listens (the direct path,
+  unused by default) dials addresses only, as before, and its direct links go on.
 
 ## The transport
 
@@ -191,11 +196,12 @@ library that gives it, chosen in #811, is hidden in `flottille-link`:
   the key it was dialed for is refused;
 - **encrypted end to end and authenticated by the devices' keys**, on both sides, with nothing
   between the two devices that can read or change it;
-- **direct to a known address**: a device listens on the address it is configured with (none
-  until the user sets one: it then only dials) and a peer dials an address it knows for that key, told by the
-  hub or given by the user ("Paths"); nothing else is tried: no relay, no NAT traversal, no hole
-  punching, no port mapping (UPnP, NAT-PMP, PCP), no address discovery service, and no server of a
-  third party in the path;
+- **through the user's hub** (since 2026-11-20): a link is dialled by key, and its packets travel in
+  the control sessions both devices keep to their hub, which forwards them between members only;
+  no NAT traversal, no hole punching, no port mapping (UPnP, NAT-PMP, PCP), no address discovery
+  service, and no server of a third party in the path. The direct path (a device listens on the
+  address it is configured with, a peer dials an address it knows for that key, "Paths") stays,
+  unused by default;
 - **streams**: requests, events, a git transfer and tunnels at once on one link, kept apart;
 - **it runs** on Linux, macOS later, and Android.
 
@@ -216,13 +222,60 @@ Only `crates/flottille-link/src/transport.rs` names the libraries: the daemon, t
 and the mobile core see Flottille's types (an endpoint, a link, the two kinds of traffic), so that a
 change of transport changes that file.
 
+**Through the hub** (#1151). QUIC runs over a socket of Flottille's own under `quinn` (its
+`AsyncUdpSocket`, `RelaySocket` in `transport.rs`): what QUIC sends goes out in the device's control
+session as one line, `{"relay": {"to": <key>, "packet": <base64>}}`, one QUIC packet a line (1200
+bytes at first, up to 1452 once QUIC's discovery of the path's size grew them, 1500 the most the hub
+takes); the hub hands it to the session
+of the member whose key it names as `{"relayed": {"from": <key>, "packet": …}}`. QUIC knows
+addresses, not keys: each key is given an address of the relay's own, in a unique local IPv6 range
+(`fd46:6c74::/32`) no network reaches through it. Nothing above changes: the TLS 1.3 of QUIC, on
+the devices' raw Ed25519 keys, checks the other side's key end to end, as on a direct link; a
+packet the hub changed fails QUIC's authentication and is dropped, and a link whose packets are all
+changed ends. Each session to the hub is a transport of its own: when it ends (the hub down, the
+session lost), every link through it ends, with it. The hub tells every member which members'
+sessions are open, `{"online": [<key>, …]}`, whenever that changes: a device dials only a member
+online, and says plainly when the other is not (`server is offline: it is not connected to the
+hub`). Members only: a packet from or to a key that is no member's (a stranger, a machine whose
+join waits, a member removed) is dropped by the hub, and so is one to a member whose session is
+not open; none is kept for later. Who a link is from is the key its TLS proved, never the hub's
+word: a hub that says a packet is from another member gets nothing served as that member. A device
+lets a packet from a key it did not dial in only from a member the hub says online, so that a hub
+that makes up senders spends none of the room its own dials need.
+
+**Behind a reverse proxy.** The control session is HTTP/1.1 upgraded as a WebSocket is, so the
+frames pass through a proxy that passes upgrades on (port 443, a container behind it). Each side
+says `{"keepalive": {}}` every 25 seconds when it has nothing to say, under the 60 s idle timeout
+of the common proxies; a device that hears nothing from its hub for 80 seconds takes the session as
+lost, and its links with it. The hub does the same with a device it hears nothing from for 80
+seconds, or that reads nothing it sends for as long: its session is closed, and the others are
+told it is offline, rather than left trying a connection that died.
+
+**What the hub sees** of the links: which devices talk to which, when, and how much (the size and
+timing of each packet); never what they say. It cannot read a request, an answer, an event, a
+bundle of code or a tunnel's bytes, nor change one unseen, nor make a link as one of the user's
+devices: it holds none of their keys. What it does as a network is what any network can: drop
+packets, delay them, or stop carrying them, which ends the links. What it does as the hub is
+larger: it pairs the devices, and a hub whose host or key is someone else's can pair a device of
+theirs, which declares its own machine and is trusted by every machine; with the links through the
+hub, that device reaches every machine through the hub itself, wherever it is, with no other way
+in to the user's network ("What a compromised hub can do").
+
+**Its bounds.** One device cannot fill the hub: each device may send others 4 MiB a second through
+it (1 MiB at once), every packet it sends counted, those the hub drops too; and at most 128 packets
+from one device wait for another (under 200 KiB), each sender having its own share, so that one
+that floods a device leaves the others their way to it. A packet past a bound is dropped, as a
+network drops one, and QUIC sends it again, slower. The others' links go on: a packet takes neither
+the hub's lock nor its member list, which the forwarding is given again each time it changes.
+
 On a link, each message goes on a QUIC stream of its own, one JSON frame one way and its answer
 (`{"ok": …}` or `{"refused": "…"}`) the other; the first stream is the version handshake ("The
 version"). The protocol names are `flottille-machine` and `flottille-client`; a message of the
 other kind is refused by the receiver, the link going on (`a machine's message is not taken on a
 client link`).
 
-**Paths.** A device listens on the address it is configured with, in the daemon's remote
+**Paths** (the direct path: unused by default since 2026-11-20, kept until the maintainer decides).
+A device listens on the address it is configured with, in the daemon's remote
 configuration (`[remote] listen`; none until the user sets one, and a device that listens nowhere
 still dials the others). It tells the hub those addresses
 whenever they change, and the hub tells the other members; the user may also give an address by
@@ -231,7 +284,9 @@ a forwarded port, a public address. Members linked to each other tell each other
 devices that have linked once can link again without the hub. A peer dials the addresses it knows
 for a key, whoever told it; the hub's list is a help, not a path.
 
-**Two devices that cannot reach each other say so plainly**, on both sides and in the clients: which
+A machine that listens nowhere (the default) dials the addresses it knows for another first,
+then the hub: with no address, it goes through the hub at once. A machine that listens chose this
+path: it dials addresses only, and takes the links that come through the hub too. **Two devices that cannot reach each other say so plainly**, on both sides and in the clients: which
 address was tried, from where, and how it failed (`server is unreachable: tried 192.0.2.10:7421
 from pc, no answer in 10 s`). Flottille does not work around it: the fix is the user's network (a
 firewall rule, a forwarded port, a VPN, another address). A device no one can dial (a phone on a
@@ -318,16 +373,17 @@ serves one user.
   what the device says of itself, when it was paired and last seen.
 - **The presence**: which of the user's clients is active ("Notifications"), as each client tells
   it.
-- **The addresses** of the members, as they tell it, to help two devices find each other.
+- **The addresses** of the members, as they tell it, for the direct path (unused by default).
+- **The sessions open**, by key, and for each the packets of links waiting for it (128 at most from
+  each member's device).
 
-**What it never does**: carry a link's bytes. It is a control plane: devices link to each other
-directly ("The transport"), so it keeps no message, no queue and no content of what they say, and
-there is no relay in it, hosted or public.
+**What it carries**: the links' packets between members ("The transport", "Through the hub"),
+encrypted end to end by the devices, which it forwards and never opens; it keeps no message and no
+content of what they say, only the packets in flight for a device whose session is open.
 
 **What it sees**: which keys connect to it, when, from which IP addresses; the member list (names,
 keys, roles, never a secret); the presence; the addresses members tell it; what each device says
-of itself. It does not see which
-devices link to each other, nor what they say.
+of itself; and of the links, which devices talk to which, when, and how much. Never what they say.
 
 **Its configuration**: a listen address (a device must be able to reach it, like any other), TLS (a certificate given, ACME, or plain behind a reverse
 proxy), a state folder. The hub URL is given to every device in its pair code: `--public-url
@@ -1607,6 +1663,17 @@ on a real phone, by hand, and reported.
   and nothing offers to end them from here.
 - Those rows are shown only while the window shows this machine: another machine's tree is its own,
   and lists what its agents started elsewhere on its own machine only.
+- Links through the hub (#1151): a link's packets travel in the control session as JSON lines, the
+  packet in base64, not as binary WebSocket frames: the session is one JSON object a line since
+  #820, and a reverse proxy carries it the same. A device dials the addresses it knows for another
+  first (the direct path, none by default), then the hub. The hub's bounds: 4 MiB a second for each
+  device's packets to the others, 1 MiB at once, each packet charged before anything else is
+  looked at; 128 packets from one device waiting for another, a share for each sender, so at most
+  128 × the members' devices for one device; a packet past them is dropped, never queued further.
+  The keepalive is 25 s each way, a session silent 80 s is lost, on the device and on the hub (on
+  the hub too a line the device reads nothing of for 80 s). A machine that listens (`[remote] listen`, the direct path the user chose) dials
+  addresses only, never through the hub, and takes the links that come either way: two machines
+  that both listen link as before #1151, and a test or a user who set `listen` keeps that path.
 
 - The mobile core (#824): a batch is what arrives within 30 ms of its first event, 256 events at
   most; a runner that cannot be linked is dialled again after 250 ms, doubling up to 30 s, and at

@@ -1354,8 +1354,8 @@ not listen, `unavailable`, with the reason. No method answers a private key.
   `state` `online`, `offline` or `needs an update`, `since` when it is so (milliseconds since the
   Unix epoch), `reason` why it is not online (`server refused the link: …`, the sentence of
   `docs/remote.md`, "The version"), or `null`, `reached` where its live link goes or came from
-  (`{"address", "dialled"}`, `dialled` saying whether this machine dialled it; `null` while it is
-  not linked), and `addresses` those it knows it at: given (by the hub, by hand), then told by it. `hub` is the hub this machine pinned, its `url` written as a user writes it (`https://hub.example.net`: the port only when it is not the scheme's own, 80 or 443, and no trailing slash; the commands, the window and the sentences say it so) (`docs/remote.md`, "The
+  (`{"address", "dialled"}`, `address` being `the hub` for a link through it, `dialled` saying
+  whether this machine dialled it; `null` while it is not linked), and `addresses` those it knows it at: given (by the hub, by hand), then told by it. `hub` is the hub this machine pinned, its `url` written as a user writes it (`https://hub.example.net`: the port only when it is not the scheme's own, 80 or 443, and no trailing slash; the commands, the window and the sentences say it so) (`docs/remote.md`, "The
   hub"), `null` until it is set up: `{"url", "key", "fingerprint", "state", "since", "reason"}`,
   `state` being `connected`, `unreachable` (`reason`: `the hub at hub.example.net is
   unreachable since 22:14: …`), `reset` (`the hub's member list was reset: set this device up
