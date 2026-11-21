@@ -292,9 +292,10 @@ fn the_window_s_own_settings_stay_this_machine_s_and_say_so(cx: &mut TestAppCont
         },
     );
     let theirs = server.user.call("appearance.show", json!({})).unwrap();
-    click(&shell, "appearance-theme-flottille", cx);
+    // Off Omarchy, Flottille's own colours are shown already: the shade is what changes.
+    click(&shell, "appearance-shade-light", cx);
     until(&shell, cx, "this machine keeps the appearance", |_| {
-        pc.user.call("appearance.show", json!({})).unwrap()["theme"] == "flottille"
+        pc.user.call("appearance.show", json!({})).unwrap()["shade"] == "light"
     });
     assert_eq!(
         server.user.call("appearance.show", json!({})).unwrap(),
