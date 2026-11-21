@@ -125,9 +125,21 @@ const SAID_KEPT: usize = 8;
 impl View {
     /// The list as this device checked it: its own entry, and the runners.
     pub(crate) fn members(&mut self, members: &Members, own: &PublicKey) {
-        if let Some(me) = members.get(own) {
-            self.role = me.role.word().to_owned();
-            self.name = me.name.clone();
+        match members.get(own) {
+            Some(me) => {
+                self.role = me.role.word().to_owned();
+                self.name = me.name.clone();
+            }
+            // Removed: no role it could claim, and the user told why.
+            None => {
+                if !self.role.is_empty() {
+                    self.say(
+                        "this phone was removed from the user's hub: pair it again".to_owned(),
+                    );
+                }
+                self.role.clear();
+                self.name.clear();
+            }
         }
         let before: HashMap<String, MachineView> = self
             .machines
@@ -398,4 +410,48 @@ fn entries<'a>(events: impl Iterator<Item = &'a Value>) -> Vec<Entry> {
 
 fn text(value: &Value) -> String {
     value.as_str().unwrap_or_default().to_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use flottille_link::{Action, DeviceKey, MemberList};
+
+    use super::*;
+
+    #[test]
+    fn a_phone_removed_from_the_list_claims_no_role_and_says_so() {
+        let (owner, phone) = (DeviceKey::make().unwrap(), DeviceKey::make().unwrap());
+        let mut list = MemberList::default();
+        for (key, name) in [(&owner, "laptop"), (&phone, "phone")] {
+            list.sign(
+                Action::Add {
+                    key: key.public(),
+                    name: name.to_owned(),
+                    role: Role::Controller,
+                },
+                &owner,
+            );
+        }
+        let hub = DeviceKey::make().unwrap().public();
+        let mut view = View::default();
+        view.members(&list.check(&owner.public(), &hub).unwrap(), &phone.public());
+        assert_eq!(
+            (view.role.as_str(), view.name.as_str()),
+            ("controller", "phone")
+        );
+
+        list.sign(
+            Action::Remove {
+                key: phone.public(),
+            },
+            &owner,
+        );
+        view.members(&list.check(&owner.public(), &hub).unwrap(), &phone.public());
+        let state = view.state();
+        assert_eq!((state.role.as_str(), state.name.as_str()), ("", ""));
+        assert_eq!(
+            state.said,
+            ["this phone was removed from the user's hub: pair it again"]
+        );
+    }
 }
