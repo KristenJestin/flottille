@@ -119,13 +119,19 @@ struct State {
     closed: Vec<u32>,
     capabilities: Vec<String>,
     next: u32,
+    /// A server that never answers: its calls wait for good.
+    hung: bool,
 }
 
 struct Server(Arc<Mutex<State>>);
 
 #[zbus::interface(name = "org.freedesktop.Notifications")]
 impl Server {
-    fn get_capabilities(&self) -> Vec<String> {
+    async fn get_capabilities(&self) -> Vec<String> {
+        let hung = self.0.lock().unwrap().hung;
+        if hung {
+            std::future::pending::<()>().await;
+        }
         self.0.lock().unwrap().capabilities.clone()
     }
 
@@ -195,8 +201,18 @@ pub struct Notifications {
 impl Notifications {
     /// A server that says it supports `capabilities` (`["actions", "body"]` is a common one).
     pub fn start(bus: &Bus, capabilities: &[&str]) -> Notifications {
+        Notifications::serve(bus, capabilities, false)
+    }
+
+    /// A server that owns the name and never answers a call: a hung desktop.
+    pub fn hung(bus: &Bus) -> Notifications {
+        Notifications::serve(bus, &["actions", "body"], true)
+    }
+
+    fn serve(bus: &Bus, capabilities: &[&str], hung: bool) -> Notifications {
         let state = Arc::new(Mutex::new(State {
             capabilities: capabilities.iter().map(|c| (*c).to_owned()).collect(),
+            hung,
             ..State::default()
         }));
         let connection = zbus::blocking::connection::Builder::address(bus.address())
@@ -252,6 +268,24 @@ impl Notifications {
     /// What the user does with a notification: `ActionInvoked`, as the desktop's server says it.
     pub fn invoke(&self, id: u32, key: &str) {
         self.connection
+            .emit_signal(
+                None::<&str>,
+                "/org/freedesktop/Notifications",
+                "org.freedesktop.Notifications",
+                "ActionInvoked",
+                &(id, key),
+            )
+            .unwrap();
+    }
+
+    /// `ActionInvoked` said by another connection of the bus, one that does not own the
+    /// server's name: what any program of the session could send.
+    pub fn forge(bus: &Bus, id: u32, key: &str) {
+        let forger = zbus::blocking::connection::Builder::address(bus.address())
+            .unwrap()
+            .build()
+            .unwrap();
+        forger
             .emit_signal(
                 None::<&str>,
                 "/org/freedesktop/Notifications",
@@ -321,4 +355,138 @@ impl Window {
         let answer: Value = serde_json::from_str(&line).unwrap();
         assert!(answer.get("error").is_none(), "presence.set: {answer}");
     }
+}
+
+/// What the fake sound server heard.
+#[derive(Clone, Debug, Default)]
+pub struct Heard {
+    /// The clients that connected.
+    pub clients: usize,
+    /// The streams played to their end (drained).
+    pub played: usize,
+    /// The bytes of samples received.
+    pub bytes: usize,
+}
+
+/// A sound server of the user's own: PulseAudio's protocol (which PipeWire answers too) on
+/// `runtime/pulse/native`, where the daemon's client looks first. It takes the samples and plays
+/// nothing; `stall_first` never ends the first stream, as a sound server that hangs.
+pub struct Pulse {
+    heard: Arc<Mutex<Heard>>,
+}
+
+impl Pulse {
+    pub fn start(user: &User, stall_first: bool) -> Pulse {
+        use std::os::unix::net::UnixListener;
+        std::fs::create_dir_all(user.path("runtime/pulse")).unwrap();
+        let listener = UnixListener::bind(user.path("runtime/pulse/native")).unwrap();
+        let heard = Arc::new(Mutex::new(Heard::default()));
+        let shared = heard.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else { return };
+                shared.lock().unwrap().clients += 1;
+                let shared = shared.clone();
+                std::thread::spawn(move || {
+                    let _ = serve_pulse(stream, &shared, stall_first);
+                });
+            }
+        });
+        Pulse { heard }
+    }
+
+    pub fn heard(&self) -> Heard {
+        self.heard.lock().unwrap().clone()
+    }
+
+    /// Waits until `count` streams were played to their end.
+    pub fn wait_played(&self, count: usize) -> Heard {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let heard = self.heard();
+            if heard.played >= count {
+                return heard;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the sound server played {heard:?}, not {count} sounds"
+            );
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    }
+}
+
+fn serve_pulse(
+    mut socket: UnixStream,
+    heard: &Mutex<Heard>,
+    stall_first: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use pulseaudio::protocol;
+    use std::io::Read;
+    let mut version = protocol::MAX_VERSION;
+    let mut channel = 0;
+    loop {
+        let descriptor = protocol::read_descriptor(&mut socket)?;
+        let mut payload = vec![0; descriptor.length as usize];
+        socket.read_exact(&mut payload)?;
+        if descriptor.channel != u32::MAX {
+            heard.lock().unwrap().bytes += payload.len();
+            continue;
+        }
+        let (seq, command) =
+            protocol::Command::read_tag_prefixed(&mut std::io::Cursor::new(payload), version)?;
+        match command {
+            protocol::Command::Auth(params) => {
+                version = params.version.min(protocol::MAX_VERSION);
+                let reply = protocol::AuthReply {
+                    version,
+                    ..Default::default()
+                };
+                protocol::write_reply_message(&mut socket, seq, &reply, version)?;
+            }
+            protocol::Command::SetClientName(_) => {
+                let reply = protocol::SetClientNameReply { client_id: 1 };
+                protocol::write_reply_message(&mut socket, seq, &reply, version)?;
+            }
+            protocol::Command::CreatePlaybackStream(mut params) => {
+                let attr = &mut params.buffer_attr;
+                attr.max_length = 4 << 20;
+                attr.target_length = 1 << 20;
+                attr.pre_buffering = 0;
+                attr.minimum_request_length = 1024;
+                let reply = protocol::CreatePlaybackStreamReply {
+                    channel,
+                    sample_spec: params.sample_spec,
+                    channel_map: params.channel_map,
+                    buffer_attr: params.buffer_attr,
+                    requested_bytes: 4 << 20,
+                    sink_name: Some(c"fake".into()),
+                    ..Default::default()
+                };
+                channel += 1;
+                protocol::write_reply_message(&mut socket, seq, &reply, version)?;
+            }
+            protocol::Command::DrainPlaybackStream(_) => {
+                let first = {
+                    let mut heard = heard.lock().unwrap();
+                    heard.played += 1;
+                    heard.played == 1
+                };
+                if !(stall_first && first) {
+                    protocol::write_ack_message(&mut socket, seq)?;
+                }
+            }
+            protocol::Command::DeletePlaybackStream(_) => {
+                protocol::write_ack_message(&mut socket, seq)?;
+            }
+            _ => protocol::write_error(&mut socket, seq, &protocol::PulseError::NotImplemented)?,
+        }
+    }
+}
+
+/// The threads of the process `pid`.
+pub fn threads(pid: u64) -> usize {
+    std::fs::read_dir(format!("/proc/{pid}/task"))
+        .unwrap()
+        .count()
 }

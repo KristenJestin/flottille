@@ -22,6 +22,19 @@ fn pending(user: &common::User) -> Vec<Value> {
         .clone()
 }
 
+/// The state of request `number` of the tree of `root`: `pending`, `allowed`, `denied`.
+fn state_of(user: &common::User, root: &str, number: u64) -> String {
+    let requests = user.call("approval.list", json!({"tree": root})).unwrap()["requests"].clone();
+    requests
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|request| request["number"] == number)
+        .and_then(|request| request["state"].as_str())
+        .unwrap_or_else(|| panic!("no request #{number}: {requests}"))
+        .to_owned()
+}
+
 /// What the daemon knows of the window: `{"focused", "session"}`, or null without one.
 fn presence(user: &common::User) -> Value {
     user.call("notifications.status", json!({})).unwrap()["window"].clone()
@@ -80,7 +93,7 @@ fn with_the_window_focused_the_notification_is_a_toast_not_a_system_one(cx: &mut
     let server = Notifications::start(&bus, &["actions", "body"]);
     let played = desktop::with_fake_audio(&user);
     project(&user);
-    let (_, mcp) = session(&user, "hello");
+    let (lead, mcp) = session(&user, "hello");
     let (shell, cx) = window(&user, cx);
     cx.update(|window, _| window.activate_window());
     until(&shell, cx, "the window says it is focused", |_| {
@@ -99,11 +112,19 @@ fn with_the_window_focused_the_notification_is_a_toast_not_a_system_one(cx: &mut
         first.origin.y > rested.origin.y,
         "it rises: {first:?} to {rested:?}"
     );
-    assert_eq!(
-        label("toast-1", cx).as_deref(),
-        Some(format!("Request #{number} waits for you Read .env").as_str())
+    // The call whole, and why the gate held it: what Allow allows is what the toast says.
+    let said = label("toast-1", cx).unwrap_or_default();
+    assert!(
+        said.starts_with(&format!("Request #{number} waits for you Read .env")),
+        "{said}"
     );
-    assert!(has("toast-1-action", cx) && has("toast-1-action-2", cx));
+    let reasons = pending(&user)[0]["reasons"].clone();
+    for reason in reasons.as_array().unwrap() {
+        let reason = reason.as_str().unwrap();
+        assert!(said.contains(reason), "{reason}: {said}");
+    }
+    assert_eq!(label("toast-1-action", cx).as_deref(), Some("Allow"));
+    assert_eq!(label("toast-1-action-2", cx).as_deref(), Some("Deny"));
     // The desktop is told nothing, and the sound plays, once, in the daemon.
     eventually("the sound", || desktop::played(&played) == ["needs-you"]);
     assert!(server.notified().is_empty(), "{:?}", server.notified());
@@ -113,10 +134,42 @@ fn with_the_window_focused_the_notification_is_a_toast_not_a_system_one(cx: &mut
     until(&shell, cx, "the request was decided", |_| {
         pending(&user).is_empty()
     });
+    assert_eq!(state_of(&user, &lead, number), "allowed");
     until_folded(&shell, cx, "the toast left", |cx| !has("toast-1", cx));
     settle(cx);
     assert_eq!(frames_pending(cx), 0, "at rest after the toast left");
     assert!(server.notified().is_empty());
+}
+
+#[gpui_kit::test]
+fn the_toast_of_a_request_too_long_to_read_whole_offers_deny_and_open_only(
+    cx: &mut TestAppContext,
+) {
+    let user = user();
+    let Some(_bus) = Bus::start(&user) else {
+        return;
+    };
+    project(&user);
+    let (lead, mcp) = session(&user, "hello");
+    let (shell, cx) = window(&user, cx);
+    cx.update(|window, _| window.activate_window());
+    until(&shell, cx, "the window says it is focused", |_| {
+        presence(&user)["focused"] == true
+    });
+    settle(cx);
+
+    let path = format!("{}/.env", ["folder"; 24].join("/"));
+    let number = held_number(mcp.call("fs_read", json!({"path": path})));
+    until(&shell, cx, "the toast", |cx| has("toast-1", cx));
+    settle(cx);
+
+    assert_eq!(label("toast-1-action", cx).as_deref(), Some("Deny"));
+    assert!(!has("toast-1-action-2", cx), "no Allow beside Deny");
+    assert!(has("toast-1-open", cx), "a click opens the session");
+    cx.update(|window, cx| window.click("toast-1-action", cx));
+    until(&shell, cx, "the request was denied", |_| {
+        state_of(&user, &lead, number) == "denied"
+    });
 }
 
 #[gpui_kit::test]
@@ -192,9 +245,10 @@ fn nothing_is_toasted_for_the_session_the_window_shows(cx: &mut TestAppContext) 
 
     // The other's toast is the first the window drew: the open session's rang nothing.
     until(&shell, cx, "the toast", |cx| has("toast-1", cx));
-    assert_eq!(
-        label("toast-1", cx).as_deref(),
-        Some(format!("Request #{other} waits for you Read .env").as_str())
+    let said = label("toast-1", cx).unwrap_or_default();
+    assert!(
+        said.starts_with(&format!("Request #{other} waits for you Read .env")),
+        "{said}"
     );
     assert!(!has("toast-2", cx));
 }

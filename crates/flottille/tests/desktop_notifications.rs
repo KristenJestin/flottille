@@ -79,6 +79,39 @@ fn pending(user: &User) -> Vec<Value> {
         .clone()
 }
 
+/// The state of request `number` of the tree of `root`: `pending`, `allowed`, `denied`.
+fn state_of(user: &User, root: &str, number: u64) -> String {
+    let requests = user.call("approval.list", json!({"tree": root})).unwrap()["requests"].clone();
+    let request = requests
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|request| request["number"] == number)
+        .unwrap_or_else(|| panic!("no request #{number}: {requests}"))
+        .clone();
+    request["state"].as_str().unwrap().to_owned()
+}
+
+/// What the gate said of request `number`, while it waits.
+fn reasons_of(user: &User, number: u64) -> Vec<String> {
+    let request = pending(user)
+        .into_iter()
+        .find(|request| request["number"] == number)
+        .unwrap();
+    request["reasons"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|reason| reason.as_str().unwrap().to_owned())
+        .collect()
+}
+
+/// A read the gate holds whose path is too long to be said whole on one line: what the
+/// notification says of it is cut.
+fn long_path() -> String {
+    format!("{}/.env", ["folder"; 24].join("/"))
+}
+
 fn rows(user: &User) -> Vec<Value> {
     user.call("notifications.list", json!({})).unwrap()["notifications"]
         .as_array()
@@ -133,6 +166,17 @@ fn a_request_sends_a_desktop_notification_with_allow_and_deny() {
     );
     assert!(notification.body.contains("Read .env"), "{notification:?}");
     assert!(notification.body.contains("app"), "{notification:?}");
+    // Allow is offered on what the user reads whole: the call and every reason the gate held
+    // it for, uncut.
+    let reasons = reasons_of(&desk.user, number);
+    assert!(!reasons.is_empty());
+    for reason in reasons {
+        assert!(
+            notification.body.contains(&reason),
+            "{reason}: {notification:?}"
+        );
+    }
+    assert!(!notification.body.contains('…'), "{notification:?}");
     assert_eq!(notification.label_of("allow"), Some("Allow"));
     assert_eq!(notification.label_of("deny"), Some("Deny"));
     assert!(
@@ -173,6 +217,7 @@ fn allow_from_the_notification_answers_the_request() {
     desk.server.invoke(told[0].id, "allow");
 
     eventually("the request was decided", || pending(&desk.user).is_empty());
+    assert_eq!(state_of(&desk.user, &desk.root, number), "allowed");
     let row = rows(&desk.user)
         .into_iter()
         .find(|row| row["title"] == format!("Request #{number} waits for you"))
@@ -191,6 +236,7 @@ fn deny_from_the_notification_denies_the_request() {
     desk.server.invoke(told[0].id, "deny");
 
     eventually("the request was decided", || pending(&desk.user).is_empty());
+    assert_eq!(state_of(&desk.user, &desk.root, number), "denied");
     let row = rows(&desk.user)
         .into_iter()
         .find(|row| row["title"] == format!("Request #{number} waits for you"))
@@ -474,4 +520,268 @@ fn a_question_rings_too_and_what_only_tells_of_the_daemon_does_not() {
     assert_eq!(told[0].summary, "Asks you a question");
     assert!(told[0].body.contains("Which database?"), "{:?}", told[0]);
     eventually("its sound", || desktop::played(&played) == ["needs-you"]);
+}
+
+#[test]
+fn a_request_too_long_to_read_whole_offers_deny_and_open_but_no_allow() {
+    let Some(desk) = desk(&["actions", "body"]) else {
+        return;
+    };
+    let number = held_number(desk.mcp.call("fs_read", json!({"path": long_path()})));
+
+    let told = desk.server.wait_for(1);
+    assert_eq!(told[0].label_of("allow"), None, "{:?}", told[0]);
+    assert_eq!(told[0].label_of("deny"), Some("Deny"), "{:?}", told[0]);
+    assert_eq!(told[0].label_of("default"), Some("Open"), "{:?}", told[0]);
+
+    // An Allow the notification did not offer, said anyway, answers nothing.
+    desk.server.invoke(told[0].id, "allow");
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(state_of(&desk.user, &desk.root, number), "pending");
+    desk.server.invoke(told[0].id, "deny");
+    eventually("the request was denied", || {
+        state_of(&desk.user, &desk.root, number) == "denied"
+    });
+}
+
+#[test]
+fn a_write_whose_content_the_notification_does_not_show_offers_no_allow() {
+    let Some(desk) = desk(&["actions", "body"]) else {
+        return;
+    };
+    held_number(desk.mcp.call(
+        "fs_write",
+        json!({"path": ".env", "content": "TOKEN=whatever the danger is\n"}),
+    ));
+
+    let told = desk.server.wait_for(1);
+    assert_eq!(told[0].label_of("allow"), None, "{:?}", told[0]);
+    assert_eq!(told[0].label_of("deny"), Some("Deny"), "{:?}", told[0]);
+}
+
+#[test]
+fn with_the_sandbox_gap_open_no_allow_is_offered() {
+    // Where the kernel refuses user namespaces, a confined command reaches the session bus by its
+    // path: what says it is the notification server may be a run's.
+    let user = User::with_fake_agent().with_env("FLOTTILLE_TEST_NO_USER_NAMESPACES", "1");
+    let Some(bus) = Bus::start(&user) else {
+        return;
+    };
+    let server = Notifications::start(&bus, &["actions", "body"]);
+    desktop::with_fake_audio(&user);
+    project(&user);
+    let (_, mcp) = root(&user, "hello");
+
+    held(&mcp);
+
+    let told = server.wait_for(1);
+    assert_eq!(told[0].label_of("allow"), None, "{:?}", told[0]);
+    assert_eq!(told[0].label_of("deny"), Some("Deny"), "{:?}", told[0]);
+}
+
+#[test]
+fn a_click_on_another_servers_notification_of_the_same_number_answers_nothing() {
+    let Some(desk) = desk(&["actions", "body"]) else {
+        return;
+    };
+    let number = held(&desk.mcp);
+    let told = desk.server.wait_for(1);
+    let Desk {
+        user,
+        _bus: bus,
+        server,
+        root,
+        ..
+    } = desk;
+
+    // The server leaves; another takes the name, and numbers its own from 1 again.
+    server.stop();
+    let other = Notifications::start(&bus, &["actions", "body"]);
+    other.invoke(told[0].id, "allow");
+    other.invoke(told[0].id, "default");
+
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(state_of(&user, &root, number), "pending");
+}
+
+#[test]
+fn an_action_said_by_a_connection_that_is_not_the_server_is_ignored() {
+    let Some(desk) = desk(&["actions", "body"]) else {
+        return;
+    };
+    let number = held(&desk.mcp);
+    let told = desk.server.wait_for(1);
+
+    Notifications::forge(&desk._bus, told[0].id, "allow");
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(state_of(&desk.user, &desk.root, number), "pending");
+
+    // The server's own is heard.
+    desk.server.invoke(told[0].id, "deny");
+    eventually("the request was denied", || {
+        state_of(&desk.user, &desk.root, number) == "denied"
+    });
+}
+
+#[test]
+fn a_notification_server_that_never_answers_holds_nothing_up() {
+    let user = User::with_fake_agent();
+    let Some(bus) = Bus::start(&user) else {
+        return;
+    };
+    let _server = Notifications::hung(&bus);
+    let played = desktop::with_fake_audio(&user);
+    project(&user);
+    let (_, mcp) = root(&user, "hello");
+
+    held(&mcp);
+    held(&mcp);
+
+    // Each rings in turn: the second's sound plays although the desktop never answered the
+    // first.
+    let deadline = Instant::now() + Duration::from_secs(40);
+    while desktop::played(&played).len() < 2 {
+        assert!(Instant::now() < deadline, "{:?}", desktop::played(&played));
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let log = desktop::daemon_log(&user);
+    assert_eq!(log.matches("no notification server").count(), 1, "{log}");
+}
+
+#[test]
+fn a_sound_server_that_stalls_holds_no_later_sound_up() {
+    let user = User::with_fake_agent();
+    let pulse = desktop::Pulse::start(&user, true);
+    project(&user);
+    let (_, mcp) = root(&user, "hello");
+
+    held(&mcp);
+    pulse.wait_played(1);
+    // The first sound never ends; a later one still plays.
+    std::thread::sleep(Duration::from_secs(1));
+    held(&mcp);
+    let deadline = Instant::now() + Duration::from_secs(40);
+    while pulse.heard().played < 2 {
+        assert!(Instant::now() < deadline, "{:?}", pulse.heard());
+        held(&mcp);
+        std::thread::sleep(Duration::from_secs(2));
+    }
+}
+
+#[test]
+fn the_sounds_go_to_the_sound_server_on_one_connection_and_the_daemon_rests_after() {
+    let user = User::with_fake_agent();
+    let pulse = desktop::Pulse::start(&user, false);
+    project(&user);
+    let (_, mcp) = root(&user, "hello");
+    let pid = user.status()["pid"].as_u64().unwrap();
+
+    held(&mcp);
+    let first = pulse.wait_played(1);
+    assert!(first.bytes > 4_000, "the samples of the sound: {first:?}");
+    std::thread::sleep(Duration::from_millis(300));
+    let threads = desktop::threads(pid);
+    for count in 2..=4 {
+        held(&mcp);
+        pulse.wait_played(count);
+    }
+    std::thread::sleep(Duration::from_millis(300));
+
+    let heard = pulse.heard();
+    assert_eq!(heard.clients, 1, "one client for every sound: {heard:?}");
+    assert_eq!(
+        desktop::threads(pid),
+        threads,
+        "no thread left behind by a sound"
+    );
+}
+
+#[test]
+fn a_refused_answer_from_the_notification_is_told() {
+    let Some(desk) = desk(&["actions", "body"]) else {
+        return;
+    };
+    let number = held(&desk.mcp);
+    let told = desk.server.wait_for(1);
+
+    // A second click, before the first one's answer withdrew the notification: the request is
+    // decided already, and the daemon says why nothing more was done.
+    desk.server.invoke(told[0].id, "deny");
+    desk.server.invoke(told[0].id, "deny");
+
+    let all = desk.server.wait_for(2);
+    let said = &all[1];
+    assert_eq!(
+        said.summary,
+        format!("Request #{number} was not answered"),
+        "{said:?}"
+    );
+    assert!(said.body.contains("already"), "{said:?}");
+    assert!(
+        desktop::daemon_log(&desk.user).contains(&format!("request #{number}")),
+        "{}",
+        desktop::daemon_log(&desk.user)
+    );
+}
+
+#[test]
+fn a_focus_that_is_not_told_again_counts_as_away() {
+    let user = User::with_fake_agent().with_env("FLOTTILLE_TEST_CLOCK", "1");
+    let Some(bus) = Bus::start(&user) else {
+        return;
+    };
+    let server = Notifications::start(&bus, &["actions", "body"]);
+    desktop::with_fake_audio(&user);
+    project(&user);
+    let (_, mcp) = root(&user, "hello");
+    // A window that said it was focused, then hung: it never says it again.
+    let _window = Window::open(&user, true, None);
+    user.call("test.advance", json!({"ms": 120_000})).unwrap();
+
+    let number = held(&mcp);
+
+    let told = server.wait_for(1);
+    assert_eq!(told[0].summary, format!("Request #{number} waits for you"));
+}
+
+#[test]
+fn a_toast_the_window_could_not_show_goes_to_the_desktop() {
+    let Some(desk) = desk(&["actions", "body"]) else {
+        return;
+    };
+    let watch = desk.user.watch(&[]);
+    let _window = Window::open(&desk.user, true, None);
+    let number = held(&desk.mcp);
+    let events = watch.until(|event| event["name"] == "notification.rang");
+    let id = events.last().unwrap()["data"]["id"].clone();
+    assert!(desk.server.notified().is_empty());
+
+    // The window lost the focus before it drew the toast: it says so.
+    desk.user
+        .call("notifications.unshown", json!({"id": id}))
+        .unwrap();
+
+    let told = desk.server.wait_for(1);
+    assert_eq!(told[0].summary, format!("Request #{number} waits for you"));
+    // Its sound played once, with the toast that was not drawn.
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(desktop::played(&desk.played), ["needs-you"]);
+}
+
+#[test]
+fn the_session_and_its_brief_are_masked_with_the_daemons_secrets() {
+    let user = User::with_fake_agent().with_env("SHOP_API_TOKEN", "plainvalue42");
+    let Some(bus) = Bus::start(&user) else {
+        return;
+    };
+    let server = Notifications::start(&bus, &["actions", "body"]);
+    desktop::with_fake_audio(&user);
+    project(&user);
+    let (_, mcp) = root(&user, "deploy with plainvalue42 now");
+
+    held(&mcp);
+
+    let told = server.wait_for(1);
+    let said = format!("{} {}", told[0].summary, told[0].body);
+    assert!(!said.contains("plainvalue42"), "{said}");
 }
