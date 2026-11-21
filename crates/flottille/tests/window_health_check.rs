@@ -142,8 +142,8 @@ fn the_health_check_is_a_page_of_settings(cx: &mut TestAppContext) {
     until(&shell, cx, "its row says it", |cx| {
         label(cx, "check-flottille-provider-codex-state").as_deref() != Some("Off")
     });
-    assert_ne!(
-        label(cx, "check-flottille-provider-codex-fix").as_deref(),
-        Some("Turn on")
-    );
+    // The fix folds away with the state it mended.
+    until(&shell, cx, "its fix folds away", |cx| {
+        !present(cx, "check-flottille-provider-codex-fix")
+    });
 }

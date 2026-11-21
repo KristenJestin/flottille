@@ -4291,7 +4291,13 @@ fn a_connection_s_client_id_is_set_in_its_dialog(cx: &mut TestAppContext) {
     );
 
     // Edited: the field holds what is saved, so that saving another field keeps it...
-    open_the_form_of(&shell, cx, "remote");
+    until(&shell, cx, "its row", |cx| visible(cx, "connection-remote"));
+    click(cx, "connection-more-remote");
+    click(cx, "edit-connection-remote");
+    until(&shell, cx, "the form opens on it", |cx| {
+        visible(cx, "connection-modal")
+    });
+    settle(cx);
     let fields = section.read_with(cx, |s, _| s.form_fields().unwrap());
     type_in(&fields.about, "A notes server, said again.", cx);
     click(cx, "save-connection");
@@ -4302,7 +4308,13 @@ fn a_connection_s_client_id_is_set_in_its_dialog(cx: &mut TestAppContext) {
     assert_eq!(kept["about"], "A notes server, said again.");
     assert_eq!(kept["client_id"], "client-123");
     // ... and emptying it takes it away.
-    open_the_form_of(&shell, cx, "remote");
+    until(&shell, cx, "its row", |cx| visible(cx, "connection-remote"));
+    click(cx, "connection-more-remote");
+    click(cx, "edit-connection-remote");
+    until(&shell, cx, "the form opens on it", |cx| {
+        visible(cx, "connection-modal")
+    });
+    settle(cx);
     let fields = section.read_with(cx, |s, _| s.form_fields().unwrap());
     type_in(&fields.client_id, "", cx);
     click(cx, "save-connection");
