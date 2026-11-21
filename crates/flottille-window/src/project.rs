@@ -622,12 +622,15 @@ impl Render for ProjectPage {
                 tabs.counted("specs", "Specs", count.to_string())
             })
             .when(self.tracked, |tabs| tabs.tab("progress", "Progress"))
-            .when(self.lists.unread > 0, |tabs| {
-                tabs.counted("routines", "Routines", self.lists.unread.to_string())
-            })
-            .when(self.lists.unread == 0, |tabs| {
-                tabs.tab("routines", "Routines")
-            })
+            // Always counted: the kit scales the count in and out as results come and are opened.
+            .counted(
+                "routines",
+                "Routines",
+                match self.lists.unread {
+                    0 => String::new(),
+                    unread => unread.to_string(),
+                },
+            )
             .on_choose(move |at, _, cx| {
                 let tab = match at {
                     0 => PageTab::Work,
