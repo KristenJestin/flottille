@@ -160,6 +160,27 @@ impl View {
                 },
             })
             .collect();
+        // What a runner that left the list said goes with it.
+        for name in before.keys() {
+            if !self.machines.iter().any(|machine| machine.name == *name) {
+                self.forget(name);
+            }
+        }
+    }
+
+    /// Forgets all of the runner `machine`: it left the list, or its name is another's now.
+    pub(crate) fn forget(&mut self, machine: &str) {
+        self.machines.retain(|view| view.name != machine);
+        self.sessions.retain(|(of, _), _| of != machine);
+        self.requests.retain(|(of, _), _| of != machine);
+        self.asks.retain(|(of, _), _| of != machine);
+        if self
+            .followed
+            .as_ref()
+            .is_some_and(|(of, _, _)| of == machine)
+        {
+            self.followed = None;
+        }
     }
 
     pub(crate) fn online(&mut self, machine: &str, online: bool, why: &str) {

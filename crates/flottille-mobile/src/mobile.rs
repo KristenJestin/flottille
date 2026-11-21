@@ -9,7 +9,7 @@
 //! that a new link misses nothing and repeats nothing. The events go to the view state in
 //! batches: what arrives together is drawn together.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -30,7 +30,7 @@ use crate::{MobileError, link};
 
 /// The hub this phone joined, as it pinned it and last checked its list.
 const HUB_FILE: &str = "hub.json";
-/// The number of the last event seen of each runner.
+/// The number of the last event handed over of each runner, by its machine key.
 const SEEN_FILE: &str = "seen.json";
 /// How long a batch waits for more events after its first.
 const BATCH_WAIT: Duration = Duration::from_millis(30);
@@ -76,6 +76,8 @@ pub(crate) struct Inner {
     handle: tokio::runtime::Handle,
     state: Mutex<State>,
     ids: AtomicU64,
+    /// The number of the next connection.
+    connections: AtomicU64,
     /// Rings when the hub told new addresses: a runner waiting to dial again tries at once.
     told_again: tokio::sync::Notify,
 }
@@ -88,25 +90,32 @@ struct State {
     view: View,
     /// The connection: what `disconnect` ends.
     connection: Option<Connection>,
-    /// The number of the last event seen of each runner.
+    /// The number of the last event handed over to the app of each runner, by its machine key
+    /// (`machine_id`): a name may be another runner's tomorrow.
     seen: BTreeMap<String, u64>,
 }
 
 /// What `connect` started.
 struct Connection {
+    /// Its number: a pump of a connection ended hands nothing over.
+    id: u64,
     notes: UnboundedSender<Note>,
     asker: flottille_link::Asker,
     endpoint: Endpoint,
     links: HashMap<String, Link>,
-    /// The runners a task links to, by name.
-    linking: HashSet<String>,
+    /// The runners a task links to, by name: the machine key it links to, and the task.
+    linking: HashMap<String, (PublicKey, tokio::task::AbortHandle)>,
     told: HashMap<[u8; 32], Vec<String>>,
     tasks: Vec<tokio::task::AbortHandle>,
 }
 
 impl Drop for Connection {
     fn drop(&mut self) {
-        for task in &self.tasks {
+        for task in self
+            .tasks
+            .iter()
+            .chain(self.linking.values().map(|(_, task)| task))
+        {
             task.abort();
         }
         for link in self.links.values() {
@@ -119,6 +128,7 @@ impl Drop for Connection {
 enum Note {
     Event {
         machine: String,
+        key: PublicKey,
         event: Value,
     },
     Loaded {
@@ -186,6 +196,7 @@ impl Core {
                 seen,
             }),
             ids: AtomicU64::new(1),
+            connections: AtomicU64::new(1),
             told_again: tokio::sync::Notify::new(),
         });
         Ok(Arc::new(Core {
@@ -412,6 +423,10 @@ impl Inner {
         match device.take(list) {
             Ok(members) => {
                 let kept = device.clone();
+                let gone = Inner::unlink_gone(&mut state);
+                for name in &gone {
+                    state.view.forget(name);
+                }
                 state.view.members(&members, &own);
                 drop(state);
                 if let Err(error) = write_json(&self.folder.join(HUB_FILE), &kept) {
@@ -427,6 +442,33 @@ impl Inner {
             }
         }
         self.note(Note::Changed);
+    }
+
+    /// Ends the links to the runners that left the list, or whose machine key changed, and their
+    /// tasks: nothing of theirs reaches the phone any more, nothing of the phone's reaches them.
+    /// Their names.
+    fn unlink_gone(state: &mut State) -> Vec<String> {
+        let runners = Inner::runners(state);
+        let Some(connection) = &mut state.connection else {
+            return Vec::new();
+        };
+        let mut gone = Vec::new();
+        connection.linking.retain(|name, (machine, task)| {
+            let still = runners
+                .iter()
+                .any(|(runner, key)| runner == name && key == machine);
+            if !still {
+                task.abort();
+                gone.push(name.clone());
+            }
+            still
+        });
+        for name in &gone {
+            if let Some(link) = connection.links.remove(name) {
+                link.close("this machine left the user's list");
+            }
+        }
+        gone
     }
 
     /// The addresses the hub told for the members' machines.
@@ -465,9 +507,13 @@ impl Inner {
             return;
         };
         for (name, machine) in runners {
-            if connection.linking.insert(name.clone()) {
-                let task = self.handle.spawn(keep_linked(self.clone(), name, machine));
-                connection.tasks.push(task.abort_handle());
+            if !connection.linking.contains_key(&name) {
+                let task = self
+                    .handle
+                    .spawn(keep_linked(self.clone(), name.clone(), machine));
+                connection
+                    .linking
+                    .insert(name, (machine, task.abort_handle()));
             }
         }
     }
@@ -562,9 +608,10 @@ impl Inner {
         Ok(())
     }
 
-    /// The runner's events on `link`, after the last one seen, until the link ends.
-    async fn watch(&self, machine: &str, link: &Link) {
-        let after = self.state().seen.get(machine).copied();
+    /// The runner's events on `link`, after the last one handed over, until the link ends. The
+    /// pump hands them over, and only then counts them seen.
+    async fn watch(&self, machine: &str, key: PublicKey, link: &Link) {
+        let after = self.state().seen.get(&machine_id(&key)).copied();
         let params = match after {
             Some(after) => json!({"after": after}),
             None => json!({}),
@@ -574,19 +621,12 @@ impl Inner {
         };
         while let Some(Ok(frame)) = answers.next().await {
             if let Some(event) = frame.get("event") {
-                let Some(seq) = event["seq"].as_u64() else {
+                if event["seq"].as_u64().is_none() {
                     continue;
-                };
-                {
-                    let mut state = self.state();
-                    // Never twice: a resumed watch starts after the last one seen.
-                    if state.seen.get(machine).is_some_and(|seen| seq <= *seen) {
-                        continue;
-                    }
-                    state.seen.insert(machine.to_owned(), seq);
                 }
                 self.note(Note::Event {
                     machine: machine.to_owned(),
+                    key,
                     event: event.clone(),
                 });
             } else if let Some(error) = frame.get("error") {
@@ -597,16 +637,34 @@ impl Inner {
                 ));
                 return;
             } else if let Some(started) = frame["result"]["after"].as_u64() {
-                self.state()
-                    .seen
-                    .entry(machine.to_owned())
-                    .or_insert(started);
+                // The first watch of a runner: where its events start for this phone, a position
+                // and no event, kept at once so that the next start resumes there.
+                let mut state = self.state();
+                let id = machine_id(&key);
+                if !state.seen.contains_key(&id) {
+                    state.seen.insert(id, started);
+                    keep_seen(&self.folder, &state.seen);
+                }
             }
         }
     }
 
-    fn online(&self, machine: &str, link: Option<Link>, why: &str) {
+    /// The link to the runner `machine`, whose machine key is `key`, up or down. A task the list
+    /// ended in the meantime changes nothing.
+    fn online(&self, machine: &str, key: PublicKey, link: Option<Link>, why: &str) {
         let mut state = self.state();
+        let current = state.connection.as_ref().is_some_and(|connection| {
+            connection
+                .linking
+                .get(machine)
+                .is_some_and(|(linked, _)| *linked == key)
+        });
+        if !current {
+            if let Some(link) = link {
+                link.close("this machine left the user's list");
+            }
+            return;
+        }
         state.view.online(machine, link.is_some(), why);
         if let Some(connection) = &mut state.connection {
             match link {
@@ -660,17 +718,19 @@ async fn connect(inner: Arc<Inner>, listener: Arc<dyn Listener>) -> Result<(), M
         endpoint.name_as(&name);
     }
     let (notes, received) = tokio::sync::mpsc::unbounded_channel();
-    let pump = tokio::spawn(pump(inner.clone(), received, listener));
+    let id = inner.connections.fetch_add(1, Ordering::Relaxed);
+    let pump = tokio::spawn(pump(inner.clone(), id, received, listener));
     let control = tokio::spawn(control(inner.clone(), session));
     {
         let mut state = inner.state();
         state.view.hub("");
         state.connection = Some(Connection {
+            id,
             notes,
             asker,
             endpoint,
             links: HashMap::new(),
-            linking: HashSet::new(),
+            linking: HashMap::new(),
             told: HashMap::new(),
             tasks: vec![pump.abort_handle(), control.abort_handle()],
         });
@@ -719,20 +779,25 @@ async fn keep_linked(inner: Arc<Inner>, name: String, machine: PublicKey) {
         match link::dial(&endpoint, machine, &told, &name).await {
             Ok(linked) => {
                 wait = FIRST_WAIT;
-                inner.online(&name, Some(linked.clone()), "");
+                inner.online(&name, machine, Some(linked.clone()), "");
                 if !loaded {
                     loaded = inner.load(&name, &linked).await.is_ok();
                 }
-                inner.watch(&name, &linked).await;
-                inner.online(&name, None, "its link ended");
+                inner.watch(&name, machine, &linked).await;
+                inner.online(&name, machine, None, "its link ended");
             }
-            Err(error) => inner.online(&name, None, &error.to_string()),
+            Err(error) => inner.online(&name, machine, None, &error.to_string()),
         }
         let still = Inner::runners(&inner.state())
             .iter()
             .any(|(runner, key)| *runner == name && *key == machine);
         if !still {
-            if let Some(connection) = &mut inner.state().connection {
+            if let Some(connection) = &mut inner.state().connection
+                && connection
+                    .linking
+                    .get(&name)
+                    .is_some_and(|(linked, _)| *linked == machine)
+            {
                 connection.linking.remove(&name);
             }
             return;
@@ -745,9 +810,13 @@ async fn keep_linked(inner: Arc<Inner>, name: String, machine: PublicKey) {
     }
 }
 
-/// The notes, in batches: the first, and whatever comes within `BATCH_WAIT` of it.
+/// The notes, in batches: the first, and whatever comes within `BATCH_WAIT` of it. An event
+/// counts as seen once its batch is handed over, never before: a connection that ends, or an app
+/// killed, with events on their way, has them sent again. A pump of a connection that ended hands
+/// nothing over.
 async fn pump(
     inner: Arc<Inner>,
+    connection: u64,
     mut received: UnboundedReceiver<Note>,
     listener: Arc<dyn Listener>,
 ) {
@@ -760,15 +829,40 @@ async fn pump(
                 _ => break,
             }
         }
-        let (batch, seen) = {
+        let (batch, handed) = {
             let mut state = inner.state();
+            if state.connection.as_ref().map(|current| current.id) != Some(connection) {
+                return;
+            }
+            let listed = Inner::runners(&state);
+            // The last number of each runner this batch hands over.
+            let mut handed: BTreeMap<String, u64> = BTreeMap::new();
             let mut events = Vec::new();
             for note in notes {
                 match note {
-                    Note::Event { machine, event } => {
+                    Note::Event {
+                        machine,
+                        key,
+                        event,
+                    } => {
+                        // A runner the list no longer holds says nothing.
+                        if !listed
+                            .iter()
+                            .any(|(runner, listed)| *runner == machine && *listed == key)
+                        {
+                            continue;
+                        }
+                        let id = machine_id(&key);
+                        let seq = event["seq"].as_u64().unwrap_or_default();
+                        // Never twice: a watch again resends what was on its way.
+                        let seen = handed.get(&id).or_else(|| state.seen.get(&id));
+                        if seen.is_some_and(|seen| seq <= *seen) {
+                            continue;
+                        }
+                        handed.insert(id, seq);
                         state.view.apply(&machine, &event);
                         events.push(Event {
-                            seq: event["seq"].as_u64().unwrap_or_default(),
+                            seq,
                             name: event["name"].as_str().unwrap_or_default().to_owned(),
                             data: event["data"].to_string(),
                             machine,
@@ -791,11 +885,32 @@ async fn pump(
                 events,
                 view: state.view.state(),
             };
-            (batch, state.seen.clone())
+            (batch, handed)
         };
-        let _ = write_json(&inner.folder.join(SEEN_FILE), &seen);
         listener.batch(batch);
+        if handed.is_empty() {
+            continue;
+        }
+        let mut state = inner.state();
+        for (id, last) in handed {
+            let seen = state.seen.entry(id).or_insert(last);
+            *seen = (*seen).max(last);
+        }
+        keep_seen(&inner.folder, &state.seen);
     }
+}
+
+/// `seen.json`, written under the state's lock: two writers never cross.
+fn keep_seen(folder: &Path, seen: &BTreeMap<String, u64>) {
+    let _ = write_json(&folder.join(SEEN_FILE), seen);
+}
+
+/// A machine key as `seen.json` names it: its bytes in hexadecimal.
+fn machine_id(key: &PublicKey) -> String {
+    key.as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 fn now_seconds() -> u64 {
