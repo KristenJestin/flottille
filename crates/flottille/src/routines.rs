@@ -414,14 +414,21 @@ fn changed(daemon: &Daemon, routine: &Routine) -> Result<Value, Failure> {
     Ok(json!({"routine": shown}))
 }
 
-/// The routine's last run, while it is under way.
+/// A run of the routine still under way, whatever came after it (a skip): one running, or one
+/// whose work goes on in a session still open.
 fn running(daemon: &Daemon, routine: &Routine) -> Option<Run> {
-    let last = daemon
-        .read(|store| store.routine_runs(&routine.id, 1))
+    let open = |session: &str| {
+        daemon
+            .read(|store| store.agent(session))
+            .ok()
+            .flatten()
+            .is_some_and(|agent| !agent.state.is_final())
+    };
+    daemon
+        .read(|store| store.routine_runs_under_way(&routine.id))
         .ok()?
         .into_iter()
-        .next()?;
-    (last.outcome == routine::RUNNING).then_some(last)
+        .find(|run| run.outcome == routine::RUNNING || run.session.as_deref().is_some_and(open))
 }
 
 /// Says a run's outcome: `routine.ran`, which the notification centre reads.
@@ -622,10 +629,11 @@ fn due_now(daemon: &Arc<Daemon>, routine: &Routine, at: u64, now: u64) {
             routine.missed_hours
         ));
     } else if let Some(last) = running(daemon, routine) {
-        skip(format!(
-            "the last run still runs, in session {}",
-            last.session.as_deref().unwrap_or_default()
-        ));
+        let session = last.session.as_deref().unwrap_or_default();
+        skip(match last.outcome.as_str() {
+            routine::GOES_ON => format!("the last run's work goes on, in session {session}"),
+            _ => format!("the last run still runs, in session {session}"),
+        });
     } else {
         let _ = start(daemon, routine, at);
     }

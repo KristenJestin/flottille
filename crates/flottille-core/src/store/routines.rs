@@ -245,6 +245,17 @@ impl Store {
             .optional()?)
     }
 
+    /// The routine's runs that may still be under way, the last first: those running, and those
+    /// whose work goes on (as long as their session is open, which the caller reads).
+    pub fn routine_runs_under_way(&self, routine: &str) -> Result<Vec<Run>> {
+        let mut statement = self.connection.prepare_cached(&format!(
+            "SELECT {RUN} FROM routine_runs WHERE routine = ?1 \
+             AND outcome IN ('running', 'goes_on') ORDER BY id DESC"
+        ))?;
+        let rows = statement.query_map(params![routine], run_row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     /// Every run under way.
     pub fn running_routine_runs(&self) -> Result<Vec<Run>> {
         let mut statement = self.connection.prepare_cached(&format!(
