@@ -234,7 +234,7 @@ fn the_gradle_distribution_is_checked_against_its_pinned_sum() {
         "{script}"
     );
     let sum = script.find("sha256sum").expect("the script checks a sum");
-    let unzip = script.find("unzip").expect("the script unzips");
+    let unzip = script.find("unzip -q").expect("the script unzips");
     assert!(sum < unzip, "the sum is checked before unzipping: {script}");
     assert!(script.contains("exit 1"), "a mismatch is refused: {script}");
 }
