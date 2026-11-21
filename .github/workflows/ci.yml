@@ -689,12 +689,15 @@ jobs:
     runs-on: ubuntu-22.04
     permissions:
       contents: read
+      # `tools/changelog.sh` reads the notes of the merged pull requests through the API.
+      pull-requests: read
     env:
       # A pull request's alpha is built from its head (the commit and the branch pushed), not from
       # its merge commit, which no one pushed: the scripts below read these two, and fall back on
       # the ref and the commit of the run when they are empty.
       HEAD_REF: ${{ github.head_ref }}
       HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      GH_TOKEN: ${{ github.token }}
     outputs:
       skip: ${{ steps.version.outputs.skip }}
       channel: ${{ steps.version.outputs.channel }}
