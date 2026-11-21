@@ -13,10 +13,9 @@
 //! longer the one at its path, another mount of the same files, a kernel that gives no namespace.
 //! Nothing here protects by reading the configuration: reading it only decides whether to lend.
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
-use std::process::Stdio;
 use std::sync::OnceLock;
 
 /// The variable that plays the account's home (what `ssh` reads `~` as), read by a test build
@@ -314,11 +313,38 @@ pub fn ssh_unlent() -> Option<String> {
 /// Whether the commands Flottille confines are confined by Landlock (`landlock::confined`): what
 /// keeps them from the daemon's runtime folder, the mount namespace's empty folder being reached
 /// through `/proc` too.
-pub(crate) fn landlock_enforced() -> bool {
+fn landlock_enforced() -> bool {
     if cfg!(debug_assertions) && std::env::var_os(NO_LANDLOCK).is_some() {
         return false;
     }
     crate::landlock::abi() >= 2
+}
+
+/// Why no push the gate let through is run outside the sandbox, if none is: the kernel has no
+/// Landlock to keep the folder it runs from out of a run's reach (`runs::push_folder`), or no
+/// `git` only root may change was found at the daemon's start. Every such push is then refused,
+/// over SSH or not.
+pub fn unlifted() -> Option<String> {
+    if !landlock_enforced() {
+        return Some(
+            "the kernel has no Landlock (its second ABI or later), which keeps the folder a push \
+             runs from, in the daemon's runtime folder, out of a run's reach"
+                .into(),
+        );
+    }
+    if crate::git::program().is_none() {
+        return Some(crate::git::UNFOUND.into());
+    }
+    None
+}
+
+/// The sentence that says why no push is lifted ([`unlifted`]), as `flottille doctor` and a push
+/// say it.
+pub fn unlifted_said(why: &str) -> String {
+    format!(
+        "a push an agent asks for is refused, since it would run outside the sandbox: {why}; \
+         push from a terminal of your own (docs/vault.md, \"The runtime folder\")"
+    )
 }
 
 /// The sentence that says why, as `flottille doctor` and a push say it.
@@ -802,20 +828,14 @@ fn included(file: &Path, home: Option<&Path>, seen: &mut Vec<PathBuf>) -> Result
 /// The values of `include.path` and `includeIf.<condition>.path` in `file` itself, as git reads
 /// them (`git config --file`, not what they include).
 fn include_paths(file: &Path) -> Vec<String> {
-    let listed = crate::children::spawn_std(
-        std::process::Command::new(crate::git::own())
-            .args(["config", "--null", "--file"])
-            .arg(file)
-            .args(["--get-regexp", r"^include(if\..*)?\.path$"])
-            .current_dir("/")
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null()),
-    )
-    .and_then(std::process::Child::wait_with_output)
-    .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
-    .unwrap_or_default();
+    let listed = crate::git::start_read(&[
+        OsStr::new("config"),
+        OsStr::new("--null"),
+        OsStr::new("--file"),
+        file.as_os_str(),
+        OsStr::new("--get-regexp"),
+        OsStr::new(r"^include(if\..*)?\.path$"),
+    ]);
     listed
         .split('\0')
         .filter_map(|entry| entry.split_once('\n'))

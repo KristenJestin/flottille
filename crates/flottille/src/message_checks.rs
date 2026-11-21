@@ -251,6 +251,11 @@ pub async fn push(
     let tried = dry_run(git, rest, end, at.folder, env, outside)
         .await
         .map_err(unknown)?;
+    if outside {
+        let mut words = said.words.clone();
+        words.extend(rest.iter().skip(end + 1).cloned());
+        asked_for(&said.rewrites, &words, &tried)?;
+    }
     format_kept(at, &project, &tried)?;
     if checks.is_empty() {
         return Ok(());
@@ -320,6 +325,21 @@ pub fn push_options(words: &[String]) -> Result<(), String> {
     })
 }
 
+/// The repository the words of a push after `push` name (the first that is no option), if they
+/// name one; why they cannot be read, when they cannot.
+pub(crate) fn pushed_to(rest: &[String]) -> Result<Option<String>, String> {
+    let end = rest
+        .iter()
+        .position(|word| word == "--" || word == "--end-of-options")
+        .unwrap_or(rest.len());
+    let said = read(&rest[..end], &PUSH)?;
+    Ok(said
+        .words
+        .into_iter()
+        .chain(rest.iter().skip(end + 1).cloned())
+        .next())
+}
+
 /// A ref a push sends, as git's dry run says it: its flag (`*` a new one), its source and its
 /// destination.
 type Pushed = (String, String, String);
@@ -377,6 +397,46 @@ async fn dry_run(
         ));
     }
     Ok(remotes)
+}
+
+/// Refuses a push that would force or delete a ref of a remote (git's dry run, `tried`) its line
+/// does not ask to: an option that does (`rewrites`), a refspec `+…` or `:…` among its `words`.
+/// What the push sends where its line names nothing is settings' to say, and a push the gate let
+/// through runs outside the sandbox, with the user's sign-in: the gate judged the line, not them.
+fn asked_for(
+    rewrites: &[&str],
+    words: &[String],
+    tried: &[(String, Vec<Pushed>)],
+) -> Result<(), String> {
+    let forces = rewrites
+        .iter()
+        .any(|option| ["force", "force-with-lease", "mirror"].contains(option))
+        || words.iter().any(|word| word.starts_with('+'));
+    let deletes = rewrites
+        .iter()
+        .any(|option| ["delete", "prune", "mirror"].contains(option))
+        || words
+            .iter()
+            .any(|word| word.starts_with(':') || word.starts_with("+:"));
+    for (url, refs) in tried {
+        for (flag, _, destination) in refs {
+            let (what, asked, how) = match flag.as_str() {
+                "+" => ("a forced update", forces, "a +refspec or --force"),
+                "-" => ("the deletion", deletes, "a :refspec, --delete or --prune"),
+                _ => continue,
+            };
+            if !asked {
+                return Err(format!(
+                    "refused: git's dry run of the push shows {what} of {destination} on {url}, \
+                     which its line does not ask for ({how}): settings chose it (a \
+                     remote.<name>.push), and the gate judged the line alone; name the refs on \
+                     the line, and ask for it there if you mean it; {}",
+                    Checked::Pushed.nothing()
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Refuses a push that makes a branch outside the project's branch format on a remote, naming the
@@ -927,6 +987,10 @@ struct Said {
     no_verify: bool,
     /// Why the message comes from elsewhere than the line, the first said.
     elsewhere: Option<&'static str>,
+    /// The options of a push on that force or delete a remote's refs (`force`, `delete`…).
+    rewrites: Vec<&'static str>,
+    /// The words that are no option, in their order (a push's remote and refspecs).
+    words: Vec<String>,
 }
 
 enum Part {
@@ -957,6 +1021,8 @@ enum Opt {
     Submodules(bool),
     /// Says whether a commit runs its hooks (`--verify`, `--no-verify`).
     Verify(bool),
+    /// Turns on or off a push's option that forces or deletes a remote's refs: its name.
+    Rewrite(&'static str, bool),
     Flag,
 }
 
@@ -1090,8 +1156,25 @@ const PUSH: Options = Options {
     matter: &[
         ("recurse-submodules", Opt::Submodules(true)),
         ("no-recurse-submodules", Opt::Submodules(false)),
+        ("force", Opt::Rewrite("force", true)),
+        ("no-force", Opt::Rewrite("force", false)),
+        ("force-with-lease", Opt::Rewrite("force-with-lease", true)),
+        (
+            "no-force-with-lease",
+            Opt::Rewrite("force-with-lease", false),
+        ),
+        ("mirror", Opt::Rewrite("mirror", true)),
+        ("no-mirror", Opt::Rewrite("mirror", false)),
+        ("delete", Opt::Rewrite("delete", true)),
+        ("no-delete", Opt::Rewrite("delete", false)),
+        ("prune", Opt::Rewrite("prune", true)),
+        ("no-prune", Opt::Rewrite("prune", false)),
     ],
-    letters: &[('o', Opt::Valued)],
+    letters: &[
+        ('o', Opt::Valued),
+        ('f', Opt::Rewrite("force", true)),
+        ('d', Opt::Rewrite("delete", true)),
+    ],
 };
 
 /// The options of a command's words, read as git reads them, up to `--`.
@@ -1114,6 +1197,8 @@ fn read(words: &[String], options: &Options) -> Result<Said, String> {
                 _ => value,
             };
             take(&mut said, opt, value.unwrap_or_default())?;
+        } else if !word.starts_with('-') || word == "-" {
+            said.words.push(word.to_owned());
         } else if let Some(cluster) = word.strip_prefix('-').filter(|c| !c.is_empty()) {
             for (index, letter) in cluster.char_indices() {
                 let opt = options
@@ -1153,6 +1238,12 @@ fn take(said: &mut Said, opt: Opt, value: &str) -> Result<(), String> {
         Opt::Verify(on) => said.no_verify = !on,
         Opt::Switch(name) => said.switches.push(name),
         Opt::Submodules(_) => said.submodules = Some(value.to_owned()),
+        Opt::Rewrite(name, on) => {
+            said.rewrites.retain(|said| *said != name);
+            if on {
+                said.rewrites.push(name);
+            }
+        }
         Opt::Valued | Opt::Stuck | Opt::Flag => {}
     }
     Ok(())
@@ -1226,6 +1317,23 @@ mod tests {
 
     fn words(line: &str) -> Vec<String> {
         split_line(line).unwrap()
+    }
+
+    #[test]
+    fn a_forced_deletion_the_line_asks_for_is_let_through() {
+        let tried = vec![(
+            "git@forge.invalid:acme/app.git".to_owned(),
+            vec![(
+                "-".to_owned(),
+                "(delete)".to_owned(),
+                "refs/heads/old".to_owned(),
+            )],
+        )];
+
+        let asked = asked_for(&[], &words("origin +:refs/heads/old"), &tried);
+
+        assert!(asked.is_ok(), "{asked:?}");
+        assert!(asked_for(&[], &words("origin +main"), &tried).is_err());
     }
 
     /// A place of one repository, in `root`.
