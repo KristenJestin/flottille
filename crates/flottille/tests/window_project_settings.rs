@@ -1029,6 +1029,10 @@ fn the_window_says_why_a_push_is_not_lifted_without_landlock(cx: &mut TestAppCon
         .unwrap();
     let why = settings["pushes_unlifted"].as_str().unwrap_or_default();
     assert!(why.contains("no Landlock"), "{settings}");
+    assert!(
+        why.contains("the folder a push runs from"),
+        "one sentence, no run of spaces: {why}"
+    );
     let (shell, cx) = window(&user, cx);
     open_settings(&shell, "app", cx);
 
