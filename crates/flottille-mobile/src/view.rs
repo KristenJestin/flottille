@@ -422,12 +422,15 @@ mod tests {
     fn a_phone_removed_from_the_list_claims_no_role_and_says_so() {
         let (owner, phone) = (DeviceKey::make().unwrap(), DeviceKey::make().unwrap());
         let mut list = MemberList::default();
-        for (key, name) in [(&owner, "laptop"), (&phone, "phone")] {
+        for (key, name, role) in [
+            (&owner, "server", Role::Runner),
+            (&phone, "phone", Role::Controller),
+        ] {
             list.sign(
                 Action::Add {
                     key: key.public(),
                     name: name.to_owned(),
-                    role: Role::Controller,
+                    role,
                 },
                 &owner,
             );
