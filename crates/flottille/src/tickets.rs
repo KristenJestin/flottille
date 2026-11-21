@@ -2403,16 +2403,18 @@ async fn list_work_items(
         });
     }
     if filters.full {
-        use futures::StreamExt as _;
         // A few at a time: a review is a read of the user's own tickets, not a load on the site.
-        let read: Vec<Result<Value, String>> = futures::stream::iter(
-            tickets
-                .iter()
-                .map(|t| viewed(&t.reference, site, REVIEW_FIELDS)),
-        )
-        .buffered(REVIEW_READS)
-        .collect()
-        .await;
+        let keys: Vec<String> = tickets.iter().map(|t| t.reference.clone()).collect();
+        let mut read: Vec<Result<Value, String>> = Vec::with_capacity(keys.len());
+        for some in keys.chunks(REVIEW_READS) {
+            read.extend(
+                futures::future::join_all(
+                    some.iter()
+                        .map(|key| async move { viewed(key, site, REVIEW_FIELDS).await }),
+                )
+                .await,
+            );
+        }
         for (ticket, item) in tickets.iter_mut().zip(read) {
             ticket.detail = Some(item.map(|item| work_item(&ticket.reference, &item, site)));
         }
