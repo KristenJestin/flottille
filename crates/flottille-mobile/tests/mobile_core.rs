@@ -1464,6 +1464,24 @@ async fn leaving_removes_this_device_from_the_list_and_says_it() {
     place.served.stop().await;
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_phone_that_left_is_not_joined_when_it_starts_again() {
+    let place = Place::new().await;
+    let (phone, _taken) = place.linked().await;
+    tokio::time::timeout(Duration::from_secs(10), phone.leave())
+        .await
+        .expect("left within 10 s")
+        .unwrap();
+    assert!(!phone.joined(), "the phone that left says it is not joined");
+    // The app starts again over the same folder: the hub's file and the key are gone, so it does
+    // not dial the hub with a key the hub revoked.
+    let again = Core::new(place.phone_folder(), Arc::new(TestSealer)).unwrap();
+    assert!(!again.joined(), "the phone starts again as not joined");
+    assert!(again.fingerprint().is_none());
+    assert!(again.view().machines.is_empty(), "{:#?}", again.view());
+    place.served.stop().await;
+}
+
 /// The view's line of the runner `name`.
 fn machine(view: &ViewState, name: &str) -> flottille_mobile::MachineView {
     view.machines
