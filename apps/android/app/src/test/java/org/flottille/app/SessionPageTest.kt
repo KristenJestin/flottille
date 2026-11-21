@@ -43,8 +43,8 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 
 /** The pictures a fake phone's gallery and camera give, and what the app is asked for. */
-class FakePictures(var gallery: List<Picture> = emptyList(), var camera: Picture? = null) : PictureSource {
-    override fun gallery(done: (List<Picture>) -> Unit) = done(gallery)
+class FakePictures(var gallery: List<Picture> = emptyList(), var camera: Picture? = null, var refused: String? = null) : PictureSource {
+    override fun gallery(done: (Pictured) -> Unit) = done(Pictured(gallery, refused))
 
     override fun camera(done: (Picture?) -> Unit) = done(camera)
 }
@@ -117,8 +117,17 @@ class SessionPageTest {
         children: List<Child> = emptyList(),
     ) = Conversation("server", "a1", "Fix the login", mode, working, child, false, more, entries, children)
 
-    private fun request(number: Long = 4, call: String = "rm -rf build", base: Boolean = false) =
-        Request("server", number, "a1", "run", call, base, "it deletes files", listOf("it deletes files"), emptyList())
+    private fun request(
+        number: Long = 4,
+        call: String = "rm -rf build",
+        base: Boolean = false,
+        tool: String = "run",
+        kind: String = "call",
+        why: String = "It deletes files.",
+        always: String = if (base) "Flottille always asks you for this, in Ask and in Auto: it may lose work." else "",
+        source: String = "asked by the conversation · #$number",
+        judgement: String = "",
+    ) = Request("server", number, "a1", tool, kind, call, base, judgement, why, always, source, emptyList())
 
     private fun ask(asked: Long = 12) = Ask(
         "server",
@@ -341,6 +350,7 @@ class SessionPageTest {
     fun a_request_already_answered_says_so_and_folds() {
         val phone = phone(requests = listOf(request(4)))
         phone.refusals["answer"] = "request #4 is decided already"
+        phone.gone += "answer"
         start(phone)
         open()
         rule.mainClock.autoAdvance = false
@@ -349,6 +359,108 @@ class SessionPageTest {
         assertHas("request:4", "request #4 is decided already")
         rule.mainClock.advanceTimeBy(6_000)
         rule.onNodeWithTag("request:4").assertDoesNotExist()
+    }
+
+    @Test
+    fun a_connection_proposal_cannot_be_allowed_from_the_card() {
+        val phone = phone(requests = listOf(request(9, "connections save docs", tool = "connections", kind = "action")))
+        start(phone)
+        open()
+        // As in the window: what it would write is read on a computer, never allowed from here.
+        rule.onNodeWithTag("allow:9").assertDoesNotExist()
+        rule.onNodeWithTag("deny:9").assertIsDisplayed()
+        assertHas("request:9", "Open it on a computer")
+        rule.onNodeWithTag("deny:9").performClick()
+        rule.waitForIdle()
+        assertEquals(listOf(Triple("server", 9L, false)), phone.allowed)
+    }
+
+    @Test
+    fun a_call_still_has_its_allow_and_a_connection_call_is_not_a_proposal() {
+        val phone = phone(requests = listOf(request(4, tool = "connections", kind = "call")))
+        start(phone)
+        open()
+        rule.onNodeWithTag("allow:4").assertIsDisplayed()
+    }
+
+    @Test
+    fun a_request_card_shows_what_the_window_shows() {
+        val phone = phone(
+            requests = listOf(
+                request(
+                    4,
+                    base = true,
+                    why = "It deletes files. Outside the project. Check the tests forwards it: it needs the build gone.",
+                    always = "Flottille always asks you this, in every mode: allowing it lets this session write to that one.",
+                    source = "asked by Check the tests · forwarded by agent a2 · #4",
+                    judgement = "The judge (claude haiku) asks you: it deletes files",
+                ),
+            ),
+        )
+        start(phone)
+        open()
+        // Every reason and who forwarded it, who asked, the judge, and the core's own warning.
+        assertHas("request:4", "Outside the project.")
+        assertHas("request:4", "Check the tests forwards it: it needs the build gone.")
+        assertHas("request:4", "asked by Check the tests · forwarded by agent a2 · #4")
+        assertHas("request:4", "The judge (claude haiku) asks you: it deletes files")
+        assertHas("request:4", "allowing it lets this session write to that one")
+        // The app writes no warning of its own: it contradicted the daemon's wording.
+        rule.onAllNodesWithText("It comes back every time, in every mode", substring = true).assertCountEquals(0)
+    }
+
+    @Test
+    fun full_is_asked_to_be_confirmed_on_the_phone() {
+        val phone = phone(page(mode = "auto"))
+        start(phone)
+        open()
+        rule.onNodeWithTag("mode:full").performClick()
+        rule.waitForIdle()
+        // The one confirmation dialog, and nothing sent while it is open.
+        rule.onNodeWithText("Switch to Full mode?").assertIsDisplayed()
+        assertTrue(phone.modes.isEmpty())
+        rule.onNodeWithText("Cancel").performClick()
+        rule.waitForIdle()
+        rule.onNodeWithText("Switch to Full mode?").assertDoesNotExist()
+        assertTrue(phone.modes.isEmpty())
+        // Confirmed, it is sent.
+        rule.onNodeWithTag("mode:full").performClick()
+        rule.waitForIdle()
+        rule.onNodeWithText("Switch to Full").performClick()
+        rule.waitForIdle()
+        assertEquals(listOf(Triple("server", "a1", "full")), phone.modes)
+        // Ask and Auto need no confirmation.
+        rule.onNodeWithTag("mode:ask").performClick()
+        rule.waitForIdle()
+        assertEquals(Triple("server", "a1", "ask"), phone.modes.last())
+    }
+
+    @Test
+    fun a_refusal_that_is_not_the_end_of_the_request_keeps_its_card() {
+        val phone = phone(requests = listOf(request(4)))
+        phone.refusals["answer"] = "the link to server ended before it answered"
+        start(phone)
+        open()
+        rule.mainClock.autoAdvance = false
+        rule.onNodeWithTag("allow:4").performClick()
+        rule.mainClock.advanceTimeBy(6_000)
+        // The card stays, with its buttons, and the reason is said as a toast; the user can retry.
+        rule.onNodeWithTag("request:4").assertExists()
+        rule.onNodeWithTag("allow:4").assertIsEnabled()
+        phone.refusals.remove("answer")
+        rule.onNodeWithTag("allow:4").performClick()
+        rule.mainClock.advanceTimeBy(300)
+        assertEquals(listOf(Triple("server", 4L, true)), phone.allowed)
+    }
+
+    @Test
+    fun a_picture_the_read_refused_is_said() {
+        val phone = phone()
+        pictures.refused = "huge.png is over 5 MiB"
+        start(phone)
+        open()
+        rule.onNodeWithText("Gallery").performClick()
+        rule.onNodeWithText("huge.png is over 5 MiB").assertIsDisplayed()
     }
 
     /** The node tagged [tag] holds [text] somewhere inside it: a card is a few texts, not one. */
@@ -369,6 +481,8 @@ class SessionPageTest {
         rule.onNodeWithTag("mode:ask").assertIsDisplayed()
         rule.onNodeWithTag("mode:full").assertIsDisplayed()
         rule.onNodeWithTag("mode:full").performClick()
+        rule.waitForIdle()
+        rule.onNodeWithText("Switch to Full").performClick()
         rule.waitForIdle()
         assertEquals(listOf(Triple("server", "a1", "full")), phone.modes)
         update(phone) { it.copy(mode = "full") }

@@ -153,8 +153,8 @@ struct Runner {
     emitted: tokio::sync::broadcast::Sender<Value>,
     taken: Arc<Mutex<Vec<Took>>>,
     answers: Arc<Mutex<HashMap<String, Value>>>,
-    /// The methods it refuses, with the sentence it says: a daemon's own refusal.
-    refusals: Arc<Mutex<HashMap<String, String>>>,
+    /// The methods it refuses, with the code and the sentence it says: a daemon's own refusal.
+    refusals: Arc<Mutex<HashMap<String, (String, String)>>>,
     links: Arc<Mutex<Vec<Link>>>,
     requests: Arc<Mutex<Requests>>,
     /// The watches subscribed, which no new event can miss from then on.
@@ -215,10 +215,15 @@ impl Runner {
 
     /// From now on it refuses `method` with `why`, as its daemon would.
     fn refuse(&self, method: &str, why: &str) {
+        self.refuse_as(method, "refused", why);
+    }
+
+    /// As [`Runner::refuse`], with the code of the daemon's error (`not-found`, `refused`).
+    fn refuse_as(&self, method: &str, code: &str, why: &str) {
         self.refusals
             .lock()
             .unwrap()
-            .insert(method.to_owned(), why.to_owned());
+            .insert(method.to_owned(), (code.to_owned(), why.to_owned()));
     }
 
     /// What its daemon gives of the session `agent` as `agent.show`: the events it emitted of it
@@ -350,8 +355,9 @@ impl Runner {
                         .unwrap()
                         .get(&accepted.method)
                         .cloned();
-                    if let Some(why) = refusal {
-                        let refused = json!({"id": accepted.id, "error": {"code": "refused", "message": why}});
+                    if let Some((code, why)) = refusal {
+                        let refused =
+                            json!({"id": accepted.id, "error": {"code": code, "message": why}});
                         stream.send(&line(refused)).await;
                         stream.end().await;
                         return;
@@ -2132,11 +2138,14 @@ async fn a_request_is_allowed_or_denied() {
     // The call as the window shows it, and the base class that always asks.
     assert_eq!(base.call, "rm -rf build");
     assert!(base.base);
-    assert_eq!(base.reason, "it deletes files");
+    assert_eq!(base.kind, "call");
     let judged = view.requests.iter().find(|r| r.number == 5).unwrap();
     assert_eq!(judged.call, r#"fs_read {"path":".env"}"#);
     assert!(!judged.base);
-    assert_eq!(judged.reason, "it reads secrets");
+    assert_eq!(
+        judged.judgement,
+        "The judge (claude haiku) asks you: it reads secrets"
+    );
 
     phone.answer("server".to_owned(), 4, true).await.unwrap();
     phone.answer("server".to_owned(), 5, false).await.unwrap();
@@ -2148,16 +2157,161 @@ async fn a_request_is_allowed_or_denied() {
         params_of(&place.runner.taken("approval.deny")[0]),
         json!({"number": 5})
     );
+    place.served.stop().await;
+}
 
-    // One that is answered already or gone: the daemon refuses and its sentence comes back.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_request_card_says_what_the_window_says() {
+    let place = Place::new().await;
+    let (phone, _taken) = place.linked().await;
+    place.runner.emit(
+        "approval.requested",
+        json!({"number": 6, "agent": "a1", "tool": "run", "call": {"line": "rm -rf build"},
+            "reasons": ["it deletes files", "outside the project"], "class": "base",
+            "kind": "call", "says": [], "judgement": null, "held_by": "user",
+            "forwards": [{"by": "a2", "why": "it needs the build gone"}]}),
+    );
+    place.runner.emit(
+        "approval.requested",
+        json!({"number": 7, "agent": "a1", "tool": "session_send", "call": {"line": "hello"},
+            "reasons": ["this session has not written to that one before: the user lets it"],
+            "class": "base", "kind": "call", "says": [], "judgement": null, "held_by": "user"}),
+    );
+    let view = until(&phone, "both requests", |view| view.requests.len() == 2).await;
+    let base = view.requests.iter().find(|r| r.number == 6).unwrap();
+    // Every reason and who forwarded it, as the window says them, and who asked.
+    assert_eq!(
+        base.why,
+        "It deletes files. Outside the project. Agent a2 forwards it: it needs the build gone."
+    );
+    assert_eq!(
+        base.source,
+        "asked by agent a1 · forwarded by agent a2 · #6"
+    );
+    // The strong warning of a base request: the window's own sentence, shared.
+    assert_eq!(base.always, flottille_protocol::words::BASE_SAYS);
+    assert!(base.always.contains("in Ask and in Auto"));
+    // The first message to another session says what it asks, not the generic warning.
+    let leave = view.requests.iter().find(|r| r.number == 7).unwrap();
+    assert_eq!(leave.always, flottille_protocol::words::LEAVE_SAYS);
+    place.served.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_request_card_says_which_agent_of_the_tree_asked() {
+    let place = Place::new().await;
+    place.runner.show(a1("ask", "idle"), None);
+    place.runner.answer(
+        "agent.tree",
+        tree_of(json!([
+            {"agent": a1("ask", "idle"), "doing": "idle", "waiting_on": null,
+                "needs_user": false, "questions": []},
+            {"agent": {"id": "c1", "title": "Check the tests", "parent": "a1", "depth": 1,
+                "role": "worker", "state": "working", "model": "sonnet"},
+                "doing": "working", "waiting_on": null, "needs_user": false, "questions": []}])),
+    );
+    let (phone, _taken) = place.linked().await;
+    phone
+        .follow("server".to_owned(), "a1".to_owned())
+        .await
+        .unwrap();
+    for (number, agent) in [(1, "a1"), (2, "c1")] {
+        place.runner.emit(
+            "approval.requested",
+            json!({"number": number, "agent": agent, "tool": "run", "call": {"line": "ls"},
+                "reasons": ["it runs"], "class": "judge", "kind": "call", "says": [],
+                "judgement": null, "held_by": "user"}),
+        );
+    }
+    let view = until(&phone, "both requests", |view| view.requests.len() == 2).await;
+    let source = |number| {
+        view.requests
+            .iter()
+            .find(|r| r.number == number)
+            .unwrap()
+            .source
+            .clone()
+    };
+    assert_eq!(source(1), "asked by the conversation · #1");
+    assert_eq!(source(2), "asked by Check the tests · #2");
+    place.served.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_connection_proposal_is_an_action_the_phone_cannot_allow() {
+    let place = Place::new().await;
+    let (phone, _taken) = place.linked().await;
+    place.runner.emit(
+        "approval.requested",
+        json!({"number": 8, "agent": "a1", "tool": "connections", "call": {"action": "save"},
+            "reasons": ["it writes a connection"], "class": "judge", "kind": "action",
+            "says": ["Adds the connection `docs`."], "judgement": null, "held_by": "user"}),
+    );
+    let view = until(&phone, "the request", |view| !view.requests.is_empty()).await;
+    assert_eq!(view.requests[0].kind, "action");
+    assert_eq!(view.requests[0].tool, "connections");
+    place.served.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_answer_for_a_request_that_is_decided_or_gone_says_so() {
+    let place = Place::new().await;
+    let (phone, _taken) = place.linked().await;
+    let answer = || phone.answer("server".to_owned(), 4, true);
+    // The daemon's own words for a request already decided, and for one it has not.
+    place.runner.refuse(
+        "approval.approve",
+        "request #4 is already decided: it was once",
+    );
+    assert!(matches!(
+        answer().await.unwrap_err(),
+        MobileError::Gone { .. }
+    ));
     place
         .runner
-        .refuse("approval.approve", "request #4 is decided already");
+        .refuse_as("approval.approve", "not-found", "there is no request #4");
+    assert!(matches!(
+        answer().await.unwrap_err(),
+        MobileError::Gone { .. }
+    ));
+    // Any other refusal is not the end of the request: its card stays.
+    place
+        .runner
+        .refuse("approval.approve", "waiting for the vault entries it names");
+    assert!(matches!(
+        answer().await.unwrap_err(),
+        MobileError::Refused { .. }
+    ));
+    place.served.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_message_whose_escapes_pass_the_frame_is_refused() {
+    let place = Place::new().await;
+    let (phone, _taken) = place.linked().await;
+    // 400,000 quotes are 800 KB as parameters, but the request carries them as a string, escaped
+    // a second time: the frame is past 1 MiB while the parameters are not.
+    let quotes = "\"".repeat(400_000);
     let why = phone
-        .answer("server".to_owned(), 4, true)
+        .send("server".to_owned(), "a1".to_owned(), quotes, vec![])
         .await
-        .unwrap_err();
-    assert_eq!(why.to_string(), "request #4 is decided already");
+        .unwrap_err()
+        .to_string();
+    assert!(why.contains("too big for the link"), "{why}");
+    assert!(
+        place.runner.taken("agent.send").is_empty(),
+        "nothing was sent"
+    );
+    // The link is still there for what follows.
+    phone
+        .send(
+            "server".to_owned(),
+            "a1".to_owned(),
+            "hello".to_owned(),
+            vec![],
+        )
+        .await
+        .unwrap();
     place.served.stop().await;
 }
 

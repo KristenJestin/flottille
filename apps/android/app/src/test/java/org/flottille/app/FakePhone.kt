@@ -57,8 +57,11 @@ class FakePhone(initial: PhoneView = PhoneView()) : Phone {
     /** The bytes of the pictures of a conversation, by name. */
     val pictureBytes = mutableMapOf<String, ByteArray>()
 
+    /** The methods whose refusal says the request or the question is decided or gone. */
+    val gone = mutableSetOf<String>()
+
     private fun refuse(method: String) {
-        refusals[method]?.let { throw PhoneException(it) }
+        refusals[method]?.let { throw PhoneException(it, gone = method in gone) }
     }
 
     override val view: PhoneView get() = state.value

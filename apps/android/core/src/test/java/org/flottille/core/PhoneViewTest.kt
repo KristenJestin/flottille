@@ -67,8 +67,8 @@ class PhoneViewTest {
             ),
             requests = listOf(
                 RequestView(
-                    machine = "server", number = 3uL, agent = "a1", tool = "shell", reasons = emptyList(),
-                    call = "shell", base = false, says = emptyList(), reason = "",
+                    machine = "server", number = 3uL, agent = "a1", tool = "shell", kind = "call",
+                    call = "shell", base = false, says = emptyList(), judgement = "", why = "", always = "", source = "",
                 ),
             ),
             asks = listOf(
@@ -106,8 +106,9 @@ class PhoneViewTest {
             ),
             requests = listOf(
                 RequestView(
-                    machine = "server", number = 4uL, agent = "a1", tool = "run", reasons = listOf("it deletes"),
-                    call = "rm -rf build", base = true, says = emptyList(), reason = "it deletes",
+                    machine = "server", number = 4uL, agent = "a1", tool = "connections", kind = "action",
+                    call = "rm -rf build", base = true, says = listOf("Adds docs."), judgement = "The judge asks you: x",
+                    why = "It deletes.", always = "It always asks.", source = "asked by the conversation · #4",
                 ),
             ),
             asks = listOf(
@@ -126,7 +127,13 @@ class PhoneViewTest {
         assertEquals(Conversation("server", "a1", "Fix the login", "full", true, false, false, true, page.entries, page.children), page)
         assertEquals(Entry(3, "user", "look [Image 1: shot.png]", listOf("shot.png")), page.entries.single())
         assertEquals(Child("c1", "Check", "running", "worker", 1), page.children.single())
-        assertEquals(Request("server", 4, "a1", "run", "rm -rf build", true, "it deletes", listOf("it deletes"), emptyList()), view.requests.single())
+        assertEquals(
+            Request(
+                "server", 4, "a1", "connections", "action", "rm -rf build", true, "The judge asks you: x", "It deletes.",
+                "It always asks.", "asked by the conversation · #4", listOf("Adds docs."),
+            ),
+            view.requests.single(),
+        )
         val ask = view.asks.single()
         assertEquals(12L, ask.asked)
         assertEquals(AskQuestion("Push?", listOf(AskOption("Yes", "Squash first")), multiple = true), ask.questions.single())
