@@ -302,9 +302,11 @@ pub struct Shell {
     /// The wait for that first read: past [`link::NOT_ANSWERING`] the window is back on this
     /// machine.
     switch_wait: Option<Task<()>>,
-    /// The session of another machine to open once that machine's first read came: the machine
-    /// and its id there.
-    open_there: Option<(String, String)>,
+    /// The session to open once the first read of the machine brought in front came: that
+    /// machine (`None`: this one) and the session's id there.
+    open_there: Option<(Option<String>, String)>,
+    /// The rows of other machines' sessions whose close was asked: gone from the list at once.
+    closing: HashSet<String>,
     /// The daemon's last read as it gave it, before the sessions on other machines are added
     /// under their pilots.
     read: Option<Snapshot>,
@@ -653,6 +655,7 @@ impl Shell {
             switching: false,
             switch_wait: None,
             open_there: None,
+            closing: HashSet::new(),
             read: None,
             choosing: None,
             updates: Some(updates),
@@ -674,12 +677,6 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let crate::machines::News::Read(read) = &news {
-            let shown = self.aim.machine();
-            self.sidebar.update(cx, |sidebar, cx| {
-                sidebar.set_machines((**read).clone(), shown, cx)
-            });
-        }
         let read = matches!(news, crate::machines::News::Read(_));
         self.machines
             .update(cx, |section, cx| section.news(news, window, cx));
@@ -695,20 +692,93 @@ impl Shell {
         }
     }
 
-    /// `read` with the sessions this machine's agents started on other machines under their
-    /// pilots, while this machine is shown: another machine's tree is its own.
+    /// `read`, of the machine in front, with the sessions of every other machine (`docs/remote.md`,
+    /// "One list of every machine"), and, while this machine is in front, those its agents started
+    /// on others under their pilots: another machine's tree is its own.
     fn with_elsewhere(&self, read: Snapshot, cx: &App) -> Snapshot {
-        match (self.aim.machine(), self.machines.read(cx).machines()) {
-            (None, Some(machines)) => read.with_elsewhere(machines),
-            _ => read,
+        let Some(machines) = self.machines.read(cx).machines() else {
+            return read;
+        };
+        let front = self.aim.machine();
+        let read = match front {
+            None => read.with_elsewhere(machines),
+            Some(_) => read,
+        };
+        let mut merged = read.with_lists(machines, front.as_deref());
+        merged
+            .elsewhere
+            .retain(|session| !self.closing.contains(&session.id));
+        merged
+    }
+
+    /// Opens the session `agent` of `machine`: the window brings that machine in front, then
+    /// opens that session once its first read came. The switch's own wait applies: past it, the
+    /// window is back on this machine and says why.
+    pub fn open_elsewhere(&mut self, machine: String, agent: String, cx: &mut Context<Self>) {
+        self.choose_then(Some(machine.clone()), Some((Some(machine), agent)), cx);
+    }
+
+    /// Opens the session `agent` of this machine, listed while another machine's is open: this
+    /// machine comes back in front, then the session opens.
+    pub fn open_here(&mut self, agent: String, cx: &mut Context<Self>) {
+        self.choose_then(None, Some((None, agent)), cx);
+    }
+
+    /// The user confirmed the end of the session of the row `session`: one of another machine's
+    /// list is closed through this machine's daemon, which keeps the close while that machine is
+    /// off (`docs/remote.md`, "One list of every machine"), and leaves the list at once; any
+    /// other is stopped where it runs.
+    pub fn end_confirmed(&mut self, session: String, window: &mut Window, cx: &mut Context<Self>) {
+        let listed = self
+            .snapshot
+            .elsewhere(&session)
+            .and_then(|found| found.elsewhere.clone())
+            .filter(|there| there.listed && !there.here);
+        let Some(there) = listed else {
+            self.perform(Command::Stop { session });
+            return;
+        };
+        self.closing.insert(session);
+        self.remote.close(there.machine, there.agent);
+        if let Some(last) = self.read.clone() {
+            let merged = self.with_elsewhere(last, cx);
+            self.show(merged, window, cx);
         }
     }
 
-    /// Opens the session `agent` of `machine`, a session an agent of this machine started there:
-    /// the window shows that machine, then that session once its first read came. The switch's
-    /// own wait applies: past it, the window is back on this machine and says why.
-    pub fn open_elsewhere(&mut self, machine: String, agent: String, cx: &mut Context<Self>) {
-        self.choose_then(Some(machine.clone()), Some((machine, agent)), cx);
+    /// This machine's daemon kept the close of `agent` of `machine`, or said why not: a refused
+    /// close brings its row back.
+    fn closed(
+        &mut self,
+        machine: String,
+        agent: String,
+        refused: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let offline = self
+            .machines
+            .read(cx)
+            .machines()
+            .and_then(|read| read.machine(&machine))
+            .filter(|found| !found.online())
+            .map(|found| found.state_words());
+        let toast = match (refused, offline) {
+            (Some(why), _) => {
+                self.closing
+                    .remove(&crate::model::elsewhere_id(&machine, &agent));
+                if let Some(last) = self.read.clone() {
+                    let merged = self.with_elsewhere(last, cx);
+                    self.show(merged, window, cx);
+                }
+                gpui_design_system::Toast::failure("The session was not closed").detail(why)
+            }
+            (None, Some(state)) => gpui_design_system::Toast::success("Session closed").detail(
+                format!("{machine} is {state}: it closes there when it is back"),
+            ),
+            (None, None) => gpui_design_system::Toast::success("Session closed"),
+        };
+        gpui_design_system::toast(toast, cx);
     }
 
     /// The Machines section of Settings.
@@ -732,7 +802,7 @@ impl Shell {
     fn choose_then(
         &mut self,
         name: Option<String>,
-        then: Option<(String, String)>,
+        then: Option<(Option<String>, String)>,
         cx: &mut Context<Self>,
     ) {
         // A choice still reading the key gives way to this one.
@@ -743,6 +813,7 @@ impl Shell {
         self.open_there = None;
         let Some(name) = name else {
             self.switch_to(None, cx);
+            self.open_there = then;
             return;
         };
         let read: Option<Machines> = self.machines.read(cx).machines().cloned();
@@ -813,14 +884,10 @@ impl Shell {
         self.seen.last_seq.store(0, Ordering::SeqCst);
         self.seen.connections.store(0, Ordering::SeqCst);
         self.aim.set(aimed);
-        cx.set_global(crate::machines::Shown(shown.clone()));
+        cx.set_global(crate::machines::Shown(shown));
         self.seen.last_seq.store(0, Ordering::SeqCst);
         self.seen.connections.store(0, Ordering::SeqCst);
         self.waiting_for_the_daemon(true, cx);
-        if let Some(read) = self.machines.read(cx).machines().cloned() {
-            self.sidebar
-                .update(cx, |sidebar, cx| sidebar.set_machines(read, shown, cx));
-        }
     }
 
     /// The session of another machine asked for, once that machine's read holds it: its page is
@@ -830,7 +897,7 @@ impl Shell {
             return;
         };
         let root = self.snapshot.root_of(&agent);
-        if self.aim.machine().as_ref() != Some(&machine) || self.snapshot.session(&root).is_none() {
+        if self.aim.machine() != machine || self.snapshot.session(&root).is_none() {
             return;
         }
         self.open_there = None;
@@ -1349,6 +1416,15 @@ impl Shell {
     /// "End session" in a session's row: the confirmation, which counts the agents that end.
     pub fn ask_end_of(&mut self, session: &str, cx: &mut Context<Self>) {
         let Some(found) = self.snapshot.session(session) else {
+            // A session of another machine's list: it alone ends, through its machine.
+            if self
+                .snapshot
+                .elsewhere(session)
+                .is_some_and(|found| found.elsewhere.as_ref().is_some_and(|t| t.listed))
+            {
+                self.sidebar
+                    .update(cx, |sidebar, cx| sidebar.ask_end(session.to_owned(), 1, cx));
+            }
             return;
         };
         let (id, count) = (found.id.clone(), found.live);
@@ -1587,6 +1663,11 @@ impl Shell {
                 if aimed != self.aim.generation() => {}
             Update::Disconnected(..) if self.switching => {}
             Update::Machines(news) => self.machines_news(*news, window, cx),
+            Update::Closed {
+                machine,
+                agent,
+                refused,
+            } => self.closed(machine, agent, refused, window, cx),
             Update::Disconnected(..) => {
                 self.set_online(false, cx);
                 self.waiting_for_the_daemon(false, cx);
@@ -3210,18 +3291,21 @@ impl Shell {
                 row.set_scope(scope, cx);
                 row.set_place(&session.place, cx);
                 row.set_pull(pull.as_ref(), cx);
-                // A session on another machine is ended or detached there, not from here.
-                let there = session.elsewhere.is_some();
+                // A session another machine lists is closed from here, through this machine's
+                // daemon; one an agent of this machine started there is ended or detached there.
+                let there = session.elsewhere.as_ref();
+                let closable = there.is_some_and(|there| there.listed && !there.here);
+                row.set_elsewhere(there, cx);
+                row.set_tag(session.tag.as_deref(), cx);
                 row.set_actions(
-                    session.ended || there,
-                    session.resumable && !there,
-                    session.started_by.as_deref(),
+                    session.ended || (there.is_some() && !closable),
+                    session.resumable && there.is_none(),
+                    session.started_by.as_deref().filter(|_| there.is_none()),
                     cx,
                 );
                 if session.ended {
                     row.set_led_by(None, cx);
                 }
-                row.set_elsewhere(session.elsewhere.as_ref(), cx);
             });
             marks.extend(session.mark);
             shown.push(row.clone());

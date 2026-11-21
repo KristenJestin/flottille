@@ -222,9 +222,11 @@ no device calls a `local` one over a link (`docs/remote.md`, "Roles").
 | `remote.address.remove` | drive |
 | `remote.members` | read |
 | `remote.launches` | read |
+| `remote.sessions` | read |
 | `remote.change` | drive |
 | `remote.pair` | local |
 | `remote.declare` | local |
+| `remote.close` | local |
 | `remote.settings` | local |
 | `remote.configure` | local |
 | `tunnel.open` | drive |
@@ -1402,6 +1404,21 @@ not listen, `unavailable`, with the reason. No method answers a private key.
   there, `request` its number), `started`, or `ended` once its end came back; `heard` the kind of
   the last delivery it sent here (`child-report`, `session-turn-ended`, `child-question`…) and
   `heard_at` when, `null` before any: what the window shows as its state as last known.
+- `remote.sessions` answers the sessions of every machine, light (`docs/remote.md`, "One list of
+  every machine"): `{"this": [session…], "machines": [{"name", "sessions": [session…], "at"}]}`,
+  `this` this machine's live root sessions, each other machine's as it last listed them over its
+  link (`at` when), kept while it is off, without those whose close waits to be sent; a machine no
+  longer among the user's is not listed. A session is `{"id", "title", "project", "state",
+  "exchanged_at", "created_at", "pilot"}`, `state` `running`, `needs you`, `waiting` or `idle`,
+  `pilot` the session of the agent that leads it on that machine, or `null`; never its
+  conversation. The event `remote.sessions {name}` says that a machine's list changed.
+- `remote.close {request}` keeps the user's close of a session of another machine: `request` is
+  `agent.stop {agent}` for that machine, signed by the client with the device key as any request
+  for another machine. This machine stores it before it sends it, sends it once that machine is
+  linked (now, or when it links again), and drops it from that machine's list at once; one close
+  of a session is kept once. `refused` for a request for this machine, for a method other than
+  `agent.stop`, for a session not named, for a name that is no machine of the user's, or when 100
+  messages wait for that machine already. A local method: never over a link.
 - `remote.change {change}` carries a member's signed change of the list (`flottille_link::Change`:
   a removal, a renaming, an icon and colour), signed by the client after `remote.members`' `head`.
   A member's addition is refused: a device is paired on the hub. It answers `remote.members` once
