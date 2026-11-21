@@ -183,8 +183,8 @@ window, the command line, the tools and the docs.
   at hub.example.net is unreachable since 22:14: …`), for the hub and for each machine it cannot
   link to (`server cannot be reached: the hub at … is unreachable since 22:14: …`); a request for
   another machine is refused saying it. What waits for a machine that is off waits on the machine
-  that sends it, as it does for a machine that is off. A device that listens and knows another's
-  address (the direct path, unused by default) still links to it directly.
+  that sends it, as it does for a machine that is off. A machine that listens (the direct path,
+  unused by default) dials addresses only, as before, and its direct links go on.
 
 ## The transport
 
@@ -270,8 +270,9 @@ a forwarded port, a public address. Members linked to each other tell each other
 devices that have linked once can link again without the hub. A peer dials the addresses it knows
 for a key, whoever told it; the hub's list is a help, not a path.
 
-A machine dials the addresses it knows for another first, then the hub: with no address (the
-default), it goes through the hub at once. **Two devices that cannot reach each other say so plainly**, on both sides and in the clients: which
+A machine that listens nowhere (the default) dials the addresses it knows for another first,
+then the hub: with no address, it goes through the hub at once. A machine that listens chose this
+path: it dials addresses only, and takes the links that come through the hub too. **Two devices that cannot reach each other say so plainly**, on both sides and in the clients: which
 address was tried, from where, and how it failed (`server is unreachable: tried 192.0.2.10:7421
 from pc, no answer in 10 s`). Flottille does not work around it: the fix is the user's network (a
 firewall rule, a forwarded port, a VPN, another address). A device no one can dial (a phone on a
@@ -1581,7 +1582,9 @@ on a real phone, by hand, and reported.
   first (the direct path, none by default), then the hub. The hub's bounds: 4 MiB a second for each
   device's packets to the others, 1 MiB at once, 256 packets waiting for each device; a packet past
   them is dropped, never queued further. The keepalive is 25 s each way, a session silent 80 s is
-  lost. A device that listens (`[remote] listen`) still takes direct links.
+  lost. A machine that listens (`[remote] listen`, the direct path the user chose) dials
+  addresses only, never through the hub, and takes the links that come either way: two machines
+  that both listen link as before #1151, and a test or a user who set `listen` keeps that path.
 
 ## Open questions
 

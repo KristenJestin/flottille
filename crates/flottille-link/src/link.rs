@@ -580,8 +580,13 @@ impl Endpoint {
             }
         }
         // Through the hub, when a session to it is open: the direct path was tried first, for a
-        // machine whose addresses the user gave.
-        let relayed = self.relayed.lock().unwrap().clone();
+        // machine whose addresses the user gave. A machine that listens chose the direct path,
+        // and dials only addresses: it still takes the links that come through the hub.
+        let relayed = if self.listening().is_some() {
+            None
+        } else {
+            self.relayed.lock().unwrap().clone()
+        };
         if let Some(relayed) = relayed {
             if !relayed.online.borrow().contains(&peer) {
                 if tried.is_empty() {
