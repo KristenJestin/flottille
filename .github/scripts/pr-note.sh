@@ -6,7 +6,8 @@
 # see is allowed to have none.
 #
 # Reads TITLE and BODY (the pull request's) and CHANGED (the paths it changes, one per line).
-# Says its warning as a workflow command, on stdout.
+# Says its warning as a workflow command, on stdout, without the title: it is the author's, and a
+# newline or `%0A` in it would start another command.
 set -euo pipefail
 
 title=${TITLE:-} body=${BODY:-} changed=${CHANGED:-}
@@ -25,4 +26,4 @@ done <<<"$changed"
 
 body=${body//$'\r'/}
 if grep -qE '^Note: .*[^[:space:]]' <<<"$body"; then exit 0; fi
-echo "::warning title=No Note line::This $title pull request changes the product, but its description has no line \`Note: <one sentence, what the user can do now>\`. Add one, or leave it out when the user cannot see the change."
+echo "::warning title=No Note line::This pull request changes the product, but its description has no line \`Note: <one sentence, what the user can do now>\`. Add one, or leave it out when the user cannot see the change."
