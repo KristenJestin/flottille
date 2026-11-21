@@ -293,7 +293,7 @@ fn the_window_s_own_settings_stay_this_machine_s_and_say_so(cx: &mut TestAppCont
     );
     let theirs = server.user.call("appearance.show", json!({})).unwrap();
     click(&shell, "appearance-theme-flottille", cx);
-    eventually("this machine keeps the appearance", || {
+    until(&shell, cx, "this machine keeps the appearance", |_| {
         pc.user.call("appearance.show", json!({})).unwrap()["theme"] == "flottille"
     });
     assert_eq!(
@@ -511,14 +511,11 @@ fn another_machine_s_vault_and_connections_are_managed_from_here(cx: &mut TestAp
                 .map(|page| page.read(cx).connections().clone())
         })
         .unwrap();
+    // This machine's list was read when the window opened: the server's is read once it is shown.
     until(&shell, cx, "the server's connections are read", |cx| {
-        connections.read_with(cx, |s, _| s.servers().is_some())
+        server.log().contains("connection.list asked by pc")
+            && connections.read_with(cx, |s, _| s.servers().is_some())
     });
-    assert!(
-        server.log().contains("connection.list asked by pc"),
-        "{}",
-        server.log()
-    );
 }
 
 #[gpui_kit::test]
