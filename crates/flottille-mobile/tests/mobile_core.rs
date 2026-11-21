@@ -15,13 +15,16 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
+use base64::Engine;
 use flottille_hub::{Hub, Served, SystemClock};
 use flottille_link::{
     Accepted, Action, Ask, Change, Colour, Device, DeviceKey, Endpoint, Hello, HubKey, Icon,
     Keyring, KeyringError, Link, MachineKey, Members, Message, PairCode, Proposed, PublicKey,
     Pushed, Requests, Role, Tls, ToDevice, arrive,
 };
-use flottille_mobile::{Batch, Core, Listener, MobileError, Sealer, ViewState, hub_card};
+use flottille_mobile::{
+    Batch, Core, Listener, MobileError, Picture, Reply, Sealer, ViewState, hub_card,
+};
 use serde_json::{Value, json};
 use zeroize::Zeroizing;
 
@@ -150,6 +153,8 @@ struct Runner {
     emitted: tokio::sync::broadcast::Sender<Value>,
     taken: Arc<Mutex<Vec<Took>>>,
     answers: Arc<Mutex<HashMap<String, Value>>>,
+    /// The methods it refuses, with the sentence it says: a daemon's own refusal.
+    refusals: Arc<Mutex<HashMap<String, String>>>,
     links: Arc<Mutex<Vec<Link>>>,
     requests: Arc<Mutex<Requests>>,
     /// The watches subscribed, which no new event can miss from then on.
@@ -175,6 +180,7 @@ impl Runner {
             emitted: tokio::sync::broadcast::channel(4096).0,
             taken: Arc::default(),
             answers: Arc::new(Mutex::new(answers)),
+            refusals: Arc::default(),
             links: Arc::default(),
             requests: Arc::new(Mutex::new(Requests::new(SystemTime::now()))),
             watching: Arc::default(),
@@ -205,6 +211,32 @@ impl Runner {
             .lock()
             .unwrap()
             .insert(method.to_owned(), result);
+    }
+
+    /// From now on it refuses `method` with `why`, as its daemon would.
+    fn refuse(&self, method: &str, why: &str) {
+        self.refusals
+            .lock()
+            .unwrap()
+            .insert(method.to_owned(), why.to_owned());
+    }
+
+    /// What its daemon gives of the session `agent` as `agent.show`: the events it emitted of it
+    /// (the last `last` ones when that is given), whether older ones remain, and the agent.
+    fn show(&self, agent: Value, last: Option<usize>) {
+        let all: Vec<Value> = self
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|event| event["data"]["agent"] == agent["id"])
+            .cloned()
+            .collect();
+        let from = last.map_or(0, |last| all.len().saturating_sub(last));
+        self.answer(
+            "agent.show",
+            json!({"agent": agent, "events": all[from..], "more": from > 0}),
+        );
     }
 
     /// The requests it took of `method`.
@@ -312,6 +344,18 @@ impl Runner {
                     }
                 };
                 if accepted.method != "events.watch" {
+                    let refusal = runner
+                        .refusals
+                        .lock()
+                        .unwrap()
+                        .get(&accepted.method)
+                        .cloned();
+                    if let Some(why) = refusal {
+                        let refused = json!({"id": accepted.id, "error": {"code": "refused", "message": why}});
+                        stream.send(&line(refused)).await;
+                        stream.end().await;
+                        return;
+                    }
                     let result = runner
                         .answers
                         .lock()
@@ -1688,5 +1732,580 @@ async fn a_link_through_the_hub_checks_the_runner_s_key() {
     .await;
     assert!(machine(&view, "server").through_hub, "{view:#?}");
     place.runner.watched().await;
+    place.served.stop().await;
+}
+
+// ---- The session page (#826): the conversation, the composer, the cards, the controls ----
+
+/// The agent `a1` as its daemon's `agent.show` and `agent.tree` give it.
+fn a1(mode: &str, state: &str) -> Value {
+    json!({"id": "a1", "title": "Fix the login", "project": "app", "parent": null,
+        "state": state, "gate_mode": mode})
+}
+
+fn tree_of(agents: Value) -> Value {
+    json!({"agents": agents})
+}
+
+fn the_page(view: &ViewState) -> &flottille_mobile::ConversationView {
+    view.conversation.as_ref().expect("a page is followed")
+}
+
+fn params_of(took: &Took) -> Value {
+    serde_json::from_str(took.0["signed"]["params"].as_str().unwrap()).unwrap()
+}
+
+fn png() -> Vec<u8> {
+    vec![0x89, b'P', b'N', b'G', 1, 2, 3]
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_conversation_follows_live() {
+    let place = Place::new().await;
+    let runner = &place.runner;
+    runner.emit(
+        "agent.prompted",
+        json!({"agent": "a1", "text": "Fix it [Image 1: shot.png]", "images": ["shot.png"]}),
+    );
+    runner.emit(
+        "agent.message",
+        json!({"agent": "a1", "text": "On it.", "message_id": "m1"}),
+    );
+    runner.emit(
+        "agent.tool_call",
+        json!({"agent": "a1", "id": "t1", "title": "Read login.rs", "update": false}),
+    );
+    runner.show(a1("auto", "idle"), None);
+    runner.answer(
+        "agent.tree",
+        tree_of(
+            json!([{"agent": a1("auto", "idle"), "doing": "idle", "waiting_on": null,
+            "needs_user": false, "questions": []}]),
+        ),
+    );
+    let (phone, _taken) = place.linked().await;
+    phone
+        .follow("server".to_owned(), "a1".to_owned())
+        .await
+        .unwrap();
+
+    let view = phone.view();
+    let page = the_page(&view);
+    assert_eq!(
+        (page.title.as_str(), page.mode.as_str(), page.child),
+        ("Fix the login", "auto", false)
+    );
+    let shown: Vec<(&str, &str)> = page
+        .entries
+        .iter()
+        .map(|entry| (entry.kind.as_str(), entry.text.as_str()))
+        .collect();
+    assert_eq!(
+        shown,
+        [
+            ("user", "Fix it [Image 1: shot.png]"),
+            ("agent", "On it."),
+            ("tool", "Read login.rs")
+        ]
+    );
+    assert_eq!(page.entries[0].images, ["shot.png"]);
+    assert!(page.entries.iter().all(|entry| entry.seq > 0));
+    assert!(!page.working);
+
+    // Live: a turn starts, its words come, then the mode changes under the user's hand.
+    runner.emit(
+        "agent.prompted",
+        json!({"agent": "a1", "text": "And the tests"}),
+    );
+    runner.emit(
+        "agent.message",
+        json!({"agent": "a1", "text": "Done.", "message_id": "m2"}),
+    );
+    let view = until(&phone, "the live words", |view| {
+        view.conversation.as_ref().is_some_and(|page| {
+            page.entries
+                .last()
+                .is_some_and(|entry| entry.text == "Done.")
+        })
+    })
+    .await;
+    assert!(the_page(&view).working, "a turn runs");
+    runner.emit("agent.turn_ended", json!({"agent": "a1"}));
+    runner.emit(
+        "agent.gate_mode_changed",
+        json!({"agent": "a1", "mode": "full"}),
+    );
+    let view = until(&phone, "the mode and the end of the turn", |view| {
+        view.conversation
+            .as_ref()
+            .is_some_and(|page| page.mode == "full" && !page.working)
+    })
+    .await;
+    assert_eq!(the_page(&view).entries.len(), 5);
+    place.served.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_long_conversation_pages_in_and_is_never_loaded_whole() {
+    let place = Place::new().await;
+    let runner = &place.runner;
+    for n in 1..=30 {
+        runner.emit(
+            "agent.prompted",
+            json!({"agent": "a1", "text": format!("message {n}")}),
+        );
+    }
+    runner.show(a1("auto", "idle"), Some(10));
+    let (phone, _taken) = place.linked().await;
+    phone
+        .follow("server".to_owned(), "a1".to_owned())
+        .await
+        .unwrap();
+
+    let view = phone.view();
+    let page = the_page(&view);
+    assert_eq!(page.entries.len(), 10);
+    assert_eq!(page.entries[0].text, "message 21");
+    assert!(page.more, "older messages remain");
+    // One page was asked, the latest: a `before` past every event, never the whole conversation.
+    let asked = runner.taken("agent.show");
+    assert_eq!(asked.len(), 1);
+    assert!(params_of(&asked[0])["before"].as_u64().unwrap() > 30);
+
+    // Older ones come on request, before the first shown.
+    runner.show(a1("auto", "idle"), Some(30));
+    runner.answer(
+        "agent.show",
+        json!({"agent": a1("auto", "idle"), "more": false,
+            "events": runner.events.lock().unwrap()[10..20].to_vec()}),
+    );
+    phone
+        .older("server".to_owned(), "a1".to_owned())
+        .await
+        .unwrap();
+    let view = phone.view();
+    let page = the_page(&view);
+    assert_eq!(page.entries.len(), 20);
+    assert_eq!(page.entries[0].text, "message 11");
+    assert!(!page.more);
+    let asked = runner.taken("agent.show");
+    assert_eq!(params_of(&asked[1])["before"], 21);
+    place.served.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn leaving_the_page_stops_following_it() {
+    let place = Place::new().await;
+    place.runner.show(a1("auto", "idle"), None);
+    let (phone, _taken) = place.linked().await;
+    phone
+        .follow("server".to_owned(), "a1".to_owned())
+        .await
+        .unwrap();
+    assert!(phone.view().conversation.is_some());
+    phone.unfollow();
+    assert!(phone.view().conversation.is_none());
+    place
+        .runner
+        .emit("agent.message", json!({"agent": "a1", "text": "late"}));
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(phone.view().conversation.is_none(), "nothing is kept of it");
+    place.served.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_message_with_a_picture_is_sent() {
+    let place = Place::new().await;
+    let (phone, _taken) = place.linked().await;
+    phone
+        .send(
+            "server".to_owned(),
+            "a1".to_owned(),
+            "look at this".to_owned(),
+            vec![Picture {
+                mime: "image/png".to_owned(),
+                data: png(),
+            }],
+        )
+        .await
+        .unwrap();
+    let sent = place.runner.taken("agent.send");
+    assert_eq!(sent.len(), 1);
+    assert!(sent[0].1.is_ok(), "signed as a member's");
+    let params = params_of(&sent[0]);
+    assert_eq!(params["agent"], "a1");
+    assert_eq!(params["message"], "look at this");
+    assert_eq!(params["images"][0]["mime"], "image/png");
+    assert_eq!(
+        base64::engine::general_purpose::STANDARD
+            .decode(params["images"][0]["data"].as_str().unwrap())
+            .unwrap(),
+        png()
+    );
+
+    // A picture alone is a message.
+    phone
+        .send(
+            "server".to_owned(),
+            "a1".to_owned(),
+            String::new(),
+            vec![Picture {
+                mime: "image/jpeg".to_owned(),
+                data: vec![0xFF, 0xD8, 1],
+            }],
+        )
+        .await
+        .unwrap();
+    assert_eq!(place.runner.taken("agent.send").len(), 2);
+    place.served.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_window_s_limits_on_pictures_hold_before_anything_is_sent() {
+    let place = Place::new().await;
+    let (phone, _taken) = place.linked().await;
+    let send = |text: &str, pictures: Vec<Picture>| {
+        phone.send(
+            "server".to_owned(),
+            "a1".to_owned(),
+            text.to_owned(),
+            pictures,
+        )
+    };
+    let picture = |mime: &str, size: usize| Picture {
+        mime: mime.to_owned(),
+        data: vec![7; size],
+    };
+    let refused = |why: Result<(), MobileError>| why.unwrap_err().to_string();
+    assert!(refused(send("x", vec![picture("image/png", 1); 21]).await).contains("20"));
+    assert!(
+        refused(send("x", vec![picture("image/png", 5 * 1024 * 1024 + 1)]).await).contains("5 MiB")
+    );
+    assert!(refused(send("x", vec![picture("image/bmp", 1)]).await).contains("image/bmp"));
+    assert!(refused(send("", vec![]).await).contains("empty"));
+    // 5 MiB exactly is allowed.
+    send("x", vec![picture("image/webp", 5 * 1024 * 1024); 2])
+        .await
+        .unwrap();
+    assert_eq!(
+        place.runner.taken("agent.send").len(),
+        1,
+        "only the last was sent"
+    );
+    place.served.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_picture_of_the_conversation_is_read_back() {
+    let place = Place::new().await;
+    place.runner.answer(
+        "agent.image",
+        json!({"mime": "image/png", "data": base64::engine::general_purpose::STANDARD.encode(png())}),
+    );
+    let (phone, _taken) = place.linked().await;
+    let bytes = phone
+        .image("server".to_owned(), "a1".to_owned(), "shot.png".to_owned())
+        .await
+        .unwrap();
+    assert_eq!(bytes, png());
+    let asked = place.runner.taken("agent.image");
+    assert_eq!(
+        params_of(&asked[0]),
+        json!({"agent": "a1", "name": "shot.png"})
+    );
+    place.served.stop().await;
+}
+
+fn ask_event(runner: &Runner) -> u64 {
+    runner.emit(
+        "agent.asked",
+        json!({"agent": "a1", "to": "user", "question": "1. Push?\n2. Title?",
+            "questions": [
+                {"question": "Push `feat/42-export` and open the pull request?",
+                 "options": [{"label": "Yes", "description": "Squash first"}, {"label": "No"}]},
+                {"question": "Title of the pull request?"}]}),
+    )
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_ask_is_answered_from_its_card() {
+    let place = Place::new().await;
+    let (phone, _taken) = place.linked().await;
+    let asked = ask_event(&place.runner);
+    let view = until(&phone, "the ask", |view| !view.asks.is_empty()).await;
+    let card = &view.asks[0];
+    assert_eq!((card.agent.as_str(), card.asked), ("a1", asked));
+    assert_eq!(card.questions.len(), 2);
+    assert_eq!(card.questions[0].options[0].label, "Yes");
+    assert_eq!(card.questions[0].options[0].description, "Squash first");
+    assert!(!card.questions[0].multiple);
+    assert!(card.questions[1].options.is_empty());
+
+    phone
+        .answer_ask(
+            "server".to_owned(),
+            "a1".to_owned(),
+            asked,
+            vec![
+                Reply {
+                    choices: vec!["Yes".to_owned()],
+                    text: "Squash it first.".to_owned(),
+                },
+                Reply {
+                    choices: vec![],
+                    text: "Export orders as CSV".to_owned(),
+                },
+            ],
+        )
+        .await
+        .unwrap();
+    let answered = place.runner.taken("agent.answer");
+    assert_eq!(
+        params_of(&answered[0]),
+        json!({"agent": "a1", "question": asked, "answers": [
+            {"choices": ["Yes"], "text": "Squash it first."},
+            {"text": "Export orders as CSV"}]})
+    );
+
+    // An ask the daemon no longer waits for is refused, and the sentence reaches the card.
+    place
+        .runner
+        .refuse("agent.answer", "that question does not wait for an answer");
+    let why = phone
+        .answer_ask("server".to_owned(), "a1".to_owned(), asked, vec![])
+        .await
+        .unwrap_err();
+    assert_eq!(why.to_string(), "that question does not wait for an answer");
+    place.served.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_question_that_waits_when_the_page_opens_is_on_its_card() {
+    let place = Place::new().await;
+    place.runner.show(a1("auto", "idle"), None);
+    place.runner.answer(
+        "agent.tree",
+        tree_of(
+            json!([{"agent": a1("auto", "idle"), "doing": "waiting for you",
+            "waiting_on": "user", "needs_user": true,
+            "questions": [{"seq": 12, "at": 1, "question": "Which branch?",
+                "questions": [{"question": "Which branch?",
+                    "options": [{"label": "main"}, {"label": "dev"}], "multiple": true}]}]}]),
+        ),
+    );
+    let (phone, _taken) = place.linked().await;
+    phone
+        .follow("server".to_owned(), "a1".to_owned())
+        .await
+        .unwrap();
+    let view = phone.view();
+    assert_eq!(view.asks.len(), 1);
+    assert_eq!(view.asks[0].asked, 12);
+    assert!(view.asks[0].questions[0].multiple);
+    place.served.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_request_is_allowed_or_denied() {
+    let place = Place::new().await;
+    let (phone, _taken) = place.linked().await;
+    place.runner.emit(
+        "approval.requested",
+        json!({"number": 4, "agent": "a1", "tool": "run", "call": {"line": "rm -rf build"},
+            "reasons": ["it deletes files", "outside the project"], "class": "base",
+            "kind": "call", "says": [], "judgement": null, "held_by": "user"}),
+    );
+    place.runner.emit(
+        "approval.requested",
+        json!({"number": 5, "agent": "a1", "tool": "fs_read", "call": {"path": ".env"},
+            "reasons": ["a sensitive place"], "class": "judge", "kind": "call", "says": [],
+            "judgement": {"by": "claude haiku", "verdict": "ask", "reason": "it reads secrets"},
+            "held_by": "user"}),
+    );
+    let view = until(&phone, "both requests", |view| view.requests.len() == 2).await;
+    let base = view.requests.iter().find(|r| r.number == 4).unwrap();
+    // The call as the window shows it, and the base class that always asks.
+    assert_eq!(base.call, "rm -rf build");
+    assert!(base.base);
+    assert_eq!(base.reason, "it deletes files");
+    let judged = view.requests.iter().find(|r| r.number == 5).unwrap();
+    assert_eq!(judged.call, r#"fs_read {"path":".env"}"#);
+    assert!(!judged.base);
+    assert_eq!(judged.reason, "it reads secrets");
+
+    phone.answer("server".to_owned(), 4, true).await.unwrap();
+    phone.answer("server".to_owned(), 5, false).await.unwrap();
+    assert_eq!(
+        params_of(&place.runner.taken("approval.approve")[0]),
+        json!({"number": 4})
+    );
+    assert_eq!(
+        params_of(&place.runner.taken("approval.deny")[0]),
+        json!({"number": 5})
+    );
+
+    // One that is answered already or gone: the daemon refuses and its sentence comes back.
+    place
+        .runner
+        .refuse("approval.approve", "request #4 is decided already");
+    let why = phone
+        .answer("server".to_owned(), 4, true)
+        .await
+        .unwrap_err();
+    assert_eq!(why.to_string(), "request #4 is decided already");
+    place.served.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_mode_is_switched_and_stop_interrupts_the_turn() {
+    let place = Place::new().await;
+    let (phone, _taken) = place.linked().await;
+    for mode in ["ask", "auto", "full"] {
+        phone
+            .set_mode("server".to_owned(), "a1".to_owned(), mode.to_owned())
+            .await
+            .unwrap();
+    }
+    let modes: Vec<Value> = place
+        .runner
+        .taken("agent.mode")
+        .iter()
+        .map(params_of)
+        .collect();
+    assert_eq!(
+        modes,
+        [
+            json!({"agent": "a1", "mode": "ask"}),
+            json!({"agent": "a1", "mode": "auto"}),
+            json!({"agent": "a1", "mode": "full"})
+        ]
+    );
+    let why = phone
+        .set_mode("server".to_owned(), "a1".to_owned(), "reckless".to_owned())
+        .await
+        .unwrap_err();
+    assert!(why.to_string().contains("reckless"), "{why}");
+    assert_eq!(place.runner.taken("agent.mode").len(), 3);
+
+    phone
+        .stop("server".to_owned(), "a1".to_owned())
+        .await
+        .unwrap();
+    assert_eq!(
+        params_of(&place.runner.taken("agent.cancel")[0]),
+        json!({"agent": "a1"})
+    );
+    place.served.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_child_s_conversation_is_a_child_s_and_the_tree_is_read() {
+    let place = Place::new().await;
+    place.runner.show(
+        json!({"id": "c1", "title": "Check the tests", "parent": "a1", "state": "working",
+            "gate_mode": "ask"}),
+        None,
+    );
+    place.runner.answer(
+        "agent.tree",
+        tree_of(json!([
+            {"agent": a1("ask", "working"), "doing": "working", "waiting_on": null,
+                "needs_user": false, "questions": []},
+            {"agent": {"id": "c1", "title": "Check the tests", "parent": "a1", "depth": 1,
+                "role": "worker", "state": "working", "model": "sonnet"},
+                "doing": "running `cargo test` for 12 min", "waiting_on": null,
+                "needs_user": false, "questions": []}])),
+    );
+    let (phone, _taken) = place.linked().await;
+    phone
+        .follow("server".to_owned(), "c1".to_owned())
+        .await
+        .unwrap();
+    let view = phone.view();
+    let page = the_page(&view);
+    assert!(page.child, "a child's page has no composer");
+    assert_eq!(page.children.len(), 1);
+    assert_eq!(page.children[0].agent, "c1");
+    assert_eq!(page.children[0].doing, "running `cargo test` for 12 min");
+    place.served.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_viewer_s_writes_are_refused_by_the_machine() {
+    let place = Place::new().await;
+    let phone = place.phone();
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        phone.join(place.pair_code(), "tablet".to_owned(), "viewer".to_owned()),
+    )
+    .await
+    .expect("paired within 10 s")
+    .unwrap();
+    let taken = Arc::new(Taken::default());
+    connected(&phone, taken, &place.runner).await;
+    assert_eq!(phone.view().role, "viewer");
+
+    let (server, agent) = ("server".to_owned(), "a1".to_owned());
+    let refusals = [
+        (
+            "send a message",
+            phone
+                .send(server.clone(), agent.clone(), "hi".into(), vec![])
+                .await,
+        ),
+        (
+            "answer a question",
+            phone
+                .answer_ask(server.clone(), agent.clone(), 1, vec![])
+                .await,
+        ),
+        (
+            "answer a request",
+            phone.answer(server.clone(), 4, true).await,
+        ),
+        (
+            "answer a request",
+            phone.answer(server.clone(), 4, false).await,
+        ),
+        (
+            "switch the mode",
+            phone
+                .set_mode(server.clone(), agent.clone(), "full".into())
+                .await,
+        ),
+        (
+            "stop a turn",
+            phone.stop(server.clone(), agent.clone()).await,
+        ),
+    ];
+    for (deed, result) in refusals {
+        let why = result.unwrap_err().to_string();
+        assert!(
+            why.contains(&format!(
+                "may only view: a controller or a runner may {deed}"
+            )),
+            "{why}"
+        );
+    }
+    // The machine served none of them, and reads still work.
+    for method in [
+        "agent.send",
+        "agent.answer",
+        "approval.approve",
+        "approval.deny",
+        "agent.mode",
+        "agent.cancel",
+    ] {
+        assert!(
+            place
+                .runner
+                .taken(method)
+                .iter()
+                .all(|(_, checked)| checked.is_err()),
+            "{method}"
+        );
+    }
+    place.runner.show(a1("auto", "idle"), None);
+    phone.follow(server, agent).await.unwrap();
     place.served.stop().await;
 }

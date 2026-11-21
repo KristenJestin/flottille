@@ -83,4 +83,45 @@ class PhoneViewTest {
         val me = state().toPhoneView().members.single()
         assertEquals(Member("pixel", "controller", "phone", "blue", you = true, addedBy = "the hub"), me)
     }
+
+    @Test
+    fun a_conversation_its_requests_and_its_asks_are_the_module_s_own_types() {
+        val view = state().copy(
+            conversation = org.flottille.core.ffi.ConversationView(
+                machine = "server", agent = "a1", title = "Fix the login", mode = "full", state = "working", working = true,
+                child = false, ended = false, more = true,
+                entries = listOf(
+                    org.flottille.core.ffi.Entry(seq = 3uL, kind = "user", text = "look [Image 1: shot.png]", images = listOf("shot.png")),
+                ),
+                children = listOf(
+                    org.flottille.core.ffi.ChildView(agent = "c1", title = "Check", doing = "running", role = "worker", depth = 1u),
+                ),
+            ),
+            requests = listOf(
+                RequestView(
+                    machine = "server", number = 4uL, agent = "a1", tool = "run", reasons = listOf("it deletes"),
+                    call = "rm -rf build", base = true, says = emptyList(), reason = "it deletes",
+                ),
+            ),
+            asks = listOf(
+                AskView(
+                    machine = "server", agent = "a1", asked = 12uL, question = "Push?",
+                    questions = listOf(
+                        org.flottille.core.ffi.AskQuestion(
+                            question = "Push?", options = listOf(org.flottille.core.ffi.AskOption("Yes", "Squash first")), multiple = true,
+                        ),
+                    ),
+                ),
+            ),
+        ).toPhoneView()
+
+        val page = view.conversation!!
+        assertEquals(Conversation("server", "a1", "Fix the login", "full", true, false, false, true, page.entries, page.children), page)
+        assertEquals(Entry(3, "user", "look [Image 1: shot.png]", listOf("shot.png")), page.entries.single())
+        assertEquals(Child("c1", "Check", "running", "worker", 1), page.children.single())
+        assertEquals(Request("server", 4, "a1", "run", "rm -rf build", true, "it deletes", listOf("it deletes"), emptyList()), view.requests.single())
+        val ask = view.asks.single()
+        assertEquals(12L, ask.asked)
+        assertEquals(AskQuestion("Push?", listOf(AskOption("Yes", "Squash first")), multiple = true), ask.questions.single())
+    }
 }

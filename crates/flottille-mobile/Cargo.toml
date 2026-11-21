@@ -32,5 +32,6 @@ uniffi = { version = "0.32.2", default-features = false }
 zeroize = "1.9.1"
 
 [dev-dependencies]
+base64 = "0.22.1"
 flottille-hub = { version = "0.1.0", path = "../flottille-hub" }
 tempfile = "3.27.0"
