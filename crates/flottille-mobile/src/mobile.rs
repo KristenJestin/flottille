@@ -57,6 +57,29 @@ pub struct Event {
     pub data: String,
 }
 
+/// A picture the user chose for a message: its type and its bytes.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct Picture {
+    /// `image/png`, `image/jpeg`, `image/gif` or `image/webp`.
+    pub mime: String,
+    pub data: Vec<u8>,
+}
+
+/// What the user answered to one question of an ask: the options chosen and the words written.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct Reply {
+    pub choices: Vec<String>,
+    pub text: String,
+}
+
+/// A message carries 20 pictures at most, 5 MiB each, as the window's composer does
+/// (`docs/protocol.md`, `agent.send`).
+const PICTURES_MOST: usize = 20;
+const PICTURE_MOST: usize = 5 * 1024 * 1024;
+const PICTURE_TYPES: [&str; 4] = ["image/png", "image/jpeg", "image/gif", "image/webp"];
+/// A `before` past every event: the daemon then gives the latest page.
+const LATEST: u64 = i64::MAX as u64;
+
 /// What takes the batches: the Kotlin module's, which hands them to a `Flow`.
 #[uniffi::export(with_foreign)]
 pub trait Listener: Send + Sync {
@@ -137,11 +160,6 @@ enum Note {
         machine: String,
         agents: Value,
         requests: Value,
-    },
-    Shown {
-        machine: String,
-        agent: String,
-        events: Value,
     },
     Changed,
 }
@@ -372,22 +390,194 @@ impl Core {
             .await
     }
 
-    /// Follows the conversation of the session `agent` of `machine`: what it holds, then each
-    /// event, in the view state's `conversation`.
+    /// Follows the conversation of the session `agent` of `machine`: its latest page and its tree
+    /// read at once, then each event, in the view state's `conversation`.
     pub async fn follow(&self, machine: String, agent: String) -> Result<(), MobileError> {
         self.inner.state().view.follow(&machine, &agent);
         let inner = self.inner.clone();
         self.inner
             .on(async move {
-                let events = inner
-                    .call(&machine, "agent.show", json!({"agent": agent}))
+                // The latest page only: a long conversation pages in with `older`, never whole.
+                let shown = inner
+                    .call(
+                        &machine,
+                        "agent.show",
+                        json!({"agent": agent, "before": LATEST}),
+                    )
                     .await?;
-                inner.note(Note::Shown {
-                    machine,
-                    agent,
-                    events,
-                });
+                let tree = inner
+                    .call(&machine, "agent.tree", json!({"agent": agent}))
+                    .await;
+                {
+                    let mut state = inner.state();
+                    state.view.shown(&machine, &agent, &shown);
+                    if let Ok(tree) = &tree {
+                        state.view.tree(&machine, &agent, tree);
+                    }
+                }
+                inner.note(Note::Changed);
                 Ok(())
+            })
+            .await
+    }
+
+    /// The page of `agent` is on screen no more: nothing of it is kept, and no event of it is
+    /// followed.
+    pub fn unfollow(&self) {
+        self.inner.state().view.unfollow();
+        self.inner.note(Note::Changed);
+    }
+
+    /// The page before the oldest events the followed conversation holds.
+    pub async fn older(&self, machine: String, agent: String) -> Result<(), MobileError> {
+        let Some(first) = self.inner.state().view.first_followed(&machine, &agent) else {
+            return Ok(());
+        };
+        let inner = self.inner.clone();
+        self.inner
+            .on(async move {
+                let shown = inner
+                    .call(
+                        &machine,
+                        "agent.show",
+                        json!({"agent": agent, "before": first}),
+                    )
+                    .await?;
+                inner.state().view.shown(&machine, &agent, &shown);
+                inner.note(Note::Changed);
+                Ok(())
+            })
+            .await
+    }
+
+    /// A message of the user to the session `agent` of `machine`, with pictures. The window's
+    /// limits hold here before anything is sent: 20 pictures, 5 MiB each, png, jpeg, gif or webp.
+    pub async fn send(
+        &self,
+        machine: String,
+        agent: String,
+        text: String,
+        pictures: Vec<Picture>,
+    ) -> Result<(), MobileError> {
+        if pictures.len() > PICTURES_MOST {
+            return Err(MobileError::new(format!(
+                "a message carries {PICTURES_MOST} pictures at most"
+            )));
+        }
+        for picture in &pictures {
+            if !PICTURE_TYPES.contains(&picture.mime.as_str()) {
+                return Err(MobileError::new(format!(
+                    "{} is not a picture Flottille takes (png, jpeg, gif or webp)",
+                    picture.mime.escape_debug()
+                )));
+            }
+            if picture.data.len() > PICTURE_MOST {
+                return Err(MobileError::new("a picture is 5 MiB at most"));
+            }
+            if picture.data.is_empty() {
+                return Err(MobileError::new("a picture is empty"));
+            }
+        }
+        if text.trim().is_empty() && pictures.is_empty() {
+            return Err(MobileError::new("the message is empty"));
+        }
+        let mut params = json!({"agent": agent, "message": text});
+        if !pictures.is_empty() {
+            use base64::Engine;
+            params["images"] = pictures
+                .iter()
+                .map(|picture| {
+                    json!({"mime": picture.mime,
+                        "data": base64::engine::general_purpose::STANDARD.encode(&picture.data)})
+                })
+                .collect();
+        }
+        let inner = self.inner.clone();
+        self.inner
+            .on(async move { inner.call(&machine, "agent.send", params).await.map(drop) })
+            .await
+    }
+
+    /// The user's answers to the ask `asked` of the session `agent` (the number of its
+    /// `agent.asked` event), one per question in order: the daemon sends the agent one message.
+    pub async fn answer_ask(
+        &self,
+        machine: String,
+        agent: String,
+        asked: u64,
+        replies: Vec<Reply>,
+    ) -> Result<(), MobileError> {
+        let answers: Vec<Value> = replies
+            .iter()
+            .map(|reply| {
+                let mut answer = json!({});
+                if !reply.choices.is_empty() {
+                    answer["choices"] = json!(reply.choices);
+                }
+                if !reply.text.is_empty() {
+                    answer["text"] = json!(reply.text);
+                }
+                answer
+            })
+            .collect();
+        let params = json!({"agent": agent, "question": asked, "answers": answers});
+        let inner = self.inner.clone();
+        self.inner
+            .on(async move { inner.call(&machine, "agent.answer", params).await.map(drop) })
+            .await
+    }
+
+    /// Puts the session `agent`'s tree in `mode`: `ask`, `auto` or `full`.
+    pub async fn set_mode(
+        &self,
+        machine: String,
+        agent: String,
+        mode: String,
+    ) -> Result<(), MobileError> {
+        if !["ask", "auto", "full"].contains(&mode.as_str()) {
+            return Err(MobileError::new(format!(
+                "{} is not a mode: ask, auto or full",
+                mode.escape_debug()
+            )));
+        }
+        let inner = self.inner.clone();
+        self.inner
+            .on(async move {
+                inner
+                    .call(
+                        &machine,
+                        "agent.mode",
+                        json!({"agent": agent, "mode": mode}),
+                    )
+                    .await
+                    .map(drop)
+            })
+            .await
+    }
+
+    /// The bytes of a picture of the conversation of `agent`, by the name its message gave.
+    pub async fn image(
+        &self,
+        machine: String,
+        agent: String,
+        name: String,
+    ) -> Result<Vec<u8>, MobileError> {
+        let inner = self.inner.clone();
+        self.inner
+            .on(async move {
+                use base64::Engine;
+                let image = inner
+                    .call(
+                        &machine,
+                        "agent.image",
+                        json!({"agent": agent, "name": name}),
+                    )
+                    .await?;
+                base64::engine::general_purpose::STANDARD
+                    .decode(image["data"].as_str().unwrap_or_default())
+                    .map_err(|error| {
+                        MobileError::new(format!("the picture is not readable: {error}"))
+                    })
             })
             .await
     }
@@ -941,11 +1131,6 @@ async fn pump(
                         agents,
                         requests,
                     } => state.view.load(&machine, &agents, &requests),
-                    Note::Shown {
-                        machine,
-                        agent,
-                        events,
-                    } => state.view.shown(&machine, &agent, &events),
                     Note::Changed => {}
                 }
             }

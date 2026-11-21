@@ -86,19 +86,49 @@ pub struct SessionView {
     pub last: u64,
 }
 
-/// The conversation of the session the app follows (`Core::follow`).
+/// The conversation of the session the app follows (`Core::follow`): its latest page of events,
+/// live, with what the page needs to draw its controls.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct ConversationView {
     pub machine: String,
     pub agent: String,
+    pub title: String,
+    /// The session's mode, `ask`, `auto` or `full`; empty before the daemon said it.
+    pub mode: String,
+    /// The agent's state as its events say it (`working`, `idle`, `ended`…).
+    pub state: String,
+    /// Whether a turn runs: what Stop interrupts.
+    pub working: bool,
+    /// Whether the agent is a child: it is written to by its parent only, its page reads.
+    pub child: bool,
+    pub ended: bool,
+    /// Whether older events remain on the machine than the ones held (`Core::older`).
+    pub more: bool,
     pub entries: Vec<Entry>,
+    /// The agents of the session's tree under its root, read only.
+    pub children: Vec<ChildView>,
 }
 
 /// One entry of a conversation: `user`, `agent`, `thought` or `tool`, and its text.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct Entry {
+    /// The number of the event the entry starts at: stable, and what orders the page.
+    pub seq: u64,
     pub kind: String,
     pub text: String,
+    /// The names of the pictures that went with a message of the user (`Core::image` reads each).
+    pub images: Vec<String>,
+}
+
+/// An agent of the session's tree, as `agent.tree` gives it.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct ChildView {
+    pub agent: String,
+    pub title: String,
+    /// What it does, in the daemon's words (`running \`cargo test\` for 12 min`).
+    pub doing: String,
+    pub role: String,
+    pub depth: u32,
 }
 
 /// A request of an agent's that waits for the user's Allow or Deny.
@@ -109,6 +139,15 @@ pub struct RequestView {
     pub agent: String,
     pub tool: String,
     pub reasons: Vec<String>,
+    /// The call on one line as the window shows it: a command's line, else the tool and its
+    /// arguments, the daemon's own text.
+    pub call: String,
+    /// A base request: it always asks, in every mode.
+    pub base: bool,
+    /// What the user allows, in the daemon's words, for a request that changes a project.
+    pub says: Vec<String>,
+    /// The judge's reason when one was asked, else the first reason it was held.
+    pub reason: String,
 }
 
 /// A question of an agent's that waits for the user's answer.
@@ -118,7 +157,25 @@ pub struct AskView {
     pub agent: String,
     /// The number of its `agent.asked` event, which `agent.answer` names.
     pub asked: u64,
+    /// The ask as one text.
     pub question: String,
+    /// Each question with its options, as the daemon sent them: one question without options when
+    /// the ask came without a list.
+    pub questions: Vec<AskQuestion>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct AskQuestion {
+    pub question: String,
+    pub options: Vec<AskOption>,
+    /// Whether several options may be chosen.
+    pub multiple: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct AskOption {
+    pub label: String,
+    pub description: String,
 }
 
 /// What the view is computed from.
@@ -136,8 +193,21 @@ pub(crate) struct View {
     asks: BTreeMap<(String, u64), AskView>,
     /// The followed session and its events by number: an event seen twice (loaded, then live) is
     /// one.
-    followed: Option<(String, String, BTreeMap<u64, Value>)>,
+    followed: Option<Followed>,
     said: Vec<String>,
+}
+
+/// The session whose page is on screen.
+struct Followed {
+    machine: String,
+    agent: String,
+    events: BTreeMap<u64, Value>,
+    /// The agent as `agent.show` gave it: its title, its mode, whether it has a parent.
+    info: Value,
+    state: String,
+    mode: String,
+    more: bool,
+    children: Vec<ChildView>,
 }
 
 struct Session {
@@ -232,11 +302,7 @@ impl View {
         self.sessions.retain(|(of, _), _| of != machine);
         self.requests.retain(|(of, _), _| of != machine);
         self.asks.retain(|(of, _), _| of != machine);
-        if self
-            .followed
-            .as_ref()
-            .is_some_and(|(of, _, _)| of == machine)
-        {
+        if self.followed.as_ref().is_some_and(|f| f.machine == machine) {
             self.followed = None;
         }
     }
@@ -306,23 +372,101 @@ impl View {
     /// Follows the session `agent` of `machine`: its conversation, from what `agent.show` gives
     /// and the events that come.
     pub(crate) fn follow(&mut self, machine: &str, agent: &str) {
-        self.followed = Some((machine.to_owned(), agent.to_owned(), BTreeMap::new()));
+        self.followed = Some(Followed {
+            machine: machine.to_owned(),
+            agent: agent.to_owned(),
+            events: BTreeMap::new(),
+            info: Value::Null,
+            state: String::new(),
+            mode: String::new(),
+            more: false,
+            children: Vec::new(),
+        });
     }
 
-    /// The events `agent.show` gave of the followed session.
-    pub(crate) fn shown(&mut self, machine: &str, agent: &str, events: &Value) {
-        for event in events["events"].as_array().into_iter().flatten() {
-            self.keep_followed(machine, agent, event);
+    /// The page is left: nothing of it is kept.
+    pub(crate) fn unfollow(&mut self) {
+        self.followed = None;
+    }
+
+    /// The number of the first event the followed page holds: where older ones end.
+    pub(crate) fn first_followed(&self, machine: &str, agent: &str) -> Option<u64> {
+        self.followed
+            .as_ref()
+            .filter(|f| f.machine == machine && f.agent == agent)
+            .and_then(|f| f.events.keys().next().copied())
+    }
+
+    /// A page of events `agent.show` gave of the followed session (the latest, or older ones).
+    pub(crate) fn shown(&mut self, machine: &str, agent: &str, shown: &Value) {
+        let Some(followed) = self
+            .followed
+            .as_mut()
+            .filter(|f| f.machine == machine && f.agent == agent)
+        else {
+            return;
+        };
+        for event in shown["events"].as_array().into_iter().flatten() {
+            if let Some(seq) = event["seq"].as_u64() {
+                followed.events.insert(seq, event.clone());
+            }
+        }
+        followed.more = shown["more"] == true;
+        if shown["agent"].is_object() {
+            followed.info = shown["agent"].clone();
+            followed.state = text(&followed.info["state"]);
+            followed.mode = text(&followed.info["gate_mode"]);
+        }
+    }
+
+    /// The tree of the followed session's root: its agents under it, read only, and the questions
+    /// its root asks the user and still waits for.
+    pub(crate) fn tree(&mut self, machine: &str, agent: &str, tree: &Value) {
+        let Some(followed) = self
+            .followed
+            .as_mut()
+            .filter(|f| f.machine == machine && f.agent == agent)
+        else {
+            return;
+        };
+        followed.children = tree["agents"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|entry| !entry["agent"]["parent"].is_null())
+            .map(|entry| ChildView {
+                agent: text(&entry["agent"]["id"]),
+                title: text(&entry["agent"]["title"]),
+                doing: text(&entry["doing"]),
+                role: text(&entry["agent"]["role"]),
+                depth: entry["agent"]["depth"].as_u64().unwrap_or(1) as u32,
+            })
+            .collect();
+        for entry in tree["agents"].as_array().into_iter().flatten() {
+            if !entry["agent"]["parent"].is_null() {
+                continue;
+            }
+            let root = text(&entry["agent"]["id"]);
+            self.asks
+                .retain(|(at, _), ask| at != machine || ask.agent != root);
+            for ask in entry["questions"].as_array().into_iter().flatten() {
+                if let Some(asked) = ask["seq"].as_u64() {
+                    self.asks.insert(
+                        (machine.to_owned(), asked),
+                        ask_view(machine, &root, asked, ask),
+                    );
+                }
+            }
         }
     }
 
     fn keep_followed(&mut self, machine: &str, agent: &str, event: &Value) {
-        if let Some((followed_machine, followed_agent, events)) = &mut self.followed
-            && followed_machine == machine
-            && followed_agent == agent
+        if let Some(followed) = &mut self.followed
+            && followed.machine == machine
+            && followed.agent == agent
             && let Some(seq) = event["seq"].as_u64()
         {
-            events.insert(seq, event.clone());
+            followed.events.insert(seq, event.clone());
         }
     }
 
@@ -363,12 +507,7 @@ impl View {
                 if let Some(asked) = event["seq"].as_u64() {
                     self.asks.insert(
                         (machine.to_owned(), asked),
-                        AskView {
-                            machine: machine.to_owned(),
-                            agent: agent.clone(),
-                            asked,
-                            question: text(&data["question"]),
-                        },
+                        ask_view(machine, &agent, asked, data),
                     );
                 }
             }
@@ -398,11 +537,34 @@ impl View {
                 state.clone_into(&mut session.state);
             }
         }
+        if let Some(followed) = &mut self.followed
+            && followed.machine == machine
+            && followed.agent == agent
+        {
+            if let Some(state) = state {
+                state.clone_into(&mut followed.state);
+            }
+            if name == "agent.gate_mode_changed" {
+                followed.mode = text(&data["mode"]);
+            }
+        }
     }
 
     fn requested(&mut self, machine: &str, request: &Value) {
         let Some(number) = request["number"].as_u64() else {
             return;
+        };
+        let reasons: Vec<String> = request["reasons"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(text)
+            .collect();
+        let tool = text(&request["tool"]);
+        // The judge's sentence when one was asked, else the first reason it was held.
+        let reason = match request["judgement"]["reason"].as_str() {
+            Some(reason) if !reason.is_empty() => reason.to_owned(),
+            _ => reasons.first().cloned().unwrap_or_default(),
         };
         self.requests.insert(
             (machine.to_owned(), number),
@@ -410,13 +572,17 @@ impl View {
                 machine: machine.to_owned(),
                 number,
                 agent: text(&request["agent"]),
-                tool: text(&request["tool"]),
-                reasons: request["reasons"]
+                call: call_line(&tool, &request["call"]),
+                tool,
+                base: request["class"] == "base",
+                says: request["says"]
                     .as_array()
                     .into_iter()
                     .flatten()
                     .map(text)
                     .collect(),
+                reason,
+                reasons,
             },
         );
     }
@@ -453,14 +619,28 @@ impl View {
             machines: self.machines.clone(),
             members: self.members.clone(),
             projects,
-            conversation: self
-                .followed
-                .as_ref()
-                .map(|(machine, agent, events)| ConversationView {
-                    machine: machine.clone(),
-                    agent: agent.clone(),
-                    entries: entries(events.values()),
-                }),
+            conversation: self.followed.as_ref().map(|followed| {
+                let session = self
+                    .sessions
+                    .get(&(followed.machine.clone(), followed.agent.clone()));
+                let title = session
+                    .map(|session| session.title.clone())
+                    .filter(|title| !title.is_empty())
+                    .unwrap_or_else(|| text(&followed.info["title"]));
+                ConversationView {
+                    machine: followed.machine.clone(),
+                    agent: followed.agent.clone(),
+                    title,
+                    mode: followed.mode.clone(),
+                    working: followed.state == "working",
+                    child: !followed.info["parent"].is_null(),
+                    ended: matches!(followed.state.as_str(), "ended" | "failed"),
+                    state: followed.state.clone(),
+                    more: followed.more,
+                    entries: entries(followed.events.values()),
+                    children: followed.children.clone(),
+                }
+            }),
             requests: self.requests.values().cloned().collect(),
             asks: self.asks.values().cloned().collect(),
             said: self.said.clone(),
@@ -494,13 +674,79 @@ fn entries<'a>(events: impl Iterator<Item = &'a Value>) -> Vec<Entry> {
         match entries.last_mut() {
             Some(last) if goes_on => last.text.push_str(&text),
             _ => entries.push(Entry {
+                seq: event["seq"].as_u64().unwrap_or_default(),
                 kind: kind.to_owned(),
                 text,
+                images: data["images"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(self::text)
+                    .collect(),
             }),
         }
         message = if piece { id } else { None };
     }
     entries
+}
+
+/// A question of the agent `agent`, from an `agent.asked` event or a question of `agent.tree`:
+/// each question with its options, or the ask's own text as the one question when it came
+/// without a list.
+fn ask_view(machine: &str, agent: &str, asked: u64, ask: &Value) -> AskView {
+    let question = text(&ask["question"]);
+    let mut questions: Vec<AskQuestion> = ask["questions"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|each| AskQuestion {
+            question: text(&each["question"]),
+            options: each["options"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|option| AskOption {
+                    label: text(&option["label"]),
+                    description: text(&option["description"]),
+                })
+                .collect(),
+            multiple: each["multiple"] == true,
+        })
+        .collect();
+    if questions.is_empty() {
+        questions.push(AskQuestion {
+            question: question.clone(),
+            options: Vec::new(),
+            multiple: false,
+        });
+    }
+    AskView {
+        machine: machine.to_owned(),
+        agent: agent.to_owned(),
+        asked,
+        question,
+        questions,
+    }
+}
+
+/// The prefix of the tools a connection offers (`conn_<name>`).
+const CONNECTION: &str = "conn_";
+
+/// The call of a request on one line, as the window shows it: a command's line, else the tool and
+/// its arguments. The daemon's own words, masked and cut by it: nothing is summarised here.
+fn call_line(tool: &str, call: &Value) -> String {
+    match (tool, call["line"].as_str()) {
+        ("run", Some(line)) => line.to_owned(),
+        (tool, _) if tool.starts_with(CONNECTION) => {
+            let name = &tool[CONNECTION.len()..];
+            let action = call["action"].as_str().unwrap_or("?");
+            match &call["arguments"] {
+                Value::Null => format!("{name} {action}"),
+                arguments => format!("{name} {action} {arguments}"),
+            }
+        }
+        (tool, _) => format!("{tool} {call}"),
+    }
 }
 
 fn now_millis() -> u64 {
