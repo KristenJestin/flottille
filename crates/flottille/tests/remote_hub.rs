@@ -732,7 +732,7 @@ fn a_headless_machine_pairs_with_the_code_and_is_in_every_list() {
     let paired = pair(&hub, &server, "server", "runner");
     assert!(
         paired.contains(&format!(
-            "server is paired with the hub at {}/ as a runner",
+            "server is paired with the hub at {} as a runner",
             hub.url()
         )),
         "{paired}"
