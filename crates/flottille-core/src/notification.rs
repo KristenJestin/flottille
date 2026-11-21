@@ -156,6 +156,71 @@ pub fn asked(tool: &str, call: &Value) -> String {
     }
 }
 
+/// How many reasons, the judge's sentence among them, a call said whole may carry, and how
+/// long each: past them, a notification server cuts the body, and what the user would allow is
+/// not what they read.
+const WHOLE_REASONS: usize = 3;
+const WHOLE_REASON: usize = 200;
+
+/// The held call and why it was held, uncut, one line each: what a notification may offer Allow
+/// on, since what the user allows is what they read. `None`, and only Deny and Open are offered,
+/// as soon as anything would be left out: a call whose summary does not say all of it (a write's
+/// content, a connection's arguments, a step of the setup), a call or a reason too long for one
+/// line, one whose shown arguments differ from those that run (cut or masked), a request that
+/// is an action said in words, or one an agent forwarded with its own words. A base request is
+/// said whole like another: its strong warning is its reason, said in full.
+pub fn whole(request: &crate::approval::Request) -> Option<String> {
+    use crate::approval::Kind;
+    if request.kind != Kind::Call
+        || !request.forwards.is_empty()
+        || request.digest.is_some()
+        || request.shown != request.arguments
+    {
+        return None;
+    }
+    let arguments = request.arguments.as_object()?;
+    // The one argument the summary says: a call with any other is not said whole.
+    let only = |name: &str| {
+        (arguments.len() == 1)
+            .then(|| arguments.get(name)?.as_str())
+            .flatten()
+    };
+    let call = match request.tool.as_str() {
+        "run" => format!("Run {}", only("line")?),
+        "fs_read" | "fs_list" => format!("Read {}", only("path")?),
+        "web" => format!("Read {}", only("url")?),
+        _ => return None,
+    };
+    let judge = request
+        .judgement
+        .as_ref()
+        .map(|judgement| format!("The judge: {}", judgement.reason));
+    let reasons: Vec<&str> = request
+        .reasons
+        .iter()
+        .map(String::as_str)
+        .chain(judge.as_deref())
+        .collect();
+    if reasons.len() > WHOLE_REASONS {
+        return None;
+    }
+    // Said as it is or not at all: a line that the excerpt would cut, fold or mask.
+    let uncut = |line: &str, most: usize| {
+        line.chars().count() <= most
+            && !line.chars().any(char::is_control)
+            && secrets::mask(line, &BTreeMap::new()) == line
+    };
+    if !uncut(&call, EXCERPT) || !reasons.iter().all(|reason| uncut(reason, WHOLE_REASON)) {
+        return None;
+    }
+    Some(
+        std::iter::once(call.as_str())
+            .chain(reasons)
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
+}
+
 /// A ticket or a pull request an agent created or changed.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Forged {
@@ -335,9 +400,6 @@ mod tests {
         for request in cases {
             assert_eq!(whole(&request), None, "{}", request.tool);
         }
-        let mut base = held("fs_read", json!({"path": ".env"}), &["r"]);
-        base.base = true;
-        assert_eq!(whole(&base), None);
         let mut action = held("fs_read", json!({"path": ".env"}), &["r"]);
         action.kind = crate::approval::Kind::Action;
         assert_eq!(whole(&action), None);
@@ -347,6 +409,20 @@ mod tests {
             why: "it needs it".into(),
         });
         assert_eq!(whole(&forwarded), None);
+    }
+
+    #[test]
+    fn a_base_request_is_said_whole_its_warning_being_its_reason() {
+        let mut base = held(
+            "fs_read",
+            json!({"path": ".env"}),
+            &[".env is a sensitive place"],
+        );
+        base.base = true;
+        assert_eq!(
+            whole(&base).as_deref(),
+            Some("Read .env\n.env is a sensitive place")
+        );
     }
 
     #[test]
