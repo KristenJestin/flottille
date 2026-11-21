@@ -194,7 +194,7 @@ impl InFlight {
     fn enter() -> Option<InFlight> {
         use std::sync::atomic::Ordering::SeqCst;
         IN_FLIGHT
-            .fetch_update(SeqCst, SeqCst, |held| {
+            .try_update(SeqCst, SeqCst, |held| {
                 (held < MOST_IN_FLIGHT).then_some(held + 1)
             })
             .ok()
