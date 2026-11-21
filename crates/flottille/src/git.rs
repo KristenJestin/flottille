@@ -720,6 +720,31 @@ pub(crate) mod tests {
     use super::*;
 
     #[test]
+    fn a_bare_name_links_to_the_program_of_its_own_name_in_the_path() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let folder = rooted_folder(&dir.path().join("path"));
+
+        // `sh` is a link to another program almost everywhere (`dash`, `bash`): the link to the
+        // name, not to what it leads to now, follows an upgrade that moves it.
+        let sh = std::fs::read_link(folder.join("sh")).unwrap();
+        assert_eq!(sh.file_name(), Some(OsStr::new("sh")), "{sh:?}");
+    }
+
+    #[test]
+    fn a_link_folder_that_cannot_be_made_is_a_path_that_finds_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("file");
+        std::fs::write(&file, "").unwrap();
+
+        let folder = rooted_folder(&file.join("path"));
+
+        // An empty one is the current folder to `execvp`: where git runs from.
+        assert!(folder.is_absolute(), "{folder:?}");
+        assert!(!folder.exists(), "{folder:?}");
+    }
+
+    #[test]
     fn the_ssh_git_runs_shares_no_connection_and_forwards_no_agent() {
         // First, so that neither `~/.ssh/config` nor a later option sets them: a master socket
         // in the read-only `~/.ssh` could not be made, and one made elsewhere any run could use.
