@@ -41,7 +41,7 @@ import org.robolectric.annotation.Config
  * test for each scenario of #825, named after it.
  */
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [34], qualifiers = "w360dp-h900dp-xhdpi")
+@Config(sdk = [34], qualifiers = "w360dp-h900dp-xhdpi", application = android.app.Application::class)
 class AppScreensTest {
     @get:Rule
     val rule = createComposeRule()
