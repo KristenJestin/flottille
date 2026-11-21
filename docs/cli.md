@@ -295,20 +295,18 @@ Fixes
 $ flottille changes --since 0.4.0-beta.104
 ```
 
-### `flottille remote on [--listen <address>|tailnet|nowhere] [--json]`
+### `flottille remote on [--json]`
 
 Remote is off until it is turned on (`docs/remote.md`, "Identity and keys"): `remote on` turns
-it on, `remote off` closes the links and keeps this machine paired with its hub, and `remote listen` says where this
-machine is reached, as Settings, Machines does. `--listen` and `listen` take an address and its port
-(7447 when it has none), `tailnet` (this machine's first Tailscale or WireGuard address) or `nowhere`
-(the default: it dials the others, nobody dials it). The daemon writes `daemon.toml` itself, keeping
-every other key and comment, and takes the change at once, with no restart; while an agent runs,
-a new address waits for the next start, and the command says so. `--json` prints what
-`remote.settings` answers (`protocol.md`, "The remote methods"). `remote.configure`.
+it on, and `remote off` closes the links and keeps this machine paired with its hub, as Settings,
+Machines does. Every link goes through the hub: nothing listens, and no address is given. The
+daemon writes `daemon.toml` itself, keeping every other key and comment, and takes the change at
+once, with no restart. `--json` prints what `remote.settings` answers (`protocol.md`, "The remote
+methods"). `remote.configure`.
 
 ```
-$ flottille remote on --listen tailnet
-Remote is on. This machine is reached at 100.64.0.7:7447.
+$ flottille remote on
+Remote is on: its links go through the hub.
 $ flottille remote off
 Remote is off: the links are closed, this machine stays paired with its hub.
 ```
@@ -316,10 +314,6 @@ Remote is off: the links are closed, this machine stays paired with its hub.
 ### `flottille remote off [--json]`
 
 As `remote on` above: closes the links and keeps this machine paired with its hub.
-
-### `flottille remote listen <address> [--json]`
-
-As `remote on` above: says where this machine is reached, with the same addresses as `--listen`.
 
 ### `flottille remote pair [--name <name>] [--role runner|controller|viewer] [--icon <icon>] [--colour <colour>] [--replace] [--json]`
 
@@ -387,31 +381,6 @@ session's device key. A role is changed on the hub's host only (`flottille-hub r
 Removes a member: a change signed by this session's device key. Every machine that hears it cuts
 its links to the removed member's machine at once; a machine that was off hears it from the hub
 before it links to anything. The device comes back only paired again on the hub. `remote.change`.
-
-### `flottille remote address list [--json]`
-
-With remote on (`docs/remote.md`, "Identity and keys"), the addresses another machine reaches this
-one at: the one its link listens on, `found` (its interfaces' when it listens on all of them; none
-until `[remote] listen` is set), and those declared by hand, `declared`. They serve the direct path
-only, unused by default: links go through the hub (`docs/remote.md`, "The transport").
-`remote.machines` (`docs/protocol.md`).
-
-```
-$ flottille remote address list
-192.168.1.20:7447  found
-100.64.0.7:7447  declared
-```
-
-### `flottille remote address add <address> [--json]`
-
-Declares an address of this machine: a VPN address, a DNS name, a forwarded port, with its port
-when it is not the link's own (`100.64.0.7`, `server.example.net:7447`). It is told at once to the
-machines linked to this one. `remote.address.add`.
-
-### `flottille remote address remove <address> [--json]`
-
-Removes an address declared by hand, and tells the machines linked to this one.
-`remote.address.remove`.
 
 ## Tunnels
 
