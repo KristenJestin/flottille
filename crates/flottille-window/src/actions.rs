@@ -379,6 +379,11 @@ pub enum Command {
         discard: Option<Vec<flottille_protocol::ShownWorkspace>>,
     },
     /// What registering a folder would register.
+    /// The folders of the machine shown a project may be added from (`project.folders`).
+    ProjectFolders {
+        /// The machine shown when it was asked: an answer for another one is dropped.
+        machine: Option<String>,
+    },
     DetectProject {
         folder: String,
         name: Option<String>,
@@ -1003,6 +1008,12 @@ pub enum Outcome {
     ProjectRemoved {
         project: String,
         result: Result<Value, String>,
+    },
+    /// The folders of `machine` a project may be added from, as `project.folders` says them, or
+    /// why they cannot be read.
+    ProjectFolders {
+        machine: Option<String>,
+        read: Result<Value, String>,
     },
     /// What a folder would register (`project.detect`), or why it cannot be.
     ProjectDetected {
@@ -1633,6 +1644,9 @@ impl Actions {
             return;
         }
         let connect = match &command {
+            // This window's build and its update are this machine's, whichever machine is shown:
+            // `update.download` and `update.restart` are never carried.
+            Command::Update { .. } => self.local.clone(),
             Command::Signed {
                 machine: Some(_), ..
             } => self.local.clone(),
@@ -2562,6 +2576,15 @@ fn perform(connect: &Connect, sign: Option<Sign>, command: Command, bounds: Boun
                 bounds.slow,
             )),
             project,
+        },
+        Command::ProjectFolders { machine } => Outcome::ProjectFolders {
+            machine,
+            read: answer(ask_alone(
+                connect,
+                "project.folders",
+                json!({}),
+                bounds.quick,
+            )),
         },
         Command::DetectProject { folder, name, seq } => Outcome::ProjectDetected {
             seq,

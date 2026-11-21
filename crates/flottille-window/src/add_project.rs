@@ -1,12 +1,17 @@
-//! Adding a project from the window, as `flottille project add` does: its folder (typed, or
-//! picked with the system's own dialog), the repositories the daemon detects in it shown before
-//! anything is registered, then the project's settings page, where its forges and tracker are
-//! declared. The folder is detected by itself: once typing rests, or at once for a picked one.
+//! Adding a project from the window, as `flottille project add` does: on which machine first, when
+//! the user has others that run agents (choosing one shows it, as opening one of its sessions
+//! does); its folder (typed, or picked with the system's own dialog on this machine, picked from
+//! the folders that machine lists on another: `docs/remote.md`, "Paths are picked, not typed"),
+//! the repositories the daemon detects in it shown before anything is registered, then the
+//! project's settings page, where its forges and tracker are declared. The folder is detected by
+//! itself: once typing rests, or at once for a picked one.
 
 use std::path::PathBuf;
 use std::time::Duration;
 
-use gpui_design_system::{Button, Modal, Type, enter, palette, presence, space};
+use gpui_design_system::{
+    Button, Field, Modal, Select, SelectOption, Type, enter, palette, presence, presence_of, space,
+};
 use gpui_kit::base::input::{InputEvent, InputState};
 use gpui_kit::{
     AppContext as _, Context, ElementId, Entity, Focusable as _, InteractiveElement, IntoElement,
@@ -42,6 +47,9 @@ pub fn repository_name(folder: &str, path: &str) -> String {
     }
 }
 
+/// The folders a machine lists, each one's path and how it is shown, or why they cannot be read.
+pub type Listed = Result<Vec<(String, String)>, String>;
+
 pub struct AddProject {
     shell: WeakEntity<Shell>,
     open: bool,
@@ -59,6 +67,11 @@ pub struct AddProject {
     pause: Option<Task<()>>,
     /// Adding, while the daemon answers.
     busy: Option<&'static str>,
+    /// The folders another machine listed (`project.folders`): the machine they are of, and each
+    /// one's path and how it is shown (`~/code/app`), or why they could not be read.
+    folders: Option<(Option<String>, Listed)>,
+    /// The machine the form was last drawn for: what was typed for another is let go.
+    drawn_for: Option<String>,
     error: Option<SharedString>,
     _subscriptions: Vec<Subscription>,
 }
@@ -90,6 +103,8 @@ impl AddProject {
             detecting: false,
             pause: None,
             busy: None,
+            folders: None,
+            drawn_for: None,
             error: None,
             _subscriptions: subscriptions,
         }
@@ -261,6 +276,39 @@ impl AddProject {
         cx.notify();
     }
 
+    /// The folders `machine` listed, or why not: kept for that machine only.
+    pub fn folders_answered(
+        &mut self,
+        machine: Option<String>,
+        read: Result<Value, String>,
+        cx: &mut Context<Self>,
+    ) {
+        let listed = read.map(|read| {
+            read["folders"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|folder| {
+                    Some((
+                        folder["path"].as_str()?.to_owned(),
+                        folder["shown"].as_str()?.to_owned(),
+                    ))
+                })
+                .collect()
+        });
+        self.folders = Some((machine, listed));
+        cx.notify();
+    }
+
+    /// The folders listed by the machine shown, once it answered.
+    pub fn folders(&self, cx: &gpui_kit::App) -> Option<&Listed> {
+        let shown = crate::machines::shown_machine(cx);
+        self.folders
+            .as_ref()
+            .filter(|(machine, _)| *machine == shown)
+            .map(|(_, listed)| listed)
+    }
+
     /// The project registered: its name, for the shell to open its settings; or why not.
     pub fn add_answered(
         &mut self,
@@ -288,8 +336,158 @@ impl AddProject {
     }
 }
 
+impl AddProject {
+    /// On which machine: this one first, then the other machines that run agents, each with its
+    /// state. None while the user has no other.
+    fn machine_choice(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+        let shell = self.shell.upgrade()?;
+        let read = shell.read(cx).machines().read(cx).machines()?.clone();
+        if !read.member() || read.runners().next().is_none() {
+            return None;
+        }
+        let this = read
+            .this
+            .clone()
+            .unwrap_or_else(|| "This machine".to_owned());
+        let runners: Vec<(String, String)> = read
+            .runners()
+            .map(|machine| (machine.name.clone(), machine.state_words()))
+            .collect();
+        let shown = crate::machines::shown_machine(cx);
+        let chosen = shown
+            .as_ref()
+            .and_then(|shown| runners.iter().position(|(name, _)| name == shown))
+            .map_or(0, |at| at + 1);
+        let options = std::iter::once(SelectOption::new("here", this).line("This machine"))
+            .chain(runners.iter().map(|(name, state)| {
+                SelectOption::new(
+                    SharedString::from(name.clone()),
+                    SharedString::from(name.clone()),
+                )
+                .line(SharedString::from(state.clone()))
+            }))
+            .collect::<Vec<_>>();
+        let names: Vec<Option<String>> = std::iter::once(None)
+            .chain(runners.into_iter().map(|(name, _)| Some(name)))
+            .collect();
+        let weak = self.shell.clone();
+        let select =
+            Select::new("add-project-machine", options, chosen).on_choose(move |at, _, cx| {
+                let name = names[at].clone();
+                weak.update(cx, |shell, cx| shell.choose_machine(name, cx))
+                    .ok();
+            });
+        Some(Field::new("add-project-machine-field", "On", select))
+    }
+
+    /// The folder: typed or picked with the system's dialog on this machine; picked from the
+    /// folders another machine lists on that one, never typed.
+    fn folder_choice(&self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+        let Some(machine) = crate::machines::shown_machine(cx) else {
+            return div()
+                .flex()
+                .gap(space::SM)
+                .child(
+                    div()
+                        .flex_1()
+                        .child(field_frame("add-project-folder", &self.folder, cx)),
+                )
+                .child(
+                    Button::secondary("add-project-browse", "Browse…")
+                        .on_click(cx.listener(|this, _, window, cx| this.browse(window, cx))),
+                )
+                .into_any_element();
+        };
+        let p = palette(cx);
+        let listed = match self.folders(cx) {
+            None => {
+                return div()
+                    .id("add-project-folders-reading")
+                    .mono(11.5)
+                    .text_color(p.faint)
+                    .child("Reading its folders…")
+                    .test_support()
+                    .into_any_element();
+            }
+            Some(Err(why)) => Err(why.clone()),
+            Some(Ok(listed)) => Ok(listed.clone()),
+        };
+        let none = match &listed {
+            Err(why) => Some(format!("Its folders cannot be read: {why}")),
+            Ok(listed) if listed.is_empty() => Some(format!(
+                "No Git repository in the home folder of {machine}, three levels down."
+            )),
+            Ok(_) => None,
+        };
+        let listed = listed.unwrap_or_default();
+        let typed = self.folder.read(cx).value().trim().to_owned();
+        let chosen = listed
+            .iter()
+            .position(|(path, _)| *path == typed)
+            .map_or(0, |at| at + 1);
+        let options = std::iter::once(SelectOption::new("none", "Choose a folder")).chain(
+            listed.iter().map(|(_, shown)| {
+                SelectOption::new(
+                    SharedString::from(shown.clone()),
+                    SharedString::from(shown.clone()),
+                )
+            }),
+        );
+        let paths: Vec<Option<String>> = std::iter::once(None)
+            .chain(listed.iter().map(|(path, _)| Some(path.clone())))
+            .collect();
+        let this = cx.entity().downgrade();
+        let select = Select::new("add-project-folders", options, chosen)
+            .disabled(listed.is_empty())
+            .on_choose(move |at, window, cx| {
+                let Some(path) = paths[at].clone() else {
+                    return;
+                };
+                this.update(cx, |this, cx| {
+                    this.set_folder(PathBuf::from(path), window, cx)
+                })
+                .ok();
+            });
+        div()
+            .flex()
+            .flex_col()
+            .child(Field::new(
+                "add-project-folders-field",
+                SharedString::from(format!("Folder on {machine}")),
+                select,
+            ))
+            .child(
+                presence_of(
+                    "add-project-no-folders",
+                    none.map(SharedString::from),
+                    move |line| {
+                        div()
+                            .id("add-project-no-folders")
+                            .aria_label(line.clone())
+                            .text_size(px(12.5))
+                            .text_color(p.faint)
+                            .child(line)
+                            .test_support()
+                            .into_any_element()
+                    },
+                )
+                .space(space::SM),
+            )
+            .into_any_element()
+    }
+}
+
 impl Render for AddProject {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let shown = crate::machines::shown_machine(cx);
+        if self.drawn_for != shown {
+            // A folder of one machine is no folder of another.
+            self.drawn_for = shown;
+            for field in [&self.folder, &self.name] {
+                field.update(cx, |field, cx| field.set_value("", window, cx));
+            }
+            self.changed(cx);
+        }
         let p = palette(cx);
         let this = cx.entity().downgrade();
         // Folding away, the result still shows what it held.
@@ -340,7 +538,7 @@ impl Render for AddProject {
             )
             .into_any_element(),
             None => Button::primary("add-project-next", "Add project")
-                .disabled(self.detected.is_none())
+                .disabled(self.detected.is_none() || crate::machines::held(cx).is_some())
                 .on_click(cx.listener(|this, _, _, cx| this.next(cx)))
                 .into_any_element(),
         };
@@ -364,22 +562,8 @@ impl Render for AddProject {
                                 "A folder that is a Git repository, or holds some one or two \
                                  levels down. Nothing is written in it.",
                             ))
-                            .child(
-                                div()
-                                    .flex()
-                                    .gap(space::SM)
-                                    .child(div().flex_1().child(field_frame(
-                                        "add-project-folder",
-                                        &self.folder,
-                                        cx,
-                                    )))
-                                    .child(
-                                        Button::secondary("add-project-browse", "Browse…")
-                                            .on_click(cx.listener(|this, _, window, cx| {
-                                                this.browse(window, cx)
-                                            })),
-                                    ),
-                            )
+                            .children(self.machine_choice(cx))
+                            .child(self.folder_choice(cx))
                             .child(field_frame("add-project-name", &self.name, cx)),
                     )
                     .child(

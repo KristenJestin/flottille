@@ -23,6 +23,8 @@ use futures::channel::mpsc::UnboundedSender;
 use serde_json::{Value, json};
 use zeroize::Zeroizing;
 
+use gpui_kit::prelude::FluentBuilder as _;
+
 use crate::device::Device;
 use crate::link::{Conn, Connect, Update};
 
@@ -821,6 +823,122 @@ pub fn shown_on(cx: &gpui_kit::App) -> Option<String> {
         .map(|machine| format!("on {machine}"))
 }
 
+/// Why the pages of the machine in front take no change now, when they take none: that machine
+/// is off (`server offline since 22:14`: nothing is sent to it, nothing is kept for it), or this
+/// device may only view it (`This device may only view server`: the daemon's refusal is the guard,
+/// this only says it beforehand). Said once, at the top of the page; its controls fade and take
+/// no click.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Held(pub Option<Holding>);
+
+impl gpui_kit::Global for Held {}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Holding {
+    /// The line the page says it in.
+    pub line: String,
+    /// The machine is off: the link to it is not a daemon that does not answer.
+    pub offline: bool,
+}
+
+/// Why the pages of the machine `front` take no change, as `machines` says it.
+pub fn holding(front: Option<&str>, machines: Option<&Machines>) -> Option<Holding> {
+    let (name, machines) = (front?, machines?);
+    if let Some(machine) = machines.machine(name).filter(|machine| !machine.online()) {
+        return Some(Holding {
+            line: format!("{name} {}", machine.state_words()),
+            offline: true,
+        });
+    }
+    let this = machines.this.as_deref()?;
+    machines
+        .members
+        .iter()
+        .find(|member| member.name == this && member.role == "viewer")
+        .map(|_| Holding {
+            line: format!("This device may only view {name}"),
+            offline: false,
+        })
+}
+
+/// What [`Held`] says now.
+pub fn held(cx: &gpui_kit::App) -> Option<Holding> {
+    cx.try_global::<Held>().and_then(|held| held.0.clone())
+}
+
+/// The line at the top of a page of another machine that names it, then where the page is:
+/// `server / Settings / Agents`; nothing on this machine. It unfolds and fades in when another
+/// machine comes in front, and folds away with its words when this one comes back.
+pub fn where_line(
+    id: &'static str,
+    parts: &[&str],
+    cx: &gpui_kit::App,
+) -> gpui_design_system::PresenceOf {
+    use gpui_design_system::{Type as _, palette, presence_of};
+    use gpui_kit::{InteractiveElement as _, IntoElement as _, ParentElement as _, Styled as _};
+    use gpui_kit::{SharedString, StatefulInteractiveElement as _, TestSupportExt as _, div, px};
+    let p = palette(cx);
+    let said = shown_machine(cx).map(|machine| {
+        SharedString::from(
+            std::iter::once(machine.as_str())
+                .chain(parts.iter().copied())
+                .collect::<Vec<_>>()
+                .join(" / "),
+        )
+    });
+    presence_of(format!("{id}-block"), said, move |said| {
+        let (machine, rest) = said.split_once(" / ").unwrap_or((said.as_ref(), ""));
+        div()
+            .id(id)
+            .aria_label(said.clone())
+            .flex()
+            .items_center()
+            .gap(px(4.))
+            .text_size(px(13.))
+            .child(
+                div()
+                    .medium()
+                    .text_color(p.text)
+                    .child(SharedString::from(machine.to_owned())),
+            )
+            .when(!rest.is_empty(), |d| {
+                d.child(
+                    div()
+                        .text_color(p.faint)
+                        .child(SharedString::from(format!("/ {rest}"))),
+                )
+            })
+            .test_support()
+            .into_any_element()
+    })
+}
+
+/// `page`, the controls of a page of the machine in front, held while [`Held`] says so: its ink
+/// fades over `HOVER` and no click reaches it, while it still scrolls and is read. The same
+/// element held or not: what the controls keep between frames stays theirs.
+pub fn hold(
+    page: gpui_kit::Stateful<gpui_kit::Div>,
+    window: &mut gpui_kit::Window,
+    cx: &mut gpui_kit::App,
+) -> gpui_kit::Stateful<gpui_kit::Div> {
+    use gpui_design_system::{fade, motion::HOVER};
+    use gpui_kit::{InteractiveElement as _, ParentElement as _, Styled as _};
+    use gpui_kit::{TestSupportExt as _, div};
+    let holding = held(cx).is_some();
+    let t = fade("page-held-fade", holding, HOVER, window, cx);
+    page.opacity(1.0 - 0.45 * t).when(holding, |d| {
+        d.capture_any_mouse_down(|_, _, cx| cx.stop_propagation())
+            .capture_any_mouse_up(|_, _, cx| cx.stop_propagation())
+            .child(
+                div()
+                    .id("page-held-veil")
+                    .absolute()
+                    .size_0()
+                    .test_support(),
+            )
+    })
+}
+
 // ── The machine shown ─────────────────────────────────────────────────────────────────────────
 
 /// The machine the window shows, and the connections made for it: every connection the window
@@ -957,5 +1075,67 @@ fn carry(pair: &Pair, machine: Option<&(String, Arc<DeviceKey>)>) -> std::io::Re
         let mut out = serde_json::to_vec(&signed).map_err(std::io::Error::other)?;
         out.push(b'\n');
         (&pair.daemon).write_all(&out)?;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Holding, Machine, Machines, Member, holding};
+    use serde_json::Value;
+
+    fn machines(state: &str, role: &str) -> Machines {
+        Machines {
+            this: Some("pc".to_owned()),
+            machines: vec![Machine {
+                name: "server".to_owned(),
+                fingerprint: "f2".to_owned(),
+                state: state.to_owned(),
+                since: None,
+                reason: None,
+                role: Some("runner".to_owned()),
+                reached: None,
+                addresses: Vec::new(),
+            }],
+            members: vec![Member {
+                name: "pc".to_owned(),
+                key: Value::Null,
+                fingerprint: "f1".to_owned(),
+                role: role.to_owned(),
+                added_by: "the hub".to_owned(),
+                machine: None,
+            }],
+            ..Machines::default()
+        }
+    }
+
+    #[test]
+    fn this_machine_in_front_holds_nothing() {
+        assert_eq!(holding(None, Some(&machines("offline", "viewer"))), None);
+    }
+
+    #[test]
+    fn a_machine_that_is_off_is_held_with_its_state() {
+        assert_eq!(
+            holding(Some("server"), Some(&machines("offline", "runner"))),
+            Some(Holding {
+                line: "server offline".to_owned(),
+                offline: true,
+            })
+        );
+    }
+
+    #[test]
+    fn a_viewer_is_held_with_the_reason() {
+        assert_eq!(
+            holding(Some("server"), Some(&machines("online", "viewer"))),
+            Some(Holding {
+                line: "This device may only view server".to_owned(),
+                offline: false,
+            })
+        );
+        assert_eq!(
+            holding(Some("server"), Some(&machines("online", "controller"))),
+            None
+        );
     }
 }

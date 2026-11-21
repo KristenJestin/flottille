@@ -2933,6 +2933,11 @@ impl Render for ProjectSettingsPage {
         let header = div()
             .flex()
             .flex_col()
+            .child(crate::machines::where_line(
+                "project-settings-where",
+                &[&self.name, "Settings"],
+                cx,
+            ))
             .child(
                 PageHeader::new("project-settings-header", "Settings")
                     .crumb(crumb)
@@ -3104,6 +3109,8 @@ impl Render for ProjectSettingsPage {
                     .when(n > 0, |d| d.mt(space::XXL))
             }))
             .test_support();
+        // Held after its blocks: what it adds comes after them, and a block's place stays its own.
+        let page = crate::machines::hold(page, window, cx);
         div()
             .size_full()
             .flex()

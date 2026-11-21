@@ -64,7 +64,14 @@ const AGENTS_BLOCKS: [&str; 5] = [
 ];
 
 /// The blocks of the General tab, top to bottom.
-const GENERAL_BLOCKS: [&str; 5] = ["about", "appearance", "workspaces", "developer", "version"];
+const GENERAL_BLOCKS: [&str; 6] = [
+    "about",
+    "own",
+    "appearance",
+    "workspaces",
+    "developer",
+    "version",
+];
 
 /// The blocks of the Approvals tab: the Auto judge, then what it is told.
 const APPROVALS_BLOCKS: [&str; 2] = ["judge", "guidance"];
@@ -2477,9 +2484,11 @@ impl Render for SettingsPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
         let pad = if self.narrow { space::LG } else { space::XXL };
-        let header = PageHeader::new("settings-header", "Settings");
         // Only the tab shown is built: what a tab holds enters again as it is shown.
         let tab = self.tab.min(SECTIONS.len() - 1);
+        let header = PageHeader::new("settings-header", "Settings").crumb(
+            crate::machines::where_line("settings-where", &["Settings", SECTIONS[tab].1], cx),
+        );
         let blocks: Vec<(&str, AnyElement)> = match SECTIONS[tab].0 {
             "agents" => vec![
                 ("providers", self.providers_section(window, cx)),
@@ -2504,6 +2513,7 @@ impl Render for SettingsPage {
             "machines" => vec![("machines", self.machines.clone().into_any_element())],
             _ => vec![
                 ("about", self.about.clone().into_any_element()),
+                ("own", self.own_line(cx).into_any_element()),
                 ("appearance", self.appearance_section(cx).into_any_element()),
                 ("workspaces", self.workspaces.clone().into_any_element()),
                 ("developer", self.developer_section(cx).into_any_element()),
@@ -2546,6 +2556,11 @@ impl Render for SettingsPage {
             .child(column(
                 enter(key("header"), 0, div().pb(space::LG).child(header)).into_any_element(),
             ))
+            .children(self.machine_chooser(cx).map(|chooser| {
+                column(
+                    enter(key("machine"), 1, div().pb(space::LG).child(chooser)).into_any_element(),
+                )
+            }))
             .child(column(enter(key("tabs"), 1, tabs).into_any_element()));
         // Each section enters as it is shown (its state is dropped while it is not drawn, so it
         // plays again), after the tabs.
@@ -2563,9 +2578,13 @@ impl Render for SettingsPage {
             .pt(space::XL)
             .pb(space::XXXL)
             .children(blocks.into_iter().enumerate().map(|(n, (part, section))| {
+                // The line of the window's own settings is there only while another machine is
+                // shown: it brings its own space.
                 column(enter(key(part), 2 + n, section).into_any_element())
-                    .when(n > 0, |d| d.mt(space::XXL))
+                    .when(n > 0 && part != "own", |d| d.mt(space::XXL))
             }));
+        // Held after its blocks: what it adds comes after them, and a block's place stays its own.
+        let page = crate::machines::hold(page, window, cx);
         div()
             .size_full()
             .flex()
@@ -2573,6 +2592,82 @@ impl Render for SettingsPage {
             .text_color(p.text)
             .child(top)
             .child(page)
+    }
+}
+
+impl SettingsPage {
+    /// Whose settings these are, at the top of the page: this machine, then the other machines
+    /// that run agents, each with its state; choosing one shows it (`Shell::choose_machine`), as
+    /// opening one of its sessions does. None while this machine is in no member list or knows no
+    /// other runner.
+    fn machine_chooser(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+        let read = self.machines.read(cx).machines()?;
+        if !read.member() || read.runners().next().is_none() {
+            return None;
+        }
+        let this = read
+            .this
+            .clone()
+            .unwrap_or_else(|| "This machine".to_owned());
+        let runners: Vec<(String, String)> = read
+            .runners()
+            .map(|machine| (machine.name.clone(), machine.state_words()))
+            .collect();
+        let shown = crate::machines::shown_machine(cx);
+        let chosen = shown
+            .as_ref()
+            .and_then(|shown| runners.iter().position(|(name, _)| name == shown))
+            .map_or(0, |at| at + 1);
+        let options = std::iter::once(SelectOption::new("here", this).line("This machine"))
+            .chain(runners.iter().map(|(name, state)| {
+                SelectOption::new(
+                    SharedString::from(name.clone()),
+                    SharedString::from(name.clone()),
+                )
+                .line(SharedString::from(state.clone()))
+            }))
+            .collect::<Vec<_>>();
+        let names: Vec<Option<String>> = std::iter::once(None)
+            .chain(runners.into_iter().map(|(name, _)| Some(name)))
+            .collect();
+        let shell = self.shell.clone();
+        let select = Select::new("settings-machine", options, chosen)
+            .fit()
+            .on_choose(move |at, _, cx| {
+                let name = names[at].clone();
+                shell
+                    .update(cx, |shell, cx| shell.choose_machine(name, cx))
+                    .ok();
+            });
+        Some(Field::new("settings-machine-field", "Settings of", select))
+    }
+
+    /// One line on the General tab while another machine is shown: its appearance and its version
+    /// are this window's, and stay this machine's.
+    fn own_line(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let p = palette(cx);
+        let this = self
+            .machines
+            .read(cx)
+            .machines()
+            .and_then(|read| read.this.clone())
+            .unwrap_or_else(|| "this machine".to_owned());
+        let said = crate::machines::shown_machine(cx).map(|_| {
+            SharedString::from(format!(
+                "The appearance and the version are this window's: they stay {this}'s."
+            ))
+        });
+        presence_of("settings-own-block", said, move |said| {
+            div()
+                .id("settings-own")
+                .aria_label(said.clone())
+                .text_size(px(12.5))
+                .text_color(p.mute)
+                .child(said)
+                .test_support()
+                .into_any_element()
+        })
+        .space(space::XXL)
     }
 }
 

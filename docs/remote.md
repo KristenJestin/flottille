@@ -592,6 +592,30 @@ open; bringing in front a machine that needs an update, or that went off meanwhi
 toast that says why, and the window stays on the machine it shows. The window reads the
 device key from the same keyring item, or the same file, as the command line.
 
+**Built (#1182), in the window: every page works on any machine.** The window addresses another
+machine one way only, the one its sessions use: bringing that machine in front, every connection of
+the window signed with the device key for it and carried by this machine's daemon. Settings opens
+with `Settings of` (the kit's select: this machine, then the other runners, each with its state);
+choosing one brings it in front, and every tab that is a machine's (Agents, Approvals, Features
+and Connections, Vault, General's about, workspaces folder and developer mode) shows and changes
+that machine's. What is the window's own stays this machine's, asked of its own daemon whichever
+machine is shown: the appearance, the version and its update (`update.*`), the folds and drafts the
+window keeps; General says it in one line while another machine is shown (`The appearance and the
+version are this window's: they stay pc's.`). Settings, Machines is the hub's list, the same from
+every machine. **Add project** asks first `On` which machine (this one first, then the runners);
+on another, the folder is picked from those that machine lists (`project.folders`: the
+repositories under its home, three levels down), never typed, then detected and added there. A
+project of another machine only opens its page by bringing that machine in front; its settings and
+every tab follow. A page of another machine says it once, at its top, in its path line (`server /
+Settings / Agents`, `server / app`, `server / app / Settings`), which unfolds as that machine
+comes in front and folds away when this one is back. While the machine in front is off, or this
+device is a `viewer` there, one line above the page says why (`server offline since 22:14`, `This
+device may only view server`), and the controls that write (Settings' sections, a project's
+settings, a project page's composer and its tab, Add project's button) fade their ink and take no
+click, while the page still scrolls and its tabs still read; nothing is sent, nothing is kept. A
+machine that is off is not brought in front (a failure toast says it, as for its sessions): what
+the window shows of it is what it read while it was on.
+
 ## Roles
 
 The user chooses what a device may do on the device when it pairs, from what it proposes; the role
@@ -717,8 +741,9 @@ machine's name.
 - **One list.** The sidebar holds the sessions of every member machine together, grouped by
   project: a project registered on several machines under the same name is one group. Sessions
   are ordered by last exchange, as on one machine. A session of another machine carries that
-  machine's name as a tag (`server`); a session of this machine carries none. There is no machine
-  switcher: the machines' states (online, offline since, needs an update) are in Settings,
+  machine's name as a tag (`server`); a session of this machine carries none. The machine is
+  chosen where a page is a machine's: Settings' `Settings of` and Add project's `On` (#1182); the
+  machines' states (online, offline since, needs an update) are in those choosers and in Settings,
   Machines.
 - **Live everywhere.** A runner tells each machine it links to its list of sessions, light (the
   `sessions` message, "What a machine may send"): when the link is made, and again whenever it
@@ -1286,6 +1311,16 @@ on a real phone, by hand, and reported.
 - **iOS** and a desktop build of the app are not planned.
 
 ## Defaults taken, to confirm
+
+- **Every page of another machine is that machine brought in front** (#1182): Settings' and Add
+  project's choosers switch the whole window, as opening a session there does, rather than a page
+  aimed at a machine of its own while the rest stays: one way to address a machine, and the
+  sidebar, the bell and the pages always say the same machine.
+- **`project.folders` lists the repositories under the machine's home, three levels down, 200 at
+  most** (#1182), not a browser of every folder: what a project is added from is a repository, and
+  a list is what a machine with no screen can offer. It is `drive`, as adding is.
+- **The chooser of Settings names each machine and its state, without its icon and colour**
+  (#1182): the kit's select has no icon for an option yet; it is a follow-up of the kit.
 
 - One list of every machine (#1150): the window follows the other machines through its own
   daemon, which keeps each machine's list as that machine tells it over the link (the `sessions`

@@ -533,6 +533,11 @@ impl Render for ProjectPage {
         let header = {
             let (shell, name) = (self.shell.clone(), self.name.clone());
             let mut header = PageHeader::new("project-header", self.name.clone())
+                .crumb(crate::machines::where_line(
+                    "project-where",
+                    &[&self.name],
+                    cx,
+                ))
                 .path(home_relative(&self.folder))
                 .action(
                     "project-settings",
@@ -665,7 +670,18 @@ impl Render for ProjectPage {
             .flex_col()
             .gap(space::XXL)
             .child(enter(key("header"), 0, header))
-            .child(enter(key("composer"), 1, self.composer.clone()))
+            // What writes is held while the machine in front takes no change; the tabs still read.
+            .child(enter(
+                key("composer"),
+                1,
+                crate::machines::hold(
+                    div()
+                        .id("project-composer-held")
+                        .child(self.composer.clone()),
+                    window,
+                    cx,
+                ),
+            ))
             .child(
                 div()
                     .flex()
@@ -676,7 +692,11 @@ impl Render for ProjectPage {
                     .child(enter(
                         key(shown_key),
                         if self.switched { 0 } else { 3 },
-                        shown,
+                        crate::machines::hold(
+                            div().id("project-shown-held").child(shown),
+                            window,
+                            cx,
+                        ),
                     )),
             )
             // The form's dialog stays in the tree whatever the tab.
