@@ -21,6 +21,7 @@ import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.performTextReplacement
 import java.time.Instant
 import java.time.ZoneOffset
+import org.flottille.core.HubCard
 import org.flottille.core.Machine
 import org.flottille.core.MachineState
 import org.flottille.core.Member
@@ -128,6 +129,25 @@ class AppScreensTest {
         rule.onNodeWithText("Continue").performClick()
         rule.onNodeWithTag("tab:machines").performClick()
         rule.onNodeWithTag("machine:server").assertIsDisplayed()
+    }
+
+    @Test
+    fun the_hub_s_card_warns_when_its_link_is_in_clear() {
+        val phone = FakePhone()
+        phone.cards["CODE-HTTP"] = HubCard("http://192.0.2.7:8080", "SHA256:a1b2c3d4")
+        start(phone)
+
+        // A hub reached by https says nothing; one reached by http says its link is in clear.
+        rule.onNodeWithTag("code-field").performTextInput("CODE-1")
+        rule.onNodeWithText("Use this code").performClick()
+        rule.onNodeWithTag("clear-warning").assertDoesNotExist()
+        rule.onNodeWithText("Back").performClick()
+
+        rule.onNodeWithTag("code-field").performTextInput("CODE-HTTP")
+        rule.onNodeWithText("Use this code").performClick()
+        rule.onNodeWithText("http://192.0.2.7:8080").assertIsDisplayed()
+        rule.onNodeWithTag("clear-warning").assertIsDisplayed()
+        rule.onNodeWithText("in clear", substring = true).assertIsDisplayed()
     }
 
     @Test
