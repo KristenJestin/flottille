@@ -461,7 +461,8 @@ fails on the path. Outside the sandbox, only these are added:
   push's own settings (the system's and the user's, as git reads them for it) say
   `push.default=upstream` (or `tracking`), a `branch.<name>.merge` of the repository's that names
   another branch than `refs/heads/<name>` is not given either: a plain `git push` of that branch
-  then has no upstream, and git says so; name the branch on the line. A URL a
+  then has no upstream, and git says so; name the branch on the line. Where `push.default`
+  cannot be read, the push is refused. A URL a
   run wrote sends the push to that host, with only the sign-in the user's own helper gives that
   host, over git's own transports (below), as the push's line could. The user's own `http.*` and
   `url.*` settings still apply: they are theirs. An `includeIf "hasconfig:remote.*.url:…"` of
@@ -478,22 +479,33 @@ fails on the path. Outside the sandbox, only these are added:
   push line that names another git folder (`--git-dir`, `--work-tree`) is refused, and one that
   moves (`-C`) is made from the repository it moves to;
 - `PATH` made of the folders of the daemon's `PATH` that only root may change (each of them and
-  every folder on the way is root's, and no one else may write it), found at the daemon's
-  start: a program the user's settings name by a bare name (a credential helper's `!gh auth
-  git-credential`, `ssh` inside a wrapper) is root's, never one a run put first in a folder it
-  can write (`~/.local/bin`, `~/bin`). It is one folder the daemon makes at its start in its
-  runtime folder, holding a link to each program of those folders that only root may change
-  too, under its name: a name whose first program there is not (a file of the user's in
-  `/usr/local/bin`, a link to one, a link that leads nowhere) has none, and the daemon's log says
-  which. One the system's folders do not hold is not found, and the helper fails: name it by its
-  path, in a folder only root may change;
+  every folder on the way is root's, and no one else may write it): a program the user's
+  settings name by a bare name (a credential helper's `!gh auth git-credential`, `ssh` inside a
+  wrapper) is root's, never one a run put first in a folder it can write (`~/.local/bin`,
+  `~/bin`). It is one folder the daemon makes for each push in the push's folder (below),
+  holding a link to each program of those folders that only root may change too, under its name
+  and to its name (`python3`, not the `python3.12` it leads to, so that an upgrade is followed):
+  a name whose first program there is not (a file of the user's in `/usr/local/bin`, a link to
+  one, a link that leads nowhere) has none, and the daemon's log says which. One the system's
+  folders do not hold is not found, and the helper fails: name it by its path, in a folder only
+  root may change. Where that folder cannot be made, the `PATH` is a path to no folder, and no
+  program is found by its bare name;
 - `core.hooksPath=/dev/null`;
 - `credential.helper=` and then the user's own credential helpers (the system's and the user's
   settings, read at the daemon's start), as for the daemon's own git (above): a helper a run wrote
   in the repository's settings is not asked, nor handed the sign-in to `store`. Those the user
   gives one forge alone, through an `includeIf "hasconfig:remote.*.url:…"`, are read at the start
-  too, from the file it includes, and written in a file of the push's folder that the same
-  `includeIf` includes after them: git asks them where the push's remotes are that forge's;
+  too, from the file it includes, and written in a file of the push's folder that is included
+  after them only where the daemon finds every URL the push may go to matches the pattern, as
+  git matches it (`*` within a folder, `**` across them; a pattern with a class `[…]` or an
+  escape matches nothing). Those URLs are the push URLs (`git remote get-url --push --all`) of
+  every remote the push knows, whichever its line or settings choose; a push whose line names a
+  URL or `--repo`, or whose `branch.<name>.remote`, `branch.<name>.pushRemote` or
+  `remote.pushDefault` names a remote git does not know (a URL), gets none. Git's own
+  `hasconfig` would include them where any remote's URL matches, a remote or a `pushurl` a run
+  wrote among them, and ask them for a sign-in to wherever the push goes: a helper that gives
+  its token to any host would send one forge's sign-in to a run's host, or another account's
+  of the same forge;
 - `push.gpgSign=false`, and the signing programs (`gpg.program`, `gpg.openpgp.program`,
   `gpg.x509.program`, `gpg.ssh.program`, `gpg.ssh.defaultKeyCommand`) set to none: a push is
   not signed, and a line's `--signed` fails;
@@ -538,8 +550,11 @@ outside the sandbox, from its folder and with its environment: its dry run, the 
 read at and what the remote has (`ls-remote`), and the commits it sends (`rev-list`, `cat-file`),
 with `GIT_NO_REPLACE_OBJECTS` and `GIT_NO_LAZY_FETCH`. A push whose dry run forces a ref (`+`) or
 deletes one (`-`) its line does not ask to (`--force`, `--force-with-lease`, `--delete`,
-`--prune`, `--mirror`, a refspec `+…` or `:…`) is refused, saying which: settings chose it, and
-the gate judged the line alone. So none of the repository's settings
+`--prune`, `--mirror`, a refspec `+…`, `:…` or `+:…`) is refused, saying which: settings chose
+it, and the gate judged the line alone. That check reads the dry run of the message checks, so
+it runs only for a project that declares message checks or a branch format (`docs/projects.md`):
+elsewhere a plain `git push` forces or deletes what the user's own `remote.<name>.push` says
+(the repository's is refused, above). So none of the repository's settings
 apply to them either (a proxy a run set never sees the sign-in they make, and a `url.*.insteadOf`
 of the repository's no longer refuses the push), nor its `info/grafts` or a replacement a run
 made, which would hide a commit from the checks while the push sends it. The other git reads
@@ -664,6 +679,12 @@ The gaps, where the platform does not allow more:
   another branch is not, where `push.default` is `upstream`, so their plain `git push` of that
   branch fails, and with `push.autoSetupRemote` goes to the branch of its own name and sets it as
   the upstream;
+- a credential helper the user gives one forge alone signs in a push the gate let through only
+  where every remote the repository knows is that forge's: a repository with remotes on two
+  forges, or a remote a run added, pushes with the helpers set for every remote alone. What else
+  the file of such an `includeIf "hasconfig:remote.*.url:…"` sets (a `url.*.insteadOf`, a
+  `user.email`) is still included by git itself where any remote matches, a remote a run wrote
+  among them: those settings are the user's own;
 - what the system's `ssh` configuration (`/etc/ssh/ssh_config` and what it includes) runs is
   root's to say, and not judged;
 - `~/.ssh` being read-only to every confined command, the `ssh` of the daemon's own fetch adds no
