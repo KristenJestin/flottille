@@ -1193,33 +1193,32 @@ fn held_events_keep_the_newest_twenty() {
 }
 
 #[test]
-fn a_live_read_before_the_round_does_not_swallow_the_review() {
+fn a_live_read_before_the_round_does_not_swallow_the_mention() {
     let user = user();
-    project(&user, Value::Null);
-    user.gh_script(json!({"pulls": {"acme/app": {"faster-login": pull(&[])}}}));
-    add(
-        &user,
-        "Reviews",
-        NIGHTLY,
-        json!({"kind": "review_requested"}),
-    );
+    project(&user, json!({"kind": "github", "repository": "."}));
+    user.gh_script(json!({"issues": {"acme/app": {"7": issue(&[], &[])}}}));
+    add(&user, "Mentions", NIGHTLY, json!({"kind": "mentioned"}));
     refresh(&user);
 
-    // An agent reads the pull request, now asking the user's review, before the next round.
-    user.gh_script(json!({"pulls": {"acme/app": {"faster-login": pull(&["someone"])}}}));
+    // An agent subscribes to the issue, now with the mention, before the next round: its live
+    // read stores the comment first.
+    user.gh_script(json!({"issues": {"acme/app": {"7": issue(
+        &["@someone could you look at the session cookie?"], &[])}}}));
     let opened = user.received_requests("session/new").len();
     user.call("agent.run", json!({"project": "app", "message": "hello"}))
         .unwrap();
     let (url, authorization) = server_of(&user, opened);
     let mcp = Mcp::initialize(&url, &authorization);
-    let shown = mcp.call(
-        "forge",
-        json!({"action": "show", "number": 12, "fresh": true}),
+    let subscribed = mcp.call(
+        "tickets",
+        json!({"action": "subscribe", "ticket": "#7", "events": ["commented"]}),
     );
-    assert!(shown.text.contains("Speed up the login"), "{}", shown.text);
+    assert!(!subscribed.error, "{}", subscribed.text);
 
     refresh(&user);
-    eventually("a run", || !started(&user, "Reviews").is_empty());
+    eventually("a run", || !started(&user, "Mentions").is_empty());
+    refresh(&user);
+    assert_eq!(started(&user, "Mentions").len(), 1, "heard once");
 }
 
 #[test]
