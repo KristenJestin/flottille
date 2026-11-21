@@ -206,10 +206,18 @@ struct Set {
 pub fn call(daemon: &Daemon, method: &str, params: Value) -> Result<Value, Failure> {
     let paths = &daemon.paths;
     match method {
+        // The findings agents filed about Flottille itself (`docs/developer.md`, "The findings").
+        "developer.reports" | "developer.report_filed" | "developer.reports_export" => {
+            return crate::findings::call(daemon, method, params);
+        }
         // The file is the user's to edit by hand too: read again, it is what the log follows.
         "developer.show" => {
             let on = setting(paths).map_err(|e| Failure::new("invalid-config", e))?;
+            let was = daemon.developer.on();
             daemon.developer.set(on);
+            if was != on {
+                daemon.mcp.relist();
+            }
         }
         "developer.set" => {
             let Set { log } = serde_json::from_value(params)?;
@@ -218,7 +226,11 @@ pub fn call(daemon: &Daemon, method: &str, params: Value) -> Result<Value, Failu
             })?;
             providers::write_in_place(&config(paths), &format!("log = {log}\n"))
                 .map_err(|e| Failure::new("unavailable", format!("developer.toml: {e}")))?;
+            let was = daemon.developer.on();
             daemon.developer.set(log);
+            if was != log {
+                daemon.mcp.relist();
+            }
             daemon
                 .emit("developer.changed", json!({"log": log}))
                 .map_err(|error| Failure::new("unavailable", error.to_string()))?;

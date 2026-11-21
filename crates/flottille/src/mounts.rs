@@ -117,7 +117,11 @@ pub fn sandbox() -> serde_json::Value {
     warnings.extend(bus_replaced().then_some(BUS_REPLACED_GAP));
     let unlent = crate::pushed::unlent();
     let mut warnings: Vec<String> = warnings.into_iter().map(str::to_owned).collect();
-    warnings.extend(unlent.as_ref().map(|why| crate::pushed::said(why)));
+    // Where no push is lifted, the agent's lending to one is moot.
+    match crate::pushed::unlifted() {
+        Some(why) => warnings.push(crate::pushed::unlifted_said(&why)),
+        None => warnings.extend(unlent.as_ref().map(|why| crate::pushed::said(why))),
+    }
     serde_json::json!({
         "landlock_abi": crate::landlock::abi(),
         "private_mounts": namespaces == Namespaces::Available,

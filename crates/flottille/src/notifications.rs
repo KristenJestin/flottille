@@ -47,6 +47,7 @@ const EVENTS: &[&str] = &[
     "run.agent_folders_unchecked",
     "run.agent_folders_put_back",
     "remote.delivery_dropped",
+    "routine.ran",
 ];
 
 #[derive(Default, Deserialize)]
@@ -591,6 +592,46 @@ fn note(
             "A message for another machine was dropped",
             notification::first_line(&crate::across::dropped_text(data)),
         )?,
+        // A routine's run rings when it has something to say, and its routine rings then; one
+        // that could not start says so. Nothing, a skip, and a routine that never rings, are its
+        // history alone.
+        "routine.ran" => {
+            let run = &data["run"];
+            let name = data["routine"]["name"].as_str().unwrap_or_default();
+            let summary = run["summary"].as_str().unwrap_or_default();
+            let rings = data["routine"]["rings"] == flottille_core::routine::RINGS_SOMETHING;
+            let source = format!("routine-run:{}", run["id"]);
+            match run["outcome"].as_str().unwrap_or_default() {
+                flottille_core::routine::SOMETHING if rings => add(
+                    daemon,
+                    event,
+                    "routine",
+                    source,
+                    run["session"].as_str(),
+                    name,
+                    notification::first_line(summary),
+                )?,
+                flottille_core::routine::GOES_ON if rings => add(
+                    daemon,
+                    event,
+                    "routine",
+                    source,
+                    run["session"].as_str(),
+                    name,
+                    notification::first_line(&format!("{summary} · its session goes on")),
+                )?,
+                flottille_core::routine::FAILED if run["session"].is_null() => add(
+                    daemon,
+                    event,
+                    "failure",
+                    source,
+                    None,
+                    format!("{name} could not run"),
+                    notification::first_line(run["why"].as_str().unwrap_or_default()),
+                )?,
+                _ => Vec::new(),
+            }
+        }
         "agent.tool_served" => match notification::forged(event) {
             Some(forged) => add(
                 daemon,

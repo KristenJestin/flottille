@@ -153,6 +153,9 @@ no device calls a `local` one over a link (`docs/remote.md`, "Roles").
 | `compaction.noticed` | drive |
 | `developer.show` | read |
 | `developer.set` | drive |
+| `developer.reports` | read |
+| `developer.report_filed` | drive |
+| `developer.reports_export` | drive |
 | `update.show` | read |
 | `update.set` | drive |
 | `update.check` | drive |
@@ -323,6 +326,14 @@ no device calls a `local` one over a link (`docs/remote.md`, "Roles").
 | `notifications.status` | read |
 | `notifications.unshown` | local |
 | `presence.set` | local |
+| `routine.list` | read |
+| `routine.show` | read |
+| `routine.add` | drive |
+| `routine.edit` | drive |
+| `routine.run` | drive |
+| `routine.pause` | drive |
+| `routine.resume` | drive |
+| `routine.remove` | drive |
 | `provider.list` | read |
 | `provider.enable` | drive |
 | `provider.disable` | drive |
@@ -528,15 +539,17 @@ or a setup step runs in it…), with the key at fault.
 
 `{"name"}`. The project's forges and tracker as its Settings show them (`docs/forges.md`, "The
 forge of a repository"): `{"name", "folder", "repositories": [{"path", "remote", "depends_on",
-"url", "forge", "proposal", "disagrees"}], "tracker", "obsolete", "pushes_unlent"}`. `depends_on` lists the paths
+"url", "forge", "proposal", "disagrees"}], "tracker", "obsolete", "pushes_unlifted", "pushes_unlent"}`. `depends_on` lists the paths
 of the repositories it depends on (`[]` when none), `url` is the remote's address (credentials taken
 out, masked; `null` when it has none), `forge` the one declared (`null` when none), `proposal` what
 the address proposes (`null` when nothing), `disagrees` why the declared forge is not where the
 remote leads (`null` when it is). `obsolete` lists the keys of the file that are no longer read
 (the old `[forges]`, `[agent_actions]`, a command's former `grants` and `children`), each with what
-replaces it. `pushes_unlent` says why the user's SSH agent is lent to no push, so that a push over
-SSH is refused (`docs/vault.md`, "The runtime folder"), as `flottille doctor` says it; `null` when
-it is lent. Nothing is asked of a forge.
+replaces it. `pushes_unlifted` says why no push an agent asks for is run outside the sandbox, so
+that every such push is refused (no Landlock, no `git` only root may change: `docs/vault.md`, "The
+runtime folder"); `null` when pushes are run. `pushes_unlent` says why the user's SSH agent is lent
+to no push, so that a push over SSH is refused, as `flottille doctor` says it; `null` when it is
+lent. Nothing is asked of a forge.
 
 #### `project.programs`
 
@@ -763,6 +776,18 @@ configuration folder.
 
 `developer.set` emits `developer.changed`. The user's door alone reaches them: no tool of an agent
 does.
+
+The findings agents filed about Flottille itself (`docs/developer.md`, "The findings") are read and
+marked by three more, whether or not the mode is on:
+
+- `developer.reports` answers `{"findings": [...]}`, each `{id, title, expected, count, first_at,
+  last_at, filed, occurrences: [{id, at, session, called, happened, differs}]}`, the oldest first.
+- `developer.report_filed {id, issue}` marks a finding filed with its issue's address and answers
+  `{id, filed}`; `not-found` for a finding there is not, `invalid-params` for an empty address.
+- `developer.reports_export` writes `developer.reports`' answer to `findings.json` in the state
+  folder (`$XDG_STATE_HOME/flottille/`) and answers `{file, count}`.
+
+An agent's report, and the marking, emit `developer.reported`.
 
 ### The update methods
 
@@ -2836,6 +2861,82 @@ again for 75 seconds (a window that hangs) counts as away. Only a client of
 this machine (`local`). With a focused window the daemon sends no system notification: it says
 `notification.rang` (`docs/events.md`) and the window draws a toast; for the session the window
 shows, it rings nothing (`docs/design.md`, §11).
+
+### The routine methods
+
+Routines (`docs/design.md`, "Routines"): work the daemon starts by itself, each run a new root
+session of the routine's project, at its time. A routine in a result:
+
+```json
+{"id": "a1b2c3d4e5f6", "name": "Tickets to review", "project": "app",
+ "prompt": "List the tickets waiting for my review",
+ "agent": {"provider": null, "model": null, "effort": null},
+ "schedule": "weekdays 08:30", "zone": "Europe/Paris", "mode": "read_only",
+ "rings": "something", "paused": false, "missed_hours": 12,
+ "next_at": 1795000200000, "delayed": null, "created_at": 1794900000000,
+ "updated_at": 1794900000000}
+```
+
+- `schedule`: days and an hour, never a cron line: `every day 07:00` (`daily 07:00`),
+  `weekdays 08:30`, `weekends 10:00`, a day of the week (`mondays 09:00`, `monday 09:00`).
+  `zone`: the IANA zone it is read in, the machine's when null.
+- `mode`: `read_only` (every call that writes is refused, in every mode of the session, whatever
+  the prompt says; reads go through), `ask` or `auto` (the gate as for any session in that mode).
+- `rings`: `something` (a notification when the run has something to say) or `never` (its
+  history only).
+- `agent`: the provider, model and effort each run starts on; null for those of a new session.
+- `next_at`: when the next run is due, null while it is paused; `delayed`: why that is later than
+  the schedule says (the quota of its provider is spent: the run waits for the reset), null
+  otherwise.
+- `missed_hours`: a run missed while the daemon was off runs once at its next start when it was
+  due less than that many hours before (1 to 168, 12 by default); an older one is skipped.
+
+A run in a result: `{"id", "routine", "due_at", "started_at", "ended_at", "session", "mode",
+"outcome", "summary", "why"}`. `session` is its root session (null for a skipped run), kept once it
+ended; `mode` the routine's when it started; `outcome` is `running`, `something`, `nothing`,
+`goes_on` (it said something and its session goes on as any session), `skipped` or `failed`;
+`summary` the one line its result said; `why` why it was skipped or failed.
+
+#### `routine.list`
+
+`{"project"?}`: `{"routines": [...]}`, by name, each with `last`, its last run, null before the
+first.
+
+#### `routine.show`
+
+`{"routine"}`, its name or id: `{"routine", "runs"}`, its last 50 runs, the last first.
+`not-found` for none.
+
+#### `routine.add`
+
+`{"name", "project", "prompt", "schedule", "zone"?, "mode"?, "rings"?, "provider"?, "model"?,
+"effort"?, "missed_hours"?}`; `mode` is `read_only` and `rings` `something` when left out.
+Answers `{"routine"}`. `invalid-params` for a schedule, zone, mode or ring it cannot read, an empty
+name or prompt; `not-found` for a project Flottille does not know; `refused` for a name another
+routine has, or an agent that cannot be chosen.
+
+#### `routine.edit`
+
+`{"routine", ...}` with any field of `routine.add`; `name` renames it. An empty `zone`,
+`provider`, `model` or `effort` goes back to the default. A new schedule or zone sets the next run
+again. Answers `{"routine"}`.
+
+#### `routine.run`
+
+`{"routine"}`: starts a run now, whatever its schedule: `{"run"}`, its session given. `refused`
+while its last run is under way: a routine never runs twice at once.
+
+#### `routine.pause`, `routine.resume`
+
+`{"routine"}`: no run starts while it is paused (`next_at` null); resumed, its next run is the
+schedule's next. Answers `{"routine"}`.
+
+#### `routine.remove`
+
+`{"routine"}`: forgets it and its history; the sessions of its runs stay, as any session.
+`{"removed": "<name>"}`.
+
+Every change emits `routine.changed`, each run's outcome `routine.ran` (`docs/events.md`).
 
 ### `test.advance`
 

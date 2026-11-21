@@ -213,6 +213,24 @@ Developer mode is on. Its log: ~/.local/state/flottille/developer.log
 
 Turns it off: nothing more is written. The log stays where it is.
 
+### `flottille developer reports [--json] [--export]`
+
+The findings agents filed about Flottille itself, with their occurrences (`docs/developer.md`, "The
+findings"): the open ones first, one block each. `--json` prints the export, `{"findings": [...]}`
+(`developer.reports`); `--export` writes it to `findings.json` in the state folder and says where.
+
+```
+$ flottille developer reports
+#1 Tickets list answers empty — 2 occurrences, open
+  expected: the open tickets
+  - 3f2a called tickets {"action": "list"}: an empty answer with no error
+```
+
+### `flottille developer reports filed <id> <address>`
+
+Marks a finding filed, with the address of its issue: it leaves the findings agents search, and the
+list says where it went.
+
 ### `flottille update`
 
 Replaces Flottille with the latest build of a channel (`docs/releases.md`): the one published
@@ -1447,6 +1465,64 @@ $ flottille agent tree bd7ed8152969
 agent bd7ed8152969, lead in shop, workspace login, on claude (sonnet): idle for 2 s
   "add the login page" (agent 1eb211e2dbf2), worker in shop, workspace login, on opencode (openai/gpt-5): in a turn
 ```
+
+## Routines
+
+Work the daemon starts by itself: each run of a routine is a new session of its project, started
+at its time as a click would start it, one-shot (`docs/design.md`, "Routines"). Every command takes
+`--json`, which prints the daemon's answer (`docs/protocol.md`, "The routine methods").
+
+### `flottille routine add <name> --project <project> --prompt <text> --schedule <when> [--zone <zone>] [--mode read-only|ask|auto] [--rings something|never] [--provider P] [--model M] [--effort E] [--missed-hours N]`
+
+Adds a routine. `--schedule` is days and an hour: `every day 07:00`, `weekdays 08:30`,
+`mondays 09:00`, read in `--zone` (an IANA zone, the machine's by default). `--mode` is
+`read-only` by default: its session reads, and every call that writes is refused. `--rings
+something` (the default) puts a notification in the centre when a run has something to say;
+`never` keeps it in its history only. A run missed while Flottille was off runs once at its next
+start within `--missed-hours` (12).
+
+```
+$ flottille routine add "Tickets to review" --project app --schedule "weekdays 08:30" \
+    --prompt "List the tickets waiting for my review"
+Added "Tickets to review".
+Tickets to review (app): weekdays 08:30, read only, next Mon 2026-11-23 08:30
+```
+
+### `flottille routine list [--project <project>]`
+
+Each routine on a line: its project, schedule, mode, next run (or `paused`) and last run.
+
+### `flottille routine show <name>`
+
+The routine, its prompt, why its next run waits when it does (a spent quota), and its history:
+each run, when it was due, its outcome and its session.
+
+```
+$ flottille routine show "Tickets to review"
+Tickets to review (app): weekdays 08:30, read only, next Tue 2026-11-24 08:30, last: 4 to review
+Prompt: List the tickets waiting for my review
+Mon 2026-11-23 08:30: 4 to review (session 3f2a9c1b7d4e)
+```
+
+### `flottille routine edit <name> [--rename <name>] [--project P] [--prompt T] [--schedule W] [--zone Z] [--mode M] [--rings R] [--provider P] [--model M] [--effort E] [--missed-hours N]`
+
+Changes what is given, nothing else.
+
+### `flottille routine run <name>`
+
+Starts a run now. Refused while its last run is under way: a routine never runs twice at once.
+
+### `flottille routine pause <name>`
+
+No run starts while it is paused.
+
+### `flottille routine resume <name>`
+
+Its next run is its schedule's next again.
+
+### `flottille routine remove <name>`
+
+Forgets the routine and its history; the sessions of its runs stay, as any session.
 
 ## What reaches you
 

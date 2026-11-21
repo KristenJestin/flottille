@@ -382,6 +382,13 @@ into `next/*`, below): the `pre-commit` hook refuses a commit on them.
   `dev` merges nothing and opens nothing (`dev`'s later commits hold the conflict too): its run
   says so and waits for that merge; the push to `dev` after it brings them. Run again after a
   failure, a branch made whose pull request was not is given it.
+- **A migration of the store made on `next/X.Y` is a named one** (`NAMED_MIGRATIONS` in
+  `crates/flottille-core/src/store.rs`), never a numbered one of `MIGRATIONS`: `dev`'s are
+  numbered and merged forward, so a number taken on `next/X.Y` would be the one of `dev`'s next
+  migration, which a store of a next build would then skip. A named migration is applied at every
+  open after the numbered ones, once (the store keeps its name), whatever comes before it; it
+  stays named when `next/X.Y` merges into `dev`. A test holds it
+  (`a_next_versions_migration_holds_when_dev_adds_one_after_it`).
 - **The `Release` workflow never releases a commit of `next/*`.**
 - **When `dev`'s version is released**, `next/X.Y` is merged into `dev` once and deleted, and
   `dev` becomes that version:

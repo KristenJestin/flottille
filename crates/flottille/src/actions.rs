@@ -473,6 +473,10 @@ pub async fn prepared(
         }
         return Ok(says);
     }
+    // A finding is filed by any agent and changes nothing of the project or the machine.
+    if tool == "services" && crate::findings::is(args) {
+        return Ok(Vec::new());
+    }
     if tool == "services" {
         return crate::services::says(daemon, &grant.place, is_root(daemon, grant), args);
     }
@@ -695,6 +699,7 @@ fn posted_says(args: &Value) -> Vec<String> {
             "list"
                 | "search"
                 | "show"
+                | "me"
                 | "types"
                 | "fields"
                 | "link_types"

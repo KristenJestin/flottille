@@ -114,7 +114,7 @@ const REPLACED: &str = "refused: this session has been replaced: a new session o
 
 /// The tools this server serves, in no order of their own: a session lists those of its grant in
 /// the order frozen in the agent.
-const SERVED: [Definition; 33] = [
+const SERVED: [Definition; 34] = [
     Definition {
         name: "fs_read",
         title: "Read a file",
@@ -406,7 +406,7 @@ const SERVED: [Definition; 33] = [
         title: "Tickets",
         description: "The tracker's tickets (GitHub #123, Jira ABC-123), via the user's gh/acli \
             (never run them). list: by state (default open), label, assignee, updated_within; search (query), \
-            on Jira also in_comments, jql; show: a workspace's ticket (in \
+            on Jira also in_comments, jql, limit; me: the user's account; show: a workspace's ticket (in \
             main, name workspace) or ticket, with links; detail full adds comments, \
             with ids; Jira images and files are named, not shown; \
             types: a Jira project's work item types; fields: a type's (kind); link_types; \
@@ -423,7 +423,7 @@ const SERVED: [Definition; 33] = [
         destructive: false,
         schema: || {
             json!({"type": "object", "properties": {
-                "action": {"type": "string", "enum": ["list", "search", "show", "people", "types", "fields", "link_types", "sprints", "milestones", "progress", "subscribe", "unsubscribe", "create", "comment", "reply", "edit", "close", "reopen", "status", "link", "unlink", "comment_edit", "comment_delete", "milestone_create", "milestone_edit", "log_time", "worklog_edit", "worklog_delete", "time_spent", "worklogs"]},
+                "action": {"type": "string", "enum": ["list", "search", "show", "people", "me", "types", "fields", "link_types", "sprints", "milestones", "progress", "subscribe", "unsubscribe", "create", "comment", "reply", "edit", "close", "reopen", "status", "link", "unlink", "comment_edit", "comment_delete", "milestone_create", "milestone_edit", "log_time", "worklog_edit", "worklog_delete", "time_spent", "worklogs"]},
                 "ticket": {"type": "string", "description": "#123 or ABC-123; the workspace's when left out."},
                 "duration": {"type": "string", "description": "log_time (Jira): the time spent, in Jira's form: 2h 30m, 1d, 45m (weeks, days, hours, minutes). worklog_edit: the new time spent."},
                 "started": {"type": "string", "description": "log_time: when the work started, RFC 3339 with its offset (2026-11-06T09:00:00+01:00); the duration before now when left out. worklog_edit: the new start."},
@@ -436,10 +436,11 @@ const SERVED: [Definition; 33] = [
                 "state": {"type": "string", "enum": ["open", "closed", "all"], "description": "list, search, milestones; milestone_edit: open or closed."},
                 "label": {"type": "string"},
                 "assignee": {"type": ["string", "null"], "description": "list, search: only those assigned to them. create, edit on Jira: whom to assign: \"me\" is the user you work for (\"assign it to me\", \"to the user\"), else an email or an account id, not a display name; edit: null removes the assignee."},
-                "detail": {"type": "string", "enum": ["short", "full"]},
+                "detail": {"type": "string", "enum": ["short", "full"], "description": "show: full adds the comments, with ids. search on Jira: full brings each ticket's status and its category, its comments (author, date, text, who they mention, as names with their account ids beside) and its links; the whole answer is read, every page."},
+                "limit": {"type": "integer", "minimum": 1, "description": "search on Jira: at most that many tickets; all those the JQL finds when left out."},
                 "fresh": {"type": "boolean", "description": "show: read the ticket again; one read in the last 30 s is given again otherwise (detail full always reads)."},
                 "title": {"type": "string"},
-                "body": {"type": "string", "description": "create, edit: description; comment, reply, comment_edit, log_time: the comment. Markdown, converted for Jira. Jira: [@Display Name](mention:<accountId>) notifies that person, an @Name alone does not (people, show give the ids); GitHub: @login."},
+                "body": {"type": "string", "description": "create, edit: description; comment, reply, comment_edit, log_time: the comment. Markdown, converted for Jira. Jira: [@Display Name](mention:<accountId>) notifies that person, an @Name alone does not (people gives the ids; show, detail full, says whom a comment mentions, with their account ids); GitHub: @login."},
                 "labels": {"type": "array", "items": {"type": "string"}, "description": "create, edit: labels to add."},
                 "reason": {"enum": ["completed", "not planned"], "description": "close: completed or not planned (GitHub)."},
                 "remove_labels": {"type": "array", "items": {"type": "string"}, "description": "edit: labels to remove."},
@@ -847,6 +848,25 @@ const SERVED: [Definition; 33] = [
             json!({"type": "object", "properties": {
                 "text": {"type": "string"}
             }, "required": ["text"], "additionalProperties": false})
+        },
+    },
+    Definition {
+        name: "routine_result",
+        title: "Give the routine's result",
+        description: "Ends a routine's run with its result: summary, one line (`4 tickets to \
+            review`); nothing: true when there is nothing to say (`Nightly green: nothing to \
+            do`), which does not ring the user; goes_on: true when your work goes on (a branch \
+            opened, not done): your session then stays open. Call it once, as your last action; \
+            without goes_on your session ends with this turn.",
+        read_only: false,
+        idempotent: false,
+        destructive: false,
+        schema: || {
+            json!({"type": "object", "properties": {
+                "summary": {"type": "string"},
+                "nothing": {"type": "boolean"},
+                "goes_on": {"type": "boolean"}
+            }, "required": ["summary"], "additionalProperties": false})
         },
     },
     Definition {
@@ -1288,6 +1308,18 @@ impl Server {
         outdated
     }
 
+    /// What a tool is listed as changed with no change of any grant (the developer mode adds
+    /// actions to `services` while it is on): every running session that can take it is told
+    /// to list its tools again.
+    pub fn relist(&self) {
+        let mut tokens = self.tokens.lock().unwrap();
+        for notice in tokens.notices.values_mut().filter(|notice| notice.takes) {
+            notice.changed += 1;
+        }
+        drop(tokens);
+        self.changes.send_modify(|n| *n += 1);
+    }
+
     /// The agent's running session now works in `place`: its next calls are decided and
     /// performed there. Nothing when no process of the agent runs.
     pub fn move_place(&self, agent: &str, place: Place) {
@@ -1611,7 +1643,7 @@ pub fn grant_of(daemon: &Daemon, agent: &Agent) -> Result<Grant, String> {
 /// changed.
 pub fn with_tools_now(daemon: &Daemon, agent: &Agent, project: &Project) -> Option<Agent> {
     let provider = providers::of(agent).ok()?;
-    let tools = crate::agents::tools_of(
+    let mut tools = crate::agents::tools_of(
         daemon,
         provider,
         project,
@@ -1621,6 +1653,10 @@ pub fn with_tools_now(daemon: &Daemon, agent: &Agent, project: &Project) -> Opti
         crate::extensions::launched(daemon, &agent.id)
             .map(|(extension, kind)| (extension.name, kind)),
     );
+    // A routine's session keeps the tool of its result, which its role alone does not give.
+    if crate::routines::is_run(daemon, &agent.id) {
+        tools.push(format!("{}{}", provider.tool_prefix, crate::routines::TOOL));
+    }
     // The same tools in another order are the same list: a new order would only cost the
     // session its prompt cache.
     let (now, had): (HashSet<&String>, HashSet<&String>) =
@@ -2068,6 +2104,10 @@ impl ServerHandler for Handler {
                 if definition.name == "ask" {
                     tool.description = Some(ask_goes(&self.daemon, &grant.agent).into());
                 }
+                // The actions that file a finding exist only while the developer mode is on.
+                if definition.name == "services" && self.daemon.developer.on() {
+                    crate::findings::offer(&mut tool);
+                }
                 tool
             })
             .collect();
@@ -2412,6 +2452,15 @@ async fn played_in(
         refused
     } else if let Some(why) = branch_refused {
         Outcome::Refused(why)
+    } else if let Some(why) = grant
+        .tools
+        .contains(&tool)
+        .then(|| crate::routines::refuses(daemon, &grant.agent, tool, &args))
+        .flatten()
+    {
+        // A read-only run's write is refused before anything is read or asked for it.
+        verdict = Some("deny");
+        Outcome::Refused(why)
     } else if grant.tools.contains(&tool) {
         // A removal's answer to discard covers the state the user was shown: read before its
         // card, so that anything written since tells.
@@ -2737,6 +2786,10 @@ pub fn judged(
     tool: &str,
     args: &Value,
 ) -> (gate::Verdict, Vec<String>) {
+    // A read-only routine's session writes nothing, in every mode: refused before any class.
+    if let Some(why) = crate::routines::refuses(daemon, &grant.agent, tool, args) {
+        return (gate::Verdict::Deny(why), Vec::new());
+    }
     let first = match tool {
         "run" | "services" => crate::services::started_first(daemon, &grant.place, tool, args),
         _ => Vec::new(),
@@ -2756,6 +2809,10 @@ fn verdict_of(
     }
     if tool == "web" && crate::show::is(args) {
         return crate::show::verdict(&grant.place, args);
+    }
+    // A finding about Flottille itself changes nothing: harmless in every mode.
+    if tool == "services" && crate::findings::is(args) {
+        return gate::Verdict::Allow;
     }
     if tool == "web" {
         return crate::web::classify(daemon, grant, args);
@@ -3438,6 +3495,7 @@ async fn performed_once(
     match tool {
         "web" if crate::show::is(&args) => crate::show::show(daemon, grant, args),
         "web" => crate::web::web(daemon, grant, args).await,
+        "services" if crate::findings::is(&args) => crate::findings::tool(daemon, grant, args),
         "services" => crate::services::tool(daemon, grant, args, first).await,
         // An accepted request's `first` is the words the user read (`approvals`).
         "connections" => crate::extensions::family_call(daemon, args, first, &grant.place).await,
@@ -3458,6 +3516,7 @@ async fn performed_once(
         "tickets" => crate::tickets::tickets(daemon, &grant.agent, &grant.place, args).await,
         "wake" => crate::subscriptions::wake(daemon, &grant.agent, args),
         "session_title" => crate::titles::session_title(daemon, grant, args),
+        crate::routines::TOOL => crate::routines::result(daemon, grant, args),
         tool if crate::extensions::gives(tool) => {
             crate::extensions::perform(daemon, grant, tool, args).await
         }
@@ -3746,12 +3805,15 @@ mod tests {
             assert_eq!(tool["_meta"]["anthropic/alwaysLoad"], true);
             assert_eq!(tool["inputSchema"]["type"], "object");
             let name = format!("mcp__flottille__{}", definition.name);
-            // The old names of ask are answered, never listed to a new agent.
+            // The old names of ask are answered, never listed to a new agent; a routine's
+            // session alone gets its result's tool.
             assert!(
-                matches!(definition.name, "ask_user" | "ask_parent")
-                    || claude::PROVIDER
-                        .tools(true, false, true, true, true)
-                        .contains(&name)
+                matches!(
+                    definition.name,
+                    "ask_user" | "ask_parent" | "routine_result"
+                ) || claude::PROVIDER
+                    .tools(true, false, true, true, true)
+                    .contains(&name)
                     || claude::PROVIDER
                         .tools(false, false, true, true, true)
                         .contains(&name),
