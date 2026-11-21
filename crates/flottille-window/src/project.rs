@@ -270,6 +270,14 @@ impl ProjectPage {
         &self.routines
     }
 
+    /// Shows the Routines tab on the result of a run.
+    pub fn show_routine_result(&mut self, routine: &str, run: u64, cx: &mut Context<Self>) {
+        self.switched = true;
+        self.choose(PageTab::Routines, cx);
+        self.routines
+            .update(cx, |routines, cx| routines.open_result(routine, run, cx));
+    }
+
     pub fn ended(&self) -> &Entity<EndedRuns> {
         &self.ended
     }

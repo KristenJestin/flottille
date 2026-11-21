@@ -4080,6 +4080,24 @@ impl Shell {
         self.settings.update(cx, |page, cx| page.reveal(at, cx));
     }
 
+    /// Opens the result of a routine's run: the project's page on its Routines tab (what a
+    /// notification of a routine's run leads to).
+    pub fn open_routine_result(
+        &mut self,
+        project: &str,
+        routine: &str,
+        run: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open(Selection::Project(project.to_owned()), window, cx);
+        if let Some(page) = self.main.read(cx).project_page().cloned()
+            && page.read(cx).name() == project
+        {
+            page.update(cx, |page, cx| page.show_routine_result(routine, run, cx));
+        }
+    }
+
     /// Opens a project's page or a session's: a choice made in a drawer closes it.
     pub fn open(&mut self, selection: Selection, window: &mut Window, cx: &mut Context<Self>) {
         self.select(selection, window, cx);
