@@ -74,6 +74,7 @@ mod reads;
 mod ready;
 mod remote;
 mod remote_command;
+mod remote_config;
 mod results;
 mod roles;
 mod rules;

@@ -401,9 +401,7 @@ fn share(
         Client::connect_or_start(paths)?.request("remote.machines", json!({}))?["this"]["name"]
             .as_str()
             .map(str::to_owned)
-            .ok_or(
-                "this machine is no member of the user's yet: flottille remote setup, or join",
-            )?;
+            .ok_or("this machine is no member of the user's yet: flottille remote pair")?;
     crate::client::aim(this);
     let shared = Client::connect_or_start(paths)?.request(
         "connection.share",

@@ -1,37 +1,37 @@
-//! Settings, General, Machines (`docs/remote.md`, "The hub", "Pairing", "Roles"): **Set up a hub** while
-//! this machine is in no member list; then the devices of the list, each renamed or removed from
-//! its "⋯", **Add a device** with the invitation's QR and its code until it expires, and the
-//! addresses this machine is reached at. A join request is the window's dialog wherever the user
-//! is, and every new member a toast. What is asked goes to this machine's daemon, signed with the
+//! Settings, Machines (`docs/remote.md`, "Identity and keys", "The hub", "Pairing", "Roles"):
+//! whether remote is on (a **Turn on** button while it is off, a **Remote** switch once it is),
+//! **Connect to your hub** while this machine is in no member list, a dialog where the code
+//! `flottille-hub pair` printed is pasted and the card this machine proposes confirmed; then the
+//! devices of the list, each renamed or removed from its "⋯", and the addresses this machine is
+//! reached at. The page says the state and holds the buttons: what is typed is a dialog of the
+//! window's host. A device is added on the hub only: every new member, and every result, is a
+//! toast. What is asked goes to this machine's daemon, signed with the
 //! device key ([`crate::machines::Remote`]); what it answers comes back as news.
 
 use std::collections::HashMap;
-use std::time::Duration;
 
 use gpui_design_system::{
-    Button, Card, Confirm, EmptyLine, Field, Icon, ListCard, ListRow, Listing, Menu, Modal, QrCode,
-    RadioChoices, Section, Toast, changed, changing, enter, palette, presence, presence_of, space,
-    tipped_when_cut, toast,
+    Button, Confirm, EmptyLine, Field, Icon, ListCard, ListRow, Listing, Menu, Modal, RadioChoices,
+    Section, Select, SelectOption, Switch, Toast, changed, changing, enter, palette, presence,
+    presence_of, space, tipped_when_cut, toast,
 };
 use gpui_kit::base::input::{Input, InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     App, AppContext as _, Context, ElementId, Entity, FocusHandle, Focusable as _,
     InteractiveElement, IntoElement, ParentElement, Render, SharedString,
-    StatefulInteractiveElement, Styled, Subscription, Task, TestSupportExt as _, WeakEntity,
-    Window, div, px,
+    StatefulInteractiveElement, Styled, Subscription, TestSupportExt as _, Window, div, px,
 };
 use zeroize::Zeroizing;
 
 use crate::commands::{boxed, line_field, menu_of, problem_line, spaced, stack};
 use crate::machines::{
-    Ask, Asked, Hub, Invitation, JoinRequest, Machines, Member, News, ROLES, Remote, how_it_failed,
-    role_words,
+    Ask, Asked, Hub, ICONS, Machines, Member, News, ROLES, Remote, how_it_failed, role_words,
 };
 use crate::modals::Modals;
 
-/// The dialog of a join request, drawn by the window's host of dialogs.
-pub const JOIN_MODAL: &str = "join-request";
+/// The dialog that connects this machine to the user's hub, drawn by the window's host of dialogs.
+pub const CONNECT_MODAL: &str = "hub-connect";
 /// The dialog that renames a device.
 pub const RENAME_MODAL: &str = "member-rename";
 /// The confirmation of a removal, over any page.
@@ -39,12 +39,20 @@ pub const REMOVAL_DIALOG: &str = "member-removal-dialog";
 /// The dialog that declares an address.
 pub const ADDRESS_MODAL: &str = "address-new";
 
-const SETUP_SENTENCE: &str = "Your machines find each other through a hub you run on a host that \
-                              is always on. Give its address and the setup code it printed: this \
-                              machine becomes its first device.";
+const REMOTE_OFF: &str = "Remote is off. This machine can join a hub and link to your other \
+                          machines.";
+const REMOTE_HINT: &str =
+    "Turn it off and the links close; this machine stays paired with your hub.";
+const CONNECT_SENTENCE: &str = "Your machines find each other through a hub you run on a host \
+                                that is always on. Run flottille-hub pair there, then paste the \
+                                code it prints: the first machine and the next ones connect the \
+                                same way.";
+const CONNECT_SAID: &str = "Paste the code flottille-hub pair printed on your hub's host. This \
+                            machine proposes its name, how it is drawn and what it may do: change \
+                            them before you connect.";
 const DEVICES_SENTENCE: &str = "Each device in this list reaches your machines with the role it \
-                                was given. Add one from here, and check the four words on both \
-                                screens.";
+                                was given. A device is added on your hub's host, with \
+                                flottille-hub pair, and its role changed there.";
 const HUB_SENTENCE: &str = "The hub tells your machines each other's addresses and keeps the \
                             list of your devices. It carries nothing of what they say to each \
                             other.";
@@ -56,34 +64,33 @@ const ADDRESSES_SENTENCE: &str = "Where your other machines reach this one: foun
 pub enum Removal {
     Member(String),
     Address(String),
+    /// Turning remote off: the links close.
+    Remote,
 }
 
 pub struct MachinesSection {
     modals: Entity<Modals>,
     remote: Remote,
     read: Option<Machines>,
-    url: Option<Entity<InputState>>,
-    code: Option<Entity<InputState>>,
-    setting_up: bool,
-    setup_error: Option<SharedString>,
-    inviting: bool,
-    invitation: Option<Invitation>,
-    /// The last invitation's code, drawn while its panel folds away.
-    shown_code: SharedString,
-    expiry: Option<Task<()>>,
+    /// The dialog that connects to the hub: whether it is open, its fields, the icon and the role
+    /// chosen, and its refusal, shown in it.
+    connect_open: bool,
+    connecting: bool,
+    connect_code: Option<Entity<InputState>>,
+    connect_name: Option<Entity<InputState>>,
+    connect_icon: usize,
+    connect_role: usize,
+    connect_error: Option<SharedString>,
+    /// What was read while remote was on: drawn while the settings fold away as it is turned off.
+    kept: Option<Machines>,
+    /// A change of remote was asked and not answered yet.
+    configuring: bool,
     members: Listing<Member>,
     addresses: Listing<crate::machines::Address>,
     menus: HashMap<String, Entity<Menu>>,
     removal: Option<Removal>,
     /// What the confirmation said last, which it still shows while it fades out.
     removal_said: Removal,
-    /// The join request shown in the dialog, the name typed and the role chosen.
-    join: Option<JoinRequest>,
-    join_said: Option<JoinRequest>,
-    join_name: Option<Entity<InputState>>,
-    join_role: usize,
-    /// The requests the user closed without answering: not shown again.
-    set_aside: Vec<String>,
     renaming: Option<String>,
     rename: Option<Entity<InputState>>,
     adding_address: bool,
@@ -97,24 +104,20 @@ impl MachinesSection {
             modals,
             remote,
             read: None,
-            url: None,
-            code: None,
-            setting_up: false,
-            setup_error: None,
-            inviting: false,
-            invitation: None,
-            shown_code: SharedString::default(),
-            expiry: None,
+            connect_open: false,
+            connecting: false,
+            connect_code: None,
+            connect_name: None,
+            connect_icon: 0,
+            connect_role: 1,
+            connect_error: None,
+            kept: None,
+            configuring: false,
             members: Listing::default(),
             addresses: Listing::default(),
             menus: HashMap::new(),
             removal: None,
             removal_said: Removal::Member(String::new()),
-            join: None,
-            join_said: None,
-            join_name: None,
-            join_role: 1,
-            set_aside: Vec::new(),
             renaming: None,
             rename: None,
             adding_address: false,
@@ -128,25 +131,27 @@ impl MachinesSection {
         self.read.as_ref()
     }
 
-    pub fn invitation(&self) -> Option<&Invitation> {
-        self.invitation.as_ref()
-    }
-
-    /// Whether an invitation is being asked of the hub.
-    pub fn is_inviting(&self) -> bool {
-        self.inviting
-    }
-
-    pub fn join(&self) -> Option<&JoinRequest> {
-        self.join.as_ref()
-    }
-
     pub fn removal(&self) -> Option<&Removal> {
         self.removal.as_ref()
     }
 
-    pub fn join_is_open(&self) -> bool {
-        self.join.is_some()
+    pub fn connect_is_open(&self) -> bool {
+        self.connect_open
+    }
+
+    /// The icon chosen in Connect to your hub, as `ICONS` numbers it.
+    pub fn connect_icon(&self) -> usize {
+        self.connect_icon
+    }
+
+    /// Whether a pairing was asked and is not answered yet.
+    pub fn is_connecting(&self) -> bool {
+        self.connecting
+    }
+
+    /// The refusal the dialog shows, when the last pairing was refused.
+    pub fn connect_error(&self) -> Option<&SharedString> {
+        self.connect_error.as_ref()
     }
 
     pub fn rename_is_open(&self) -> bool {
@@ -157,8 +162,10 @@ impl MachinesSection {
         self.adding_address
     }
 
-    pub fn join_focus(&self, cx: &App) -> Option<FocusHandle> {
-        self.join_name.as_ref().map(|field| field.focus_handle(cx))
+    pub fn connect_focus(&self, cx: &App) -> Option<FocusHandle> {
+        self.connect_code
+            .as_ref()
+            .map(|field| field.focus_handle(cx))
     }
 
     pub fn rename_focus(&self, cx: &App) -> Option<FocusHandle> {
@@ -169,42 +176,38 @@ impl MachinesSection {
         self.address.as_ref().map(|field| field.focus_handle(cx))
     }
 
-    /// The fields of the setup, of the join dialog and of the others, made once with the window.
+    /// The fields of the dialogs, made once with the window.
     pub fn fields(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.url.is_some() {
+        if self.connect_code.is_some() {
             return;
         }
-        let url = line_field("https://hub.example.net", window, cx);
+        // The code lets a device pair while pair mode lasts: not shown as it is typed.
         let code = cx.new(|cx| {
             let mut field = InputState::new(window, cx).masked(true);
             gpui_design_system::follow_theme(&mut field, cx);
             field
         });
-        for input in [&url, &code] {
+        let name = line_field("laptop", window, cx);
+        for input in [&code, &name] {
             self._subscriptions
                 .push(cx.subscribe(input, |this, _, event, cx| {
-                    if matches!(event, InputEvent::Change) && this.setup_error.take().is_some() {
+                    if matches!(event, InputEvent::Change) && this.connect_error.take().is_some() {
                         cx.notify();
                     }
                 }));
         }
-        self.url = Some(url);
-        self.code = Some(code);
-        self.join_name = Some(line_field("pixel", window, cx));
+        self.connect_code = Some(code);
+        self.connect_name = Some(name);
         self.rename = Some(line_field("laptop", window, cx));
         self.address = Some(line_field("100.64.0.7", window, cx));
     }
 
-    pub fn url_field(&self) -> Option<&Entity<InputState>> {
-        self.url.as_ref()
+    pub fn connect_code_field(&self) -> Option<&Entity<InputState>> {
+        self.connect_code.as_ref()
     }
 
-    pub fn code_field(&self) -> Option<&Entity<InputState>> {
-        self.code.as_ref()
-    }
-
-    pub fn join_name_field(&self) -> Option<&Entity<InputState>> {
-        self.join_name.as_ref()
+    pub fn connect_name_field(&self) -> Option<&Entity<InputState>> {
+        self.connect_name.as_ref()
     }
 
     pub fn rename_field(&self) -> Option<&Entity<InputState>> {
@@ -219,29 +222,12 @@ impl MachinesSection {
     pub fn news(&mut self, news: News, window: &mut Window, cx: &mut Context<Self>) {
         match news {
             News::Read(read) => {
-                // A request that waits shows its dialog, once, wherever the user is.
-                if self.join.is_none()
-                    && let Some(waiting) = read
-                        .requests
-                        .iter()
-                        .find(|request| !self.set_aside.contains(&request.request))
-                {
-                    self.ask_join(waiting.clone(), window, cx);
-                }
-                // A request answered elsewhere, or expired, closes its dialog.
-                if let Some(open) = &self.join
-                    && !read.requests.iter().any(|r| r.request == open.request)
-                {
-                    self.join = None;
+                if read.off.is_none() {
+                    self.kept = Some((*read).clone());
                 }
                 if self.read.as_ref() != Some(&*read) {
                     self.read = Some(*read);
                     cx.notify();
-                }
-            }
-            News::JoinRequested(request) => {
-                if self.join.is_none() && !self.set_aside.contains(&request.request) {
-                    self.ask_join(request, window, cx);
                 }
             }
             News::Added {
@@ -254,7 +240,7 @@ impl MachinesSection {
                 let removed = name.clone();
                 toast(
                     Toast::success(format!(
-                        "New device: {name} ({}), added at {} from {added_by}",
+                        "New device: {name} ({}), added at {} by {added_by}",
                         role_words(&role),
                         crate::session::clock(at)
                     ))
@@ -274,44 +260,34 @@ impl MachinesSection {
     fn done(
         &mut self,
         asked: Asked,
-        done: Result<Option<Invitation>, String>,
+        done: Result<(), String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         match (asked, done) {
-            (Asked::Setup, Ok(_)) => {
-                self.setting_up = false;
-                if let Some(code) = &self.code {
+            (Asked::Pair, Ok(())) => {
+                self.connecting = false;
+                self.connect_open = false;
+                if let Some(code) = &self.connect_code {
                     code.update(cx, |field, cx| field.set_value("", window, cx));
                 }
-                toast(Toast::success("This machine set up the hub"), cx);
+                toast(Toast::success("This machine is connected to your hub"), cx);
             }
-            (Asked::Setup, Err(why)) => {
-                self.setting_up = false;
-                toast(Toast::failure("The hub was not set up").detail(why), cx);
+            // The refusal stays in the dialog, beside what the user typed.
+            (Asked::Pair, Err(why)) => {
+                self.connecting = false;
+                self.connect_error = Some(why.into());
             }
-            (Asked::Invite, Ok(Some(invitation))) => {
-                self.inviting = false;
-                self.show_invitation(invitation, cx);
+            (Asked::Configure { on }, done) => {
+                self.configuring = false;
+                match done {
+                    Ok(_) => {
+                        let said = if on { "Remote is on" } else { "Remote is off" };
+                        toast(Toast::success(said), cx);
+                    }
+                    Err(why) => toast(Toast::failure("Remote was not changed").detail(why), cx),
+                }
             }
-            (Asked::Invite, Ok(None)) => self.inviting = false,
-            (Asked::Invite, Err(why)) => {
-                self.inviting = false;
-                toast(Toast::failure("No invitation was made").detail(why), cx);
-            }
-            (Asked::Accept(name), Ok(_)) => {
-                // Its toast is the new member's, which every client says.
-                let _ = name;
-            }
-            (Asked::Accept(name), Err(why)) => toast(
-                Toast::failure(format!("{name} was not added")).detail(why),
-                cx,
-            ),
-            (Asked::Refuse, Ok(_)) => toast(Toast::success("The join request was refused"), cx),
-            (Asked::Refuse, Err(why)) => toast(
-                Toast::failure("The join request was not refused").detail(why),
-                cx,
-            ),
             (Asked::Rename(name), Ok(_)) => toast(Toast::success(format!("Renamed {name}")), cx),
             (Asked::Rename(name), Err(why)) => toast(
                 Toast::failure(format!("Not renamed {name}")).detail(why),
@@ -340,122 +316,78 @@ impl MachinesSection {
         cx.notify();
     }
 
-    fn show_invitation(&mut self, invitation: Invitation, cx: &mut Context<Self>) {
-        let left = invitation.expires.saturating_sub(crate::shell::now_ms());
-        self.shown_code = invitation.code.clone().into();
-        self.invitation = Some(invitation);
-        // It folds away when it expires: on the window's clock, which a test moves.
-        self.expiry = Some(cx.spawn(async move |this: WeakEntity<Self>, cx| {
-            cx.background_executor()
-                .timer(Duration::from_millis(left))
-                .await;
-            this.update(cx, |this, cx| {
-                this.invitation = None;
-                cx.notify();
-            })
-            .ok();
-        }));
-        cx.notify();
-    }
-
     // ── What the user does ────────────────────────────────────────────────────────────────
 
-    /// Set up: the hub's URL and its setup code, this machine its first device.
-    pub fn set_up(&mut self, cx: &mut Context<Self>) {
-        let (Some(url), Some(code)) = (&self.url, &self.code) else {
-            return;
-        };
-        let url = url.read(cx).value().trim().to_owned();
-        let code = Zeroizing::new(code.read(cx).value().trim().to_owned());
-        if url.is_empty() || code.is_empty() {
-            self.setup_error = Some("Give the hub's address and its setup code.".into());
-            cx.notify();
-            return;
+    /// Opens Connect to your hub, its card as this machine proposes it.
+    pub fn open_connect(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let proposed = self
+            .read
+            .as_ref()
+            .map(|read| read.proposed.clone())
+            .unwrap_or_default();
+        if let Some(name) = &self.connect_name {
+            name.update(cx, |field, cx| field.set_value(proposed.name, window, cx));
         }
-        self.setting_up = true;
-        self.remote.ask(Ask::Setup {
-            url,
-            code,
-            name: crate::machines::host_name(),
-        });
-        cx.notify();
-    }
-
-    /// Add a device: an invitation from the hub, its QR and its code.
-    pub fn invite(&mut self, cx: &mut Context<Self>) {
-        // The hub makes the invitation: out of reach, there is nothing to ask.
-        if self.inviting
-            || self
-                .read
-                .as_ref()
-                .and_then(|read| read.hub.as_ref())
-                .is_some_and(|hub| !hub.usable())
-        {
-            return;
-        }
-        self.inviting = true;
-        self.remote.ask(Ask::Invite);
-        cx.notify();
-    }
-
-    fn ask_join(&mut self, request: JoinRequest, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(name) = &self.join_name {
-            name.update(cx, |field, cx| field.set_value("", window, cx));
-        }
-        self.join_role = 1;
-        self.join_said = Some(request.clone());
-        self.join = Some(request);
+        self.connect_icon = ICONS
+            .iter()
+            .position(|(key, _)| *key == proposed.icon)
+            .unwrap_or(0);
+        self.connect_role = ROLES
+            .iter()
+            .position(|(key, _, _)| *key == proposed.role)
+            .unwrap_or(1);
+        self.connect_error = None;
+        self.connect_open = true;
         self.modals
-            .update(cx, |modals, cx| modals.open(JOIN_MODAL, cx));
+            .update(cx, |modals, cx| modals.open(CONNECT_MODAL, cx));
         cx.notify();
+    }
+
+    /// Turns remote on or off.
+    fn configure(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.configuring = true;
+        self.remote.ask(Ask::Configure { on });
+        cx.notify();
+    }
+
+    pub fn choose_icon(&mut self, icon: usize, cx: &mut Context<Self>) {
+        if self.connect_icon != icon {
+            self.connect_icon = icon;
+            cx.notify();
+        }
     }
 
     pub fn choose_role(&mut self, role: usize, cx: &mut Context<Self>) {
-        if self.join_role != role {
-            self.join_role = role;
+        if self.connect_role != role {
+            self.connect_role = role;
             cx.notify();
         }
     }
 
-    pub fn accept(&mut self, cx: &mut Context<Self>) {
-        let Some(request) = self.join.clone() else {
+    /// Connects: the code pasted, the card as the user left it.
+    pub fn connect(&mut self, cx: &mut Context<Self>) {
+        let (Some(code), Some(name)) = (&self.connect_code, &self.connect_name) else {
             return;
         };
-        let name = self
-            .join_name
-            .as_ref()
-            .map(|field| field.read(cx).value().trim().to_owned())
-            .unwrap_or_default();
-        if name.is_empty() {
+        if self.connecting {
             return;
         }
-        // Answered: it stays listed until the hub took the answer, and is not asked again.
-        self.join = None;
-        self.set_aside.push(request.request.clone());
-        self.remote.ask(Ask::Accept {
-            request,
+        let code = Zeroizing::new(code.read(cx).value().trim().to_owned());
+        let name = name.read(cx).value().trim().to_owned();
+        if code.is_empty() || name.is_empty() {
+            self.connect_error = Some("Paste the code, and give this machine a name.".into());
+            cx.notify();
+            return;
+        }
+        self.connecting = true;
+        self.connect_error = None;
+        self.remote.ask(Ask::Pair {
+            code,
             name,
-            role: ROLES[self.join_role].0.to_owned(),
+            icon: ICONS[self.connect_icon].0.to_owned(),
+            role: ROLES[self.connect_role].0.to_owned(),
         });
         cx.notify();
-    }
-
-    pub fn refuse(&mut self, cx: &mut Context<Self>) {
-        let Some(request) = self.join.take() else {
-            return;
-        };
-        self.set_aside.push(request.request.clone());
-        self.remote.ask(Ask::Refuse {
-            request: request.request,
-        });
-        cx.notify();
-    }
-
-    fn close_join(&mut self, cx: &mut Context<Self>) {
-        if let Some(request) = self.join.take() {
-            self.set_aside.push(request.request);
-            cx.notify();
-        }
     }
 
     /// Asks to confirm a removal: the one confirmation dialog.
@@ -469,6 +401,7 @@ impl MachinesSection {
         match self.removal.take() {
             Some(Removal::Member(name)) => self.remote.ask(Ask::Remove { name }),
             Some(Removal::Address(address)) => self.remote.ask(Ask::AddressRemove(address)),
+            Some(Removal::Remote) => self.configure(false, cx),
             None => {}
         }
         cx.notify();
@@ -533,66 +466,87 @@ impl MachinesSection {
 
     // ── The dialogs ───────────────────────────────────────────────────────────────────────
 
-    /// The join request's dialog: the four words, the device's name, its role.
-    pub fn join_dialog(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> Modal {
-        let p = palette(cx);
-        let request = self.join.clone().or_else(|| self.join_said.clone());
-        let words: SharedString = request
-            .as_ref()
-            .map(|request| request.words.join(" "))
-            .unwrap_or_default()
-            .into();
+    /// Connect to your hub: the code, then the card this machine proposes, confirmed.
+    pub fn connect_dialog(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> Modal {
         let this = cx.entity().downgrade();
-        let roles = ROLES.iter().fold(
-            RadioChoices::new("join-role", "This device can"),
-            |choices, (key, title, line)| choices.choice(*key, *title, *line),
-        );
         let chosen = cx.entity().downgrade();
-        let roles = roles.chosen(self.join_role).on_choose(move |at, _, cx| {
-            chosen.update(cx, |this, cx| this.choose_role(at, cx)).ok();
+        // Five kinds: a select, as the kit's radio choices take four at most.
+        let icons = Select::new(
+            "connect-icon",
+            ICONS
+                .iter()
+                .map(|(key, title)| SelectOption::new(*key, *title)),
+            self.connect_icon,
+        )
+        .on_choose(move |at, _, cx| {
+            chosen.update(cx, |this, cx| this.choose_icon(at, cx)).ok();
         });
-        let name = self.join_name.clone().map(|field| {
-            Field::new(
-                "join-name-field",
-                "Name",
-                boxed("join-name", Input::new(&field), cx),
+        let chosen = cx.entity().downgrade();
+        let roles = ROLES
+            .iter()
+            .fold(
+                RadioChoices::new("connect-role", "This device can"),
+                |choices, (key, title, line)| choices.choice(*key, *title, *line),
+            )
+            .chosen(self.connect_role)
+            .on_choose(move |at, _, cx| {
+                chosen.update(cx, |this, cx| this.choose_role(at, cx)).ok();
+            });
+        let code = self.connect_code.clone().map(|field| {
+            spaced(
+                space::LG,
+                Field::new(
+                    "connect-code-field",
+                    "Pair code",
+                    boxed("connect-code", Input::new(&field), cx),
+                )
+                .hint("It holds your hub's address and key: nothing else to type."),
             )
         });
-        Modal::new(JOIN_MODAL, "A device asks to join")
-            .sentence(
-                "Accept it only if the new device shows the same four words. Choose its name and \
-                 what it may do.",
+        let name = self.connect_name.clone().map(|field| {
+            spaced(
+                space::LG,
+                Field::new(
+                    "connect-name-field",
+                    "Name",
+                    boxed("connect-name", Input::new(&field), cx),
+                ),
             )
-            .open(self.join.is_some())
+        });
+        Modal::new(CONNECT_MODAL, "Connect to your hub")
+            .sentence(CONNECT_SAID)
+            .open(self.connect_open)
             .takes_focus()
             .on_close(move |_, cx| {
-                this.update(cx, |this, cx| this.close_join(cx)).ok();
+                this.update(cx, |this, cx| {
+                    this.connect_open = false;
+                    cx.notify();
+                })
+                .ok();
             })
             .child(
                 stack(space::LG)
+                    .children(code)
+                    .children(name)
                     .child(spaced(
                         space::LG,
-                        div()
-                            .id("join-words")
-                            .aria_label(words.clone())
-                            .text_size(px(18.))
-                            .text_color(p.text)
-                            .child(words)
-                            .test_support(),
+                        Field::new("connect-icon-field", "This device is", icons),
                     ))
-                    .children(name.map(|name| spaced(space::LG, name)))
                     .child(spaced(
                         space::LG,
-                        Field::new("join-role-field", "This device can", roles),
+                        Field::new("connect-role-field", "This device can", roles),
+                    ))
+                    .child(problem_line(
+                        "connect-problem",
+                        self.connect_error.clone(),
+                        space::MD,
+                        cx,
                     )),
             )
             .action(
-                Button::quiet("join-refuse", "Refuse")
-                    .on_click(cx.listener(|this, _, _, cx| this.refuse(cx))),
-            )
-            .action(
-                Button::primary("join-accept", "Accept")
-                    .on_click(cx.listener(|this, _, _, cx| this.accept(cx))),
+                Button::primary("connect-save", "Connect")
+                    .disabled(self.connecting)
+                    .on_click(cx.listener(|this, _, _, cx| this.connect(cx))),
             )
     }
 
@@ -652,47 +606,53 @@ impl MachinesSection {
 
     // ── The page ──────────────────────────────────────────────────────────────────────────
 
-    fn setup_section(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let url = self.url.clone().map(|field| {
-            spaced(
-                space::LG,
-                Field::new(
-                    "hub-url-field",
-                    "Hub address",
-                    boxed("hub-url", Input::new(&field), cx),
-                ),
-            )
-        });
-        let code = self.code.clone().map(|field| {
-            spaced(
-                space::LG,
-                Field::new(
-                    "hub-code-field",
-                    "Setup code",
-                    boxed("hub-code", Input::new(&field), cx),
-                )
-                .hint("Printed once in the hub's log at its first start."),
-            )
-        });
-        Section::new("hub-setup", "Set up a hub")
-            .sentence(SETUP_SENTENCE)
+    /// Whether remote is on: its notice and **Turn on** while it is off, the **Remote** switch once
+    /// it is. Each folds away as the other unfolds.
+    fn remote_section(&mut self, off: bool, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let p = palette(cx);
+        let notice = div()
+            .flex()
+            .flex_col()
             .child(
-                stack(space::LG)
-                    .children(url)
-                    .children(code)
-                    .child(problem_line(
-                        "hub-setup-problem",
-                        self.setup_error.clone(),
-                        space::MD,
-                        cx,
-                    ))
-                    .child(spaced(
-                        space::LG,
-                        Button::primary("set-up-hub", "Set up")
-                            .disabled(self.setting_up)
-                            .on_click(cx.listener(|this, _, _, cx| this.set_up(cx))),
-                    )),
+                div()
+                    .id("remote-notice")
+                    .aria_label(REMOTE_OFF)
+                    .text_size(px(13.))
+                    .text_color(p.mute)
+                    .child(REMOTE_OFF)
+                    .test_support(),
             )
+            .child(spaced(
+                space::MD,
+                div().child(
+                    Button::primary("turn-on-remote", "Turn on")
+                        .disabled(self.configuring)
+                        .on_click(cx.listener(|this, _, _, cx| this.configure(true, cx))),
+                ),
+            ));
+        let switch = Switch::new("remote-switch", true, "Remote")
+            .hint(REMOTE_HINT)
+            .disabled(self.configuring)
+            .on_click(cx.listener(|this, _, _, cx| this.ask_removal(Removal::Remote, cx)));
+        div()
+            .id("remote")
+            .flex()
+            .flex_col()
+            .child(presence("remote-off-block", off, notice))
+            .child(presence("remote-on-block", !off, switch))
+            .test_support()
+    }
+
+    /// With no hub: what a hub is, and the one way in.
+    fn connect_section(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        Section::new("hub-connect", "Connect to your hub")
+            .sentence(CONNECT_SENTENCE)
+            .child(spaced(
+                space::LG,
+                Button::primary("connect-hub", "Connect to your hub")
+                    .disabled(self.connecting)
+                    .on_click(cx.listener(|this, _, window, cx| this.open_connect(window, cx))),
+            ))
     }
 
     /// The hub: its address, whether it answers, and when it does not, which address was tried
@@ -828,87 +788,15 @@ impl MachinesSection {
                 row,
             );
         }
-        let code = self.shown_code.clone();
-        let until = self
-            .invitation
-            .as_ref()
-            .map(|invitation| crate::session::clock(invitation.expires))
-            .unwrap_or_default();
-        let shown = self.invitation.is_some();
-        let copied = code.clone();
-        let content =
-            div()
-                .id("invitation-panel")
-                .flex()
-                .gap(space::LG)
-                .p(space::LG)
-                // As wide as its plate: the code's column takes the rest.
-                .child(div().flex_none().child(
-                    QrCode::new("invitation-qr", code.clone(), "Invitation code").shown(shown),
-                ))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .flex()
-                        .flex_col()
-                        .gap(space::SM)
-                        .child(
-                            div()
-                                .text_size(px(12.5))
-                                .text_color(p.mute)
-                                .child("On the new device, scan the code, or give it this code:"),
-                        )
-                        .child(
-                            div()
-                                .id("invitation-code")
-                                .aria_label(code.clone())
-                                .text_size(px(12.5))
-                                .text_color(p.text)
-                                .child(code)
-                                .test_support(),
-                        )
-                        .child({
-                            let said: SharedString = format!("Valid once, until {until}.").into();
-                            div()
-                                .id("invitation-expiry")
-                                .aria_label(said.clone())
-                                .text_size(px(12.5))
-                                .text_color(p.mute)
-                                .child(said)
-                                .test_support()
-                        })
-                        .child(
-                            div().child(
-                                Button::quiet("copy-invitation", "Copy code")
-                                    .leading(Icon::Copy)
-                                    .on_click(move |_, _, cx| {
-                                        cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(
-                                            copied.to_string(),
-                                        ));
-                                        toast(Toast::success("Code copied"), cx);
-                                    }),
-                            ),
-                        ),
-                )
-                .test_support();
-        let panel = Card::new().id("invitation-card").child(content);
         let count = self.members.len();
         let hub_down = self
             .read
             .as_ref()
             .and_then(|read| read.hub.as_ref())
             .and_then(|hub| hub.needs_words());
-        let hub_usable = hub_down.is_none();
         Section::new("devices", "Devices")
             .count(count.to_string())
             .sentence(DEVICES_SENTENCE)
-            .action(
-                Button::secondary("add-device", "Add a device")
-                    .leading(Icon::Plus)
-                    .disabled(self.inviting || !hub_usable)
-                    .on_click(cx.listener(|this, _, _, cx| this.invite(cx))),
-            )
             .child(
                 stack(space::MD)
                     .child(
@@ -931,7 +819,6 @@ impl MachinesSection {
                         )
                         .space(space::MD),
                     )
-                    .child(presence("invitation", shown, panel).space(space::MD))
                     .child(presence("member-list-block", count > 0, list).space(space::MD)),
             )
     }
@@ -1026,13 +913,19 @@ impl MachinesSection {
         let (question, sentence, action) = match &self.removal_said {
             Removal::Member(name) => (
                 format!("Remove {name}?"),
-                "Its links are cut on every machine at once, and its key never joins again.",
+                "Its links are cut on every machine at once; it comes back only paired again on \
+                 your hub.",
                 "Remove device",
             ),
             Removal::Address(address) => (
                 format!("Remove the address {address}?"),
                 "Your other machines no longer try this machine there.",
                 "Remove address",
+            ),
+            Removal::Remote => (
+                "Turn remote off?".to_owned(),
+                "The links close; this machine stays paired with your hub.",
+                "Turn off",
             ),
         };
         let (this, again) = (cx.entity().downgrade(), cx.entity().downgrade());
@@ -1048,7 +941,9 @@ impl MachinesSection {
             })
     }
 
-    /// The sections of the tab, top to bottom, each entering on its own.
+    /// The sections of the tab, top to bottom, each entering on its own: whether remote is on, then
+    /// (while it is) where this machine is reached, the hub, the devices and the addresses. They
+    /// fold away, as they were, when remote is turned off.
     pub fn blocks(
         &mut self,
         window: &mut Window,
@@ -1058,19 +953,46 @@ impl MachinesSection {
             let waiting = gpui_design_system::Skeleton::new("machines-skeleton").h(px(120.));
             return vec![("machines-loading", waiting.into_any_element())];
         };
-        if let Some(off) = read.off {
-            let line = EmptyLine::new(
-                "machines-off",
-                Icon::Service,
-                format!("Your other machines are not reached from this one: {off}"),
-            );
-            return vec![("machines-off", line.into_any_element())];
+        let off = read.off.is_some();
+        let mut blocks = vec![("remote", self.remote_section(off, cx).into_any_element())];
+        let shown = if off { self.kept.clone() } else { Some(read) };
+        if let Some(shown) = shown {
+            let live = self.read.replace(shown);
+            let rest = self.rest(window, cx);
+            self.read = live;
+            let column = div()
+                .flex()
+                .flex_col()
+                .children(rest.into_iter().enumerate().map(|(n, (part, block))| {
+                    div().when(n > 0, |d| d.mt(space::XXL)).child(enter(
+                        ElementId::Name(format!("enter-machines-{part}").into()),
+                        n,
+                        block,
+                    ))
+                }));
+            blocks.push((
+                "machines-rest",
+                presence("machines-rest", !off, column)
+                    .space(space::XXL)
+                    .into_any_element(),
+            ));
         }
+        blocks
+    }
+
+    /// What remote on shows under its switch.
+    fn rest(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<(&'static str, gpui_kit::AnyElement)> {
+        let read = self.read.clone().unwrap_or_default();
+        let mut blocks = Vec::new();
         if !read.member() {
-            return vec![("hub-setup", self.setup_section(cx).into_any_element())];
+            blocks.push(("hub-connect", self.connect_section(cx).into_any_element()));
+            return blocks;
         }
         let hub = read.hub.as_ref().map(|hub| self.hub_section(hub, cx));
-        let mut blocks = Vec::new();
         blocks.extend(hub.map(|hub| ("hub", hub.into_any_element())));
         blocks.push((
             "devices",
@@ -1090,6 +1012,10 @@ impl Render for MachinesSection {
             .flex()
             .flex_col()
             .children(blocks.into_iter().enumerate().map(|(n, (part, block))| {
+                // The settings under the switch hold their own space and enter section by section.
+                if part == "machines-rest" {
+                    return div().child(block);
+                }
                 div().when(n > 0, |d| d.mt(space::XXL)).child(enter(
                     ElementId::Name(format!("enter-machines-{part}").into()),
                     n,

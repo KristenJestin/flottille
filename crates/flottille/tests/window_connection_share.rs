@@ -537,10 +537,10 @@ fn what_the_machine_shown_lists_is_read_when_the_window_switches_to_it(cx: &mut 
 
 #[gpui_kit::test]
 fn sign_in_on_a_machine_while_another_is_shown(cx: &mut TestAppContext) {
-    let (_hub, pc, server) = pc_and_server(User::new());
+    let (hub, pc, server) = pc_and_server(User::new());
     // A third machine, a runner, whose copy of the server's connection is signed in.
     let laptop = Machine::of(User::new().with_env("FLOTTILLE_TEST_SIGN_IN_LOOPBACK", "127.0.0.2"));
-    pair(&pc, &laptop, "laptop", "runner");
+    pair(&hub, &laptop, "laptop", "runner");
     server.wait_for_member("laptop", true);
     pc.wait_for("laptop", "online");
     server.wait_for("laptop", "online");

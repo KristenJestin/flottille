@@ -9,7 +9,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use flottille_link::{DeviceKey, KeyError, Keyring, KeyringError};
-use serde_json::{Value, json};
 use zeroize::Zeroizing;
 
 type Result<T> = std::result::Result<T, String>;
@@ -40,66 +39,37 @@ impl Device {
         DeviceKey::load(&self.keyring, &self.folder)
             .map_err(said)?
             .ok_or_else(|| {
-                "this device holds no key of a member: set up a hub, or join one".to_owned()
+                "this device holds no key of a member: connect it to your hub".to_owned()
             })
     }
 
-    /// The key a setup is made with: the one kept, or a new one, kept as pending before the hub
-    /// sees it and kept only once the hub took it ([`Device::keep_new`]); whether it is new.
-    pub fn key_to_join(&self) -> Result<(DeviceKey, bool)> {
+    /// The key a pairing is made with (`docs/remote.md`, "Identity and keys"): the one kept, made
+    /// once; one a setup or a join of before pair mode left pending, kept now; or a new one, kept
+    /// at once. A device paired again with its key finds its card on the hub.
+    pub fn key_to_pair(&self) -> Result<DeviceKey> {
         if let Some(key) = DeviceKey::load(&self.keyring, &self.folder).map_err(said)? {
-            return Ok((key, false));
+            return Ok(key);
         }
-        let key = DeviceKey::make().map_err(said)?;
-        let public = key.public();
-        let pending = key
-            .keep_pending(&self.keyring, &self.folder)
-            .map_err(said)?;
-        if pending.public() != public {
-            return Err(ANOTHER_CLIENT.to_owned());
-        }
-        Ok((pending, true))
-    }
-
-    /// Keeps `key`, the pending key a setup succeeded with.
-    pub fn keep_new(&self, key: DeviceKey) -> Result<()> {
+        let key = match DeviceKey::load_pending(&self.keyring, &self.folder).map_err(said)? {
+            Some(pending) => pending,
+            None => {
+                let key = DeviceKey::make().map_err(said)?;
+                let public = key.public();
+                let pending = key
+                    .keep_pending(&self.keyring, &self.folder)
+                    .map_err(said)?;
+                if pending.public() != public {
+                    return Err(ANOTHER_CLIENT.to_owned());
+                }
+                pending
+            }
+        };
         let public = key.public();
         let kept = key.promote(&self.keyring, &self.folder).map_err(said)?;
         if kept.public() != public {
             return Err(ANOTHER_CLIENT.to_owned());
         }
-        Ok(())
-    }
-
-    /// The pending key a setup or a join left when it did not end: kept when the hub's list holds
-    /// it as a member, removed otherwise, so that a key the hub saw in a setup that did not
-    /// succeed is never sent again (`flottille remote`'s own rule). A join the daemon accepted
-    /// for it is left to `flottille remote join`, which declares the machine.
-    pub fn settle_pending(&self, ask: &mut impl FnMut(&str, Value) -> Result<Value>) -> Result<()> {
-        let Some(pending) = DeviceKey::load_pending(&self.keyring, &self.folder).map_err(said)?
-        else {
-            return Ok(());
-        };
-        let key = pending.public();
-        let accepted = ask("remote.join", json!({"key": key, "resume": true}))?;
-        if !accepted.is_null() {
-            return Err(
-                "a join of this device waits for its machine to be declared: run \
-                        flottille remote join to end it"
-                    .to_owned(),
-            );
-        }
-        let listed = !ask("remote.machines", json!({}))?["hub"].is_null()
-            && ask("remote.members", json!({}))?["members"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .any(|member| member["key"] == json!(key));
-        if listed {
-            self.keep_new(pending)
-        } else {
-            DeviceKey::discard_pending(&self.keyring, &self.folder).map_err(said)
-        }
+        Ok(kept)
     }
 
     pub fn folder(&self) -> &Path {
@@ -108,7 +78,7 @@ impl Device {
 }
 
 const ANOTHER_CLIENT: &str = "another client kept a device key at the same moment: Settings, \
-                              General, Machines lists the members";
+                              Machines lists the members";
 
 fn said(error: KeyError) -> String {
     error.to_string()

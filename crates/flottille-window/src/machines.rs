@@ -1,8 +1,8 @@
-//! The user's machines, as this machine's daemon says them (`docs/remote.md`): the hub it is set
-//! up with, the members of the hub's list, the machines it links to and their state, the join
-//! requests that wait for this machine's member, and its own addresses. The window reads them on
-//! a connection of its own to this machine, whichever machine it shows: the list and the pairing
-//! are this machine's, signed with this session's device key ([`crate::device`]).
+//! The user's machines, as this machine's daemon says them (`docs/remote.md`): the hub it is paired
+//! with, the members of the hub's list, the machines it links to and their state, what this
+//! machine proposes for itself when it pairs, and its own addresses. The window reads them on a
+//! connection of its own to this machine, whichever machine it shows: the list and the pairing are
+//! this machine's, signed with this session's device key ([`crate::device`]).
 //!
 //! The machine the window shows is chosen in the sidebar's switcher: [`Aim`] makes every other
 //! connection of the window go to it, each request signed with the device key and carried by this
@@ -49,6 +49,15 @@ pub const ROLES: [(&str, &str, &str); 3] = [
         "View only",
         "It reads your machines and their sessions, and answers nothing.",
     ),
+];
+
+/// The icons a device is drawn with (`docs/remote.md`, "A device's card"), with their words.
+pub const ICONS: [(&str, &str); 5] = [
+    ("desktop", "Desktop"),
+    ("laptop", "Laptop"),
+    ("server", "Server"),
+    ("phone", "Phone"),
+    ("tablet", "Tablet"),
 ];
 
 /// A role as the toast says it: `control only`.
@@ -165,31 +174,6 @@ pub struct Member {
     pub machine: Option<String>,
 }
 
-/// A join request that waits for this machine's member.
-#[derive(Clone, Debug, PartialEq)]
-pub struct JoinRequest {
-    /// The new device's fingerprint, which names it.
-    pub request: String,
-    pub key: Value,
-    pub words: Vec<String>,
-}
-
-impl JoinRequest {
-    fn of(value: &Value) -> JoinRequest {
-        JoinRequest {
-            request: text(&value["request"]),
-            key: value["key"].clone(),
-            words: value["words"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_str)
-                .map(str::to_owned)
-                .collect(),
-        }
-    }
-}
-
 /// An address this machine may be reached at: `found` or `declared` by hand.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Address {
@@ -267,8 +251,7 @@ impl Hub {
 
     /// What does not work while it is not usable: its state is the tag's to say, not this line's.
     pub fn needs_words(&self) -> Option<String> {
-        (!self.usable())
-            .then(|| "Adding a device and changing the list wait for the hub.".to_owned())
+        (!self.usable()).then(|| "Changing the list waits for the hub.".to_owned())
     }
 }
 
@@ -290,6 +273,14 @@ fn host_of(address: &str) -> String {
         .map_or_else(|_| address.to_owned(), |socket| socket.ip().to_string())
 }
 
+/// What a machine proposes for itself when it pairs, as `remote.machines` says it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Proposed {
+    pub name: String,
+    pub icon: String,
+    pub role: String,
+}
+
 /// Everything the window shows of the user's machines.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Machines {
@@ -303,13 +294,14 @@ pub struct Machines {
     pub members: Vec<Member>,
     /// The hash of the list's last change, which the next one is signed after.
     pub head: Value,
-    pub requests: Vec<JoinRequest>,
+    /// What this machine proposes for itself when it pairs: its name, icon and role.
+    pub proposed: Proposed,
     /// The sessions this machine's agents started on the others.
     pub launches: Vec<Launched>,
 }
 
 impl Machines {
-    /// Whether this machine is in a member list: with none, Settings offers to set a hub up.
+    /// Whether this machine is in a member list: with none, Settings offers to connect to a hub.
     pub fn member(&self) -> bool {
         self.hub.is_some() && self.this.is_some()
     }
@@ -338,22 +330,13 @@ fn text(value: &Value) -> String {
 
 /// What the user asks of the machines, off the UI's thread.
 pub enum Ask {
-    /// Makes this machine the first member of the hub at `url`, with its setup code.
-    Setup {
-        url: String,
+    /// Pairs this machine with the hub of `code`, what `flottille-hub pair` printed, as the card
+    /// the user confirmed.
+    Pair {
         code: Zeroizing<String>,
         name: String,
-    },
-    /// An invitation: a code and its QR, valid 5 minutes, once.
-    Invite,
-    /// Accepts a join request with the new device's name and role.
-    Accept {
-        request: JoinRequest,
-        name: String,
+        icon: String,
         role: String,
-    },
-    Refuse {
-        request: String,
     },
     Rename {
         name: String,
@@ -364,19 +347,21 @@ pub enum Ask {
     },
     AddressAdd(String),
     AddressRemove(String),
+    /// Turns remote on or off (`remote.configure`).
+    Configure {
+        on: bool,
+    },
 }
 
 impl Ask {
     fn kind(&self) -> Asked {
         match self {
-            Ask::Setup { .. } => Asked::Setup,
-            Ask::Invite => Asked::Invite,
-            Ask::Accept { name, .. } => Asked::Accept(name.clone()),
-            Ask::Refuse { .. } => Asked::Refuse,
+            Ask::Pair { .. } => Asked::Pair,
             Ask::Rename { new_name, .. } => Asked::Rename(new_name.clone()),
             Ask::Remove { name } => Asked::Remove(name.clone()),
             Ask::AddressAdd(address) => Asked::AddressAdd(address.clone()),
             Ask::AddressRemove(address) => Asked::AddressRemove(address.clone()),
+            Ask::Configure { on } => Asked::Configure { on: *on },
         }
     }
 }
@@ -384,22 +369,12 @@ impl Ask {
 /// What was asked, as its answer says it.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Asked {
-    Setup,
-    Invite,
-    Accept(String),
-    Refuse,
+    Pair,
     Rename(String),
     Remove(String),
     AddressAdd(String),
     AddressRemove(String),
-}
-
-/// An invitation the hub gave: the code (the QR's text) and when it expires.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Invitation {
-    pub code: String,
-    /// In milliseconds since the Unix epoch.
-    pub expires: u64,
+    Configure { on: bool },
 }
 
 /// What the machines' worker tells the window.
@@ -408,9 +383,7 @@ pub enum News {
     /// A fresh read of the machines.
     Read(Box<Machines>),
     /// What was asked was done, or why not.
-    Done(Asked, std::result::Result<Option<Invitation>, String>),
-    /// A new device asks to join through this machine's member.
-    JoinRequested(JoinRequest),
+    Done(Asked, std::result::Result<(), String>),
     /// A member was added to the list, whoever added it.
     Added {
         name: String,
@@ -485,7 +458,6 @@ impl Remote {
             if let Some(event) = conn.next_event(Some(AGAIN))? {
                 let data = &event.data;
                 let news = match event.name.as_str() {
-                    "remote.join_requested" => Some(News::JoinRequested(JoinRequest::of(data))),
                     "remote.member_added" => Some(News::Added {
                         name: text(&data["name"]),
                         role: text(&data["role"]),
@@ -534,86 +506,55 @@ impl Remote {
             .key()
     }
 
-    fn perform(&self, ask: Ask) -> std::result::Result<Option<Invitation>, String> {
+    fn perform(&self, ask: Ask) -> std::result::Result<(), String> {
         let stream = (self.local)().map_err(|error| format!("cannot reach Flottille: {error}"))?;
         let mut conn = Conn::new(stream).map_err(|error| error.to_string())?;
         let mut request = |method: &str, params: Value| -> Result<Value> {
             conn.ask_within(method, params, BOUND)?
         };
         match ask {
-            Ask::Setup { url, code, name } => {
+            Ask::Pair {
+                code,
+                name,
+                icon,
+                role,
+            } => {
                 let device = self
                     .device
                     .as_ref()
                     .ok_or("this window holds no device key".to_owned())?;
-                device.settle_pending(&mut request)?;
-                let (key, new) = device.key_to_join()?;
+                let key = device.key_to_pair()?;
                 let machine: flottille_link::PublicKey = serde_json::from_value(
                     request("remote.machines", json!({}))?["this"]["key"].clone(),
                 )
                 .map_err(|error| error.to_string())?;
-                let mut list = flottille_link::MemberList::start(&name, &key)
-                    .map_err(|error| error.to_string())?;
+                let proposed = flottille_link::Proposed {
+                    key: key.public(),
+                    name,
+                    role: flottille_link::Role::from_word(&role)
+                        .ok_or_else(|| format!("{role} is no role"))?,
+                    icon: flottille_link::Icon::from_word(&icon)
+                        .ok_or_else(|| format!("{icon} is no icon"))?,
+                    colour: flottille_link::Colour::of(&key.public()),
+                };
+                let paired = request(
+                    "remote.pair",
+                    json!({"code": code.as_str(), "proposed": proposed}),
+                )?;
+                let head: flottille_link::ChangeHash =
+                    serde_json::from_value(paired["head"].clone())
+                        .map_err(|error| error.to_string())?;
                 // Claimed by the machine's daemon, which holds its key.
-                list.sign(
+                let declared = flottille_link::Change::sign(
+                    head,
                     flottille_link::Action::Machine {
                         key: key.public(),
                         machine,
                     },
                     &key,
                 );
-                request(
-                    "remote.setup",
-                    json!({"url": url, "code": code.as_str(), "changes": list.changes()}),
-                )?;
-                if new {
-                    device.keep_new(key)?;
-                }
-                Ok(None)
-            }
-            Ask::Invite => {
-                let hub: flottille_link::PublicKey = serde_json::from_value(
-                    request("remote.machines", json!({}))?["hub"]["key"].clone(),
-                )
-                .map_err(|_| "this machine is not set up with a hub".to_owned())?;
-                let key = self.key()?;
-                let asked = flottille_link::InvitationAsk::sign(&hub, unix_now(), &key)
-                    .map_err(|error| error.to_string())?;
-                let invited = request("remote.invite", json!({"ask": asked}))?;
-                Ok(Some(Invitation {
-                    code: text(&invited["code"]),
-                    expires: invited["expires"].as_u64().unwrap_or_default(),
-                }))
-            }
-            Ask::Accept {
-                request: join,
-                name,
-                role,
-            } => {
-                let key = self.key()?;
-                let new: flottille_link::PublicKey =
-                    serde_json::from_value(join.key).map_err(|error| error.to_string())?;
-                let role = match role.as_str() {
-                    "runner" => flottille_link::Role::Runner,
-                    "controller" => flottille_link::Role::Controller,
-                    _ => flottille_link::Role::Viewer,
-                };
-                let members = request("remote.members", json!({}))?;
-                let change = signed_after(
-                    &members,
-                    flottille_link::Action::Add {
-                        key: new,
-                        name,
-                        role,
-                    },
-                    &key,
-                )?;
-                request("remote.change", json!({"change": change}))?;
-                Ok(None)
-            }
-            Ask::Refuse { request: join } => {
-                request("remote.refuse", json!({"request": join}))?;
-                Ok(None)
+                request("remote.declare", json!({"change": declared}))?;
+                Ok(())
             }
             Ask::Rename { name, new_name } => {
                 let key = self.key()?;
@@ -628,7 +569,7 @@ impl Remote {
                     &key,
                 )?;
                 request("remote.change", json!({"change": change}))?;
-                Ok(None)
+                Ok(())
             }
             Ask::Remove { name } => {
                 let key = self.key()?;
@@ -640,15 +581,19 @@ impl Remote {
                     &key,
                 )?;
                 request("remote.change", json!({"change": change}))?;
-                Ok(None)
+                Ok(())
             }
             Ask::AddressAdd(address) => {
                 request("remote.address.add", json!({"address": address}))?;
-                Ok(None)
+                Ok(())
             }
             Ask::AddressRemove(address) => {
                 request("remote.address.remove", json!({"address": address}))?;
-                Ok(None)
+                Ok(())
+            }
+            Ask::Configure { on } => {
+                request("remote.configure", json!({"on": on}))?;
+                Ok(())
             }
         }
     }
@@ -692,7 +637,11 @@ fn read(conn: &mut Conn) -> Result<Machines> {
         hub,
         members: Vec::new(),
         head: Value::Null,
-        requests: Vec::new(),
+        proposed: Proposed {
+            name: text(&machines["proposed"]["name"]),
+            icon: text(&machines["proposed"]["icon"]),
+            role: text(&machines["proposed"]["role"]),
+        },
         launches: Vec::new(),
     };
     if let Ok(launched) = conn.ask_within("remote.launches", json!({}), BOUND)? {
@@ -721,14 +670,6 @@ fn read(conn: &mut Conn) -> Result<Machines> {
                 machine: member["machine"].as_str().map(str::to_owned),
             })
             .collect();
-        if let Ok(requests) = conn.ask_within("remote.requests", json!({}), BOUND)? {
-            read.requests = requests
-                .as_array()
-                .into_iter()
-                .flatten()
-                .map(JoinRequest::of)
-                .collect();
-        }
     }
     Ok(read)
 }
@@ -753,30 +694,6 @@ fn signed_after(
     let head: flottille_link::ChangeHash =
         serde_json::from_value(members["head"].clone()).map_err(|error| error.to_string())?;
     Ok(flottille_link::Change::sign(head, action, key))
-}
-
-fn unix_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|since| since.as_secs())
-        .unwrap_or_default()
-}
-
-/// The host's name: this device's name when it sets a hub up, as `flottille remote setup` takes it.
-pub fn host_name() -> String {
-    let mut buffer = [0u8; 256];
-    // SAFETY: the buffer is as long as said; gethostname writes within it.
-    if unsafe { libc::gethostname(buffer.as_mut_ptr().cast(), buffer.len()) } != 0 {
-        return "this-machine".to_owned();
-    }
-    let end = buffer
-        .iter()
-        .position(|byte| *byte == 0)
-        .unwrap_or(buffer.len());
-    match String::from_utf8_lossy(&buffer[..end]).into_owned() {
-        name if name.is_empty() => "this-machine".to_owned(),
-        name => name,
-    }
 }
 
 /// The machine the window shows, when it is not this one: what the cards of a session there say
