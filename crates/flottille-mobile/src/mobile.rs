@@ -77,6 +77,9 @@ pub struct Reply {
 const PICTURES_MOST: usize = 20;
 const PICTURE_MOST: usize = 5 * 1024 * 1024;
 const PICTURE_TYPES: [&str; 4] = ["image/png", "image/jpeg", "image/gif", "image/webp"];
+/// What a signed request holds besides its parameters (the key, the signature, the nonce), and the
+/// escapes of the parameters, which travel as a string: the room kept in a frame.
+const FRAME_MARGIN: usize = 16 * 1024;
 /// A `before` past every event: the daemon then gives the latest page.
 const LATEST: u64 = i64::MAX as u64;
 
@@ -491,6 +494,13 @@ impl Core {
                         "data": base64::engine::general_purpose::STANDARD.encode(&picture.data)})
                 })
                 .collect();
+        }
+        // The request travels in one frame of the link, signed: pictures in base64 included. A
+        // message that cannot fit is refused here, saying why, rather than ending the link.
+        if params.to_string().len() + FRAME_MARGIN > flottille_link::FRAME_LIMIT {
+            return Err(MobileError::new(
+                "this message is too big for the link: its pictures and its words take 1 MiB at most together, about 700 KiB of pictures",
+            ));
         }
         let inner = self.inner.clone();
         self.inner

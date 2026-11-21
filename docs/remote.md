@@ -1085,8 +1085,12 @@ a `SessionKey` (machine and agent), which an intent can carry too (`MainActivity
   file is deleted) and the share sheet (an intent filter for `image/*` only: the pictures wait in
   the composer of the session the user picks, and are never sent without a tap). The window's limits
   hold in the composer and again in the core, before anything is sent: 20 pictures a message, 5
-  MiB each, png, jpeg, gif or webp; a camera shot over 5 MiB is scaled to 2000 px on its long side,
-  as the daemon scales what it is given. Nothing of a picture is logged. A message to a machine
+  MiB each, png, jpeg, gif or webp. **A message is one signed request, so one frame of the link
+  (1 MiB), pictures in base64 included: about 700 KB of pictures together, which is the limit that
+  binds.** The core refuses a message that does not fit, saying so, and the app scales a jpeg, png
+  or webp over 230 KB down to 2000 px and re-encodes it, so that a camera shot fits (the window's
+  own messages to another machine meet the same frame: a follow-up may carry pictures in chunks).
+  Nothing of a picture is logged. A message to a machine
   that is off is refused, said as a toast with since when (`server is offline since 22:14`) and kept
   in the composer: nothing is queued.
 - **Answering**: the ask card docks above the composer, one question at a time (Previous, `2 of 4`,

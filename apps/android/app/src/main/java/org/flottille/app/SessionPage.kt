@@ -102,7 +102,7 @@ private sealed interface Line {
 }
 
 /** The conversation's entries as lines: the thoughts and the tool calls between two messages fold into one. */
-private fun lines(entries: List<Entry>): List<Line> {
+private fun toLines(entries: List<Entry>): List<Line> {
     val out = mutableListOf<Line>()
     val steps = mutableListOf<Entry>()
     fun flush() {
@@ -305,7 +305,7 @@ private fun Header(page: Conversation?, key: SessionKey, readOnly: Boolean, onBa
 @Composable
 private fun ConversationList(phone: Phone, key: SessionKey, page: Conversation, onOlder: () -> Unit) {
     val state = rememberLazyListState()
-    val lines = lines(page.entries)
+    val lines = toLines(page.entries)
     // What was there when the page opened is simply there; what arrives after unfolds and fades in.
     val initial = remember(key) { lines.map { it.key }.toSet() }
     val appeared = remember(key) { mutableStateListOf<String>() }

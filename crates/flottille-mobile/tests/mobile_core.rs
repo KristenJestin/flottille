@@ -1983,8 +1983,13 @@ async fn the_window_s_limits_on_pictures_hold_before_anything_is_sent() {
     );
     assert!(refused(send("x", vec![picture("image/bmp", 1)]).await).contains("image/bmp"));
     assert!(refused(send("", vec![]).await).contains("empty"));
-    // 5 MiB exactly is allowed.
-    send("x", vec![picture("image/webp", 5 * 1024 * 1024); 2])
+    // A message travels in one frame of the link (1 MiB, pictures in base64 included): what cannot
+    // fit is refused here with its reason, never sent to end the link.
+    assert!(
+        refused(send("x", vec![picture("image/webp", 5 * 1024 * 1024)]).await).contains("link")
+    );
+    assert!(refused(send("x", vec![picture("image/png", 400_000); 2]).await).contains("link"));
+    send("x", vec![picture("image/webp", 600_000)])
         .await
         .unwrap();
     assert_eq!(

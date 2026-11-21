@@ -20,6 +20,16 @@ import org.flottille.core.Picture
 object PictureLimits {
     const val MOST = 20
     const val BYTES = 5 * 1024 * 1024
+
+    /**
+     * What the pictures of a message take together: a request is one frame of the link, 1 MiB, and
+     * the pictures travel in base64 (the window's own messages to another machine meet the same
+     * frame). The core refuses what does not fit; the composer says so before.
+     */
+    const val LINK_BYTES = 700_000
+
+    /** What a picture is scaled down to when it is bigger: three of them fit a message. */
+    const val TARGET_BYTES = 230_000
     val TYPES = listOf("image/png", "image/jpeg", "image/gif", "image/webp")
 
     /** Why [add] cannot join the [held] pictures of a message, or null when it can. */
@@ -29,6 +39,8 @@ object PictureLimits {
             add.bytes.isEmpty() -> "${add.name.ifEmpty { "this picture" }} is empty"
             add.bytes.size > BYTES -> "${add.name.ifEmpty { "this picture" }} is over 5 MiB"
             held.size >= MOST -> "A message carries $MOST pictures at most"
+            held.sumOf { it.bytes.size } + add.bytes.size > LINK_BYTES ->
+                "A message carries 700 KB of pictures at most, the link's frame: remove one or pick a smaller picture"
             else -> null
         }
 }
@@ -63,12 +75,12 @@ class SystemPictures(private val activity: ComponentActivity) : PictureSource {
     private var cameraDone: ((Picture?) -> Unit)? = null
     private var shot: File? = null
 
-    private val gallery = activity.registerForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(PictureLimits.MOST)) { uris ->
+    private val pick = activity.registerForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(PictureLimits.MOST)) { uris ->
         galleryDone?.invoke(uris.mapNotNull { read(activity, it) })
         galleryDone = null
     }
 
-    private val camera = activity.registerForActivityResult(ActivityResultContracts.TakePicture()) { taken ->
+    private val shoot = activity.registerForActivityResult(ActivityResultContracts.TakePicture()) { taken ->
         val file = shot
         shot = null
         val picture = if (taken && file != null) {
@@ -87,7 +99,7 @@ class SystemPictures(private val activity: ComponentActivity) : PictureSource {
 
     override fun gallery(done: (List<Picture>) -> Unit) {
         galleryDone = done
-        gallery.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+        pick.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
     }
 
     override fun camera(done: (Picture?) -> Unit) {
@@ -105,7 +117,7 @@ class SystemPictures(private val activity: ComponentActivity) : PictureSource {
         val folder = File(activity.cacheDir, "pictures").apply { mkdirs() }
         val file = File.createTempFile("photo-", ".jpg", folder)
         shot = file
-        camera.launch(FileProvider.getUriForFile(activity, "${activity.packageName}.pictures", file))
+        shoot.launch(FileProvider.getUriForFile(activity, "${activity.packageName}.pictures", file))
     }
 
     private fun finish(picture: Picture?) {
@@ -122,7 +134,7 @@ fun read(context: Context, uri: Uri): Picture? {
 }
 
 /** The pictures an intent shares to the app (an intent filter for images only), read. */
-fun shared(context: Context, intent: Intent): List<Picture> {
+fun sharedPictures(context: Context, intent: Intent): List<Picture> {
     // The typed getters need API 33; the app's minimum is 31.
     @Suppress("DEPRECATION")
     val uris = when (intent.action) {
@@ -148,29 +160,38 @@ private fun readAtMost(stream: InputStream, limit: Int): ByteArray {
 }
 
 /**
- * The picture [stream] holds, scaled down to 2000 px on its long side when it is over the limit
- * (a phone's camera makes more than 5 MiB), as the daemon scales what it is given. A gif or a
- * webp that is too big is left as it is: the composer refuses it.
+ * The picture [stream] holds, scaled down to 2000 px on its long side and re-encoded when it is
+ * over [PictureLimits.TARGET_BYTES] (a phone's camera makes several MiB, and a message carries one
+ * frame of the link), as the daemon scales what it is given. A gif or a webp is left as it is: the
+ * composer refuses one that does not fit.
  */
 private fun fitted(stream: InputStream, mime: String, name: String): Picture {
     val bytes = readAtMost(stream, PictureLimits.BYTES * 4 + 1)
-    if (bytes.size <= PictureLimits.BYTES || mime !in listOf("image/jpeg", "image/png", "image/webp")) {
+    if (bytes.size <= PictureLimits.TARGET_BYTES || mime !in listOf("image/jpeg", "image/png", "image/webp")) {
         return Picture(mime, bytes, name)
     }
     val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
     BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
     var sample = 1
     while (maxOf(bounds.outWidth, bounds.outHeight) / sample > 2000) sample *= 2
-    val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, BitmapFactory.Options().apply { inSampleSize = sample })
+    var bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, BitmapFactory.Options().apply { inSampleSize = sample })
         ?: return Picture(mime, bytes, name)
-    var quality = 90
+    val jpeg = name.substringBeforeLast('.') + ".jpg"
     while (true) {
-        val out = ByteArrayOutputStream()
-        bitmap.compress(Bitmap.CompressFormat.JPEG, quality, out)
-        if (out.size() <= PictureLimits.BYTES || quality <= 40) {
-            bitmap.recycle()
-            return Picture("image/jpeg", out.toByteArray(), name.substringBeforeLast('.') + ".jpg")
+        for (quality in listOf(85, 70, 55)) {
+            val out = ByteArrayOutputStream()
+            bitmap.compress(Bitmap.CompressFormat.JPEG, quality, out)
+            if (out.size() <= PictureLimits.TARGET_BYTES) {
+                bitmap.recycle()
+                return Picture("image/jpeg", out.toByteArray(), jpeg)
+            }
         }
-        quality -= 15
+        // Still too big: half the size, until it fits or there is nothing left to give.
+        if (bitmap.width < 200 || bitmap.height < 200) {
+            val out = ByteArrayOutputStream()
+            bitmap.compress(Bitmap.CompressFormat.JPEG, 55, out)
+            return Picture("image/jpeg", out.toByteArray(), jpeg)
+        }
+        bitmap = Bitmap.createScaledBitmap(bitmap, bitmap.width / 2, bitmap.height / 2, true)
     }
 }

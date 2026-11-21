@@ -69,7 +69,7 @@ class MainActivity : ComponentActivity() {
             // Read off the main thread: a picture can be megabytes. Nothing is sent: the pictures
             // wait for the user to say which session they go to.
             lifecycleScope.launch {
-                shared = withContext(Dispatchers.IO) { shared(this@MainActivity, intent) }
+                shared = withContext(Dispatchers.IO) { sharedPictures(this@MainActivity, intent) }
             }
         }
     }
