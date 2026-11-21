@@ -2086,3 +2086,35 @@ mod removal {
         assert!(refused.contains(&agent), "{refused}");
     }
 }
+
+#[test]
+fn the_folders_a_project_may_be_added_from_are_the_repositories_under_home() {
+    let user = User::new();
+    let app = user.path("home/code/app");
+    user.git_init(&app);
+    // A repository inside another is the outer one's: it is not offered on its own.
+    user.git_init(&app.join("web"));
+    user.git_init(&user.path("home/notes"));
+    user.git_init(&user.path("home/a/b/deep"));
+    user.git_init(&user.path("home/a/b/c/too-deep"));
+    user.git_init(&user.path("home/.hidden/repo"));
+    user.git_init(&user.path("home/code/shop"));
+    add(&user, &user.path("home/code/shop"));
+
+    let listed = user.call("project.folders", json!({})).unwrap();
+
+    assert_eq!(listed["home"], user.path("home").to_str().unwrap());
+    let shown: Vec<&str> = listed["folders"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|folder| folder["shown"].as_str().unwrap())
+        .collect();
+    // Up to three levels down, hidden folders left out, a project's folder too.
+    assert_eq!(shown, ["~/a/b/deep", "~/code/app", "~/notes"]);
+    assert_eq!(
+        listed["folders"][1]["path"],
+        app.to_str().unwrap(),
+        "{listed}"
+    );
+}
