@@ -689,5 +689,7 @@ mod tests {
         assert!(!mentions("@someone-else could you look?", "someone"));
         assert!(!mentions("@someones", "someone"));
         assert!(!mentions("mail someone@example.com", "someone"));
+        assert!(mentions("@SomeOne could you look?", "someone"));
+        assert!(mentions("@someone look", "SomeOne"));
     }
 }

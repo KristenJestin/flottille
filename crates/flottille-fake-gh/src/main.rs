@@ -35,7 +35,8 @@
 //! The writes answer as `gh` does when they work: `pr create` prints the new pull request's URL
 //! (numbered `created`, 1 by default), `pr merge` and `run rerun` print nothing, and `run list`
 //! prints `runs` of the repository (`{"runs": {"acme/app": [{"databaseId": 7, …}]}}`), `[]`
-//! without. `pr comment` prints the new comment's URL (`…/pull/N#issuecomment-<commented>`, 1 by default), `pr edit`, `pr close` and `pr reopen` the pull request's URL, of one the script holds.
+//! without; `api repos/<owner>/<name>/actions/runs` answers the same runs as the REST API names
+//! them. `pr comment` prints the new comment's URL (`…/pull/N#issuecomment-<commented>`, 1 by default), `pr edit`, `pr close` and `pr reopen` the pull request's URL, of one the script holds.
 //! With `merge_methods` (`{"acme/app": ["merge", "rebase"]}`), `pr merge` fails for a method
 //! (`--squash`, `--merge`, `--rebase`) the repository does not allow, as GitHub refuses it, and
 //! `repo view <repository> --json …Allowed` says them (every one without). `pr view` gives a pull
@@ -540,6 +541,39 @@ fn answer(script: &Value, args: &[String]) -> i32 {
             0
         }
         ["api", "graphql", ..] => graphql(script, &words),
+        ["api", path, ..] if path.starts_with("repos/") && path.ends_with("/actions/runs") => {
+            // `repos/<owner>/<name>/actions/runs`: the same `runs` as `run list`, named as the
+            // REST answer names them, kept to `-f branch=<branch>`; a run's `headRepository`
+            // (`owner/name`) is the repository itself unless the script names another (a fork).
+            let repository = &path["repos/".len()..path.len() - "/actions/runs".len()];
+            let branch = words.iter().find_map(|w| w.strip_prefix("branch="));
+            let runs: Vec<Value> = script["runs"][repository]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|run| {
+                    branch.is_none_or(|branch| {
+                        run["headBranch"].as_str().is_none_or(|on| on == branch)
+                    })
+                })
+                .map(|run| {
+                    let head = run["headRepository"].as_str().unwrap_or(repository);
+                    json!({"id": run["databaseId"], "name": run["workflowName"],
+                        "display_title": run["displayTitle"], "path": run["path"],
+                        "status": run["status"],
+                        "conclusion": run["conclusion"].as_str().filter(|c| !c.is_empty()),
+                        "event": run["event"], "head_branch": run["headBranch"],
+                        "html_url": run["url"],
+                        "head_repository": {"full_name": head},
+                        "repository": {"full_name": repository}})
+                })
+                .collect();
+            println!(
+                "{}",
+                json!({"total_count": runs.len(), "workflow_runs": runs})
+            );
+            0
+        }
         ["api", path, rest @ ..] if path.starts_with("repos/") && path.ends_with("/reviews") => {
             let parts: Vec<&str> = path.split('/').collect();
             let [_, owner, name, "pulls", number, "reviews"] = parts[..] else {
