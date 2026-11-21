@@ -1156,10 +1156,12 @@ fn at_most_once_holds_past_fifty_rows_of_its_day() {
     runs_are(&user, failed);
     refresh(&user);
     std::thread::sleep(Duration::from_millis(500));
+    // The history shows its last 50 rows only: the sessions say how many runs started.
     assert_eq!(
-        started(&user, "Once a day").len(),
+        sessions(&user).len(),
         1,
-        "the same day, however long its history"
+        "the same day, however long its history: {:?}",
+        runs(&user, "Once a day").first()
     );
 }
 
