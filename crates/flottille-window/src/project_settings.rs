@@ -3107,10 +3107,9 @@ impl Render for ProjectSettingsPage {
             .children(blocks.into_iter().enumerate().map(|(n, (part, section))| {
                 column(enter(key(part), 2 + n, section).into_any_element())
                     .when(n > 0, |d| d.mt(space::XXL))
-            }))
-            .test_support();
+            }));
         // Held after its blocks: what it adds comes after them, and a block's place stays its own.
-        let page = crate::machines::hold(page, window, cx);
+        let page = crate::machines::hold(page, window, cx).test_support();
         div()
             .size_full()
             .flex()
