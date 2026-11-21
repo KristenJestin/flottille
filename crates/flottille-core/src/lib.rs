@@ -24,6 +24,7 @@ pub mod protocol;
 pub mod provider;
 pub mod question;
 pub mod registry;
+pub mod routine;
 pub mod run;
 pub mod secrets;
 pub mod service;

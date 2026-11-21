@@ -323,6 +323,14 @@ no device calls a `local` one over a link (`docs/remote.md`, "Roles").
 | `inbox.list` | read |
 | `notifications.list` | read |
 | `notifications.read` | drive |
+| `routine.list` | read |
+| `routine.show` | read |
+| `routine.add` | drive |
+| `routine.edit` | drive |
+| `routine.run` | drive |
+| `routine.pause` | drive |
+| `routine.resume` | drive |
+| `routine.remove` | drive |
 | `provider.list` | read |
 | `provider.enable` | drive |
 | `provider.disable` | drive |
@@ -2818,6 +2826,82 @@ session or clicks a row; what arrives in the session already open stays unread, 
 perhaps open with nobody looking. Reading a request does not answer it: it stays `resolved:
 false` until it is decided. Every change is told by the event `notifications.changed`
 (`docs/events.md`), so that every client follows.
+
+### The routine methods
+
+Routines (`docs/design.md`, "Routines"): work the daemon starts by itself, each run a new root
+session of the routine's project, at its time. A routine in a result:
+
+```json
+{"id": "a1b2c3d4e5f6", "name": "Tickets to review", "project": "app",
+ "prompt": "List the tickets waiting for my review",
+ "agent": {"provider": null, "model": null, "effort": null},
+ "schedule": "weekdays 08:30", "zone": "Europe/Paris", "mode": "read_only",
+ "rings": "something", "paused": false, "missed_hours": 12,
+ "next_at": 1795000200000, "delayed": null, "created_at": 1794900000000,
+ "updated_at": 1794900000000}
+```
+
+- `schedule`: days and an hour, never a cron line: `every day 07:00` (`daily 07:00`),
+  `weekdays 08:30`, `weekends 10:00`, a day of the week (`mondays 09:00`, `monday 09:00`).
+  `zone`: the IANA zone it is read in, the machine's when null.
+- `mode`: `read_only` (every call that writes is refused, in every mode of the session, whatever
+  the prompt says; reads go through), `ask` or `auto` (the gate as for any session in that mode).
+- `rings`: `something` (a notification when the run has something to say) or `never` (its
+  history only).
+- `agent`: the provider, model and effort each run starts on; null for those of a new session.
+- `next_at`: when the next run is due, null while it is paused; `delayed`: why that is later than
+  the schedule says (the quota of its provider is spent: the run waits for the reset), null
+  otherwise.
+- `missed_hours`: a run missed while the daemon was off runs once at its next start when it was
+  due less than that many hours before (1 to 168, 12 by default); an older one is skipped.
+
+A run in a result: `{"id", "routine", "due_at", "started_at", "ended_at", "session", "mode",
+"outcome", "summary", "why"}`. `session` is its root session (null for a skipped run), kept once it
+ended; `mode` the routine's when it started; `outcome` is `running`, `something`, `nothing`,
+`goes_on` (it said something and its session goes on as any session), `skipped` or `failed`;
+`summary` the one line its result said; `why` why it was skipped or failed.
+
+#### `routine.list`
+
+`{"project"?}`: `{"routines": [...]}`, by name, each with `last`, its last run, null before the
+first.
+
+#### `routine.show`
+
+`{"routine"}`, its name or id: `{"routine", "runs"}`, its last 50 runs, the last first.
+`not-found` for none.
+
+#### `routine.add`
+
+`{"name", "project", "prompt", "schedule", "zone"?, "mode"?, "rings"?, "provider"?, "model"?,
+"effort"?, "missed_hours"?}`; `mode` is `read_only` and `rings` `something` when left out.
+Answers `{"routine"}`. `invalid-params` for a schedule, zone, mode or ring it cannot read, an empty
+name or prompt; `not-found` for a project Flottille does not know; `refused` for a name another
+routine has, or an agent that cannot be chosen.
+
+#### `routine.edit`
+
+`{"routine", ...}` with any field of `routine.add`; `name` renames it. An empty `zone`,
+`provider`, `model` or `effort` goes back to the default. A new schedule or zone sets the next run
+again. Answers `{"routine"}`.
+
+#### `routine.run`
+
+`{"routine"}`: starts a run now, whatever its schedule: `{"run"}`, its session given. `refused`
+while its last run is under way: a routine never runs twice at once.
+
+#### `routine.pause`, `routine.resume`
+
+`{"routine"}`: no run starts while it is paused (`next_at` null); resumed, its next run is the
+schedule's next. Answers `{"routine"}`.
+
+#### `routine.remove`
+
+`{"routine"}`: forgets it and its history; the sessions of its runs stay, as any session.
+`{"removed": "<name>"}`.
+
+Every change emits `routine.changed`, each run's outcome `routine.ran` (`docs/events.md`).
 
 ### `test.advance`
 
