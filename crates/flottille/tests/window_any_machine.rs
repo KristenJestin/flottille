@@ -89,7 +89,7 @@ fn window<'a>(
     let device = Some(Device::in_folder(machine.folder()));
     let (shell, cx) =
         cx.add_window_view(|window, cx| Shell::new_polled_with(connect, device, window, cx));
-    cx.simulate_resize(size(px(1280.), px(1600.)));
+    cx.simulate_resize(size(px(1280.), px(2400.)));
     until(&shell, cx, "the server is read online", |cx| {
         shell.read_with(cx, |s, cx| {
             s.machines()
@@ -186,7 +186,7 @@ fn settings_of(shell: &Entity<Shell>, machine: &str, cx: &mut VisualTestContext)
 }
 
 fn developer_on(user: &User) -> bool {
-    user.call("developer.show", json!({})).unwrap()["enabled"] == true
+    user.call("developer.show", json!({})).unwrap()["log"] == true
 }
 
 fn specs_language(user: &User) -> Value {
@@ -225,7 +225,7 @@ fn settings_show_and_change_another_machine_s(cx: &mut TestAppContext) {
 
     // The chooser says whose settings these are, this machine first, then the runners.
     assert_eq!(
-        label(cx, "settings-machine-label").as_deref(),
+        label(cx, "settings-machine-field-label").as_deref(),
         Some("Settings of")
     );
     click(&shell, "settings-machine", cx);
@@ -543,9 +543,10 @@ fn a_machine_that_is_off_shows_greyed_and_sends_nothing(cx: &mut TestAppContext)
     settings_of(&shell, "here", cx);
     click(&shell, "settings-machine", cx);
     assert!(
-        label(cx, "settings-machine-server").is_some_and(|said| said.contains("offline since")),
+        label(cx, "settings-machine-server-line")
+            .is_some_and(|said| said.contains("offline since")),
         "{:?}",
-        label(cx, "settings-machine-server")
+        label(cx, "settings-machine-server-line")
     );
 }
 
