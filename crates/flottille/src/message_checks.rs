@@ -222,8 +222,8 @@ pub async fn push(
     // Read before any dry run: an option given `--dry-run` as its value would make it the push.
     let said = read(&rest[..end], &PUSH)
         .map_err(|why| unknown(format!("its options cannot be read: {why}")))?;
-    // What is read of the repository is read in the sandbox, from the repository itself: the
-    // folder a push outside it runs from (`push_folder`) is out of a confined command's reach.
+    // The settings that may make it recurse are read in the sandbox, from the repository itself:
+    // the folder a push outside it runs from (`push_folder`) is out of a confined command's reach.
     let read_env: Env = env
         .iter()
         .filter(|(name, _)| !(outside && (*name == "GIT_DIR" || *name == "GIT_OBJECT_DIRECTORY")))
@@ -234,6 +234,20 @@ pub async fn push(
             .await
             .map_err(unknown)?;
     }
+    // What it sends, and what its remote has, are read where the push runs: outside the sandbox,
+    // from its folder, which none of the repository's settings (a proxy, a rewritten URL) nor
+    // its grafts reach; a replacement or a lazy fetch of either, never.
+    let mut sends_env = match outside {
+        true => env.clone(),
+        false => read_env,
+    };
+    sends_env.insert("GIT_NO_REPLACE_OBJECTS".into(), "1".into());
+    sends_env.insert("GIT_NO_LAZY_FETCH".into(), "1".into());
+    let sends = Reads {
+        folder: at.folder,
+        env: &sends_env,
+        outside,
+    };
     let tried = dry_run(git, rest, end, at.folder, env, outside)
         .await
         .map_err(unknown)?;
@@ -241,19 +255,10 @@ pub async fn push(
     if checks.is_empty() {
         return Ok(());
     }
-    for sha in sent(git, &tried, at.folder, &read_env)
-        .await
-        .map_err(unknown)?
-    {
-        let object = read_git(
-            git,
-            &["cat-file", "commit", &sha],
-            at.folder,
-            &read_env,
-            None,
-        )
-        .await
-        .map_err(unknown)?;
+    for sha in sent(git, &tried, &sends).await.map_err(unknown)? {
+        let object = read_git(git, &["cat-file", "commit", &sha], &sends, None)
+            .await
+            .map_err(unknown)?;
         let message = object.split_once("\n\n").map_or("", |(_, message)| message);
         let subject = crate::mcp::masked(message.lines().next().unwrap_or_default(), at.place);
         let short = &sha[..12.min(sha.len())];
@@ -345,7 +350,7 @@ async fn dry_run(
     dry.extend_from_slice(&rest[end..]);
     // Where the push runs: outside the sandbox, it signs in to the remote the same way.
     let tried = match outside {
-        true => crate::git::run_outside(folder, &dry, env).await?,
+        true => crate::git::run_outside(folder, &dry, env, None).await?,
         false => crate::git::run_in(folder, &dry, env, None).await?,
     };
     let mut remotes: Vec<(String, Vec<Pushed>)> = Vec::new();
@@ -431,8 +436,7 @@ fn format_kept(
 async fn sent(
     git: &[String],
     tried: &[(String, Vec<Pushed>)],
-    folder: &Path,
-    env: &Env,
+    reads: &Reads<'_>,
 ) -> Result<Vec<String>, String> {
     let mut commits: Vec<String> = Vec::new();
     for (url, refs) in tried {
@@ -452,7 +456,7 @@ async fn sent(
         }
         let mut input = String::new();
         for source in sources {
-            let sha = read_git(git, &["rev-parse", "--verify", source], folder, env, None).await?;
+            let sha = read_git(git, &["rev-parse", "--verify", source], reads, None).await?;
             input.push_str(sha.trim());
             input.push('\n');
         }
@@ -461,8 +465,7 @@ async fn sent(
         let read = read_git(
             git,
             &["ls-remote", "--get-url", "--end-of-options", url],
-            folder,
-            env,
+            reads,
             None,
         )
         .await?;
@@ -473,14 +476,7 @@ async fn sent(
                  has cannot be known: push without the rewrite"
             ));
         }
-        let had = read_git(
-            git,
-            &["ls-remote", "--end-of-options", url],
-            folder,
-            env,
-            None,
-        )
-        .await?;
+        let had = read_git(git, &["ls-remote", "--end-of-options", url], reads, None).await?;
         for listed in had.lines() {
             input.push_str(listed.split('\t').next().unwrap_or_default());
             input.push('\n');
@@ -488,8 +484,7 @@ async fn sent(
         let listed = read_git(
             git,
             &["rev-list", "--reverse", "--ignore-missing", "--stdin"],
-            folder,
-            env,
+            reads,
             Some(input.into_bytes()),
         )
         .await?;
@@ -528,18 +523,28 @@ async fn setting(
     }
 }
 
+/// Where the git reads of a push are made: from `folder`, with `env`, outside the sandbox where
+/// the push runs outside it.
+struct Reads<'a> {
+    folder: &'a Path,
+    env: &'a Env,
+    outside: bool,
+}
+
 /// A git command of `git`'s (`git` and the line's global options): its output, or what git
 /// said when it failed.
 async fn read_git(
     git: &[String],
     command: &[&str],
-    folder: &Path,
-    env: &Env,
+    reads: &Reads<'_>,
     input: Option<Vec<u8>>,
 ) -> Result<String, String> {
     let mut words = git.to_vec();
     words.extend(command.iter().map(|word| word.to_string()));
-    let output = crate::git::run_in(folder, &words, env, input).await?;
+    let output = match reads.outside {
+        true => crate::git::run_outside(reads.folder, &words, reads.env, input).await?,
+        false => crate::git::run_in(reads.folder, &words, reads.env, input).await?,
+    };
     match output.success {
         true => Ok(output.stdout),
         false => Err(format!(

@@ -330,16 +330,18 @@ pub async fn run_in<S: AsRef<OsStr>>(
     bounded(command, dir, &words[1..], limit, OUTPUT_LIMIT, input).await
 }
 
-/// [`run_in`] outside the sandbox: for what a push the gate let through reads of its remote
-/// before it goes (its dry run), which signs in as the push itself does (`runs::lifted`).
+/// [`run_in`] outside the sandbox: for what a push the gate let through reads before it goes (its
+/// dry run, what its remote has, the commits it sends), from the folder it runs from and signed
+/// in as the push itself is (`runs::lifted`).
 pub async fn run_outside<S: AsRef<OsStr>>(
     dir: &Path,
     words: &[S],
     env: &BTreeMap<OsString, OsString>,
+    input: Option<Vec<u8>>,
 ) -> Result<Output, String> {
-    let command = read_in(dir, words, env, false);
+    let command = read_in(dir, words, env, input.is_some());
     let limit = Class::Read.limit();
-    bounded(command, dir, &words[1..], limit, OUTPUT_LIMIT, None).await
+    bounded(command, dir, &words[1..], limit, OUTPUT_LIMIT, input).await
 }
 
 /// The command of [`run_in`] and [`run_outside`]: never a prompt, nowhere to answer it.
