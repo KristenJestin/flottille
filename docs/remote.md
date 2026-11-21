@@ -595,16 +595,20 @@ device key from the same keyring item, or the same file, as the command line.
 **Built (#1182), in the window: every page works on any machine.** The window addresses another
 machine one way only, the one its sessions use: bringing that machine in front, every connection of
 the window signed with the device key for it and carried by this machine's daemon. Settings opens
-with `Settings of` (the kit's select: this machine, then the other runners, each with its state);
+with `Settings of` (the kit's select: this machine, then the other runners, each with its role and
+state, `runner · online`);
 choosing one brings it in front, and every tab that is a machine's (Agents, Approvals, Features
 and Connections, Vault, General's about, workspaces folder and developer mode) shows and changes
 that machine's. What is the window's own stays this machine's, asked of its own daemon whichever
 machine is shown: the appearance, the version and its update (`update.*`), the folds and drafts the
-window keeps; General says it in one line while another machine is shown (`The appearance and the
-version are this window's: they stay pc's.`). Settings, Machines is the hub's list, the same from
-every machine. **Add project** asks first `On` which machine (this one first, then the runners);
-on another, the folder is picked from those that machine lists (`project.folders`: the
-repositories under its home, three levels down), never typed, then detected and added there. A
+window keeps; one line under the tabs says it while another machine is shown (`This window
+(appearance, version) stays this machine's, pc, whichever machine is chosen above.`). Settings, Machines is the hub's list, the same from
+every machine. **Add project** asks first on which machine (radios: this one first, then the runners,
+each with its role and state; Next), then the folder there (Back returns to the machine): on
+another machine it is picked in that machine's folders, never typed, from its home, a folder opened
+after the other (`project.folders`, `..` going up), each saying whether it is a repository and how
+many it holds, or that it is already a project; a repository is picked, then detected and added
+there. On this machine it is typed or picked with the system's dialog, as before. A
 project of another machine only opens its page by bringing that machine in front; its settings and
 every tab follow. A page of another machine says it once, at its top, in its path line (`server /
 Settings / Agents`, `server / app`, `server / app / Settings`), which unfolds as that machine
@@ -1316,11 +1320,13 @@ on a real phone, by hand, and reported.
   project's choosers switch the whole window, as opening a session there does, rather than a page
   aimed at a machine of its own while the rest stays: one way to address a machine, and the
   sidebar, the bell and the pages always say the same machine.
-- **`project.folders` lists the repositories under the machine's home, three levels down, 200 at
-  most** (#1182), not a browser of every folder: what a project is added from is a repository, and
-  a list is what a machine with no screen can offer. It is `drive`, as adding is.
-- **The chooser of Settings names each machine and its state, without its icon and colour**
-  (#1182): the kit's select has no icon for an option yet; it is a follow-up of the kit.
+- **`project.folders` lists one folder's folders at a time** (#1182), from the machine's home: the
+  dialog opens them one after the other, and a folder that is a repository itself is picked; a
+  folder that only holds repositories (not one itself) is opened, not picked. It is `drive`, as
+  adding is.
+- **The choosers name each machine with its role and state, without its icon and colour**
+  (#1182): the kit has no device icons and its select and radios no mark for an option yet; it is
+  a follow-up of the kit. The choosers offer the runners only: a controller holds no project.
 
 - One list of every machine (#1150): the window follows the other machines through its own
   daemon, which keeps each machine's list as that machine tells it over the link (the `sessions`

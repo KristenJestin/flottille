@@ -64,14 +64,7 @@ const AGENTS_BLOCKS: [&str; 5] = [
 ];
 
 /// The blocks of the General tab, top to bottom.
-const GENERAL_BLOCKS: [&str; 6] = [
-    "about",
-    "own",
-    "appearance",
-    "workspaces",
-    "developer",
-    "version",
-];
+const GENERAL_BLOCKS: [&str; 5] = ["about", "appearance", "workspaces", "developer", "version"];
 
 /// The blocks of the Approvals tab: the Auto judge, then what it is told.
 const APPROVALS_BLOCKS: [&str; 2] = ["judge", "guidance"];
@@ -2513,7 +2506,6 @@ impl Render for SettingsPage {
             "machines" => vec![("machines", self.machines.clone().into_any_element())],
             _ => vec![
                 ("about", self.about.clone().into_any_element()),
-                ("own", self.own_line(cx).into_any_element()),
                 ("appearance", self.appearance_section(cx).into_any_element()),
                 ("workspaces", self.workspaces.clone().into_any_element()),
                 ("developer", self.developer_section(cx).into_any_element()),
@@ -2561,7 +2553,8 @@ impl Render for SettingsPage {
                     enter(key("machine"), 1, div().pb(space::LG).child(chooser)).into_any_element(),
                 )
             }))
-            .child(column(enter(key("tabs"), 1, tabs).into_any_element()));
+            .child(column(enter(key("tabs"), 1, tabs).into_any_element()))
+            .child(column(self.own_line(cx).into_any_element()));
         // Each section enters as it is shown (its state is dropped while it is not drawn, so it
         // plays again), after the tabs.
         let page = div()
@@ -2578,10 +2571,8 @@ impl Render for SettingsPage {
             .pt(space::XL)
             .pb(space::XXXL)
             .children(blocks.into_iter().enumerate().map(|(n, (part, section))| {
-                // The line of the window's own settings is there only while another machine is
-                // shown: it brings its own space.
                 column(enter(key(part), 2 + n, section).into_any_element())
-                    .when(n > 0 && part != "own", |d| d.mt(space::XXL))
+                    .when(n > 0, |d| d.mt(space::XXL))
             }));
         // Held after its blocks: what it adds comes after them, and a block's place stays its own.
         let page = crate::machines::hold(page, window, cx);
@@ -2601,35 +2592,20 @@ impl SettingsPage {
     /// opening one of its sessions does. None while this machine is in no member list or knows no
     /// other runner.
     fn machine_chooser(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
-        let read = self.machines.read(cx).machines()?;
-        if !read.member() || read.runners().next().is_none() {
+        let choices = crate::machines::choices(self.machines.read(cx).machines()?);
+        if choices.len() < 2 {
             return None;
         }
-        let this = read
-            .this
-            .clone()
-            .unwrap_or_else(|| "This machine".to_owned());
-        let runners: Vec<(String, String)> = read
-            .runners()
-            .map(|machine| (machine.name.clone(), machine.state_words()))
-            .collect();
         let shown = crate::machines::shown_machine(cx);
-        let chosen = shown
-            .as_ref()
-            .and_then(|shown| runners.iter().position(|(name, _)| name == shown))
-            .map_or(0, |at| at + 1);
-        let options = std::iter::once(SelectOption::new("here", this).line("This machine"))
-            .chain(runners.iter().map(|(name, state)| {
-                SelectOption::new(
-                    SharedString::from(name.clone()),
-                    SharedString::from(name.clone()),
-                )
-                .line(SharedString::from(state.clone()))
-            }))
+        let chosen = choices
+            .iter()
+            .position(|choice| choice.name == shown)
+            .unwrap_or(0);
+        let options = choices
+            .iter()
+            .map(|choice| SelectOption::new(choice.key(), choice.title.clone()).line(choice.line()))
             .collect::<Vec<_>>();
-        let names: Vec<Option<String>> = std::iter::once(None)
-            .chain(runners.into_iter().map(|(name, _)| Some(name)))
-            .collect();
+        let names: Vec<Option<String>> = choices.into_iter().map(|choice| choice.name).collect();
         let shell = self.shell.clone();
         let select = Select::new("settings-machine", options, chosen)
             .fit()
@@ -2642,8 +2618,8 @@ impl SettingsPage {
         Some(Field::new("settings-machine-field", "Settings of", select))
     }
 
-    /// One line on the General tab while another machine is shown: its appearance and its version
-    /// are this window's, and stay this machine's.
+    /// One line under the tabs while another machine is shown, whichever tab: the appearance and
+    /// the version are this window's, and stay this machine's.
     fn own_line(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let p = palette(cx);
         let this = self
@@ -2654,7 +2630,8 @@ impl SettingsPage {
             .unwrap_or_else(|| "this machine".to_owned());
         let said = crate::machines::shown_machine(cx).map(|_| {
             SharedString::from(format!(
-                "The appearance and the version are this window's: they stay {this}'s."
+                "This window (appearance, version) stays this machine's, {this}, whichever \
+                 machine is chosen above."
             ))
         });
         presence_of("settings-own-block", said, move |said| {
@@ -2667,7 +2644,7 @@ impl SettingsPage {
                 .test_support()
                 .into_any_element()
         })
-        .space(space::XXL)
+        .space(space::MD)
     }
 }
 

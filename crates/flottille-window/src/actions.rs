@@ -383,6 +383,8 @@ pub enum Command {
     ProjectFolders {
         /// The machine shown when it was asked: an answer for another one is dropped.
         machine: Option<String>,
+        /// The folder whose folders are listed; the home when none.
+        path: Option<String>,
     },
     DetectProject {
         folder: String,
@@ -2577,12 +2579,12 @@ fn perform(connect: &Connect, sign: Option<Sign>, command: Command, bounds: Boun
             )),
             project,
         },
-        Command::ProjectFolders { machine } => Outcome::ProjectFolders {
+        Command::ProjectFolders { machine, path } => Outcome::ProjectFolders {
             machine,
             read: answer(ask_alone(
                 connect,
                 "project.folders",
-                json!({}),
+                json!({"path": path}),
                 bounds.quick,
             )),
         },

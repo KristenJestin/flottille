@@ -823,6 +823,71 @@ pub fn shown_on(cx: &gpui_kit::App) -> Option<String> {
         .map(|machine| format!("on {machine}"))
 }
 
+/// A machine the user may choose where a page is a machine's (Settings of, Add project): this one
+/// first, then the other machines that run agents.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Choice {
+    /// `None`: this machine.
+    pub name: Option<String>,
+    pub title: String,
+    pub role: Option<String>,
+    /// Its state in words: `online`, `offline since 22:14`.
+    pub state: String,
+}
+
+impl Choice {
+    /// Its key among the options: `here` for this machine, its name for another.
+    pub fn key(&self) -> gpui_kit::SharedString {
+        self.name
+            .clone()
+            .unwrap_or_else(|| "here".to_owned())
+            .into()
+    }
+
+    /// What it is and how it is: `runner · online`, `this machine · runner · online`.
+    pub fn line(&self) -> gpui_kit::SharedString {
+        let mut said: Vec<&str> = Vec::new();
+        if self.name.is_none() {
+            said.push("this machine");
+        }
+        if let Some(role) = &self.role {
+            said.push(role);
+        }
+        said.push(&self.state);
+        said.join(" · ").into()
+    }
+}
+
+/// The machines the user may choose, as `machines` says them: none but this one while it is in
+/// no member list.
+pub fn choices(machines: &Machines) -> Vec<Choice> {
+    let role_of = |name: &str| {
+        machines
+            .members
+            .iter()
+            .find(|member| member.name == name)
+            .map(|member| member.role.clone())
+    };
+    let this = machines.this.clone();
+    let here = Choice {
+        name: None,
+        title: this.clone().unwrap_or_else(|| "This machine".to_owned()),
+        role: this.as_deref().and_then(role_of),
+        state: "online".to_owned(),
+    };
+    if !machines.member() {
+        return vec![here];
+    }
+    std::iter::once(here)
+        .chain(machines.runners().map(|machine| Choice {
+            name: Some(machine.name.clone()),
+            title: machine.name.clone(),
+            role: machine.role.clone(),
+            state: machine.state_words(),
+        }))
+        .collect()
+}
+
 /// Why the pages of the machine in front take no change now, when they take none: that machine
 /// is off (`server offline since 22:14`: nothing is sent to it, nothing is kept for it), or this
 /// device may only view it (`This device may only view server`: the daemon's refusal is the guard,

@@ -1103,8 +1103,13 @@ impl Shell {
     /// Opens the form that adds a project.
     pub fn add_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.left.update(cx, |drawer, cx| drawer.close(cx));
+        let asks_machine = self
+            .machines
+            .read(cx)
+            .machines()
+            .is_some_and(|read| crate::machines::choices(read).len() > 1);
         self.add_project
-            .update(cx, |form, cx| form.open(window, cx));
+            .update(cx, |form, cx| form.open(asks_machine, window, cx));
         self.read_folders(cx);
     }
 
@@ -1116,6 +1121,7 @@ impl Shell {
         {
             self.perform(Command::ProjectFolders {
                 machine: Some(machine),
+                path: None,
             });
         }
     }
