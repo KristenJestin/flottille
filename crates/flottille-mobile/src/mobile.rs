@@ -297,13 +297,20 @@ impl Core {
                     .await
                     .map_err(|error| MobileError::new(error.to_string()))?;
                 // The hub has it: it ends this device's session without sending the list, so the
-                // links end here and the view says it.
+                // links end here and the view says it. The hub's file and the device key go too:
+                // started again, the phone is not joined and never dials with a revoked key.
                 let mut state = inner.state();
                 let ended = state.connection.take();
+                let forgotten = match std::fs::remove_file(inner.folder.join(HUB_FILE)) {
+                    Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
+                    _ => inner.sealed.forget_kept(),
+                };
+                state.device = None;
+                state.key = None;
                 state.view.removed();
                 drop(state);
                 drop(ended);
-                Ok(())
+                forgotten.map_err(|error| MobileError::new(format!("this device's files: {error}")))
             })
             .await
     }
