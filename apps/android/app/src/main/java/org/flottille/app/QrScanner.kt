@@ -75,7 +75,7 @@ fun CameraScanner(onCode: (String) -> Unit) {
                 val future = ProcessCameraProvider.getInstance(ctx)
                 future.addListener(
                     {
-                        val preview = Preview.Builder().build().also { it.surfaceProvider = view.surfaceProvider }
+                        val preview = Preview.Builder().build().also { it.setSurfaceProvider(view.surfaceProvider) }
                         val analysis = ImageAnalysis.Builder()
                             .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                             .build()
