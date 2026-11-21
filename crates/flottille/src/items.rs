@@ -605,16 +605,18 @@ fn failed(cursor: &mut Cursor, problem: String) {
 
 /// Writes what a round read so far, with its events, unless the project is gone meanwhile:
 /// then nothing of it is kept, and false says to stop. The subscriptions to those items are
-/// offered the events once they are stored.
+/// offered the events once they are stored, and the routines what was heard in them.
 fn flush(
     daemon: &Arc<Daemon>,
     project: &str,
     items: &mut Vec<Item>,
     events: &mut Vec<(&'static str, Value)>,
+    heard: &mut Vec<crate::routines::events::Heard>,
 ) -> Result<bool, String> {
     if !projects::exists(daemon, project) {
         items.clear();
         events.clear();
+        heard.clear();
         return Ok(false);
     }
     if items.is_empty() && events.is_empty() {
@@ -626,6 +628,7 @@ fn flush(
         .map_err(|error| format!("the items could not be stored: {error}"))?;
     crate::subscriptions::items(daemon, project, &items, &events);
     crate::extensions::heard(daemon, &events);
+    crate::routines::events::heard(daemon, project, std::mem::take(heard));
     Ok(true)
 }
 
@@ -756,7 +759,13 @@ pub fn put_live(daemon: &Arc<Daemon>, mut fetched: Fetched) {
             false => events_of(None, &fetched),
         };
         let project = fetched.item.project.clone();
-        if let Err(error) = flush(daemon, &project, &mut vec![fetched.item], &mut events) {
+        if let Err(error) = flush(
+            daemon,
+            &project,
+            &mut vec![fetched.item],
+            &mut events,
+            &mut Vec::new(),
+        ) {
             eprintln!("flottille daemon: items of {project}: {error}");
         }
         return;
@@ -790,7 +799,13 @@ pub fn put_live(daemon: &Arc<Daemon>, mut fetched: Fetched) {
     }
     let mut events = events_of(Some(&old), &fetched);
     let project = fetched.item.project.clone();
-    if let Err(error) = flush(daemon, &project, &mut vec![fetched.item], &mut events) {
+    if let Err(error) = flush(
+        daemon,
+        &project,
+        &mut vec![fetched.item],
+        &mut events,
+        &mut Vec::new(),
+    ) {
         eprintln!("flottille daemon: items of {project}: {error}");
     }
 }
@@ -847,6 +862,8 @@ async fn source_round(daemon: &Arc<Daemon>, project: &Project, source: &Source) 
     // The runs agents follow in the repository, read with its pull requests, whatever they gave.
     if let Source::Pulls(checkout) = source {
         forge::followed::round(daemon, &project.name, checkout).await;
+        // The workflow runs the project's routines wait for, read with them as well.
+        crate::routines::events::workflow_round(daemon, &project.name, checkout).await;
     }
     match outcome {
         // The project went meanwhile: nothing of it is written back.
@@ -935,6 +952,8 @@ async fn read_round(
     };
     know_mine(daemon, swept_key.clone(), unknown);
     let (mut items, mut events) = (Vec::new(), Vec::new());
+    // What happened to the user in them, for the routines that wait for it.
+    let mut heard = Vec::new();
     let mut listed_keys = Vec::new();
     let followed = followed_work_items(daemon, &project.name);
     for mut fetched in listing.items {
@@ -976,7 +995,7 @@ async fn read_round(
                     fetched = gone;
                 }
                 Err(error) => {
-                    flush(daemon, &project.name, &mut items, &mut events)?;
+                    flush(daemon, &project.name, &mut items, &mut events, &mut heard)?;
                     return Err(error);
                 }
             }
@@ -1003,9 +1022,18 @@ async fn read_round(
                     .into_iter()
                     .filter(|(name, _)| !(*name == "item.opened" && made_before)),
             );
+            if old.is_some() || !made_before {
+                heard.extend(crate::routines::events::heard_of(
+                    old,
+                    &fetched,
+                    me.as_deref(),
+                ));
+            }
         }
         items.push(fetched.item);
-        if items.len() >= BATCH && !flush(daemon, &project.name, &mut items, &mut events)? {
+        if items.len() >= BATCH
+            && !flush(daemon, &project.name, &mut items, &mut events, &mut heard)?
+        {
             return Ok(None);
         }
     }
@@ -1039,7 +1067,7 @@ async fn read_round(
         events.extend(events_of(Some(old), &fetched));
         items.push(fetched.item);
     }
-    if !flush(daemon, &project.name, &mut items, &mut events)? {
+    if !flush(daemon, &project.name, &mut items, &mut events, &mut heard)? {
         return Ok(None);
     }
     if sweep || first {

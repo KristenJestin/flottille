@@ -64,7 +64,8 @@ const SSH_TIME: Duration = Duration::from_secs(5);
 const COMMENT_CHARS: usize = 2000;
 /// What `gh pr view` is asked for.
 const FIELDS: &str = "number,title,state,isDraft,headRefName,headRefOid,baseRefName,\
-    isCrossRepository,url,mergeable,reviewDecision,statusCheckRollup,comments,reviews,body,mergedBy,mergedAt";
+    isCrossRepository,url,mergeable,reviewDecision,statusCheckRollup,comments,reviews,body,mergedBy,mergedAt,\
+    reviewRequests";
 /// The ways `forge` `merge` merges a pull request, the first by default.
 pub const MERGE_METHODS: [&str; 3] = ["squash", "merge", "rebase"];
 pub(crate) use pipelines::{HIDDEN_EVERYWHERE, bitbucket_key, with_branch};
@@ -3962,6 +3963,14 @@ impl Pulls {
             .ok_or_else(|| format!("gh pr view {number} answered no pull request"))?;
         let read = fetched_pull(&self.path, "github", &pull, true);
         fetched.item.details = read.item.details;
+        // Whose review is asked: a person's login, or a team's name.
+        fetched.item.details["requested"] = viewed["reviewRequests"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|asked| asked["login"].as_str().or(asked["name"].as_str()))
+            .map(masked)
+            .collect();
         fetched.item.checks = github_checks(&viewed);
         fetched.comments = read.comments;
         fetched.reviews = read.reviews;
@@ -4089,6 +4098,15 @@ fn fetched_pull(path: &str, source: &str, pull: &Pull, detailed: bool) -> crate:
     }
     if !pull.reviewers.is_empty() {
         details["reviewers"] = pull.reviewers.iter().map(reviewer_json).collect();
+    }
+    // Bitbucket asks a review as a reviewer whose verdict is pending.
+    if detailed && source == "bitbucket" {
+        details["requested"] = pull
+            .reviewers
+            .iter()
+            .filter(|(_, state, _)| *state == "pending")
+            .map(|(name, _, _)| json!(name))
+            .collect();
     }
     crate::items::Fetched {
         item: flottille_core::item::Item {

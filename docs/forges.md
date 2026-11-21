@@ -142,6 +142,9 @@ itself (`gh pr view <n> -R github.com/owner/name --json …`):
   request whose checks were all skipped is refused like one with none); none when there are no
   checks;
 - its comments (their number; `forge` `show` gives their text, and the reviews');
+- whose review is asked (`reviewRequests`: a person's login, a team's name), which the rounds of
+  the items keep as the item's `details.requested` (on Bitbucket, the reviewers whose verdict is
+  pending): a routine waiting for a review asked of the user reads it ("Routines" below);
 - with `detail: full`, its **review threads** ("Review threads" below), counted otherwise where
   they were read;
 - for a merged or closed one, **the comment it was closed with**, when the forge gives one
@@ -857,6 +860,31 @@ names the runs the agent already follows there (`docs/tools.md`, "The forge").
   view --json` gives the run's `state` (`name`, `result.name`) and `created_on` and `completed_on`;
   that a run waiting on a manual step says `state.stage.name` `PAUSED`, or else shows as no step
   running, one done and the next `PENDING` (a run read between two steps then reads as waiting).
+
+### Routines
+
+A routine that runs on an event (`docs/design.md` §5.10) reads nothing on its own rhythm: what it
+waits for is read by the rounds of the items, as a subscription's is.
+
+- **A review asked of the user** is a pull request whose `details.requested` holds the user (whom
+  the forge says they are signed in as, `docs/items.md`, "Stored") when the round before did not:
+  a pull request first seen with it counts, one whose asked reviewers were never read before does
+  not.
+- **A workflow run that ends** is read with the pull requests of its repository, by their round,
+  one request a routine waiting for one in the project and none while no routine waits: `gh run
+  list -R github.com/<owner>/<name> [--workflow <workflow>] [--branch <branch>] --limit 20 --json
+  databaseId,workflowName,displayTitle,status,conclusion,event,headBranch,url`. A run is the
+  routine's event once it is `completed` and was not in the routine's last read: the first read
+  is no event (what ended before is not news), and the runs read are kept in the store, so that a
+  restart of the daemon neither misses one that ended meanwhile nor says one twice. How it started
+  is GitHub's `event`: `schedule`, `push`, `workflow_dispatch` (`manual`); it failed when its
+  `conclusion` is `failure`, `timed_out` or `startup_failure` (`cancelled` is no failure).
+  `--workflow` takes the workflow's file (`nightly.yml`) or its name, as `gh` does.
+- **Not yet**: the pipelines of Bitbucket for a workflow run (its runs are read for `forge runs`
+  only).
+- **Assumed**, and the maintainer checks it on a real forge: that `gh pr view --json
+  reviewRequests` lists `{login}` for a person and `{name}` for a team, and that asking a review
+  moves the pull request's `updatedAt`, which is how a round of what changed lists it again.
 
 ## Why a check failed
 

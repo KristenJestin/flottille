@@ -1469,10 +1469,10 @@ agent bd7ed8152969, lead in shop, workspace login, on claude (sonnet): idle for 
 ## Routines
 
 Work the daemon starts by itself: each run of a routine is a new session of its project, started
-at its time as a click would start it, one-shot (`docs/design.md`, "Routines"). Every command takes
+at its time, or when its event comes, as a click would start it, one-shot (`docs/design.md`, "Routines"). Every command takes
 `--json`, which prints the daemon's answer (`docs/protocol.md`, "The routine methods").
 
-### `flottille routine add <name> --project <project> --prompt <text> --schedule <when> [--zone <zone>] [--mode read-only|ask|auto] [--rings something|never] [--provider P] [--model M] [--effort E] [--missed-hours N]`
+### `flottille routine add <name> --project <project> --prompt <text> (--schedule <when> | --on <event> [<its fields>]) [--zone <zone>] [--mode read-only|ask|auto] [--rings something|never] [--provider P] [--model M] [--effort E] [--missed-hours N]`
 
 Adds a routine. `--schedule` is days and an hour: `every day 07:00`, `weekdays 08:30`,
 `mondays 09:00`, read in `--zone` (an IANA zone, the machine's by default). `--mode` is
@@ -1480,6 +1480,20 @@ Adds a routine. `--schedule` is days and an hour: `every day 07:00`, `weekdays 0
 something` (the default) puts a notification in the centre when a run has something to say;
 `never` keeps it in its history only. A run missed while Flottille was off runs once at its next
 start within `--missed-hours` (12).
+
+Instead of `--schedule`, `--on` names the event it runs on (`docs/protocol.md`, "The routine
+methods"): `workflow-run` (`--repository`, `--workflow`, `--branch`, `--started-by
+schedule|push|manual|any`, `--outcome failed|any`), `review-requested` (`--repository`),
+`mentioned` (`--tracker-project`) or `assigned` (`--tracker-project`, `--type`); each with
+`--not-before HH:MM`, `--at-most-once day|hour` and `--new-session`. What is not given is any.
+
+```
+$ flottille routine add "Nightly fix" --project app --on workflow-run --workflow nightly.yml \
+    --branch dev --started-by schedule --outcome failed --not-before 08:00 --at-most-once day \
+    --prompt "Read why the nightly failed and say what to fix"
+Added "Nightly fix".
+Nightly fix (app): when nightly.yml fails on dev, started by its schedule, not before 08:00, at most once a day, read only
+```
 
 ```
 $ flottille routine add "Tickets to review" --project app --schedule "weekdays 08:30" \
@@ -1490,12 +1504,15 @@ Tickets to review (app): weekdays 08:30, read only, next Mon 2026-11-23 08:30
 
 ### `flottille routine list [--project <project>]`
 
-Each routine on a line: its project, schedule, mode, next run (or `paused`) and last run.
+Each routine on a line: its project, schedule or event, mode, next run (or `paused`) and last
+run.
 
 ### `flottille routine show <name>`
 
 The routine, its prompt, why its next run waits when it does (a spent quota), and its history:
-each run, when it was due, its outcome and its session.
+each run, when it was due, its outcome and its session; a skipped one says why (`skipped:
+delivered to its session still open, 3f2a9c1b7d4e` for an event given to the last run's open
+session).
 
 ```
 $ flottille routine show "Tickets to review"
@@ -1504,9 +1521,10 @@ Prompt: List the tickets waiting for my review
 Mon 2026-11-23 08:30: 4 to review (session 3f2a9c1b7d4e)
 ```
 
-### `flottille routine edit <name> [--rename <name>] [--project P] [--prompt T] [--schedule W] [--zone Z] [--mode M] [--rings R] [--provider P] [--model M] [--effort E] [--missed-hours N]`
+### `flottille routine edit <name> [--rename <name>] [--project P] [--prompt T] [--schedule W | --on E [<its fields>]] [--zone Z] [--mode M] [--rings R] [--provider P] [--model M] [--effort E] [--missed-hours N]`
 
-Changes what is given, nothing else.
+Changes what is given, nothing else. `--schedule` replaces an event, `--on` a schedule or the
+event (its fields not given are any).
 
 ### `flottille routine run <name>`
 

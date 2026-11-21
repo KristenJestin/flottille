@@ -44,8 +44,12 @@ pub struct Routine {
     pub provider: Option<String>,
     pub model: Option<String>,
     pub effort: Option<String>,
-    /// `weekdays 08:30`, `every day 07:00`, `mondays 09:00`.
+    /// `weekdays 08:30`, `every day 07:00`, `mondays 09:00`; empty for a routine that runs on an
+    /// event.
     pub schedule: String,
+    /// The event it runs on instead of a schedule (`docs/protocol.md`, "The routine methods"),
+    /// every field of its kind said.
+    pub event: Option<Value>,
     /// The time zone the schedule is read in, an IANA name; `None` for the machine's.
     pub zone: Option<String>,
     /// One of `MODES`.
@@ -71,7 +75,11 @@ impl Routine {
             "project": self.project,
             "prompt": self.prompt,
             "agent": {"provider": self.provider, "model": self.model, "effort": self.effort},
-            "schedule": self.schedule,
+            "schedule": match self.event {
+                Some(_) => Value::Null,
+                None => json!(self.schedule),
+            },
+            "event": self.event,
             "zone": self.zone,
             "mode": self.mode,
             "rings": self.rings,
@@ -105,6 +113,9 @@ pub struct Run {
     pub summary: Option<String>,
     /// Why it was skipped or failed.
     pub why: Option<String>,
+    /// What started it, as the forge or the tracker said it: none for a run of its schedule or
+    /// by hand.
+    pub trigger: Option<String>,
 }
 
 impl Run {
@@ -120,6 +131,7 @@ impl Run {
             "outcome": self.outcome,
             "summary": self.summary,
             "why": self.why,
+            "trigger": self.trigger,
         })
     }
 }
