@@ -6,9 +6,7 @@
 use crate::common::User;
 use crate::remote::{self, Machine, TestHub};
 
-use std::time::{Duration, Instant};
-
-use flottille_link::{Device, Endpoint, Hello, MachineKey, Tls, Traffic};
+use flottille_link::{MachineKey, Traffic};
 use serde_json::{Value, json};
 
 /// A machine whose `daemon.toml` is `toml`, started.
@@ -233,14 +231,9 @@ fn a_peer_that_still_sends_addresses_links() {
 
     // The server of the previous version: its machine key, through the hub, telling the pc its
     // addresses as it did on every link.
-    let key = MachineKey::load_or_make(&server.folder()).unwrap();
-    let pinned: Device =
-        serde_json::from_str(&std::fs::read_to_string(server.folder().join("hub.json")).unwrap())
-            .unwrap();
     assert!(server.user.run(&["daemon", "stop"]).status.success());
     pc.wait_for("server", "offline");
-    let pc_key = pc.remote()["this"]["key"].clone();
-    let pc_key: flottille_link::PublicKey = serde_json::from_value(pc_key).unwrap();
+    let pc_key = remote::key_of(&pc);
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
@@ -248,24 +241,10 @@ fn a_peer_that_still_sends_addresses_links() {
         .build()
         .unwrap();
     let (endpoint, answered) = runtime.block_on(async {
-        let hello = Hello::ours(env!("CARGO_PKG_VERSION"));
-        let mut session = pinned.connect(&key, &hello, &Tls::System).await.unwrap();
-        let endpoint = Endpoint::dialler(&key).unwrap();
-        endpoint.through(session.relay().unwrap());
-        tokio::spawn(async move { while session.next().await.is_some() {} });
-        let deadline = Instant::now() + remote::WAIT;
-        let link = loop {
-            match endpoint
-                .connect(pc_key, &[], Traffic::Machine, &hello, "pc")
-                .await
-            {
-                Ok(link) => break link,
-                Err(why) => {
-                    assert!(Instant::now() < deadline, "{why}");
-                    tokio::time::sleep(Duration::from_millis(200)).await;
-                }
-            }
-        };
+        let endpoint = remote::endpoint_of(&server.folder()).await;
+        let link = remote::dial(&endpoint, pc_key, Traffic::Machine, "pc")
+            .await
+            .unwrap();
         let answered = link
             .send_raw(br#"{"machine": {"addresses": ["192.0.2.7:7447"]}}"#)
             .await

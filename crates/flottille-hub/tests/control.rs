@@ -1048,7 +1048,7 @@ async fn the_hubs_host_changes_a_role_and_every_device_sees_it() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn the_hub_tells_every_member_the_addresses_their_machines_told() {
+async fn a_machine_of_the_previous_version_that_tells_addresses_keeps_its_session() {
     let place = Place::new();
     let served = place.serve("127.0.0.1:0").await;
     let mut two = two(&place, &served).await;
@@ -1057,34 +1057,38 @@ async fn the_hub_tells_every_member_the_addresses_their_machines_told() {
         .connect(&two.server_machine, &hello(), &Tls::System)
         .await
         .unwrap();
+    // What such a machine asks at every session, whatever it holds: answered, nothing kept.
+    for addresses in [
+        vec!["192.0.2.10:7447".to_owned()],
+        vec!["not an address".to_owned()],
+    ] {
+        server_session
+            .ask(flottille_link::Ask::Addresses { addresses })
+            .await
+            .unwrap();
+    }
+    // Its session goes on: its next ask is taken, and the pc still hears the hub's news.
     server_session
-        .ask(flottille_link::Ask::Addresses {
-            addresses: vec!["192.0.2.10:7447".to_owned()],
+        .ask(flottille_link::Ask::About {
+            device: "computer".to_owned(),
+            system: "linux".to_owned(),
         })
         .await
         .unwrap();
-    // Not an address: refused, the ones told kept.
-    let refused = server_session
-        .ask(flottille_link::Ask::Addresses {
-            addresses: vec!["not an address".to_owned()],
-        })
-        .await
-        .unwrap_err();
-    assert!(refused.to_string().contains("not addresses"), "{refused}");
-    let told = tokio::time::timeout(Duration::from_secs(10), async {
+    let facts = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            if let Some(Pushed::Addresses(told)) = two.pc_session.next().await
-                && !told.is_empty()
+            if let Some(Pushed::Facts(facts)) = two.pc_session.next().await
+                && facts
+                    .iter()
+                    .any(|facts| facts.kind.as_deref() == Some("computer"))
             {
-                return told;
+                return facts;
             }
         }
     })
     .await
     .unwrap();
-    assert_eq!(told.len(), 1);
-    assert_eq!(told[0].key, two.server_machine.public());
-    assert_eq!(told[0].addresses, ["192.0.2.10:7447"]);
+    assert!(!facts.is_empty());
     served.stop().await;
 }
 
@@ -1387,8 +1391,9 @@ async fn a_pairing_session_that_declares_no_machine_is_closed() {
     let asking = tokio::spawn(async move {
         loop {
             let _ = asker
-                .ask(flottille_link::Ask::Addresses {
-                    addresses: Vec::new(),
+                .ask(flottille_link::Ask::Presence {
+                    active: true,
+                    last_input: 0,
                 })
                 .await;
             tokio::time::sleep(QUICK_PAIR / 4).await;

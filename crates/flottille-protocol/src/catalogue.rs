@@ -131,8 +131,6 @@ pub const METHODS: &[(&str, Class)] = &[
     ("vault.asks", Read),
     ("vault.ask_dismiss", Drive),
     ("remote.machines", Read),
-    ("remote.address.add", Drive),
-    ("remote.address.remove", Drive),
     ("remote.members", Read),
     ("remote.launches", Read),
     ("remote.sessions", Read),
@@ -142,8 +140,8 @@ pub const METHODS: &[(&str, Class)] = &[
     // As `remote.pair`: the declaration of this machine by the device that paired.
     ("remote.declare", Local),
     ("remote.close", Local),
-    // Whether remote is on and where this machine is reached, and its change: the machine's own
-    // user, never another machine's device (a link could turn the machine off from afar).
+    // Whether remote is on, and its change: the machine's own user, never another machine's
+    // device (a link could turn the machine off from afar).
     ("remote.settings", Local),
     ("remote.configure", Local),
     // It opens a port on the client's machine for a run's port on this one: a user's act.

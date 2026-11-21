@@ -46,10 +46,11 @@ pub struct MachineView {
     pub state: String,
     /// When it came to be in that state, in milliseconds since the Unix epoch.
     pub since: u64,
-    /// Why it is not online, when it is not: the link's own sentence (which address was tried,
-    /// which side to update).
+    /// Why it is not online, when it is not: the link's own sentence (the hub, which side to
+    /// update).
     pub why: String,
-    /// Whether its link goes through the hub, not to an address (#1167).
+    /// Whether its link goes through the hub (#1167): every link does since 2026-11-21, so it is
+    /// whether it is online; kept for the app.
     pub through_hub: bool,
 }
 
