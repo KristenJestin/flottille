@@ -40,6 +40,9 @@ class KeystoreSealer(private val alias: String = "flottille-device") : Sealer {
         throw MobileException.Refused("the device key cannot be sealed: ${error.message}")
     } catch (error: RuntimeException) {
         throw MobileException.Refused("the device key cannot be sealed: ${error.message}")
+    } finally {
+        // The key in clear lives no longer than its sealing.
+        plain.fill(0)
     }
 
     override fun open(sealed: ByteArray): ByteArray = try {

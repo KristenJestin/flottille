@@ -22,7 +22,10 @@ class OnThePhoneTest {
     fun the_keystore_seals_and_opens_the_device_key() {
         val sealer = KeystoreSealer("flottille-test")
         val plain = ByteArray(32) { it.toByte() }
-        val sealed = sealer.seal(plain)
+        val given = plain.copyOf()
+        val sealed = sealer.seal(given)
+        // What it was given in clear, it clears.
+        assertArrayEquals(ByteArray(32), given)
         assertFalse(sealed.contentEquals(plain))
         assertArrayEquals(plain, sealer.open(sealed))
         sealed[sealed.size - 1] = (sealed.last() + 1).toByte()
