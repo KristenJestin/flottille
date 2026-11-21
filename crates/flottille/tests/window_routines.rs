@@ -460,11 +460,10 @@ fn a_run_under_way_shows_its_session_state_branch_and_pull_request(cx: &mut Test
         label(cx, "result-status-requests").as_deref(),
         Some("Requests No request waits for you")
     );
+    let last = label(cx, "result-status-last").unwrap();
     assert!(
-        label(cx, "result-status-last")
-            .unwrap()
-            .contains("The branch fix/7 is open"),
-        "the agent's last message"
+        last.contains("The branch fix/7 is open"),
+        "the agent's last message: {last}"
     );
     assert!(present(cx, "result-open-session"));
 }

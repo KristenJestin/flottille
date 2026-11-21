@@ -2128,17 +2128,21 @@ fn run_status(
         json!({"agent": session, "before": 9_007_199_254_740_991_u64}),
     )?;
     let workspace = shown["agent"]["workspace"].as_str().map(str::to_owned);
-    // The last message: the pieces that share the id of the last `agent.message` are one.
+    // The last message: the pieces of a reply follow each other, and share an id when the
+    // provider gives one; a piece after something else, or of another id, starts a message.
     let mut last: Vec<String> = Vec::new();
     let mut last_id: Option<String> = None;
+    let mut after_piece = false;
     for event in shown["events"].as_array().into_iter().flatten() {
         if event["name"] != "agent.message" {
+            after_piece = false;
             continue;
         }
         let id = event["data"]["message_id"].as_str().map(str::to_owned);
-        if id.is_none() || id != last_id {
+        if !after_piece || (id.is_some() && id != last_id) {
             last.clear();
         }
+        after_piece = true;
         last_id = id;
         last.push(
             event["data"]["text"]
