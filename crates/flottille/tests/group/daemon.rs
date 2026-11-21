@@ -7,6 +7,8 @@
 #[path = "../common/mod.rs"]
 mod common;
 
+#[path = "../android_apk.rs"]
+mod android_apk;
 #[path = "../appearance.rs"]
 mod appearance;
 #[path = "../commands.rs"]
