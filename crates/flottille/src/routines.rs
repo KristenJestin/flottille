@@ -829,9 +829,10 @@ pub fn reads(tool: &str, args: &Value) -> bool {
         "fs_read" | "fs_list" | "search" | "skill_read" | "agent_status" | "session_read"
         | "session_title" | "wake" | "report" | "ask" | "ask_user" | "ask_parent" | TOOL => true,
         "run_status" => matches!(action, "" | "output"),
+        // Not `checks`: it reruns the failed runs of the branch's last commit.
         "forge" => matches!(
             action,
-            "list" | "show" | "people" | "checks" | "pipelines" | "runs" | "run_view" | "run_logs"
+            "list" | "show" | "people" | "pipelines" | "runs" | "run_view" | "run_logs"
         ),
         "tickets" => matches!(
             action,
