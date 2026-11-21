@@ -854,12 +854,18 @@ pub fn reads(tool: &str, args: &Value) -> bool {
         }
         "setup" | "vault" => action == "list",
         "project" => matches!(action, "settings" | "rules"),
+        // A bodiless GET of no one's: headers can make it another method
+        // (`X-HTTP-Method-Override`), and an entry signs it in as the user, where such a GET
+        // writes on many APIs. The tracker and the forge are read through their own tools.
         "web" => {
             !crate::show::is(args)
                 && args["method"]
                     .as_str()
                     .is_none_or(|method| method.eq_ignore_ascii_case("GET"))
                 && args["body"].is_null()
+                && args["headers"].is_null()
+                && args["entry"].is_null()
+                && args["auth"].is_null()
         }
         _ => false,
     }
