@@ -4,13 +4,22 @@
 //! sight. A window that closes, or dies, closes its connection: its presence goes with it, and
 //! the daemon counts the user as away. The same presence the remote design uses
 //! (`docs/remote.md`, "Notifications"), seen from this machine.
+//!
+//! The window says it again every 30 seconds: a focus it has not said again for [`STALE_MS`] is a
+//! window that hangs, and counts as away, so that what rings is not drawn by a window nobody
+//! sees.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use serde::Deserialize;
 
+use flottille_core::store::now_ms;
+
 use crate::daemon::Daemon;
+
+/// How long a presence holds without being told again: two of the window's 30 seconds, and room.
+pub const STALE_MS: u64 = 75_000;
 
 /// What one window says of itself.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
@@ -29,18 +38,20 @@ pub struct Presences(Mutex<Windows>);
 #[derive(Default)]
 struct Windows {
     next: u64,
-    by_connection: HashMap<u64, Presence>,
+    /// Each window's presence, and when it was last told.
+    by_connection: HashMap<u64, (Presence, u64)>,
 }
 
 impl Presences {
-    /// The windows that are focused.
+    /// The windows that are focused, and said so lately.
     pub fn focused(&self) -> Vec<Presence> {
+        let now = now_ms();
         let windows = self.0.lock().unwrap();
         windows
             .by_connection
             .values()
-            .filter(|presence| presence.focused)
-            .cloned()
+            .filter(|(presence, told)| presence.focused && now.saturating_sub(*told) < STALE_MS)
+            .map(|(presence, _)| presence.clone())
             .collect()
     }
 
@@ -51,8 +62,15 @@ impl Presences {
         windows
             .by_connection
             .values()
+            .map(|(presence, _)| presence)
             .find(|presence| presence.focused)
-            .or_else(|| windows.by_connection.values().next())
+            .or_else(|| {
+                windows
+                    .by_connection
+                    .values()
+                    .map(|(presence, _)| presence)
+                    .next()
+            })
             .cloned()
     }
 }
@@ -68,7 +86,7 @@ impl Hold {
         let mut windows = daemon.presence.0.lock().unwrap();
         windows.next += 1;
         let number = windows.next;
-        windows.by_connection.insert(number, presence);
+        windows.by_connection.insert(number, (presence, now_ms()));
         Hold {
             daemon: daemon.clone(),
             number,
@@ -77,7 +95,9 @@ impl Hold {
 
     pub fn set(&self, presence: Presence) {
         let mut windows = self.daemon.presence.0.lock().unwrap();
-        windows.by_connection.insert(self.number, presence);
+        windows
+            .by_connection
+            .insert(self.number, (presence, now_ms()));
     }
 }
 

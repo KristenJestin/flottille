@@ -22,7 +22,7 @@ use tokio::sync::{broadcast, watch};
 
 use crate::daemon::Daemon;
 use crate::sounds::{Sound, Sounds};
-use crate::system_notifications::{Desktop, Heard, Hears, Outgoing};
+use crate::system_notifications::{Desktop, Heard, Hears, Outgoing, Shown};
 
 /// The volume every sound plays at, until the settings of #1003 say another.
 const VOLUME: f32 = 1.0;
@@ -47,11 +47,13 @@ fn sound_of(notification: &Notification) -> Sound {
     }
 }
 
-/// A notification shown by the desktop.
-struct Shown {
+/// A notification of the centre the desktop shows.
+struct Showing {
     notification: u64,
-    /// The request's number, for a request: what Allow and Deny answer.
+    /// The request's number, for a request: what Deny answers, and Allow when it was offered.
     request: Option<u64>,
+    /// Whether Allow was offered: the notification said the whole call.
+    allows: bool,
     session: Option<String>,
 }
 
@@ -59,8 +61,8 @@ struct Shown {
 pub struct Rings {
     desktop: Desktop,
     sounds: Sounds,
-    /// By the desktop's own number of each notification.
-    shown: Mutex<HashMap<u32, Shown>>,
+    /// By the server that shows each and its number there.
+    shown: Mutex<HashMap<Shown, Showing>>,
 }
 
 impl Rings {
@@ -78,13 +80,19 @@ impl Rings {
         json!({"shows": why.is_none(), "why": why, "sound": self.sounds.why_not()})
     }
 
-    fn desktop_number_of(&self, notification: u64) -> Option<u32> {
+    fn shown_as(&self, notification: u64) -> Option<Shown> {
         let shown = self.shown.lock().unwrap();
         shown
             .iter()
             .find(|(_, one)| one.notification == notification)
-            .map(|(number, _)| *number)
+            .map(|(shown, _)| shown.clone())
     }
+}
+
+/// What is done with what the desktop tells back.
+fn hears_of(daemon: &Arc<Daemon>) -> Hears {
+    let daemon = daemon.clone();
+    Arc::new(move |heard| on_heard(&daemon, heard))
 }
 
 /// Follows the centre until the daemon stops, from the notification numbered `from`.
@@ -94,10 +102,7 @@ pub async fn run(
     mut from: u64,
     mut stopping: watch::Receiver<bool>,
 ) {
-    let hears: Hears = {
-        let daemon = daemon.clone();
-        Arc::new(move |heard| on_heard(&daemon, heard))
-    };
+    let hears = hears_of(&daemon);
     // Said at the start when the desktop shows nothing, and kept for Settings.
     daemon.rings.desktop.connect(&hears).await;
     loop {
@@ -164,6 +169,7 @@ async fn ring(daemon: &Arc<Daemon>, hears: &Hears, notification: &Notification, 
     let sounding = daemon.clone();
     tokio::spawn(async move { sounding.rings.sounds.play(sound, VOLUME).await });
     let request = request_of(source);
+    let whole = request.and_then(|number| whole_of(daemon, number));
     if !focused.is_empty() {
         let _ = daemon.emit(
             "notification.rang",
@@ -178,30 +184,105 @@ async fn ring(daemon: &Arc<Daemon>, hears: &Hears, notification: &Notification, 
                 "excerpt": notification.excerpt,
                 "needs_you": notification.needs_you,
                 "request": request,
+                "whole": whole,
             }),
         );
         return;
     }
+    to_the_desktop(daemon, hears, notification, request, whole).await;
+}
+
+/// A notification told to the desktop. Allow is offered on what the notification says whole
+/// alone, and never while a confined command may be what answers on the bus: where the kernel
+/// gives it no private mount namespace, or the bus found at the start was replaced, a run could
+/// own the server's name and click Allow on its own request (`docs/vault.md`, "The gaps").
+async fn to_the_desktop(
+    daemon: &Arc<Daemon>,
+    hears: &Hears,
+    notification: &Notification,
+    request: Option<u64>,
+    whole: Option<String>,
+) {
+    let allows = whole.is_some() && !bus_reachable_by_runs();
     let outgoing = Outgoing {
-        replaces: daemon
-            .rings
-            .desktop_number_of(notification.id)
-            .unwrap_or_default(),
         summary: masked(&notification.title),
-        body: body_of(daemon, notification),
-        decides: request.is_some(),
+        body: body_of(daemon, notification, whole.as_deref()),
+        allows,
+        denies: request.is_some(),
         stays: notification.needs_you,
     };
-    if let Some(number) = daemon.rings.desktop.notify(hears, &outgoing).await {
+    if let Some(shown) = daemon.rings.desktop.notify(hears, &outgoing).await {
         daemon.rings.shown.lock().unwrap().insert(
-            number,
-            Shown {
+            shown,
+            Showing {
                 notification: notification.id,
                 request,
+                allows,
                 session: notification.session.clone(),
             },
         );
     }
+}
+
+/// Whether a confined command may reach the session bus: the kernel gives no private mount
+/// namespace, or what is at the bus's path is not what the daemon found at its start.
+fn bus_reachable_by_runs() -> bool {
+    crate::mounts::namespaces() == crate::mounts::Namespaces::Refused
+        || crate::mounts::bus_replaced()
+}
+
+/// The call of request `number` and its reasons, when they can be said whole
+/// (`notification::whole`), masked with the daemon's secrets too.
+fn whole_of(daemon: &Arc<Daemon>, number: u64) -> Option<String> {
+    let request = daemon.read(|store| store.request(number)).ok().flatten()?;
+    let whole = flottille_core::notification::whole(&request)?;
+    (masked(&whole) == whole).then_some(whole)
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Unshown {
+    id: u64,
+}
+
+/// `notifications.unshown {"id"}`: answered at once, the desktop told after.
+pub fn unshown_asked(
+    daemon: &Arc<Daemon>,
+    params: Value,
+) -> Result<Value, crate::projects::Failure> {
+    let asked: Unshown = serde_json::from_value(params)
+        .map_err(|error| crate::projects::Failure::new("invalid-params", error.to_string()))?;
+    let daemon = daemon.clone();
+    tokio::spawn(async move {
+        if let Err(error) = unshown(&daemon, asked.id).await {
+            eprintln!(
+                "flottille daemon: notification {} not shown: {error}",
+                asked.id
+            );
+        }
+    });
+    Ok(json!({}))
+}
+
+/// The window could not draw the toast of `notification` (it lost the focus before it came):
+/// the desktop shows it instead, with no second sound (`notifications.unshown`).
+pub async fn unshown(daemon: &Arc<Daemon>, notification: u64) -> flottille_core::Result<()> {
+    let found = daemon.read(|store| store.notifications_of(&[notification]))?;
+    let Some((notification, source)) = found.into_iter().next() else {
+        return Ok(());
+    };
+    if notification.resolved
+        || notification.read_at.is_some()
+        || !rings(&notification)
+        || daemon.rings.shown_as(notification.id).is_some()
+    {
+        return Ok(());
+    }
+    let hears = hears_of(daemon);
+    let request = request_of(&source);
+    let whole = request.and_then(|number| whole_of(daemon, number));
+    to_the_desktop(daemon, &hears, &notification, request, whole).await;
+    Ok(())
 }
 
 /// The request a notification's `source` names (`request:3`).
@@ -209,13 +290,15 @@ fn request_of(source: &str) -> Option<u64> {
     source.strip_prefix("request:")?.parse().ok()
 }
 
-/// A text, masked: what the desktop is told is never a secret.
+/// A text, masked with the daemon's secrets as every text an agent or the user gave is: what the
+/// desktop is told, which its server may keep in a history, is never a secret.
 fn masked(text: &str) -> String {
-    secrets::mask(text, &BTreeMap::new())
+    let env: BTreeMap<_, _> = std::env::vars_os().collect();
+    secrets::mask(text, &env)
 }
 
-/// The session and project, then the excerpt.
-fn body_of(daemon: &Arc<Daemon>, notification: &Notification) -> String {
+/// The session and project, then the call whole when it is said so, else the excerpt.
+fn body_of(daemon: &Arc<Daemon>, notification: &Notification, whole: Option<&str>) -> String {
     let session = notification
         .session
         .as_deref()
@@ -232,62 +315,81 @@ fn body_of(daemon: &Arc<Daemon>, notification: &Notification) -> String {
         (None, Some(session)) => session,
         (None, None) => String::new(),
     };
-    let body = match (place.is_empty(), notification.excerpt.is_empty()) {
-        (true, _) => notification.excerpt.clone(),
+    let said = whole.unwrap_or(&notification.excerpt);
+    let body = match (place.is_empty(), said.is_empty()) {
+        (true, _) => said.to_owned(),
         (false, true) => place,
-        (false, false) => format!("{place}\n{}", notification.excerpt),
+        (false, false) => format!("{place}\n{said}"),
     };
     masked(&body)
 }
 
 /// Takes a notification off the desktop: it was answered or read elsewhere.
 async fn withdraw(daemon: &Arc<Daemon>, notification: u64) {
-    let Some(number) = daemon.rings.desktop_number_of(notification) else {
+    let Some(shown) = daemon.rings.shown_as(notification) else {
         return;
     };
-    daemon.rings.shown.lock().unwrap().remove(&number);
-    daemon.rings.desktop.close(number).await;
+    daemon.rings.shown.lock().unwrap().remove(&shown);
+    daemon.rings.desktop.close(&shown).await;
 }
 
-/// What the user does with a notification of the desktop.
+/// What the user does with a notification of the desktop. Only what the notification offered,
+/// of the server that shows it, is done: Allow where it was offered, Deny on a request, Open.
 fn on_heard(daemon: &Arc<Daemon>, heard: Heard) {
     match heard {
-        Heard::Closed(number) => {
-            daemon.rings.shown.lock().unwrap().remove(&number);
+        Heard::Closed { server, number } => {
+            daemon.rings.shown.lock().unwrap().remove(&(server, number));
         }
-        Heard::Action(number, key) => {
-            let (request, session) = {
+        Heard::Action {
+            server,
+            number,
+            key,
+        } => {
+            let (request, allows, session) = {
                 let shown = daemon.rings.shown.lock().unwrap();
-                match shown.get(&number) {
-                    Some(one) => (one.request, one.session.clone()),
+                match shown.get(&(server, number)) {
+                    Some(one) => (one.request, one.allows, one.session.clone()),
                     None => return,
                 }
             };
             let daemon = daemon.clone();
             tokio::spawn(async move {
-                match (key.as_str(), request, session) {
-                    ("allow", Some(number), _) => {
-                        let _ = crate::approvals::call(
-                            daemon,
-                            "approval.approve",
-                            json!({"number": number}),
-                        )
-                        .await;
+                let (method, number) = match (key.as_str(), request, session) {
+                    ("allow", Some(number), _) if allows => ("approval.approve", number),
+                    ("deny", Some(number), _) => ("approval.deny", number),
+                    ("default", _, Some(session)) => {
+                        open_session(&daemon.paths, &session);
+                        return;
                     }
-                    ("deny", Some(number), _) => {
-                        let _ = crate::approvals::call(
-                            daemon,
-                            "approval.deny",
-                            json!({"number": number}),
-                        )
-                        .await;
-                    }
-                    ("default", _, Some(session)) => open_session(&daemon.paths, &session),
-                    _ => {}
+                    _ => return,
+                };
+                let answered =
+                    crate::approvals::call(daemon.clone(), method, json!({"number": number})).await;
+                if let Err(failure) = answered {
+                    refused(&daemon, number, &failure.message).await;
                 }
             });
         }
     }
+}
+
+/// An answer from a notification that the daemon refused (decided already, elsewhere): said in
+/// the log and on the desktop, so that the click is not lost without a word.
+async fn refused(daemon: &Arc<Daemon>, number: u64, why: &str) {
+    let why = masked(why);
+    eprintln!("flottille daemon: the answer to request #{number} from a notification: {why}");
+    let outgoing = Outgoing {
+        summary: format!("Request #{number} was not answered"),
+        body: why,
+        allows: false,
+        denies: false,
+        stays: false,
+    };
+    daemon
+        .rings
+        .desktop
+        .notify(&hears_of(daemon), &outgoing)
+        .await;
 }
 
 /// Brings the window forward on a session, or starts it there: what `flottille open` does, and

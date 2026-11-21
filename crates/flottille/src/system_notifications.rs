@@ -6,15 +6,22 @@
 //! another implementation of [`Desktop`]'s three calls, `notify`, `close` and `status`, with the
 //! [`Heard`] it reports.
 //!
-//! One notification of Flottille's is one of the desktop's, replaced (`replaces_id`) when it
-//! changes and closed when it is answered or read elsewhere, never stacked. The actions are asked
-//! for only when the server says it has them (`actions`): a request has Allow and Deny, and every
-//! notification's default action opens its session. No sound hint is sent: the sound is
-//! Flottille's own, played by the daemon.
+//! One notification of Flottille's is one of the desktop's, sent once and closed when it is
+//! answered or read elsewhere. The actions are asked for only when the server says it has them
+//! (`actions`): a request has Deny, and Allow when the notification says the whole call
+//! (`rings.rs`), and every notification's default action opens its session. No sound hint is
+//! sent: the sound is Flottille's own, played by the daemon.
+//!
+//! What the desktop tells back is said with the server that told it, the bus's unique name of
+//! the connection that owned `org.freedesktop.Notifications` then: another server that takes the
+//! name later numbers its notifications from 1 again, and its numbers name none of Flottille's.
+//! Every call is given [`ANSWER_WITHIN`]: a bus or a server that hangs holds nothing up.
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use futures::StreamExt as _;
 use zbus::zvariant::Value;
@@ -25,14 +32,17 @@ const PATH: &str = "/org/freedesktop/Notifications";
 const APP_NAME: &str = "Flottille";
 const ENTRY: &str = "flottille";
 
+/// How long the bus and the server have to answer a call.
+pub const ANSWER_WITHIN: Duration = Duration::from_secs(5);
+
 /// What a notification says to the desktop.
 pub struct Outgoing {
-    /// The desktop's number of the notification this one replaces, 0 for a new one.
-    pub replaces: u32,
     pub summary: String,
     pub body: String,
-    /// Allow and Deny: a request.
-    pub decides: bool,
+    /// Allow: a request whose whole call the body says.
+    pub allows: bool,
+    /// Deny: a request.
+    pub denies: bool,
     /// Whether it stays until it is answered, rather than leaving after the desktop's own time.
     pub stays: bool,
 }
@@ -40,11 +50,20 @@ pub struct Outgoing {
 /// What the desktop tells back.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Heard {
-    /// The user chose an action of the notification numbered so: `allow`, `deny` or `default`.
-    Action(u32, String),
-    /// The notification numbered so is gone: closed by the user, expired, or by the daemon.
-    Closed(u32),
+    /// The user chose an action of the notification `number` of `server` (a bus's unique name):
+    /// `allow`, `deny` or `default`.
+    Action {
+        server: String,
+        number: u32,
+        key: String,
+    },
+    /// The notification `number` of `server` is gone: closed by the user, expired, or by the
+    /// daemon.
+    Closed { server: String, number: u32 },
 }
+
+/// A notification the desktop shows: the server that numbered it, and its number.
+pub type Shown = (String, u32);
 
 /// What is done with what the desktop tells back.
 pub type Hears = Arc<dyn Fn(Heard) + Send + Sync>;
@@ -53,6 +72,9 @@ struct Link {
     connection: zbus::Connection,
     /// Whether the server supports actions.
     actions: bool,
+    /// The server that answered last: a notification of another is not closed, its number may
+    /// be another program's now.
+    server: String,
 }
 
 /// The desktop's notifications, as far as this machine's session has them.
@@ -108,9 +130,9 @@ impl Desktop {
         }
     }
 
-    /// Sends a notification, or replaces one: the desktop's number of it. `None` when the desktop
-    /// shows nothing.
-    pub async fn notify(&self, hears: &Hears, outgoing: &Outgoing) -> Option<u32> {
+    /// Sends a notification: the server that shows it and its number there. `None` when the
+    /// desktop shows nothing.
+    pub async fn notify(&self, hears: &Hears, outgoing: &Outgoing) -> Option<Shown> {
         if !self.connect(hears).await {
             return None;
         }
@@ -121,34 +143,51 @@ impl Desktop {
         };
         let mut offered: Vec<&str> = Vec::new();
         if actions {
-            if outgoing.decides {
-                offered.extend(["allow", "Allow", "deny", "Deny"]);
+            if outgoing.allows {
+                offered.extend(["allow", "Allow"]);
+            }
+            if outgoing.denies {
+                offered.extend(["deny", "Deny"]);
             }
             offered.extend(["default", "Open"]);
         }
         let mut hints: HashMap<&str, Value<'_>> = HashMap::new();
         hints.insert("desktop-entry", Value::from(ENTRY));
         let timeout: i32 = if outgoing.stays { 0 } else { -1 };
-        let sent = connection
-            .call_method(
-                Some(DESTINATION),
-                PATH,
-                Some(DESTINATION),
-                "Notify",
-                &(
-                    APP_NAME,
-                    outgoing.replaces,
-                    ENTRY,
-                    outgoing.summary.as_str(),
-                    outgoing.body.as_str(),
-                    offered,
-                    hints,
-                    timeout,
-                ),
-            )
-            .await;
-        match sent.and_then(|reply| reply.body().deserialize::<u32>()) {
-            Ok(number) => Some(number),
+        let sent = within(connection.call_method(
+            Some(DESTINATION),
+            PATH,
+            Some(DESTINATION),
+            "Notify",
+            &(
+                APP_NAME,
+                0u32,
+                ENTRY,
+                outgoing.summary.as_str(),
+                outgoing.body.as_str(),
+                offered,
+                hints,
+                timeout,
+            ),
+        ))
+        .await
+        .and_then(|reply| {
+            let number = reply
+                .body()
+                .deserialize::<u32>()
+                .map_err(|e| e.to_string())?;
+            Ok((
+                sender_of(&reply).ok_or("the answer names no sender")?,
+                number,
+            ))
+        });
+        match sent {
+            Ok((server, number)) => {
+                if let Some(link) = self.link.lock().await.as_mut() {
+                    link.server = server.clone();
+                }
+                Some((server, number))
+            }
             Err(error) => {
                 // The server left, or the bus: the next notification connects again.
                 *self.link.lock().await = None;
@@ -159,23 +198,35 @@ impl Desktop {
         }
     }
 
-    /// Closes the desktop's notification numbered so: what was answered or read elsewhere is not
-    /// left on the screen.
-    pub async fn close(&self, number: u32) {
+    /// Closes a notification the desktop shows: what was answered or read elsewhere is not left
+    /// on the screen. One of a server that left is gone with it.
+    pub async fn close(&self, (server, number): &Shown) {
         let connection = match self.link.lock().await.as_ref() {
-            Some(link) => link.connection.clone(),
-            None => return,
+            Some(link) if link.server == *server => link.connection.clone(),
+            _ => return,
         };
-        let _ = connection
-            .call_method(
-                Some(DESTINATION),
-                PATH,
-                Some(DESTINATION),
-                "CloseNotification",
-                &(number,),
-            )
-            .await;
+        let _ = within(connection.call_method(
+            Some(DESTINATION),
+            PATH,
+            Some(DESTINATION),
+            "CloseNotification",
+            &(*number,),
+        ))
+        .await;
     }
+}
+
+/// A call of the bus, given [`ANSWER_WITHIN`].
+async fn within<T>(call: impl Future<Output = zbus::Result<T>>) -> Result<T, String> {
+    match tokio::time::timeout(ANSWER_WITHIN, call).await {
+        Ok(answer) => answer.map_err(|error| error.to_string()),
+        Err(_) => Err(format!("no answer within {} s", ANSWER_WITHIN.as_secs())),
+    }
+}
+
+/// The unique name of the connection that sent a message.
+fn sender_of(message: &zbus::Message) -> Option<String> {
+    message.header().sender().map(|sender| sender.to_string())
 }
 
 /// The session bus's socket when it is a path nobody listens on: the connection is not tried
@@ -207,49 +258,70 @@ async fn open(hears: &Hears) -> Result<Link, String> {
             "no session bus (nothing at {path}: No such file or directory)"
         ));
     }
-    let connection = zbus::Connection::session()
+    let connection = within(zbus::Connection::session())
         .await
         .map_err(|error| format!("no session bus ({error})"))?;
-    let capabilities = connection
-        .call_method(
-            Some(DESTINATION),
-            PATH,
-            Some(DESTINATION),
-            "GetCapabilities",
-            &(),
-        )
+    let no_server =
+        |error: String| format!("no notification server answers on the session bus ({error})");
+    let reply = within(connection.call_method(
+        Some(DESTINATION),
+        PATH,
+        Some(DESTINATION),
+        "GetCapabilities",
+        &(),
+    ))
+    .await
+    .map_err(no_server)?;
+    let capabilities = reply
+        .body()
+        .deserialize::<Vec<String>>()
+        .map_err(|error| no_server(error.to_string()))?;
+    let server = sender_of(&reply).ok_or_else(|| no_server("the answer names no sender".into()))?;
+    let proxy = within(zbus::Proxy::new(
+        &connection,
+        DESTINATION,
+        PATH,
+        DESTINATION,
+    ))
+    .await
+    .map_err(no_server)?;
+    // zbus hears these signals only from the connection that owns the name at the time, and
+    // follows a change of owner: a program that only says them is not heard.
+    let mut invoked = within(proxy.receive_signal("ActionInvoked"))
         .await
-        .and_then(|reply| reply.body().deserialize::<Vec<String>>())
-        .map_err(|error| format!("no notification server answers on the session bus ({error})"))?;
-    let proxy = zbus::Proxy::new(&connection, DESTINATION, PATH, DESTINATION)
+        .map_err(no_server)?;
+    let mut closed = within(proxy.receive_signal("NotificationClosed"))
         .await
-        .map_err(|error| format!("no notification server answers on the session bus ({error})"))?;
-    let mut invoked = proxy
-        .receive_signal("ActionInvoked")
-        .await
-        .map_err(|error| format!("no notification server answers on the session bus ({error})"))?;
-    let mut closed = proxy
-        .receive_signal("NotificationClosed")
-        .await
-        .map_err(|error| format!("no notification server answers on the session bus ({error})"))?;
+        .map_err(no_server)?;
     let on_action = hears.clone();
     tokio::spawn(async move {
         while let Some(message) = invoked.next().await {
-            if let Ok((number, key)) = message.body().deserialize::<(u32, String)>() {
-                on_action(Heard::Action(number, key));
+            if let (Ok((number, key)), Some(server)) = (
+                message.body().deserialize::<(u32, String)>(),
+                sender_of(&message),
+            ) {
+                on_action(Heard::Action {
+                    server,
+                    number,
+                    key,
+                });
             }
         }
     });
     let on_close = hears.clone();
     tokio::spawn(async move {
         while let Some(message) = closed.next().await {
-            if let Ok((number, _reason)) = message.body().deserialize::<(u32, u32)>() {
-                on_close(Heard::Closed(number));
+            if let (Ok((number, _reason)), Some(server)) = (
+                message.body().deserialize::<(u32, u32)>(),
+                sender_of(&message),
+            ) {
+                on_close(Heard::Closed { server, number });
             }
         }
     });
     Ok(Link {
         connection,
         actions: capabilities.iter().any(|name| name == "actions"),
+        server,
     })
 }

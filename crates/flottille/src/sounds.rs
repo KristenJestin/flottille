@@ -3,10 +3,17 @@
 //! (PulseAudio's protocol, which PipeWire answers too) so that they sound when the window is
 //! closed. Never by running `paplay` or `aplay`. Without a sound server the daemon says it once
 //! and plays nothing.
+//!
+//! One client of the sound server serves every sound for the daemon's life: the library's client
+//! keeps a thread that ends only once its server closes the connection, so a client made for
+//! each sound would leave one behind each time. A sound is given [`PLAYS_WITHIN`]; one that rings
+//! while another plays is dropped rather than queued, and a server that stalls holds no later
+//! sound up.
 
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use flottille_core::paths::Paths;
 
@@ -15,6 +22,9 @@ use flottille_core::paths::Paths;
 /// alone (`cargo test` builds without optimisation, a release with): a user's file that asks for
 /// it is not read, and no sound is lost to it.
 const CHOICE: &str = "audio.toml";
+
+/// How long a sound has to be played, its connection made: they last half a second.
+const PLAYS_WITHIN: Duration = Duration::from_secs(5);
 
 /// Which sound a notification makes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -108,9 +118,9 @@ pub struct Sounds {
     backend: Backend,
     /// Why there is no sound, once said.
     said: AtomicBool,
-    /// Which sounds are playing now: a second request in the same instant waits for the first's
-    /// end rather than mixing into it.
-    playing: tokio::sync::Mutex<()>,
+    /// The sound server's client while one plays, kept for the next: a second sound in the same
+    /// instant is dropped rather than mixed into the first or queued behind it.
+    playing: tokio::sync::Mutex<Option<pulseaudio::Client>>,
     /// What was last said of the device, for Settings.
     why: Mutex<Option<String>>,
 }
@@ -124,7 +134,7 @@ impl Sounds {
         Sounds {
             backend,
             said: AtomicBool::new(false),
-            playing: tokio::sync::Mutex::new(()),
+            playing: tokio::sync::Mutex::new(None),
             why: Mutex::new(None),
         }
     }
@@ -136,10 +146,30 @@ impl Sounds {
 
     /// Plays `sound` at `volume`, and says once, in the daemon's log, why when it cannot.
     pub async fn play(&self, sound: Sound, volume: f32) {
-        let _one_at_a_time = self.playing.lock().await;
+        let Ok(mut client) = self.playing.try_lock() else {
+            return;
+        };
         let played = match &self.backend {
             Backend::Fake(file) => record(file, sound),
-            Backend::System => play_on_the_system(sound, volume).await,
+            Backend::System => {
+                let played = tokio::time::timeout(
+                    PLAYS_WITHIN,
+                    play_on_the_system(&mut client, sound, volume),
+                )
+                .await
+                .unwrap_or_else(|_| {
+                    Err(format!(
+                        "no audio device: the sound server did not play a sound within {} s",
+                        PLAYS_WITHIN.as_secs()
+                    ))
+                });
+                // A client that failed, or is stuck, is not used again: the next sound makes
+                // another.
+                if played.is_err() {
+                    *client = None;
+                }
+                played
+            }
         };
         match played {
             Ok(()) => {
@@ -180,16 +210,25 @@ fn record(file: &std::path::Path, sound: Sound) -> Result<(), String> {
         .map_err(|error| format!("the fake sink cannot be written: {error}"))
 }
 
-/// The sound server's stream: the samples sent as it asks for them, then drained.
-async fn play_on_the_system(sound: Sound, volume: f32) -> Result<(), String> {
+/// The sound server's stream: the samples sent as it asks for them, then drained. The client is
+/// made when there is none.
+async fn play_on_the_system(
+    client: &mut Option<pulseaudio::Client>,
+    sound: Sound,
+    volume: f32,
+) -> Result<(), String> {
     use pulseaudio::{AsPlaybackSource as _, Client, protocol};
 
     let pcm = Pcm::of(sound.wav()).ok_or("a sound of Flottille's is not a WAV file")?;
     let samples = pcm.at(volume);
-    let client = tokio::task::spawn_blocking(|| Client::from_env(c"Flottille"))
-        .await
-        .map_err(|error| format!("no audio device: {error}"))?
-        .map_err(|error| format!("no audio device: no sound server answers ({error})"))?;
+    if client.is_none() {
+        let made = tokio::task::spawn_blocking(|| Client::from_env(c"Flottille"))
+            .await
+            .map_err(|error| format!("no audio device: {error}"))?
+            .map_err(|error| format!("no audio device: no sound server answers ({error})"))?;
+        *client = Some(made);
+    }
+    let client = client.as_ref().ok_or("no audio device")?;
     let params = protocol::PlaybackStreamParams {
         sample_spec: protocol::SampleSpec {
             format: protocol::SampleFormat::S16Le,

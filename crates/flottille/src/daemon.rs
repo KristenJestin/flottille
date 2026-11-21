@@ -1163,6 +1163,13 @@ fn handle(daemon: &Arc<Daemon>, request: Request) -> (Message, Option<Subscripti
             },
             None,
         ),
+        "notifications.unshown" => (
+            match crate::rings::unshown_asked(daemon, request.params) {
+                Ok(result) => Message::result(id, result),
+                Err(failure) => failure.answer(Some(id)),
+            },
+            None,
+        ),
         method if method.starts_with("notifications.") => (
             match crate::notifications::call(daemon, method, request.params) {
                 Ok(result) => Message::result(id, result),
