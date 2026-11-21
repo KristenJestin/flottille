@@ -716,8 +716,20 @@ fn reconcile(daemon: &Arc<Daemon>) {
             }
             continue;
         };
-        let Ok(Some(agent)) = daemon.read(|store| store.agent(session)) else {
-            continue;
+        let agent = match daemon.read(|store| store.agent(session)) {
+            Ok(Some(agent)) => agent,
+            // A daemon stopped between the run's session and its row: it never started either.
+            Ok(None) => {
+                end_run(
+                    daemon,
+                    &run,
+                    routine::FAILED,
+                    None,
+                    Some("its session is gone"),
+                );
+                continue;
+            }
+            Err(_) => continue,
         };
         if !agent.state.is_final() {
             continue;
@@ -746,9 +758,9 @@ fn end_run(daemon: &Daemon, run: &Run, outcome: &str, summary: Option<&str>, why
     }
 }
 
-/// The end of a turn of a root: a run's session that gave its result ends; one that ended its
-/// turn without it, with nothing to wait for, is reminded once, and then its run failed while
-/// the session stays, as any session.
+/// The end of a turn of a root: a run's session that gave its result ends; one whose turn ended
+/// without it, however, with nothing to wait for, is reminded once, and then its run failed while
+/// the session stays, as any session. A turn the user stopped fails the run at once.
 pub fn turn_ended(daemon: &Arc<Daemon>, agent: &flottille_core::agent::Agent, stop_reason: &str) {
     let Ok(Some(run)) = daemon.read(|store| store.routine_run_of(&agent.id)) else {
         return;
@@ -757,7 +769,9 @@ pub fn turn_ended(daemon: &Arc<Daemon>, agent: &flottille_core::agent::Agent, st
         routine::SOMETHING | routine::NOTHING => {
             tree::stop_tree(daemon, &agent.id, "its routine's run is done");
         }
-        routine::RUNNING if stop_reason == "end_turn" => {
+        // Whatever ended the turn (its end, its tokens spent, a refusal), the run is reminded once
+        // of its result; only a turn stopped by the user with nothing after it fails at once.
+        routine::RUNNING => {
             let waits = agent.waiting_on_answer
                 || daemon
                     .read(|store| store.deliveries(&agent.id, "queued"))
@@ -766,6 +780,16 @@ pub fn turn_ended(daemon: &Arc<Daemon>, agent: &flottille_core::agent::Agent, st
                     .read(|store| store.pending_requests_of(&agent.id))
                     .is_ok_and(|requests| !requests.is_empty());
             if waits {
+                return;
+            }
+            if stop_reason == "cancelled" {
+                end_run(
+                    daemon,
+                    &run,
+                    routine::FAILED,
+                    None,
+                    Some("its turn was stopped before its result"),
+                );
                 return;
             }
             let reminded = daemon
