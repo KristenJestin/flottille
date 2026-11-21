@@ -944,7 +944,7 @@ impl Link {
 
     /// Whether the link goes through the hub, not to an address.
     pub fn through_hub(&self) -> bool {
-        crate::transport::is_relayed(&self.conn.remote())
+        self.conn.through_hub()
     }
 
     /// What the other side said in its hello.

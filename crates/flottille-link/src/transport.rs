@@ -186,7 +186,11 @@ impl Transport {
             .map_err(Failure::Lost)?
             .connect_with(client, address, SERVER_NAME)
             .map_err(|error| Failure::Lost(error.to_string()))?;
-        connecting.await.map(Conn::new).map_err(failure)
+        let relayed = self.relay.is_some();
+        connecting
+            .await
+            .map(|connection| Conn::new(connection, relayed))
+            .map_err(failure)
     }
 
     /// The next connection that comes from an address that proved it is the sender's, `None`
@@ -201,7 +205,7 @@ impl Transport {
         loop {
             let incoming = endpoint.accept().await?;
             if incoming.remote_address_validated() {
-                return Some(Incoming(incoming));
+                return Some(Incoming(incoming, self.relay.is_some()));
             }
             if let Err(error) = incoming.retry() {
                 error.into_incoming().ignore();
@@ -279,14 +283,6 @@ struct Names {
 
 /// What the relay's own addresses start with: `fd46:6c74::/32`, unique local, `Fl` and `t`.
 const RELAY_PREFIX: [u16; 2] = [0xfd46, 0x6c74];
-
-/// Whether `address` is one a relay made for a key.
-pub(crate) fn is_relayed(address: &SocketAddr) -> bool {
-    match address.ip() {
-        std::net::IpAddr::V6(ip) => ip.segments()[..2] == RELAY_PREFIX,
-        std::net::IpAddr::V4(_) => false,
-    }
-}
 
 impl RelaySocket {
     pub(crate) fn new(
@@ -453,8 +449,8 @@ fn key_of(der: &[u8]) -> Option<[u8; 32]> {
     der.strip_prefix(SPKI_PREFIX.as_slice())?.try_into().ok()
 }
 
-/// A connection that came in, its TLS not done yet.
-pub(crate) struct Incoming(quinn::Incoming);
+/// A connection that came in, its TLS not done yet, and whether it came through the hub.
+pub(crate) struct Incoming(quinn::Incoming, bool);
 
 impl Incoming {
     /// The address it came from, proved by the retry.
@@ -468,7 +464,11 @@ impl Incoming {
     }
 
     pub(crate) async fn finish(self) -> Result<Conn, Failure> {
-        self.0.await.map(Conn::new).map_err(failure)
+        let relayed = self.1;
+        self.0
+            .await
+            .map(|connection| Conn::new(connection, relayed))
+            .map_err(failure)
     }
 }
 
@@ -478,7 +478,7 @@ impl Incoming {
 /// that is slow to say what it is (or never does) holds up no other, and is given up on after
 /// `OPENING`.
 #[derive(Clone)]
-pub(crate) struct Conn(quinn::Connection, Arc<Inbox>);
+pub(crate) struct Conn(quinn::Connection, Arc<Inbox>, bool);
 
 /// What the other side opened, read, and not taken yet.
 struct Inbox(tokio::sync::Mutex<mpsc::Receiver<Inbound>>);
@@ -487,7 +487,8 @@ struct Inbox(tokio::sync::Mutex<mpsc::Receiver<Inbound>>);
 const WAITING: usize = 16;
 
 impl Conn {
-    fn new(connection: quinn::Connection) -> Conn {
+    /// The connection, `relayed` when it goes through the hub.
+    fn new(connection: quinn::Connection, relayed: bool) -> Conn {
         let (inbound, queue) = mpsc::channel(WAITING);
         let accepting = connection.clone();
         tokio::spawn(async move {
@@ -507,7 +508,17 @@ impl Conn {
                 });
             }
         });
-        Conn(connection, Arc::new(Inbox(tokio::sync::Mutex::new(queue))))
+        Conn(
+            connection,
+            Arc::new(Inbox(tokio::sync::Mutex::new(queue))),
+            relayed,
+        )
+    }
+
+    /// Whether it goes through the hub: its transport's, not its address's to say, as a host of
+    /// a real network may hold an address of the relay's range.
+    pub(crate) fn through_hub(&self) -> bool {
+        self.2
     }
 
     /// The other side's key.
