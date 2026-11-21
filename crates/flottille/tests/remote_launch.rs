@@ -120,6 +120,9 @@ impl Machine {
     pub(crate) fn stand_in(&self) -> PathBuf {
         let stopped = self.user.run(&["daemon", "stop"]);
         assert!(stopped.status.success(), "{}", self.log());
+        // The others let its link go at their next round, once the hub says it is gone: the
+        // test's link of its key is not refused for that one.
+        std::thread::sleep(Duration::from_secs(2));
         self.user.path("state/flottille/remote")
     }
 

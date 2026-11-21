@@ -63,6 +63,12 @@ fn sockets(user: &User) -> (usize, usize) {
     )
 }
 
+/// The sockets of a daemon with remote off, as `sockets` counts them: its own clients' (its
+/// tools listen on 127.0.0.1), none of the link's.
+fn off_sockets() -> (usize, usize) {
+    sockets(&User::new())
+}
+
 /// What a command printed on its error output.
 fn stderr(output: &std::process::Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
@@ -152,10 +158,11 @@ fn there_is_no_listen_nor_address_left() {
     let toml = std::fs::read_to_string(pc.user.path("config/flottille/daemon.toml")).unwrap();
     assert!(!toml.contains("listen"), "{toml}");
 
-    // With remote on and linked, neither daemon holds a socket that listens, nor any UDP socket.
+    // With remote on and linked, neither daemon holds a UDP socket, nor a socket that listens
+    // beyond those it holds with remote off.
     pc.wait_for("server", "online");
     for machine in [&pc, &server] {
-        assert_eq!(sockets(&machine.user), (0, 0), "{}", machine.log());
+        assert_eq!(sockets(&machine.user), off_sockets(), "{}", machine.log());
     }
 }
 
@@ -167,7 +174,7 @@ fn an_old_daemon_toml_with_listen_starts_and_says_it_is_ignored() {
     let log = pc.log();
     assert_eq!(log.matches(said).count(), 1, "{log}");
     // Nothing listens, and the user's file is left as they wrote it.
-    assert_eq!(sockets(&pc.user), (0, 0), "{log}");
+    assert_eq!(sockets(&pc.user), off_sockets(), "{log}");
     assert_eq!(
         std::fs::read_to_string(pc.user.path("config/flottille/daemon.toml")).unwrap(),
         toml
