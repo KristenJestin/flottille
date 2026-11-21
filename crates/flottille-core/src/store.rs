@@ -981,8 +981,18 @@ const MIGRATIONS: &[&str] = &[
     ) STRICT;
     INSERT INTO notification_cursor (id, seq) SELECT 1, coalesce(max(seq), 0) FROM events;
 ",
-    "
-    -- The routines (`docs/design.md`, \"Routines\"): work the daemon starts by itself, as a new
+];
+
+/// The migrations of the version after dev's (`docs/releases.md`, "The next version"), each by
+/// its name, which the store keeps once it is applied (`named_migrations`): applied at every open
+/// after the numbered ones, never twice, whatever their place. A `next/X.Y` line adds its own
+/// here and never to `MIGRATIONS`: dev's own are merged forward into it numbered, and the number a
+/// next build had taken would be the one of dev's later migration, which a store of that build
+/// would then never run. Never renamed nor edited once released, and never moved to `MIGRATIONS`.
+const NAMED_MIGRATIONS: &[(&str, &str)] = &[(
+    "routines",
+    r#"
+    -- The routines (`docs/design.md`, "Routines"): work the daemon starts by itself, as a new
     -- root session, at its time. `next_at` is when its next run is due, null while it is paused;
     -- `delayed` why that is later than its schedule says (a spent quota).
     CREATE TABLE routines (
@@ -1020,8 +1030,8 @@ const MIGRATIONS: &[&str] = &[
     ) STRICT;
     CREATE INDEX routine_runs_by_routine ON routine_runs (routine, id);
     CREATE INDEX routine_runs_by_session ON routine_runs (session);
-",
-];
+"#,
+)];
 
 /// How many of each extension's own migrations were applied (`docs/extensions.md`, "Data"): its
 /// tables, `ext_<name>_…`, are brought up to date as the store's are, and kept when it is turned
@@ -5155,6 +5165,14 @@ fn path_text(path: &Path) -> Result<&str> {
 }
 
 fn migrate(connection: &mut Connection) -> Result<()> {
+    migrate_with(connection, MIGRATIONS, NAMED_MIGRATIONS)
+}
+
+fn migrate_with(
+    connection: &mut Connection,
+    migrations: &[&str],
+    named: &[(&str, &str)],
+) -> Result<()> {
     let transaction =
         connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let mut applied: usize =
@@ -5173,16 +5191,33 @@ fn migrate(connection: &mut Connection) -> Result<()> {
     if alpha {
         applied -= 1;
     }
-    if applied > MIGRATIONS.len() {
+    if applied > migrations.len() {
         return Err(Error::Refused(format!(
             "the store is at schema {applied}, made by a newer Flottille than this one (schema {})",
-            MIGRATIONS.len()
+            migrations.len()
         )));
     }
-    for migration in &MIGRATIONS[applied..] {
+    for migration in &migrations[applied..] {
         transaction.execute_batch(migration)?;
     }
     transaction.execute_batch(EXTENSION_MIGRATIONS)?;
+    transaction.execute_batch(
+        "CREATE TABLE IF NOT EXISTS named_migrations (name TEXT PRIMARY KEY) STRICT;",
+    )?;
+    for (name, migration) in named {
+        let done = transaction
+            .query_row(
+                "SELECT 1 FROM named_migrations WHERE name = ?1",
+                [name],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if !done {
+            transaction.execute_batch(migration)?;
+            transaction.execute("INSERT INTO named_migrations (name) VALUES (?1)", [name])?;
+        }
+    }
     if alpha {
         transaction.execute_batch(
             "INSERT INTO extension_migrations (name, applied) \
@@ -5190,7 +5225,7 @@ fn migrate(connection: &mut Connection) -> Result<()> {
              DROP TABLE extension_schemas;",
         )?;
     }
-    transaction.pragma_update(None, "user_version", MIGRATIONS.len())?;
+    transaction.pragma_update(None, "user_version", migrations.len())?;
     transaction.commit()?;
     Ok(())
 }
@@ -5379,6 +5414,45 @@ mod tests {
         assert_eq!(store.schema_version().unwrap(), MIGRATIONS.len());
         assert_eq!(store.last_seq().unwrap(), 1);
         assert!(store.workspaces(None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_next_versions_migration_holds_when_dev_adds_one_after_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut connection = Connection::open(dir.path().join("flottille.db")).unwrap();
+        // A next build ran the routines' migration and kept a routine.
+        migrate_with(&mut connection, MIGRATIONS, NAMED_MIGRATIONS).unwrap();
+        connection
+            .execute(
+                "INSERT INTO routines (id, name, project, prompt, schedule, mode, rings, \
+                 missed_hours, created_at, updated_at) \
+                 VALUES ('r1', 'Nightly', 'app', 'Read', 'every day 07:00', 'read_only', \
+                 'something', 12, 1, 1)",
+                [],
+            )
+            .unwrap();
+
+        // Dev's later migration comes merged forward, numbered after every one of its own.
+        let later: Vec<&str> = MIGRATIONS
+            .iter()
+            .copied()
+            .chain(["CREATE TABLE later_of_dev (id INTEGER PRIMARY KEY) STRICT;"])
+            .collect();
+        migrate_with(&mut connection, &later, NAMED_MIGRATIONS).unwrap();
+
+        let version: usize = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, later.len());
+        let count = |table: &str| -> i64 {
+            connection
+                .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap()
+        };
+        assert_eq!(count("later_of_dev"), 0, "dev's migration ran");
+        assert_eq!(count("routines"), 1, "the routines' was not run again");
     }
 
     #[test]
