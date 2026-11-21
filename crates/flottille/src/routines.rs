@@ -931,6 +931,35 @@ mod tests {
     }
 
     #[test]
+    fn an_hour_skipped_by_the_spring_clock_change_runs_after_it() {
+        let paris = TimeZone::get("Europe/Paris").unwrap();
+        // Sunday 28 March 2027, 00:00 in Paris: at 02:00 the clocks go to 03:00.
+        let midnight: u64 = 1_806_188_400_000;
+        assert_eq!(said(midnight), "Sat 2027-03-27 23:00");
+        let at = Schedule::parse("every day 02:30")
+            .unwrap()
+            .next_after(&paris, midnight)
+            .unwrap();
+        // 03:30 in Paris, summer time.
+        assert_eq!(said(at), "Sun 2027-03-28 01:30");
+    }
+
+    #[test]
+    fn an_hour_repeated_by_the_autumn_clock_change_runs_once() {
+        let paris = TimeZone::get("Europe/Paris").unwrap();
+        // Sunday 31 October 2027, 00:00 in Paris: at 03:00 the clocks go back to 02:00.
+        let midnight: u64 = 1_824_933_600_000;
+        assert_eq!(said(midnight), "Sat 2027-10-30 22:00");
+        let schedule = Schedule::parse("every day 02:30").unwrap();
+        let first = schedule.next_after(&paris, midnight).unwrap();
+        // The first 02:30, summer time.
+        assert_eq!(said(first), "Sun 2027-10-31 00:30");
+        // Not again an hour later: the next is Monday's.
+        let next = schedule.next_after(&paris, first).unwrap();
+        assert_eq!(said(next), "Mon 2027-11-01 01:30");
+    }
+
+    #[test]
     fn a_schedule_it_cannot_read_is_refused() {
         for text in [
             "",
@@ -952,7 +981,7 @@ mod tests {
             ("fs_read", json!({"path": "a"})),
             ("search", json!({"pattern": "a"})),
             ("tickets", json!({"action": "show", "id": "7"})),
-            ("forge", json!({"action": "checks"})),
+            ("forge", json!({"action": "runs"})),
             ("web", json!({"url": "https://example.com"})),
             (TOOL, json!({"summary": "x"})),
         ] {
@@ -970,12 +999,23 @@ mod tests {
             ("forge", json!({"action": "create"})),
             ("forge", json!({"action": "merge"})),
             ("forge", json!({"action": "subscribe"})),
+            // It reruns the failed runs of the branch's last commit.
+            ("forge", json!({"action": "checks"})),
             ("workspace", json!({"action": "create"})),
             ("agent_launch", json!({})),
             ("session_send", json!({})),
             (
                 "web",
                 json!({"url": "https://example.com", "method": "POST"}),
+            ),
+            (
+                "web",
+                json!({"url": "https://example.com/items",
+                    "headers": {"X-HTTP-Method-Override": "DELETE"}}),
+            ),
+            (
+                "web",
+                json!({"url": "https://example.com/items", "entry": "api-token"}),
             ),
             ("vault", json!({"action": "ask"})),
             ("review", json!({})),

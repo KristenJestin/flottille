@@ -26,6 +26,8 @@ const LIST_REVIEWS: &str = "List the tickets waiting for my review";
 const NIGHTLY: &str = "Read the nightly run of the tests";
 const HOLDING: &str = "Look through the whole backlog slowly";
 const IDLE: &str = "Read the project and wait";
+const LONG: &str = "Write the whole history of the project";
+const BRANCH: &str = "Open a branch for the fix";
 
 fn script() -> Value {
     json!({"turns": [
@@ -36,6 +38,10 @@ fn script() -> Value {
             {"mcp": {"tool": "routine_result", "arguments":
                 {"summary": "Nightly green: nothing to do", "nothing": true}}}]},
         {"when": HOLDING, "do": [{"hold": "release"}]},
+        {"when": LONG, "do": [{"say": "Chapter one."}], "stop": "max_tokens"},
+        {"when": BRANCH, "do": [
+            {"mcp": {"tool": "routine_result", "arguments":
+                {"summary": "fix/7 opened, tests run", "goes_on": true}}}]},
         {"when": "hello", "do": [{"update": {"sessionUpdate": "session_info_update", "_meta":
             {"jetbrains": {"air": {"sessionFailure": {"severity": "error", "category": "limit",
             "message": "You've hit your weekly limit · resets 1pm (Europe/Paris)"}}}}}}]},
@@ -204,38 +210,49 @@ fn a_routine_runs_at_its_time_as_a_new_session() {
     assert_eq!(sessions(&user).len(), 1, "one run, one session");
 }
 
+/// The time of day of `at` in UTC, `HH:MM`: a schedule's hour.
+fn hour_of(at: u64) -> String {
+    Timestamp::from_millisecond(at as i64)
+        .unwrap()
+        .to_zoned(TimeZone::UTC)
+        .strftime("%H:%M")
+        .to_string()
+}
+
+/// Stops the daemon, and sets the next run due of each routine named as the machine was off.
+fn off_until(user: &User, next: &[(&str, u64)]) {
+    assert!(user.run(&["daemon", "stop"]).status.success());
+    let store = rusqlite::Connection::open(user.path("state/flottille/flottille.db")).unwrap();
+    for (name, at) in next {
+        store
+            .execute(
+                "UPDATE routines SET next_at = ?1 WHERE name = ?2",
+                rusqlite::params![at, name],
+            )
+            .unwrap();
+    }
+}
+
 #[test]
 fn a_missed_run_runs_once_at_the_next_start() {
     let user = user();
     project(&user);
-    add(
-        &user,
-        json!({"name": "Nightly", "prompt": NIGHTLY, "schedule": "every day 07:00",
-            "zone": "UTC"}),
-    );
-    add(
-        &user,
-        json!({"name": "Old", "prompt": NIGHTLY, "schedule": "every day 07:00",
-            "zone": "UTC"}),
-    );
-    assert!(user.run(&["daemon", "stop"]).status.success());
     // The machine was off: Nightly was due two hours ago (and the days before, once each), Old
     // thirteen hours ago, past the 12 hours a missed run is still run within.
     let real_now = jiff::Timestamp::now().as_millisecond() as u64;
-    let store = rusqlite::Connection::open(user.path("state/flottille/flottille.db")).unwrap();
-    store
-        .execute(
-            "UPDATE routines SET next_at = ?1 WHERE name = 'Nightly'",
-            [real_now - 2 * HOUR],
-        )
-        .unwrap();
-    store
-        .execute(
-            "UPDATE routines SET next_at = ?1 WHERE name = 'Old'",
-            [real_now - 13 * HOUR],
-        )
-        .unwrap();
-    drop(store);
+    let nightly = real_now - 2 * HOUR;
+    let old = real_now - 13 * HOUR;
+    add(
+        &user,
+        json!({"name": "Nightly", "prompt": NIGHTLY,
+            "schedule": format!("every day {}", hour_of(nightly)), "zone": "UTC"}),
+    );
+    add(
+        &user,
+        json!({"name": "Old", "prompt": NIGHTLY,
+            "schedule": format!("every day {}", hour_of(old)), "zone": "UTC"}),
+    );
+    off_until(&user, &[("Nightly", nightly - 2 * DAY), ("Old", old)]);
 
     user.status();
     let run = ended_run(&user, "Nightly");
@@ -257,6 +274,45 @@ fn a_missed_run_runs_once_at_the_next_start() {
     std::thread::sleep(Duration::from_millis(1_500));
     assert_eq!(runs(&user, "Nightly").len(), 1);
     assert_eq!(sessions(&user).len(), 1, "one session for the missed runs");
+}
+
+#[test]
+fn a_run_missed_over_a_weekend_runs_its_last_time() {
+    let user = user();
+    project(&user);
+    // Every day at a time half an hour ago; the machine was off from before that time two days
+    // ago: the stored next run is 48 hours late, the day's own only 30 minutes.
+    let real_now = jiff::Timestamp::now().as_millisecond() as u64;
+    let today = real_now - 30 * MINUTE;
+    add(
+        &user,
+        json!({"name": "Morning", "prompt": NIGHTLY,
+            "schedule": format!("every day {}", hour_of(today)), "zone": "UTC"}),
+    );
+    off_until(&user, &[("Morning", today - 2 * DAY)]);
+
+    user.status();
+
+    eventually("the day's run", || {
+        runs(&user, "Morning")
+            .iter()
+            .any(|run| run["outcome"] == "nothing")
+    });
+    std::thread::sleep(Duration::from_millis(1_500));
+    let all = runs(&user, "Morning");
+    let ran: Vec<&Value> = all.iter().filter(|run| !run["session"].is_null()).collect();
+    assert_eq!(ran.len(), 1, "the last time due runs, once: {all:?}");
+    assert!(
+        ran[0]["due_at"].as_u64().unwrap() > real_now - HOUR,
+        "the day's own time: {all:?}"
+    );
+    assert!(
+        all.iter()
+            .filter(|run| run["session"].is_null())
+            .all(|run| run["outcome"] == "skipped"),
+        "{all:?}"
+    );
+    assert_eq!(sessions(&user).len(), 1);
 }
 
 /// What the gate says of a read-only run's write: refused, saying why.
@@ -308,9 +364,47 @@ fn a_read_only_routine_cannot_write_whatever_its_prompt_says() {
     assert!(!ticket.error, "{}", ticket.text);
     assert!(ticket.text.contains("Login fails"), "{}", ticket.text);
 
-    for mode in ["auto", "full"] {
+    for mode in ["ask", "auto", "full"] {
         user.call("agent.mode", json!({"agent": session, "mode": mode}))
             .unwrap();
+        refused(
+            mcp.call("forge", json!({"action": "checks"})),
+            "a forge checks, which reruns failed runs",
+        );
+        refused(
+            mcp.call(
+                "agent_launch",
+                json!({"role": "worker", "brief": "Comment on ticket 7."}),
+            ),
+            "a child",
+        );
+        refused(
+            mcp.call(
+                "web",
+                json!({"action": "fetch", "url": "http://127.0.0.1:9/items",
+                    "headers": {"X-HTTP-Method-Override": "DELETE"}}),
+            ),
+            "a GET that says another method",
+        );
+        refused(
+            mcp.call(
+                "web",
+                json!({"action": "fetch", "url": "http://127.0.0.1:9/items",
+                    "entry": "api-token"}),
+            ),
+            "a signed-in GET",
+        );
+        // Refused before anything is read for it: the forge is not asked whose comment it is.
+        let asked = user.gh_received().len();
+        refused(
+            mcp.call(
+                "tickets",
+                json!({"action": "comment_edit", "ticket": "7", "comment": "123",
+                    "body": "Edited."}),
+            ),
+            "a comment's edit",
+        );
+        assert_eq!(user.gh_received().len(), asked, "{:?}", user.gh_received());
         refused(
             mcp.call(
                 "tickets",
@@ -342,6 +436,49 @@ fn a_read_only_routine_cannot_write_whatever_its_prompt_says() {
             .is_none_or(Vec::is_empty),
         "nothing is asked of the user"
     );
+}
+
+#[test]
+fn a_read_only_run_writes_nothing_once_its_routine_is_removed() {
+    let user = user();
+    project(&user);
+    add(
+        &user,
+        json!({"name": "Gone", "schedule": "every day 07:00", "zone": "UTC",
+            "mode": "read_only", "prompt": format!("{IDLE}. Then write notes.md.")}),
+    );
+    let opened = user.received_requests("session/new").len();
+    let session = user
+        .call("routine.run", json!({"routine": "Gone"}))
+        .unwrap()["run"]["session"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (url, authorization) = server_of(&user, opened);
+    let mcp = Mcp::initialize(&url, &authorization);
+    eventually("its first turn", || {
+        agent(&user, &session)["state"] == "idle"
+    });
+
+    user.call("routine.remove", json!({"routine": "Gone"}))
+        .unwrap();
+
+    for mode in ["auto", "full"] {
+        user.call("agent.mode", json!({"agent": session, "mode": mode}))
+            .unwrap();
+        refused(
+            mcp.call(
+                "fs_write",
+                json!({"path": "notes.md", "content": "notes\n"}),
+            ),
+            "a file write once the routine is gone",
+        );
+        refused(
+            mcp.call("run", json!({"line": "ls"})),
+            "a run once the routine is gone",
+        );
+    }
+    assert!(!user.path("work/app/notes.md").exists());
 }
 
 #[test]
@@ -456,6 +593,154 @@ fn a_run_due_while_the_last_runs_is_skipped_and_said() {
     assert_eq!(all[1]["session"], first.as_str());
     assert_eq!(sessions(&user).len(), 1, "never twice at once");
     std::fs::write(user.path("fake/release"), "").unwrap();
+}
+
+#[test]
+fn two_runs_due_while_the_last_runs_are_both_skipped() {
+    let user = user();
+    project(&user);
+    add(
+        &user,
+        json!({"name": "Backlog", "prompt": HOLDING, "schedule": "every day 07:00",
+            "zone": "UTC", "mode": "auto"}),
+    );
+    move_clock_to(&user, "UTC", None, 7, 0);
+    eventually("the first run", || {
+        runs(&user, "Backlog")
+            .first()
+            .is_some_and(|run| run["outcome"] == "running")
+    });
+
+    advance(&user, DAY);
+    eventually("the second day's skip", || {
+        runs(&user, "Backlog").len() == 2
+    });
+    let refused = user.call("routine.run", json!({"routine": "Backlog"}));
+    assert!(
+        refused.is_err(),
+        "a run by hand beside the first: {refused:?}"
+    );
+    advance(&user, DAY);
+    eventually("the third day's skip", || runs(&user, "Backlog").len() == 3);
+    std::thread::sleep(Duration::from_millis(1_500));
+
+    let all = runs(&user, "Backlog");
+    assert_eq!(all.len(), 3, "{all:?}");
+    assert_eq!(all[0]["outcome"], "skipped", "{all:?}");
+    assert_eq!(all[1]["outcome"], "skipped", "{all:?}");
+    assert_eq!(all[2]["outcome"], "running", "{all:?}");
+    assert_eq!(sessions(&user).len(), 1, "never twice at once");
+    std::fs::write(user.path("fake/release"), "").unwrap();
+}
+
+#[test]
+fn a_run_whose_work_goes_on_is_never_run_beside() {
+    let user = user();
+    project(&user);
+    add(
+        &user,
+        json!({"name": "Fix", "prompt": BRANCH, "schedule": "every day 07:00",
+            "zone": "UTC", "mode": "auto"}),
+    );
+    move_clock_to(&user, "UTC", None, 7, 0);
+    let run = ended_run(&user, "Fix");
+    assert_eq!(run["outcome"], "goes_on", "{run}");
+    let session = run["session"].as_str().unwrap().to_owned();
+    eventually("its turn ends", || {
+        agent(&user, &session)["state"] == "idle"
+    });
+
+    advance(&user, DAY);
+    eventually("the second day's run", || runs(&user, "Fix").len() == 2);
+
+    let all = runs(&user, "Fix");
+    assert_eq!(all[0]["outcome"], "skipped", "{all:?}");
+    assert!(
+        all[0]["why"].as_str().unwrap().contains(session.as_str()),
+        "{all:?}"
+    );
+    assert_eq!(sessions(&user).len(), 1, "never twice at once");
+}
+
+#[test]
+fn a_run_whose_turn_stops_short_is_reminded_then_failed() {
+    let user = user();
+    project(&user);
+    add(
+        &user,
+        json!({"name": "History", "prompt": LONG, "schedule": "every day 07:00",
+            "zone": "UTC", "mode": "auto"}),
+    );
+    move_clock_to(&user, "UTC", None, 7, 0);
+
+    let run = ended_run(&user, "History");
+
+    assert_eq!(run["outcome"], "failed", "{run}");
+    assert!(
+        prompts(&user)
+            .iter()
+            .any(|prompt| prompt.contains("It is what this routine's run returns")),
+        "reminded first: {:?}",
+        prompts(&user)
+    );
+}
+
+#[test]
+fn a_run_the_user_stops_fails() {
+    let user = user();
+    project(&user);
+    add(
+        &user,
+        json!({"name": "Backlog", "prompt": HOLDING, "schedule": "every day 07:00",
+            "zone": "UTC", "mode": "auto"}),
+    );
+    let session = user
+        .call("routine.run", json!({"routine": "Backlog"}))
+        .unwrap()["run"]["session"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    eventually("its turn", || {
+        prompts(&user).iter().any(|prompt| prompt.contains(HOLDING))
+            && agent(&user, &session)["state"] == "working"
+    });
+
+    user.call("agent.cancel", json!({"agent": session}))
+        .unwrap();
+
+    let run = ended_run(&user, "Backlog");
+    assert_eq!(run["outcome"], "failed", "{run}");
+    assert!(run["why"].as_str().unwrap().contains("stopped"), "{run}");
+}
+
+#[test]
+fn a_run_whose_session_is_gone_fails() {
+    let user = user();
+    project(&user);
+    add(
+        &user,
+        json!({"name": "Backlog", "prompt": HOLDING, "schedule": "every day 07:00",
+            "zone": "UTC", "mode": "auto"}),
+    );
+    let session = user
+        .call("routine.run", json!({"routine": "Backlog"}))
+        .unwrap()["run"]["session"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(user.run(&["daemon", "stop"]).status.success());
+    // A crash between the run and its session's row: the run names a session there is none of.
+    let store = rusqlite::Connection::open(user.path("state/flottille/flottille.db")).unwrap();
+    store
+        .execute("DELETE FROM agents WHERE id = ?1", [&session])
+        .unwrap();
+    drop(store);
+
+    user.status();
+
+    let run = ended_run(&user, "Backlog");
+    assert_eq!(run["outcome"], "failed", "{run}");
+    assert!(run["why"].as_str().unwrap().contains("gone"), "{run}");
 }
 
 #[test]
