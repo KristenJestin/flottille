@@ -34,6 +34,14 @@ class OnThePhoneTest {
     }
 
     @Test
+    fun the_core_keeps_its_folder_out_of_backups() {
+        val folder = FlottilleCore.folder(context)
+        assertTrue(folder.path, folder.canonicalPath.startsWith(context.noBackupFilesDir.canonicalPath))
+        FlottilleCore(context, KeystoreSealer("flottille-test")).use { core -> assertFalse(core.joined) }
+        assertTrue(File(folder, "endpoint").isDirectory)
+    }
+
+    @Test
     fun the_core_loads_on_the_phone_and_says_what_it_refuses() = runBlocking {
         val folder = File(context.filesDir, "core-test").apply { deleteRecursively() }
         FlottilleCore.keepPanics(folder.apply { mkdirs() })
