@@ -962,8 +962,11 @@ async fn to_paths(folder: &Path, words: &[String], env: &BTreeMap<OsString, OsSt
 }
 
 /// The folder a push the gate let through runs from (`push_folder`), made for the repository
-/// its `words` push from: `folder`, then each `-C` of its line. A line that names another git
-/// folder (`--git-dir`) is refused: it would win over the one made.
+/// its `words` push from: `folder`, then each `-C` of its line. Of git's global options, the line
+/// may hold `-C` and those that change nothing of where the push goes or what it runs
+/// ([`HARMLESS_GLOBALS`]): another is refused, since outside the sandbox it would take a program
+/// (`--exec-path`), a setting that wins over the daemon's own (`-c`, `--config-env`) or another
+/// git folder (`--git-dir`) of a run's.
 async fn push_folder(
     daemon: &Daemon,
     folder: &Path,
@@ -974,13 +977,21 @@ async fn push_folder(
     for (option, value) in globals {
         match option {
             "-C" => from = from.join(value.unwrap_or_default()),
-            "--git-dir" | "--work-tree" => {
+            "-c" | "--config-env" => {
                 return Err(format!(
-                    "a push the gate let through runs from the repository of its folder, and \
-                     {option} names another: push from its folder instead"
+                    "a push the gate let through takes no setting on its line ({option}), which \
+                     would win over the daemon's own: set it in your own git settings, or push \
+                     without it"
                 ));
             }
-            _ => {}
+            option if HARMLESS_GLOBALS.contains(&option) => {}
+            option => {
+                return Err(format!(
+                    "a push the gate let through takes no {option} on its line, which outside \
+                     the sandbox could run a program, read another git folder or change how \
+                     git runs: push without it, from the repository's folder"
+                ));
+            }
         }
     }
     let user = crate::pushed::user_settings(&from).await?;
@@ -992,6 +1003,23 @@ async fn push_folder(
             )
         })
 }
+
+/// git's global options a push the gate let through may hold on its line besides `-C`: none
+/// names a program, a setting or a git folder.
+const HARMLESS_GLOBALS: [&str; 12] = [
+    "--no-pager",
+    "-P",
+    "-p",
+    "--paginate",
+    "--no-replace-objects",
+    "--literal-pathspecs",
+    "--glob-pathspecs",
+    "--noglob-pathspecs",
+    "--icase-pathspecs",
+    "--no-optional-locks",
+    "--no-advice",
+    "--no-lazy-fetch",
+];
 
 /// The push's `words`, its submodules not pushed, whatever the line or the settings say: last
 /// among its options, it wins over theirs.
