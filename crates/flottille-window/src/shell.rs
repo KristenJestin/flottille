@@ -405,6 +405,10 @@ impl Shell {
         let actions = Actions::spawn_aimed(aim.clone(), local, sender);
         let this = cx.entity().downgrade();
         cx.set_global(crate::tunnels::Tunnels::new(this.clone()));
+        cx.set_global(crate::shown_files::ShownFiles::new(
+            connect.clone(),
+            this.clone(),
+        ));
         let top = cx.new(|_| TopBar::new(this.clone()));
         let sidebar = cx.new(|_| Sidebar::new(this.clone()));
         let rules = cx.new(|_| RulesEditor::new(this.clone(), None));
@@ -1150,6 +1154,12 @@ impl Shell {
     /// What opens a folder in the user's editor, for the session pages opened from now on.
     pub fn set_opener(&mut self, opener: Opener) {
         self.follow.opener = opener;
+    }
+
+    /// Opens a file of this machine with the system's default handler: a copy of another
+    /// machine's file the window wrote (`crate::shown_files`).
+    pub fn open_local(&self, path: &std::path::Path) {
+        (self.follow.opener)(path);
     }
 
     /// Opens a link (a pull request) with the system's default handler.
@@ -3465,7 +3475,27 @@ impl Shell {
         let toast = match sharing.links.as_slice() {
             [only] => {
                 let target = only.target.clone();
+                let video = crate::shown_files::is_video(&target);
+                let sent = video || crate::links_card::is_picture(&target);
                 match self.aim.machine().filter(|_| !is_address(&target)) {
+                    // A picture or a video of another machine: that machine sends a copy.
+                    Some(machine) if sent => {
+                        let link = crate::conversation::ShownLink {
+                            title: only.title.clone(),
+                            whence: only.whence.clone(),
+                            target: target.clone(),
+                            agent: only.agent.clone(),
+                            seq: only.seq,
+                        };
+                        let kind = if video { "video" } else { "picture" };
+                        gpui_design_system::Toast::success(format!(
+                            "The agent shares a {kind} of {machine}: {}",
+                            only.name()
+                        ))
+                        .action(if video { "Play" } else { "Open" }, move |_, cx| {
+                            crate::shown_files::open(&link, cx)
+                        })
+                    }
                     // A file of another machine is shown where it is, never opened here.
                     Some(machine) => gpui_design_system::Toast::success(format!(
                         "The agent shares a file of {machine}: {target}"

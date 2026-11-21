@@ -72,7 +72,9 @@ fn script(port: u16) -> Value {
         {"when": "SHOW LOCAL", "do": [link(&format!("http://localhost:{port}/docs"))]},
         {"when": "SHOW NOWHERE", "do": [link("http://localhost:1/nothing")]},
         {"when": "SHOW PUBLIC", "do": [link("https://example.org/t/42")]},
-        {"when": "SHOW FILE", "do": [file("shot.png")]}
+        {"when": "SHOW FILE", "do": [file("shot.png")]},
+        {"when": "SHOW CLIP", "do": [file("clip.mp4")]},
+        {"when": "SHOW NOTES", "do": [file("notes.md")]}
     ]})
 }
 
@@ -632,24 +634,85 @@ fn a_link_no_run_of_the_machine_serves_is_a_toast_with_its_reason(cx: &mut TestA
 }
 
 #[gpui_kit::test]
-fn a_file_of_another_machine_says_where_it_is(cx: &mut TestAppContext) {
+fn a_file_of_another_machine_that_is_no_picture_says_where_it_is(cx: &mut TestAppContext) {
     let (_turn, machines) = machines();
-    std::fs::write(machines.server.user.path("work/app/shot.png"), PNG).unwrap();
+    std::fs::write(machines.server.user.path("work/app/notes.md"), "# notes\n").unwrap();
     let (shell, cx, opened) = window(&machines.pc, cx);
     on_the_server(&shell, cx);
-    let (_page, at) = card_of(&shell, &machines, "SHOW FILE", cx);
-    let path = std::fs::canonicalize(machines.server.user.path("work/app/shot.png")).unwrap();
+    let (_page, at) = card_of(&shell, &machines, "SHOW NOTES", cx);
+    let path = std::fs::canonicalize(machines.server.user.path("work/app/notes.md")).unwrap();
 
     let said = label(cx, &format!("row-{at}-link-0")).expect("the line is drawn");
     assert!(said.contains("server"), "{said}");
     assert!(said.contains(path.to_str().unwrap()), "{said}");
     assert!(
         !present(cx, &format!("row-{at}-link-0-open")),
-        "Open is not drawn: the file is not on this machine"
+        "Open is not drawn: the file is not on this machine, and only pictures and videos travel"
     );
-    assert!(
-        !present(cx, &format!("row-{at}-link-0-thumb")),
-        "the path is the server's: it is never read here, though it exists here"
-    );
+    assert!(!present(cx, &format!("row-{at}-link-0-thumb")));
     assert!(opened.lock().unwrap().is_empty());
+}
+
+/// What the window opened, once it opened something.
+fn opened_file(shell: &Entity<Shell>, opened: &Opened, cx: &mut VisualTestContext) -> PathBuf {
+    until(shell, cx, "the window opens a file", |_| {
+        !opened.lock().unwrap().is_empty()
+    });
+    opened.lock().unwrap()[0].clone()
+}
+
+/// Frames the window asks for with nothing moving: none at rest.
+fn pending_frames(cx: &mut VisualTestContext) -> usize {
+    cx.update(|window, cx| window.simulate_next_frame(cx))
+}
+
+#[gpui_kit::test]
+fn a_picture_an_agent_showed_on_another_machine_is_displayed(cx: &mut TestAppContext) {
+    let (_turn, machines) = machines();
+    std::fs::write(machines.server.user.path("work/app/shot.png"), PNG).unwrap();
+    let (shell, cx, opened) = window(&machines.pc, cx);
+    on_the_server(&shell, cx);
+    let (_page, at) = card_of(&shell, &machines, "SHOW FILE", cx);
+    let thumb = format!("row-{at}-link-0-thumb");
+
+    // The server sends it: the placeholder fades into the picture.
+    until(&shell, cx, "the picture is drawn", |cx| present(cx, &thumb));
+    settle(&shell, cx);
+    assert!(height(cx, &thumb) > 0., "the picture takes its room");
+    let said = label(cx, &format!("row-{at}-link-0")).expect("the line is drawn");
+    assert!(said.contains("server"), "{said}");
+    let path = std::fs::canonicalize(machines.server.user.path("work/app/shot.png")).unwrap();
+    assert!(
+        !said.contains(path.to_str().unwrap()),
+        "the picture replaces the server's path: {said}"
+    );
+    assert_eq!(pending_frames(cx), 0, "at rest once the picture is in");
+
+    // Open hands the user's viewer a copy the server sent, on this machine.
+    click(&shell, cx, &format!("row-{at}-link-0-open"));
+    let copy = opened_file(&shell, &opened, cx);
+    assert_ne!(copy, path);
+    assert!(copy.to_str().unwrap().ends_with("shot.png"), "{copy:?}");
+    assert_eq!(std::fs::read(&copy).unwrap(), PNG);
+}
+
+#[gpui_kit::test]
+fn a_video_of_another_machine_plays_in_the_user_s_player(cx: &mut TestAppContext) {
+    let (_turn, machines) = machines();
+    let video: Vec<u8> = (0..3 * 1024 * 1024 + 7).map(|n| (n % 253) as u8).collect();
+    std::fs::write(machines.server.user.path("work/app/clip.mp4"), &video).unwrap();
+    let (shell, cx, opened) = window(&machines.pc, cx);
+    on_the_server(&shell, cx);
+    let (_page, at) = card_of(&shell, &machines, "SHOW CLIP", cx);
+    let play = format!("row-{at}-link-0-open");
+    assert_eq!(label(cx, &play).as_deref(), Some("Play"));
+
+    // The player is given a file of this machine as soon as its first chunk is in, and the rest
+    // arrives into it.
+    click(&shell, cx, &play);
+    let copy = opened_file(&shell, &opened, cx);
+    assert!(copy.to_str().unwrap().ends_with("clip.mp4"), "{copy:?}");
+    eventually("the whole video arrives", || {
+        std::fs::read(&copy).is_ok_and(|bytes| bytes == video)
+    });
 }

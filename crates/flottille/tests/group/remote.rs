@@ -25,6 +25,8 @@ mod remote_asks;
 mod remote_code;
 #[path = "../remote_deliveries.rs"]
 mod remote_deliveries;
+#[path = "../remote_files.rs"]
+mod remote_files;
 #[path = "../remote_hub.rs"]
 mod remote_hub;
 #[path = "../remote_keys.rs"]

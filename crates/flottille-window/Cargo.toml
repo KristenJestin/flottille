@@ -40,3 +40,5 @@ zeroize = "1.9.1"
 # Already built for the derive macros; the scan of `presence` gaps reads the window's sources
 # as a syntax tree (`tests/a_block_has_its_own_space.rs`).
 syn = { version = "2", features = ["full", "visit"] }
+# The throwaway folders of the unit tests of `shown_files`; already built for the daemon.
+tempfile = "3.27.0"
