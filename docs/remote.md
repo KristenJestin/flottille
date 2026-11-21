@@ -935,7 +935,8 @@ As built (#818):
   gives.
 
 **The mobile core, as built (#824).** `crates/flottille-mobile` holds a `Core` over a folder of the
-app's private storage that no backup copies (`FlottilleCore(context)`: `noBackupFilesDir`): the
+app's private storage that no backup copies (`FlottilleCore(context)`: `noBackupFilesDir`; the
+manifest also excludes every domain from the cloud backup and the device transfer): the
 endpoint's key is there in clear, and a sealed device key restored elsewhere opens with no
 Keystore there.
 
@@ -1001,12 +1002,15 @@ core behind it, the screens' tests play a fake) and never the generated bindings
   the most recent; a session of a machine that is offline is greyed and not opened) and **Machines**
   (the hub, reachable or not, and each machine: `Online`, `Offline since 22:14` with the address that
   was tried, `Needs an update`); **Settings**, from the top bar: this device's name and role, the
-  members, **Remove this device** (it asks once). There is no Add a device.
+  members, **Remove this device** (it asks once). There is no Add a device. The hub's card says
+  that the link is in clear when its URL is `http://`.
 - **The core's view state** gained what the screens say: a machine's `state` (`online`, `offline`,
   `needs an update`) and `since`, the `members` (this device marked, who added each), `hub_card`
   and `leave` (the phone's own removal, signed with its device key and sent to the hub, which ends
   its session without sending the list: once the hub took it, the core ends its links, the view
-  claims no role and says the phone was removed, and the app asks to join again).
+  claims no role and says the phone was removed, and the app asks to join again). The core also
+  deletes the hub's file and the kept device key: started again, the phone is not joined and never
+  dials with a revoked key.
 - **Motion**, as the window's: the kit's durations and its ease-out cubic are `ui/Tokens.kt`
   (`Motion`); every press fades and sinks (`FButton`), a choice's fill and ring move over `PANEL`, a
   row inserted, removed or moved animates (`animateItem`), a state that changes fades (machine

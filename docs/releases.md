@@ -154,13 +154,34 @@ of 100 or more, or a major of 21, is refused and fails the build). The APK is bu
 hand and never with the SDK of a computer: the `android` job installs what the project names, builds
 it on every pull request that touches the app (and every push), reads the version back out of it,
 and keeps it as the artefact `android-apk` (14 days), so a test on a phone installs the CI's build.
-It is signed with the release key of the repository's secrets (`ANDROID_KEYSTORE_BASE64`,
-`ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, `ANDROID_KEY_PASSWORD`, which only the maintainer
-creates; no file of the repository holds a key or a password) on a push, and **debug-signed** on a
-pull request and wherever the secrets do not exist: the job says which in a notice, and the file
-says it (`flottille-<version>-debug-signed.apk`). `publish` attaches the signed APK
-(`flottille-<version>.apk`) to the GitHub release of its version, with the other artefacts, and
-never a debug-signed one. A phone that holds a debug-signed build uninstalls it before the release's.
+**The build holds no key**: Gradle builds the release APK unsigned (no signing configuration reads
+the environment), and `apk.sh` signs a copy of it with a key made for the run, to install for a test
+(`flottille-<version>-debug-signed.apk`, never released). The release key signs in **`android-sign`**,
+a job of its own that runs on a `push` only (never a pull request's run, nor a run started by hand),
+in the environment `android-release`. It runs no third-party action and no script of the repository:
+it downloads the unsigned APK of the build job (`android-unsigned`), signs it with the runner's own
+`apksigner` in one step, the only one that holds the secrets (`--ks-pass env:…`, `--key-pass env:…`),
+and uploads `android-signed`. `publish` attaches that artefact to the GitHub release of its version,
+with the other artefacts, and only that one, and only in a push's run: never an APK of a pull
+request's run, whatever its file is called. A phone that holds a debug-signed build uninstalls it
+before the release's.
+
+**What the maintainer sets once** (repository settings, never in the repository; until then the
+job signs nothing and says so in a notice, and the release carries no APK):
+
+1. *Settings → Environments → New environment*: `android-release`. Create it before the first push that follows
+   the merge: a job that names an environment that does not exist creates it, with no protection.
+2. In it, *Deployment branches and tags → Selected branches and tags*, and add these four patterns:
+   `main`, `dev`, `stable/*`, `next/*` (the branches whose pushes run CI). No pull request's
+   branch, no feature branch and no tag then reaches the environment's secrets.
+3. In it, *Environment secrets* (**not** the repository's secrets, which any branch's workflow
+   can read): `ANDROID_KEYSTORE_BASE64` (the keystore file, base64), `ANDROID_KEYSTORE_PASSWORD`,
+   `ANDROID_KEY_ALIAS` and `ANDROID_KEY_PASSWORD`. No file of the repository holds a key or a
+   password.
+4. Optional: *Required reviewers* on the environment, to approve each release's signing.
+
+The same four secrets must not exist as repository secrets: the environment's are the only ones
+the workflow reads, and the signing step the only one that names them.
 
 ## What CI checks
 
