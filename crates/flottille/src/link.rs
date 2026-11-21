@@ -222,6 +222,9 @@ pub struct Remote {
     pub(crate) receiving: crate::travel::Receiving,
     /// The tunnels this machine carries and serves (`tunnel.rs`).
     pub(crate) tunnels: crate::tunnel::Tunnels,
+    /// Becomes true when this link stops, for its own tasks: the daemon's stop, or remote turned
+    /// off, or the link made again somewhere else.
+    halt: Arc<tokio::sync::watch::Sender<bool>>,
 }
 
 /// Starts the link: the endpoint, the loop that accepts and the one that dials. A link that
@@ -240,9 +243,9 @@ pub fn start(
     .map_err(|error| error.to_string())?;
     match endpoint.listening() {
         Some(local) => eprintln!("flottille daemon: the link listens on {local}"),
-        None => eprintln!(
-            "flottille daemon: the link listens nowhere ([remote] listen in daemon.toml); it dials"
-        ),
+        None => {
+            eprintln!("flottille daemon: the link listens nowhere (Settings, Machines); it dials")
+        }
     }
     let remote = Arc::new(Remote::new(
         endpoint,
@@ -250,6 +253,17 @@ pub fn start(
         emit.clone(),
     ));
     let _ = remote.daemon.set(daemon);
+    // The daemon's stop is this link's, and so is the link's own.
+    tokio::spawn({
+        let halt = remote.halt.clone();
+        async move {
+            tokio::select! {
+                _ = stopped(stopping) => { halt.send_replace(true); }
+                _ = stopped(halt.subscribe()) => {}
+            }
+        }
+    });
+    let stopping = remote.halt.subscribe();
     // Read before the first link comes in, which is judged by the file as last read.
     remote.peers();
     let control = Arc::new(crate::hub_session::Control::new(
@@ -267,6 +281,11 @@ pub fn start(
     tokio::spawn(keep_offering(remote.clone(), stopping.clone()));
     tokio::spawn(dial(remote.clone(), stopping));
     Ok(remote)
+}
+
+/// Until `stopping` says so; nothing held of it, so that a `select!` holding it stays `Send`.
+async fn stopped(mut stopping: tokio::sync::watch::Receiver<bool>) {
+    let _ = stopping.wait_for(|stop| *stop).await;
 }
 
 /// This build's hello; a test build may make it another's.
@@ -327,6 +346,7 @@ impl Remote {
             offer_now: tokio::sync::Notify::new(),
             lists: tokio::sync::watch::Sender::new(0),
             tunnels: crate::tunnel::Tunnels::default(),
+            halt: Arc::new(tokio::sync::watch::Sender::new(false)),
             transfers: Default::default(),
             receiving: Default::default(),
         }
@@ -456,6 +476,18 @@ impl Remote {
     /// Closes every link, telling the other machines.
     pub async fn close(&self) {
         self.endpoint.close().await;
+    }
+
+    /// Stops this link for good: its tasks end and every link closes (remote turned off, or the
+    /// link made again where it listens).
+    pub async fn stop(&self) {
+        self.halt.send_replace(true);
+        self.close().await;
+    }
+
+    /// Where the link listens, when it does.
+    pub fn listening(&self) -> Option<SocketAddr> {
+        self.endpoint.listening()
     }
 
     /// The machines this one trusts: the file as last read whole.
@@ -2126,6 +2158,10 @@ fn stamp(file: &Path) -> Option<Stamp> {
 
 /// The link's methods (`docs/protocol.md`, "Remote").
 pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Result<Value, Failure> {
+    // Said of this machine, on or off: before a link is needed.
+    if matches!(method, "remote.settings" | "remote.configure") {
+        return crate::remote_config::call(daemon, method, params).await;
+    }
     let remote = remote_of(&daemon)?;
     let params = if params.is_null() { json!({}) } else { params };
     match method {
@@ -2239,10 +2275,8 @@ fn control_of(remote: &Remote) -> Result<Arc<crate::hub_session::Control>, Failu
 }
 
 pub(crate) fn remote_of(daemon: &Daemon) -> Result<Arc<Remote>, Failure> {
-    match daemon.remote.get() {
-        None => Err(Failure::refused(
-            "remote is off: turn it on in daemon.toml ([remote] on = true)",
-        )),
+    match daemon.link() {
+        None => Err(Failure::refused(crate::remote_config::OFF)),
         Some(Err(why)) => Err(Failure::new(
             flottille_protocol::code::UNAVAILABLE,
             format!("the link is not up: {why}"),

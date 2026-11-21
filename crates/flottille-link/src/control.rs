@@ -166,9 +166,34 @@ impl HubUrl {
         })
     }
 
-    /// `host:port`, as a sentence names the hub.
+    /// `host:port`, which is reached: the port is always there.
     pub fn authority(&self) -> String {
         format!("{}:{}", self.host, self.port)
+    }
+
+    /// The host, with its port only when it is not the scheme's own (80, 443): how a sentence
+    /// names the hub.
+    pub fn host_shown(&self) -> String {
+        let own = if self.tls { 443 } else { 80 };
+        if self.port == own {
+            self.host.clone()
+        } else {
+            self.authority()
+        }
+    }
+
+    /// The URL as a user writes it: `https://hub.example.net`, the port only when it is not the
+    /// scheme's own and the path only when there is one. What is stored and sent is
+    /// [`Display`](fmt::Display)'s, whole.
+    pub fn shown(&self) -> String {
+        let scheme = if self.tls { "https" } else { "http" };
+        let path = if self.path == "/" { "" } else { &self.path };
+        format!("{scheme}://{}{path}", self.host_shown())
+    }
+
+    /// `text` as [`HubUrl::shown`] says it, or as it is when it is no hub URL.
+    pub fn shown_text(text: &str) -> String {
+        HubUrl::parse(text).map_or_else(|_| text.to_owned(), |url| url.shown())
     }
 
     /// The host as TLS names it: an IPv6 address without its brackets.
@@ -634,7 +659,7 @@ impl Device {
         match session.refused {
             Some((_, true)) => Err(ControlError::Reset),
             Some((reason, false)) => Err(ControlError::Refused {
-                hub: url.authority(),
+                hub: url.host_shown(),
                 reason,
             }),
             None => Ok(session),
@@ -657,7 +682,7 @@ impl Device {
             reason: why,
         })?;
         proposed.check().map_err(|why| ControlError::Refused {
-            hub: url.authority(),
+            hub: url.host_shown(),
             reason: why,
         })?;
         let pairing = Pairing {
@@ -676,7 +701,7 @@ impl Device {
         .await?;
         if let Some((reason, _)) = &session.refused {
             return Err(ControlError::Refused {
-                hub: url.authority(),
+                hub: url.host_shown(),
                 reason: reason.clone(),
             });
         }
@@ -1388,11 +1413,47 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_hubs_address_is_shown_without_its_default_port_or_a_trailing_slash() {
+        // What is stored and reached keeps the port and the path whole; what is shown is how a
+        // user writes it.
+        let shown = |text: &str| HubUrl::parse(text).unwrap().shown();
+        assert_eq!(shown("https://hub.example.net"), "https://hub.example.net");
+        assert_eq!(
+            shown("https://Hub.Example.net:443/"),
+            "https://hub.example.net"
+        );
+        assert_eq!(shown("http://hub.example.net:80"), "http://hub.example.net");
+        // A port that is not the scheme's own stays, and so does a path a proxy routes by.
+        assert_eq!(
+            shown("https://hub.example.net:80"),
+            "https://hub.example.net:80"
+        );
+        assert_eq!(shown("http://192.0.2.10:7448/"), "http://192.0.2.10:7448");
+        assert_eq!(
+            shown("http://192.0.2.10:7448/flottille"),
+            "http://192.0.2.10:7448/flottille"
+        );
+        assert_eq!(shown("http://[fd7a::7]:7448"), "http://[fd7a::7]:7448");
+        assert_eq!(
+            HubUrl::parse("https://hub.example.net")
+                .unwrap()
+                .host_shown(),
+            "hub.example.net"
+        );
+        assert_eq!(HubUrl::shown_text("not a url"), "not a url");
+        // Reached as it always was.
+        let url = HubUrl::parse("https://hub.example.net").unwrap();
+        assert_eq!(url.authority(), "hub.example.net:443");
+        assert_eq!(url.to_string(), "https://hub.example.net:443/");
+    }
+
+    #[test]
     fn a_hub_url_says_its_port_or_takes_the_scheme_s() {
         let url = HubUrl::parse("https://Hub.Example.net").unwrap();
         assert_eq!(url.to_string(), "https://hub.example.net:443/");
         let url = HubUrl::parse("http://192.0.2.10:7448/flottille").unwrap();
         assert_eq!(url.authority(), "192.0.2.10:7448");
+
         assert_eq!(url.path, "/flottille");
         let url = HubUrl::parse("http://[fd7a::7]:7448").unwrap();
         assert_eq!(url.tls_name(), "fd7a::7");

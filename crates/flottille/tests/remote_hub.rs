@@ -296,7 +296,7 @@ fn links_go_on_while_the_hub_is_down() {
     server.wait_for("pc", "online");
     let hub_seen = pc.remote()["hub"].clone();
     assert_eq!(hub_seen["state"], "connected", "{hub_seen}");
-    assert_eq!(hub_seen["url"], format!("{}/", hub.url()));
+    assert_eq!(hub_seen["url"], hub.url());
 
     hub.down();
     // What needs the hub says so, with since when...
@@ -666,6 +666,7 @@ fn a_machine_paired_with_a_hub_pairs_with_another_only_when_asked_to_replace_it(
     let pinned: Value =
         serde_json::from_str(&std::fs::read_to_string(pc.folder().join("hub.json")).unwrap())
             .unwrap();
+    // The file keeps the address as it was given; only what is shown drops the slash.
     assert_eq!(pinned["url"], format!("{}/", first.url()));
 
     pair_call(&pc, &second, &seeded(41), "pc", true).unwrap();
@@ -731,7 +732,7 @@ fn a_headless_machine_pairs_with_the_code_and_is_in_every_list() {
     let paired = pair(&hub, &server, "server", "runner");
     assert!(
         paired.contains(&format!(
-            "server is paired with the hub at {}/ as a runner",
+            "server is paired with the hub at {} as a runner",
             hub.url()
         )),
         "{paired}"
@@ -1559,4 +1560,38 @@ fn a_machine_that_wakes_from_a_suspend_judges_links_by_the_next_list() {
         pc.log()
     );
     drop(trusting.hub.runtime);
+}
+
+#[test]
+fn the_hubs_address_is_shown_without_its_default_port_or_a_trailing_slash() {
+    let hub = TestHub::new();
+    let pc = Machine::new(None);
+    // A code whose address has a trailing slash: it is not shown with one, and the port the hub is
+    // on, which is not its scheme's own, stays. The default ports are the unit test's of
+    // `HubUrl::shown`.
+    let typed = format!("{}/", hub.url());
+    let (_, code) = hub
+        .served()
+        .with_hub(|served| served.open_pairing(&typed, None).unwrap());
+    let output = pc.user.run_with_input(
+        &["remote", "pair", "--name", "pc", "--role", "runner"],
+        &format!("{}\n", code.code().unwrap()),
+    );
+    assert!(output.status.success(), "{}", pc.log());
+    let said = String::from_utf8_lossy(&output.stdout).into_owned();
+    assert!(said.contains(&format!("hub at {} as", hub.url())), "{said}");
+    assert!(!said.contains(&typed), "{said}");
+
+    let seen = pc.remote();
+    assert_eq!(seen["hub"]["url"], hub.url());
+    let members = pc.user.call("remote.members", json!({})).unwrap();
+    assert_eq!(members["hub"], hub.url());
+    // A second pairing without --replace is refused, naming the hub as it is shown. The refusal
+    // comes before the code is used, so any hub's code will do.
+    let other = TestHub::new();
+    let (_, refused) = pair_call(&pc, &other, &seeded(43), "pc", false).unwrap_err();
+    assert!(
+        refused.contains(&format!("hub at {} already", hub.url())),
+        "{refused}"
+    );
 }
