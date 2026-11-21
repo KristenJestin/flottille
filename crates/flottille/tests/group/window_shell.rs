@@ -41,6 +41,8 @@ mod window_machines;
 mod window_menus;
 #[path = "../window_notifications.rs"]
 mod window_notifications;
+#[path = "../window_one_list.rs"]
+mod window_one_list;
 #[path = "../window_pasted_text.rs"]
 mod window_pasted_text;
 #[path = "../window_pictures.rs"]

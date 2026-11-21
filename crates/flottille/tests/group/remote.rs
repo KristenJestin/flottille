@@ -35,8 +35,12 @@ mod remote_keys;
 mod remote_launch;
 #[path = "../remote_link.rs"]
 mod remote_link;
+#[path = "../remote_relay.rs"]
+mod remote_relay;
 #[path = "../remote_requests.rs"]
 mod remote_requests;
+#[path = "../remote_sessions.rs"]
+mod remote_sessions;
 #[path = "../remote_settings.rs"]
 mod remote_settings;
 #[path = "../remote_tunnels.rs"]

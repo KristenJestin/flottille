@@ -222,9 +222,11 @@ no device calls a `local` one over a link (`docs/remote.md`, "Roles").
 | `remote.address.remove` | drive |
 | `remote.members` | read |
 | `remote.launches` | read |
+| `remote.sessions` | read |
 | `remote.change` | drive |
 | `remote.pair` | local |
 | `remote.declare` | local |
+| `remote.close` | local |
 | `remote.settings` | local |
 | `remote.configure` | local |
 | `tunnel.open` | drive |
@@ -523,13 +525,15 @@ or a setup step runs in it…), with the key at fault.
 
 `{"name"}`. The project's forges and tracker as its Settings show them (`docs/forges.md`, "The
 forge of a repository"): `{"name", "folder", "repositories": [{"path", "remote", "depends_on",
-"url", "forge", "proposal", "disagrees"}], "tracker", "obsolete"}`. `depends_on` lists the paths
+"url", "forge", "proposal", "disagrees"}], "tracker", "obsolete", "pushes_unlent"}`. `depends_on` lists the paths
 of the repositories it depends on (`[]` when none), `url` is the remote's address (credentials taken
 out, masked; `null` when it has none), `forge` the one declared (`null` when none), `proposal` what
 the address proposes (`null` when nothing), `disagrees` why the declared forge is not where the
 remote leads (`null` when it is). `obsolete` lists the keys of the file that are no longer read
 (the old `[forges]`, `[agent_actions]`, a command's former `grants` and `children`), each with what
-replaces it. Nothing is asked of a forge.
+replaces it. `pushes_unlent` says why the user's SSH agent is lent to no push, so that a push over
+SSH is refused (`docs/vault.md`, "The runtime folder"), as `flottille doctor` says it; `null` when
+it is lent. Nothing is asked of a forge.
 
 #### `project.programs`
 
@@ -1353,8 +1357,8 @@ not listen, `unavailable`, with the reason. No method answers a private key.
   `state` `online`, `offline` or `needs an update`, `since` when it is so (milliseconds since the
   Unix epoch), `reason` why it is not online (`server refused the link: …`, the sentence of
   `docs/remote.md`, "The version"), or `null`, `reached` where its live link goes or came from
-  (`{"address", "dialled"}`, `dialled` saying whether this machine dialled it; `null` while it is
-  not linked), and `addresses` those it knows it at: given (by the hub, by hand), then told by it. `hub` is the hub this machine pinned, its `url` written as a user writes it (`https://hub.example.net`: the port only when it is not the scheme's own, 80 or 443, and no trailing slash; the commands, the window and the sentences say it so) (`docs/remote.md`, "The
+  (`{"address", "dialled"}`, `address` being `the hub` for a link through it, `dialled` saying
+  whether this machine dialled it; `null` while it is not linked), and `addresses` those it knows it at: given (by the hub, by hand), then told by it. `hub` is the hub this machine pinned, its `url` written as a user writes it (`https://hub.example.net`: the port only when it is not the scheme's own, 80 or 443, and no trailing slash; the commands, the window and the sentences say it so) (`docs/remote.md`, "The
   hub"), `null` until it is set up: `{"url", "key", "fingerprint", "state", "since", "reason"}`,
   `state` being `connected`, `unreachable` (`reason`: `the hub at hub.example.net is
   unreachable since 22:14: …`), `reset` (`the hub's member list was reset: set this device up
@@ -1401,6 +1405,21 @@ not listen, `unavailable`, with the reason. No method answers a private key.
   there, `request` its number), `started`, or `ended` once its end came back; `heard` the kind of
   the last delivery it sent here (`child-report`, `session-turn-ended`, `child-question`…) and
   `heard_at` when, `null` before any: what the window shows as its state as last known.
+- `remote.sessions` answers the sessions of every machine, light (`docs/remote.md`, "One list of
+  every machine"): `{"this": [session…], "machines": [{"name", "sessions": [session…], "at"}]}`,
+  `this` this machine's live root sessions, each other machine's as it last listed them over its
+  link (`at` when), kept while it is off, without those whose close waits to be sent; a machine no
+  longer among the user's is not listed. A session is `{"id", "title", "project", "state",
+  "exchanged_at", "created_at", "pilot"}`, `state` `running`, `needs you`, `waiting` or `idle`,
+  `pilot` the session of the agent that leads it on that machine, or `null`; never its
+  conversation. The event `remote.sessions {name}` says that a machine's list changed.
+- `remote.close {request}` keeps the user's close of a session of another machine: `request` is
+  `agent.stop {agent}` for that machine, signed by the client with the device key as any request
+  for another machine. This machine stores it before it sends it, sends it once that machine is
+  linked (now, or when it links again), and drops it from that machine's list at once; one close
+  of a session is kept once. `refused` for a request for this machine, for a method other than
+  `agent.stop`, for a session not named, for a name that is no machine of the user's, or when 100
+  messages wait for that machine already. A local method: never over a link.
 - `remote.change {change}` carries a member's signed change of the list (`flottille_link::Change`:
   a removal, a renaming, an icon and colour), signed by the client after `remote.members`' `head`.
   A member's addition is refused: a device is paired on the hub. It answers `remote.members` once

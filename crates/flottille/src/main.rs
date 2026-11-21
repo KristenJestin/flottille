@@ -67,6 +67,7 @@ mod programs;
 mod project_command;
 mod projects;
 mod providers;
+mod push_folder;
 mod pushed;
 mod quota;
 mod read_commands;

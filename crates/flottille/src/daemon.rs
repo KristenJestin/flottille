@@ -143,16 +143,19 @@ pub fn run(paths: &Paths) -> Result<()> {
     // What a daemon that died left: the display folders it made, which only a daemon holding the
     // lock makes, so none is this daemon's; it makes its own again.
     crate::display::clean(paths);
+    // The folders of pushes a daemon that died left: none is in use.
+    let _ = std::fs::remove_dir_all(paths.runtime.join("pushes"));
     // Before anything runs: where the SSH agent's socket is, which every run is kept from.
     crate::ssh_agent::find();
     crate::mounts::find_bus();
     if crate::mounts::namespaces() == crate::mounts::Namespaces::Refused {
         eprintln!("flottille daemon: {}", crate::mounts::REFUSED_GAP);
     }
+    // Before anything runs: the git a push the gate let through runs, and the daemon's own,
+    // never one planted later.
+    crate::git::find_git();
     // Before any repository is read: the user's own credential helpers, the only ones it runs.
     crate::git::find_helpers();
-    // Before anything runs: the git a push the gate let through runs, never one planted later.
-    crate::git::find_git();
     // Before anything runs: what a push reads, which every run has read-only.
     crate::pushed::find(true);
     let machine_key = crate::remote::machine_key(paths)?;

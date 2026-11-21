@@ -1904,7 +1904,7 @@ mod removal {
         assert!(user.project_file("app").exists());
     }
 
-    /// The user with a `git` that runs the real one, but first `on_remove` (shell) for a
+    /// The user with a daemon's `git` that runs the real one, but first `on_remove` (shell) for a
     /// `git worktree remove`.
     fn wrapping_removals(user: User, on_remove: &str) -> User {
         let real = std::process::Command::new("sh")
@@ -1925,12 +1925,8 @@ mod removal {
         .unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let path = format!(
-            "{}:{}",
-            bin.display(),
-            std::env::var("PATH").unwrap_or_default()
-        );
-        user.with_env("PATH", &path)
+        // The daemon's own git is the one found at its start, not the `PATH`'s first.
+        user.with_env("FLOTTILLE_TEST_GIT", script.to_str().unwrap())
     }
 
     /// A user whose `git` holds `git worktree remove` until the test releases it: `held` exists
