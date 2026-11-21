@@ -224,7 +224,8 @@ change of transport changes that file.
 **Through the hub** (#1151). QUIC runs over a socket of Flottille's own under `quinn` (its
 `AsyncUdpSocket`, `RelaySocket` in `transport.rs`): what QUIC sends goes out in the device's control
 session as one line, `{"relay": {"to": <key>, "packet": <base64>}}`, one QUIC packet a line (1200
-bytes at most, path MTU discovery off, 1500 the most the hub takes); the hub hands it to the session
+bytes at first, up to 1452 once QUIC's discovery of the path's size grew them, 1500 the most the hub
+takes); the hub hands it to the session
 of the member whose key it names as `{"relayed": {"from": <key>, "packet": …}}`. QUIC knows
 addresses, not keys: each key is given an address of the relay's own, in a unique local IPv6 range
 (`fd46:6c74::/32`) no network reaches through it. Nothing above changes: the TLS 1.3 of QUIC, on
@@ -236,23 +237,35 @@ sessions are open, `{"online": [<key>, …]}`, whenever that changes: a device d
 online, and says plainly when the other is not (`server is offline: it is not connected to the
 hub`). Members only: a packet from or to a key that is no member's (a stranger, a machine whose
 join waits, a member removed) is dropped by the hub, and so is one to a member whose session is
-not open; none is kept for later.
+not open; none is kept for later. Who a link is from is the key its TLS proved, never the hub's
+word: a hub that says a packet is from another member gets nothing served as that member. A device
+lets a packet from a key it did not dial in only from a member the hub says online, so that a hub
+that makes up senders spends none of the room its own dials need.
 
 **Behind a reverse proxy.** The control session is HTTP/1.1 upgraded as a WebSocket is, so the
 frames pass through a proxy that passes upgrades on (port 443, a container behind it). Each side
 says `{"keepalive": {}}` every 25 seconds when it has nothing to say, under the 60 s idle timeout
 of the common proxies; a device that hears nothing from its hub for 80 seconds takes the session as
-lost, and its links with it.
+lost, and its links with it. The hub does the same with a device it hears nothing from for 80
+seconds, or that reads nothing it sends for as long: its session is closed, and the others are
+told it is offline, rather than left trying a connection that died.
 
 **What the hub sees** of the links: which devices talk to which, when, and how much (the size and
 timing of each packet); never what they say. It cannot read a request, an answer, an event, a
-bundle of code or a tunnel's bytes, nor change one unseen, nor make a link to a device: it holds no
-device's key. What it can do is what any network can: drop packets, delay them, or stop carrying
-them, which ends the links.
+bundle of code or a tunnel's bytes, nor change one unseen, nor make a link as one of the user's
+devices: it holds none of their keys. What it does as a network is what any network can: drop
+packets, delay them, or stop carrying them, which ends the links. What it does as the hub is
+larger: it pairs the devices, and a hub whose host or key is someone else's can pair a device of
+theirs, which declares its own machine and is trusted by every machine; with the links through the
+hub, that device reaches every machine through the hub itself, wherever it is, with no other way
+in to the user's network ("What a compromised hub can do").
 
 **Its bounds.** One device cannot fill the hub: each device may send others 4 MiB a second through
-it (1 MiB at once), and at most 256 packets wait for each device (under 400 KiB); a packet past
-either is dropped, as a network drops one, and QUIC sends it again, slower. The others' links go on.
+it (1 MiB at once), every packet it sends counted, those the hub drops too; and at most 128 packets
+from one device wait for another (under 200 KiB), each sender having its own share, so that one
+that floods a device leaves the others their way to it. A packet past a bound is dropped, as a
+network drops one, and QUIC sends it again, slower. The others' links go on: a packet takes neither
+the hub's lock nor its member list, which the forwarding is given again each time it changes.
 
 On a link, each message goes on a QUIC stream of its own, one JSON frame one way and its answer
 (`{"ok": …}` or `{"refused": "…"}`) the other; the first stream is the version handshake ("The
@@ -350,7 +363,8 @@ serves one user.
 - **The presence**: which of the user's clients is active ("Notifications"), as each client tells
   it.
 - **The addresses** of the members, as they tell it, for the direct path (unused by default).
-- **The sessions open**, by key, and for each the packets of links waiting for it (256 at most).
+- **The sessions open**, by key, and for each the packets of links waiting for it (128 at most from
+  each member's device).
 
 **What it carries**: the links' packets between members ("The transport", "Through the hub"),
 encrypted end to end by the devices, which it forwards and never opens; it keeps no message and no
@@ -1580,9 +1594,11 @@ on a real phone, by hand, and reported.
   packet in base64, not as binary WebSocket frames: the session is one JSON object a line since
   #820, and a reverse proxy carries it the same. A device dials the addresses it knows for another
   first (the direct path, none by default), then the hub. The hub's bounds: 4 MiB a second for each
-  device's packets to the others, 1 MiB at once, 256 packets waiting for each device; a packet past
-  them is dropped, never queued further. The keepalive is 25 s each way, a session silent 80 s is
-  lost. A machine that listens (`[remote] listen`, the direct path the user chose) dials
+  device's packets to the others, 1 MiB at once, each packet charged before anything else is
+  looked at; 128 packets from one device waiting for another, a share for each sender, so at most
+  128 × the members' devices for one device; a packet past them is dropped, never queued further.
+  The keepalive is 25 s each way, a session silent 80 s is lost, on the device and on the hub (on
+  the hub too a line the device reads nothing of for 80 s). A machine that listens (`[remote] listen`, the direct path the user chose) dials
   addresses only, never through the hub, and takes the links that come either way: two machines
   that both listen link as before #1151, and a test or a user who set `listen` keeps that path.
 
