@@ -734,8 +734,8 @@ fn an_allowed_push_takes_the_options_it_was_judged_with() {
     let pushed = line(
         &user,
         &mcp,
-        "git -c push.default=current push --recurse-submodules=check origin \
-         HEAD:refs/heads/optioned",
+        // No setting on the line: it would win over the daemon's own (refused, below).
+        "git --no-pager push --recurse-submodules=check origin HEAD:refs/heads/optioned",
     );
 
     assert!(
