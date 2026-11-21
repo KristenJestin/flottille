@@ -1,7 +1,8 @@
 //! One window (`docs/cli.md`, `flottille window`): the first window holds a lock beside the
 //! daemon's, in the runtime folder, and listens on a socket there. A later `flottille window`
 //! finds the lock held, says "raise" on that socket and leaves; the first window brings itself
-//! to the front. The kernel lets the lock go when the window's process ends, however it ends, so
+//! to the front. `open <session>` on the same socket brings it forward on that session
+//! (`flottille open`, the default action of a desktop notification). The kernel lets the lock go when the window's process ends, however it ends, so
 //! a window that died blocks nobody, and its socket file is replaced by the next.
 
 use std::fs::{File, OpenOptions, TryLockError};
@@ -14,8 +15,19 @@ use flottille_core::paths::{Paths, ensure_private_dir};
 
 /// What a command that asks to raise says.
 const RAISE: &str = "raise";
-/// What is read of a peer: a word and its end of line, and a little more.
-const LONGEST: usize = 16;
+/// What a command says to bring the window forward on a session, then the session's id.
+const OPEN: &str = "open";
+/// What a peer says to the window.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Ask {
+    /// Come to the front.
+    Raise,
+    /// Come to the front on this session (its root agent's id).
+    Open(String),
+}
+
+/// What is read of a peer: a line, and a little more.
+const LONGEST: usize = 96;
 /// How long a peer has, from its connection to its end of line.
 const DEADLINE: Duration = Duration::from_secs(1);
 
@@ -83,42 +95,75 @@ fn first(paths: &Paths, lock: File) -> io::Result<Start> {
 }
 
 impl Instance {
-    /// Calls `raise` each time a command asks the window to come to the front, from a thread of
-    /// its own that lives as long as the process. What was asked before this is kept by the
-    /// socket and arrives now.
+    /// Calls `raise` each time a command asks the window to come to the front (on a session or
+    /// not), from a thread of its own that lives as long as the process. What was asked before
+    /// this is kept by the socket and arrives now.
     pub fn serve(self, raise: impl Fn() + Send + 'static) {
+        self.serve_asks(move |_| raise());
+    }
+
+    /// [`Instance::serve`], told what is asked: to come to the front, or to come on a session.
+    pub fn serve_asks(self, on: impl Fn(Ask) + Send + 'static) {
         std::thread::spawn(move || {
             // The lock lives as long as this thread: the process.
             let _lock = self._lock;
             for stream in self.listener.incoming() {
                 let Ok(stream) = stream else { continue };
-                if says_raise(stream) {
-                    raise();
+                if let Some(ask) = asked(stream) {
+                    on(ask);
                 }
             }
         });
     }
 }
 
-/// Whether the peer says "raise" and ends its line. It is read for a short while and a few
-/// bytes only: a local peer that says nothing, trickles bytes or never ends its line cannot hold
-/// the others back, nor make the window keep what it sends.
-fn says_raise(mut stream: UnixStream) -> bool {
+/// Asks the open window to come to the front on `session`: whether a window took the request.
+/// Nothing is started: the caller does when none is open.
+pub fn open_session(paths: &Paths, session: &str) -> io::Result<bool> {
+    match UnixStream::connect(paths.window_socket()) {
+        Ok(mut stream) => {
+            writeln!(stream, "{OPEN} {session}")?;
+            Ok(true)
+        }
+        // No socket, or the file of a window that closed.
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+            ) =>
+        {
+            Ok(false)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// What the peer says, if it is "raise" or "open" and a session, ending its line. It is read for
+/// a short while and a few bytes only: a local peer that says nothing, trickles bytes or never
+/// ends its line cannot hold the others back, nor make the window keep what it sends.
+fn asked(mut stream: UnixStream) -> Option<Ask> {
     let deadline = Instant::now() + DEADLINE;
     let mut said = [0u8; LONGEST];
     let mut length = 0;
     while length < LONGEST && !said[..length].contains(&b'\n') {
         // The time that is left of the whole line, not a new one at each read.
-        let Some(left) = deadline.checked_duration_since(Instant::now()) else {
-            return false;
-        };
-        if stream.set_read_timeout(Some(left)).is_err() {
-            return false;
-        }
+        let left = deadline.checked_duration_since(Instant::now())?;
+        stream.set_read_timeout(Some(left)).ok()?;
         match stream.read(&mut said[length..]) {
             Ok(0) | Err(_) => break,
             Ok(read) => length += read,
         }
     }
-    said[..length].trim_ascii() == RAISE.as_bytes()
+    let line = std::str::from_utf8(said[..length].trim_ascii()).ok()?;
+    if line == RAISE {
+        return Some(Ask::Raise);
+    }
+    let session = line.strip_prefix(OPEN)?.strip_prefix(' ')?;
+    // An agent's id: letters, digits and dashes, nothing a page's name could be bent with.
+    let plain = !session.is_empty()
+        && session.len() <= 64
+        && session
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    plain.then(|| Ask::Open(session.to_owned()))
 }

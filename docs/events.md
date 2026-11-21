@@ -396,6 +396,18 @@ reads on after the last number it saw.
 | `pruned` | `true` when notifications older than 30 days, or beyond the newest 1,000, were forgotten. |
 | `how` | `read` when a client marked them read (`notifications.read`), `kept` when the daemon added or resolved them from the events, or forgot the old. |
 
+### `notification.rang`
+
+A notification of the centre rang while a window is focused and does not show its session
+(`docs/design.md`, §11): the daemon sends no system notification, and the focused window draws a
+toast of its own. `id` (the notification's number, `notifications.list`), `in` (`window`), `kind`,
+`session`, `project`, `workspace`, `title`, `excerpt` (masked, as the centre keeps them),
+`needs_you`, `request` (the request's number for a request, what Deny answers; `null` for the
+others), and `whole`: the call and why the gate held it, one line each and uncut, when they can
+be said whole (`docs/design.md`, §11), the toast's text then and the only case it offers Allow;
+`null` otherwise. A notification that rings with no window focused is sent to the desktop and says
+no event. Its sound is played by the daemon in either case.
+
 ### `routine.changed`
 
 A routine was added, edited, paused, resumed, delayed or removed, or a run of it started

@@ -27,6 +27,8 @@ mod window_connection_requests;
 mod window_connection_share;
 #[path = "../window_connections.rs"]
 mod window_connections;
+#[path = "../window_desktop_notifications.rs"]
+mod window_desktop_notifications;
 #[path = "../window_developer_reports.rs"]
 mod window_developer_reports;
 #[path = "../window_drafts.rs"]

@@ -2367,6 +2367,11 @@ fn a_push_is_not_lifted_where_no_landlock_keeps_its_folder_from_runs() {
     assert!(!remote_has(&user, "unprotected"), "{}", pushed.text);
     assert!(helper_said(&user).is_empty(), "{:?}", helper_said(&user));
     assert!(pushed.text.contains("Landlock"), "{}", pushed.text);
+    assert!(
+        pushed.text.contains("the folder a push runs from"),
+        "one sentence, no run of spaces: {}",
+        pushed.text
+    );
 }
 
 #[test]
@@ -2463,4 +2468,239 @@ fn a_rewrite_for_reads_a_run_set_refuses_no_checked_push() {
     );
 
     assert!(remote_has(&user, "read-rewritten"), "{}", pushed.text);
+}
+
+/// The user's own git settings (`~/.gitconfig`, which the daemon reads in place of none): `text`.
+fn user_settings(user: User, text: &str) -> User {
+    std::fs::create_dir_all(user.path("home")).unwrap();
+    let settings = user.path("home/.gitconfig");
+    std::fs::write(&settings, text).unwrap();
+    user.with_env("GIT_CONFIG_GLOBAL", settings.to_str().unwrap())
+}
+
+#[test]
+fn a_run_written_merge_sends_nothing_to_another_branch_with_push_default_upstream() {
+    let (user, _agent, _bus) = user();
+    // The user's own choice, which a run cannot write.
+    let user = user_settings(user, "[push]\n\tdefault = upstream\n");
+    let mcp = session(&user, SSH_REMOTE);
+    let folder = user.path("work/app");
+    committed(&user, "a change");
+    // As a run could write them: a plain `git push` would send `main` to `elsewhere`.
+    user.git(&folder, &["config", "branch.main.remote", "origin"]);
+    user.git(
+        &folder,
+        &["config", "branch.main.merge", "refs/heads/elsewhere"],
+    );
+
+    let pushed = line(&user, &mcp, "git push");
+
+    assert!(
+        !remote_has(&user, "elsewhere"),
+        "the push went to another branch: {}",
+        pushed.text
+    );
+    // A branch whose upstream is its own name still goes with a plain `git push`.
+    user.git(&folder, &["config", "branch.main.merge", "refs/heads/main"]);
+    let pushed = line(&user, &mcp, "git push");
+    let local = user.git_output(&folder, &["rev-parse", "main"]);
+    let remote = user.git_output(
+        &folder,
+        &[
+            "--git-dir",
+            user.path("remotes/app.git").to_str().unwrap(),
+            "rev-parse",
+            "main",
+        ],
+    );
+    assert_eq!(local, remote, "{}", pushed.text);
+}
+
+#[test]
+fn a_push_is_not_lifted_without_a_root_owned_git() {
+    let (user, _agent, _bus) = user();
+    // The only git of the daemon's `PATH` is the user's, which a run can overwrite: it says
+    // whether it ever ran where the runtime folder is in reach, outside the sandbox.
+    let git = user.path("programs/git");
+    std::fs::remove_file(&git).unwrap();
+    script(
+        &git,
+        &format!(
+            "if PATH='{path}' ls '{runtime}' >/dev/null 2>&1; then echo \"$*\" >> '{outside}'; fi\n\
+             exec '{real}' \"$@\"\n",
+            path = std::env::var("PATH").unwrap_or_default(),
+            runtime = user.path("runtime").display(),
+            outside = user.path("git-ran-outside").display(),
+            real = common::program("git").display(),
+        ),
+    );
+    let mcp = session(&user, SSH_REMOTE);
+
+    let pushed = line(&user, &mcp, "git push origin HEAD:refs/heads/unrooted");
+
+    assert!(!remote_has(&user, "unrooted"), "{}", pushed.text);
+    assert!(
+        pushed.text.contains("no git of the daemon's PATH"),
+        "{}",
+        pushed.text
+    );
+    let outside = std::fs::read_to_string(user.path("git-ran-outside")).unwrap_or_default();
+    assert!(
+        outside.is_empty(),
+        "the user's git ran outside the sandbox: {outside}"
+    );
+    let doctor = user.run(&["doctor", "--json"]);
+    let report: serde_json::Value = serde_json::from_slice(&doctor.stdout).unwrap();
+    assert!(
+        report["warnings"]
+            .to_string()
+            .contains("no git of the daemon's PATH"),
+        "{report}"
+    );
+}
+
+/// The user's sign-in for one forge alone, as `gh auth setup-git` or a per-forge identity
+/// writes it: an `includeIf "hasconfig:remote.*.url:…"` for the loopback forge of
+/// [`http_remote`] (`127.0.0.1`, not `localhost`). Its helper adds each action it is asked for to
+/// `helper-said`, then the host it is asked for, and gives an invented sign-in to any host, as a
+/// helper that reads a token from a password store does.
+fn per_forge_helper(user: User) -> User {
+    let helper = user.path("helper/sign-in");
+    script(
+        &helper,
+        &format!(
+            "echo \"$1\" >> '{said}'\n\
+             while read -r asked; do\n\
+               case \"$asked\" in host=*) echo \"$asked\" >> '{said}';; esac\n\
+             done\n\
+             if [ \"$1\" = get ]; then echo username=octo; echo password=invented-password; fi\n",
+            said = user.path("helper-said").display()
+        ),
+    );
+    std::fs::create_dir_all(user.path("home")).unwrap();
+    let forge = user.path("home/forge.gitconfig");
+    std::fs::write(
+        &forge,
+        format!("[credential]\n\thelper = {}\n", helper.display()),
+    )
+    .unwrap();
+    user_settings(
+        user,
+        &format!(
+            "[includeIf \"hasconfig:remote.*.url:http://127.0.0.1:*/**\"]\n\tpath = {}\n",
+            forge.display()
+        ),
+    )
+}
+
+#[test]
+fn a_helper_the_user_set_per_forge_signs_a_lifted_push_in() {
+    let (user, _agent, _bus) = user();
+    let (_server, url) = http_remote(&user);
+    let user = per_forge_helper(user);
+    let mcp = session(&user, &url);
+
+    let pushed = line(&user, &mcp, "git push origin HEAD:refs/heads/per-forge");
+
+    assert!(remote_has(&user, "per-forge"), "{}", pushed.text);
+    assert!(
+        helper_said(&user).contains(&"get".to_owned()),
+        "{:?}",
+        helper_said(&user)
+    );
+}
+
+#[test]
+fn a_decoy_remote_gets_no_forge_helper_asked_for_another_host() {
+    let (user, _agent, _bus) = user();
+    let (_server, url) = http_remote(&user);
+    let user = per_forge_helper(user);
+    // The same server under a host the forge's pattern does not name: the run's own.
+    let elsewhere = url.replace("127.0.0.1", "localhost");
+    let mcp = session(&user, &elsewhere);
+    // As a run could write it: a remote that matches the forge's pattern, pushed to by no one.
+    user.git(
+        &user.path("work/app"),
+        &["config", "remote.decoy.url", &url],
+    );
+
+    let pushed = line(&user, &mcp, "git push origin HEAD:refs/heads/decoyed");
+
+    assert!(!remote_has(&user, "decoyed"), "{}", pushed.text);
+    assert!(
+        !helper_said(&user)
+            .iter()
+            .any(|said| said.starts_with("host=")),
+        "the forge's helper was asked: {:?}",
+        helper_said(&user)
+    );
+}
+
+#[test]
+fn a_run_written_pushurl_gets_no_forge_helper_asked_for_another_host() {
+    let (user, _agent, _bus) = user();
+    let (_server, url) = http_remote(&user);
+    let user = per_forge_helper(user);
+    let mcp = session(&user, &url);
+    // As a run could write it: `origin` still matches the forge's pattern, its pushes go to
+    // another host.
+    user.git(
+        &user.path("work/app"),
+        &[
+            "config",
+            "remote.origin.pushurl",
+            &url.replace("127.0.0.1", "localhost"),
+        ],
+    );
+
+    let pushed = line(&user, &mcp, "git push origin HEAD:refs/heads/pushurl");
+
+    assert!(!remote_has(&user, "pushurl"), "{}", pushed.text);
+    assert!(
+        !helper_said(&user)
+            .iter()
+            .any(|said| said.starts_with("host=")),
+        "the forge's helper was asked: {:?}",
+        helper_said(&user)
+    );
+}
+
+#[test]
+fn a_dry_run_that_forces_a_ref_the_line_did_not_name_is_refused() {
+    let (user, _agent, _bus) = user();
+    // Which refs a plain `git push origin` sends, forced: settings of the user's own, as the
+    // only ones a lifted push still reads for it.
+    let user = user_settings(
+        user,
+        "[remote \"origin\"]\n\tpush = +refs/heads/main:refs/heads/main\n",
+    );
+    project(&user, SSH_REMOTE);
+    message_checked(&user);
+    let folder = user.path("work/app");
+    let before = user.git_output(&folder, &["rev-parse", "main"]);
+    // A history of its own, which the remote's `main` is not part of.
+    user.git(&folder, &["checkout", "--quiet", "--orphan", "other"]);
+    user.git(&folder, &["commit", "--quiet", "-m", "a good rewrite"]);
+    user.git(&folder, &["branch", "--quiet", "-f", "main", "other"]);
+    user.git(&folder, &["checkout", "--quiet", "main"]);
+    let mcp = agent(&user);
+    let remote_main = || {
+        user.git_output(
+            &folder,
+            &[
+                "--git-dir",
+                user.path("remotes/app.git").to_str().unwrap(),
+                "rev-parse",
+                "main",
+            ],
+        )
+    };
+
+    let pushed = line(&user, &mcp, "git push origin");
+
+    assert_eq!(remote_main(), before, "main was forced: {}", pushed.text);
+    assert!(pushed.text.contains("forced"), "{}", pushed.text);
+    // A line that asks for the force still forces.
+    let pushed = line(&user, &mcp, "git push --force origin");
+    assert_ne!(remote_main(), before, "{}", pushed.text);
 }

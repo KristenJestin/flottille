@@ -28,7 +28,7 @@ use gpui_kit::{
 };
 use lyon_tessellation::{LineCap, LineJoin};
 
-use crate::actions::{Actions, Command, Details, Outcome, Pick, Reading, RunFrom};
+use crate::actions::{Actions, Answer, Command, Details, Outcome, Pick, Reading, RunFrom};
 use crate::add_project::AddProject;
 use crate::composer::{Choice, Composer, PlaceChoice};
 use crate::end_led::LedEnd;
@@ -42,7 +42,7 @@ use crate::link::{self, Connect, Seen, Update};
 use crate::machines::Machines;
 use crate::machines_page::{MachinesSection, RemovalDialog};
 use crate::modals::Modals;
-use crate::model::{BellItem, Forged, LinkShown, News, Place, Preparation, Snapshot};
+use crate::model::{BellItem, Forged, LinkShown, News, Place, Preparation, Rang, Snapshot};
 use crate::open::Opener;
 use crate::page::{MainArea, Page};
 use crate::project::{NewWorkspace, PageTab, PlaceData, ProjectData, SessionLine};
@@ -155,6 +155,8 @@ fn page_named(name: &str) -> Option<(Selection, Option<usize>)> {
 }
 
 pub struct Shell {
+    /// What the window tells the daemon of itself: focused or not, and the session it shows.
+    presence: crate::presence::Presence,
     seen: Arc<Seen>,
     /// What "Restart Flottille" runs, off the UI's thread: `flottille daemon stop`, after which
     /// the link starts Flottille again.
@@ -402,6 +404,8 @@ impl Shell {
             updates: sender.clone(),
             opener: crate::open::system(),
         };
+        // What the window tells of itself goes to this machine's daemon, whichever machine is shown.
+        let presence = crate::presence::Presence::spawn(local.clone());
         let actions = Actions::spawn_aimed(aim.clone(), local, sender);
         let this = cx.entity().downgrade();
         cx.set_global(crate::tunnels::Tunnels::new(this.clone()));
@@ -581,7 +585,16 @@ impl Shell {
         });
         cx.observe_window_bounds(window, |this, window, cx| this.relayout(false, window, cx))
             .detach();
+        // The daemon sends the desktop a notification only while nobody looks: it is told when the
+        // window gains or loses the focus.
+        cx.observe_window_activation(window, |this, window, _| this.tell_presence(window))
+            .detach();
+        presence.tell(crate::presence::State {
+            focused: window.is_window_active(),
+            session: None,
+        });
         let mut shell = Self {
+            presence,
             seen,
             restart: Arc::new(restart_flottille),
             build: None,
@@ -1776,6 +1789,7 @@ impl Shell {
             Update::Forged(forged) => self.forged(forged, cx),
             Update::News(news) => self.news(news, cx),
             Update::Link(link) => self.linked(link, cx),
+            Update::Rang(rang) => self.rang(rang, window, cx),
             Update::Prompted(agent) => self.spoke(&agent),
             Update::Routines { project } => {
                 if let Some(routines) = self.project_routines_of(&project, cx) {
@@ -2227,6 +2241,7 @@ impl Shell {
                         Some(next) => self.open(Selection::Project(next), window, cx),
                         None => {
                             self.selected = None;
+                            self.tell_presence(window);
                             self.project_settings = None;
                             self.spec_page = None;
                             self.main.update(cx, |main, cx| {
@@ -3143,6 +3158,17 @@ impl Shell {
         self.reopen = page_named(page);
     }
 
+    /// Shows a session's page, as a command that asks for it does (`flottille open`): at once
+    /// when the window knows the session, as soon as the daemon's next read says so otherwise.
+    pub fn show_session(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let selection = Selection::Session(id.to_owned());
+        if self.page_of(&selection, cx) != Page::Empty {
+            self.open(selection, window, cx);
+        } else {
+            self.reopen = Some((selection, None));
+        }
+    }
+
     /// The page shown, named for [`Shell::reopen`]: `session:<id>`, `project:<name>`,
     /// `settings:<tab>`, `project-settings:<name>`, `spec:<n>:<project>`, `services`.
     pub fn page_name(&self, cx: &gpui_kit::App) -> Option<String> {
@@ -3430,6 +3456,9 @@ impl Shell {
         self.docks
             .retain(|id, _| snapshot.sessions.iter().any(|s| &s.id == id));
         let edited = snapshot.project_changes != self.snapshot.project_changes;
+        let desktop_why = snapshot.desktop_why.clone();
+        self.settings
+            .update(cx, |page, cx| page.set_desktop(desktop_why, cx));
         self.snapshot = snapshot;
         // A session detached from its pilot: its open page stops saying who led it.
         if let Some(page) = self.session_page.clone()
@@ -3569,6 +3598,68 @@ impl Shell {
         gpui_design_system::toast(toast.keyed(key), cx);
     }
 
+    /// Tells the daemon whether this window is focused and which session it shows.
+    fn tell_presence(&self, window: &Window) {
+        let session = match &self.selected {
+            Some(Selection::Session(id)) => Some(id.clone()),
+            _ => None,
+        };
+        self.presence.tell(crate::presence::State {
+            focused: window.is_window_active(),
+            session,
+        });
+    }
+
+    /// The daemon rang a notification in this window, which is focused and does not show its
+    /// session: the same title and text as the system's would have had, in a toast of the kit.
+    /// A request has Deny, and Allow (primary) only when the toast says the whole call and why it
+    /// was held; a click opens the session; it folds away after a few seconds unless hovered, and
+    /// at once when the notification is answered or read.
+    fn rang(&mut self, rang: Rang, window: &Window, cx: &mut Context<Self>) {
+        // This window lost the focus since: the daemon has the desktop show it.
+        if !window.is_window_active() {
+            self.presence.unshown(rang.id);
+            return;
+        }
+        let key = format!("notification-{}", rang.id);
+        let mut toast = gpui_design_system::Toast::notice(rang.title.clone()).keyed(key);
+        let said = rang.whole.as_ref().unwrap_or(&rang.excerpt);
+        if !said.is_empty() {
+            toast = toast.detail(said.clone());
+        }
+        if let (Some(number), Some(session)) = (rang.request, rang.session.clone()) {
+            let answer = |answer: Answer| {
+                let (shell, session) = (cx.entity().downgrade(), session.clone());
+                move |_: &mut Window, cx: &mut App| {
+                    shell
+                        .update(cx, |shell, _| {
+                            shell.perform(Command::Answer {
+                                session: session.clone(),
+                                number,
+                                answer,
+                            })
+                        })
+                        .ok();
+                }
+            };
+            if rang.whole.is_some() {
+                toast = toast.primary_action("Allow", answer(Answer::Once));
+            }
+            toast = toast.quiet_action("Deny", answer(Answer::Deny));
+        }
+        if let Some(session) = rang.session {
+            let shell = cx.entity().downgrade();
+            toast = toast.on_open(move |window, cx| {
+                shell
+                    .update(cx, |shell, cx| {
+                        shell.open(Selection::Session(session.clone()), window, cx)
+                    })
+                    .ok();
+            });
+        }
+        gpui_design_system::toast(toast, cx);
+    }
+
     /// What the agent said or what the user told it ends the row of links it was sharing.
     fn spoke(&mut self, agent: &str) {
         if let Some(sharing) = self.sharing.get_mut(agent) {
@@ -3602,6 +3693,12 @@ impl Shell {
             let said = self.news.get(id).map(String::as_str);
             if row.read(cx).unread() != said {
                 row.update(cx, |row, cx| row.set_unread(said, cx));
+            }
+        }
+        // What was answered or read, anywhere, leaves the screen: its toast folds away.
+        for item in &self.snapshot.bell {
+            if item.read || item.resolved {
+                gpui_design_system::toast::withdraw(&format!("notification-{}", item.id), cx);
             }
         }
         // What waits on another machine says which: the inbox is that machine's.
@@ -4078,6 +4175,7 @@ impl Shell {
         }
         let page = self.page_of(&selection, cx);
         self.selected = Some(selection);
+        self.tell_presence(window);
         let forms = self.forms_for(&page, window, cx);
         let session = self.session_for(&page, window, cx);
         let project_settings = self.project_settings_for(&page, window, cx);

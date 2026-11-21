@@ -9,6 +9,8 @@ mod common;
 
 #[path = "../appearance.rs"]
 mod appearance;
+#[path = "../cli_open.rs"]
+mod cli_open;
 #[path = "../commands.rs"]
 mod commands;
 #[path = "../commit_message.rs"]
@@ -19,6 +21,8 @@ mod daemon;
 mod daemon_at_rest;
 #[path = "../desktop_entry.rs"]
 mod desktop_entry;
+#[path = "../desktop_notifications.rs"]
+mod desktop_notifications;
 #[path = "../developer.rs"]
 mod developer;
 #[path = "../developer_reports.rs"]

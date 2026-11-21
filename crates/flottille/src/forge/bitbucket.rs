@@ -588,7 +588,7 @@ async fn detailed_with(
             let page = page?;
             let (values, cut) = comments?;
             let closing = cloud_closing(found.state, &page);
-            let comments = cloud_comments(&values);
+            let comments = named_mentions(context, cloud_comments(&values)).await;
             let threads = super::threads::cloud(&values, &comments);
             Ok::<_, String>((cloud_reviewers(&page), comments, closing, (threads, cut)))
         } else {
@@ -1469,6 +1469,75 @@ fn cloud_comments(comments: &[Value]) -> Vec<Comment> {
             recorded: false,
         })
         .collect()
+}
+
+/// How many accounts one pull request's mentions are looked up for; the others read as someone.
+const MENTIONED: usize = 30;
+
+/// The account ids a Cloud text mentions: Cloud writes a mention as `@{<account id>}`.
+fn mentioned_in(text: &str) -> Vec<&str> {
+    let mut found = Vec::new();
+    let mut rest = text;
+    while let Some(at) = rest.find("@{") {
+        let after = &rest[at + 2..];
+        let Some(end) = after.find('}') else { break };
+        found.push(&after[..end]);
+        rest = &after[end + 1..];
+    }
+    found
+}
+
+/// A Cloud comment's mentions written as the names of the accounts (`@Ada Lovelace`), as a person
+/// reads them: each account is asked of Cloud once (`GET /users/<account id>`), and one it does
+/// not give, or whose id is no account id, reads as `@someone`. Never an id in the text.
+async fn named_mentions(context: &str, mut comments: Vec<Comment>) -> Vec<Comment> {
+    let mut ids: Vec<String> = Vec::new();
+    for comment in &comments {
+        for id in mentioned_in(&comment.body) {
+            if !ids.iter().any(|known| known == id) && ids.len() < MENTIONED {
+                ids.push(id.to_owned());
+            }
+        }
+    }
+    if ids.is_empty() {
+        return comments;
+    }
+    let asked = ids.iter().map(|id| async move {
+        // The id goes into a path: an account id is letters, digits, `:`, `-` and `_`.
+        if id.is_empty()
+            || !id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || ":-_".contains(c))
+        {
+            return None;
+        }
+        let user = json(&["api", &format!("/users/{id}"), "--context", context])
+            .await
+            .ok()?;
+        let name = user["display_name"].as_str()?.trim();
+        (!name.is_empty()).then(|| masked(name).replace(['\n', '\r'], " "))
+    });
+    let names = futures::future::join_all(asked).await;
+    for comment in &mut comments {
+        let mut said = String::with_capacity(comment.body.len());
+        let mut rest = comment.body.as_str();
+        while let Some(at) = rest.find("@{") {
+            let after = &rest[at + 2..];
+            let Some(end) = after.find('}') else { break };
+            let name = ids
+                .iter()
+                .position(|id| id == &after[..end])
+                .and_then(|at| names[at].as_deref())
+                .unwrap_or("someone");
+            said.push_str(&rest[..at]);
+            said.push('@');
+            said.push_str(name);
+            rest = &after[end + 1..];
+        }
+        said.push_str(rest);
+        comment.body = said;
+    }
+    comments
 }
 
 /// A comment's number, as Bitbucket gives it, to tell it from another of the same words.

@@ -268,6 +268,11 @@ pub const SESSIONS_HINT: &str =
 pub const RESUME_HINT: &str = "A session stopped by its quota goes on at the reset. Each session \
      can change it in its composer.";
 
+/// What the Notifications section says of what rings.
+pub const NOTIFICATIONS_HINT: &str = "A request, a question, a failure or a report rings with a \
+    short sound: as a notification of this desktop when the window is not focused, as a toast \
+    in the window when it is.";
+
 /// What the developer mode's switch logs, under its label.
 pub const DEVELOPER_HINT: &str = "Why each call was allowed, held or refused, one JSON line each, \
      secrets masked. For working on Flottille.";
@@ -317,6 +322,8 @@ pub struct SettingsPage {
     developer: Option<Developer>,
     /// The developer mode's switch flipped, until the daemon answers: what it was asked to become.
     developer_pending: Option<bool>,
+    /// Why the desktop shows none of Flottille's notifications, `None` while it does.
+    desktop_why: Option<String>,
     /// The findings agents filed about Flottille itself, once the daemon said them.
     findings: Option<Vec<crate::findings::Finding>>,
     finding_rows: Listing<crate::findings::Finding>,
@@ -433,6 +440,7 @@ impl SettingsPage {
             new_session_pending: false,
             developer: None,
             developer_pending: None,
+            desktop_why: None,
             findings: None,
             finding_rows: Listing::default(),
             exporting: false,
@@ -1280,6 +1288,56 @@ impl SettingsPage {
             Err(_) => {}
         }
         cx.notify();
+    }
+
+    /// What the daemon says of the desktop's notifications: why it shows none, or nothing.
+    pub fn set_desktop(&mut self, why: Option<String>, cx: &mut Context<Self>) {
+        if self.desktop_why != why {
+            self.desktop_why = why;
+            cx.notify();
+        }
+    }
+
+    /// What rings, and where: the desktop's notification when the window is not focused, a toast
+    /// when it is, and a short sound; and the line that says when the desktop shows none.
+    fn notifications_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = palette(cx);
+        let card = div()
+            .id("notifications")
+            .p(space::LG)
+            .flex()
+            .flex_col()
+            .rounded(px(12.))
+            .bg(p.card)
+            .border_1()
+            .border_color(p.line)
+            .text_size(px(13.))
+            .child(div().child(NOTIFICATIONS_HINT))
+            .child(
+                presence_of(
+                    "desktop-notifications-line",
+                    self.desktop_why.clone().map(SharedString::from),
+                    move |why| {
+                        div()
+                            .id("desktop-notifications")
+                            .aria_label("This desktop shows no notifications")
+                            .flex()
+                            .flex_col()
+                            .text_size(px(12.5))
+                            .child(
+                                div()
+                                    .text_color(p.text)
+                                    .child("This desktop shows no notifications"),
+                            )
+                            .child(div().text_color(p.mute).child(why))
+                            .test_support()
+                            .into_any_element()
+                    },
+                )
+                .space(space::MD),
+            )
+            .test_support();
+        Section::new("notifications", "Notifications").child(card)
     }
 
     /// The daemon's list of the findings: the rows that came unfold, those that left fold away.
@@ -2505,6 +2563,10 @@ impl Render for SettingsPage {
             _ => vec![
                 ("about", self.about.clone().into_any_element()),
                 ("appearance", self.appearance_section(cx).into_any_element()),
+                (
+                    "notifications",
+                    self.notifications_section(cx).into_any_element(),
+                ),
                 ("workspaces", self.workspaces.clone().into_any_element()),
                 ("developer", self.developer_section(cx).into_any_element()),
                 ("version", self.version.clone().into_any_element()),

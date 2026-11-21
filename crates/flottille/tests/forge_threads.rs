@@ -1089,3 +1089,27 @@ fn a_data_center_comment_that_keeps_changing_says_to_try_again() {
     );
     assert_eq!(bkt_writes(&user).len(), 2, "{:?}", bkt_writes(&user));
 }
+
+#[test]
+fn a_bitbucket_cloud_mention_is_a_name() {
+    let user = User::with_fake_agent().with_fake_bkt();
+    on_cloud(&user);
+    let mut script = cloud_script();
+    // Cloud writes a mention in the raw text as `@{<account id>}`.
+    script["api"]["/repositories/acme/app/pullrequests/12/comments"]["values"][3]["content"]["raw"] =
+        json!("Thanks @{557058:9f8e7d6c-0000-4222-8333-444455556666}, and @{no-such-account}.");
+    script["api"]["/users/557058:9f8e7d6c-0000-4222-8333-444455556666"] = json!({"display_name": "Ada Lovelace", "account_id": "557058:9f8e7d6c-0000-4222-8333-444455556666"});
+    user.bkt_script(script);
+    let mcp = agent(&user);
+
+    let text = show(&mcp);
+
+    assert!(
+        text.contains("Thanks @Ada Lovelace, and @someone"),
+        "{text}"
+    );
+    assert!(
+        !text.contains("557058") && !text.contains("no-such-account"),
+        "{text}"
+    );
+}
