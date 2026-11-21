@@ -1274,6 +1274,23 @@ fn notes_are_grouped_by_area_with_fixes_last() {
     );
 }
 
+#[test]
+fn the_token_is_given_to_the_step_that_reads_the_notes_only() {
+    let workflow = std::fs::read_to_string(tool(".github/workflows/ci.yml")).unwrap();
+    let build = workflow
+        .split("      HEAD_REF: ${{ github.head_ref }}")
+        .nth(1)
+        .unwrap();
+    let (job, steps) = build.split_once("    steps:").unwrap();
+    // The job's own environment reaches every step, the build scripts and the dependencies.
+    assert!(!job.contains("GH_TOKEN"), "{job}");
+    let (version, _) = steps.split_once("        run: |").unwrap();
+    assert!(
+        version.contains("GH_TOKEN: ${{ github.token }}"),
+        "{version}"
+    );
+}
+
 // The shape check asks for a note (#1178).
 
 /// What `.github/scripts/pr-note.sh` says of a pull request titled `title` that changes `changed`
