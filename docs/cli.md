@@ -143,6 +143,9 @@ warn acli is not on PATH, and example.atlassian.net (shop: tracker) needs it: in
 warn claude is 2.1.300, and this Flottille was checked against 2.1.295: its stream-json mode may have changed
 ```
 
+The window's **Settings › General › Check Flottille** shows the same checks (`provider.list`, `daemon.status`, `project.programs`), with *Check again*, and *Turn on* for a provider that is off.
+
+
 ### `flottille provider list [--json]`
 
 Each provider, whether its agents can run, the Auto judge (`docs/design.md` §7.1), said

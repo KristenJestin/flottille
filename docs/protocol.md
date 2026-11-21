@@ -921,7 +921,8 @@ setting}]`, `setting` being `judged`, `passes`, `asked` or `off`).
   it is turned on, by `extension.set {name: "connections", enabled: true}` (whose answer then has
   `given`, the names of the connections it pinned) or by `connection.edit {enabled: true}`; so is
   one whose sign-in (`connection.login`) ends well.
-- `connection.edit {name, …}` replaces the keys given (`null` removes one; a command drops the URL
+- `connection.edit {name, …}` replaces the keys given (`null` removes one, and so does an empty
+  `client_id`, which a client that cannot send a `null` uses; a command drops the URL
   and the other way round). An edit of the command, the URL, `env`, `headers` or `only` is pinned
   again as `connection.add` pins, the settings of the actions that did not change kept, with
   `given` in the answer; but not when the connection is cut off (its diff is read first) or off,
