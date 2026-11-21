@@ -14,7 +14,7 @@ use flottille_window::Shell;
 use flottille_window::settings::SettingsPage;
 use gpui_design_system::motion::PANEL;
 use gpui_design_system::omarchy::Environment;
-use gpui_kit::test::TestWindowExt;
+use gpui_kit::test::{TestQueryExt as _, TestWindowExt};
 use gpui_kit::{Entity, TestAppContext, VisualTestContext, px, size};
 use serde_json::{Value, json};
 
@@ -347,9 +347,14 @@ fn a_finding_is_marked_filed_with_its_address(cx: &mut TestAppContext) {
         })
     });
     click(cx, "finding-filed-save");
-    until(&shell, cx, "the dialog closes", |cx| {
-        !present(cx, "finding-filed-modal")
+    until(&shell, cx, "the daemon answers", |cx| {
+        toasts(&shell, cx)
+            .iter()
+            .any(|toast| toast == "Finding #2 is marked filed")
     });
+    // The dialog folds away over its motion.
+    settle(cx);
+    assert!(!present(cx, "finding-filed-modal"), "the dialog closes");
     // The daemon holds what `developer reports filed` writes.
     let reports = user.call("developer.reports", json!({})).unwrap();
     let filed = reports["findings"]
@@ -374,7 +379,6 @@ fn a_finding_is_marked_filed_with_its_address(cx: &mut TestAppContext) {
         label(cx, "finding-2-filed").as_deref(),
         Some("Filed: https://example.com/acme/app/issues/12")
     );
-    // A filed finding is filed: its ⋯ no longer offers it.
-    click(cx, "finding-2-more");
-    assert!(!present(cx, "finding-2-mark-filed"));
+    // A filed finding is filed: it has no ⋯ to offer it again.
+    assert!(!present(cx, "finding-2-more"));
 }
