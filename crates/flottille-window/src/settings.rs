@@ -55,8 +55,9 @@ pub const SECTIONS: [(&str, &str); 6] = [
 
 /// The blocks of the Agents tab, top to bottom: each one is a section of the page, entering on its
 /// own.
-const AGENTS_BLOCKS: [&str; 5] = [
+const AGENTS_BLOCKS: [&str; 6] = [
     "providers",
+    "forges",
     "new-sessions",
     "rules",
     "tool-results",
@@ -344,6 +345,8 @@ pub struct SettingsPage {
     /// Why the daemon could not read the appearance it keeps: the tab says so and stays usable,
     /// a choice writes it again.
     appearance_unread: Option<String>,
+    /// The programs' sign-ins: the forges' section, and what each provider's row offers.
+    sign_in: Entity<crate::sign_in::SignInSection>,
     /// The tab chosen: the index of its section in [`SECTIONS`].
     tab: usize,
     /// The row of Features whose page is open, by its key: kept while another tab is shown.
@@ -409,8 +412,10 @@ impl SettingsPage {
         connections: Entity<ConnectionsSection>,
         machines: Entity<crate::machines_page::MachinesSection>,
         version: Entity<crate::version::VersionSection>,
+        sign_in: Entity<crate::sign_in::SignInSection>,
     ) -> Self {
         Self {
+            sign_in,
             machines,
             version,
             rules,
@@ -969,6 +974,10 @@ impl SettingsPage {
 
     pub fn workspaces_folder(&self) -> &Entity<WorkspacesFolder> {
         &self.workspaces
+    }
+
+    pub fn sign_in(&self) -> &Entity<crate::sign_in::SignInSection> {
+        &self.sign_in
     }
 
     pub fn vault(&self) -> &Entity<VaultSection> {
@@ -2181,6 +2190,12 @@ impl SettingsPage {
                 None => tag.into_any_element(),
             }
         });
+        // Its own sign-in, as the daemon of the machine read it: its state, Sign in or Sign out,
+        // and the line to type when it signs in only in a terminal and the row does not say it.
+        let says_line = !provider.needs_sign_in();
+        let controls = div().child(self.sign_in.update(cx, |section, cx| {
+            section.controls(&provider.name, says_line, cx)
+        }));
         // What to do about it unfolds under the line: the command that signs it in, in a block to
         // copy, or the page that says how to install it.
         let sign_in = presence_of(
@@ -2244,6 +2259,7 @@ impl SettingsPage {
             .child(state.mt(space::SM))
             .child(sign_in)
             .child(install)
+            .child(controls.mt(space::SM))
             .into_any_element()
     }
 
@@ -2483,6 +2499,7 @@ impl Render for SettingsPage {
         let blocks: Vec<(&str, AnyElement)> = match SECTIONS[tab].0 {
             "agents" => vec![
                 ("providers", self.providers_section(window, cx)),
+                ("forges", self.sign_in.clone().into_any_element()),
                 (
                     "new-sessions",
                     self.new_sessions_section(cx).into_any_element(),

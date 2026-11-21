@@ -419,6 +419,7 @@ impl Shell {
         let modals = cx.new(|_| Modals::new());
         let version = cx.new(|_| crate::version::VersionSection::new(this.clone()));
         let vault = cx.new(|_| VaultSection::new(this.clone(), modals.clone()));
+        let sign_in = cx.new(|_| crate::sign_in::SignInSection::new(this.clone(), modals.clone()));
         let connections =
             cx.new(|_| ConnectionsSection::new(this.clone(), vault.clone(), modals.clone()));
         let machines = {
@@ -449,6 +450,7 @@ impl Shell {
                 connections.clone(),
                 machines.clone(),
                 version.clone(),
+                sign_in.clone(),
             )
         });
         let services = {
@@ -477,6 +479,14 @@ impl Shell {
                 |vault, window, cx| vault.dialog(window, cx),
                 VaultSection::is_open,
                 VaultSection::focus_handle,
+                cx,
+            );
+            modals.add(
+                crate::sign_in::MODAL,
+                &sign_in,
+                |section, window, cx| section.dialog(window, cx),
+                crate::sign_in::SignInSection::is_open,
+                crate::sign_in::SignInSection::focus_handle,
                 cx,
             );
             modals.add(
@@ -1735,6 +1745,14 @@ impl Shell {
             Update::CompactionChanged => self.actions.send(Command::CompactionRead),
             Update::SessionsChanged => self.actions.send(Command::SessionsRead),
             Update::VaultChanged => self.actions.send(Command::Vault),
+            Update::ProgramSignIn {
+                program,
+                state,
+                why,
+            } => {
+                let section = self.settings.read(cx).sign_in().clone();
+                section.update(cx, |section, cx| section.changed(&program, &state, why, cx));
+            }
             Update::SignIn { said, name, why } => {
                 let section = self.settings.read(cx).connections().clone();
                 section.update(cx, |section, cx| {
@@ -2298,6 +2316,24 @@ impl Shell {
                     let section = page.read(cx).commands().clone();
                     section.update(cx, |section, cx| section.written(refused, cx));
                 }
+            }
+            Outcome::SignIns(listed) => {
+                let section = self.settings.read(cx).sign_in().clone();
+                section.update(cx, |section, cx| section.listed(listed, cx));
+            }
+            Outcome::SignInStarted { program, answer } => {
+                let section = self.settings.read(cx).sign_in().clone();
+                section.update(cx, |section, cx| section.started(&program, answer, cx));
+            }
+            Outcome::SignInAnswered {
+                program,
+                what,
+                refused,
+            } => {
+                let section = self.settings.read(cx).sign_in().clone();
+                section.update(cx, |section, cx| {
+                    section.answered(&program, what, refused, cx)
+                });
             }
             Outcome::Vault { listed } => {
                 // A project's Tracker offers the entries it sees to log time with.
@@ -3074,6 +3110,7 @@ impl Shell {
         self.actions
             .send(Command::WorkspacesFolderRead { project: None });
         self.actions.send(Command::Vault);
+        self.actions.send(Command::SignIns);
         self.ask_appearance(None);
     }
 
