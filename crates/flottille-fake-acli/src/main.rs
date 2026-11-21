@@ -165,11 +165,18 @@
 //! `no_move` ends with 0 without moving, as a bulk command ignoring a refused transition may;
 //! `die` ends the process by a signal, before or after the move; `unreadable_after_move` makes
 //! a `view` end with 1 once the work item has moved.
+//!
+//! The sign-in (#1185): `jira auth login` and `jira auth logout` play the scripted sign-in every
+//! fake shares (`crates/flottille-fake-gh/src/sign_in.rs`), and `jira auth status` says what it
+//! left.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value, json};
+
+#[path = "../../flottille-fake-gh/src/sign_in.rs"]
+mod sign_in;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -388,9 +395,15 @@ fn answer(dir: &Path, script: &Value, args: &[String]) -> i32 {
             println!("acli version 1.3.2-stable");
             0
         }
+        // Its documented web sign-in (`acli jira auth login --web`), the browser on the same
+        // machine; the words it prints are assumed, `acli`'s source being closed.
+        ["jira", "auth", "login", ..] => sign_in::login(dir, script, args, |address, _| {
+            println!("Open this URL in your browser to authenticate: {address}");
+        }),
+        ["jira", "auth", "logout", ..] => sign_in::logout(dir, args),
         ["jira", "auth", "status", ..] => {
             wait(script);
-            if script["signed_in"] == false {
+            if !sign_in::signed_in(dir, script) {
                 eprintln!("✗ Not logged in. Run: acli jira auth login");
                 return 1;
             }

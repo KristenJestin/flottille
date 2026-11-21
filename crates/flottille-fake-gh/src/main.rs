@@ -138,16 +138,32 @@
 //! [{"id": "F_s", "name": "Status", "options": [{"id": "o1", "name": "Todo"}]}]}`); `project
 //! item-edit` answers nothing. `missing_scope: true` makes every `project` call, and an `issue
 //! view` asking `projectItems`, fail as `gh` does without the `project` scope.
+//!
+//! The sign-in (#1185): `auth status` (signed in as the script's `user`, its token line
+//! `status_token`), `auth login` and `auth logout` play the scripted sign-in of `sign_in.rs`,
+//! which every fake program shares. Called through a link named `glab`, the fake is GitLab's
+//! `glab` for its version and its sign-in alone, its folder `FLOTTILLE_FAKE_GLAB_DIR`.
 
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value, json};
 
+mod sign_in;
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let dir =
-        PathBuf::from(std::env::var_os("FLOTTILLE_FAKE_GH_DIR").expect("FLOTTILLE_FAKE_GH_DIR"));
+    // Called as `glab` (a link named so), it is GitLab's command line, for its sign-in alone, in
+    // a folder of its own.
+    let called = std::env::args_os()
+        .next()
+        .and_then(|zero| Path::new(&zero).file_name().map(|name| name.to_owned()));
+    let glab_called = called.as_deref() == Some(std::ffi::OsStr::new("glab"));
+    let variable = match glab_called {
+        true => "FLOTTILLE_FAKE_GLAB_DIR",
+        false => "FLOTTILLE_FAKE_GH_DIR",
+    };
+    let dir = PathBuf::from(std::env::var_os(variable).expect(variable));
     let env: Map<String, Value> = ["GH_TOKEN", "GITHUB_TOKEN", "GH_CONFIG_DIR", "GH_HOST"]
         .iter()
         .filter_map(|name| Some((name.to_string(), Value::from(std::env::var(name).ok()?))))
@@ -171,7 +187,97 @@ fn main() {
         .ok()
         .and_then(|text| serde_json::from_str(&text).ok())
         .unwrap_or_else(|| json!({}));
+    if glab_called {
+        std::process::exit(glab(&dir, &script, &args));
+    }
+    if let Some(code) = auth(&dir, &script, &args) {
+        std::process::exit(code);
+    }
     std::process::exit(answer(&script, &args));
+}
+
+/// The login of the account the fake is signed in as: the script's `user`, else `someone`.
+fn login_name(script: &Value) -> String {
+    script["user"]["login"]
+        .as_str()
+        .unwrap_or("someone")
+        .to_owned()
+}
+
+/// `gh auth status`, `login` and `logout`, as `gh` 2.60 prints them (`internal/authflow/flow.go`
+/// for the sign-in: a terminal-less `--web` prints the code and the address, and waits); none for
+/// any other command. `status_token` is the masked token line `gh auth status` prints, which
+/// Flottille must never keep.
+fn auth(dir: &Path, script: &Value, args: &[String]) -> Option<i32> {
+    let words: Vec<&str> = args.iter().map(String::as_str).collect();
+    let code = match words.as_slice() {
+        ["auth", "status", ..] => {
+            wait(script);
+            if !sign_in::signed_in(dir, script) {
+                eprintln!(
+                    "You are not logged into any GitHub hosts. To log in, run: gh auth login"
+                );
+                return Some(1);
+            }
+            let token = script["status_token"]
+                .as_str()
+                .unwrap_or("gho_************************************");
+            eprintln!(
+                "github.com\n  ✓ Logged in to github.com account {} (keyring)\n  - Active account: \
+                 true\n  - Git operations protocol: https\n  - Token: {token}",
+                login_name(script)
+            );
+            0
+        }
+        ["auth", "login", ..] => sign_in::login(dir, script, args, |address, code| {
+            eprintln!("! First copy your one-time code: {code}");
+            eprintln!("Open this URL to continue in your web browser: {address}");
+        }),
+        ["auth", "logout", ..] => {
+            let code = sign_in::logout(dir, args);
+            eprintln!("✓ Logged out of github.com account {}", login_name(script));
+            code
+        }
+        _ => return None,
+    };
+    if code == 0 && words.get(1) == Some(&"login") {
+        eprintln!(
+            "✓ Authentication complete.\n✓ Logged in as {}",
+            login_name(script)
+        );
+    }
+    Some(code)
+}
+
+/// The fake as `glab`: its version, and its sign-in as glab's device flow prints it
+/// (`internal/oauth2/device.go`: the code, then the address, on its error output).
+fn glab(dir: &Path, script: &Value, args: &[String]) -> i32 {
+    let words: Vec<&str> = args.iter().map(String::as_str).collect();
+    match words.as_slice() {
+        ["--version"] => {
+            println!("glab 1.53.0 (2026-01-01)");
+            0
+        }
+        ["auth", "status", ..] => {
+            if sign_in::signed_in(dir, script) {
+                eprintln!("gitlab.com\n  ✓ Logged in to gitlab.com as someone");
+                0
+            } else {
+                eprintln!("gitlab.com\n  x gitlab.com: API call failed: 401 Unauthorized");
+                1
+            }
+        }
+        ["auth", "login", ..] => sign_in::login(dir, script, args, |address, code| {
+            eprintln!("\nFirst copy your one-time code: {code}");
+            eprintln!("Then open this URL on any device to authorize: {address}\n");
+            eprintln!("Waiting for authorization...");
+        }),
+        ["auth", "logout", ..] => sign_in::logout(dir, args),
+        _ => {
+            eprintln!("fake glab: unknown command {words:?}");
+            2
+        }
+    }
 }
 
 /// Whether a `pr edit`, `pr ready` or `pr reopen` was received.
@@ -707,17 +813,6 @@ fn answer(script: &Value, args: &[String]) -> i32 {
                 Value::Null => println!("{}", json!({"login": "someone"})),
                 user => println!("{user}"),
             }
-            0
-        }
-        ["auth", "status", ..] => {
-            wait(script);
-            if script["signed_in"] == false {
-                eprintln!(
-                    "You are not logged into any GitHub hosts. To log in, run: gh auth login"
-                );
-                return 1;
-            }
-            eprintln!("github.com\n  ✓ Logged in to github.com account someone (keyring)");
             0
         }
         ["issue", "view", number, ..] => {
