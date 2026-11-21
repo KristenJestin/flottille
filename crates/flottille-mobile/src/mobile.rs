@@ -105,7 +105,9 @@ struct Connection {
     links: HashMap<String, Link>,
     /// The runners a task links to, by name: the machine key it links to, and the task.
     linking: HashMap<String, (PublicKey, tokio::task::AbortHandle)>,
-    told: HashMap<[u8; 32], Vec<String>>,
+    /// The addresses the hub told, none before its first telling: a runner is linked to once it
+    /// came, so that the addresses are tried before the hub (`docs/remote.md`, "The transport").
+    told: Option<HashMap<[u8; 32], Vec<String>>>,
     tasks: Vec<tokio::task::AbortHandle>,
 }
 
@@ -474,10 +476,11 @@ impl Inner {
     /// The addresses the hub told for the members' machines.
     fn told(self: &Arc<Self>, told: Vec<Told>) {
         if let Some(connection) = &mut self.state().connection {
-            connection.told = told
-                .into_iter()
-                .map(|told| (*told.key.as_bytes(), told.addresses))
-                .collect();
+            connection.told = Some(
+                told.into_iter()
+                    .map(|told| (*told.key.as_bytes(), told.addresses))
+                    .collect(),
+            );
         }
         self.told_again.notify_waiters();
         self.link_runners();
@@ -506,6 +509,9 @@ impl Inner {
         let Some(connection) = &mut state.connection else {
             return;
         };
+        if connection.told.is_none() {
+            return;
+        }
         for (name, machine) in runners {
             if let std::collections::hash_map::Entry::Vacant(vacant) =
                 connection.linking.entry(name)
@@ -666,7 +672,8 @@ impl Inner {
             }
             return;
         }
-        state.view.online(machine, link.is_some(), why);
+        let through_hub = link.as_ref().is_some_and(Link::through_hub);
+        state.view.online(machine, link.is_some(), through_hub, why);
         if let Some(connection) = &mut state.connection {
             match link {
                 Some(link) => {
@@ -694,7 +701,7 @@ async fn connect(inner: Arc<Inner>, listener: Arc<dyn Listener>) -> Result<(), M
         (device, state.endpoint.clone())
     };
     let said = |error: flottille_link::ControlError| MobileError::new(error.to_string());
-    let session = device
+    let mut session = device
         .connect(&machine, &crate::hello(), &Tls::System)
         .await
         .map_err(said)?;
@@ -715,6 +722,11 @@ async fn connect(inner: Arc<Inner>, listener: Arc<dyn Listener>) -> Result<(), M
         .map_err(said)?;
     let endpoint =
         Endpoint::dialler(&machine).map_err(|error| MobileError::new(error.to_string()))?;
+    // The phone listens nowhere: its links to the runners go through this session to the hub,
+    // after any address the hub told, as a daemon's do.
+    if let Some(port) = session.relay() {
+        endpoint.through(port);
+    }
     if let Some(name) = Some(inner.state().view.state().name).filter(|name| !name.is_empty()) {
         endpoint.name_as(&name);
     }
@@ -732,7 +744,7 @@ async fn connect(inner: Arc<Inner>, listener: Arc<dyn Listener>) -> Result<(), M
             endpoint,
             links: HashMap::new(),
             linking: HashMap::new(),
-            told: HashMap::new(),
+            told: None,
             tasks: vec![pump.abort_handle(), control.abort_handle()],
         });
     }
@@ -768,7 +780,8 @@ async fn keep_linked(inner: Arc<Inner>, name: String, machine: PublicKey) {
                     connection.endpoint.clone(),
                     connection
                         .told
-                        .get(machine.as_bytes())
+                        .as_ref()
+                        .and_then(|told| told.get(machine.as_bytes()))
                         .cloned()
                         .unwrap_or_default(),
                 )
