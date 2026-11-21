@@ -794,3 +794,95 @@ fn removing_a_routine_is_asked_once_in_the_dialog_of_the_window(cx: &mut TestApp
         present(cx, "routines-empty")
     });
 }
+
+#[gpui_kit::test]
+fn a_routine_notification_opens_the_result_page(cx: &mut TestAppContext) {
+    let user = user();
+    add(&user, "Tickets to review", LIST_REVIEWS, json!({}));
+    let run = run_now(&user, "Tickets to review");
+    assert_eq!(unread(&user, "Tickets to review"), 1);
+
+    // The window is on no page of the project: the notification's row leads there.
+    let (shell, cx) = window(&user, cx);
+    until(
+        &shell,
+        cx,
+        "the bell has the routine's notification",
+        |cx| {
+            shell.read_with(cx, |s, _| {
+                s.snapshot().bell.iter().any(|n| n.kind == "routine")
+            })
+        },
+    );
+    let key = shell.read_with(cx, |s, _| {
+        s.snapshot()
+            .bell
+            .iter()
+            .find(|n| n.kind == "routine")
+            .unwrap()
+            .key
+            .clone()
+    });
+    shell.update_in(cx, |s, window, cx| s.choose(&key, window, cx));
+    until(&shell, cx, "the result page shows", |cx| {
+        present(cx, "result-report")
+    });
+
+    assert_eq!(
+        shell.read_with(cx, |s, _| s.selected().cloned()),
+        Some(flottille_window::shell::Selection::Project(
+            "app".to_owned()
+        )),
+        "the project's page, not the session's"
+    );
+    assert!(!present(cx, "session-composer"), "no conversation");
+    assert_eq!(
+        label(cx, "result-summary").as_deref(),
+        Some("4 to review"),
+        "the run's result: run {}",
+        run["id"]
+    );
+    until(&shell, cx, "the daemon knows it was opened", |_| {
+        unread(&user, "Tickets to review") == 0
+    });
+    until(&shell, cx, "the notification is read", |cx| {
+        shell.read_with(cx, |s, _| s.snapshot().bell.iter().all(|n| n.read))
+    });
+}
+
+#[gpui_kit::test]
+fn the_routines_tab_has_its_place_in_the_history(cx: &mut TestAppContext) {
+    use flottille_window::history::Way;
+    let user = user();
+    add(&user, "Tickets to review", LIST_REVIEWS, json!({}));
+    let (shell, cx) = open_tab(&user, cx);
+    until(&shell, cx, "the routine's row shows", |cx| {
+        present(cx, "routine-Tickets to review")
+    });
+
+    shell.update_in(cx, |s, window, cx| {
+        s.open(flottille_window::shell::Selection::Settings, window, cx)
+    });
+    settle(cx);
+    assert!(!present(cx, "routine-Tickets to review"));
+
+    shell.update_in(cx, |s, window, cx| s.go(Way::Back, window, cx));
+    until(&shell, cx, "the Routines tab is back", |cx| {
+        present(cx, "routine-Tickets to review")
+    });
+    assert_eq!(
+        shell.read_with(cx, |s, _| s.selected().cloned()),
+        Some(flottille_window::shell::Selection::Project(
+            "app".to_owned()
+        ))
+    );
+
+    // Back again is the page on the tab it was opened on; forward is the Routines tab.
+    shell.update_in(cx, |s, window, cx| s.go(Way::Back, window, cx));
+    settle(cx);
+    assert!(!present(cx, "routine-Tickets to review"));
+    shell.update_in(cx, |s, window, cx| s.go(Way::Forward, window, cx));
+    until(&shell, cx, "the Routines tab is back", |cx| {
+        present(cx, "routine-Tickets to review")
+    });
+}
