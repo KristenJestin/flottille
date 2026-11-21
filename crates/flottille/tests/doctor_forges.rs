@@ -82,12 +82,12 @@ fn doctor_lists_the_forge_and_tracker_programs_the_projects_use() {
     assert_eq!(entry(&report, "bkt", "bitbucket.org")["signed_in"], true);
     assert_eq!(entry(&report, "bkt", "git.example.com")["signed_in"], true);
     // No git in its `PATH`: doctor says no push is lifted, and nothing else.
+    let warnings = report["warnings"].as_array().unwrap();
+    assert_eq!(warnings.len(), 1, "{report}");
     assert!(
-        report["warnings"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|warning| warning.to_string().contains("no git of the daemon's PATH")),
+        warnings[0]
+            .to_string()
+            .contains("no git of the daemon's PATH"),
         "{report}"
     );
 
