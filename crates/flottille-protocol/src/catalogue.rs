@@ -313,6 +313,34 @@ mod tests {
     }
 
     #[test]
+    fn what_a_session_page_writes_is_drive_and_what_it_reads_is_read() {
+        // A viewer's device may read a conversation, its tree, its pictures and its requests, and
+        // writes none of it: the machine refuses each write by this class (`docs/remote.md`, "Roles").
+        for method in [
+            "agent.send",
+            "agent.send_now",
+            "agent.answer",
+            "agent.cancel",
+            "agent.mode",
+            "approval.approve",
+            "approval.deny",
+        ] {
+            assert_eq!(class(method), Some(Drive), "{method}");
+        }
+        for method in [
+            "agent.show",
+            "agent.tree",
+            "agent.image",
+            "agent.file",
+            "agent.list",
+            "approval.list",
+            "events.watch",
+        ] {
+            assert_eq!(class(method), Some(Read), "{method}");
+        }
+    }
+
+    #[test]
     fn the_drafts_and_the_window_s_state_are_of_the_machine_alone() {
         // What the user left in the window is not read by a device that follows over a link.
         for method in [

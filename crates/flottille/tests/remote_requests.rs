@@ -756,6 +756,12 @@ fn a_viewer_reads_but_cannot_send_answer_or_start() {
         ("agent.send", "send a message"),
         ("agent.answer", "answer a question"),
         ("approval.approve", "answer a request"),
+        // What the Android session page writes (#826): a viewer's page draws none of it, and the
+        // machine refuses each, so a device that bypassed the page changes nothing either.
+        ("approval.deny", "answer a request"),
+        ("agent.mode", "switch the mode"),
+        ("agent.cancel", "stop a turn"),
+        ("agent.send_now", "send a message"),
         ("agent.start", "start a session"),
     ]
     .into_iter()
