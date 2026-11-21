@@ -2367,6 +2367,11 @@ fn a_push_is_not_lifted_where_no_landlock_keeps_its_folder_from_runs() {
     assert!(!remote_has(&user, "unprotected"), "{}", pushed.text);
     assert!(helper_said(&user).is_empty(), "{:?}", helper_said(&user));
     assert!(pushed.text.contains("Landlock"), "{}", pushed.text);
+    assert!(
+        pushed.text.contains("the folder a push runs from"),
+        "one sentence, no run of spaces: {}",
+        pushed.text
+    );
 }
 
 #[test]
@@ -2554,17 +2559,20 @@ fn a_push_is_not_lifted_without_a_root_owned_git() {
     );
 }
 
-#[test]
-fn a_helper_the_user_set_per_forge_signs_a_lifted_push_in() {
-    let (user, _agent, _bus) = user();
-    let (_server, url) = http_remote(&user);
-    // The user's sign-in for one forge alone, as `gh auth setup-git` or a per-forge identity
-    // writes it: an `includeIf "hasconfig:remote.*.url:…"`.
+/// The user's sign-in for one forge alone, as `gh auth setup-git` or a per-forge identity
+/// writes it: an `includeIf "hasconfig:remote.*.url:…"` for the loopback forge of
+/// [`http_remote`] (`127.0.0.1`, not `localhost`). Its helper adds each action it is asked for to
+/// `helper-said`, then the host it is asked for, and gives an invented sign-in to any host, as a
+/// helper that reads a token from a password store does.
+fn per_forge_helper(user: User) -> User {
     let helper = user.path("helper/sign-in");
     script(
         &helper,
         &format!(
             "echo \"$1\" >> '{said}'\n\
+             while read -r asked; do\n\
+               case \"$asked\" in host=*) echo \"$asked\" >> '{said}';; esac\n\
+             done\n\
              if [ \"$1\" = get ]; then echo username=octo; echo password=invented-password; fi\n",
             said = user.path("helper-said").display()
         ),
@@ -2576,13 +2584,20 @@ fn a_helper_the_user_set_per_forge_signs_a_lifted_push_in() {
         format!("[credential]\n\thelper = {}\n", helper.display()),
     )
     .unwrap();
-    let user = user_settings(
+    user_settings(
         user,
         &format!(
             "[includeIf \"hasconfig:remote.*.url:http://127.0.0.1:*/**\"]\n\tpath = {}\n",
             forge.display()
         ),
-    );
+    )
+}
+
+#[test]
+fn a_helper_the_user_set_per_forge_signs_a_lifted_push_in() {
+    let (user, _agent, _bus) = user();
+    let (_server, url) = http_remote(&user);
+    let user = per_forge_helper(user);
     let mcp = session(&user, &url);
 
     let pushed = line(&user, &mcp, "git push origin HEAD:refs/heads/per-forge");
@@ -2591,6 +2606,61 @@ fn a_helper_the_user_set_per_forge_signs_a_lifted_push_in() {
     assert!(
         helper_said(&user).contains(&"get".to_owned()),
         "{:?}",
+        helper_said(&user)
+    );
+}
+
+#[test]
+fn a_decoy_remote_gets_no_forge_helper_asked_for_another_host() {
+    let (user, _agent, _bus) = user();
+    let (_server, url) = http_remote(&user);
+    let user = per_forge_helper(user);
+    // The same server under a host the forge's pattern does not name: the run's own.
+    let elsewhere = url.replace("127.0.0.1", "localhost");
+    let mcp = session(&user, &elsewhere);
+    // As a run could write it: a remote that matches the forge's pattern, pushed to by no one.
+    user.git(
+        &user.path("work/app"),
+        &["config", "remote.decoy.url", &url],
+    );
+
+    let pushed = line(&user, &mcp, "git push origin HEAD:refs/heads/decoyed");
+
+    assert!(!remote_has(&user, "decoyed"), "{}", pushed.text);
+    assert!(
+        !helper_said(&user)
+            .iter()
+            .any(|said| said.starts_with("host=")),
+        "the forge's helper was asked: {:?}",
+        helper_said(&user)
+    );
+}
+
+#[test]
+fn a_run_written_pushurl_gets_no_forge_helper_asked_for_another_host() {
+    let (user, _agent, _bus) = user();
+    let (_server, url) = http_remote(&user);
+    let user = per_forge_helper(user);
+    let mcp = session(&user, &url);
+    // As a run could write it: `origin` still matches the forge's pattern, its pushes go to
+    // another host.
+    user.git(
+        &user.path("work/app"),
+        &[
+            "config",
+            "remote.origin.pushurl",
+            &url.replace("127.0.0.1", "localhost"),
+        ],
+    );
+
+    let pushed = line(&user, &mcp, "git push origin HEAD:refs/heads/pushurl");
+
+    assert!(!remote_has(&user, "pushurl"), "{}", pushed.text);
+    assert!(
+        !helper_said(&user)
+            .iter()
+            .any(|said| said.starts_with("host=")),
+        "the forge's helper was asked: {:?}",
         helper_said(&user)
     );
 }
