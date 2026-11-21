@@ -406,6 +406,8 @@ async fn accept<C: Clock + Send + 'static>(
 #[derive(Default)]
 struct Sent {
     list: Option<MemberList>,
+    /// Whether the empty list of addresses a device of before 2026-11-21 waits for was sent.
+    no_addresses: bool,
     presence: Option<Vec<PresenceOf>>,
     facts: Option<Vec<Facts>>,
     online: Option<Vec<PublicKey>>,
@@ -604,6 +606,13 @@ fn news<C: Clock>(
     let Some(members) = hub.members() else {
         return frames;
     };
+    // A phone's core of before 2026-11-21 links to its runners only once the hub told the
+    // addresses of the direct link, removed then: told none, once a session, it links through the
+    // hub. A device of since reads it and ignores it.
+    if !sent.no_addresses {
+        frames.push(ToDevice::Addresses(serde_json::Value::Array(Vec::new())));
+        sent.no_addresses = true;
+    }
     let facts = hub.facts().to_vec();
     if sent.facts.as_ref() != Some(&facts) {
         frames.push(ToDevice::Facts(facts.clone()));

@@ -489,10 +489,9 @@ pub enum ToDevice {
     },
     /// The member list, whole, as the members signed it.
     List(MemberList),
-    /// What a hub of the previous version sends: the addresses its members told, for the direct
-    /// link removed on 2026-11-21. Read and ignored, so that a device keeps its session to such a
-    /// hub; this version's hub never sends it.
-    #[serde(skip_serializing)]
+    /// The addresses of the members' machines, for the direct link removed on 2026-11-21: a hub
+    /// of before sends those its members told; this version's hub sends an empty list, once a
+    /// session, which a phone's core of before waits for before it links. Read and ignored.
     Addresses(serde_json::Value),
     /// The presence of the members' clients, for a runner.
     Presence(Vec<PresenceOf>),
@@ -1812,7 +1811,7 @@ mod tests {
     }
 
     #[test]
-    fn the_addresses_of_the_previous_version_are_read_and_never_sent() {
+    fn the_addresses_of_the_previous_version_are_read_and_ignored() {
         // A hub of the previous version tells its members' addresses: read, so that the session
         // goes on, and nothing of it kept.
         let told = format!(
@@ -1823,7 +1822,6 @@ mod tests {
             serde_json::from_str::<ToDevice>(&told),
             Ok(ToDevice::Addresses(_))
         ));
-        assert!(serde_json::to_string(&ToDevice::Addresses(serde_json::json!([]))).is_err());
         // A machine of the previous version tells its own: still an ask the hub reads.
         let asked: Asked =
             serde_json::from_str(r#"{"id": 3, "kind": "addresses", "addresses": ["192.0.2.7"]}"#)
