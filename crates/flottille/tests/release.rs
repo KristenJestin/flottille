@@ -4471,7 +4471,7 @@ fn publish_never_runs_on_a_commit_no_verify_passed_on() {
     let verify = job("verify");
     assert!(
         verify.contains(
-            "needs: [verified-on-dev, changes, check, build-tests, doc-tests, test, test-selected, hub]"
+            "needs: [verified-on-dev, changes, check, build-tests, doc-tests, test, test-selected, hub, android]"
         ),
         "{verify}"
     );
@@ -5188,8 +5188,15 @@ fn a_pull_request_runs_the_selected_tests_alone_and_a_push_the_whole_suite() {
     let verify = ci_job("verify");
     assert!(
         verify.contains(
-            "needs: [verified-on-dev, changes, check, build-tests, doc-tests, test, test-selected, hub]"
+            "needs: [verified-on-dev, changes, check, build-tests, doc-tests, test, test-selected, hub, android]"
         ),
+        "{verify}"
+    );
+    // A red Android job (the phone's core on an emulator) is never merged; skipped is a pass.
+    assert!(
+        verify.contains("ANDROID: ${{ needs.android.result }}")
+            && verify
+                .contains(r#"if [ "$ANDROID" = failure ] || [ "$ANDROID" = cancelled ]; then"#),
         "{verify}"
     );
 }
