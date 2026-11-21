@@ -39,6 +39,8 @@ pub struct MachineView {
     pub online: bool,
     /// Why it is not, when it is not: the link's own sentence.
     pub why: String,
+    /// Whether its link goes through the hub, not to an address (#1167).
+    pub through_hub: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
@@ -157,6 +159,7 @@ impl View {
                     role: member.role.word().to_owned(),
                     online: false,
                     why: "not linked yet".to_owned(),
+                    through_hub: false,
                 },
             })
             .collect();
@@ -183,9 +186,10 @@ impl View {
         }
     }
 
-    pub(crate) fn online(&mut self, machine: &str, online: bool, why: &str) {
+    pub(crate) fn online(&mut self, machine: &str, online: bool, through_hub: bool, why: &str) {
         if let Some(view) = self.machines.iter_mut().find(|view| view.name == machine) {
             view.online = online;
+            view.through_hub = online && through_hub;
             why.clone_into(&mut view.why);
         }
     }

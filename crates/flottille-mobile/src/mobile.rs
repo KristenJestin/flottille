@@ -666,7 +666,8 @@ impl Inner {
             }
             return;
         }
-        state.view.online(machine, link.is_some(), why);
+        let through_hub = link.as_ref().is_some_and(Link::through_hub);
+        state.view.online(machine, link.is_some(), through_hub, why);
         if let Some(connection) = &mut state.connection {
             match link {
                 Some(link) => {
