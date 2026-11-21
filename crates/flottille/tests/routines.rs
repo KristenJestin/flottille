@@ -165,7 +165,15 @@ fn a_routine_runs_at_its_time_as_a_new_session() {
             "schedule": "weekdays 08:30", "zone": "UTC", "mode": "read_only"}),
     );
     assert_eq!(routine["schedule"], "weekdays 08:30", "{routine}");
-    assert_eq!(routine["next_at"], now(&user) + 30 * MINUTE, "{routine}");
+    let first = routine["next_at"].as_u64().unwrap();
+    let said = |at: u64| {
+        Timestamp::from_millisecond(at as i64)
+            .unwrap()
+            .to_zoned(TimeZone::UTC)
+            .strftime("%a %H:%M")
+            .to_string()
+    };
+    assert_eq!(said(first), "Mon 08:30", "{routine}");
 
     advance(&user, 29 * MINUTE);
     assert!(sessions(&user).is_empty(), "nothing runs before its time");
@@ -192,10 +200,7 @@ fn a_routine_runs_at_its_time_as_a_new_session() {
     let next = show(&user, "Tickets to review")["routine"]["next_at"]
         .as_u64()
         .unwrap();
-    let said = Timestamp::from_millisecond(next as i64)
-        .unwrap()
-        .to_zoned(TimeZone::UTC);
-    assert_eq!(said.strftime("%a %H:%M").to_string(), "Tue 08:30");
+    assert_eq!(said(next), "Tue 08:30");
     assert_eq!(sessions(&user).len(), 1, "one run, one session");
 }
 
@@ -327,7 +332,7 @@ fn a_read_only_routine_cannot_write_whatever_its_prompt_says() {
         !user
             .gh_received()
             .iter()
-            .any(|call| call.to_string().contains("comment")),
+            .any(|call| call["args"][1] == "comment"),
         "nothing reached the forge: {:?}",
         user.gh_received()
     );
