@@ -105,7 +105,9 @@
 //! "…": "…"}}}}`), a run it does not hold being not found. `workflow run <workflow>` prints the
 //! link of the run it started (numbered `dispatched`, 1 by default), as `gh` does when GitHub gives
 //! it, and `run cancel <id>` that the cancel was asked. `run list --branch <b>` keeps the runs whose
-//! `headBranch` is that branch (a run with none is kept).
+//! `headBranch` is that branch (a run with none is kept), and `--workflow <w>` those whose
+//! `workflowName` is `w` or whose `path` (the workflow's file, which a test gives) ends with the
+//! file `w`, as GitHub takes either.
 //!
 //! `edit_starts` (`{"acme/app": {"12": [{"__typename": "CheckRun", "name": "build", …}]}}`) adds
 //! those checks to the `statusCheckRollup` that `pr view` answers for that pull request once a
@@ -1044,6 +1046,15 @@ fn answer(script: &Value, args: &[String]) -> i32 {
                         .filter(|run| {
                             option("--branch").is_none_or(|branch| {
                                 run["headBranch"].as_str().is_none_or(|on| on == branch)
+                            })
+                        })
+                        // As GitHub takes it: the workflow's name, or its file's.
+                        .filter(|run| {
+                            option("--workflow").is_none_or(|workflow| {
+                                run["workflowName"] == workflow
+                                    || run["path"].as_str().is_some_and(|path| {
+                                        path.rsplit('/').next() == Some(workflow)
+                                    })
                             })
                         })
                         .collect();
