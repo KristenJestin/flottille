@@ -25,6 +25,12 @@ class BindingsTest {
         override fun open(sealed: ByteArray) = seal(sealed)
     }
 
+    /** A Keystore that fails as Android's does at times: neither sealed nor refused, thrown. */
+    private object Throwing : Sealer {
+        override fun seal(plain: ByteArray): ByteArray = throw IllegalStateException("the Keystore is locked")
+        override fun open(sealed: ByteArray): ByteArray = throw IllegalStateException("the Keystore is locked")
+    }
+
     private fun folder(): File = Files.createTempDirectory("flottille-core").toFile()
 
     @Test
@@ -71,6 +77,17 @@ class BindingsTest {
                 assertTrue(refused.why, refused.why.contains("not connected"))
             }
         }
+    }
+
+    @Test
+    fun a_sealer_that_throws_leaves_the_phone_not_joined_and_says_why() {
+        val folder = folder()
+        File(folder, "device.sealed").writeBytes(ByteArray(44) { 1 })
+        FlottilleCore(folder, Throwing).use { core ->
+            assertFalse(core.joined)
+            assertTrue(core.view.said.toString(), core.view.said.any { it.contains("the Keystore is locked") })
+        }
+        assertNull(FlottilleCore.lastPanic(folder))
     }
 
     @Test

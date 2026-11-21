@@ -48,6 +48,14 @@ impl std::fmt::Display for MobileError {
 
 impl std::error::Error for MobileError {}
 
+/// What the app's side threw that is not a `MobileError` (a sealer's unexpected exception): a
+/// refusal said, never a panic of the core.
+impl From<uniffi::UnexpectedUniFFICallbackError> for MobileError {
+    fn from(error: uniffi::UnexpectedUniFFICallbackError) -> MobileError {
+        MobileError::new(format!("the app failed: {}", error.reason))
+    }
+}
+
 /// What the core says of itself to the hub and to each runner: Flottille's version, the protocols
 /// it speaks.
 pub(crate) fn hello() -> flottille_link::Hello {

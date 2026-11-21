@@ -30,11 +30,15 @@ class KeystoreSealer(private val alias: String = "flottille-device") : Sealer {
         return generator.generateKey()
     }
 
+    // The Keystore throws `ProviderException` (a `RuntimeException`) as often as a
+    // `GeneralSecurityException`: anything thrown is a refusal said, never a panic of the core.
     override fun seal(plain: ByteArray): ByteArray = try {
         val cipher = Cipher.getInstance(TRANSFORMATION)
         cipher.init(Cipher.ENCRYPT_MODE, key())
         cipher.iv + cipher.doFinal(plain)
     } catch (error: GeneralSecurityException) {
+        throw MobileException.Refused("the device key cannot be sealed: ${error.message}")
+    } catch (error: RuntimeException) {
         throw MobileException.Refused("the device key cannot be sealed: ${error.message}")
     }
 
@@ -44,7 +48,7 @@ class KeystoreSealer(private val alias: String = "flottille-device") : Sealer {
         cipher.doFinal(sealed, IV, sealed.size - IV)
     } catch (error: GeneralSecurityException) {
         throw MobileException.Refused("the device key cannot be opened: ${error.message}")
-    } catch (error: IllegalArgumentException) {
+    } catch (error: RuntimeException) {
         throw MobileException.Refused("the device key cannot be opened: ${error.message}")
     }
 
