@@ -1035,6 +1035,21 @@ mod tests {
     use super::*;
     use quinn::AsyncUdpSocket;
 
+    /// The length of the next packet `socket` lets in, within half a second.
+    async fn received(socket: &RelaySocket) -> Option<usize> {
+        let mut buffer = [0u8; 64];
+        let wait = std::future::poll_fn(|cx| {
+            let mut bufs = [std::io::IoSliceMut::new(&mut buffer)];
+            let mut meta = [quinn::udp::RecvMeta::default()];
+            socket
+                .poll_recv(cx, &mut bufs, &mut meta)
+                .map(Result::unwrap)
+        });
+        tokio::time::timeout(Duration::from_millis(500), wait)
+            .await
+            .ok()
+    }
+
     #[tokio::test]
     async fn a_hub_that_makes_up_senders_is_given_none_of_their_names() {
         let (out, _sent) = mpsc::channel(8);
@@ -1054,31 +1069,10 @@ mod tests {
             key[..4].copy_from_slice(&n.to_le_bytes());
             given.try_send((key, vec![1, 2, 3])).unwrap();
         }
-        let mut buffer = [0u8; 64];
-        let received = std::future::poll_fn(|cx| {
-            let mut bufs = [std::io::IoSliceMut::new(&mut buffer)];
-            let mut meta = [quinn::udp::RecvMeta::default()];
-            Poll::Ready(
-                socket
-                    .poll_recv(cx, &mut bufs, &mut meta)
-                    .map(Result::unwrap),
-            )
-        })
-        .await;
-        assert!(received.is_pending(), "a made-up sender came in");
+        assert_eq!(received(&socket).await, None, "a made-up sender came in");
         // This machine still dials whom it chooses, and a member online comes in.
         assert!(socket.address_of(&[9; 32]).is_some());
         given.try_send((*member.as_bytes(), vec![4, 5])).unwrap();
-        let received = std::future::poll_fn(|cx| {
-            let mut bufs = [std::io::IoSliceMut::new(&mut buffer)];
-            let mut meta = [quinn::udp::RecvMeta::default()];
-            Poll::Ready(
-                socket
-                    .poll_recv(cx, &mut bufs, &mut meta)
-                    .map(Result::unwrap),
-            )
-        })
-        .await;
-        assert_eq!(received, Poll::Ready(1));
+        assert_eq!(received(&socket).await, Some(1));
     }
 }
