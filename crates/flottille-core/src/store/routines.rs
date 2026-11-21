@@ -8,6 +8,19 @@ use crate::{Error, Result};
 
 const ROUTINE: &str = "id, name, project, prompt, provider, model, effort, schedule, zone, mode, \
     rings, paused, missed_hours, next_at, delayed, created_at, updated_at, event";
+/// The most events held for a routine: the newest, the earlier ones only counted.
+pub const HELD: usize = 20;
+const EARLIER_START: &str = "(and ";
+const EARLIER_END: &str = " earlier events, not kept)";
+
+/// The count of the line that says how many earlier events were let go.
+fn earlier_of(line: &str) -> Option<u64> {
+    line.strip_prefix(EARLIER_START)?
+        .strip_suffix(EARLIER_END)?
+        .parse()
+        .ok()
+}
+
 const RUN: &str =
     "id, routine, due_at, started_at, ended_at, session, mode, outcome, summary, why, trigger";
 
@@ -308,14 +321,52 @@ impl Store {
     }
 
     /// Holds what an event said until `at` (its `not_before`), with what was held already: one
-    /// held earlier keeps its time.
+    /// held earlier keeps its time. The newest `HELD` are kept, and a first line says how many
+    /// earlier ones were let go.
     pub fn hold_routine_event(&self, id: &str, at: u64, said: &str) -> Result<()> {
+        let held: Option<Option<String>> = self
+            .connection
+            .query_row(
+                "SELECT held FROM routines WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let mut held: Vec<String> = held
+            .flatten()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default();
+        let mut earlier = match held.first().and_then(|first| earlier_of(first)) {
+            Some(earlier) => {
+                held.remove(0);
+                earlier
+            }
+            None => 0,
+        };
+        held.push(said.to_owned());
+        if held.len() > HELD {
+            let over = held.len() - HELD;
+            held.drain(..over);
+            earlier += over as u64;
+        }
+        if earlier > 0 {
+            held.insert(0, format!("{EARLIER_START}{earlier}{EARLIER_END}"));
+        }
         self.connection.execute(
-            "UPDATE routines SET held_at = coalesce(held_at, ?2), \
-             held = json_insert(coalesce(held, '[]'), '$[#]', ?3) WHERE id = ?1",
-            params![id, at, said],
+            "UPDATE routines SET held_at = coalesce(held_at, ?2), held = ?3 WHERE id = ?1",
+            params![id, at, serde_json::to_string(&held)?],
         )?;
         Ok(())
+    }
+
+    /// How many of the routine's runs started a session since `since`.
+    pub fn routine_started_since(&self, routine: &str, since: u64) -> Result<u64> {
+        Ok(self.connection.query_row(
+            "SELECT count(*) FROM routine_runs WHERE routine = ?1 AND session IS NOT NULL \
+             AND started_at >= ?2",
+            params![routine, since],
+            |row| row.get(0),
+        )?)
     }
 
     /// The routines whose held events are due at `now`, with when they were.

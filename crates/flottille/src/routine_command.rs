@@ -124,7 +124,7 @@ pub struct EventFields {
     #[arg(long)]
     branch: Option<String>,
     /// How the workflow run started
-    #[arg(long, value_parser = ["schedule", "push", "manual", "any"])]
+    #[arg(long, value_parser = ["schedule", "push", "manual", "pull_request", "any"])]
     started_by: Option<String>,
     /// How the workflow run ended
     #[arg(long, value_parser = ["failed", "any"])]
