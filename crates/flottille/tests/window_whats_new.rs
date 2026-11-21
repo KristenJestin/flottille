@@ -265,7 +265,7 @@ fn what_is_new_spans_every_beta_since_the_version_last_run(cx: &mut TestAppConte
         [
             "remote", "window", "agents", "tools", "projects", "other", "fixed"
         ]
-        .map(|key| visible(cx, &format!("whats-new-area-{key}"))),
+        .map(|key| visible(cx, &format!("whats-new-area-{key}-title"))),
         [true, true, false, false, false, true, true]
     );
     assert_eq!(
@@ -395,7 +395,7 @@ fn opened_on<'a>(
         visible(cx, "whats-new-page")
     });
     until(&shell, cx, "the notes are drawn", |cx| {
-        visible(cx, "whats-new-area-fixed")
+        visible(cx, "whats-new-change-0")
     });
     settle(cx);
     (shell, cx)
@@ -415,7 +415,7 @@ fn a_pull_request_without_a_note_is_not_on_the_page(cx: &mut TestAppContext) {
         "{said:?}"
     );
     // ... and no section is made for them: their commits only exist in the raw list.
-    assert!(!visible(cx, "whats-new-area-agents"));
+    assert!(!visible(cx, "whats-new-area-agents-title"));
     assert_eq!(said.len(), NOTES.len());
     assert!(!visible(cx, "whats-new-raw-0"), "the raw list is folded");
 }
@@ -469,7 +469,7 @@ fn highlights_are_shown_when_the_release_has_some(cx: &mut TestAppContext) {
     ));
     let (_, cx) = opened_on(&user, notes, cx);
 
-    assert!(visible(cx, "whats-new-highlights"));
+    assert!(visible(cx, "whats-new-highlights-title"));
     assert_eq!(
         [0, 1].map(|n| label(cx, &format!("whats-new-highlight-{n}")).unwrap()),
         [
@@ -486,5 +486,5 @@ fn a_release_without_highlights_draws_no_block_for_them(cx: &mut TestAppContext)
     let user = User::new();
     let (_, cx) = opened_on(&user, betas(), cx);
 
-    assert!(!visible(cx, "whats-new-highlights"));
+    assert!(!visible(cx, "whats-new-highlights-title"));
 }

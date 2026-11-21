@@ -10,7 +10,8 @@
 set -euo pipefail
 
 title=${TITLE:-} body=${BODY:-} changed=${CHANGED:-}
-[[ $title =~ ^(feat|fix)[(:!] ]] || exit 0
+kind='^(feat|fix)[(:!]'
+[[ $title =~ $kind ]] || exit 0
 
 # The product is what ships: its crates and the apps, not the fakes nor the tests of a crate.
 product=

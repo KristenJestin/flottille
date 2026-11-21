@@ -577,8 +577,8 @@ fn a_fast_forward_release_after_the_two_squash_releases() {
     assert_eq!(repo.next(&["stable", "--at", &released]), "0.1.2");
     assert_eq!(
         repo.changelog(&["--at", &released]),
-        "### Features\n\n- **tools**: cut long results (#350)\n\n\
-         ### Fixes\n\n- **store**: a lock (#351)\n"
+        "### All changes\n\n#### Features\n\n- **tools**: cut long results (#350)\n\n\
+         #### Fixes\n\n- **store**: a lock (#351)\n"
     );
     repo.tag("v0.1.2");
     repo.git(&["checkout", "--quiet", "dev"]);
@@ -615,8 +615,8 @@ fn a_second_fast_forward_release_counts_from_the_first() {
     assert_eq!(released, dev);
     assert_eq!(
         repo.changelog(&["v0.1.2..v0.1.3"]),
-        "### Fixes\n\n- **cli**: a flag (#360)\n\n\
-         ### Performance\n\n- **store**: fewer reads (#361)\n"
+        "### All changes\n\n#### Fixes\n\n- **cli**: a flag (#360)\n\n\
+         #### Performance\n\n- **store**: fewer reads (#361)\n"
     );
     repo.commit("feat(gui): another page (#362)");
     assert_eq!(repo.next(&["beta"]), "0.1.4-beta.1");
