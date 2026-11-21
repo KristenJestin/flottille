@@ -892,8 +892,9 @@ core behind it, the screens' tests play a fake) and never the generated bindings
   members, **Remove this device** (it asks once). There is no Add a device.
 - **The core's view state** gained what the screens say: a machine's `state` (`online`, `offline`,
   `needs an update`) and `since`, the `members` (this device marked, who added each), `hub_card`
-  and `leave` (the phone's own removal, signed with its device key and sent to the hub, which sends
-  the list back without it: the view then claims no role and the app asks to join again).
+  and `leave` (the phone's own removal, signed with its device key and sent to the hub, which ends
+  its session without sending the list: once the hub took it, the core ends its links, the view
+  claims no role and says the phone was removed, and the app asks to join again).
 - **Motion**, as the window's: the kit's durations and its ease-out cubic are `ui/Tokens.kt`
   (`Motion`); every press fades and sinks (`FButton`), a choice's fill and ring move over `PANEL`, a
   row inserted, removed or moved animates (`animateItem`), a state that changes fades (machine
