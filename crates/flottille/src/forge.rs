@@ -3963,12 +3963,13 @@ impl Pulls {
             .ok_or_else(|| format!("gh pr view {number} answered no pull request"))?;
         let read = fetched_pull(&self.path, "github", &pull, true);
         fetched.item.details = read.item.details;
-        // Whose review is asked: a person's login, or a team's name.
+        // Whose review is asked: the logins of the people. A team's name is not a login, and a
+        // request to a team is not the user's (`docs/forges.md`, "Routines").
         fetched.item.details["requested"] = viewed["reviewRequests"]
             .as_array()
             .into_iter()
             .flatten()
-            .filter_map(|asked| asked["login"].as_str().or(asked["name"].as_str()))
+            .filter_map(|asked| asked["login"].as_str())
             .map(masked)
             .collect();
         fetched.item.checks = github_checks(&viewed);
@@ -4098,15 +4099,6 @@ fn fetched_pull(path: &str, source: &str, pull: &Pull, detailed: bool) -> crate:
     }
     if !pull.reviewers.is_empty() {
         details["reviewers"] = pull.reviewers.iter().map(reviewer_json).collect();
-    }
-    // Bitbucket asks a review as a reviewer whose verdict is pending.
-    if detailed && source == "bitbucket" {
-        details["requested"] = pull
-            .reviewers
-            .iter()
-            .filter(|(_, state, _)| *state == "pending")
-            .map(|(name, _, _)| json!(name))
-            .collect();
     }
     crate::items::Fetched {
         item: flottille_core::item::Item {
