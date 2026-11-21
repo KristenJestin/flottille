@@ -70,6 +70,14 @@ on the line of a program that is not ready (Check again); never in a loop and ne
 (`docs/cli.md`), which names the programs of the registered projects only, a missing one a warning
 and never a failure.
 
+### Signing in from the window
+
+The window's Settings, Agents, list `gh`, `glab`, `acli` and `bkt` under **Forges and trackers**
+(those the projects use first), each with its version and whether it is signed in, and start their
+own sign-in on the machine shown: `docs/agents.md`, "Signing in", which says each command, what it
+shows and what it keeps (nothing but the address and the code, in memory, while it runs). The
+checks above are unchanged; `glab`'s is its own `glab auth status --hostname <host>`.
+
 ## The forge of a repository
 
 **Each repository declares its forge, and nothing is guessed.** The project's file says it, per

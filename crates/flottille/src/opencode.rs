@@ -100,7 +100,7 @@ fn command() -> Result<Program, String> {
 }
 
 /// OpenCode's login file: `$XDG_DATA_HOME/opencode/auth.json`, or `~/.local/share/opencode`.
-fn login_file() -> Option<PathBuf> {
+pub(crate) fn login_file() -> Option<PathBuf> {
     let data = match std::env::var_os("XDG_DATA_HOME").map(PathBuf::from) {
         Some(data) if data.is_absolute() => data,
         _ => PathBuf::from(std::env::var_os("HOME")?).join(".local/share"),

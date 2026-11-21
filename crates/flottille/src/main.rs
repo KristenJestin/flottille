@@ -89,6 +89,7 @@ mod session_name;
 mod session_read;
 mod setup;
 mod show;
+mod sign_in;
 mod skill_command;
 mod skills;
 mod ssh_agent;

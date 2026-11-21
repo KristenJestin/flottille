@@ -126,6 +126,20 @@ one for a user who never chose (`"picked": true`), or the user saw the notice of
 |---|---|
 | `judge` | `{"provider", "model", "picked"?}`, `model` `null` for the provider's default; `null` when none is chosen. |
 
+### `signin.changed`
+
+A program's own sign-in or sign-out, started from the window, moved (`signin.start`,
+`signin.cancel`, `signin.sign_out`; `docs/agents.md`, "Signing in"). It says the program and its
+state only: never the address, the code nor anything the program printed, since every event is
+stored. `signin.list` says the rest.
+
+| Field | |
+|---|---|
+| `program` | `claude`, `codex`, `gh`, `glab`, `acli` or `bkt`. |
+| `host` | The host it signs in to, `null` for an agent. |
+| `state` | `started`, `signed_in`, `failed`, `cancelled` or `signed_out`. |
+| `why` | Only for `failed`: Flottille's own sentence (the exit code, a time passed), never the program's words. |
+
 ### `judge.changed`
 
 The user edited the Auto judge's guidance, or reset it to the default (`judge.set`,
