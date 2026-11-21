@@ -592,7 +592,11 @@ fn write_new(file: &Path, secret: &[u8]) -> Result<(), KeyError> {
     ));
     let failed = |error: std::io::Error| KeyError(format!("{shown} cannot be made: {error}"));
     let written = link_new(&temporary, file, secret);
-    let removed = std::fs::remove_file(&temporary);
+    let removed = match std::fs::remove_file(&temporary) {
+        // Renamed as the key (`link_new`, on Android): nothing is left to remove.
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+        removed => removed,
+    };
     written.map_err(failed)?;
     removed.map_err(failed)?;
     // The folder's entries, durable as the file is.
@@ -612,6 +616,19 @@ fn link_new(temporary: &Path, file: &Path, secret: &[u8]) -> std::io::Result<()>
     out.write_all(secret)?;
     out.sync_all()?;
     match std::fs::hard_link(temporary, file) {
+        // Android's SELinux refuses a hard link in an app's own data: the phone's endpoint key
+        // (`flottille-mobile`) is made by the app's one process, so a rename, which never leaves a
+        // part of a key under its name, does it; a key made there already is kept.
+        #[cfg(target_os = "android")]
+        Err(error) if error.kind() == ErrorKind::PermissionDenied => {
+            match std::fs::symlink_metadata(file) {
+                Ok(_) => Ok(()),
+                Err(missing) if missing.kind() == ErrorKind::NotFound => {
+                    std::fs::rename(temporary, file)
+                }
+                Err(other) => Err(other),
+            }
+        }
         Err(error) if error.kind() != ErrorKind::AlreadyExists => Err(error),
         _ => Ok(()),
     }
