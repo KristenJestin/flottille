@@ -2074,3 +2074,380 @@ fn a_credential_helper_named_by_a_bare_name_runs_the_root_owned_program() {
     );
     assert!(remote_has(&user, "rooted"), "{}", pushed.text);
 }
+
+/// A message check of the project's, `checks-bin/msg-lint`, that refuses a message saying
+/// `bad`: set before the agent's session starts, so that it reads it.
+fn message_checked(user: &User) {
+    script(
+        &user.path("checks-bin/msg-lint"),
+        "for last; do :; done\n\
+         if grep -q bad \"$last\"; then echo 'msg: the subject says bad'; exit 1; fi\n",
+    );
+    let check = format!("{} {{message}}", user.path("checks-bin/msg-lint").display());
+    user.call(
+        "project.set_message_checks",
+        json!({"name": "app", "checks": [check]}),
+    )
+    .unwrap();
+}
+
+/// A commit of the project's repository with this message.
+fn committed(user: &User, message: &str) {
+    let folder = user.path("work/app");
+    std::fs::write(folder.join("README.md"), format!("{message}\n")).unwrap();
+    user.git(&folder, &["commit", "--quiet", "-am", message]);
+}
+
+#[test]
+fn a_proxy_a_run_set_never_sees_the_sign_in_of_a_checked_push() {
+    let (user, _agent, _bus) = user();
+    let user = credential_helper(user);
+    let (_server, url) = http_remote(&user);
+    project(&user, &url);
+    message_checked(&user);
+    committed(&user, "a good change");
+    let proxy = run_s_proxy(&user);
+    let folder = user.path("work/app");
+    user.git(&folder, &["config", &format!("http.{url}.proxy"), &proxy]);
+    let mcp = agent(&user);
+
+    let pushed = line(&user, &mcp, "git push origin HEAD:refs/heads/checked");
+
+    let said = std::fs::read_to_string(user.path("proxy-said")).unwrap_or_default();
+    assert!(
+        said.is_empty(),
+        "the run's proxy was sent: {said}\n{}",
+        pushed.text
+    );
+    assert!(remote_has(&user, "checked"), "{}", pushed.text);
+    // The setting is one git follows: a read of the repository's own goes through the proxy.
+    let _ = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&folder)
+        .args(["ls-remote", "origin"])
+        .env("GIT_CONFIG_GLOBAL", user.path("home/.gitconfig"))
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output()
+        .unwrap();
+    let said = std::fs::read_to_string(user.path("proxy-said")).unwrap_or_default();
+    assert!(said.contains("Authorization: Basic"), "{said}");
+}
+
+#[test]
+fn a_push_refspec_a_run_wrote_deletes_no_remote_branch() {
+    let (user, _agent, _bus) = user();
+    let mcp = session(&user, SSH_REMOTE);
+    // As a run could write it: a plain `git push origin` would delete `main` on the remote.
+    user.git(
+        &user.path("work/app"),
+        &["config", "remote.origin.push", ":refs/heads/main"],
+    );
+
+    let pushed = line(&user, &mcp, "git push origin");
+
+    assert!(
+        remote_has(&user, "main"),
+        "main was deleted: {}",
+        pushed.text
+    );
+    assert!(
+        pushed.text.contains("remote.origin.push"),
+        "{}",
+        pushed.text
+    );
+}
+
+#[test]
+fn a_mirror_a_run_set_prunes_no_remote_branch() {
+    let (user, _agent, _bus) = user();
+    let mcp = session(&user, SSH_REMOTE);
+    let folder = user.path("work/app");
+    user.git(
+        &folder,
+        &[
+            "--git-dir",
+            user.path("remotes/app.git").to_str().unwrap(),
+            "branch",
+            "other",
+            "main",
+        ],
+    );
+    // As a run could write it: a plain `git push origin` would force every ref and prune the
+    // remote's others.
+    user.git(&folder, &["config", "remote.origin.mirror", "true"]);
+
+    let pushed = line(&user, &mcp, "git push origin");
+
+    assert!(
+        remote_has(&user, "other"),
+        "the remote was pruned: {}",
+        pushed.text
+    );
+    assert!(
+        pushed.text.contains("remote.origin.mirror"),
+        "{}",
+        pushed.text
+    );
+}
+
+#[test]
+fn a_push_default_a_run_wrote_sends_nothing_to_another_branch() {
+    let (user, _agent, _bus) = user();
+    let mcp = session(&user, SSH_REMOTE);
+    let folder = user.path("work/app");
+    committed(&user, "a change");
+    // As a run could write them: a plain `git push` would send `main` to `elsewhere`.
+    for (key, value) in [
+        ("push.default", "upstream"),
+        ("branch.main.remote", "origin"),
+        ("branch.main.merge", "refs/heads/elsewhere"),
+    ] {
+        user.git(&folder, &["config", key, value]);
+    }
+
+    let pushed = line(&user, &mcp, "git push");
+
+    assert!(
+        !remote_has(&user, "elsewhere"),
+        "the push went to another branch: {}",
+        pushed.text
+    );
+    assert!(pushed.text.contains("push.default"), "{}", pushed.text);
+}
+
+#[test]
+fn a_lifted_push_runs_no_program_of_an_exec_path_on_its_line() {
+    let (user, _agent, _bus) = user();
+    let user = credential_helper(user);
+    let (_server, url) = http_remote(&user);
+    project(&user, &url);
+    let tools = user.path("work/app/tools");
+    // A run's own `git-remote-http`, which git takes from the exec path of the line.
+    script(
+        &tools.join("git-remote-http"),
+        &format!(
+            "echo ran >> '{}'\nexit 1\n",
+            user.path("exec-path-ran").display()
+        ),
+    );
+    let mcp = agent(&user);
+
+    let pushed = line(
+        &user,
+        &mcp,
+        &format!(
+            "git --exec-path={} push origin HEAD:refs/heads/exec",
+            tools.display()
+        ),
+    );
+
+    assert!(
+        !user.path("exec-path-ran").exists(),
+        "the run's program ran: {}",
+        pushed.text
+    );
+    assert!(pushed.text.contains("--exec-path"), "{}", pushed.text);
+}
+
+#[test]
+fn a_setting_on_a_lifted_push_s_line_sends_no_sign_in_to_its_proxy() {
+    let (user, _agent, _bus) = user();
+    let user = credential_helper(user);
+    let (_server, url) = http_remote(&user);
+    project(&user, &url);
+    let proxy = run_s_proxy(&user);
+    let mcp = agent(&user);
+
+    let pushed = line(
+        &user,
+        &mcp,
+        &format!("git -c http.proxy={proxy} push origin HEAD:refs/heads/lined"),
+    );
+
+    let said = std::fs::read_to_string(user.path("proxy-said")).unwrap_or_default();
+    assert!(
+        said.is_empty(),
+        "the line's proxy was sent: {said}\n{}",
+        pushed.text
+    );
+    assert!(pushed.text.contains("-c"), "{}", pushed.text);
+}
+
+#[test]
+fn grafts_a_run_wrote_hide_no_commit_from_the_message_checks() {
+    let (user, _agent, _bus) = user();
+    project(&user, SSH_REMOTE);
+    message_checked(&user);
+    let folder = user.path("work/app");
+    committed(&user, "a bad change");
+    committed(&user, "a good change");
+    // As a run could write them: the good change's parent is said to be the start, which the
+    // remote has, so that the bad one is not read.
+    let sha = |rev: &str| {
+        user.git_output(&folder, &["rev-parse", rev])
+            .trim()
+            .to_owned()
+    };
+    let info = folder.join(".git/info");
+    std::fs::create_dir_all(&info).unwrap();
+    std::fs::write(
+        info.join("grafts"),
+        format!("{} {}\n", sha("HEAD"), sha("HEAD~2")),
+    )
+    .unwrap();
+    let mcp = agent(&user);
+
+    let pushed = line(&user, &mcp, "git push origin HEAD:refs/heads/grafted");
+
+    assert!(
+        !remote_has(&user, "grafted"),
+        "the bad change went unread: {}",
+        pushed.text
+    );
+    assert!(pushed.text.contains("a bad change"), "{}", pushed.text);
+}
+
+#[test]
+fn a_replaced_commit_hides_no_message_from_the_checks() {
+    let (user, _agent, _bus) = user();
+    project(&user, SSH_REMOTE);
+    message_checked(&user);
+    let folder = user.path("work/app");
+    committed(&user, "a bad change");
+    // As a run could write it: the bad change is read as a good one.
+    let good = user
+        .git_output(
+            &folder,
+            &[
+                "commit-tree",
+                "HEAD^{tree}",
+                "-p",
+                "HEAD~1",
+                "-m",
+                "a good change",
+            ],
+        )
+        .trim()
+        .to_owned();
+    user.git(&folder, &["replace", "HEAD", &good]);
+    let mcp = agent(&user);
+
+    let pushed = line(&user, &mcp, "git push origin HEAD:refs/heads/replaced");
+
+    assert!(
+        !remote_has(&user, "replaced"),
+        "the bad change went unread: {}",
+        pushed.text
+    );
+}
+
+#[test]
+fn a_push_is_not_lifted_where_no_landlock_keeps_its_folder_from_runs() {
+    let (user, _agent, _bus) = user();
+    let user = credential_helper(user).with_env("FLOTTILLE_TEST_NO_LANDLOCK", "1");
+    let (_server, url) = http_remote(&user);
+    let mcp = session(&user, &url);
+
+    let pushed = line(&user, &mcp, "git push origin HEAD:refs/heads/unprotected");
+
+    assert!(!remote_has(&user, "unprotected"), "{}", pushed.text);
+    assert!(helper_said(&user).is_empty(), "{:?}", helper_said(&user));
+    assert!(pushed.text.contains("Landlock"), "{}", pushed.text);
+}
+
+#[test]
+fn a_push_from_a_linked_worktree_goes() {
+    let (user, _agent, _bus) = user();
+    let mcp = session(&user, SSH_REMOTE);
+    let folder = user.path("work/app");
+    user.git(
+        &folder,
+        &["worktree", "add", "--quiet", "linked", "-b", "linked"],
+    );
+    let linked = folder.join("linked");
+    std::fs::write(linked.join("README.md"), "linked\n").unwrap();
+    user.git(
+        &linked,
+        &["commit", "--quiet", "-am", "from the linked worktree"],
+    );
+
+    let pushed = line(
+        &user,
+        &mcp,
+        "git -C linked push origin HEAD:refs/heads/from-linked",
+    );
+
+    assert!(remote_has(&user, "from-linked"), "{}", pushed.text);
+    // Its remote-tracking ref moved in the repository.
+    let tracked = user.git_output(&folder, &["rev-parse", "refs/remotes/origin/from-linked"]);
+    let head = user.git_output(&linked, &["rev-parse", "HEAD"]);
+    assert_eq!(tracked, head, "{}", pushed.text);
+}
+
+#[test]
+fn a_url_rewrite_of_the_user_s_settings_for_the_remote_s_forge_still_applies() {
+    let (user, _agent, _bus) = user();
+    let mine = user.path("remotes/mine.git");
+    user.git(
+        &user.path(""),
+        &["init", "--quiet", "--bare", mine.to_str().unwrap()],
+    );
+    // The user's own settings for the repositories of one forge: an
+    // `includeIf "hasconfig:remote.*.url:…"`.
+    std::fs::create_dir_all(user.path("home")).unwrap();
+    let included = user.path("home/forge.gitconfig");
+    std::fs::write(
+        &included,
+        format!("[url \"git@forge.invalid:acme/mine.git\"]\n\tpushInsteadOf = {SSH_REMOTE}\n"),
+    )
+    .unwrap();
+    let settings = user.path("home/.gitconfig");
+    std::fs::write(
+        &settings,
+        format!(
+            "[includeIf \"hasconfig:remote.*.url:git@forge.invalid:**\"]\n\tpath = {}\n",
+            included.display()
+        ),
+    )
+    .unwrap();
+    let user = user.with_env("GIT_CONFIG_GLOBAL", settings.to_str().unwrap());
+    let mcp = session(&user, SSH_REMOTE);
+
+    let pushed = line(&user, &mcp, "git push origin HEAD:refs/heads/forged");
+
+    let landed = std::process::Command::new("git")
+        .arg("--git-dir")
+        .arg(&mine)
+        .args(["rev-parse", "--verify", "--quiet", "refs/heads/forged"])
+        .output()
+        .unwrap()
+        .status
+        .success();
+    assert!(landed, "{}", pushed.text);
+}
+
+#[test]
+fn a_rewrite_for_reads_a_run_set_refuses_no_checked_push() {
+    let (user, _agent, _bus) = user();
+    project(&user, SSH_REMOTE);
+    message_checked(&user);
+    committed(&user, "a good change");
+    // As a run could write it, for reads alone: the push does not follow it.
+    user.git(
+        &user.path("work/app"),
+        &[
+            "config",
+            "url.git@forge.invalid:acme/elsewhere.git.insteadOf",
+            SSH_REMOTE,
+        ],
+    );
+    let mcp = agent(&user);
+
+    let pushed = line(
+        &user,
+        &mcp,
+        "git push origin HEAD:refs/heads/read-rewritten",
+    );
+
+    assert!(remote_has(&user, "read-rewritten"), "{}", pushed.text);
+}
