@@ -30,6 +30,9 @@ use crate::extensions::Then as Extension;
 use crate::session::{MarkdownText, said_at};
 use crate::shell::{Selection, Shell};
 
+/// What a link of the path line does.
+type Go = Box<dyn Fn(&mut Window, &mut App)>;
+
 /// What the daemon's answers to the tab's requests lead to.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Then {

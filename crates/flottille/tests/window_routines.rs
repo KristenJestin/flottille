@@ -163,7 +163,9 @@ fn present(cx: &mut VisualTestContext, id: &str) -> bool {
     cx.update(|window, _| window.try_find(id.to_owned()).is_some())
 }
 
+/// Clicks `id` once what moves has settled: a row that still unfolds has no middle to click.
 fn click(cx: &mut VisualTestContext, id: &str) {
+    settle(cx);
     cx.update(|window, cx| window.click(id.to_owned(), cx));
     settle(cx);
 }
@@ -234,8 +236,9 @@ fn the_routines_tab_lists_the_project_routines_with_their_last_run(cx: &mut Test
     });
 
     assert_eq!(
-        label(cx, "routine-Tickets to review-title").as_deref(),
-        Some("Tickets to review")
+        label(cx, "routine-Tickets to review").as_deref(),
+        Some("Tickets to review"),
+        "a row's label is its name"
     );
     assert_eq!(
         label(cx, "routine-Tickets to review-line").as_deref(),
@@ -306,6 +309,9 @@ fn an_unread_result_has_a_dot_until_opened(cx: &mut TestAppContext) {
     );
 
     click(cx, "routine-Tickets to review");
+    until(&shell, cx, "the history is listed", |cx| {
+        present(cx, &format!("routine-run-{}", run["id"]))
+    });
     click(cx, &format!("routine-run-{}", run["id"]));
     until(&shell, cx, "the daemon knows it was opened", |_| {
         unread(&user, "Tickets to review") == 0
@@ -579,7 +585,7 @@ fn the_form_shows_the_event_fields_when_an_event_is_chosen(cx: &mut TestAppConte
 
     // On a schedule at first: days and an hour, never a cron line.
     assert!(present(cx, "routine-days"), "days");
-    assert!(present(cx, "routine-hour"), "an hour");
+    assert!(present(cx, "routine-hour-box"), "an hour");
     assert!(!present(cx, "routine-event-kind"), "no event kind yet");
 
     click(cx, "routine-trigger-choice-event");
