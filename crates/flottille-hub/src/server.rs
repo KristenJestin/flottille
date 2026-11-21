@@ -85,13 +85,16 @@ const ARRIVAL_WAIT: Duration = Duration::from_secs(5);
 const MOST_ADDRESSES: usize = 64;
 const LONGEST_ADDRESS: usize = 300;
 
-/// The waits of the server: how long a connection may take to arrive, and how long a pairing's
-/// session lasts. The production's are the default; a test serves with shorter ones
-/// (`serve_with`).
+/// The waits of the server: how long a connection may take to arrive, how long a pairing's
+/// session lasts, and how long a session may stay silent before it is let go. The production's
+/// are the default; a test serves with shorter ones (`serve_with`).
 #[derive(Clone, Copy, Debug)]
 pub struct Waits {
     pub arrival: Duration,
     pub pair_idle: Duration,
+    /// Without a word from its device, or with a line it does not read, for this long, a session
+    /// is lost, and its device said offline: `flottille_link::SILENCE`.
+    pub silence: Duration,
 }
 
 impl Default for Waits {
@@ -99,6 +102,7 @@ impl Default for Waits {
         Waits {
             arrival: ARRIVAL_WAIT,
             pair_idle: PAIR_IDLE,
+            silence: flottille_link::SILENCE,
         }
     }
 }
@@ -378,7 +382,7 @@ async fn accept<C: Clock + Send + 'static>(
             };
             // A member's session is not counted; a pairing's is, while it lasts.
             let _permit = paired.is_some().then_some(permit);
-            let Ok(session) = arriving.welcome().await else {
+            let Ok(session) = arriving.welcome_within(shared.waits.silence).await else {
                 return;
             };
             match &paired {

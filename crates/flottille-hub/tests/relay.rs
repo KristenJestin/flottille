@@ -514,7 +514,7 @@ async fn a_silent_device_is_said_offline() {
         silence: Duration::from_secs(2),
         ..Waits::default()
     };
-    let mut place = Place::with(waits).await;
+    let place = Place::with(waits).await;
     let (laptop, laptop_machine) = (device_key(3), place.machine("laptop"));
     let mut laptop_session = place.add(&laptop, &laptop_machine, "laptop").await;
     let mut laptop_port = port(&mut laptop_session);

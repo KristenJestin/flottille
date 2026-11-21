@@ -30,8 +30,9 @@
 //! hands it to the session of the member whose key is `K'`, saying it is from `K`, and never
 //! opens it. `online` is the members' keys whose session is open, sent to members whenever it
 //! changes. A side with nothing to say says `keepalive` every `KEEPALIVE`, so that a reverse
-//! proxy on the way does not take the session for idle; a device that hears nothing from its hub
-//! for `SILENCE` takes the session as lost.
+//! proxy on the way does not take the session for idle; a side that hears nothing from the other
+//! for `SILENCE` takes the session as lost, and so does the hub when a device reads nothing it
+//! sends for as long.
 //!
 //! `session` is `flottille-hub-session-v1` and a zero byte: nothing else a key signs starts so.
 //! Each side signs the other's fresh nonce and the other's key, so that a proof cannot be played
@@ -98,8 +99,10 @@ const WAIT: Duration = Duration::from_secs(10);
 /// How often each side of a session says something when it has nothing to say: under the idle
 /// timeout of the common reverse proxies, 60 s.
 pub const KEEPALIVE: Duration = Duration::from_secs(25);
-/// A device that hears nothing from its hub for this long takes the session as lost.
-const SILENCE: Duration = Duration::from_secs(80);
+/// A side that hears nothing from the other for this long takes the session as lost: a device its
+/// hub's, the hub a device's, which is said offline then rather than left online on a connection
+/// that died.
+pub const SILENCE: Duration = Duration::from_secs(80);
 /// The packets of links waiting in a device's session, each way: past them a packet is dropped,
 /// as a network drops one.
 const RELAY_WAITING: usize = 256;
@@ -1409,15 +1412,27 @@ impl Arriving {
         let _ = self.writer.shutdown().await;
     }
 
-    /// Welcomes the device: the session, whose asks come in on `asks`.
-    pub async fn welcome(mut self) -> std::io::Result<HubSession> {
+    /// Welcomes the device: the session, whose asks come in on `asks`, lost after `SILENCE`
+    /// without a word from the device.
+    pub async fn welcome(self) -> std::io::Result<HubSession> {
+        self.welcome_within(SILENCE).await
+    }
+
+    /// [`Arriving::welcome`], the session lost after `silence` without a word from the device, or
+    /// a line it does not read for as long.
+    pub async fn welcome_within(mut self, silence: Duration) -> std::io::Result<HubSession> {
         write_line(&mut self.writer, &ToDevice::Welcome {}).await?;
         let (sender, asks) = mpsc::channel(16);
         let (relaying, relays) = mpsc::channel(RELAY_WAITING);
         let mut reader = self.reader;
         let reading = tokio::spawn(async move {
             loop {
-                let frame = read_frame::<serde_json::Value>(&mut reader, ASK_LIMIT).await;
+                let read = read_frame::<serde_json::Value>(&mut reader, ASK_LIMIT);
+                let Ok(frame) = tokio::time::timeout(silence, read).await else {
+                    let why = format!("it said nothing in {} s", silence.as_secs());
+                    let _ = sender.send(Err(why)).await;
+                    return;
+                };
                 if let Ok(frame) = &frame {
                     if frame.get("keepalive").is_some() {
                         continue;
@@ -1452,6 +1467,7 @@ impl Arriving {
             asks,
             relays: Some(Relays(relays)),
             writer: self.writer,
+            silence,
             reading,
         })
     }
@@ -1478,6 +1494,8 @@ pub struct HubSession {
     /// The packets of links the device sent for others, until they are taken.
     relays: Option<Relays>,
     writer: Writer,
+    /// How long a line may wait for the device to read it.
+    silence: Duration,
     /// The task that reads the device's asks: it holds the connection's other half, so it ends
     /// with the session, or the device would not see the hub go.
     reading: tokio::task::JoinHandle<()>,
@@ -1513,7 +1531,13 @@ impl HubSession {
     }
 
     pub async fn send(&mut self, frame: &ToDevice) -> std::io::Result<()> {
-        write_line(&mut self.writer, frame).await
+        match tokio::time::timeout(self.silence, write_line(&mut self.writer, frame)).await {
+            Ok(written) => written,
+            Err(_) => Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("it read nothing in {} s", self.silence.as_secs()),
+            )),
+        }
     }
 
     pub async fn close(mut self) {
