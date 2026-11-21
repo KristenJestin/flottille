@@ -123,6 +123,29 @@ impl Schedule {
     }
 }
 
+impl Schedule {
+    /// The last time at or before `now` it names, in `zone`.
+    pub fn last_at_or_before(&self, zone: &TimeZone, now: u64) -> Option<u64> {
+        let here = Timestamp::from_millisecond(i64::try_from(now).ok()?)
+            .ok()?
+            .to_zoned(zone.clone());
+        let mut date = here.date();
+        for _ in 0..8 {
+            let day = DAYS
+                .iter()
+                .position(|(_, weekday)| *weekday == date.weekday())?;
+            if self.days[day] {
+                let at: Zoned = date.to_datetime(self.time).to_zoned(zone.clone()).ok()?;
+                if at.timestamp() <= here.timestamp() {
+                    return u64::try_from(at.timestamp().as_millisecond()).ok();
+                }
+            }
+            date = date.yesterday().ok()?;
+        }
+        None
+    }
+}
+
 /// The routine's time zone: its own, else the machine's.
 fn zone_of(routine: &Routine) -> TimeZone {
     routine
@@ -607,6 +630,14 @@ fn due_now(daemon: &Arc<Daemon>, routine: &Routine, at: u64, now: u64) {
     {
         return;
     }
+    // Runs missed while the daemon was off: the last of them is the one that may run, however
+    // late the first was (off over a weekend, Monday's run is due, not Saturday's). One its
+    // schedule does not name (a run delayed to a quota's reset) is `at` itself.
+    let at = Schedule::parse(&routine.schedule)
+        .ok()
+        .and_then(|schedule| schedule.last_at_or_before(&zone_of(routine), now))
+        .filter(|last| *last > at)
+        .unwrap_or(at);
     let skip = |why: String| {
         let skipped = daemon.read(|store| {
             store.add_routine_run(&NewRun {
@@ -987,6 +1018,30 @@ mod tests {
         // Not again an hour later: the next is Monday's.
         let next = schedule.next_after(&paris, first).unwrap();
         assert_eq!(said(next), "Mon 2027-11-01 01:30");
+    }
+
+    #[test]
+    fn the_last_time_due_is_read_back_from_now() {
+        let last = |text: &str, now: u64| {
+            said(
+                Schedule::parse(text)
+                    .unwrap()
+                    .last_at_or_before(&TimeZone::UTC, now)
+                    .unwrap(),
+            )
+        };
+        // Off from Saturday 06:00 to Monday 07:30: Monday's own run is the one due.
+        assert_eq!(
+            last("every day 07:00", MONDAY - 150 * 60_000),
+            "Mon 2026-11-09 07:00"
+        );
+        assert_eq!(
+            last("weekdays 07:00", MONDAY - 26 * 3_600_000),
+            "Fri 2026-11-06 07:00"
+        );
+        // Its own time is due.
+        assert_eq!(last("every day 10:00", MONDAY), "Mon 2026-11-09 10:00");
+        assert_eq!(last("mondays 10:01", MONDAY), "Mon 2026-11-02 10:01");
     }
 
     #[test]
