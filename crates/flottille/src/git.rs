@@ -125,7 +125,11 @@ static HELPERS: OnceLock<Vec<(String, String)>> = OnceLock::new();
 /// start: each `includeIf "hasconfig:remote.*.url:…"` condition (its key) with the helpers of the
 /// file it includes. Git includes such a file only where a repository's remotes match, which no
 /// read without a repository says.
-static FORGE_HELPERS: OnceLock<Vec<(String, Vec<(String, String)>)>> = OnceLock::new();
+static FORGE_HELPERS: OnceLock<Vec<ForgeHelpers>> = OnceLock::new();
+
+/// An `includeIf "hasconfig:…"` condition of the user's settings, and the credential helpers of
+/// the file it includes.
+pub type ForgeHelpers = (String, Vec<(String, String)>);
 
 /// The settings `args` of `git config` lists, read at the daemon's start by its own git, confined:
 /// a git only root may change is not always found, and the one of the `PATH` may be a run's.
@@ -214,7 +218,7 @@ pub fn find_helpers() {
 }
 
 /// [`FORGE_HELPERS`].
-pub fn forge_helpers() -> &'static [(String, Vec<(String, String)>)] {
+pub fn forge_helpers() -> &'static [ForgeHelpers] {
     FORGE_HELPERS.get().map(Vec::as_slice).unwrap_or_default()
 }
 
@@ -297,15 +301,17 @@ static OWN: OnceLock<Option<PathBuf>> = OnceLock::new();
 /// of it. Never read by a release build, never the git of a push the gate let through.
 const TEST_GIT: &str = "FLOTTILLE_TEST_GIT";
 
-/// The folders of the daemon's `PATH` that only root may change (each of them and every folder
-/// on the way is root's, and no one else may write it), found at its start: the `PATH` of a push
+/// The programs of the folders of the daemon's `PATH` that only root may change, each of them
+/// only root's to change too (each, and every folder on the way, is root's, and no one else may
+/// write it), found at its start and linked in a folder of the daemon's ([`rooted_folder`]): the
+/// `PATH` of a push
 /// the gate let through, so that a program the user's settings name by a bare name (a credential
 /// helper's `!gh auth git-credential`, `ssh` in a wrapper) is never one a run put first.
 static ROOTED_PATH: OnceLock<OsString> = OnceLock::new();
 
 /// Finds the `git` of [`GIT`] and [`OWN`], and [`ROOTED_PATH`], at the daemon's start, before
 /// anything runs.
-pub fn find_git() {
+pub fn find_git(runtime: &Path) {
     let chosen = crate::ssh_agent::chosen(crate::ssh_agent::candidates("git"));
     GIT.get_or_init(|| {
         let found = chosen
@@ -325,47 +331,55 @@ pub fn find_git() {
         }
         chosen.map(|(git, _)| git)
     });
-    ROOTED_PATH.get_or_init(|| {
-        let path = std::env::var_os("PATH").unwrap_or_default();
-        let rooted: Vec<PathBuf> = std::env::split_paths(&path)
-            .filter_map(|folder| folder.canonicalize().ok())
-            .filter(|folder| only_root_may_change(folder))
-            .filter(|folder| match changeable_entry(folder) {
-                None => true,
-                Some(entry) => {
-                    eprintln!(
-                        "flottille daemon: {} is left out of the PATH of a push the gate lets \
-                         through: {} is not only root's to change",
-                        folder.display(),
-                        entry.display()
-                    );
-                    false
-                }
-            })
-            .collect();
-        std::env::join_paths(rooted).unwrap_or_default()
-    });
+    ROOTED_PATH.get_or_init(|| rooted_folder(&runtime.join("path")).into_os_string());
 }
 
-/// An entry of `folder`, one of the `PATH`, that is not only root's to change
-/// ([`only_root_may_change`], what its links lead to, a link that leads nowhere among them): a
-/// program a bare name finds there would be one a run could write.
-fn changeable_entry(folder: &Path) -> Option<PathBuf> {
-    let entries = match std::fs::read_dir(folder) {
-        Ok(entries) => entries,
-        Err(_) => return Some(folder.to_owned()),
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let target = path.canonicalize();
-        if target.as_ref().is_ok_and(|target| target.is_dir()) {
+/// Makes `folder`, in the daemon's runtime folder (out of every confined command's reach), the
+/// one folder of [`ROOTED_PATH`]: a link to each program of the daemon's `PATH` that only root
+/// may change, under its name, in the folders the `PATH` names that only root may change. A name
+/// whose first program is not only root's (a file of the user's in `/usr/local/bin`, a link to
+/// one, a link that leads nowhere) has none: a bare name never finds one a run could write. An
+/// empty path where the folder cannot be made: nothing is found.
+fn rooted_folder(folder: &Path) -> PathBuf {
+    let _ = std::fs::remove_dir_all(folder);
+    use std::os::unix::fs::DirBuilderExt;
+    let made = std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(folder);
+    if let Err(error) = made {
+        eprintln!(
+            "flottille daemon: cannot make {}, so a push the gate lets through finds no program \
+             by its bare name: {error}",
+            folder.display()
+        );
+        return PathBuf::new();
+    }
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let mut named: std::collections::BTreeSet<OsString> = Default::default();
+    for dir in std::env::split_paths(&path).filter_map(|dir| dir.canonicalize().ok()) {
+        if !only_root_may_change(&dir) {
             continue;
         }
-        if !target.is_ok_and(|target| only_root_may_change(&target)) {
-            return Some(path);
+        for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+            let name = entry.file_name();
+            let target = entry.path().canonicalize();
+            if target.as_ref().is_ok_and(|target| target.is_dir()) || !named.insert(name.clone()) {
+                continue;
+            }
+            match target {
+                Ok(target) if only_root_may_change(&target) => {
+                    let _ = std::os::unix::fs::symlink(&target, folder.join(&name));
+                }
+                _ => eprintln!(
+                    "flottille daemon: {} is not only root's to change, so a push the gate lets \
+                     through does not run it by its bare name",
+                    entry.path().display()
+                ),
+            }
         }
     }
-    None
+    folder.to_owned()
 }
 
 /// Whether only root may change `path`, a program or a folder: it and every folder on the way to

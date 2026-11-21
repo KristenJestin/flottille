@@ -481,10 +481,12 @@ fails on the path. Outside the sandbox, only these are added:
   every folder on the way is root's, and no one else may write it), found at the daemon's
   start: a program the user's settings name by a bare name (a credential helper's `!gh auth
   git-credential`, `ssh` inside a wrapper) is root's, never one a run put first in a folder it
-  can write (`~/.local/bin`, `~/bin`). A folder that holds an entry not only root's to change (a
-  file of the user's in `/usr/local/bin`, a link to one, a link that leads nowhere) is left out
-  whole, and the daemon's log says which entry. One the system's folders do not hold is not
-  found, and the helper fails: name it by its path, in a folder only root may change;
+  can write (`~/.local/bin`, `~/bin`). It is one folder the daemon makes at its start in its
+  runtime folder, holding a link to each program of those folders that only root may change
+  too, under its name: a name whose first program there is not (a file of the user's in
+  `/usr/local/bin`, a link to one, a link that leads nowhere) has none, and the daemon's log says
+  which. One the system's folders do not hold is not found, and the helper fails: name it by its
+  path, in a folder only root may change;
 - `core.hooksPath=/dev/null`;
 - `credential.helper=` and then the user's own credential helpers (the system's and the user's
   settings, read at the daemon's start), as for the daemon's own git (above): a helper a run wrote
