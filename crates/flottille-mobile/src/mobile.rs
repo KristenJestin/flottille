@@ -267,8 +267,8 @@ impl Core {
     }
 
     /// Removes this device from the user's list: its own removal, signed with its device key and
-    /// sent to the hub, which sends the list back without it. The view then claims no role and
-    /// says the phone was removed; joining again is the way back.
+    /// sent to the hub. The connection ends, and the view claims no role and says the phone was
+    /// removed; joining again is the way back.
     pub async fn leave(&self) -> Result<(), MobileError> {
         let (asker, change) = {
             let state = self.inner.state();
@@ -287,12 +287,21 @@ impl Core {
             );
             (asker, change)
         };
+        let inner = self.inner.clone();
         self.inner
             .on(async move {
                 asker
                     .ask(Ask::Submit { change })
                     .await
-                    .map_err(|error| MobileError::new(error.to_string()))
+                    .map_err(|error| MobileError::new(error.to_string()))?;
+                // The hub has it: it ends this device's session without sending the list, so the
+                // links end here and the view says it.
+                let mut state = inner.state();
+                let ended = state.connection.take();
+                state.view.removed();
+                drop(state);
+                drop(ended);
+                Ok(())
             })
             .await
     }

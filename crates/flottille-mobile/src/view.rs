@@ -252,6 +252,13 @@ impl View {
         }
     }
 
+    /// This phone removed itself from the list: the hub does not send the list to a device it just
+    /// removed, so nothing of the user's is left to show, and the user is told why.
+    pub(crate) fn removed(&mut self) {
+        *self = View::default();
+        self.say("this phone was removed from the user's hub: pair it again".to_owned());
+    }
+
     pub(crate) fn hub(&mut self, hub: &str) {
         hub.clone_into(&mut self.hub);
     }
