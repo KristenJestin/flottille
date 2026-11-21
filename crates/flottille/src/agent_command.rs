@@ -623,6 +623,27 @@ fn run_agent(paths: &Paths, asked: AgentRun, json: bool) -> Result<ExitCode> {
     Ok(code)
 }
 
+/// `flottille open <agent>`: the window comes forward on the agent's session (its root's), or
+/// starts there when none is open.
+pub fn open(paths: &Paths, agent: &str) -> Result<ExitCode> {
+    let mut client = Client::connect_or_start(paths)?;
+    let mut id = agent.to_owned();
+    // A sub-agent's session is its root's: a page is a root's.
+    for _ in 0..64 {
+        let shown = shown_agent(&mut client, &id)?;
+        match shown["parent"].as_str() {
+            Some(parent) => id = parent.to_owned(),
+            None => {
+                id = shown["id"].as_str().unwrap_or(&id).to_owned();
+                break;
+            }
+        }
+    }
+    crate::rings::open_session(paths, &id);
+    println!("Asked the window to show the session of {agent}.");
+    Ok(ExitCode::SUCCESS)
+}
+
 /// The agent as `agent.show` gives it.
 fn shown_agent(client: &mut Client, agent: &str) -> Result<Value> {
     let shown = client.request(

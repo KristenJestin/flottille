@@ -36,6 +36,7 @@ pub mod model;
 pub mod open;
 pub mod page;
 pub mod picture_viewer;
+pub mod presence;
 pub mod programs;
 pub mod progress;
 pub mod project;
@@ -177,7 +178,7 @@ pub fn run(
                 });
                 frame_counter(window, cx);
                 if let Some(instance) = instance {
-                    raise_on_request(instance, window, cx);
+                    serve_asks(instance, Some(shell.clone()), window, cx);
                 }
                 shell
             });
@@ -202,14 +203,32 @@ fn icon() -> std::sync::Arc<image::RgbaImage> {
 /// desktop does not let a program take the focus (a Wayland compositor often only marks the
 /// window as asking for attention), that is all that can be done.
 pub fn raise_on_request(instance: Instance, window: &mut gpui_kit::Window, cx: &mut gpui_kit::App) {
+    serve_asks(instance, None, window, cx);
+}
+
+/// [`raise_on_request`], and with a `shell` the window also opens the session a command names
+/// (`flottille open`, the default action of a desktop notification).
+fn serve_asks(
+    instance: Instance,
+    shell: Option<gpui_kit::Entity<Shell>>,
+    window: &mut gpui_kit::Window,
+    cx: &mut gpui_kit::App,
+) {
     let (ask, mut asked) = futures::channel::mpsc::unbounded();
-    instance.serve(move || {
-        let _ = ask.unbounded_send(());
+    instance.serve_asks(move |what| {
+        let _ = ask.unbounded_send(what);
     });
     window
         .spawn(cx, async move |cx| {
-            while asked.next().await.is_some() {
-                if cx.update(|window, _| window.activate_window()).is_err() {
+            while let Some(what) = asked.next().await {
+                let shell = shell.clone();
+                let done = cx.update(|window, cx| {
+                    window.activate_window();
+                    if let (instance::Ask::Open(session), Some(shell)) = (what, shell) {
+                        shell.update(cx, |shell, cx| shell.show_session(&session, window, cx));
+                    }
+                });
+                if done.is_err() {
                     break;
                 }
             }

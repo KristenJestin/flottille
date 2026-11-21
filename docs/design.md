@@ -1592,12 +1592,73 @@ own view, the growing conversation as a list that does not rebuild what did not 
 
 ## 11. Desktop integration
 
-Through the CLI only: `flottille status --json` (counts of agents running, waiting for the user,
-failed), `flottille watch` (events), `flottille open <agent>` (focus the window on it). A desktop
-shell shows a badge or a notification from these. Nothing of any desktop lives in this
-repository, but the generic XDG entry that puts Flottille in an application launcher with its icon
-(`docs/releases.md`, "The launcher entry"), and the one window a second `flottille window` brings
-to the front.
+**Flottille sends the desktop's own notifications**, generic, through the freedesktop
+Notifications specification (`org.freedesktop.Notifications` on the session bus), which every
+Linux desktop's notification server answers; nothing in it is specific to one desktop. The
+daemon sends them, with a D-Bus library (`zbus`, never `notify-send`), so that they come when the
+window is closed.
+
+- **What rings.** Each new notification of the centre (§10) whose settings say it rings: until
+  the notification settings land (#1003: on and off, volume, quiet hours, Do not disturb), the
+  requests, the questions, the failures and the reports of a root session. The rule is one
+  function of the daemon, where the settings plug in.
+- **Where it rings.** The window tells the daemon its presence (`presence.set`: focused or not,
+  and the session its page shows), on a connection it keeps open, so that a window that closes or
+  dies is no longer there; it is the presence the remote design uses (`remote.md`,
+  "Notifications"), seen from this machine. **Window focused**: no system notification; the window
+  draws a toast of the kit at the corner, with the same title and text and, for a request,
+  **Deny** (quiet) and **Allow** (primary) when Allow is offered (below); a click opens the
+  session; it folds away after a few seconds unless hovered, and at once when the notification is
+  answered or read. A window that lost the focus before the toast came tells the daemon
+  (`notifications.unshown`), and the desktop shows it instead. Nothing at all, not even a sound,
+  for the session whose page is open: it is in sight. **Window not focused, minimised or
+  closed**: the system notification. The window says its presence again every 30 seconds: a
+  focus not said again for 75 seconds (a window that hangs) counts as away.
+- **Sound.** Each notification that rings plays a short sound, in the window or out of it, once
+  for a notification: one for what needs the user (a request, a question), another for the rest.
+  They are Flottille's own, made from sine waves by a script and committed under `assets/sounds/`,
+  under the repository's licence, and the daemon plays them through the sound server (PulseAudio's
+  protocol, which PipeWire answers too), never by running `paplay` or `aplay`. The system
+  notification carries no sound hint, so the desktop plays no second one. No sound server: the
+  daemon says it once in its log, plays nothing and goes on. One client of the sound server serves
+  every sound; a sound that rings while another plays is dropped, not queued, and one that does
+  not end within 5 seconds is given up.
+- **Content.** The title (`Request #3 waits for you`), the project and the session, the excerpt:
+  masked with the daemon's secrets too, never a secret. For a request whose call can be said
+  whole, the call and why the gate held it instead (`notification::whole`), on lines of their
+  own. The app name is Flottille, its icon and its launcher
+  entry those of `docs/releases.md`, "The launcher entry".
+- **Actions**, where the server supports them (the `actions` capability): a request has Deny,
+  answered as the window would, through the gate's methods; every notification's default action
+  opens its session (`flottille open <agent>`: the open window comes forward on it, or the
+  window starts there). **Allow only on what is read whole**: what the user allows is what they
+  read, so Allow is offered, on the desktop and in the toast, only when the notification says the
+  whole call and every reason the gate held it for, uncut: a run line, a read of a path or of a
+  URL, with no other argument, one line of at most 120 characters, at most three reasons (the
+  judge's sentence among them) of at most 200 characters each, nothing masked or cut in what is
+  shown. A write (whose content is not shown), a connection's call, an action said in words, a
+  base or forwarded request get Deny and Open only; the window's card says the rest. Nor is Allow
+  offered on the desktop where a confined command may reach the session bus (no private mount
+  namespace, or the bus found at the start replaced: `docs/vault.md`, "The gaps"). Only what a
+  notification offered is done, and only when the server that showed it says it: a server that
+  takes the name later numbers its own from 1 again, and a program that only says the signal is
+  not heard. An answer the daemon refuses (decided meanwhile) is said in its log and in a
+  notification of its own. Every call on the bus is given 5 seconds: a bus or a server that hangs
+  holds nothing up.
+- **Withdrawn when resolved.** A notification answered or read elsewhere (`notifications.changed`)
+  has its desktop notification closed (`CloseNotification`); one desktop notification stands for
+  one notification, never stacked.
+- **No bus, no server.** The daemon says it once in its log, keeps the reason for Settings ("This
+  desktop shows no notifications": `notifications.status`) and goes on; the window's toast and the
+  sound still tell the user.
+- **Other platforms.** macOS and Windows are not built; the sender is one module
+  (`system_notifications.rs`), so that another platform's can sit beside it.
+
+The rest of the desktop is the command line only: `flottille status --json` (counts of agents
+running, waiting for the user, failed), `flottille watch` (events), `flottille open <agent>`
+(focus the window on it). Nothing of any desktop lives in this repository, but the generic XDG
+entry that puts Flottille in an application launcher with its icon (`docs/releases.md`, "The
+launcher entry"), and the one window a second `flottille window` brings to the front.
 
 ## 12. Later: remote
 

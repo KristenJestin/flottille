@@ -320,6 +320,9 @@ no device calls a `local` one over a link (`docs/remote.md`, "Roles").
 | `inbox.list` | read |
 | `notifications.list` | read |
 | `notifications.read` | drive |
+| `notifications.status` | read |
+| `notifications.unshown` | local |
+| `presence.set` | local |
 | `provider.list` | read |
 | `provider.enable` | drive |
 | `provider.disable` | drive |
@@ -2803,6 +2806,36 @@ session or clicks a row; what arrives in the session already open stays unread, 
 perhaps open with nobody looking. Reading a request does not answer it: it stays `resolved:
 false` until it is decided. Every change is told by the event `notifications.changed`
 (`docs/events.md`), so that every client follows.
+
+### `notifications.status`
+
+No params. What the daemon says of the desktop and of the window (#1002):
+`{"desktop": {"shows", "why", "sound"}, "window": {"focused", "session"} | null}`. `shows` is
+`false` when the desktop shows none of Flottille's notifications (no session bus, or no notification
+server on it), and `why` says it (`no notification server answers on the session bus (…)`), which
+Settings words as "This desktop shows no notifications"; `sound` says why no sound is played (no
+sound server), `null` while there is one. `window` is the presence the daemon has: a focused
+window's, else any window's, `null` when no window is connected.
+
+### `notifications.unshown`
+
+`{"id"}`. The window could not draw the toast of a notification the daemon rang in it
+(`notification.rang`): it lost the focus before the toast came. Answers `{}` at once; the desktop
+then shows that notification, as if no window had been focused, with no second sound. Nothing is
+done for a notification answered or read meanwhile, or already shown by the desktop. Only a client
+of this machine (`local`).
+
+### `presence.set`
+
+`{"focused", "session"?}`. A window tells the daemon its presence: whether it is the window the
+user is in, and the session its page shows (its root agent's id; none for another page). Answers
+`{}`. The presence belongs to **the connection that tells it** and goes with it: a window that
+closes, or dies, is no longer there, and the daemon counts the user as away. The window says it again
+on any change, and every 30 seconds, so that a daemon that started again is told; a focus not said
+again for 75 seconds (a window that hangs) counts as away. Only a client of
+this machine (`local`). With a focused window the daemon sends no system notification: it says
+`notification.rang` (`docs/events.md`) and the window draws a toast; for the session the window
+shows, it rings nothing (`docs/design.md`, §11).
 
 ### `test.advance`
 

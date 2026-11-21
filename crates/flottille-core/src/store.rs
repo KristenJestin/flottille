@@ -4374,6 +4374,54 @@ impl Store {
         Ok(found)
     }
 
+    /// The notifications numbered `ids`, oldest first, each with its `source` (what it is about:
+    /// `request:3`), which the rows say no more of.
+    pub fn notifications_of(&self, ids: &[u64]) -> Result<Vec<(Notification, String)>> {
+        let mut found = Vec::new();
+        let mut statement = self.connection.prepare(
+            "SELECT id, at, kind, session, project, workspace, title, excerpt, read_at, resolved, \
+             source FROM notifications WHERE id = ?1",
+        )?;
+        for id in ids {
+            let row = statement
+                .query_row([id], |row| {
+                    Ok((notification_row(row)?, row.get::<_, String>(10)?))
+                })
+                .optional()?;
+            found.extend(row);
+        }
+        found.sort_by_key(|(row, _)| row.id);
+        Ok(found)
+    }
+
+    /// The source of each notification numbered after `after`, with the notification: what the
+    /// desktop is told of the new ones.
+    pub fn notifications_since(
+        &self,
+        after: u64,
+        limit: usize,
+    ) -> Result<Vec<(Notification, String)>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, at, kind, session, project, workspace, title, excerpt, read_at, resolved, \
+             source FROM notifications WHERE id > ?1 ORDER BY id LIMIT ?2",
+        )?;
+        let found = statement
+            .query_map(params![after, limit as i64], |row| {
+                Ok((notification_row(row)?, row.get::<_, String>(10)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(found)
+    }
+
+    /// The number of the last notification kept, 0 when none was.
+    pub fn last_notification(&self) -> Result<u64> {
+        Ok(self.connection.query_row(
+            "SELECT coalesce(max(id), 0) FROM notifications",
+            [],
+            |row| row.get(0),
+        )?)
+    }
+
     /// How many notifications are unread: those that wait for the user, and the others.
     pub fn unread_notifications(&self) -> Result<(usize, usize)> {
         let waits = notification::NEEDS_YOU

@@ -23,6 +23,9 @@ pub struct Snapshot {
     pub bell: Vec<BellItem>,
     /// How many are unread: those that need the user, and the others.
     pub unread: (usize, usize),
+    /// Why the desktop shows none of Flottille's notifications (`notifications.status`), `None`
+    /// while it does: Settings says it.
+    pub desktop_why: Option<String>,
     /// How many `project.changed` events the link has seen: a project's file was edited when it
     /// grows.
     pub project_changes: u64,
@@ -487,6 +490,40 @@ impl LinkShown {
     /// What names the link: the title, else where it leads.
     pub fn name(&self) -> &str {
         self.title.as_deref().unwrap_or(&self.whence)
+    }
+}
+
+/// A notification the daemon rang in the window (`notification.rang`, `docs/events.md`): the
+/// window was focused and did not show its session, so the daemon sent no system notification and
+/// the window draws a toast of its own.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Rang {
+    /// The notification's number in the centre.
+    pub id: u64,
+    pub session: Option<String>,
+    pub title: String,
+    pub excerpt: String,
+    /// The request's number, for a request: what Deny answers, and Allow when `whole` says it.
+    pub request: Option<u64>,
+    /// The call and why it was held, uncut, when the daemon can say them whole: Allow is offered
+    /// on it alone, what the user allows being what they read.
+    pub whole: Option<String>,
+}
+
+impl Rang {
+    pub fn of(event: &flottille_protocol::Event) -> Option<Rang> {
+        if event.name != "notification.rang" || event.data["in"] != "window" {
+            return None;
+        }
+        let data = &event.data;
+        Some(Rang {
+            id: data["id"].as_u64()?,
+            session: data["session"].as_str().map(str::to_owned),
+            title: data["title"].as_str()?.to_owned(),
+            excerpt: data["excerpt"].as_str().unwrap_or_default().to_owned(),
+            request: data["request"].as_u64(),
+            whole: data["whole"].as_str().map(str::to_owned),
+        })
     }
 }
 
@@ -956,6 +993,7 @@ impl Snapshot {
             workspaces,
             bell: Vec::new(),
             unread: (0, 0),
+            desktop_why: None,
             project_changes: 0,
             roots: parents
                 .keys()

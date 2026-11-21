@@ -1667,6 +1667,14 @@ click outside closes.
 Below 1240 pixels wide, the session page's rail of agents becomes a drawer from the right; below
 860, the tree of projects becomes a drawer from the left, opened by the menu button of the top bar.
 
+### `flottille open <agent>`
+
+Brings the window forward on an agent's session, or starts it there: the session is the root's of
+the agent named (its id; a sub-agent's is its root's). It says `open <session>` on the open
+window's socket (`window.sock`, as `flottille window` does to raise it), and the window comes to
+the front on that session; with no window open it starts `flottille window` on it. It is also the
+default action of a desktop notification (`docs/design.md`, §11): a click on it does the same.
+
 ## The pilot door
 
 ### `flottille bridge claude`

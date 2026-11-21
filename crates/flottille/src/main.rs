@@ -62,6 +62,7 @@ mod pictures;
 mod pilot;
 mod place;
 mod posts;
+mod presence;
 mod program;
 mod programs;
 mod project_command;
@@ -77,6 +78,7 @@ mod remote;
 mod remote_command;
 mod remote_config;
 mod results;
+mod rings;
 mod roles;
 mod rules;
 mod run_methods;
@@ -90,9 +92,11 @@ mod setup;
 mod show;
 mod skill_command;
 mod skills;
+mod sounds;
 mod ssh_agent;
 mod subscriptions;
 mod sweep;
+mod system_notifications;
 mod tasks;
 mod test_time;
 mod tickets;
@@ -283,6 +287,11 @@ enum Command {
         #[arg(long, hide = true)]
         open: Option<String>,
     },
+    /// Bring the window forward on an agent's session, or start it there
+    Open {
+        /// The agent: its id, or a name that tells it from the others
+        agent: String,
+    },
     /// Replace Flottille with the latest build of a channel, its sum checked first
     Update {
         /// stable, beta or alpha; the one last chosen, or this build's, by default
@@ -416,6 +425,7 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
     let here = match &cli.command {
         Command::Daemon { action: None } => Some("daemon"),
         Command::Window { .. } => Some("window"),
+        Command::Open { .. } => Some("open"),
         Command::Update { .. } => Some("update"),
         Command::Mcp => Some("mcp"),
         Command::Bridge { .. } => Some("bridge"),
@@ -515,6 +525,7 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         Command::Remote { action } => return remote_command::run(&paths, action),
         Command::Workspace { action } => return workspace_command::run(&paths, action),
         Command::Agent { action } => return agent_command::run(&paths, action),
+        Command::Open { agent } => return agent_command::open(&paths, &agent),
         Command::Named { action } => return command_command::run(&paths, action),
         Command::Doctor { json } => return agent_command::doctor(&paths, json),
         Command::Provider { action } => {
