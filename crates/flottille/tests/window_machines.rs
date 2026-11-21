@@ -1691,7 +1691,6 @@ fn one_click_is_one_request_and_one_toast(cx: &mut TestAppContext) {
     });
     settle(&shell, cx);
     click(&shell, cx, "member-removal-action");
-    click(&shell, cx, "member-removal-action");
     assert!(shell.read_with(cx, |s, cx| s.machines().read(cx).is_changing()));
     // The hub never answers: the daemon says so after its bound, once.
     let deadline = Instant::now() + WAIT;
@@ -1875,11 +1874,12 @@ fn the_machine_of_a_session_in_the_sidebar_shows_its_look(cx: &mut TestAppContex
         .unwrap();
     let id = started["agent"]["id"].as_str().unwrap().to_owned();
     let (shell, cx) = window(&pc, cx);
+    let row = flottille_window::model::elsewhere_id("server", &id);
     until(&shell, cx, "the server's session is listed", |cx| {
-        present(cx, &format!("session-machine-icon-{id}"))
+        present(cx, &format!("session-machine-icon-{row}"))
     });
     assert_eq!(
-        label(cx, &format!("session-machine-icon-{id}")),
+        label(cx, &format!("session-machine-icon-{row}")),
         Some(look_words(&server.member("server").unwrap()))
     );
 }

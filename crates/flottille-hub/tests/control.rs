@@ -1881,7 +1881,10 @@ async fn a_stranger_learns_nothing_of_the_list_from_its_refusal() {
         .connect(&place.machine("stranger"), &hello(), &Tls::System)
         .await
         .unwrap_err();
-    assert!(matches!(refused, ControlError::Refused { .. }), "{refused}");
+    assert!(
+        matches!(refused, ControlError::NotMember { .. }),
+        "{refused}"
+    );
     let pc = device_key(1);
     let (_device, _session) = pair_device(&served, &pc, &place.machine("pc"), "pc", Role::Runner)
         .await
@@ -1890,7 +1893,10 @@ async fn a_stranger_learns_nothing_of_the_list_from_its_refusal() {
         .connect(&place.machine("stranger"), &hello(), &Tls::System)
         .await
         .unwrap_err();
-    assert!(matches!(refused, ControlError::Refused { .. }), "{refused}");
+    assert!(
+        matches!(refused, ControlError::NotMember { .. }),
+        "{refused}"
+    );
     assert!(
         !refused.to_string().contains(&pc.public().fingerprint()),
         "{refused}"

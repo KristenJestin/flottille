@@ -42,10 +42,9 @@ pub fn choose(ours: &Hello, theirs: &Hello, peer: &str) -> Result<u32, NeedsUpda
         .copied()
         .max()
         .ok_or_else(|| NeedsUpdate {
-            peer: peer.to_owned(),
+            peer: Some(peer.to_owned()),
             theirs: theirs.clone(),
             ours: ours.clone(),
-            hub: false,
         })
 }
 
@@ -54,24 +53,21 @@ pub fn choose(ours: &Hello, theirs: &Hello, peer: &str) -> Result<u32, NeedsUpda
 /// to update named by the newer protocol. `ours` is the device's side, whoever says it: the hub
 /// makes the sentence its device reads from the device's hello and its own.
 pub fn choose_hub(ours: &Hello, theirs: &Hello) -> Result<u32, NeedsUpdate> {
-    choose(ours, theirs, HUB).map_err(|mut refusal| {
-        refusal.hub = true;
+    choose(ours, theirs, "the hub").map_err(|mut refusal| {
+        refusal.peer = None;
         refusal
     })
 }
-
-/// How the hub is named in a sentence.
-const HUB: &str = "the hub";
 
 /// The refusal: no protocol in common. It displays as the sentence of the doc, which says which
 /// side runs what, so that the user knows which to update.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NeedsUpdate {
-    peer: String,
+    /// The other side as the user knows it; `None` for the hub, which is told to update on its
+    /// host.
+    peer: Option<String>,
     theirs: Hello,
     ours: Hello,
-    /// The peer is the hub: only it is told to be updated on its host.
-    hub: bool,
 }
 
 impl NeedsUpdate {
@@ -83,7 +79,7 @@ impl NeedsUpdate {
 
 impl fmt::Display for NeedsUpdate {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.hub {
+        let Some(peer) = &self.peer else {
             // The side with the older protocol is the one to update: the hub, on its host, or
             // this machine.
             let update = match self.theirs.newest() < self.ours.newest() {
@@ -98,12 +94,12 @@ impl fmt::Display for NeedsUpdate {
                 self.ours.flottille,
                 self.ours.newest(),
             );
-        }
+        };
         write!(
             f,
             "{} runs Flottille {} (protocol {}), this machine {} (protocol {}): update one of \
              them (flottille update)",
-            self.peer,
+            peer,
             self.theirs.flottille,
             self.theirs.newest(),
             self.ours.flottille,
