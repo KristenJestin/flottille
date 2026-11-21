@@ -148,7 +148,7 @@ text. A code mark goes beside a link and no other mark, as Jira holds it. A text
 in it is paragraphs, a line break staying a line break.
 
 **Reading** gives, for the same nodes, the Markdown above (a table is `| a | b |` rows under a
-`| --- |` line), a mention as its text, a link card as its address, a hard break as a line break.
+`| --- |` line), a mention as its name (`@Ada Lovelace`, see "A review reads Jira" below), a link card as its address, a hard break as a line break.
 An image or a file (`mediaSingle`, `mediaGroup`, `media`, `mediaInline`) is a line where it stands:
 `[image: <name>, not shown: ask the user to paste it if it matters]`, or `[file: <name>, not
 shown]`; an external image (`type: "external"`) gives its address as its name. The name is the
@@ -532,7 +532,8 @@ ticket itself.
     account id. `people` says the account id of every person (`Ana Example (ana@example.org),
     account id 5b10…`, once when it is already how they are named), and `show` with `detail
     full` says the author's account id on each Jira comment's line (`[comment 20000, author
-    account 5b10…]`), so an agent answering someone can mention them.
+    account 5b10…]`), and a comment that mentions people says whom, with their account ids
+    (`mentions @Ada Lovelace (account 5b10…)`), so an agent answering someone can mention them.
   - **A person seen nowhere yet is searched on the site.** `people {query, ticket?}` on Jira also
     asks the site, with the project's tracker entry (REST, signed as the rest of the calls, the
     secret in no argument, log nor answer): with a `ticket`, `GET
@@ -550,10 +551,12 @@ ticket itself.
     cannot be reached, `people` answers from the assignees and says so (`Only the assignees were
     searched, not the site: …`, with how to set the entry), and claims no ticket filter. No query:
     no search (Jira's takes words).
-  - A mention reads back as `[@Display Name](mention:<accountId>)`, the form the agent writes, so
-    one read can be repeated (a mention whose id is no account id reads as its text: an id is
-    never put into a link whatever its shape). GitHub is unchanged: an `@login` notifies, and a `mention:` link is left as
-    a link. A raw ADF given in `fields` is the agent's own document: its mention nodes are not
+  - A mention reads back as its name, `@Display Name` (#1126, which answers the open question of
+    #1093: the form the agent writes, `[@Display Name](mention:<accountId>)`, put an id in every
+    text read, where a person's name was wanted); **the account id stays beside the text**, on the
+    comment's `mentions` line of `show` and in the structured form of `workspace.ticket`
+    ("A review reads Jira" below), and `people` gives the ids to write one with. GitHub is
+    unchanged: an `@login` notifies, and a `mention:` link is left as a link. A raw ADF given in `fields` is the agent's own document: its mention nodes are not
     looked up, except those of `fields.description`.
   - Not confirmed against a real site (the fake follows the shapes above): that a `mention` node
     in the body of `POST …/comment`, of the comment's `PUT`, of a description's `PUT` and of a
@@ -1149,6 +1152,47 @@ tickets {action: "worklog_delete", ticket: "ABC-123", worklog: "10234"}
 **The maintainer checks it on their Jira site**: one worklog of their own corrected and one
 deleted on a real work item. The answers of the worklog endpoint to a `PUT` and a `DELETE` were not
 read from a real site.
+
+### A review reads Jira
+
+A routine that lists the tickets waiting for the user's review reads, for a search, each ticket's
+status and its comments with who wrote them and whom they mention, and the links between tickets
+(#1126). All of it is a read: no call writes to a tracker.
+
+- **A mention is a name.** A Jira comment's mention node (`{"type": "mention", "attrs": {"id": …,
+  "text": "@Ada Lovelace"}}`) reads as `@Ada Lovelace` in `show`, in `comments` of `workspace.ticket`
+  and in the search below; a node with no name reads `@someone`. The account id is the structured
+  form, for a comparison: `show` adds under a comment `mentions @Ada Lovelace (account 5b10…),
+  @Grace Hopper (account 712020:…)`, and the JSON of a comment has `account` (its author's) and
+  `mentions` (`[{"account", "name"}]`). The comment of a Bitbucket Cloud pull request writes a
+  mention `@{<account id>}`: it is read as the name (`GET /users/<id>`, once per account, at most 30
+  accounts a pull request), `@someone` for an account Cloud does not give, never an id. GitHub's
+  `@login` is a name already; Data Center's text is read as it is.
+- **Markup the tracker adds is removed.** `<custom …>` and `</custom>` tags in a text (a comment's
+  mention or a smart value, as some sites write them) are dropped, the words between them kept;
+  nothing keeps the tags.
+- **A search that brings what a review needs.** `tickets {"action": "search", "jql": "project =
+  ABC AND statusCategory != Done AND comment ~ \"Ada\"", "detail": "full"}` asks `acli` for the
+  fields `comment` and `issuelinks` too, with `--paginate`, so every page is read (up to 10000
+  tickets, said when reached), or `limit` tickets (`limit` also bounds a short search). Each ticket
+  is its line, then `Status: In Review (category: indeterminate)`, its comments as `show` gives them
+  (author, date, text, the `mentions` line; the newest 30, the older counted) and its links as
+  `show` gives them (`blocks ABC-9 (To Do): …`, `is blocked by …`, with the other key). **`detail
+  full` and `limit` are a Jira search's**: a `list` and a GitHub search refuse them, naming the
+  other way (`show` reads one ticket with its comments). A search is a read, held by no gate, and
+  as `search` is not kept across a write.
+- **Who the user is.** `tickets {"action": "me"}` says which account is the user's, from the
+  connection: on Jira `GET /rest/api/3/myself` with the project's vault entry (the one of
+  `worklog_token`, as `worklogs` reads it, asked once and kept; the secret is in no answer; no
+  entry is refused with how to set one), on GitHub `gh api user`. A prompt can then say "my
+  comments": those whose `author account` is that account, and whose mentions carry it. A read,
+  never held.
+- Not confirmed against a real site: that `acli jira workitem search` takes `comment` and
+  `issuelinks` among its `--fields` (the page does not list them: see the assumption above, and the
+  fake accepts them), and the shape of the comments it prints (taken as `view`'s). The maintainer
+  checks one search on their Jira site.
+- The tests: `crates/flottille/tests/ticket_jira_review.rs` (the fake `acli`, a fake HTTP site for
+  `myself`, the daemon's in-memory keyring) and `forge_threads.rs` (Bitbucket Cloud).
 
 ### Reading worklogs
 

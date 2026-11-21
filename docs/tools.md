@@ -1151,7 +1151,9 @@ Jira: their account id, else their e-mail). The card shows the names as given.
   one** (Jira rewrites nothing): only a mention node with the account id does, so in a Jira
   `comment`, `comment_edit`, `reply`, `log_time` comment, `create` or `edit` description the agent
   writes `[@Display Name](mention:<accountId>)` (`people` gives the account ids, and `show` each
-  comment author's; the `body` field's description says so), which becomes the node. Each account is looked up on the site with the project's tracker entry: an id the site
+  comment author's and whom a comment mentions; the `body` field's description says so), which
+  becomes the node. A mention read in a comment is its name (`@Ada Lovelace`), its account id on a
+  `mentions` line beside it. Each account is looked up on the site with the project's tracker entry: an id the site
   does not know, or one that holds no account id, is refused before the user is asked, and the
   card says who is notified by the name Jira returns and the id, whatever the text says. Every
   such text goes through Jira's API with the entry (never `acli`), so it is refused without one
@@ -1291,6 +1293,11 @@ Jira: their account id, else their e-mail). The card shows the names as given.
   the title and the body whole, and a long one or one holding a secret is refused or base, as
   for the forge's writes ("The forge"). Locks, a project or a tracker kept read only, are
   planned as their own feature.
+- **A review reads Jira** (#1126, `docs/tickets.md`, "A review reads Jira"), all reads: `search` on
+  Jira with `detail: full` brings each ticket's status and its category, its comments (author, date,
+  text, whom they mention) and its links, every page read, or `limit` tickets; `me` says which
+  account is the user's (Jira `myself` with the project's entry, GitHub `gh api user`); a mention
+  reads as a name with its account id beside it.
 - **Logging time**: `log_time {ticket, duration, started?, body?}` posts a worklog on a Jira work
   item, with the vault entry the project's `[tracker] worklog_token` names; a write like `comment`,
   its card saying the ticket, the duration and the start; refused on GitHub. `time_spent` (a read)
