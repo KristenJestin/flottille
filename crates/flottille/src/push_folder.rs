@@ -21,23 +21,29 @@ use std::path::{Path, PathBuf};
 
 use crate::git::Class;
 
-/// The repository's settings a push still reads: which remote, at which URLs, and which refs go
-/// there. Each is a name of a remote, a URL or a refspec, never a program nor a way to reach the
-/// remote (`http.*`, `url.*`, `remote.<name>.proxy`, `remote.<name>.vcs` are left out). Names as
-/// `git config --list` writes them: the section and the key lower case, the middle as it is.
-const KEPT: [&str; 11] = [
+/// The repository's settings a push still reads: which remote, at which URLs, a branch's
+/// upstream and the remote-tracking refs. Each is a name of a remote, a URL or a refspec, never a
+/// program nor a way to reach the remote (`http.*`, `url.*`, `remote.<name>.proxy`,
+/// `remote.<name>.vcs` are left out), nor which refs a push that names none sends ([`REFUSED`]).
+/// Names as `git config --list` writes them: the section and the key lower case, the middle as
+/// it is.
+const KEPT: [&str; 8] = [
     "remote.*.url",
     "remote.*.pushurl",
-    "remote.*.push",
     "remote.*.fetch",
-    "remote.*.mirror",
     "branch.*.remote",
     "branch.*.pushremote",
     "branch.*.merge",
     "remote.pushdefault",
-    "push.default",
     "push.autosetupremote",
 ];
+
+/// The repository's settings that say which refs a push sends when its line names none, and how:
+/// one a run wrote would make a plain `git push` delete a branch of the remote (`:main`), force
+/// it (`+refs/heads/*`), prune it (`mirror`) or send to another branch than its own
+/// (`push.default=upstream`). A push from a repository that sets one is refused rather than run
+/// without it, which would send other refs than the user meant.
+const REFUSED: [&str; 3] = ["remote.*.push", "remote.*.mirror", "push.default"];
 
 /// What the folder made for a push holds.
 pub struct PushFolder {
@@ -209,6 +215,18 @@ fn repository_settings(listed: &str) -> Result<(String, Vec<(String, String)>), 
             if name != "worktreeconfig" {
                 extensions.push_str(&format!("\t{name} = {value}\n"));
             }
+        } else if let Some(pattern) = REFUSED.iter().find(|pattern| matches(pattern, &key)) {
+            // A mirror turned off is no mirror.
+            let off = ["false", "no", "off", "0"].contains(&value.to_ascii_lowercase().as_str());
+            if !(pattern.ends_with(".mirror") && off) {
+                return Err(format!(
+                    "its repository's settings say which refs a push sends ({key}), which a run \
+                     may have written, and a push the gate let through follows only the refs \
+                     its line names and your own settings: unset it (git config --unset-all \
+                     {key}) or set it in your own git settings, and name the refs on the line \
+                     (git push origin HEAD:refs/heads/<branch>)"
+                ));
+            }
         } else if KEPT.iter().any(|pattern| matches(pattern, &key)) {
             kept.push((key, value));
         }
@@ -267,8 +285,9 @@ mod tests {
             "local\0url.https://elsewhere.invalid/.insteadof\nhttps://forge.invalid/",
             "local\0core.sshcommand\nplanted",
             "local\0include.path\n/tmp/planted",
+            "local\0remote.origin.mirror\nfalse",
             "global\0push.default\ncurrent",
-            "worktree\0push.default\nsimple",
+            "worktree\0push.autosetupremote\ntrue",
             "",
         ]
         .join("\0");
@@ -288,9 +307,22 @@ mod tests {
                 "remote.origin.fetch",
                 "branch.feat/a.b.remote",
                 "branch.feat/a.b.merge",
-                "push.default",
+                "push.autosetupremote",
             ]
         );
+    }
+
+    #[test]
+    fn a_repository_that_says_which_refs_a_push_sends_is_refused() {
+        for listed in [
+            "local\0remote.origin.push\n:refs/heads/main",
+            "local\0remote.origin.push\n+refs/heads/*:refs/heads/*",
+            "local\0remote.origin.mirror\ntrue",
+            "local\0remote.origin.mirror",
+            "worktree\0push.default\nupstream",
+        ] {
+            assert!(repository_settings(listed).is_err(), "{listed}");
+        }
     }
 
     #[test]
