@@ -65,6 +65,10 @@ pub(crate) const COMMENTS: usize = 30;
 const ATTACHMENTS: usize = 30;
 /// What `gh issue view` is asked for.
 const GH_FIELDS: &str = "number,title,state,body,comments,url,milestone";
+/// What a review reads of each ticket a search found: its status, comments and links.
+const REVIEW_FIELDS: &str = "summary,status,comment,issuelinks,attachment";
+/// How many tickets of a review are read at once.
+const REVIEW_READS: usize = 6;
 /// What `acli jira workitem view` is asked for.
 /// `*navigable` brings the site's Sprint field, whose id is the site's own (`sprints`).
 const ACLI_FIELDS: &str =
@@ -1650,8 +1654,9 @@ struct Listed {
     /// The title of its milestone, on GitHub.
     milestone: Option<String>,
     url: Option<String>,
-    /// A Jira search with `detail: full`: the ticket as the search read it, its comments and links.
-    detail: Option<Ticket>,
+    /// A Jira search with `detail: full`: the ticket as `view` read it, its comments and links, or
+    /// why it could not be read.
+    detail: Option<Result<Ticket, String>>,
 }
 
 /// `tickets list` and `tickets search`: every ticket of a state, by label, assignee and, for a
@@ -1891,8 +1896,12 @@ async fn listed(daemon: &Daemon, project: &Project, asked: &TicketsCall) -> Outc
         }
         text.push_str(&line);
         text.push('\n');
-        if let Some(read) = &ticket.detail {
-            text.push_str(&read.review_text());
+        match &ticket.detail {
+            Some(Ok(read)) => text.push_str(&read.review_text()),
+            Some(Err(why)) => text.push_str(&format!(
+                "  (its comments and links could not be read: {why})\n"
+            )),
+            None => {}
         }
     }
     if filters.full && tickets.len() >= JIRA_ALL {
@@ -2317,6 +2326,8 @@ async fn list_work_items(
         .limit
         .unwrap_or(if filters.full { JIRA_ALL } else { LISTED })
         .to_string();
+    // The fields a search may ask are the five of a list (`acli` refuses others, see
+    // `docs/tickets.md`): a review's comments and links are read with each ticket's `view`.
     let mut args = vec![
         "jira",
         "workitem",
@@ -2324,10 +2335,7 @@ async fn list_work_items(
         "--jql",
         &query,
         "--fields",
-        match filters.full {
-            true => "key,summary,status,assignee,labels,comment,issuelinks",
-            false => "key,summary,status,assignee,labels",
-        },
+        "key,summary,status,assignee,labels",
         "--json",
     ];
     if filters.full {
@@ -2391,8 +2399,23 @@ async fn list_work_items(
             // the filter says is what every item found holds.
             milestone: versions::said_in(fields).or_else(|| filters.milestone.map(masked)),
             url: Some(format!("https://{site}/browse/{}", masked(key))),
-            detail: filters.full.then(|| work_item(key, item, site)),
+            detail: None,
         });
+    }
+    if filters.full {
+        use futures::StreamExt as _;
+        // A few at a time: a review is a read of the user's own tickets, not a load on the site.
+        let read: Vec<Result<Value, String>> = futures::stream::iter(
+            tickets
+                .iter()
+                .map(|t| viewed(&t.reference, site, REVIEW_FIELDS)),
+        )
+        .buffered(REVIEW_READS)
+        .collect()
+        .await;
+        for (ticket, item) in tickets.iter_mut().zip(read) {
+            ticket.detail = Some(item.map(|item| work_item(&ticket.reference, &item, site)));
+        }
     }
     Ok((tickets, left_out, nulls))
 }

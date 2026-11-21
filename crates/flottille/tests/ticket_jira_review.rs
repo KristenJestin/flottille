@@ -40,10 +40,12 @@ impl Jira {
                 let mut raw = [0u8; 4096];
                 let read = stream.read(&mut raw).unwrap_or(0);
                 let head = String::from_utf8_lossy(&raw[..read]).into_owned();
+                // Without the query string, which an empty list of parameters leaves as `?`.
                 let path = head
                     .lines()
                     .next()
                     .and_then(|line| line.split(' ').nth(1))
+                    .and_then(|target| target.split('?').next())
                     .unwrap_or_default()
                     .to_owned();
                 kept.lock().unwrap().push(path.clone());
@@ -346,19 +348,29 @@ fn a_search_pages_to_the_end_with_comments_and_links() {
         "{found}"
     );
     assert!(!found.contains("](mention:"), "{found}");
-    // It asked for every page, and for the comments and the links.
-    let search = user
-        .acli_received()
-        .into_iter()
+    // It asked for every page; a search takes no `comment` nor `issuelinks` among its fields
+    // (`acli` refuses them), so each ticket is read with its comments and links.
+    let calls = user.acli_received();
+    let search = calls
+        .iter()
         .find(|call| call["args"][2] == "search")
         .expect("a search");
     let args = search["args"].to_string();
     assert!(args.contains("--paginate"), "{args}");
-    assert!(
-        args.contains("comment") && args.contains("issuelinks"),
-        "{args}"
-    );
     assert!(args.contains("comment ~"), "{args}");
+    let views: Vec<String> = calls
+        .iter()
+        .filter(|call| call["args"][2] == "view")
+        .map(|call| call["args"].to_string())
+        .collect();
+    for key in ["ABC-1", "ABC-2", "ABC-3"] {
+        let view = views.iter().find(|view| view.contains(key));
+        let view = view.unwrap_or_else(|| panic!("{key} was not read: {views:?}"));
+        assert!(
+            view.contains("comment") && view.contains("issuelinks"),
+            "{view}"
+        );
+    }
 }
 
 #[test]

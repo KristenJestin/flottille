@@ -1172,25 +1172,28 @@ status and its comments with who wrote them and whom they mention, and the links
   mention or a smart value, as some sites write them) are dropped, the words between them kept;
   nothing keeps the tags.
 - **A search that brings what a review needs.** `tickets {"action": "search", "jql": "project =
-  ABC AND statusCategory != Done AND comment ~ \"Ada\"", "detail": "full"}` asks `acli` for the
-  fields `comment` and `issuelinks` too, with `--paginate`, so every page is read (up to 10000
-  tickets, said when reached), or `limit` tickets (`limit` also bounds a short search). Each ticket
-  is its line, then `Status: In Review (category: indeterminate)`, its comments as `show` gives them
-  (author, date, text, the `mentions` line; the newest 30, the older counted) and its links as
-  `show` gives them (`blocks ABC-9 (To Do): …`, `is blocked by …`, with the other key). **`detail
-  full` and `limit` are a Jira search's**: a `list` and a GitHub search refuse them, naming the
-  other way (`show` reads one ticket with its comments). A search is a read, held by no gate, and
-  as `search` is not kept across a write.
+  ABC AND statusCategory != Done AND comment ~ \"Ada\"", "detail": "full"}` runs the search with
+  `--paginate`, so every page is read (up to 10000 tickets, said when reached), or `limit`
+  tickets (`limit` also bounds a short search), then reads each ticket found with `acli jira
+  workitem view` (`summary,status,comment,issuelinks,attachment`, six at a time): a search is not
+  asked `comment` nor `issuelinks`, which `acli` refuses among a search's fields (above). Each
+  ticket is its line, then `Status: In Review (category: indeterminate)`, its comments as `show`
+  gives them (author, date, text, the `mentions` line; the newest 30, the older counted) and its
+  links as `show` gives them (`blocks ABC-9 (To Do): …`, `is blocked by …`, with the other key). A
+  ticket whose `view` fails says so under its line, the others are shown. **`detail full` and
+  `limit` are a Jira search's**: a `list` and a GitHub search refuse them, naming the other way
+  (`show` reads one ticket with its comments). A search is a read, held by no gate, and not kept
+  across a write.
 - **Who the user is.** `tickets {"action": "me"}` says which account is the user's, from the
   connection: on Jira `GET /rest/api/3/myself` with the project's vault entry (the one of
   `worklog_token`, as `worklogs` reads it, asked once and kept; the secret is in no answer; no
   entry is refused with how to set one), on GitHub `gh api user`. A prompt can then say "my
   comments": those whose `author account` is that account, and whose mentions carry it. A read,
   never held.
-- Not confirmed against a real site: that `acli jira workitem search` takes `comment` and
-  `issuelinks` among its `--fields` (the page does not list them: see the assumption above, and the
-  fake accepts them), and the shape of the comments it prints (taken as `view`'s). The maintainer
-  checks one search on their Jira site.
+- Not confirmed against a real site: the comments and links `view` prints for a ticket found by a
+  search are the shapes `show` already reads; one search of a review is for the maintainer to
+  check on their Jira site. A review is one `view` per ticket found: a search of hundreds of
+  tickets is that many reads (six at a time), which `limit` bounds.
 - The tests: `crates/flottille/tests/ticket_jira_review.rs` (the fake `acli`, a fake HTTP site for
   `myself`, the daemon's in-memory keyring) and `forge_threads.rs` (Bitbucket Cloud).
 
