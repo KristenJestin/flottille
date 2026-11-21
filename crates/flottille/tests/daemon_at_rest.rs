@@ -64,6 +64,29 @@ fn woken(
     woken
 }
 
+/// Asserts the daemon `pid` wakes no more than its own timers need over ten seconds, and says no
+/// event to the client `watch` follows with.
+fn at_rest(pid: u64, watch: &common::Watch) {
+    let span = Duration::from_secs(10);
+    let before = sleeps(pid);
+    std::thread::sleep(span);
+    let threads = woken(&before, &sleeps(pid));
+
+    let woken: u64 = threads.iter().map(|(_, count)| count).sum();
+    let rate = woken as f64 / span.as_secs_f64();
+    assert!(
+        rate <= WAKE_UPS_PER_SECOND,
+        "the daemon woke {woken} times in {span:?} ({rate:.1} per second, at most \
+         {WAKE_UPS_PER_SECOND}), by thread: {threads:?}"
+    );
+    let events: Vec<_> = watch
+        .within(Duration::from_millis(100))
+        .into_iter()
+        .map(|event| event["name"].clone())
+        .collect();
+    assert!(events.is_empty(), "events at rest: {events:?}");
+}
+
 #[test]
 fn the_daemon_does_not_wake_at_rest() {
     let user = User::with_fake_agent().with_fake_escalation();
@@ -91,22 +114,41 @@ fn the_daemon_does_not_wake_at_rest() {
     // What the starts left to finish (a title, a sweep) ends first.
     watch.within(Duration::from_secs(6));
 
-    let span = Duration::from_secs(10);
-    let before = sleeps(pid);
-    std::thread::sleep(span);
-    let threads = woken(&before, &sleeps(pid));
+    at_rest(pid, &watch);
+}
 
-    let woken: u64 = threads.iter().map(|(_, count)| count).sum();
-    let rate = woken as f64 / span.as_secs_f64();
-    assert!(
-        rate <= WAKE_UPS_PER_SECOND,
-        "the daemon woke {woken} times in {span:?} ({rate:.1} per second, at most \
-         {WAKE_UPS_PER_SECOND}), by thread: {threads:?}"
-    );
-    let events: Vec<_> = watch
-        .within(Duration::from_millis(100))
-        .into_iter()
-        .map(|event| event["name"].clone())
-        .collect();
-    assert!(events.is_empty(), "events at rest: {events:?}");
+/// Routines between their runs (#1122): the daemon keeps one deadline, the next run due, which
+/// the sweep already running reads; nothing of theirs wakes it.
+#[test]
+fn the_daemon_stays_at_rest_between_runs() {
+    let user = User::with_fake_agent().with_fake_escalation();
+    let folder = user.path("work/app");
+    user.git_init(&folder);
+    std::fs::write(folder.join("README.md"), "app\n").unwrap();
+    user.git(&folder, &["add", "README.md"]);
+    user.git(&folder, &["commit", "--quiet", "-m", "start"]);
+    user.call("project.add", json!({"folder": folder, "name": "app"}))
+        .unwrap();
+    // None is due within the measure: their hour is three hours ahead.
+    let hour = (jiff::Timestamp::now() + jiff::SignedDuration::from_hours(3))
+        .to_zoned(jiff::tz::TimeZone::UTC)
+        .strftime("%H:%M")
+        .to_string();
+    for (name, days) in [
+        ("Tickets to review", "weekdays"),
+        ("Nightly", "every day"),
+        ("Weekly", "mondays"),
+    ] {
+        user.call(
+            "routine.add",
+            json!({"name": name, "project": "app", "prompt": "List what waits",
+                "schedule": format!("{days} {hour}"), "zone": "UTC", "mode": "read_only"}),
+        )
+        .unwrap();
+    }
+    let pid = user.status()["pid"].as_u64().unwrap();
+    let watch = user.watch(&[]);
+    watch.within(Duration::from_secs(6));
+
+    at_rest(pid, &watch);
 }
