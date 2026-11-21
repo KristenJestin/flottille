@@ -1288,6 +1288,18 @@ impl Server {
         outdated
     }
 
+    /// What a tool is listed as changed with no change of any grant (the developer mode adds
+    /// actions to `services` while it is on): every running session that can take it is told
+    /// to list its tools again.
+    pub fn relist(&self) {
+        let mut tokens = self.tokens.lock().unwrap();
+        for notice in tokens.notices.values_mut().filter(|notice| notice.takes) {
+            notice.changed += 1;
+        }
+        drop(tokens);
+        self.changes.send_modify(|n| *n += 1);
+    }
+
     /// The agent's running session now works in `place`: its next calls are decided and
     /// performed there. Nothing when no process of the agent runs.
     pub fn move_place(&self, agent: &str, place: Place) {
@@ -2068,6 +2080,10 @@ impl ServerHandler for Handler {
                 if definition.name == "ask" {
                     tool.description = Some(ask_goes(&self.daemon, &grant.agent).into());
                 }
+                // The actions that file a finding exist only while the developer mode is on.
+                if definition.name == "services" && self.daemon.developer.on() {
+                    crate::findings::offer(&mut tool);
+                }
                 tool
             })
             .collect();
@@ -2757,6 +2773,10 @@ fn verdict_of(
     if tool == "web" && crate::show::is(args) {
         return crate::show::verdict(&grant.place, args);
     }
+    // A finding about Flottille itself changes nothing: harmless in every mode.
+    if tool == "services" && crate::findings::is(args) {
+        return gate::Verdict::Allow;
+    }
     if tool == "web" {
         return crate::web::classify(daemon, grant, args);
     }
@@ -3438,6 +3458,7 @@ async fn performed_once(
     match tool {
         "web" if crate::show::is(&args) => crate::show::show(daemon, grant, args),
         "web" => crate::web::web(daemon, grant, args).await,
+        "services" if crate::findings::is(&args) => crate::findings::tool(daemon, grant, args),
         "services" => crate::services::tool(daemon, grant, args, first).await,
         // An accepted request's `first` is the words the user read (`approvals`).
         "connections" => crate::extensions::family_call(daemon, args, first, &grant.place).await,
