@@ -165,7 +165,7 @@ fn the_start_dialog_offers_the_machines_that_can_run_the_project(cx: &mut TestAp
     });
     // Choosing it shows that machine, where the session then starts.
     click(cx, "place-choice-machine-server");
-    until(&shell, cx, "the window shows the server", |_| {
+    until(&shell, cx, "the window shows the server", |cx| {
         shell.read_with(&*cx, |s, _| s.machine_shown().as_deref() == Some("server"))
     });
 }
