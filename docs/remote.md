@@ -390,7 +390,9 @@ so that a session opened before a change that leaves it out asks nothing more. T
 list whole, what it knows of each device, and, to a runner, the presence, at once and whenever
 they change. A machine of before 2026-11-21 still asks to tell its addresses: the hub answers and
 keeps nothing of them; a hub of before then still sends the addresses its members told: a device
-reads and ignores them, so that neither loses its session while the other is updated. Text the hub or anything at its address says is shown with its control and format
+reads and ignores them, so that neither loses its session while the other is updated. The hub
+sends each session an empty list of addresses once, `{"addresses": []}`, which a phone's core of
+before waits for before it links to its runners. Text the hub or anything at its address says is shown with its control and format
 characters replaced.
 
 **Its limits.** Someone with no key holds little of it: 64 connections at most that have not proved
