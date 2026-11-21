@@ -62,11 +62,19 @@ fn until(
     }
 }
 
+/// Lets every motion end: the window's clock goes on until it asks for no animation frame over
+/// half a second of it, so that a row clicked is where it stays.
 fn settle(cx: &mut VisualTestContext) {
-    for _ in 0..40 {
+    let mut quiet = 0;
+    for _ in 0..1000 {
         cx.executor().advance_clock(Duration::from_millis(16));
-        cx.update(|window, cx| window.simulate_next_frame(cx));
         cx.run_until_parked();
+        let asked = cx.update(|window, cx| window.simulate_next_frame(cx));
+        cx.run_until_parked();
+        quiet = if asked == 0 { quiet + 1 } else { 0 };
+        if quiet >= 30 {
+            return;
+        }
     }
 }
 
@@ -84,6 +92,7 @@ fn label(cx: &mut VisualTestContext, id: &str) -> Option<String> {
 }
 
 fn click(cx: &mut VisualTestContext, id: &str) {
+    settle(cx);
     let id = id.to_owned();
     cx.update(|window, cx| window.click(id, cx));
     settle(cx);
@@ -134,7 +143,10 @@ fn sign_in_shows_the_address_and_the_code_and_ends_signed_in(cx: &mut TestAppCon
     until(&shell, cx, "gh's row says it is not signed in", |cx| {
         label(cx, "sign-in-state-gh").as_deref() == Some("Not signed in")
     });
-    assert!(visible(cx, "forges"), "the Forges and trackers section");
+    assert!(
+        visible(cx, "sign-in-row-gh"),
+        "gh is a row of the Forges and trackers section"
+    );
     click(cx, "sign-in-gh");
 
     until(
@@ -224,10 +236,9 @@ fn cancel_stops_the_sign_in(cx: &mut TestAppContext) {
     });
     settle(cx);
     assert!(!visible(cx, "sign-in-modal"), "the dialog closed");
-    assert_eq!(
-        label(cx, "sign-in-state-gh").as_deref(),
-        Some("Not signed in")
-    );
+    until(&shell, cx, "gh's row says it is not signed in", |cx| {
+        label(cx, "sign-in-state-gh").as_deref() == Some("Not signed in")
+    });
 }
 
 #[gpui_kit::test]
@@ -277,6 +288,7 @@ fn a_program_without_a_flow_says_the_line_to_type(cx: &mut TestAppContext) {
         !visible(cx, "sign-in-opencode"),
         "no Sign in without a flow"
     );
+    settle(cx);
     // A program that is not installed says so, and offers nothing.
     assert_eq!(
         label(cx, "sign-in-state-acli").as_deref(),
