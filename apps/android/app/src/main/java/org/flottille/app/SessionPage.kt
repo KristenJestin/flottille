@@ -512,8 +512,9 @@ private fun Composer(
     var sending by remember(key) { mutableStateOf(false) }
     val canSend = (text.isNotBlank() || attached.isNotEmpty()) && !sending
 
-    fun attach(picked: List<Picture>) {
-        for (picture in picked) {
+    fun attach(picked: Pictured) {
+        picked.refused?.let(onToast)
+        for (picture in picked.pictures) {
             val why = PictureLimits.refusal(attached, picture)
             if (why != null) onToast(why) else attached += picture
         }
@@ -571,7 +572,7 @@ private fun Composer(
         Field("Message", text, { text = it }, tag = "composer", singleLine = false, maxLines = 8)
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(Space.Sm), verticalAlignment = Alignment.CenterVertically) {
             FButton("Gallery", { pictures.gallery(::attach) }, kind = ButtonKind.Ghost)
-            FButton("Camera", { pictures.camera { it?.let { picture -> attach(listOf(picture)) } } }, kind = ButtonKind.Ghost)
+            FButton("Camera", { pictures.camera { it?.let { picture -> attach(Pictured(listOf(picture))) } } }, kind = ButtonKind.Ghost)
             Box(Modifier.weight(1f), contentAlignment = Alignment.CenterEnd) {
                 // Stop takes Send's place while a turn runs and Send has nothing to send.
                 Crossfade(targetState = page.working && !canSend, animationSpec = Motion.spec(Motion.PANEL), label = "send or stop") { stop ->

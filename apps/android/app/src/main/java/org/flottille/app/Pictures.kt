@@ -1,7 +1,7 @@
 package org.flottille.app
 
 import android.Manifest
-import android.content.Context
+import android.content.ContentResolver
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
@@ -11,9 +11,13 @@ import androidx.activity.ComponentActivity
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.FileProvider
+import androidx.lifecycle.lifecycleScope
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.InputStream
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.flottille.core.Picture
 
 /** The window's limits on the pictures of a message (`docs/protocol.md`, `agent.send`). */
@@ -45,6 +49,9 @@ object PictureLimits {
         }
 }
 
+/** What a read of pictures gave: the pictures, and one sentence of why others were left out. */
+class Pictured(val pictures: List<Picture>, val refused: String? = null)
+
 /**
  * Where the pictures of a message come from: the gallery and the camera. The system's
  * ([SystemPictures]) never needs a storage permission; the tests play another. A picture's bytes
@@ -52,14 +59,14 @@ object PictureLimits {
  */
 interface PictureSource {
     /** The pictures the user picks from the gallery; none when they pick none. */
-    fun gallery(done: (List<Picture>) -> Unit)
+    fun gallery(done: (Pictured) -> Unit)
 
     /** A picture the camera takes; none when the user leaves it. */
     fun camera(done: (Picture?) -> Unit)
 
     /** A phone with no way to pick: the composer offers none. */
     object None : PictureSource {
-        override fun gallery(done: (List<Picture>) -> Unit) = done(emptyList())
+        override fun gallery(done: (Pictured) -> Unit) = done(Pictured(emptyList()))
 
         override fun camera(done: (Picture?) -> Unit) = done(null)
     }
@@ -71,33 +78,39 @@ interface PictureSource {
  * gives out, for the time of the shot. Read, then deleted.
  */
 class SystemPictures(private val activity: ComponentActivity) : PictureSource {
-    private var galleryDone: ((List<Picture>) -> Unit)? = null
+    private var galleryDone: ((Pictured) -> Unit)? = null
     private var cameraDone: ((Picture?) -> Unit)? = null
     private var shot: File? = null
 
+    // What is read stays off the main thread: a picture can be megabytes.
     private val pick = activity.registerForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(PictureLimits.MOST)) { uris ->
-        galleryDone?.invoke(uris.mapNotNull { read(activity, it) })
+        val done = galleryDone
         galleryDone = null
+        activity.lifecycleScope.launch {
+            val read = withContext(Dispatchers.IO) { readPictures(uris, ResolverReader(activity.contentResolver)) }
+            done?.invoke(read)
+        }
     }
 
     private val shoot = activity.registerForActivityResult(ActivityResultContracts.TakePicture()) { taken ->
         val file = shot
         shot = null
-        val picture = if (taken && file != null) {
-            file.inputStream().use { fitted(it, "image/jpeg", file.name) }
-        } else {
-            null
-        }
-        file?.delete()
-        cameraDone?.invoke(picture)
+        val done = cameraDone
         cameraDone = null
+        activity.lifecycleScope.launch {
+            // Read, then deleted, whatever came of it: a shot is never left in the cache.
+            val picture = withContext(Dispatchers.IO) {
+                if (file == null) null else if (taken) readShot(file) else file.delete().let { null }
+            }
+            done?.invoke(picture)
+        }
     }
 
     private val permission = activity.registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) launchCamera() else finish(null)
     }
 
-    override fun gallery(done: (List<Picture>) -> Unit) {
+    override fun gallery(done: (Pictured) -> Unit) {
         galleryDone = done
         pick.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
     }
@@ -113,6 +126,11 @@ class SystemPictures(private val activity: ComponentActivity) : PictureSource {
         }
     }
 
+    init {
+        // What a process that died between the shot and its read left behind.
+        clearShots(File(activity.cacheDir, "pictures"))
+    }
+
     private fun launchCamera() {
         val folder = File(activity.cacheDir, "pictures").apply { mkdirs() }
         val file = File.createTempFile("photo-", ".jpg", folder)
@@ -126,32 +144,106 @@ class SystemPictures(private val activity: ComponentActivity) : PictureSource {
     }
 }
 
-/** A picture the system gave by [uri] (a gallery pick, a share), or null when it cannot be read. */
-fun read(context: Context, uri: Uri): Picture? {
-    val mime = context.contentResolver.getType(uri) ?: return null
-    val name = uri.lastPathSegment?.substringAfterLast('/').orEmpty().ifEmpty { "picture" }
-    return context.contentResolver.openInputStream(uri)?.use { fitted(it, mime, name) }
+/** What the system's content resolver says of a picture it gives out by a uri. */
+interface PictureReader {
+    fun type(uri: Uri): String?
+
+    fun open(uri: Uri): InputStream?
 }
 
-/** The pictures an intent shares to the app (an intent filter for images only), read. */
-fun sharedPictures(context: Context, intent: Intent): List<Picture> {
-    // The typed getters need API 33; the app's minimum is 31.
-    @Suppress("DEPRECATION")
-    val uris = when (intent.action) {
-        Intent.ACTION_SEND -> listOfNotNull(intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM))
-        Intent.ACTION_SEND_MULTIPLE -> intent.getParcelableArrayListExtra<Uri>(Intent.EXTRA_STREAM).orEmpty()
+/** The reader of the app: the content resolver. */
+class ResolverReader(private val resolver: ContentResolver) : PictureReader {
+    override fun type(uri: Uri): String? = resolver.getType(uri)
+
+    override fun open(uri: Uri): InputStream? = resolver.openInputStream(uri)
+}
+
+/**
+ * The pictures at [uris] (a gallery pick, a share), read for a message. A uri comes from another
+ * app, so it is never trusted: one the app has no grant for, one that fails, one that is no picture
+ * or is over [PictureLimits.BYTES] (refused before it is held, and never cut short) is left out and
+ * said once, and reading stops once the pictures held pass [PictureLimits.LINK_BYTES], what a
+ * message carries (the composer says it for the last).
+ */
+fun readPictures(uris: List<Uri>, reader: PictureReader): Pictured {
+    val pictures = mutableListOf<Picture>()
+    var unread = 0
+    var oversize: String? = null
+    var held = 0
+    for (uri in uris.take(PictureLimits.MOST)) {
+        if (held > PictureLimits.LINK_BYTES) break
+        try {
+            val mime = reader.type(uri)
+            val name = uri.lastPathSegment?.substringAfterLast('/').orEmpty().ifEmpty { "picture" }
+            val picture = if (mime == null) null else reader.open(uri)?.use { fitted(it, mime, name, PictureLimits.BYTES) }
+            if (picture == null) {
+                unread += 1
+            } else {
+                pictures += picture
+                held += picture.bytes.size
+            }
+        } catch (big: TooBig) {
+            oversize = "${big.name.ifEmpty { "a picture" }} is over 5 MiB"
+        } catch (_: Exception) {
+            // No grant (SecurityException), a provider that died, a file that is gone: one picture
+            // less, never the end of the app.
+            unread += 1
+        }
+    }
+    val said = listOfNotNull(
+        oversize,
+        if (unread > 0) "$unread picture${if (unread > 1) "s" else ""} could not be read" else null,
+    ).joinToString(". ").ifEmpty { null }
+    return Pictured(pictures, said)
+}
+
+/** The pictures an intent shares to the app (an intent filter for images only): their uris. */
+@Suppress("DEPRECATION") // The typed getters need API 33; the app's minimum is 31.
+fun sharedUris(intent: Intent): List<Uri> {
+    // Another app wrote the extra: a value of another type, or one that cannot be read, is no
+    // picture, never an exception.
+    val extra = runCatching { intent.extras?.get(Intent.EXTRA_STREAM) }.getOrNull()
+    return when (intent.action) {
+        Intent.ACTION_SEND -> listOfNotNull(extra as? Uri)
+        Intent.ACTION_SEND_MULTIPLE -> (extra as? List<*>).orEmpty().filterIsInstance<Uri>()
         else -> emptyList()
     }
-    return uris.take(PictureLimits.MOST).mapNotNull { read(context, it) }
 }
 
-/** At most [limit] bytes of [stream]: a file of any size never fills the memory. */
+/**
+ * The shot the camera wrote into [file]: read, and deleted whatever comes of it. A photo of a phone
+ * is several MiB, so it is read up to [CAMERA_BYTES] and scaled down as a gallery pick is.
+ */
+fun readShot(file: File): Picture? =
+    try {
+        file.inputStream().use { fitted(it, "image/jpeg", file.name, CAMERA_BYTES) }
+    } catch (_: Exception) {
+        null
+    } finally {
+        file.deleteRecursively()
+    }
+
+/** A picture longer than what is read of it: refused, never cut short. */
+private class TooBig(val name: String) : Exception()
+
+/** Removes what is left in the folder of the camera's shots (a process that died before its read). */
+fun clearShots(folder: File) {
+    folder.listFiles()?.forEach { it.deleteRecursively() }
+}
+
+/** What a shot of the camera is read up to, before it is scaled down. */
+private const val CAMERA_BYTES = 20 * 1024 * 1024
+
+/**
+ * At most [limit] bytes of [stream], read plus one so that a stream longer than [limit] is seen:
+ * a file of any size never fills the memory. The size is [limit] + 1 when it hit the cap.
+ */
 private fun readAtMost(stream: InputStream, limit: Int): ByteArray {
     val out = ByteArrayOutputStream()
     val buffer = ByteArray(64 * 1024)
     var total = 0
-    while (total < limit) {
-        val read = stream.read(buffer, 0, minOf(buffer.size, limit - total))
+    while (total <= limit) {
+        val read = stream.read(buffer, 0, minOf(buffer.size, limit + 1 - total))
         if (read < 0) break
         out.write(buffer, 0, read)
         total += read
@@ -165,8 +257,10 @@ private fun readAtMost(stream: InputStream, limit: Int): ByteArray {
  * frame of the link), as the daemon scales what it is given. A gif or a webp is left as it is: the
  * composer refuses one that does not fit.
  */
-private fun fitted(stream: InputStream, mime: String, name: String): Picture {
-    val bytes = readAtMost(stream, PictureLimits.BYTES * 4 + 1)
+private fun fitted(stream: InputStream, mime: String, name: String, limit: Int): Picture {
+    val bytes = readAtMost(stream, limit)
+    // Past the limit it was cut short: never sent as a picture it is not.
+    if (bytes.size > limit) throw TooBig(name)
     if (bytes.size <= PictureLimits.TARGET_BYTES || mime !in listOf("image/jpeg", "image/png", "image/webp")) {
         return Picture(mime, bytes, name)
     }

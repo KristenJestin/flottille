@@ -80,6 +80,7 @@ fun FlottilleApp(
     onOpenSession: (machine: String, agent: String) -> Unit = { _, _ -> },
     pictures: PictureSource = PictureSource.None,
     shared: List<Picture> = emptyList(),
+    sharedNote: String? = null,
     onSharedPlaced: () -> Unit = {},
     open: SessionKey? = null,
 ) {
@@ -115,6 +116,8 @@ fun FlottilleApp(
                 settings = false
             }
         }
+        // What of a share could not be taken is said once, as the other results are.
+        LaunchedEffect(sharedNote) { if (sharedNote != null) toast = sharedNote }
         LaunchedEffect(toast) {
             if (toast != null) {
                 delay(TOAST_MILLIS)
