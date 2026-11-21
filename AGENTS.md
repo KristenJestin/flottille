@@ -215,6 +215,15 @@ each test in a process of its own, which hides such a test: CI is not what finds
   `android`, `site`.
 - **Pull requests into `dev` are merged by squash only.** The title is a plain Angular subject.
   The description is written in the first person as the maintainer and ends with `Closes #<n>`.
+- **A pull request the user can see carries a `Note:` line** in its description, at the start of its
+  line: `Note: <one sentence, capitalised, what the user can do now>` (`Note: Drive another machine
+  from the window, each action signed.`). A fix says what no longer goes wrong (`Note: A device can
+  be removed while the hub is slow.`). It is written in the user's words: short, concrete, no crate,
+  scope or protocol name, no pull request number. `tools/changelog.sh` builds the release's body from
+  these lines and the "What's new" page says them (`docs/releases.md`, "What's new"). A pull request
+  with no `Note:` line (ci, refactor, test, docs, chore, or invisible) is not on the page. The
+  `shape` check warns, without failing, when a `feat` or `fix` touching the product has none; the
+  pull request template has the place.
 - **`main` gets no squash and no merge commit**: the release pull request `dev → main` is opened
   for review, and the `Release` workflow, not the merge button, closes it by moving `main`
   forward to a commit of `dev` (`docs/releases.md`, "Releasing").
