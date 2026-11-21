@@ -964,12 +964,11 @@ async fn the_phone_joins_again_after_it_was_removed() {
         .served
         .with_hub(|hub| hub.remove("phone").map(drop))
         .unwrap();
-    // Its own entry gone, the phone says so and claims no role.
-    let view = until(&phone, "the removal said", |view| {
-        view.role.is_empty() && view.said.iter().any(|said| said.contains("removed"))
+    // The hub ends the session of a device it removed.
+    until(&phone, "the hub's refusal said", |view| {
+        view.hub.contains("not one of this hub's members")
     })
     .await;
-    assert!(view.name.is_empty(), "{view:#?}");
 
     // Paired again: the key the hub admitted is the one that signs.
     place.joined(&phone).await;
