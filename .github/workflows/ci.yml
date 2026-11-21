@@ -494,7 +494,10 @@ jobs:
     env:
       CARGO_INCREMENTAL: 0
     steps:
+      # The whole history, with its tags: the APK's version is `tools/version.sh`'s.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - run: rustup target add aarch64-linux-android x86_64-linux-android
       - uses: Swatinem/rust-cache@v2
         with:
@@ -504,10 +507,91 @@ jobs:
         with:
           tool: cargo-ndk@4.1.2
       - run: apps/android/ci.sh
+      # The APK (`docs/releases.md`, "The version"), on every pull request that touches the app and
+      # every push, for every channel: the version of `tools/version.sh`. This job runs the
+      # branch's own code and holds no secret: the APK it builds is unsigned, and a copy of it is
+      # signed with a key made for the run, to install on a phone for a test. The release key
+      # signs it in `android-sign`, a job of its own.
+      - name: The APK, with the version
+        id: apk
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          APK_OUT: ${{ runner.temp }}/apk
+        run: apps/android/apk.sh
+      - name: Keep the APK to try
+        if: steps.apk.outputs.dir != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-apk
+          path: ${{ steps.apk.outputs.dir }}
+          retention-days: 14
+      # What `android-sign` signs: the same build, unsigned.
+      - name: Keep the unsigned APK
+        if: steps.apk.outputs.unsigned != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-unsigned
+          path: ${{ steps.apk.outputs.unsigned }}
+          retention-days: 1
       - name: Disk left
         if: always()
         run: df -h /
         continue-on-error: true
+
+  # The release key signs the APK here and nowhere else (`docs/releases.md`, "The version"). The
+  # job runs on a push to a protected branch only, in the environment `android-release`, whose
+  # deployment branches are the maintainer's to set: no other branch's code, no pull request and no
+  # run started by hand reaches the key. It runs no third-party action and no script of the
+  # repository: it takes the unsigned APK of `android`, signs it with the runner's own
+  # `apksigner`, and keeps it for `publish`. Without the secrets it signs nothing and says so.
+  android-sign:
+    needs: [android]
+    if: ${{ !cancelled() && github.event_name == 'push' && needs.android.result == 'success' }}
+    runs-on: ubuntu-latest
+    environment: android-release
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: android-unsigned
+          path: unsigned
+      - name: Sign the APK
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          shopt -s nullglob
+          apks=(unsigned/flottille-*-unsigned.apk)
+          if [ "${#apks[@]}" -eq 0 ]; then echo "::notice::no APK was built: nothing to sign."; exit 0; fi
+          if [ -z "$KEYSTORE_BASE64" ] || [ -z "$KEYSTORE_PASSWORD" ] || [ -z "$KEY_ALIAS" ] || [ -z "$KEY_PASSWORD" ]; then
+            echo "::notice::the release key is not in this environment's secrets: no signed APK."
+            exit 0
+          fi
+          umask 077
+          ks=$(mktemp)
+          trap 'rm -f "$ks"' EXIT
+          printf '%s' "$KEYSTORE_BASE64" | base64 -d > "$ks"
+          apksigner=$(ls "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -n 1)
+          mkdir signed
+          for unsigned in "${apks[@]}"; do
+            name=${unsigned##*/}
+            signed=signed/${name%-unsigned.apk}.apk
+            "$apksigner" sign --v4-signing-enabled false --ks "$ks" --ks-key-alias "$KEY_ALIAS" \
+              --ks-pass env:KEYSTORE_PASSWORD --key-pass env:KEY_PASSWORD --out "$signed" "$unsigned"
+            "$apksigner" verify "$signed"
+          done
+          echo "::notice::signed with the release key."
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-signed
+          path: signed
+          if-no-files-found: ignore
+          retention-days: 1
 
   # The required check: one job that always ends, success or failure, whatever happened to the
   # partitions (failed, cancelled, never started), so that it never waits on a job skipped.
@@ -833,7 +917,7 @@ jobs:
           retention-days: 1
 
   publish:
-    needs: [verified-on-dev, changes, verify, build, hub]
+    needs: [verified-on-dev, changes, verify, build, hub, android, android-sign]
     # `verify` passed here, or was skipped because this commit passed it on dev: never on a commit
     # no `verify` passed on. A failed or skipped `build` publishes nothing.
     if: >-
@@ -842,6 +926,8 @@ jobs:
         || needs.changes.outputs.alpha == 'true')
       && needs.build.result == 'success' && needs.build.outputs.skip != 'true'
       && needs.hub.result == 'success'
+      && (needs.android.result == 'success' || needs.android.result == 'skipped')
+      && (needs.android-sign.result == 'success' || needs.android-sign.result == 'skipped')
       && (needs.verify.result == 'success'
         || (needs.verify.result == 'skipped' && needs.verified-on-dev.outputs.verified == 'true'))
     runs-on: ubuntu-latest
@@ -868,6 +954,16 @@ jobs:
           pattern: hub-assets-*
           path: hub
           merge-multiple: true
+      # The app's APK: the signed one of `android-sign`, which only a push run has (its job runs on
+      # a push, in its environment). A pull request's run, or one without the release key,
+      # attaches none: no APK of a build job is ever attached.
+      - name: The signed APK
+        if: github.event_name == 'push'
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: android-signed
+          path: android
       - name: Publish
         id: publish
         env:
@@ -890,6 +986,8 @@ jobs:
             cat "$RUNNER_TEMP/tip.err" >&2; exit 1
           fi
           title="Flottille v$VERSION"
+          shopt -s nullglob
+          apk=(android/flottille-*.apk)
           # Nothing is replaced, ever (releases are immutable): a version already published, of any
           # channel, stays as it is; a draft left by a failed upload is made again.
           if draft=$(gh release view "$TAG" --json isDraft --jq .isDraft 2> /dev/null); then
@@ -898,7 +996,7 @@ jobs:
           # The files go with the release in this one call: an immutable release takes none after.
           if [ "$CHANNEL" = stable ] && [ "$branch" = main ]; then
             # On the commit released, the same on main and on dev: the next betas count from it.
-            gh release create "$TAG" release/assets/* hub/assets/* --target "$sha" --title "$title" --notes-file release/notes.md --latest
+            gh release create "$TAG" release/assets/* hub/assets/* "${apk[@]}" --target "$sha" --title "$title" --notes-file release/notes.md --latest
           elif [ "$CHANNEL" = stable ]; then
             # A line's, on its tag: the stable channel takes the latest release, so it is marked
             # latest when above the one marked (the newest line's fix reaches its users), never
@@ -911,9 +1009,9 @@ jobs:
             elif ! grep -q 'HTTP 404' "$RUNNER_TEMP/latest.err"; then
               cat "$RUNNER_TEMP/latest.err" >&2; exit 1
             fi
-            gh release create "$TAG" release/assets/* hub/assets/* --target "$sha" --title "$title" --notes-file release/notes.md "$latest"
+            gh release create "$TAG" release/assets/* hub/assets/* "${apk[@]}" --target "$sha" --title "$title" --notes-file release/notes.md "$latest"
           else
-            gh release create "$TAG" release/assets/* hub/assets/* --target "$sha" --title "$title" --notes-file release/notes.md --prerelease --latest=false
+            gh release create "$TAG" release/assets/* hub/assets/* "${apk[@]}" --target "$sha" --title "$title" --notes-file release/notes.md --prerelease --latest=false
           fi
 
   # The hub's image (docs/releases.md): once its release is published, the image the `hub` job made

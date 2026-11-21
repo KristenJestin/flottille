@@ -22,6 +22,26 @@ fn failed_to_keep(error: std::io::Error) -> MobileError {
     ))
 }
 
+/// The hub a pair code names, as the card the app shows before anything is sent: its address and
+/// its key's fingerprint, which the phone will pin.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct HubCard {
+    pub url: String,
+    pub fingerprint: String,
+}
+
+/// Reads the QR's `code`, or the one pasted: the hub's card, with no network. A code that is not
+/// one says why.
+#[uniffi::export]
+pub fn hub_card(code: String) -> Result<HubCard, MobileError> {
+    let code =
+        PairCode::from_code(code.trim()).map_err(|error| MobileError::new(error.to_string()))?;
+    Ok(HubCard {
+        url: code.hub_url,
+        fingerprint: code.hub_key.fingerprint(),
+    })
+}
+
 /// Pairs with the hub of the QR's `code` as `name` with `role` (`controller` or `viewer`): the
 /// hub as pinned, with the list checked, and the device key kept.
 pub(crate) async fn pair(
