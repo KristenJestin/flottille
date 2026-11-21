@@ -817,25 +817,34 @@ As built (#818):
   within the few seconds Android gives.
 
 **The mobile core, as built (#824).** `crates/flottille-mobile` holds a `Core` over a folder of the
-app's private storage:
+app's private storage that no backup copies (`FlottilleCore(context)`: `noBackupFilesDir`): the
+endpoint's key is there in clear, and a sealed device key restored elsewhere opens with no
+Keystore there.
 
 - **Keys**: the device key, kept by the link's keyring logic in a file whose bytes the app sealed
   (`Sealer`: AES-GCM under a key of the Android Keystore, `KeystoreSealer`), pending until the join
   succeeded, as a computer's is. The endpoint's key, the phone's "machine" in the member list, is a
   key of its own in that folder with the machine key's care: a member's own key may not be its
-  machine's.
+  machine's. A device key the app cannot open (its Keystore key lost) leaves the phone not joined,
+  saying to pair it again; the core still starts.
 - **Joining** is the hub's pair mode: `join` takes the code of the QR `flottille-hub pair` printed,
   with the name and role the app proposed and the user confirmed (`controller` or `viewer`; the
   icon `phone`, the colour of its key). The phone pins the hub's key from the code, proves the
   secret, checks the list the hub signed back to the hub's key and its root, declares its endpoint
-  and keeps its key. Every list after is checked against what it kept; one that does not check is
-  refused and said in the view state, the list kept as it was.
+  and keeps its key. A join again (after a removal, a hub's reset, a key lost) makes a new device
+  key and a new endpoint key, which replace the old ones once the hub admitted it. Every list after
+  is checked against what it kept; one that does not check is refused and said in the view state,
+  the list kept as it was. A runner that leaves the list (or whose machine key changes under its
+  name) is unlinked at once and forgotten by the view; the phone's own entry gone, the view claims
+  no role and says it was removed.
 - **Connected** (`connect`, the Kotlin `Flow` of batches): the control session (what it is and
   its presence told), a
   link to each runner of the list, dialled by one function of the core (today the addresses the hub
   tells; through the hub with #1151), each request signed with the device key, and each runner's
-  `events.watch` resumed after the last event seen of it, kept in the folder: a new link, or the
-  app's next start, misses nothing and repeats nothing. `request`, `answer` (Allow, Deny), `stop`
+  `events.watch` resumed after the last event handed over of it, kept in the folder by its machine
+  key: a new link, or the app's next start, misses nothing and repeats nothing. An event counts as
+  seen once its batch reached the app, so that one on its way when the connection ends, or the app
+  is killed, is sent again. `request`, `answer` (Allow, Deny), `stop`
   (the turn) and `follow` (a conversation) go over those links.
 - **The view state** is computed in Rust and handed whole with every batch: the runners and their
   state, one list of sessions for every machine by project (#1150), the followed conversation, the
