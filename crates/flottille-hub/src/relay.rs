@@ -140,3 +140,45 @@ impl Relay {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Three members' keys, made in a temporary folder.
+    fn keys() -> (tempfile::TempDir, [PublicKey; 3]) {
+        let dir = tempfile::tempdir().unwrap();
+        let key = |name: &str| {
+            flottille_link::MachineKey::load_or_make(&dir.path().join(name))
+                .unwrap()
+                .public()
+        };
+        let keys = [key("pc"), key("server"), key("laptop")];
+        (dir, keys)
+    }
+
+    /// A relay between the members `members`.
+    fn relay_of(_members: &[PublicKey]) -> Relay {
+        Relay::default()
+    }
+
+    #[test]
+    fn a_second_sender_still_reaches_a_device_another_floods() {
+        let (_dir, [pc, server, laptop]) = keys();
+        let relay = relay_of(&[pc, server, laptop]);
+        let mut opened = relay.open(server);
+
+        // The pc fills what waits for the server, which reads nothing for now; the laptop's packet
+        // still finds its place.
+        for _ in 0..RELAY_QUEUE * 2 {
+            relay.forward(pc, &server, vec![7; 1000]);
+        }
+        relay.forward(laptop, &server, b"from the laptop".to_vec());
+        let mut got = Vec::new();
+        while let Ok(packet) = opened.inbox.try_recv() {
+            got.push(packet);
+        }
+        assert!(got.contains(&(laptop, b"from the laptop".to_vec())));
+        assert!(got.len() < RELAY_QUEUE * 2, "{} packets kept", got.len());
+    }
+}

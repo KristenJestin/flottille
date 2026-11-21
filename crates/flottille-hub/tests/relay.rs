@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use flottille_hub::{Hub, RELAY_BURST, RELAY_RATE, Served, SystemClock};
 use flottille_link::{
-    Action, Change, Colour, Device, DeviceKey, Hello, Icon, Keyring, KeyringError, MachineKey,
+    Action, Ask, Change, Colour, Device, DeviceKey, Hello, Icon, Keyring, KeyringError, MachineKey,
     PairCode, Paired, Proposed, PublicKey, RelayPort, Role, Session, Tls,
 };
 use zeroize::Zeroizing;
@@ -368,5 +368,136 @@ async fn one_device_cannot_fill_the_hub() {
         got.contains(&(place.pc_machine.public(), b"after the flood".to_vec())),
         "{} packets",
         got.len()
+    );
+}
+
+/// Every machine of `place` tells the hub as many addresses as it keeps, each as long as it
+/// keeps: what a session's news holds at most, and what the hub would copy again for every packet.
+fn tell_long_addresses(place: &Place, machines: &[PublicKey]) {
+    for machine in machines {
+        let addresses: Vec<String> = (0..64)
+            .map(|n| format!("{}{n:02}.example.org:7447", "relay-harbour-".repeat(20)))
+            .collect();
+        place
+            .served
+            .with_hub(|hub| hub.tell_addresses(machine, addresses).unwrap());
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_flood_leaves_the_other_sessions_answered() {
+    let mut place = Place::new().await;
+    let (server, server_machine) = (device_key(2), place.machine("server"));
+    let (laptop, laptop_machine) = (device_key(3), place.machine("laptop"));
+    let server_session = place.add(&server, &server_machine, "server").await;
+    let mut laptop_session = place.add(&laptop, &laptop_machine, "laptop").await;
+    let mut laptop_port = port(&mut laptop_session);
+    let laptop = laptop_session.asker();
+    let _laptop_session = drain(laptop_session);
+    let mut server_session = server_session;
+    let mut server_port = port(&mut server_session);
+    let _server_session = drain(server_session);
+    tell_long_addresses(
+        &place,
+        &[
+            place.pc_machine.public(),
+            server_machine.public(),
+            laptop_machine.public(),
+        ],
+    );
+    let pc_port = port(&mut place.pc_session);
+    online(
+        &mut laptop_port,
+        &[place.pc_machine.public(), server_machine.public()],
+    )
+    .await;
+
+    // The pc sends all it can for three seconds, to the server and to a key that is no member's.
+    let (target, stranger) = (server_machine.public(), place.machine("stranger").public());
+    let flooding = tokio::spawn(async move {
+        let packet = vec![7u8; 1200];
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_secs(3) {
+            pc_port.send(&target, packet.clone()).await;
+            pc_port.send(&stranger, packet.clone()).await;
+        }
+        pc_port
+    });
+    let reading = tokio::spawn(async move {
+        let until = tokio::time::Instant::now() + Duration::from_secs(4);
+        while let Ok(Some(_)) = tokio::time::timeout_at(until, server_port.recv()).await {}
+    });
+
+    // Meanwhile each ask of the laptop is answered at once, as with no flood.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let mut slowest = Duration::ZERO;
+    for n in 0..20u64 {
+        let asked = Instant::now();
+        laptop
+            .ask(Ask::Presence {
+                active: true,
+                last_input: n,
+            })
+            .await
+            .unwrap();
+        slowest = slowest.max(asked.elapsed());
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        slowest < Duration::from_millis(200),
+        "an ask of the laptop waited {slowest:?} while the pc flooded"
+    );
+    drop(flooding.await.unwrap());
+    reading.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_packet_to_no_one_costs_its_sender() {
+    let mut place = Place::new().await;
+    let (server, server_machine) = (device_key(2), place.machine("server"));
+    let mut server_session = place.add(&server, &server_machine, "server").await;
+    let mut server_port = port(&mut server_session);
+    let _server_session = drain(server_session);
+    let mut pc_port = port(&mut place.pc_session);
+    online(&mut pc_port, &[server_machine.public()]).await;
+
+    // Three bursts' worth to a key that is no member's, then a hundred packets to the server at
+    // once: the first spent what the pc may send, and the server is sent little of the rest.
+    let stranger = place.machine("stranger").public();
+    let packet = vec![7u8; 1200];
+    for _ in 0..(3 * RELAY_BURST as usize).div_ceil(packet.len()) {
+        pc_port.send(&stranger, packet.clone()).await;
+    }
+    for _ in 0..100 {
+        pc_port.send(&server_machine.public(), packet.clone()).await;
+    }
+    let got = received_within(&mut server_port, Duration::from_secs(2)).await;
+    assert!(
+        got.len() < 50,
+        "{} of 100 packets went through after three bursts to no one",
+        got.len()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_member_removed_is_sent_nothing_while_its_session_is_open() {
+    let mut place = Place::new().await;
+    let (laptop, laptop_machine) = (device_key(3), place.machine("laptop"));
+    let mut laptop_session = place.add(&laptop, &laptop_machine, "laptop").await;
+    let mut laptop_port = port(&mut laptop_session);
+    let _laptop_session = drain(laptop_session);
+    let mut pc_port = port(&mut place.pc_session);
+    online(&mut pc_port, &[laptop_machine.public()]).await;
+
+    // Right after its removal, before its session is closed, the laptop is no member: what the pc
+    // sends it is dropped.
+    place.remove("laptop");
+    for n in 0..20u8 {
+        assert!(pc_port.try_send(&laptop_machine.public(), vec![n; 100]));
+    }
+    assert!(
+        received_within(&mut laptop_port, Duration::from_secs(1))
+            .await
+            .is_empty()
     );
 }

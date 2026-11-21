@@ -36,6 +36,9 @@ struct Proxy {
     tampers: Arc<AtomicBool>,
     /// Whether it is cut: what it carried is closed, and what comes is closed at once.
     cut: Arc<AtomicBool>,
+    /// The sender it names in place of another, in what the hub sends the devices, if any: what
+    /// a hub that passes one member for another does.
+    retags: Arc<Mutex<Option<(Value, Value)>>>,
     streams: Arc<Mutex<Vec<TcpStream>>>,
 }
 
@@ -47,12 +50,14 @@ impl Proxy {
             recorded: Arc::default(),
             tampers: Arc::default(),
             cut: Arc::default(),
+            retags: Arc::default(),
             streams: Arc::default(),
         };
-        let (recorded, tampers, cut, streams) = (
+        let (recorded, tampers, cut, retags, streams) = (
             proxy.recorded.clone(),
             proxy.tampers.clone(),
             proxy.cut.clone(),
+            proxy.retags.clone(),
             proxy.streams.clone(),
         );
         std::thread::spawn(move || {
@@ -89,21 +94,23 @@ impl Proxy {
                     }
                     let _ = hub_out.shutdown(Shutdown::Both);
                 });
-                let (mut hub_in, mut device_out) = (hub, device);
-                let recorded_down = recorded.clone();
+                let (hub_in, mut device_out) = (hub, device);
+                let (recorded_down, retags) = (recorded.clone(), retags.clone());
                 std::thread::spawn(move || {
-                    let mut buffer = [0u8; 16 * 1024];
-                    while let Ok(read) = hub_in.read(&mut buffer) {
-                        if read == 0 {
+                    let mut lines = BufReader::new(hub_in);
+                    let mut line = Vec::new();
+                    while lines
+                        .read_until(b'\n', &mut line)
+                        .is_ok_and(|read| read > 0)
+                    {
+                        recorded_down.lock().unwrap().extend_from_slice(&line);
+                        if let Some((from, to)) = retags.lock().unwrap().as_ref() {
+                            line = retagged(&line, from, to);
+                        }
+                        if device_out.write_all(&line).is_err() {
                             break;
                         }
-                        recorded_down
-                            .lock()
-                            .unwrap()
-                            .extend_from_slice(&buffer[..read]);
-                        if device_out.write_all(&buffer[..read]).is_err() {
-                            break;
-                        }
+                        line.clear();
                     }
                     let _ = device_out.shutdown(Shutdown::Both);
                 });
@@ -140,6 +147,20 @@ fn tampered(line: &[u8]) -> Vec<u8> {
     let last = bytes.len() - 1;
     bytes[last] ^= 0x5a;
     frame["relay"]["packet"] = json!(base64::engine::general_purpose::STANDARD.encode(bytes));
+    let mut changed = serde_json::to_vec(&frame).unwrap();
+    changed.push(b'\n');
+    changed
+}
+
+/// A line the hub sent, said to be from `to` if it carries a packet from `from`.
+fn retagged(line: &[u8], from: &Value, to: &Value) -> Vec<u8> {
+    let Ok(mut frame) = serde_json::from_slice::<Value>(line) else {
+        return line.to_vec();
+    };
+    if frame["relayed"]["from"] != *from {
+        return line.to_vec();
+    }
+    frame["relayed"]["from"] = to.clone();
     let mut changed = serde_json::to_vec(&frame).unwrap();
     changed.push(b'\n');
     changed
@@ -331,6 +352,26 @@ fn the_hub_cannot_change_what_it_carries() {
     assert!(!asked.status.success());
     assert!(!server.log().contains("asked by pc"), "{}", server.log());
     eventually("the link ended", || pc.seen("server")["state"] != "online");
+}
+
+#[test]
+fn the_hub_cannot_pass_one_member_for_another() {
+    let (hub, pc, server) = pc_and_server(User::new(), User::new());
+    let laptop = machine(User::new());
+    pair(&hub, &laptop, "laptop");
+    server.wait_for("laptop");
+    pc.wait_for("laptop");
+    // What the pc sends the server, the hub says is the laptop's.
+    *hub.proxy.retags.lock().unwrap() = Some((json!(pc.key()), json!(laptop.key())));
+
+    // Whatever comes of the link, the server serves nothing as the laptop's: who a link is from
+    // is the key its TLS proved, never the hub's word.
+    let _ = on(&pc, "server", &["status", "--json"]);
+    let log = server.log();
+    assert!(
+        !log.contains("asked by laptop") && !log.contains("from laptop"),
+        "{log}"
+    );
 }
 
 #[test]

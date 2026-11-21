@@ -996,3 +996,37 @@ impl TlsServer {
         Ok(Box::new(self.0.accept(stream).await?))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use quinn::AsyncUdpSocket;
+
+    #[tokio::test]
+    async fn a_hub_that_makes_up_senders_is_given_none_of_their_names() {
+        let (out, _sent) = mpsc::channel(8);
+        let (given, incoming) = mpsc::channel(MOST_NAMED + 1);
+        let socket = RelaySocket::new(out, incoming);
+
+        // A hub brings packets from as many keys as a relay names, none of them online.
+        for n in 0..MOST_NAMED as u32 {
+            let mut key = [0xee; 32];
+            key[..4].copy_from_slice(&n.to_le_bytes());
+            given.try_send((key, vec![1, 2, 3])).unwrap();
+        }
+        let mut buffer = [0u8; 64];
+        let received = std::future::poll_fn(|cx| {
+            let mut bufs = [std::io::IoSliceMut::new(&mut buffer)];
+            let mut meta = [quinn::udp::RecvMeta::default()];
+            Poll::Ready(
+                socket
+                    .poll_recv(cx, &mut bufs, &mut meta)
+                    .map(Result::unwrap),
+            )
+        })
+        .await;
+        assert!(received.is_pending(), "a made-up sender came in");
+        // This machine still dials whom it chooses.
+        assert!(socket.address_of(&[9; 32]).is_some());
+    }
+}
