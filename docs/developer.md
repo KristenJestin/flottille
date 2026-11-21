@@ -18,6 +18,40 @@ start and again on each `developer.show`.
 the user only. Past 10 MB it is moved to `developer.log.1`, replacing the one there, and a new log
 begins: the two hold the last 10 to 20 MB. Settings and `flottille developer show` say its path.
 
+## The findings
+
+The agents Flottille runs hit Flottille's own bugs (a tool that answers wrong, a refusal that makes
+no sense, a step that hangs) and, without a place to say it, say it in a conversation where it is
+lost. While the developer mode is on, the `services` tool offers two more actions (a tool that
+offers actions already, every agent has it, and the gate lets these through in every mode; the
+choice is written in `docs/tools.md`, "Findings"): `report` files a finding about Flottille itself,
+`find_reports` searches the open ones. Off, the tool does not list them and a call of either is
+refused.
+
+- **One finding per bug, with its occurrences.** A finding is a title, what was expected, and its
+  occurrences: when, which session (the agent's id), what it called, what happened this time, and
+  what differs from the others. The first report makes the finding and its first occurrence; a later
+  report that names the finding adds an occurrence. The finding shows its count and its first and
+  last time. Flottille matches nothing by itself: the agent searches (`find_reports`, every word of
+  its query in a title or any text of an open finding) and judges whether its bug is there.
+- **Kept in the store** (`findings`, `finding_occurrences`), not in the log: the log is rotated, the
+  findings are the maintainer's until the lead agent files them. At most 500 findings and 200
+  occurrences for one, so that an agent that loops does not fill it.
+- **Masked before they are stored**, with the path a tool's output takes (`mcp::masked`): the
+  daemon's secrets and those of the agent's place become `[masked]`, so neither the store nor the
+  export ever holds one.
+- **Exported, not filed by Flottille.** `flottille developer reports` lists them (`--json` prints
+  the export, `--export` writes it to `findings.json` in the state folder and says where), the
+  Developer section of Settings lists them with the same export button, and `flottille developer
+  reports filed <id> <address>` marks a finding filed with its issue's address: a filed finding is
+  no longer searched, and a bug that comes back after its issue is a new finding.
+
+The export is one JSON document, `{"findings": [...]}`, each finding `{id, title, expected, count,
+first_at, last_at, filed, occurrences: [{id, at, session, called, happened, differs}]}` (times in
+milliseconds since the Unix epoch, `filed` the issue's address or `null`, `differs` a text or
+`null`). A reader ignores a field it does not know, and a field is never renamed. It holds nothing
+else: no credential, no path but what the agent wrote.
+
 ## What it never holds
 
 Every text of a line is masked before it is written, as everywhere in Flottille: the values of the

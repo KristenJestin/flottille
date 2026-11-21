@@ -139,6 +139,16 @@ The user switched the developer mode (`developer.set`, `docs/developer.md`).
 |---|---|
 | `log` | Whether the log is written now. |
 
+### `developer.reported`
+
+An agent filed a finding about Flottille itself or added an occurrence to one, or a finding was
+marked filed (`docs/developer.md`, "The findings").
+
+| Field | |
+|---|---|
+| `finding` | The finding's number. |
+| `new` | Whether the report made the finding (`true`), added an occurrence, or the finding was marked filed (`false`). |
+
 ### `update.changed`
 
 What the daemon knows of an update of Flottille changed: a check began or ended, a download

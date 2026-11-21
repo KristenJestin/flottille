@@ -213,6 +213,24 @@ Developer mode is on. Its log: ~/.local/state/flottille/developer.log
 
 Turns it off: nothing more is written. The log stays where it is.
 
+### `flottille developer reports [--json] [--export]`
+
+The findings agents filed about Flottille itself, with their occurrences (`docs/developer.md`, "The
+findings"): the open ones first, one block each. `--json` prints the export, `{"findings": [...]}`
+(`developer.reports`); `--export` writes it to `findings.json` in the state folder and says where.
+
+```
+$ flottille developer reports
+#1 Tickets list answers empty — 2 occurrences, open
+  expected: the open tickets
+  - 3f2a called tickets {"action": "list"}: an empty answer with no error
+```
+
+### `flottille developer reports filed <id> <address>`
+
+Marks a finding filed, with the address of its issue: it leaves the findings agents search, and the
+list says where it went.
+
 ### `flottille update`
 
 Replaces Flottille with the latest build of a channel (`docs/releases.md`): the one published

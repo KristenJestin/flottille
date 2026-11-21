@@ -1014,6 +1014,35 @@ It is the agent's own bookkeeping: the gate allows it in every mode, never held.
 pull request's subscription: its description says `For a time the user asked: never poll CI, forge
 run follows its run and forge subscribe a pull request's checks.`
 
+## Findings
+
+While the developer mode is on (`docs/developer.md`, "The findings"), the tool of the machine's
+services, `services`, lists two more actions, for every agent, a root and a child alike:
+
+| Action | |
+|---|---|
+| `report {title, expected, called, happened}` | Files a finding about Flottille itself: what the agent called, what it expected, what happened. Answers `Filed as finding #3.` |
+| `report {finding, called, happened, differs?}` | Adds an occurrence to an open finding (`finding` its number): when it came, the agent's session, what it called, what happened this time, and what differs from the others. Refused for a finding that is filed (the bug is a new finding) or that holds 200 occurrences, and when `title` or `expected` come with it. |
+| `find_reports {query}` | The open findings whose title or text hold every word of `query`, at most 10, each with its number, expected, count. The agent judges whether its bug is there; Flottille matches nothing else. |
+
+**Where they live.** `services` is the tool of the machine, which Flottille itself runs, that every
+agent has in every project and whose reads the gate already lets through; a family of its own would
+be one more tool in every prompt and every frozen list, for the two actions of a mode meant for the
+few. The actions are added to the tool's schema and description when it is listed while the mode is
+on, so a client that listed it before the mode was switched calls it again after its next listing
+(`list_changed` is not sent for a mode); a call while the mode is off is refused naming it. The
+gate lets both through in every mode: they change nothing of the project or the machine.
+
+**The guide.** The description tells when to report: what Flottille did wrong (a tool that answered
+wrong, a refusal that makes no sense, a step that hangs), never the agent's own mistake, the user's
+request or a bug of the project's code; to search first and add an occurrence when the bug is
+there; and never to put a secret in a finding. (It rides on the tool, not on `guide.md`, which is
+the same short text for every agent whether the mode is on or not.)
+
+Every text is masked as any result of a tool is (`[masked]` for a secret of the daemon or of the
+agent's place) before it is stored, at most 200 characters for a title and 2,000 for any other
+text.
+
 ## The vault
 
 **`vault {action: "list"}`** lists the entries of the user's vault the agent's project sees
