@@ -1,6 +1,7 @@
 //! The window's history, as a browser's: the places shown in it, in order, and where the window
 //! stands among them. It lives as long as the window and is not stored.
 
+use crate::project::PageTab;
 use crate::shell::Selection;
 
 /// A place of the history: a page, and for a session's page the agent shown in it.
@@ -9,8 +10,9 @@ pub struct Visit {
     pub selection: Selection,
     /// The sub-agent whose conversation is shown, `None` for the session's own.
     pub agent: Option<String>,
-    /// For a project's page, whether its Progress tab was the one shown.
-    pub progress: bool,
+    /// For a project's page, the tab that is a place of its own (Progress or Routines) when it
+    /// was the one shown; `None` for Work and the lists.
+    pub tab: Option<PageTab>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -38,26 +40,24 @@ impl History {
         self.push(Visit {
             selection,
             agent: None,
-            progress: false,
+            tab: None,
         });
     }
 
-    /// The project `project`'s page shows its Progress tab (`progress`), or leaves it: each is a
-    /// place of its own, so that back and forward return to the tab.
-    pub fn show_progress(&mut self, project: &str, progress: bool) {
+    /// The project `project`'s page shows `tab`, `Some` for Progress or Routines and `None` when
+    /// it leaves them: each is a place of its own, so that back and forward return to the tab.
+    pub fn show_tab(&mut self, project: &str, tab: Option<PageTab>) {
         let Some(current) = self.current() else {
             return;
         };
-        if current.selection != Selection::Project(project.to_owned())
-            || current.progress == progress
-        {
+        if current.selection != Selection::Project(project.to_owned()) || current.tab == tab {
             return;
         }
         let selection = current.selection.clone();
         self.push(Visit {
             selection,
             agent: None,
-            progress,
+            tab,
         });
     }
 
@@ -74,7 +74,7 @@ impl History {
         self.push(Visit {
             selection,
             agent,
-            progress: false,
+            tab: None,
         });
     }
 

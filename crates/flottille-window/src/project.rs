@@ -642,9 +642,7 @@ impl Render for ProjectPage {
                 // Not inside the page's own update: the shell keeps the history, and feeds the
                 // Progress page the sessions it shows.
                 shell
-                    .update(cx, |shell, cx| {
-                        shell.tab_chosen(&project, tab == PageTab::Progress, cx)
-                    })
+                    .update(cx, |shell, cx| shell.tab_chosen(&project, tab, cx))
                     .ok();
             });
 

@@ -4129,10 +4129,10 @@ impl Shell {
         if matches!(visit.selection, Selection::Project(_))
             && let Some(page) = self.main.read(cx).project_page().cloned()
         {
-            let tab = match (visit.progress, page.read(cx).tab()) {
-                (true, _) => Some(PageTab::Progress),
-                (false, PageTab::Progress) => Some(PageTab::Work),
-                (false, _) => None,
+            let tab = match (visit.tab, page.read(cx).tab()) {
+                (Some(tab), _) => Some(tab),
+                (None, PageTab::Progress | PageTab::Routines) => Some(PageTab::Work),
+                (None, _) => None,
             };
             if let Some(tab) = tab {
                 page.update(cx, |page, cx| page.choose(tab, cx));
@@ -4205,10 +4205,14 @@ impl Shell {
         self.refresh_project(cx);
     }
 
-    /// The tab of the open project's page was chosen by the user: Progress is a place of the
-    /// history, and its page gets the sessions and workspaces of its project.
-    pub fn tab_chosen(&mut self, project: &str, progress: bool, cx: &mut Context<Self>) {
-        self.history.show_progress(project, progress);
+    /// The tab of the open project's page was chosen by the user: Progress and Routines are
+    /// places of the history, and the Progress page gets the sessions and workspaces of its
+    /// project.
+    pub fn tab_chosen(&mut self, project: &str, tab: PageTab, cx: &mut Context<Self>) {
+        self.history.show_tab(
+            project,
+            matches!(tab, PageTab::Progress | PageTab::Routines).then_some(tab),
+        );
         self.feed_progress(cx);
     }
 
