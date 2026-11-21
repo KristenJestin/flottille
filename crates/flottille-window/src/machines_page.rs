@@ -11,9 +11,9 @@ use std::collections::HashMap;
 
 use gpui_design_system::motion::PANEL;
 use gpui_design_system::{
-    Button, Confirm, EmptyLine, Field, Icon, ListCard, ListRow, Listing, Menu, Modal, RadioChoices,
-    Section, Select, SelectOption, Swatch, Swatches, Switch, Toast, changed, changing, enter, fade,
-    palette, presence, presence_of, space, tipped_when_cut, toast,
+    Button, Confirm, Field, Icon, ListCard, ListRow, Listing, Menu, Modal, RadioChoices, Section,
+    Select, SelectOption, Swatch, Swatches, Switch, Toast, changed, changing, enter, fade, palette,
+    presence, presence_of, space, tipped_when_cut, toast,
 };
 use gpui_kit::base::input::{Input, InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -24,7 +24,7 @@ use gpui_kit::{
 };
 use zeroize::Zeroizing;
 
-use crate::commands::{boxed, line_field, menu_of, problem_line, spaced, stack};
+use crate::commands::{boxed, line_field, problem_line, spaced, stack};
 use crate::machines::{
     Ask, Asked, COLOURS, Hub, ICONS, Machines, Member, News, ROLES, Remote, how_it_failed,
     role_words, shade,
