@@ -24,7 +24,7 @@ its code sent by itself (#816), the deliveries and calls between a session and t
 started it on another machine, kept for a machine that is off, with the commits coming back (#817),
 where a question and a held request go while the parent's machine is off (#818), the tunnels
 to the ports of a run's server (#829), a vault entry shared with another machine (#832), a
-connection shared the same way (#833) and the window's machines, in Settings, General, Machines
+connection shared the same way (#833) and the window's machines, in Settings, Machines
 (#814). What is decided is said as such; the defaults taken are in "Defaults taken, to confirm";
 what is open
 is in "Open questions". It replaces the proposal of 2026-11-03 (a relay
@@ -225,7 +225,7 @@ client link`).
 configuration (`[remote] listen`; none until the user sets one, and a device that listens nowhere
 still dials the others). It tells the hub those addresses
 whenever they change, and the hub tells the other members; the user may also give an address by
-hand (`flottille remote address add 100.64.0.7`, Settings, General, Machines): a tailnet address, a DNS name,
+hand (`flottille remote address add 100.64.0.7`, Settings, Machines): a tailnet address, a DNS name,
 a forwarded port, a public address. Members linked to each other tell each other too, so that two
 devices that have linked once can link again without the hub. A peer dials the addresses it knows
 for a key, whoever told it; the hub's list is a help, not a path.
@@ -239,8 +239,9 @@ link.
 
 ## Identity and keys
 
-- **Remote is off** until the user turns it on in the daemon's configuration,
-  `$XDG_CONFIG_HOME/flottille/daemon.toml`:
+- **Remote is off** until the user turns it on: **Turn on** in Settings, Machines, or
+  `flottille remote on`. The daemon writes its configuration itself,
+  `$XDG_CONFIG_HOME/flottille/daemon.toml`, keeping every other key and comment of the user's file:
 
   ```toml
   [remote]
@@ -249,7 +250,16 @@ link.
   # listen = "0.0.0.0:7447"
   ```
 
-  Off, nothing of it is made or read.
+  Off, nothing of it is made or read. Nothing is opened until the user says where this machine is
+  reached (`listen`): **Nowhere** (the default: it dials the others, nobody dials it), an address
+  of one of its interfaces, a Tailscale or WireGuard one offered first and marked, **Every
+  network** (`0.0.0.0`, which opens a port on any network the machine joins) or an address typed.
+  Whether remote is on is set in the window (Settings, Machines) and from the command line; where
+  it is reached (`listen`) from the command line only (`flottille remote on [--listen
+  <address>|tailnet|nowhere]`, `flottille remote off`, `flottille remote listen <address>`;
+  `remote.configure`, `protocol.md`), and taken at once: the link starts, stops, or listens
+  elsewhere, with no restart. Turning remote off closes the links and keeps the pairing with the
+  hub and the keys. A file edited by hand is still read at the daemon's start.
 - **Keys are Ed25519** (`crates/flottille-link`): a device's identity is its public key, shown as
   its fingerprint, the first 8 bytes of the key's SHA-256 in hexadecimal by groups of four
   (`3f2a-91bc-0d4e-77a1`). A private key is made from the operating system's random generator,
@@ -500,8 +510,9 @@ hub's change as one no member signed.
 with the device key; the daemon carries what they signed (`remote.*`, `protocol.md`) and says what
 changed as events (`remote.*`, `events.md`). The phone's part is not built.
 
-**Built (#814, #1146), in the window**: Settings, General, Machines offers **Connect to your hub**
-while this machine is in no member list: one button, which opens a dialog where the code is pasted
+**Built (#814, #1146, #1144), in the window**: Settings, Machines, a tab of its own, says first
+whether remote is on (a **Turn on** button while it is off, a **Remote** switch once it is, whose
+off asks once), then offers **Connect to your hub** while this machine is in no member list: one button, which opens a dialog where the code is pasted
 (a field that hides what is typed), and the card this machine proposes confirmed (its name, This
 device is, a select of the five icons, This device can, Run agents / Control only / View only);
 a refusal stays in the dialog, a success closes it with a toast. There is no Add a device and no
@@ -831,7 +842,7 @@ As built (#818):
   opened at a client). When the hub is unreachable, the runner counts the user as away and pushes.
 - **Dismissal follows**: what is answered or seen elsewhere sends `dismissed` with its ids, and the
   phone removes its notification. A request answered at the desk never stays on the lock screen.
-- One setting, Settings, General, Machines: **Notify the phone**: `when I am away` (the default) or `always`.
+- One setting, Settings, Machines: **Notify the phone**: `when I am away` (the default) or `always`.
 - No push service of Google's in the first version; an embedded FCM distributor is a later option if
   the app is ever distributed.
 
@@ -1034,6 +1045,19 @@ on a real phone, by hand, and reported.
 - **iOS** and a desktop build of the app are not planned.
 
 ## Defaults taken, to confirm
+
+- **A change of where this machine is reached is taken by closing the link and making it again,
+  not by the daemon starting again** (#1144): simpler, and no client reconnects. It cuts what the
+  link carries, so while an agent runs the change is written and waits for the next start, and
+  the command says so (`remote.settings`' `waits`). Turning remote on or off is not held:
+  the user asked for it, the off one after a confirmation.
+- **The window offers no `listen`** (#1144, the maintainer's decision): the traffic between devices
+  is to go through the hub (a relay, its own coming issue), so a device will not need to listen on
+  any address. The direct link, `remote.configure {listen}`, `remote.settings` and the command line
+  stay as they are until a later decision.
+- **The interfaces `remote.settings` lists** are the IPv4 ones the system lists (`getifaddrs`), loopback and
+  interfaces that are down left out: a Tailscale or WireGuard one (an address of 100.64.0.0/10, or
+  an interface named `tailscale*` or `wg*`) first.
 
 - The window shows one machine at a time, with a switcher.
 - The project must be registered by hand on the other machine, under the same name.
@@ -1349,7 +1373,7 @@ on a real phone, by hand, and reported.
 - A machine that cannot reach another says every address it tried, from where, and how each
   failed: `server is unreachable: tried 127.0.0.1:7447 from pc, no answer in 10 s`; `from` is the
   machine's name in the member list (its key's fingerprint before it has one). A hub that cannot
-  be reached is said the same way, with since when: `the hub at hub.example.net:443 is
+  be reached is said the same way, with since when: `the hub at hub.example.net is
   unreachable since 22:14: tried 192.0.2.10:443: Connection refused`.
 - A machine paired tells the hub what it is and its addresses at once, then its addresses whenever
   they change; the hub keeps them in memory, 64 at most per machine, each a host and a port, and
@@ -1451,9 +1475,10 @@ on a real phone, by hand, and reported.
   back is taken only for a repository of a launch this machine sent to that very machine, into the
   repository it was sent from, under the name this machine gives that machine; the way back sends
   the commits past the sender's tip, its snapshot, and what came back already.
-- The window's Machines are a section of Settings, General (Devices, Addresses), not a tab of their
-  own: the five tabs of Settings stay five (`docs/reference/gpui.md`, rule 13). Its switcher offers
-  the runners, and the machines whose role is not known yet (linked with no hub's list), never a
+- The window's Machines are a tab of Settings of their own (Remote on or off, the hub, Devices,
+  Addresses; `docs/reference/gpui.md`, rule 13, revised for it), and nothing of it is typed on
+  the page: Connect to your hub, a rename and an address are dialogs. Its switcher offers the
+  runners, and the machines whose role is not known yet (linked with no hub's list), never a
   controller or a viewer. While the
   window shows another machine, what it keeps of itself (its folds, the drafts, its appearance)
   stays with this machine. A member's row says its role, who added it and its machine's state:

@@ -261,14 +261,19 @@ the wrong code first).
     controls, and animates in, so that nothing moves; a short row (under 740 px) gives the chips
     their icons, never an overflow. **[test]** `window_compaction.rs`, `window_quota.rs` (a 1280
     px window), `window_rules.rs`.
-13. **Tabs by subject; a feature is a row, never a tab.** Settings has five tabs (Agents,
-    Approvals, Features, Vault, General) and six at most, Usage the last; a project's settings
-    have six (Repositories, Workspaces, Tasks, Instructions, Features, Vault); the project page
-    four at most and room for a fifth (Progress, for a project with a tracker). A new part of Flottille adds no tab: a part the user turns on or
-    off (Specs, Review, the compaction, Connections, later the handbook) is a row of the
-    Features tab, which opens its page in place of the list (`Subpage`); a setting every agent
-    shares is a section of a tab that exists. A tab with a single control is a section of
-    another.
+13. **Tabs by subject; a part gets a tab of its own when it fits.** A tab holds one subject,
+    the one the user goes to on its own, with several sections of its own: Machines (Remote:
+    whether it is on, the hub, the devices, the addresses) is one,
+    and Usage and Notifications will be. Settings has six tabs (Agents, Approvals, Features,
+    Vault, Machines, General), Usage later; a project's settings have six (Repositories,
+    Workspaces, Tasks, Instructions, Features, Vault); the project page four at most and room for
+    a fifth (Progress, for a project with a tracker). The limit is the mess, not a number: the
+    tabs stay few enough to read at a glance, and when they are no longer the structure is
+    reviewed (#1145). A smaller part stays a row of the Features tab, which opens its page in
+    place of the list (`Subpage`), when the user turns it on or off (Specs, Review, the
+    compaction, Connections, later the handbook), or a section of the tab of its subject; a
+    setting every agent shares is a section of a tab that exists. A tab with a single control is a
+    section of another.
 14. **A feature's page, one pattern.** It starts with the same block, in this order: its switch,
     labelled with what it does ("Review changes", "Write specs before building", "Compact long
     conversations", "Let a model decide in Auto"); its hint, one sentence of what it does and

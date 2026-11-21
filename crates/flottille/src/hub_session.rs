@@ -148,7 +148,7 @@ impl Control {
         };
         let seen = self.seen.lock().unwrap();
         json!({
-            "url": device.url,
+            "url": HubUrl::shown_text(&device.url),
             "key": device.hub,
             "fingerprint": device.hub.fingerprint(),
             "state": seen.state,
@@ -224,8 +224,10 @@ impl Control {
         replace: bool,
     ) -> Result<Value, String> {
         if !replace && let Some(pinned) = self.pinned() {
-            let url =
-                pinned.map_or_else(|_| self.file().display().to_string(), |device| device.url);
+            let url = pinned.map_or_else(
+                |_| self.file().display().to_string(),
+                |device| HubUrl::shown_text(&device.url),
+            );
             return Err(format!(
                 "this machine is paired with the hub at {url} already: give --replace to pair it \
                  with another (the machines it trusts through that hub are forgotten)"
@@ -248,7 +250,7 @@ impl Control {
         let (device, members) = paired.listed().await.map_err(|error| error.to_string())?;
         eprintln!(
             "flottille daemon: paired with the hub at {}, whose key is {}",
-            device.url,
+            HubUrl::shown_text(&device.url),
             device.hub.fingerprint()
         );
         let answer = paired_json(&device, &members, &key)
@@ -311,11 +313,11 @@ impl Control {
         }
         eprintln!(
             "flottille daemon: this machine is paired with the hub at {}",
-            device.url
+            HubUrl::shown_text(&device.url)
         );
         self.again.notify_one();
         Ok(json!({
-            "url": device.url,
+            "url": HubUrl::shown_text(&device.url),
             "hub": device.hub.fingerprint(),
             "root": device.root.fingerprint(),
             "name": this.as_ref().map(|this| this.name.clone()),
@@ -447,7 +449,7 @@ fn paired_json(device: &Device, members: &Members, key: &PublicKey) -> Option<Va
         "role": entry.role,
         "added_by": name_of(members, &entry.added_by),
         "hub": device.hub.fingerprint(),
-        "url": device.url,
+        "url": HubUrl::shown_text(&device.url),
     }))
 }
 
@@ -513,7 +515,7 @@ fn host_name() -> Option<String> {
 /// The members of a checked list, as `remote.members` says them.
 fn members_json(device: &Device, members: &Members, own: &PublicKey, facts: &[Facts]) -> Value {
     json!({
-        "hub": device.url,
+        "hub": HubUrl::shown_text(&device.url),
         "root": name_of(members, &members.root()),
         "head": members.head(),
         "this": members.by_machine(own).map(|member| member.name.clone()),
@@ -572,7 +574,7 @@ pub async fn run(
         }
         if let Some(device) = pinned {
             let authority = HubUrl::parse(&device.url)
-                .map(|url| url.authority())
+                .map(|url| url.host_shown())
                 .unwrap_or_else(|_| device.url.clone());
             let hello = crate::link::hello();
             let connected = tokio::select! {
