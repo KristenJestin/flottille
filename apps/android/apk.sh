@@ -44,7 +44,7 @@ code=$("$android/version-code.sh" "$version")
 echo "The APK of $version (versionCode $code), built from ${sha:0:12} on $branch."
 
 "$android/gradle.sh" :app:assembleRelease "-Pflottille.version=$version" "-Pflottille.versionCode=$code"
-built=$android/app/build/outputs/apk/release/app-release.apk
+built=$android/app/build/outputs/apk/release/app-release-unsigned.apk
 [ -f "$built" ] || { echo "no APK was built" >&2; exit 1; }
 
 # The version the APK says, read back out of it.
