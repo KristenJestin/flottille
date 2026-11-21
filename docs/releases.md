@@ -145,6 +145,23 @@ for HEAD and its branch by default):
 (`flottille 0.3.2-rc.1 (rc, …)`), a build of `next/X.Y` says `next`. A build CI did not make is `local`:
 `flottille 0.1.0 (local, 3f2a9c1d7b44)`.
 
+**The Android app has the repository's version** (`apps/android`, `docs/remote.md`, "The Android
+app"): CI gives each build's version (`tools/version.sh`, whatever the channel: stable, beta or an
+alpha) to Gradle as the APK's `versionName` (`-Pflottille.version`), and its `versionCode` derives
+from it, always rising (`apps/android/version-code.sh`: `(X*10000 + Y*100 + Z) * 10000 + slot`, the
+slot ordering an alpha, a beta, a release candidate and the release of one `X.Y.Z`; a minor or a patch
+of 100 or more, or a major of 21, is refused and fails the build). The APK is built by CI, never by
+hand and never with the SDK of a computer: the `android` job installs what the project names, builds
+it on every pull request that touches the app (and every push), reads the version back out of it,
+and keeps it as the artefact `android-apk` (14 days), so a test on a phone installs the CI's build.
+It is signed with the release key of the repository's secrets (`ANDROID_KEYSTORE_BASE64`,
+`ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, `ANDROID_KEY_PASSWORD`, which only the maintainer
+creates; no file of the repository holds a key or a password) on a push, and **debug-signed** on a
+pull request and wherever the secrets do not exist: the job says which in a notice, and the file
+says it (`flottille-<version>-debug-signed.apk`). `publish` attaches the signed APK
+(`flottille-<version>.apk`) to the GitHub release of its version, with the other artefacts, and
+never a debug-signed one. A phone that holds a debug-signed build uninstalls it before the release's.
+
 ## What CI checks
 
 `.github/workflows/ci.yml` judges a commit **once**, and a pull request only by a **fast check**:
