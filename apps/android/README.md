@@ -21,4 +21,9 @@ a UniFFI library) for everything that talks to a daemon.
 - `version-code.sh`, `apk.sh`: the APK as CI builds it, with the repository's version
   (`docs/releases.md`, "The version"). Never by hand.
 
-The session page, Needs you and the notifications come with #826 and its followers.
+- the session page (`SessionPage.kt`, `Cards.kt`, `Pictures.kt`): the conversation live, the composer
+  with pictures (gallery, camera through a `FileProvider`, the share sheet), the ask card, the
+  requests, the mode, Stop and the tree read only; `SessionKey` is the one entry point, by machine
+  and session id (a notification's intent carries `org.flottille.app.MACHINE` and `AGENT`).
+
+Needs you and the notifications come with the issues after #826.

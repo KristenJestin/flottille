@@ -53,7 +53,7 @@ class FakePictures(var gallery: List<Picture> = emptyList(), var camera: Picture
  * asks it. One test for each scenario of the issue, named after it.
  */
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [34], qualifiers = "w360dp-h900dp-xhdpi", application = android.app.Application::class)
+@Config(sdk = [34], qualifiers = "w360dp-h900dp-xhdpi-night", application = android.app.Application::class)
 class SessionPageTest {
     @get:Rule
     val rule = createComposeRule()

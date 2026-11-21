@@ -65,8 +65,15 @@ class PhoneViewTest {
             projects = listOf(
                 ProjectView("alpha", listOf(session("server", "a1"), session("server", "a2"), session("laptop", "a1"))),
             ),
-            requests = listOf(RequestView(machine = "server", number = 3uL, agent = "a1", tool = "shell", reasons = emptyList())),
-            asks = listOf(AskView(machine = "server", agent = "a2", asked = 9uL, question = "which one?")),
+            requests = listOf(
+                RequestView(
+                    machine = "server", number = 3uL, agent = "a1", tool = "shell", reasons = emptyList(),
+                    call = "shell", base = false, says = emptyList(), reason = "",
+                ),
+            ),
+            asks = listOf(
+                AskView(machine = "server", agent = "a2", asked = 9uL, question = "which one?", questions = emptyList()),
+            ),
         ).toPhoneView()
         val waiting = view.projects[0].sessions.map { Triple(it.machine, it.agent, it.waiting) }
         // The agent's name alone is not enough: laptop's a1 is another session than server's.
