@@ -514,7 +514,7 @@ async fn a_silent_device_is_said_offline() {
         silence: Duration::from_secs(2),
         ..Waits::default()
     };
-    let place = Place::with(waits).await;
+    let mut place = Place::with(waits).await;
     let (laptop, laptop_machine) = (device_key(3), place.machine("laptop"));
     let mut laptop_session = place.add(&laptop, &laptop_machine, "laptop").await;
     let mut laptop_port = port(&mut laptop_session);
@@ -539,4 +539,29 @@ async fn a_silent_device_is_said_offline() {
         let _ =
             tokio::time::timeout(Duration::from_millis(300), laptop_port.online_changed()).await;
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_packet_waits_for_nothing_the_hub_does() {
+    let mut place = Place::new().await;
+    let (server, server_machine) = (device_key(2), place.machine("server"));
+    let mut server_session = place.add(&server, &server_machine, "server").await;
+    let mut server_port = port(&mut server_session);
+    let _server_session = drain(server_session);
+    let pc_port = port(&mut place.pc_session);
+    online(&mut server_port, &[place.pc_machine.public()]).await;
+
+    // The hub busy for two seconds, as with a long change of its list: the links do not wait.
+    let served = std::sync::Arc::new(place.served);
+    let busy = tokio::task::spawn_blocking({
+        let served = served.clone();
+        move || served.with_hub(|_| std::thread::sleep(Duration::from_secs(2)))
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    for n in 0..5u8 {
+        assert!(pc_port.send(&server_machine.public(), vec![n; 100]).await);
+    }
+    let got = received_within(&mut server_port, Duration::from_secs(1)).await;
+    assert_eq!(got.len(), 5, "the links waited for the hub");
+    busy.await.unwrap();
 }
