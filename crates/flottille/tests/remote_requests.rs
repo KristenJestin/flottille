@@ -782,6 +782,44 @@ fn a_viewer_reads_but_cannot_send_answer_or_start() {
     assert_eq!(server.log().matches(SERVED).count(), 1, "{}", server.log());
 }
 
+/// #1185: a program's sign-in is the user's, from a device that may drive the machine: a viewer
+/// starts none, gives no code, cancels none and signs nothing out.
+#[test]
+fn a_viewer_cannot_sign_in() {
+    let (_hub, _pc, server, laptop) = pc_server_and(User::new(), User::new(), "laptop", "viewer");
+    let device = laptop.device();
+
+    let read = laptop.raw(&signed(&device, "1", "server", "signin.list", json!({})));
+    assert!(read["error"].is_null(), "{read}");
+    assert!(read["result"]["programs"].is_array(), "{read}");
+
+    for (n, (method, deed)) in [
+        ("signin.start", "sign a program in"),
+        ("signin.code", "call signin.code"),
+        ("signin.cancel", "call signin.cancel"),
+        ("signin.sign_out", "sign a program out"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let id = format!("{}", n + 2);
+        let answer = laptop.raw(&signed(
+            &device,
+            &id,
+            "server",
+            method,
+            json!({"program": "gh"}),
+        ));
+        assert_eq!(answer["id"], id.as_str());
+        assert_eq!(
+            error_of(&answer),
+            format!("refused: laptop may only view: a controller or a runner may {deed}"),
+            "{method}"
+        );
+    }
+    assert_eq!(server.log().matches(SERVED).count(), 1, "{}", server.log());
+}
+
 #[test]
 fn a_controller_answers_a_request_and_starts_a_session_on_a_runner() {
     let (_hub, _pc, server, tablet) =
