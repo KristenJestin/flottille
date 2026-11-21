@@ -282,6 +282,11 @@ pub fn call(daemon: &Arc<Daemon>, method: &str, params: Value) -> Result<Value, 
             let asked: Edit = serde_json::from_value(params)?;
             let mut routine = find(daemon, &asked.routine)?;
             let event = trigger(asked.schedule.as_deref(), asked.event.as_ref())?;
+            // Another project's events are not this one's: what it saw and held is forgotten.
+            let project_moves = asked
+                .project
+                .as_ref()
+                .is_some_and(|project| *project != routine.project);
             let event_moves = event.is_some() || asked.schedule.is_some();
             let schedule_moves = event_moves || asked.zone.is_some();
             // Giving one replaces the other.
@@ -326,7 +331,7 @@ pub fn call(daemon: &Arc<Daemon>, method: &str, params: Value) -> Result<Value, 
             }
             routine.updated_at = now;
             daemon.read(|store| store.update_routine(&routine))?;
-            if event_moves {
+            if event_moves || project_moves {
                 daemon.read(|store| store.reset_routine_event(&routine.id))?;
             }
             changed(daemon, &routine)?
@@ -340,6 +345,11 @@ pub fn call(daemon: &Arc<Daemon>, method: &str, params: Value) -> Result<Value, 
             routine.delayed = None;
             routine.updated_at = now;
             daemon.read(|store| store.update_routine(&routine))?;
+            // A paused routine hears nothing: what it held is let go, and what ends while it is
+            // paused is no event once it resumes.
+            if routine.paused {
+                daemon.read(|store| store.reset_routine_event(&routine.id))?;
+            }
             changed(daemon, &routine)?
         }
         "routine.remove" => {
