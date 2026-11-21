@@ -20,8 +20,7 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 #[derive(Subcommand)]
 pub enum RemoteAction {
-    /// Turn remote on: this machine can join a hub and link to your other machines through it.
-    /// Nothing listens
+    /// Turn remote on: this machine can join a hub and link to your other machines through it
     On {
         #[arg(long)]
         json: bool,
