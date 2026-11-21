@@ -2246,7 +2246,21 @@ fn a_lifted_push_runs_no_program_of_an_exec_path_on_its_line() {
         "the run's program ran: {}",
         pushed.text
     );
-    assert!(pushed.text.contains("--exec-path"), "{}", pushed.text);
+    assert!(
+        pushed.text.contains("takes no --exec-path"),
+        "{}",
+        pushed.text
+    );
+    // The option is one git follows: its own read of the remote runs the run's program.
+    let _ = std::process::Command::new("git")
+        .arg("-C")
+        .arg(user.path("work/app"))
+        .arg(format!("--exec-path={}", tools.display()))
+        .args(["ls-remote", "origin"])
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .output()
+        .unwrap();
+    assert!(user.path("exec-path-ran").exists());
 }
 
 #[test]
@@ -2270,7 +2284,7 @@ fn a_setting_on_a_lifted_push_s_line_sends_no_sign_in_to_its_proxy() {
         "the line's proxy was sent: {said}\n{}",
         pushed.text
     );
-    assert!(pushed.text.contains("-c"), "{}", pushed.text);
+    assert!(pushed.text.contains("takes no setting"), "{}", pushed.text);
 }
 
 #[test]
@@ -2429,17 +2443,16 @@ fn a_url_rewrite_of_the_user_s_settings_for_the_remote_s_forge_still_applies() {
 #[test]
 fn a_rewrite_for_reads_a_run_set_refuses_no_checked_push() {
     let (user, _agent, _bus) = user();
-    project(&user, SSH_REMOTE);
+    let user = credential_helper(user);
+    let (_server, url) = http_remote(&user);
+    project(&user, &url);
     message_checked(&user);
     committed(&user, "a good change");
     // As a run could write it, for reads alone: the push does not follow it.
+    let elsewhere = url.replace("app.git", "elsewhere.git");
     user.git(
         &user.path("work/app"),
-        &[
-            "config",
-            "url.git@forge.invalid:acme/elsewhere.git.insteadOf",
-            SSH_REMOTE,
-        ],
+        &["config", &format!("url.{elsewhere}.insteadOf"), &url],
     );
     let mcp = agent(&user);
 
