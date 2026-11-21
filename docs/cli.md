@@ -348,7 +348,9 @@ server  projects: app (12 free), site (none free)  agents: claude
 
 Renames a member: a change signed by this session's device key. `remote.change`.
 
-### `flottille remote icon <name> <icon> [--json]`, `flottille remote colour <name> <colour> [--json]`
+### `flottille remote icon <name> <icon> [--json]`
+
+### `flottille remote colour <name> <colour> [--json]`
 
 Changes how a member is drawn, its icon or its colour, the other kept: a change signed by this
 session's device key. A role is changed on the hub's host only (`flottille-hub role`).
