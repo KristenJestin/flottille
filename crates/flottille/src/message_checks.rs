@@ -400,7 +400,9 @@ fn asked_for(
     let deletes = rewrites
         .iter()
         .any(|option| ["delete", "prune", "mirror"].contains(option))
-        || words.iter().any(|word| word.starts_with(':'));
+        || words
+            .iter()
+            .any(|word| word.starts_with(':') || word.starts_with("+:"));
     for (url, refs) in tried {
         for (flag, _, destination) in refs {
             let (what, asked, how) = match flag.as_str() {
