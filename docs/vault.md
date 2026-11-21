@@ -498,7 +498,7 @@ fails on the path. Outside the sandbox, only these are added:
   too, from the file it includes, and written in a file of the push's folder that is included
   after them only where the daemon finds every URL the push may go to matches the pattern, as
   git matches it (`*` within a folder, `**` across them; a pattern with a class `[…]` or an
-  escape matches nothing). Those URLs are the push URLs (`git remote get-url --push --all`) of
+  escape matches nothing). Those URLs are the push URLs (as `git remote -v` says them) of
   every remote the push knows, whichever its line or settings choose; a push whose line names a
   URL or `--repo`, or whose `branch.<name>.remote`, `branch.<name>.pushRemote` or
   `remote.pushDefault` names a remote git does not know (a URL), gets none. Git's own

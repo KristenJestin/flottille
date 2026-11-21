@@ -128,7 +128,7 @@ impl PushFolder {
     }
 
     /// Every URL the push of `words` may go to, as git reads its settings with `env`: the push
-    /// URLs of every remote it knows, which settles where a push that names none goes, whatever
+    /// URLs of every remote it knows (`git remote -v`), which settles where a push that names none goes, whatever
     /// chooses it. None where a remote cannot be read, where a setting that chooses one
     /// (`branch.<name>.remote`, `branch.<name>.pushRemote`, `remote.pushDefault`) or the line
     /// names one git does not know (a URL), or where the line says `--repo`.
@@ -145,13 +145,15 @@ impl PushFolder {
         };
         let listed = read(&["remote"]).await.filter(|read| read.success)?;
         let remotes: Vec<&str> = listed.stdout.lines().collect();
-        let mut urls = Vec::new();
-        for remote in &remotes {
-            let read = read(&["remote", "get-url", "--push", "--all", *remote])
-                .await
-                .filter(|read| read.success)?;
-            urls.extend(read.stdout.lines().map(str::to_owned));
-        }
+        // `git remote get-url` knows no remote the settings of the environment alone name, which
+        // are all a push's; `-v` does, each push URL rewritten as the push rewrites it.
+        let shown = read(&["remote", "-v"]).await.filter(|read| read.success)?;
+        let urls: Vec<String> = shown
+            .stdout
+            .lines()
+            .filter_map(|line| line.strip_suffix(" (push)")?.split_once('\t'))
+            .map(|(_, url)| url.to_owned())
+            .collect();
         let known = |name: &str| name == "." || remotes.contains(&name);
         // None of them set is no failure: git says nothing, and exits with 1.
         let chosen = read(&[
