@@ -688,7 +688,7 @@ impl Inner {
         machine: &str,
         key: PublicKey,
         link: Option<Link>,
-        state: PeerState,
+        peer: PeerState,
         why: &str,
     ) {
         let mut state = self.state();
@@ -704,7 +704,7 @@ impl Inner {
             }
             return;
         }
-        state.view.online(machine, state, why);
+        state.view.online(machine, peer, why);
         if let Some(connection) = &mut state.connection {
             match link {
                 Some(link) => {
