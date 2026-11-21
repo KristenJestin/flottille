@@ -1507,7 +1507,7 @@ async fn follow(
     going.display.lock().unwrap().take();
     let push_folder = going.push_folder.lock().unwrap().take();
     if let Some(push_folder) = push_folder {
-        push_folder.upstreams_back().await;
+        push_folder.written_back().await;
     }
     while let Ok(read) = reader.try_read(&mut buffer) {
         if read == 0 {

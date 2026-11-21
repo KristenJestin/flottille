@@ -12,9 +12,10 @@
 //! - of the repository's, only what says which refs go to which remote: [`KEPT`];
 //! - the daemon's own (`runs::lifted`).
 //!
-//! The repository's refs and objects are its own, reached from the folder made: the push reads
-//! its branches and updates its remote-tracking refs in place. An upstream the push sets (`-u`)
-//! is written back to the repository's settings once it ended.
+//! The repository's objects are its own, reached from the folder made; its refs are those it had
+//! when the folder was made, written there, so that a run moving a branch between the checks of
+//! the push and the push sends nothing they did not read. The remote-tracking refs the push moved
+//! and an upstream it set (`-u`) are written back to the repository once it ended.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -56,6 +57,9 @@ pub struct PushFolder {
     settings: Vec<(String, String)>,
     /// Where the push was run from: the repository an upstream it sets is written back to.
     from: PathBuf,
+    /// The repository's refs when the folder was made, each with its object: what the push
+    /// reads, and what a remote-tracking ref it moved is moved from in the repository.
+    refs: Vec<(String, String)>,
 }
 
 impl PushFolder {
@@ -74,9 +78,11 @@ impl PushFolder {
         &self.settings
     }
 
-    /// Writes back to the repository the upstreams the push set (`-u`, `push.autoSetupRemote`):
-    /// git wrote them in the folder's own settings, which held no `branch.*`.
-    pub async fn upstreams_back(self) {
+    /// Writes back to the repository what the push changed in the folder: the remote-tracking
+    /// refs it moved, and the upstreams it set (`-u`, `push.autoSetupRemote`), which git wrote in
+    /// the folder's own settings, which held no `branch.*`.
+    pub async fn written_back(self) {
+        self.tracking_back().await;
         // Read here and given to git on its input: the runtime folder is out of a confined
         // command's reach.
         let Ok(file) = std::fs::read(self.folder.path().join("config")) else {
@@ -112,6 +118,94 @@ impl PushFolder {
             }
         }
     }
+
+    /// Moves in the repository each remote-tracking ref the push moved in the folder, from the
+    /// object it had when the folder was made: one a run moved since is left as it is.
+    async fn tracking_back(&self) {
+        let now = folder_refs(self.folder.path());
+        let before = |name: &str| {
+            self.refs
+                .iter()
+                .find(|(_, had)| had == name)
+                .map(|(sha, _)| sha.as_str())
+        };
+        let mut commands = Vec::new();
+        for (sha, name) in &now {
+            if name.starts_with("refs/remotes/") && before(name) != Some(sha.as_str()) {
+                commands.push(match before(name) {
+                    Some(old) => format!("update {name} {sha} {old}\n"),
+                    None => format!("create {name} {sha}\n"),
+                });
+            }
+        }
+        for (old, name) in &self.refs {
+            if name.starts_with("refs/remotes/") && !now.iter().any(|(_, kept)| kept == name) {
+                commands.push(format!("delete {name} {old}\n"));
+            }
+        }
+        let git = crate::git::own().to_string_lossy().into_owned();
+        let words = [git, "update-ref".to_owned(), "--stdin".to_owned()];
+        // One at a time: a ref a run moved since is not moved, and the others still are.
+        for command in commands {
+            let moved = crate::git::run_in(
+                &self.from,
+                &words,
+                &Default::default(),
+                Some(command.clone().into_bytes()),
+            )
+            .await;
+            if let Err(why) = moved.and_then(|moved| match moved.success {
+                true => Ok(()),
+                false => Err(moved.stderr),
+            }) {
+                eprintln!(
+                    "flottille daemon: a remote-tracking ref a push moved is not moved ({}): {why}",
+                    command.trim()
+                );
+            }
+        }
+    }
+}
+
+/// The refs of the folder a push ran from, each with its object: those of its `packed-refs`, and
+/// the loose ones the push wrote over them.
+fn folder_refs(folder: &Path) -> Vec<(String, String)> {
+    let mut refs: Vec<(String, String)> = std::fs::read_to_string(folder.join("packed-refs"))
+        .unwrap_or_default()
+        .lines()
+        .filter(|line| !line.starts_with('#') && !line.starts_with('^'))
+        .filter_map(|line| line.split_once(' '))
+        .map(|(sha, name)| (sha.to_owned(), name.to_owned()))
+        .collect();
+    let mut folders = vec![folder.join("refs")];
+    while let Some(at) = folders.pop() {
+        let Ok(entries) = std::fs::read_dir(&at) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            match entry.file_type() {
+                Ok(kind) if kind.is_dir() => folders.push(path),
+                Ok(kind) if kind.is_file() => {
+                    let Ok(name) = path.strip_prefix(folder) else {
+                        continue;
+                    };
+                    let name = name.to_string_lossy().into_owned();
+                    let Ok(text) = std::fs::read_to_string(&path) else {
+                        continue;
+                    };
+                    let sha = text.trim();
+                    if name.ends_with(".lock") || sha.starts_with("ref:") || sha.is_empty() {
+                        continue;
+                    }
+                    refs.retain(|(_, had)| *had != name);
+                    refs.push((sha.to_owned(), name));
+                }
+                _ => {}
+            }
+        }
+    }
+    refs
 }
 
 /// Makes the folder a push from the repository at `from` runs from, in `under` (the daemon's
@@ -136,6 +230,13 @@ pub async fn made(
             ),
         };
     let listed = read(&["config", "--list", "--show-scope", "--includes", "--null"]).await?;
+    // A symbolic one (`refs/remotes/origin/HEAD`) as the ref it leads to: the push moves none.
+    let refs: Vec<(String, String)> = read(&["for-each-ref", "--format=%(objectname) %(refname)"])
+        .await?
+        .lines()
+        .filter_map(|line| line.split_once(' '))
+        .map(|(sha, name)| (sha.to_owned(), name.to_owned()))
+        .collect();
     let (repository, kept) = repository_settings(&listed)?;
     let mut settings = user;
     settings.extend(kept);
@@ -150,22 +251,27 @@ pub async fn made(
     };
     write("HEAD", &head)?;
     write("config", &repository)?;
-    std::fs::create_dir(folder.path().join("objects"))
-        .map_err(|e| format!("cannot make the push's folder: {e}"))?;
-    // Its refs are the repository's: the push reads its branches and moves its remote-tracking
-    // refs there. `shallow` says where its history stops.
-    for name in ["refs", "packed-refs", "shallow"] {
-        let target = common.join(name);
-        if std::fs::symlink_metadata(&target).is_ok() {
-            std::os::unix::fs::symlink(&target, folder.path().join(name))
-                .map_err(|e| format!("cannot make the push's folder: {e}"))?;
-        }
+    for name in ["objects", "refs"] {
+        std::fs::create_dir(folder.path().join(name))
+            .map_err(|e| format!("cannot make the push's folder: {e}"))?;
+    }
+    // Its refs are the repository's as they are now, which the checks read and the push sends.
+    let packed: String = refs
+        .iter()
+        .map(|(sha, name)| format!("{sha} {name}\n"))
+        .collect();
+    write("packed-refs", &packed)?;
+    // Where its history stops.
+    if let Ok(shallow) = std::fs::read(common.join("shallow")) {
+        std::fs::write(folder.path().join("shallow"), shallow)
+            .map_err(|e| format!("cannot write the push's shallow: {e}"))?;
     }
     Ok(PushFolder {
         folder,
         objects: common.join("objects"),
         settings,
         from: from.to_owned(),
+        refs,
     })
 }
 
@@ -323,6 +429,36 @@ mod tests {
         ] {
             assert!(repository_settings(listed).is_err(), "{listed}");
         }
+    }
+
+    #[test]
+    fn the_refs_a_push_moved_in_its_folder_are_read_over_those_it_had() {
+        let folder = tempfile::tempdir().unwrap();
+        std::fs::write(
+            folder.path().join("packed-refs"),
+            "# pack-refs with: sorted\n1111 refs/heads/main\n2222 refs/remotes/origin/main\n\
+             3333 refs/tags/v1\n^4444\n",
+        )
+        .unwrap();
+        let origin = folder.path().join("refs/remotes/origin");
+        std::fs::create_dir_all(&origin).unwrap();
+        std::fs::write(origin.join("main"), "5555\n").unwrap();
+        std::fs::write(origin.join("new"), "6666\n").unwrap();
+        std::fs::write(origin.join("new.lock"), "7777\n").unwrap();
+
+        let mut refs = folder_refs(folder.path());
+        refs.sort_by(|a, b| a.1.cmp(&b.1));
+
+        let refs: Vec<(&str, &str)> = refs.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+        assert_eq!(
+            refs,
+            [
+                ("1111", "refs/heads/main"),
+                ("5555", "refs/remotes/origin/main"),
+                ("6666", "refs/remotes/origin/new"),
+                ("3333", "refs/tags/v1"),
+            ]
+        );
     }
 
     #[test]
