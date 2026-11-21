@@ -230,14 +230,20 @@ pub fn find_git() {
         let path = std::env::var_os("PATH").unwrap_or_default();
         let rooted: Vec<PathBuf> = std::env::split_paths(&path)
             .filter_map(|folder| folder.canonicalize().ok())
-            .filter(|folder| folder.ancestors().all(root_s_alone))
+            .filter(|folder| only_root_may_change(folder))
             .collect();
         std::env::join_paths(rooted).unwrap_or_default()
     });
 }
 
-/// Whether only root may change `folder`: it is root's, and neither its group nor others may
-/// write it.
+/// Whether only root may change `path`, a program or a folder: it and every folder on the way to
+/// it are root's, and neither their group nor others may write them. The one rule of what a
+/// push the gate let through, or the daemon's own git, may run.
+pub(crate) fn only_root_may_change(path: &Path) -> bool {
+    path.ancestors().all(root_s_alone)
+}
+
+/// Whether `path` is root's, and neither its group nor others may write it.
 fn root_s_alone(folder: &Path) -> bool {
     use std::os::unix::fs::MetadataExt;
     std::fs::metadata(folder).is_ok_and(|m| m.uid() == 0 && m.mode() & 0o022 == 0)
