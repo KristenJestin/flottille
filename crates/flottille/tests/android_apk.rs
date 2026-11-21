@@ -114,13 +114,14 @@ fn the_apk_is_built_by_ci_with_the_version() {
     let publish = job(".github/workflows/ci.yml", "publish");
     assert!(publish.contains("android-apk"), "{publish}");
     assert!(publish.contains("debug-signed"), "{publish}");
-    assert_eq!(
-        publish.matches("gh release create").count(),
-        publish
-            .lines()
-            .filter(|line| line.contains("gh release create") && line.contains("\"${apk[@]}\""))
-            .count(),
-        "every way of publishing carries the APK: {publish}"
+    let creates: Vec<&str> = publish
+        .lines()
+        .filter(|line| line.trim_start().starts_with("gh release create"))
+        .collect();
+    assert_eq!(creates.len(), 3, "{publish}");
+    assert!(
+        creates.iter().all(|line| line.contains("\"${apk[@]}\"")),
+        "every way of publishing carries the APK: {creates:?}"
     );
     let releases = read("docs/releases.md");
     assert!(
