@@ -58,8 +58,9 @@ import org.flottille.core.Request
 
 /**
  * A request that waits for the user: the call as the daemon gave it (the same words the window
- * shows, never summarised here), the reason, and Allow and Deny, which a viewer does not get. A
- * base request stands apart by its tag and its warning: it asks every time, in every mode.
+ * shows, never summarised here), every reason and who asked, and Allow and Deny, which a viewer
+ * does not get; a proposal to write a connection has Deny only, as in the window. A base request
+ * stands apart by its tag and the daemon's warning, said as the window says it.
  * [refusal] is what the machine said when it refused the answer (already answered, gone): the card
  * says it, then folds.
  */
@@ -90,19 +91,25 @@ fun RequestCard(
         }
         Label(request.call)
         request.says.forEach { Label(it, style = Type.Label, color = palette.mute) }
-        if (request.reason.isNotEmpty()) Label(request.reason, style = Type.Small, color = palette.mute)
-        if (request.base) {
-            Label(
-                "It comes back every time, in every mode. Allow it only if you know what it does.",
-                style = Type.Label.copy(fontWeight = FontWeight.SemiBold),
-                color = palette.wait,
-            )
+        // What the window says, as the core gives it: the judge, every reason and who forwarded
+        // it, and who asked.
+        if (request.judgement.isNotEmpty()) Label(request.judgement, style = Type.Label, color = palette.mute)
+        if (request.why.isNotEmpty()) Label(request.why, style = Type.Small, color = palette.mute)
+        if (request.source.isNotEmpty()) Label(request.source, style = Type.Small, color = palette.faint)
+        if (request.base && request.always.isNotEmpty()) {
+            Label(request.always, style = Type.Label.copy(fontWeight = FontWeight.SemiBold), color = palette.wait)
         }
         Message(refusal, tag = "request-refusal:${request.number}")
         if (!readOnly && refusal == null) {
+            if (request.proposesAConnection) {
+                // What it would write is read in the window's dialog, never allowed from a card.
+                Label("Open it on a computer to read what it would write: it is allowed there, not here.", style = Type.Label, color = palette.mute)
+            }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(Space.Sm, Alignment.End)) {
                 FButton("Deny", { onAnswer(false) }, kind = ButtonKind.Secondary, enabled = !answering, modifier = Modifier.testTag("deny:${request.number}"))
-                FButton("Allow", { onAnswer(true) }, kind = ButtonKind.Primary, enabled = !answering, modifier = Modifier.testTag("allow:${request.number}"))
+                if (!request.proposesAConnection) {
+                    FButton("Allow", { onAnswer(true) }, kind = ButtonKind.Primary, enabled = !answering, modifier = Modifier.testTag("allow:${request.number}"))
+                }
             }
         }
     }

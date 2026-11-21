@@ -140,7 +140,7 @@ internal fun ViewState.toPhoneView(): PhoneView {
             )
         },
         requests = requests.map {
-            Request(it.machine, it.number.toLong(), it.agent, it.tool, it.call, it.base, it.reason, it.reasons, it.says)
+            Request(it.machine, it.number.toLong(), it.agent, it.tool, it.kind, it.call, it.base, it.judgement, it.why, it.always, it.source, it.says)
         },
         asks = asks.map { ask ->
             Ask(

@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use flottille_link::{Members, PeerState, PublicKey, Role};
+use flottille_protocol::words::{self, THE_CONVERSATION};
 use serde_json::Value;
 
 /// What the app draws, whole, with every batch.
@@ -131,14 +132,19 @@ pub struct ChildView {
     pub depth: u32,
 }
 
-/// A request of an agent's that waits for the user's Allow or Deny.
+/// A request of an agent's that waits for the user's Allow or Deny. What the card says is the
+/// window's, word for word (`flottille_protocol::words`): the daemon's reasons and the sentences of
+/// the agents that forwarded it, who asked, what the judge said, and why a base request always asks.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct RequestView {
     pub machine: String,
     pub number: u64,
     pub agent: String,
     pub tool: String,
-    pub reasons: Vec<String>,
+    /// `call`, or `action`: a change of the project the agent asks for. An `action` of the tool
+    /// `connections` is a proposal to write a connection, which a card never allows: the window
+    /// opens a dialog of what it would write.
+    pub kind: String,
     /// The call on one line as the window shows it: a command's line, else the tool and its
     /// arguments, the daemon's own text.
     pub call: String,
@@ -146,8 +152,16 @@ pub struct RequestView {
     pub base: bool,
     /// What the user allows, in the daemon's words, for a request that changes a project.
     pub says: Vec<String>,
-    /// The judge's reason when one was asked, else the first reason it was held.
-    pub reason: String,
+    /// What the Auto judge said, when it was judged; else empty.
+    pub judgement: String,
+    /// Every reason it was held and every sentence of the agents that forwarded it, each a
+    /// sentence of its own.
+    pub why: String,
+    /// Why a base request always asks (the window's sentence, which names a first message to
+    /// another session apart); empty when it is not a base request.
+    pub always: String,
+    /// Who asked and who forwarded it, with its number: `asked by the conversation · #4`.
+    pub source: String,
 }
 
 /// A question of an agent's that waits for the user's answer.
@@ -189,7 +203,7 @@ pub(crate) struct View {
     members: Vec<MemberView>,
     /// The sessions by machine and agent.
     sessions: BTreeMap<(String, String), Session>,
-    requests: BTreeMap<(String, u64), RequestView>,
+    requests: BTreeMap<(String, u64), Held>,
     asks: BTreeMap<(String, u64), AskView>,
     /// The followed session and its events by number: an event seen twice (loaded, then live) is
     /// one.
@@ -208,6 +222,21 @@ struct Followed {
     mode: String,
     more: bool,
     children: Vec<ChildView>,
+}
+
+/// A request as the daemon gave it. Who asked and who forwarded it are named when the view is
+/// computed: the names are the followed page's tree.
+struct Held {
+    number: u64,
+    agent: String,
+    tool: String,
+    kind: String,
+    call: String,
+    base: bool,
+    says: Vec<String>,
+    judgement: Option<(String, String, String)>,
+    reasons: Vec<String>,
+    forwards: Vec<(String, String)>,
 }
 
 struct Session {
@@ -554,37 +583,104 @@ impl View {
         let Some(number) = request["number"].as_u64() else {
             return;
         };
-        let reasons: Vec<String> = request["reasons"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .map(text)
-            .collect();
-        let tool = text(&request["tool"]);
-        // The judge's sentence when one was asked, else the first reason it was held.
-        let reason = match request["judgement"]["reason"].as_str() {
-            Some(reason) if !reason.is_empty() => reason.to_owned(),
-            _ => reasons.first().cloned().unwrap_or_default(),
+        let strings = |value: &Value| -> Vec<String> {
+            value.as_array().into_iter().flatten().map(text).collect()
         };
+        let tool = text(&request["tool"]);
         self.requests.insert(
             (machine.to_owned(), number),
-            RequestView {
-                machine: machine.to_owned(),
+            Held {
                 number,
                 agent: text(&request["agent"]),
                 call: call_line(&tool, &request["call"]),
                 tool,
+                kind: match request["kind"].as_str() {
+                    Some(kind) if !kind.is_empty() => kind.to_owned(),
+                    _ => "call".to_owned(),
+                },
                 base: request["class"] == "base",
-                says: request["says"]
+                says: strings(&request["says"]),
+                judgement: request["judgement"].is_object().then(|| {
+                    let judgement = &request["judgement"];
+                    (
+                        text(&judgement["by"]),
+                        text(&judgement["verdict"]),
+                        text(&judgement["reason"]),
+                    )
+                }),
+                reasons: strings(&request["reasons"]),
+                forwards: request["forwards"]
                     .as_array()
                     .into_iter()
                     .flatten()
-                    .map(text)
+                    .map(|forward| (text(&forward["by"]), text(&forward["why"])))
                     .collect(),
-                reason,
-                reasons,
             },
         );
+    }
+
+    /// How a request's card names an agent, as the window does: the followed session is the
+    /// conversation, a child of its tree is its title, any other `agent <id>`.
+    fn said_name(&self, machine: &str, id: &str) -> String {
+        match &self.followed {
+            Some(followed) if followed.machine == machine => {
+                if followed.agent == id {
+                    return THE_CONVERSATION.to_owned();
+                }
+                if let Some(child) = followed.children.iter().find(|child| child.agent == id)
+                    && !child.title.trim().is_empty()
+                {
+                    return child.title.clone();
+                }
+            }
+            _ => {}
+        }
+        format!("agent {id}")
+    }
+
+    /// The request as the app draws it.
+    fn request_view(&self, machine: &str, held: &Held) -> RequestView {
+        let forwards: Vec<String> = held
+            .forwards
+            .iter()
+            .map(|(by, said)| words::forwarded(&self.said_name(machine, by), said))
+            .collect();
+        let why = words::sentences(
+            held.reasons
+                .iter()
+                .map(String::as_str)
+                .chain(forwards.iter().map(String::as_str)),
+        );
+        let forwarders: Vec<String> = held
+            .forwards
+            .iter()
+            .map(|(by, _)| self.said_name(machine, by))
+            .collect();
+        RequestView {
+            machine: machine.to_owned(),
+            number: held.number,
+            agent: held.agent.clone(),
+            tool: held.tool.clone(),
+            kind: held.kind.clone(),
+            call: held.call.clone(),
+            base: held.base,
+            says: held.says.clone(),
+            judgement: held
+                .judgement
+                .as_ref()
+                .map(|(by, verdict, reason)| words::judged(by, verdict, reason))
+                .unwrap_or_default(),
+            always: match held.base {
+                true => words::always_says(&why).to_owned(),
+                false => String::new(),
+            },
+            source: words::source(
+                held.number,
+                &self.said_name(machine, &held.agent),
+                forwarders.iter().map(String::as_str),
+            ),
+            why,
+        }
     }
 
     /// The state the app draws.
@@ -641,7 +737,11 @@ impl View {
                     children: followed.children.clone(),
                 }
             }),
-            requests: self.requests.values().cloned().collect(),
+            requests: self
+                .requests
+                .iter()
+                .map(|((machine, _), held)| self.request_view(machine, held))
+                .collect(),
             asks: self.asks.values().cloned().collect(),
             said: self.said.clone(),
         }

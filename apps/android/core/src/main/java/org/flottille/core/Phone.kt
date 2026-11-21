@@ -42,19 +42,30 @@ data class Conversation(
     val children: List<Child>,
 )
 
-/** A request of an agent's that waits for Allow or Deny. [call] is the daemon's own text. */
+/**
+ * A request of an agent's that waits for Allow or Deny. What the card says comes from the core as
+ * the window says it, never summarised here: [call] the call, [why] every reason and who forwarded
+ * it, [always] why a base request always asks, [source] who asked.
+ */
 data class Request(
     val machine: String,
     val number: Long,
     val agent: String,
     val tool: String,
+    /** `call`, or `action`; an `action` of `connections` is never allowed from a card. */
+    val kind: String,
     val call: String,
     /** A base request always asks, in every mode. */
     val base: Boolean,
-    val reason: String,
-    val reasons: List<String>,
+    val judgement: String,
+    val why: String,
+    val always: String,
+    val source: String,
     val says: List<String>,
-)
+) {
+    /** A proposal to write a connection: what it would write is read on a computer, as in the window. */
+    val proposesAConnection: Boolean get() = tool == "connections" && kind == "action"
+}
 
 data class AskOption(val label: String, val description: String)
 
