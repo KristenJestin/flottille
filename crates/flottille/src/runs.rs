@@ -566,9 +566,11 @@ pub async fn run(
             let mut lifted_env = env(push_folder.as_ref());
             // Read with every setting the push reads: the user's `push.default` may be set for
             // one forge alone.
-            if let Some(made) = push_folder.as_mut()
-                && made.unsteered(&lifted_env).await
-            {
+            if let Some(made) = push_folder.as_mut() {
+                made.destined(&lifted_env, &pushed_words).await;
+                if let Err(why) = made.unsteered(&lifted_env).await {
+                    return Outcome::Refused(format!("refused: {why}"));
+                }
                 lifted_env = env(Some(made));
             }
             Some(lifted_env)
@@ -1085,7 +1087,8 @@ fn lifted(
     }
     // A program the user's settings name by a bare name is found in the folders only root may
     // change, never in one a run could put a program of its own in.
-    env.insert("PATH".into(), crate::git::rooted_path());
+    let path = from.map_or(Path::new(crate::git::NO_PATH), |from| from.path());
+    env.insert("PATH".into(), path.as_os_str().to_owned());
     configure(&mut env, "core.hooksPath", "/dev/null");
     env.insert("GIT_SSH_COMMAND".into(), ssh);
     env.insert(
@@ -1096,12 +1099,12 @@ fn lifted(
     env.insert("GIT_ASKPASS".into(), "".into());
     // The user's own credential helpers alone: an empty one empties those read before, the
     // repository's among them, and these are read last. Those the user set for one forge alone
-    // are included where the push's remotes are that forge's, as the user's settings say.
+    // are included where every URL the push may go to is that forge's.
     for (key, value) in crate::git::helper_settings() {
         configure(&mut env, &key, &value);
     }
     for (key, value) in from.map(|from| from.forge_helpers()).unwrap_or_default() {
-        configure(&mut env, key, value);
+        configure(&mut env, &key, &value);
     }
     // Nor the signing program a repository's settings name: a push is not signed.
     for (key, value) in UNSIGNED {
@@ -2983,8 +2986,8 @@ mod tests {
         assert_eq!(get(format!("GIT_CONFIG_VALUE_{}", count + 1)), "");
         assert_eq!(get("GIT_PROXY_COMMAND".into()), "");
         assert_eq!(get("GIT_ASKPASS".into()), "");
-        // The folders only root may change, found at the daemon's start: none in this test.
-        assert_eq!(env[&OsString::from("PATH")], crate::git::rooted_path());
+        // No push folder, and so no folder of the programs only root may change: none found.
+        assert_eq!(env[&OsString::from("PATH")], crate::git::NO_PATH);
         let replaced = lifted("ssh".into(), true, true, None);
         assert!(!replaced.contains_key(&OsString::from("DBUS_SESSION_BUS_ADDRESS")));
         let unlent = lifted("ssh".into(), false, false, None);

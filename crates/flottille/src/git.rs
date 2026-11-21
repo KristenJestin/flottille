@@ -145,7 +145,7 @@ pub(crate) fn start_read<S: AsRef<OsStr>>(args: &[S]) -> String {
 }
 
 /// The entries of `git config --null --get-regexp`, each its key and its value.
-fn entries(listed: &str) -> Vec<(String, String)> {
+pub(crate) fn entries(listed: &str) -> Vec<(String, String)> {
     listed
         .split('\0')
         .filter_map(|entry| entry.split_once('\n'))
@@ -301,17 +301,8 @@ static OWN: OnceLock<Option<PathBuf>> = OnceLock::new();
 /// of it. Never read by a release build, never the git of a push the gate let through.
 const TEST_GIT: &str = "FLOTTILLE_TEST_GIT";
 
-/// The programs of the folders of the daemon's `PATH` that only root may change, each of them
-/// only root's to change too (each, and every folder on the way, is root's, and no one else may
-/// write it), found at its start and linked in a folder of the daemon's ([`rooted_folder`]): the
-/// `PATH` of a push
-/// the gate let through, so that a program the user's settings name by a bare name (a credential
-/// helper's `!gh auth git-credential`, `ssh` in a wrapper) is never one a run put first.
-static ROOTED_PATH: OnceLock<OsString> = OnceLock::new();
-
-/// Finds the `git` of [`GIT`] and [`OWN`], and [`ROOTED_PATH`], at the daemon's start, before
-/// anything runs.
-pub fn find_git(runtime: &Path) {
+/// Finds the `git` of [`GIT`] and [`OWN`] at the daemon's start, before anything runs.
+pub fn find_git() {
     let chosen = crate::ssh_agent::chosen(crate::ssh_agent::candidates("git"));
     GIT.get_or_init(|| {
         let found = chosen
@@ -331,16 +322,23 @@ pub fn find_git(runtime: &Path) {
         }
         chosen.map(|(git, _)| git)
     });
-    ROOTED_PATH.get_or_init(|| rooted_folder(&runtime.join("path")).into_os_string());
 }
 
+/// The `PATH` that finds nothing: a path to no folder. An empty one is the current folder to
+/// `execvp` and to some shells, where git runs from.
+pub const NO_PATH: &str = "/nonexistent/flottille-no-path";
+
 /// Makes `folder`, in the daemon's runtime folder (out of every confined command's reach), the
-/// one folder of [`ROOTED_PATH`]: a link to each program of the daemon's `PATH` that only root
-/// may change, under its name, in the folders the `PATH` names that only root may change. A name
-/// whose first program is not only root's (a file of the user's in `/usr/local/bin`, a link to
-/// one, a link that leads nowhere) has none: a bare name never finds one a run could write. An
-/// empty path where the folder cannot be made: nothing is found.
-fn rooted_folder(folder: &Path) -> PathBuf {
+/// one folder of the `PATH` of a push the gate let through, made for each push (`push_folder`):
+/// a link to each program of the daemon's `PATH` that only root may change, under its name, in
+/// the folders the `PATH` names that only root may change (each, and every folder on the way, is
+/// root's, and no one else may write it). A program the user's settings name by a bare name (a
+/// credential helper's `!gh auth git-credential`, `ssh` in a wrapper) is then never one a run
+/// put first. A name whose first program is not only root's (a file of the user's in
+/// `/usr/local/bin`, a link to one, a link that leads nowhere) has none. Each link names the
+/// program under its own name, not where it leads now: a versioned link (`python3`) follows an
+/// upgrade, which only root makes. [`NO_PATH`] where the folder cannot be made.
+pub fn rooted_folder(folder: &Path) -> PathBuf {
     let _ = std::fs::remove_dir_all(folder);
     use std::os::unix::fs::DirBuilderExt;
     let made = std::fs::DirBuilder::new()
@@ -353,7 +351,7 @@ fn rooted_folder(folder: &Path) -> PathBuf {
              by its bare name: {error}",
             folder.display()
         );
-        return PathBuf::new();
+        return PathBuf::from(NO_PATH);
     }
     let path = std::env::var_os("PATH").unwrap_or_default();
     let mut named: std::collections::BTreeSet<OsString> = Default::default();
@@ -369,7 +367,7 @@ fn rooted_folder(folder: &Path) -> PathBuf {
             }
             match target {
                 Ok(target) if only_root_may_change(&target) => {
-                    let _ = std::os::unix::fs::symlink(&target, folder.join(&name));
+                    let _ = std::os::unix::fs::symlink(entry.path(), folder.join(&name));
                 }
                 _ => eprintln!(
                     "flottille daemon: {} is not only root's to change, so a push the gate lets \
@@ -393,11 +391,6 @@ pub(crate) fn only_root_may_change(path: &Path) -> bool {
 fn root_s_alone(folder: &Path) -> bool {
     use std::os::unix::fs::MetadataExt;
     std::fs::metadata(folder).is_ok_and(|m| m.uid() == 0 && m.mode() & 0o022 == 0)
-}
-
-/// The `PATH` of a push the gate let through: [`ROOTED_PATH`].
-pub fn rooted_path() -> OsString {
-    ROOTED_PATH.get().cloned().unwrap_or_default()
 }
 
 /// The `git` the daemon runs for itself: [`OWN`]'s, `git` of the `PATH` where nothing was

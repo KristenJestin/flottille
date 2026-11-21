@@ -325,6 +325,21 @@ pub fn push_options(words: &[String]) -> Result<(), String> {
     })
 }
 
+/// The repository the words of a push after `push` name (the first that is no option), if they
+/// name one; why they cannot be read, when they cannot.
+pub(crate) fn pushed_to(rest: &[String]) -> Result<Option<String>, String> {
+    let end = rest
+        .iter()
+        .position(|word| word == "--" || word == "--end-of-options")
+        .unwrap_or(rest.len());
+    let said = read(&rest[..end], &PUSH)?;
+    Ok(said
+        .words
+        .into_iter()
+        .chain(rest.iter().skip(end + 1).cloned())
+        .next())
+}
+
 /// A ref a push sends, as git's dry run says it: its flag (`*` a new one), its source and its
 /// destination.
 type Pushed = (String, String, String);

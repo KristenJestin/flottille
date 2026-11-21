@@ -153,7 +153,7 @@ pub fn run(paths: &Paths) -> Result<()> {
     }
     // Before anything runs: the git a push the gate let through runs, and the daemon's own,
     // never one planted later.
-    crate::git::find_git(&paths.runtime);
+    crate::git::find_git();
     // Before any repository is read: the user's own credential helpers, the only ones it runs.
     crate::git::find_helpers();
     // Before anything runs: what a push reads, which every run has read-only.

@@ -22,6 +22,9 @@ use std::path::{Path, PathBuf};
 
 use crate::git::Class;
 
+/// The environment of a command.
+type Env = std::collections::BTreeMap<OsString, OsString>;
+
 /// The repository's settings a push still reads: which remote, at which URLs, a branch's
 /// upstream and the remote-tracking refs. Each is a name of a remote, a URL or a refspec, never a
 /// program nor a way to reach the remote (`http.*`, `url.*`, `remote.<name>.proxy`,
@@ -56,9 +59,14 @@ pub struct PushFolder {
     /// repository's that are [`KEPT`], from `kept_from` on.
     settings: Vec<(String, String)>,
     kept_from: usize,
-    /// The includes of the credential helpers the user set for one forge alone
-    /// (`git::forge_helpers`), each naming a file of this folder that holds them.
+    /// The credential helpers the user set for one forge alone (`git::forge_helpers`): the
+    /// pattern of the remotes' URLs that are that forge's, and the file of this folder that holds
+    /// them.
     forge_helpers: Vec<(String, String)>,
+    /// Those of `forge_helpers` the push reads ([`PushFolder::destined`]).
+    included: Vec<String>,
+    /// The one folder of the push's `PATH` (`git::rooted_folder`), made for it.
+    path: PathBuf,
     /// Where the push was run from: the repository an upstream it sets is written back to.
     from: PathBuf,
     /// The repository's refs when the folder was made, each with its object: what the push
@@ -82,31 +90,121 @@ impl PushFolder {
         &self.settings
     }
 
+    /// The `PATH` of the push.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
     /// The settings to give the push after the daemon's emptied its credential helpers: the
-    /// user's helpers for one forge, included where the push's remotes are that forge's.
-    pub fn forge_helpers(&self) -> &[(String, String)] {
-        &self.forge_helpers
+    /// user's helpers for one forge, included where every URL the push may go to is that
+    /// forge's ([`PushFolder::destined`]).
+    pub fn forge_helpers(&self) -> Vec<(String, String)> {
+        self.included
+            .iter()
+            .map(|file| ("include.path".to_owned(), file.clone()))
+            .collect()
+    }
+
+    /// Chooses the user's helpers for one forge the push reads, its environment `env` (its own,
+    /// with none of them) and its `words`: those whose pattern every URL it may go to matches,
+    /// as the daemon judges it. Git's own `hasconfig:remote.*.url:` would include a forge's
+    /// helpers where any remote's URL matches, a remote or a `pushurl` a run wrote among them,
+    /// and ask them for a sign-in to wherever the push goes. None where what the push may go to
+    /// cannot be read.
+    pub async fn destined(&mut self, env: &Env, words: &[String]) {
+        self.included.clear();
+        let Some(urls) = self.destinations(env, words).await else {
+            return;
+        };
+        if urls.is_empty() {
+            return;
+        }
+        self.included = self
+            .forge_helpers
+            .iter()
+            .filter(|(pattern, _)| urls.iter().all(|url| wildmatch(pattern, url)))
+            .map(|(_, file)| file.clone())
+            .collect();
+    }
+
+    /// Every URL the push of `words` may go to, as git reads its settings with `env`: the push
+    /// URLs of every remote it knows, which settles where a push that names none goes, whatever
+    /// chooses it. None where a remote cannot be read, where a setting that chooses one
+    /// (`branch.<name>.remote`, `branch.<name>.pushRemote`, `remote.pushDefault`) or the line
+    /// names one git does not know (a URL), or where the line says `--repo`.
+    async fn destinations(&self, env: &Env, words: &[String]) -> Option<Vec<String>> {
+        let git = crate::git::program()?.to_string_lossy().into_owned();
+        let read = async |args: &[&str]| {
+            let words: Vec<String> = std::iter::once(git.as_str())
+                .chain(args.iter().copied())
+                .map(str::to_owned)
+                .collect();
+            crate::git::run_outside(&self.from, &words, env, None)
+                .await
+                .ok()
+        };
+        let listed = read(&["remote"]).await.filter(|read| read.success)?;
+        let remotes: Vec<&str> = listed.stdout.lines().collect();
+        let mut urls = Vec::new();
+        for remote in &remotes {
+            let read = read(&["remote", "get-url", "--push", "--all", *remote])
+                .await
+                .filter(|read| read.success)?;
+            urls.extend(read.stdout.lines().map(str::to_owned));
+        }
+        let known = |name: &str| name == "." || remotes.contains(&name);
+        // None of them set is no failure: git says nothing, and exits with 1.
+        let chosen = read(&[
+            "config",
+            "--null",
+            "--get-regexp",
+            r"^(branch\..*\.(push)?remote|remote\.pushdefault)$",
+        ])
+        .await
+        .filter(|read| read.success || read.stderr.trim().is_empty())?;
+        if !crate::git::entries(&chosen.stdout)
+            .iter()
+            .all(|(_, name)| known(name))
+        {
+            return None;
+        }
+        let at_push = crate::gate::git_globals(&words[1..]).0 + 1;
+        let rest = &words[at_push + 1..];
+        if rest.iter().any(|word| word.starts_with("--repo")) {
+            return None;
+        }
+        match crate::message_checks::pushed_to(rest) {
+            Ok(Some(named)) if !remotes.contains(&named.as_str()) => None,
+            Ok(_) => Some(urls),
+            Err(_) => None,
+        }
     }
 
     /// Drops the repository's `branch.<name>.merge` that names another branch than its own,
     /// where the push, read with `env` (its own), sends a branch to its upstream
     /// (`push.default=upstream`, the user's choice): one a run wrote would send a plain `git push`
-    /// to another branch. Whether it dropped one, so that the push's settings are made again.
-    pub async fn unsteered(
-        &mut self,
-        env: &std::collections::BTreeMap<OsString, OsString>,
-    ) -> bool {
-        let Some(git) = crate::git::program() else {
-            return false;
+    /// to another branch. Whether it dropped one, so that the push's settings are made again; why
+    /// the push is refused where `push.default` cannot be read.
+    pub async fn unsteered(&mut self, env: &Env) -> Result<bool, String> {
+        let unread = |why: &str| {
+            format!(
+                "what push.default says cannot be read ({why}), and a branch's upstream a run \
+                 wrote may send the push to another branch"
+            )
         };
+        let git = crate::git::program().ok_or_else(|| unread(crate::git::UNFOUND))?;
         let git = git.to_string_lossy().into_owned();
         let words = [git.as_str(), "config", "--get", "push.default"].map(str::to_owned);
-        let Ok(read) = crate::git::run_outside(&self.from, &words, env, None).await else {
-            return false;
-        };
+        let read = crate::git::run_outside(&self.from, &words, env, None)
+            .await
+            .map_err(|why| unread(&why))?;
+        // Unset is no failure: git says nothing, and exits with 1.
+        if !read.success && !read.stderr.trim().is_empty() {
+            return Err(unread(read.stderr.trim()));
+        }
         let default = read.stdout.trim().to_ascii_lowercase();
         if !["upstream", "tracking"].contains(&default.as_str()) {
-            return false;
+            return Ok(false);
         }
         let before = self.settings.len();
         let mut at = 0;
@@ -115,7 +213,7 @@ impl PushFolder {
             at += 1;
             at <= kept_from || !steering(key, value)
         });
-        self.settings.len() != before
+        Ok(self.settings.len() != before)
     }
 
     /// Writes back to the repository what the push changed in the folder: the remote-tracking
@@ -248,6 +346,44 @@ fn folder_refs(folder: &Path) -> Vec<(String, String)> {
     refs
 }
 
+/// Whether `url` matches `pattern` as git matches a `hasconfig:remote.*.url:` pattern (its
+/// `wildmatch` with `WM_PATHNAME`): `*` and `?` never cross a `/`, `**` between two of them, or
+/// at an end, does. A class (`[…]`) or an escape (`\`) matches nothing: a forge's helpers are
+/// given where the daemon is sure.
+fn wildmatch(pattern: &str, url: &str) -> bool {
+    fn from(pattern: &[u8], text: &[u8], after_slash: bool) -> bool {
+        if let [b'*', b'*', rest @ ..] = pattern
+            && after_slash
+            && matches!(rest.first(), None | Some(b'/'))
+        {
+            let Some(rest) = rest.get(1..) else {
+                return true;
+            };
+            // `**/`: none or more whole folders.
+            return (0..=text.len())
+                .filter(|&at| at == 0 || text[at - 1] == b'/')
+                .any(|at| from(rest, &text[at..], true));
+        }
+        match pattern.first() {
+            None => text.is_empty(),
+            Some(b'*') => {
+                let rest = &pattern[pattern.iter().take_while(|&&c| c == b'*').count()..];
+                (0..=text.len())
+                    .take_while(|&at| at == 0 || text[at - 1] != b'/')
+                    .any(|at| from(rest, &text[at..], at == 0 && after_slash))
+            }
+            Some(b'?') => text
+                .first()
+                .is_some_and(|&c| c != b'/' && from(&pattern[1..], &text[1..], false)),
+            Some(b'[' | b'\\') => false,
+            Some(&c) => text
+                .first()
+                .is_some_and(|&t| t == c && from(&pattern[1..], &text[1..], c == b'/')),
+        }
+    }
+    from(pattern.as_bytes(), url.as_bytes(), true)
+}
+
 /// Whether the repository's `key` is a `branch.<name>.merge` naming another branch than
 /// `<name>`.
 fn steering(key: &str, value: &str) -> bool {
@@ -321,17 +457,28 @@ pub async fn made(
     // includes no file but by its path.
     let mut forge_helpers = Vec::new();
     for (index, (condition, helpers)) in crate::git::forge_helpers().iter().enumerate() {
+        // `includeif.hasconfig:remote.*.url:<pattern>.path`, the only condition of the kind git
+        // has.
+        let Some(pattern) = condition
+            .strip_prefix("includeif.hasconfig:remote.*.url:")
+            .and_then(|rest| rest.strip_suffix(".path"))
+        else {
+            continue;
+        };
         let name = format!("forge-helpers-{index}");
         write(&name, &crate::git::helpers_file(helpers))?;
         let path = folder.path().join(name).to_string_lossy().into_owned();
-        forge_helpers.push((condition.clone(), path));
+        forge_helpers.push((pattern.to_owned(), path));
     }
+    let path = crate::git::rooted_folder(&folder.path().join("path"));
     Ok(PushFolder {
         folder,
         objects: common.join("objects"),
         settings,
         kept_from,
         forge_helpers,
+        included: Vec::new(),
+        path,
         from: from.to_owned(),
         refs,
     })
@@ -436,6 +583,75 @@ pub fn listed_settings(listed: &str) -> Vec<(String, String)> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_forge_s_pattern_is_matched_as_git_matches_it() {
+        for (pattern, url, matched) in [
+            (
+                "http://127.0.0.1:*/**",
+                "http://127.0.0.1:8080/app.git",
+                true,
+            ),
+            (
+                "http://127.0.0.1:*/**",
+                "http://localhost:8080/app.git",
+                false,
+            ),
+            (
+                "https://forge.invalid/acme/**",
+                "https://forge.invalid/acme/a/b.git",
+                true,
+            ),
+            (
+                "https://forge.invalid/acme/**",
+                "https://forge.invalid/other/b.git",
+                false,
+            ),
+            (
+                "https://forge.invalid/*",
+                "https://forge.invalid/acme/b.git",
+                false,
+            ),
+            (
+                "https://*.invalid/acme",
+                "https://evil.example/x.invalid/acme",
+                false,
+            ),
+            (
+                "https://forge.invalid/**/app.git",
+                "https://forge.invalid/app.git",
+                true,
+            ),
+            (
+                "https://forge.invalid/**/app.git",
+                "https://forge.invalid/a/b/app.git",
+                true,
+            ),
+            (
+                "https://forge.invalid/a**",
+                "https://forge.invalid/a/b",
+                false,
+            ),
+            (
+                "https://forge.invalid/?cme",
+                "https://forge.invalid/acme",
+                true,
+            ),
+            (
+                "https://forge.invalid/[a]cme",
+                "https://forge.invalid/acme",
+                false,
+            ),
+            ("**", "https://anything.example/x", true),
+            (
+                "https://forge.invalid/acme",
+                "https://forge.invalid/acme.evil.example",
+                false,
+            ),
+        ] {
+            assert_eq!(wildmatch(pattern, url), matched, "{pattern} {url}");
+        }
+    }
+
     #[tokio::test]
     async fn a_push_default_that_cannot_be_read_refuses_the_push() {
         let folder = tempfile::tempdir().unwrap();
@@ -445,6 +661,8 @@ mod tests {
             settings: vec![("branch.main.merge".into(), "refs/heads/elsewhere".into())],
             kept_from: 0,
             forge_helpers: Vec::new(),
+            included: Vec::new(),
+            path: PathBuf::from(crate::git::NO_PATH),
             // git cannot run there: what `push.default` is cannot be read.
             from: PathBuf::from("/nonexistent/flottille-no-repository"),
             refs: Vec::new(),
