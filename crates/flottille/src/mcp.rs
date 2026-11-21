@@ -114,7 +114,7 @@ const REPLACED: &str = "refused: this session has been replaced: a new session o
 
 /// The tools this server serves, in no order of their own: a session lists those of its grant in
 /// the order frozen in the agent.
-const SERVED: [Definition; 33] = [
+const SERVED: [Definition; 34] = [
     Definition {
         name: "fs_read",
         title: "Read a file",
@@ -851,6 +851,25 @@ const SERVED: [Definition; 33] = [
         },
     },
     Definition {
+        name: "routine_result",
+        title: "Give the routine's result",
+        description: "Ends a routine's run with its result: summary, one line (`4 tickets to \
+            review`); nothing: true when there is nothing to say (`Nightly green: nothing to \
+            do`), which does not ring the user; goes_on: true when your work goes on (a branch \
+            opened, not done): your session then stays open. Call it once, as your last action; \
+            without goes_on your session ends with this turn.",
+        read_only: false,
+        idempotent: false,
+        destructive: false,
+        schema: || {
+            json!({"type": "object", "properties": {
+                "summary": {"type": "string"},
+                "nothing": {"type": "boolean"},
+                "goes_on": {"type": "boolean"}
+            }, "required": ["summary"], "additionalProperties": false})
+        },
+    },
+    Definition {
         name: "ask",
         title: "Ask a question",
         description: ASK,
@@ -1289,6 +1308,18 @@ impl Server {
         outdated
     }
 
+    /// What a tool is listed as changed with no change of any grant (the developer mode adds
+    /// actions to `services` while it is on): every running session that can take it is told
+    /// to list its tools again.
+    pub fn relist(&self) {
+        let mut tokens = self.tokens.lock().unwrap();
+        for notice in tokens.notices.values_mut().filter(|notice| notice.takes) {
+            notice.changed += 1;
+        }
+        drop(tokens);
+        self.changes.send_modify(|n| *n += 1);
+    }
+
     /// The agent's running session now works in `place`: its next calls are decided and
     /// performed there. Nothing when no process of the agent runs.
     pub fn move_place(&self, agent: &str, place: Place) {
@@ -1612,7 +1643,7 @@ pub fn grant_of(daemon: &Daemon, agent: &Agent) -> Result<Grant, String> {
 /// changed.
 pub fn with_tools_now(daemon: &Daemon, agent: &Agent, project: &Project) -> Option<Agent> {
     let provider = providers::of(agent).ok()?;
-    let tools = crate::agents::tools_of(
+    let mut tools = crate::agents::tools_of(
         daemon,
         provider,
         project,
@@ -1622,6 +1653,10 @@ pub fn with_tools_now(daemon: &Daemon, agent: &Agent, project: &Project) -> Opti
         crate::extensions::launched(daemon, &agent.id)
             .map(|(extension, kind)| (extension.name, kind)),
     );
+    // A routine's session keeps the tool of its result, which its role alone does not give.
+    if crate::routines::is_run(daemon, &agent.id) {
+        tools.push(format!("{}{}", provider.tool_prefix, crate::routines::TOOL));
+    }
     // The same tools in another order are the same list: a new order would only cost the
     // session its prompt cache.
     let (now, had): (HashSet<&String>, HashSet<&String>) =
@@ -2069,6 +2104,10 @@ impl ServerHandler for Handler {
                 if definition.name == "ask" {
                     tool.description = Some(ask_goes(&self.daemon, &grant.agent).into());
                 }
+                // The actions that file a finding exist only while the developer mode is on.
+                if definition.name == "services" && self.daemon.developer.on() {
+                    crate::findings::offer(&mut tool);
+                }
                 tool
             })
             .collect();
@@ -2413,6 +2452,15 @@ async fn played_in(
         refused
     } else if let Some(why) = branch_refused {
         Outcome::Refused(why)
+    } else if let Some(why) = grant
+        .tools
+        .contains(&tool)
+        .then(|| crate::routines::refuses(daemon, &grant.agent, tool, &args))
+        .flatten()
+    {
+        // A read-only run's write is refused before anything is read or asked for it.
+        verdict = Some("deny");
+        Outcome::Refused(why)
     } else if grant.tools.contains(&tool) {
         // A removal's answer to discard covers the state the user was shown: read before its
         // card, so that anything written since tells.
@@ -2738,6 +2786,10 @@ pub fn judged(
     tool: &str,
     args: &Value,
 ) -> (gate::Verdict, Vec<String>) {
+    // A read-only routine's session writes nothing, in every mode: refused before any class.
+    if let Some(why) = crate::routines::refuses(daemon, &grant.agent, tool, args) {
+        return (gate::Verdict::Deny(why), Vec::new());
+    }
     let first = match tool {
         "run" | "services" => crate::services::started_first(daemon, &grant.place, tool, args),
         _ => Vec::new(),
@@ -2757,6 +2809,10 @@ fn verdict_of(
     }
     if tool == "web" && crate::show::is(args) {
         return crate::show::verdict(&grant.place, args);
+    }
+    // A finding about Flottille itself changes nothing: harmless in every mode.
+    if tool == "services" && crate::findings::is(args) {
+        return gate::Verdict::Allow;
     }
     if tool == "web" {
         return crate::web::classify(daemon, grant, args);
@@ -3439,6 +3495,7 @@ async fn performed_once(
     match tool {
         "web" if crate::show::is(&args) => crate::show::show(daemon, grant, args),
         "web" => crate::web::web(daemon, grant, args).await,
+        "services" if crate::findings::is(&args) => crate::findings::tool(daemon, grant, args),
         "services" => crate::services::tool(daemon, grant, args, first).await,
         // An accepted request's `first` is the words the user read (`approvals`).
         "connections" => crate::extensions::family_call(daemon, args, first, &grant.place).await,
@@ -3459,6 +3516,7 @@ async fn performed_once(
         "tickets" => crate::tickets::tickets(daemon, &grant.agent, &grant.place, args).await,
         "wake" => crate::subscriptions::wake(daemon, &grant.agent, args),
         "session_title" => crate::titles::session_title(daemon, grant, args),
+        crate::routines::TOOL => crate::routines::result(daemon, grant, args),
         tool if crate::extensions::gives(tool) => {
             crate::extensions::perform(daemon, grant, tool, args).await
         }
@@ -3747,12 +3805,15 @@ mod tests {
             assert_eq!(tool["_meta"]["anthropic/alwaysLoad"], true);
             assert_eq!(tool["inputSchema"]["type"], "object");
             let name = format!("mcp__flottille__{}", definition.name);
-            // The old names of ask are answered, never listed to a new agent.
+            // The old names of ask are answered, never listed to a new agent; a routine's
+            // session alone gets its result's tool.
             assert!(
-                matches!(definition.name, "ask_user" | "ask_parent")
-                    || claude::PROVIDER
-                        .tools(true, false, true, true, true)
-                        .contains(&name)
+                matches!(
+                    definition.name,
+                    "ask_user" | "ask_parent" | "routine_result"
+                ) || claude::PROVIDER
+                    .tools(true, false, true, true, true)
+                    .contains(&name)
                     || claude::PROVIDER
                         .tools(false, false, true, true, true)
                         .contains(&name),

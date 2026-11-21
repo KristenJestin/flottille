@@ -12,6 +12,7 @@ use serde_json::{Value, json};
 
 use crate::agent::{Agent, AgentState, Choices, GateMode, TurnUsage, Used};
 use crate::approval::{Decision, Delivery, Forward, Judgement, Kind, Leave, Request, RequestState};
+use crate::finding::{self, Finding};
 use crate::item::{Check, Cursor, Filter, Item, Post};
 use crate::notification::{self, New as NewNotification, Notification};
 use crate::protocol::Event;
@@ -21,6 +22,9 @@ use crate::workspace::{Action, Failure, Step, StepState, Workspace};
 use crate::{Error, Result};
 
 /// The code of one repository that travelled for a launch (`travels`).
+mod routines;
+pub use routines::NewRun;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Travel {
     /// `out` when it went to `machine`, `in` when it came from it.
@@ -990,7 +994,80 @@ const MIGRATIONS: &[&str] = &[
         at      INTEGER NOT NULL
     ) STRICT;
 ",
+    "
+    -- What the agents report about Flottille itself (`docs/developer.md`, \"The findings\"): one
+    -- finding per bug, each time it was met an occurrence. Texts are masked before they are kept.
+    CREATE TABLE findings (
+        id       INTEGER PRIMARY KEY AUTOINCREMENT,
+        title    TEXT NOT NULL,
+        expected TEXT NOT NULL,
+        filed    TEXT
+    ) STRICT;
+    CREATE TABLE finding_occurrences (
+        id       INTEGER PRIMARY KEY AUTOINCREMENT,
+        finding  INTEGER NOT NULL REFERENCES findings (id),
+        at       INTEGER NOT NULL,
+        session  TEXT NOT NULL,
+        called   TEXT NOT NULL,
+        happened TEXT NOT NULL,
+        differs  TEXT
+    ) STRICT;
+    CREATE INDEX finding_occurrences_by_finding ON finding_occurrences (finding, id);
+",
 ];
+
+/// The migrations of the version after dev's (`docs/releases.md`, "The next version"), each by
+/// its name, which the store keeps once it is applied (`named_migrations`): applied at every open
+/// after the numbered ones, never twice, whatever their place. A `next/X.Y` line adds its own
+/// here and never to `MIGRATIONS`: dev's own are merged forward into it numbered, and the number a
+/// next build had taken would be the one of dev's later migration, which a store of that build
+/// would then never run. Never renamed nor edited once released, and never moved to `MIGRATIONS`.
+const NAMED_MIGRATIONS: &[(&str, &str)] = &[(
+    "routines",
+    r#"
+    -- The routines (`docs/design.md`, "Routines"): work the daemon starts by itself, as a new
+    -- root session, at its time. `next_at` is when its next run is due, null while it is paused;
+    -- `delayed` why that is later than its schedule says (a spent quota).
+    CREATE TABLE routines (
+        id           TEXT PRIMARY KEY,
+        name         TEXT NOT NULL UNIQUE,
+        project      TEXT NOT NULL,
+        prompt       TEXT NOT NULL,
+        provider     TEXT,
+        model        TEXT,
+        effort       TEXT,
+        schedule     TEXT NOT NULL,
+        zone         TEXT,
+        mode         TEXT NOT NULL,
+        rings        TEXT NOT NULL,
+        paused       INTEGER NOT NULL DEFAULT 0,
+        missed_hours INTEGER NOT NULL,
+        next_at      INTEGER,
+        delayed      TEXT,
+        created_at   INTEGER NOT NULL,
+        updated_at   INTEGER NOT NULL
+    ) STRICT;
+    -- Each run of a routine: its session (none for a skipped run), kept with the run once the
+    -- session ended, and the mode it started in.
+    CREATE TABLE routine_runs (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        routine    TEXT NOT NULL REFERENCES routines (id) ON DELETE CASCADE,
+        due_at     INTEGER NOT NULL,
+        started_at INTEGER NOT NULL,
+        ended_at   INTEGER,
+        session    TEXT,
+        mode       TEXT NOT NULL,
+        outcome    TEXT NOT NULL,
+        summary    TEXT,
+        why        TEXT
+    ) STRICT;
+    CREATE INDEX routine_runs_by_routine ON routine_runs (routine, id);
+    CREATE INDEX routine_runs_by_session ON routine_runs (session);
+    -- A run's session that may write nothing, set when the run starts and given to the children
+    -- it makes: the gate reads it on the session's own row, whatever becomes of its routine.
+    ALTER TABLE agents ADD COLUMN read_only INTEGER NOT NULL DEFAULT 0;
+"#,
+)];
 
 /// How many of each extension's own migrations were applied (`docs/extensions.md`, "Data"): its
 /// tables, `ext_<name>_…`, are brought up to date as the store's are, and kept when it is turned
@@ -1579,6 +1656,13 @@ impl Store {
                 agent.detached_from,
                 agent.titled_by,
             ],
+        )?;
+        // A child of a session that may write nothing may write nothing either, whatever becomes
+        // of its parent (a detach): the flag is its own.
+        transaction.execute(
+            "UPDATE agents SET read_only = 1 WHERE id = ?1 \
+             AND (SELECT read_only FROM agents WHERE id = ?2) = 1",
+            params![agent.id, agent.parent],
         )?;
         let event = append_agent_event(&transaction, &agent.id, event.0, event.1)?;
         transaction.commit()?;
@@ -4509,6 +4593,104 @@ impl Store {
         Ok(())
     }
 
+    /// Keeps a new finding with its first occurrence: its id.
+    pub fn add_finding(
+        &mut self,
+        title: &str,
+        expected: &str,
+        first: &finding::NewOccurrence,
+    ) -> Result<u64> {
+        let transaction = self.connection.transaction()?;
+        transaction.execute(
+            "INSERT INTO findings (title, expected) VALUES (?1, ?2)",
+            params![title, expected],
+        )?;
+        let id = transaction.last_insert_rowid() as u64;
+        add_occurrence_row(&transaction, id, first)?;
+        transaction.commit()?;
+        Ok(id)
+    }
+
+    /// Adds an occurrence to a finding: `None` when there is no such finding.
+    pub fn add_occurrence(
+        &mut self,
+        finding: u64,
+        occurrence: &finding::NewOccurrence,
+    ) -> Result<Option<u64>> {
+        let transaction = self.connection.transaction()?;
+        let known = transaction
+            .query_row(
+                "SELECT 1 FROM findings WHERE id = ?1",
+                [finding],
+                |_| Ok(()),
+            )
+            .optional()?;
+        if known.is_none() {
+            return Ok(None);
+        }
+        let id = add_occurrence_row(&transaction, finding, occurrence)?;
+        transaction.commit()?;
+        Ok(Some(id))
+    }
+
+    /// Every finding, the oldest first, each with its occurrences in the order they came.
+    pub fn findings(&self) -> Result<Vec<Finding>> {
+        let mut found = self
+            .connection
+            .prepare("SELECT id, title, expected, filed FROM findings ORDER BY id")?;
+        let mut all: Vec<Finding> = found
+            .query_map([], |row| {
+                Ok(Finding {
+                    id: row.get(0)?,
+                    title: row.get(1)?,
+                    expected: row.get(2)?,
+                    count: 0,
+                    first_at: 0,
+                    last_at: 0,
+                    filed: row.get(3)?,
+                    occurrences: Vec::new(),
+                })
+            })?
+            .collect::<std::result::Result<_, _>>()?;
+        let mut rows = self.connection.prepare(
+            "SELECT finding, id, at, session, called, happened, differs \
+             FROM finding_occurrences ORDER BY id",
+        )?;
+        let occurrences = rows.query_map([], |row| {
+            Ok((
+                row.get::<_, u64>(0)?,
+                finding::Occurrence {
+                    id: row.get(1)?,
+                    at: row.get(2)?,
+                    session: row.get(3)?,
+                    called: row.get(4)?,
+                    happened: row.get(5)?,
+                    differs: row.get(6)?,
+                },
+            ))
+        })?;
+        for row in occurrences {
+            let (of, occurrence) = row?;
+            if let Some(finding) = all.iter_mut().find(|finding| finding.id == of) {
+                finding.occurrences.push(occurrence);
+            }
+        }
+        for finding in &mut all {
+            finding.count = finding.occurrences.len();
+            finding.first_at = finding.occurrences.first().map_or(0, |o| o.at);
+            finding.last_at = finding.occurrences.last().map_or(0, |o| o.at);
+        }
+        Ok(all)
+    }
+
+    /// Marks a finding filed, with the address of its issue: whether there was such a finding.
+    pub fn file_finding(&self, id: u64, issue: &str) -> Result<bool> {
+        Ok(self.connection.execute(
+            "UPDATE findings SET filed = ?2 WHERE id = ?1",
+            params![id, issue],
+        )? > 0)
+    }
+
     /// Whether `prune_notifications` would forget any: read, so that a keeper with nothing to do
     /// writes nothing.
     pub fn prunable_notifications(&self, now: u64) -> Result<bool> {
@@ -5179,7 +5361,35 @@ fn path_text(path: &Path) -> Result<&str> {
     })
 }
 
+fn add_occurrence_row(
+    connection: &Connection,
+    finding: u64,
+    occurrence: &finding::NewOccurrence,
+) -> Result<u64> {
+    connection.execute(
+        "INSERT INTO finding_occurrences (finding, at, session, called, happened, differs) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            finding,
+            occurrence.at,
+            occurrence.session,
+            occurrence.called,
+            occurrence.happened,
+            occurrence.differs
+        ],
+    )?;
+    Ok(connection.last_insert_rowid() as u64)
+}
+
 fn migrate(connection: &mut Connection) -> Result<()> {
+    migrate_with(connection, MIGRATIONS, NAMED_MIGRATIONS)
+}
+
+fn migrate_with(
+    connection: &mut Connection,
+    migrations: &[&str],
+    named: &[(&str, &str)],
+) -> Result<()> {
     let transaction =
         connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let mut applied: usize =
@@ -5198,16 +5408,33 @@ fn migrate(connection: &mut Connection) -> Result<()> {
     if alpha {
         applied -= 1;
     }
-    if applied > MIGRATIONS.len() {
+    if applied > migrations.len() {
         return Err(Error::Refused(format!(
             "the store is at schema {applied}, made by a newer Flottille than this one (schema {})",
-            MIGRATIONS.len()
+            migrations.len()
         )));
     }
-    for migration in &MIGRATIONS[applied..] {
+    for migration in &migrations[applied..] {
         transaction.execute_batch(migration)?;
     }
     transaction.execute_batch(EXTENSION_MIGRATIONS)?;
+    transaction.execute_batch(
+        "CREATE TABLE IF NOT EXISTS named_migrations (name TEXT PRIMARY KEY) STRICT;",
+    )?;
+    for (name, migration) in named {
+        let done = transaction
+            .query_row(
+                "SELECT 1 FROM named_migrations WHERE name = ?1",
+                [name],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if !done {
+            transaction.execute_batch(migration)?;
+            transaction.execute("INSERT INTO named_migrations (name) VALUES (?1)", [name])?;
+        }
+    }
     if alpha {
         transaction.execute_batch(
             "INSERT INTO extension_migrations (name, applied) \
@@ -5215,7 +5442,7 @@ fn migrate(connection: &mut Connection) -> Result<()> {
              DROP TABLE extension_schemas;",
         )?;
     }
-    transaction.pragma_update(None, "user_version", MIGRATIONS.len())?;
+    transaction.pragma_update(None, "user_version", migrations.len())?;
     transaction.commit()?;
     Ok(())
 }
@@ -5404,6 +5631,45 @@ mod tests {
         assert_eq!(store.schema_version().unwrap(), MIGRATIONS.len());
         assert_eq!(store.last_seq().unwrap(), 1);
         assert!(store.workspaces(None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_next_versions_migration_holds_when_dev_adds_one_after_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut connection = Connection::open(dir.path().join("flottille.db")).unwrap();
+        // A next build ran the routines' migration and kept a routine.
+        migrate_with(&mut connection, MIGRATIONS, NAMED_MIGRATIONS).unwrap();
+        connection
+            .execute(
+                "INSERT INTO routines (id, name, project, prompt, schedule, mode, rings, \
+                 missed_hours, created_at, updated_at) \
+                 VALUES ('r1', 'Nightly', 'app', 'Read', 'every day 07:00', 'read_only', \
+                 'something', 12, 1, 1)",
+                [],
+            )
+            .unwrap();
+
+        // Dev's later migration comes merged forward, numbered after every one of its own.
+        let later: Vec<&str> = MIGRATIONS
+            .iter()
+            .copied()
+            .chain(["CREATE TABLE later_of_dev (id INTEGER PRIMARY KEY) STRICT;"])
+            .collect();
+        migrate_with(&mut connection, &later, NAMED_MIGRATIONS).unwrap();
+
+        let version: usize = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, later.len());
+        let count = |table: &str| -> i64 {
+            connection
+                .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap()
+        };
+        assert_eq!(count("later_of_dev"), 0, "dev's migration ran");
+        assert_eq!(count("routines"), 1, "the routines' was not run again");
     }
 
     #[test]
@@ -6108,6 +6374,42 @@ mod tests {
         assert_eq!(store.agents().unwrap(), std::slice::from_ref(&agent));
         assert_eq!(store.agent("other").unwrap(), None);
         assert_eq!(store.agent_events(&agent.id, 0, 10).unwrap(), [event]);
+    }
+
+    #[test]
+    fn a_child_of_a_read_only_session_is_read_only_whatever_its_parent_becomes() {
+        let mut store = Store::open_in_memory().unwrap();
+        let root = an_agent();
+        store
+            .create_agent(&root, ("agent.created", json!({})))
+            .unwrap();
+        assert!(!store.read_only(&root.id).unwrap());
+        store.set_read_only(&root.id).unwrap();
+        let child = Agent {
+            id: "child0000000".into(),
+            parent: Some(root.id.clone()),
+            ..an_agent()
+        };
+        store
+            .create_agent(&child, ("agent.created", json!({})))
+            .unwrap();
+        let other = Agent {
+            id: "other0000000".into(),
+            ..an_agent()
+        };
+        store
+            .create_agent(&other, ("agent.created", json!({})))
+            .unwrap();
+
+        store
+            .connection
+            .execute("UPDATE agents SET parent = NULL WHERE id = ?1", [&child.id])
+            .unwrap();
+
+        assert!(store.read_only(&root.id).unwrap());
+        assert!(store.read_only(&child.id).unwrap(), "its own flag");
+        assert!(!store.read_only(&other.id).unwrap());
+        assert!(!store.read_only("gone").unwrap());
     }
 
     #[test]

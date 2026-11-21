@@ -1014,6 +1014,35 @@ It is the agent's own bookkeeping: the gate allows it in every mode, never held.
 pull request's subscription: its description says `For a time the user asked: never poll CI, forge
 run follows its run and forge subscribe a pull request's checks.`
 
+## Findings
+
+While the developer mode is on (`docs/developer.md`, "The findings"), the tool of the machine's
+services, `services`, lists two more actions, for every agent, a root and a child alike:
+
+| Action | |
+|---|---|
+| `report {title, expected, called, happened}` | Files a finding about Flottille itself: what the agent called, what it expected, what happened. Answers `Filed as finding #3.` |
+| `report {finding, called, happened, differs?}` | Adds an occurrence to an open finding (`finding` its number): when it came, the agent's session, what it called, what happened this time, and what differs from the others. Refused for a finding that is filed (the bug is a new finding) or that holds 200 occurrences, and when `title` or `expected` come with it. |
+| `find_reports {query}` | The open findings whose title or text hold every word of `query`, at most 10, each with its number, expected, count. The agent judges whether its bug is there; Flottille matches nothing else. |
+
+**Where they live.** `services` is the tool of the machine, which Flottille itself runs, that every
+agent has in every project and whose reads the gate already lets through; a family of its own would
+be one more tool in every prompt and every frozen list, for the two actions of a mode meant for the
+few. The actions are added to the tool's schema and description when it is listed while the mode is
+on, so a client that listed it before the mode was switched calls it again after its next listing
+(`list_changed` is not sent for a mode); a call while the mode is off is refused naming it. The
+gate lets both through in every mode: they change nothing of the project or the machine.
+
+**The guide.** The description tells when to report: what Flottille did wrong (a tool that answered
+wrong, a refusal that makes no sense, a step that hangs), never the agent's own mistake, the user's
+request or a bug of the project's code; to search first and add an occurrence when the bug is
+there; and never to put a secret in a finding. (It rides on the tool, not on `guide.md`, which is
+the same short text for every agent whether the mode is on or not.)
+
+Every text is masked as any result of a tool is (`[masked]` for a secret of the daemon or of the
+agent's place) before it is stored, at most 200 characters for a title and 2,000 for any other
+text.
+
 ## The vault
 
 **`vault {action: "list"}`** lists the entries of the user's vault the agent's project sees
@@ -1647,6 +1676,7 @@ Two of them take an `action`, as the tools of a family do: `agent_status` (`stat
 | `agent_status {agent_id?, action? status \| conversation, detail? short \| full, after?}` | `action status` (the default): one line per child (or for the one named): what it does (in a turn, `running \`<line>\` for 12 min`, `waiting for approval #3`, `waiting on the provider`, idle, reported, ended or failed with why), the time since its last sign of activity, its context use. For all the children it stops there (`detail short`) and says how to get more; for the one named, or with `detail full`, each also has its last three messages. `action conversation` (with `agent_id`; `after` pages): a page of the child's conversation, oldest first, one line per event that says something (`#<n> sent: …`, `said: …` for a whole reply, its streamed pieces joined and masked, two messages apart, `tool call: …`, a tool served and its outcome, a turn's end, a replacement, a report), each line of 2,000 characters at most (a longer reply goes on, whole, on the next lines), the page under 30,000; it ends with the `after` to pass for the next page. |
 | `agent_stop {agent_id}` | Stops the child and its own children, deepest first; what was queued for them is superseded; their runs are stopped. Their workspaces stay. `agent_id` may also name a session of the caller's project, by its id or its title: one it started as `led` is its own to end, judged as any call in the tree's mode; any other (one it handed, or one it did not start) is held for the user every time, in every mode, Full included ("Sessions that talk to each other", "Ending another session"). |
 | `report {text}` | The caller is done. At most 10,000 characters, so that it rides whole on its parent's results; a longer one is refused, asking for fewer words and a file that holds the details. A child's report goes to its parent at once (`child-report`, with its workspace, its branch and the last commit of each repository), and the child ends when its turn does (or two minutes later, if its turn goes on). A root's report is shown to the user (`agent.reported`) and the root stays. |
+| `routine_result {summary, nothing?, goes_on?}` (a routine's session) | The result of a routine's run (`docs/design.md` §5.10), given once, as its last action: `summary` one line of at most 300 characters, masked; `nothing: true` when there is nothing to say (kept in the routine's history, never rung); `goes_on: true` when its work goes on (a branch opened): the session then stays open as any session, refused in a read-only routine. Without `goes_on` the session ends with that turn. Only a session a routine started has it: it is added to that session's tools when it is made; any other caller is refused. |
 | `ask {question}` or `ask {questions: [{question, options?, multiple?}]}` | One question, or up to 4 at once (more is refused, asking for the rest once these are answered); `question` and `questions` are exclusive. A question's `options` are 2 to 4 short choices, each `{label, description?}` (a label of one line of 60 characters at most, distinct, a description of one line); `multiple` lets the user pick several (refused without options). Every question can also be answered in words. Its description says, in its few sentences, one question per point to decide, with options when the answers are known, and holds a call of each form. Answered later as a message; the daemon decides where it goes, never the agent, and the tool's description says it for the caller in one sentence chosen by its kind: a **child** asks its parent (`child-question`, answered with `agent_send`; until then the child shows as waiting on its parent); a **led** session asks its pilot (the pilot is woken at the turn's end, "Following a session", and answers with `session_send`; until then the session shows as waiting on its pilot, and the user sees the question in the session too); **any other root** asks the user (`agent.asked`, the inbox). A parent and a pilot read the ask as one text, each question numbered with its options under it, and answer in words; the user answers each question apart, on the ask's card in the window or with `flottille agent answer` (`agent.answer`), and the agent gets one message that quotes each question with its answer under it ("Answering an ask", below). What an agent needs goes here, never in a report or a last message; see "Where a question goes", below. |
 | `ask_user {question}`, `ask_parent {question}` | The two names `ask` replaced, kept for one release: no agent is given them, and a call of either is answered, routed as `ask` is, whoever makes it. |
 | `approval_answer {request_id, decision, why, machine?}` | Answers a request held for the caller: `deny` (the agent that asked is told, with the why) or `forward` (to the caller's parent with its why, or to the user from a root). `machine` names the machine of a child of the caller's on another machine, as its `child-asks` says it: answered there, and forwarded, it goes to the user of that machine (`docs/remote.md`, "Where a question goes when the parent is off"). There is no way to allow: `allow` is refused as a decision the tool does not have, and a request the caller does not hold, or no longer holds, is refused (`refused: request #n is not held by this agent: …`). |
@@ -2343,6 +2373,20 @@ says who answers a call to judge (`docs/design.md` §7.1).
 
 1. **Refused**, with a sentence saying why and what to do instead (under 2,000 characters): what
    cannot be made as it is, in every mode.
+   - every call that writes, made by the session of a read-only routine (`docs/design.md`
+     §5.10), checked before anything else: it reads only `fs_read`, `fs_list`, `search`,
+     `skill_read`, `agent_status`, `session_read`, `session_title`, `wake`, `report`, `ask`,
+     `routine_result`, `run_status` `output`, `forge` `list`, `show`, `people`,
+     `pipelines`, `runs`, `run_view`, `run_logs` (not `checks`, which reruns the failed runs),
+     `tickets` `list`, `search`, `show`, `people`,
+     `types`, `fields`, `link_types`, `sprints`, `milestones`, `progress`, `time_spent`,
+     `worklogs`, the `list` and `show` of `tasks`, `skills`, `commands`, `workspace`,
+     `services` and `connections`, `setup` and `vault` `list`, `project` `settings` and `rules`,
+     and a `web` `GET` with no body, no header, no vault entry and no auth that shows nothing.
+     Any other tool or action, one of an extension or a connection included, is a write
+     (`refused: this session is the run of a read-only routine: …`), in Ask, Auto and Full
+     alike, refused before anything is read for it. The session is read only by a mark on its
+     own row, given to its children, which removing the routine does not lift;
    - shell syntax in a line (`run` splits a line without a shell, and refuses what it
      cannot split), and a call whose arguments do not fit the tool;
    - a login printed: `gh auth token`, `glab auth token`, `auth status` with `--show-token` (`-t`);

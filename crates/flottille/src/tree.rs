@@ -2755,6 +2755,7 @@ pub fn after_turn(daemon: &Arc<Daemon>, id: &str, stop_reason: &str) {
     if agent.parent.is_none() && !crate::across::remote_child(daemon, &agent) {
         crate::subscriptions::turn_ended(daemon, &agent);
         remind_integrated(daemon, &agent);
+        crate::routines::turn_ended(daemon, &agent, stop_reason);
         return;
     }
     if agent.reported_at.is_some() {

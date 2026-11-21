@@ -139,6 +139,16 @@ The user switched the developer mode (`developer.set`, `docs/developer.md`).
 |---|---|
 | `log` | Whether the log is written now. |
 
+### `developer.reported`
+
+An agent filed a finding about Flottille itself or added an occurrence to one, or a finding was
+marked filed (`docs/developer.md`, "The findings").
+
+| Field | |
+|---|---|
+| `finding` | The finding's number. |
+| `new` | Whether the report made the finding (`true`), added an occurrence, or the finding was marked filed (`false`). |
+
 ### `update.changed`
 
 What the daemon knows of an update of Flottille changed: a check began or ended, a download
@@ -385,6 +395,32 @@ reads on after the last number it saw.
 | `ids` | The numbers of the notifications added, resolved or marked read, sorted; empty when only the old ones went. |
 | `pruned` | `true` when notifications older than 30 days, or beyond the newest 1,000, were forgotten. |
 | `how` | `read` when a client marked them read (`notifications.read`), `kept` when the daemon added or resolved them from the events, or forgot the old. |
+
+### `routine.changed`
+
+A routine was added, edited, paused, resumed, delayed or removed, or a run of it started
+(`docs/protocol.md`, "The routine methods").
+
+| Field | |
+|---|---|
+| `routine` | The routine as `routine.show` gives it; `{"id", "name"}` alone when it was removed. |
+| `run` | The run that started, with its session; absent for any other change. |
+| `removed` | `true` when it was removed; absent otherwise. |
+| `project` | The routine's project. |
+
+### `routine.ran`
+
+A run of a routine has its outcome: it ended with its result (`something`, `nothing`, or
+`goes_on`, its session going on), it was skipped (its last run still ran, or it was missed too
+long ago), or it failed (its session ended without its result, or could not start). The
+notification centre makes a row of a run with something to say whose routine rings (`rings`
+`something`), and of a run that could not start; nothing else rings.
+
+| Field | |
+|---|---|
+| `routine` | The routine, as `routine.show` gives it. |
+| `run` | The run, its `outcome`, `summary`, `why` and `session`. |
+| `project` | The routine's project. |
 
 ### `remote.member_added`, `remote.member_removed`, `remote.member_renamed`, `remote.member_role`
 

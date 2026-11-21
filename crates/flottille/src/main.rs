@@ -33,6 +33,7 @@ mod display;
 mod drafts;
 mod extensions;
 mod files;
+mod findings;
 mod follow;
 mod forge;
 mod gate;
@@ -78,6 +79,8 @@ mod remote_command;
 mod remote_config;
 mod results;
 mod roles;
+mod routine_command;
+mod routines;
 mod rules;
 mod run_methods;
 mod runs;
@@ -212,6 +215,11 @@ enum Command {
     Tunnel {
         #[command(subcommand)]
         action: TunnelAction,
+    },
+    /// Routines: sessions the daemon starts by itself on a schedule, their runs and results
+    Routine {
+        #[command(subcommand)]
+        action: routine_command::RoutineAction,
     },
     /// The services of the machine, shared by every project: listed, written, started, stopped
     Service {
@@ -376,6 +384,28 @@ enum DeveloperAction {
     On,
     /// Stop logging
     Off,
+    /// The findings agents filed about Flottille itself, with their occurrences
+    Reports {
+        /// The findings as JSON: the export the lead agent reads
+        #[arg(long)]
+        json: bool,
+        /// Write them to a file of the state folder, and say where
+        #[arg(long)]
+        export: bool,
+        #[command(subcommand)]
+        action: Option<ReportsAction>,
+    },
+}
+
+#[derive(Subcommand)]
+enum ReportsAction {
+    /// Mark a finding filed, with the address of its issue
+    Filed {
+        /// The finding's number
+        id: u64,
+        /// The issue's address
+        issue: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -573,6 +603,38 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
                     client.request("developer.set", json!({"log": false}))?,
                     false,
                 ),
+                DeveloperAction::Reports {
+                    json,
+                    export,
+                    action,
+                } => {
+                    match (action, export) {
+                        (Some(ReportsAction::Filed { id, issue }), _) => {
+                            client.request(
+                                "developer.report_filed",
+                                json!({"id": id, "issue": issue}),
+                            )?;
+                            println!("Finding #{id} is marked filed: {issue}");
+                        }
+                        (None, true) => {
+                            let said = client.request("developer.reports_export", json!({}))?;
+                            println!(
+                                "{} finding(s) written to {}",
+                                said["count"],
+                                said["file"].as_str().unwrap_or_default()
+                            );
+                        }
+                        (None, false) => {
+                            let said = client.request("developer.reports", json!({}))?;
+                            if json {
+                                println!("{said}");
+                            } else {
+                                print!("{}", findings::listing(&said));
+                            }
+                        }
+                    }
+                    return Ok(ExitCode::SUCCESS);
+                }
             };
             if json {
                 println!("{answer}");
@@ -587,6 +649,7 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         Command::Runs { action } => runs_command::run(&paths, action)?,
         Command::Tunnel { action } => tunnel_command::run(&paths, action, machine)?,
         Command::Service { action } => service_command::run(&paths, action)?,
+        Command::Routine { action } => routine_command::run(&paths, action)?,
         Command::Approvals { json } => approval_command::approvals(&paths, json)?,
         Command::Approve { number, discard } => approval_command::approve(&paths, number, discard)?,
         Command::Deny { number } => approval_command::deny(&paths, number)?,

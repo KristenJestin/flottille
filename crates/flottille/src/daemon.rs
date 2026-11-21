@@ -305,6 +305,10 @@ pub struct Daemon {
     pub developer: developer::Log,
     /// When the inactive sessions were last looked for (`inactive::check`); 0 before the first.
     pub inactive_checked: AtomicU64,
+    /// When the next run of a routine is due, as the store last said (`routines::check`): the
+    /// one deadline of every routine, read by the sweep; 0 to read the store again, `u64::MAX`
+    /// when none is due.
+    pub routine_due: AtomicU64,
     /// Where the vault's secrets are (`docs/vault.md`).
     pub vault: crate::vault::Keyring,
     /// What the extensions keep while the daemon runs.
@@ -421,6 +425,7 @@ impl Daemon {
             items: items::Items::default(),
             developer: developer::Log::open(paths),
             inactive_checked: AtomicU64::new(0),
+            routine_due: AtomicU64::new(0),
             vault: crate::vault::Keyring::open(paths),
             extensions: extensions::Live::default(),
             watch: Arc::default(),
@@ -742,6 +747,7 @@ async fn serve(
     crate::models::check(&daemon);
     crate::inactive::check(&daemon);
     crate::quota::check(&daemon);
+    crate::routines::check(&daemon);
 
     let mut connections = JoinSet::new();
     let reason = loop {
@@ -1159,6 +1165,13 @@ fn handle(daemon: &Arc<Daemon>, request: Request) -> (Message, Option<Subscripti
         ),
         method if method.starts_with("window.") => (
             match crate::drafts::call(daemon, method, request.params) {
+                Ok(result) => Message::result(id, result),
+                Err(failure) => failure.answer(Some(id)),
+            },
+            None,
+        ),
+        method if method.starts_with("routine.") => (
+            match crate::routines::call(daemon, method, request.params) {
                 Ok(result) => Message::result(id, result),
                 Err(failure) => failure.answer(Some(id)),
             },

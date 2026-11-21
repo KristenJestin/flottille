@@ -21,6 +21,8 @@ mod daemon_at_rest;
 mod desktop_entry;
 #[path = "../developer.rs"]
 mod developer;
+#[path = "../developer_reports.rs"]
+mod developer_reports;
 #[path = "../fake_records.rs"]
 mod fake_records;
 #[path = "../families.rs"]
