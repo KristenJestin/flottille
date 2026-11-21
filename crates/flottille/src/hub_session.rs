@@ -23,7 +23,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use flottille_link::{
-    Action, Ask, Asker, Change, ControlError, Device, Facts, HubUrl, ListError, MachineKey,
+    Action, Ask, Asker, Change, ControlError, Device, Facts, Hello, HubUrl, ListError, MachineKey,
     MemberList, Members, PairCode, Paired, Proposed, PublicKey, Pushed, Role, Session, Tls,
 };
 use serde_json::{Value, json};
