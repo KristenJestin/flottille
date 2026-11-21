@@ -480,6 +480,16 @@ async fn account(
 pub(super) async fn own_account(
     project: &Project,
     jira: &Site<'_>,
+    entry: (&str, u64),
+) -> Result<(String, String), Outcome> {
+    let (account, name) = own_account_named(project, jira, entry).await?;
+    Ok((account, format!("your account ({name})")))
+}
+
+/// The account the token belongs to and its display name, asked of the site once and kept.
+pub(super) async fn own_account_named(
+    project: &Project,
+    jira: &Site<'_>,
     (entry, stamp): (&str, u64),
 ) -> Result<(String, String), Outcome> {
     let failed = |why: String| Outcome::Failed(why);
@@ -494,8 +504,8 @@ pub(super) async fn own_account(
         .unwrap_or_else(PoisonError::into_inner)
         .get(&key)
         .cloned();
-    if let Some((account, name)) = kept {
-        return Ok((account, format!("your account ({name})")));
+    if let Some(kept) = kept {
+        return Ok(kept);
     }
     let me = jira.get("myself", &[]).await.map_err(failed)?;
     let account = me["accountId"].as_str().unwrap_or_default().to_owned();
@@ -510,7 +520,7 @@ pub(super) async fn own_account(
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .insert(key, (account.clone(), name.clone()));
-    Ok((account, format!("your account ({name})")))
+    Ok((account, name))
 }
 
 async fn read(

@@ -36,6 +36,7 @@ use crate::reads::{self, Reads};
 mod events;
 mod fields;
 mod links;
+mod me;
 mod milestones;
 mod people;
 pub mod progress;
@@ -53,7 +54,6 @@ pub use replies::says as reply_says;
 pub use worklog::change_says as worklog_change_says;
 pub use worklog::says as worklog_says;
 pub use worklog::unset as worklog_unset;
-pub(crate) use worklogs::is_account;
 
 /// A call of `acli` is cut after this.
 const ACLI_TIME: Duration = Duration::from_secs(30);
@@ -141,6 +141,9 @@ pub struct Comment {
     /// Jira: the id of the comment it answers (`parentId`), when it is a reply in a thread; read
     /// by `show` with `detail full` from Jira's REST API, which `acli`'s view is not known to give.
     pub parent: Option<String>,
+    /// Jira: the people it mentions, `(account id, "@Display Name")`, in the order of the text;
+    /// its text names them, and the ids stay here for a comparison.
+    pub mentions: Vec<(String, String)>,
 }
 
 impl Comment {
@@ -168,10 +171,25 @@ impl Comment {
             (None, _) => String::new(),
         };
         format!(
-            "{indent}- {}{id}{at}: {}\n",
+            "{indent}- {}{id}{at}: {}\n{}",
             self.by(),
-            self.body.replace('\n', &format!("\n{indent}    "))
+            self.body.replace('\n', &format!("\n{indent}    ")),
+            self.mentions_line(indent)
         )
+    }
+
+    /// The people the text names, with their account ids: what a prompt compares ("a comment
+    /// that mentions me") without reading an id in the text.
+    fn mentions_line(&self, indent: &str) -> String {
+        if self.mentions.is_empty() {
+            return String::new();
+        }
+        let said: Vec<String> = self
+            .mentions
+            .iter()
+            .map(|(account, name)| format!("{name} (account {account})"))
+            .collect();
+        format!("{indent}    mentions {}\n", said.join(", "))
     }
 
     /// Its author, and that an agent posted it when one did.
@@ -196,6 +214,7 @@ fn comment_of(author: String, at: Option<&str>, id: Option<String>, text: &str) 
         account: None,
         restricted: None,
         parent: None,
+        mentions: Vec::new(),
     }
 }
 
@@ -210,7 +229,11 @@ impl Ticket {
             "url": self.url,
             "description": self.description,
             "comments": self.comments.iter()
-                .map(|c| json!({"author": c.author, "at": c.at, "body": c.body}))
+                .map(|c| json!({"author": c.author, "account": c.account, "at": c.at,
+                    "body": c.body,
+                    "mentions": c.mentions.iter()
+                        .map(|(account, name)| json!({"account": account, "name": name}))
+                        .collect::<Vec<_>>()}))
                 .collect::<Vec<_>>(),
             "older_comments": self.older,
             "assignee": self.assignee,
@@ -222,6 +245,34 @@ impl Ticket {
                     "author": a.author, "at": a.at}))
                 .collect::<Vec<_>>(),
         })
+    }
+
+    /// What a search with `detail: full` says of a ticket under its line: its status with its
+    /// category, its comments (author, date, text, who they mention) and its links.
+    fn review_text(&self) -> String {
+        let mut text = match self.category.is_empty() {
+            true => format!("  Status: {}\n", self.state),
+            false => format!("  Status: {} (category: {})\n", self.state, self.category),
+        };
+        if !self.comments.is_empty() {
+            text.push_str(&format!(
+                "  Comments ({}):\n",
+                self.comments.len() + self.older
+            ));
+            if self.older > 0 {
+                text.push_str(&format!("    ({} older ones are not shown)\n", self.older));
+            }
+            for comment in &self.comments {
+                text.push_str(&comment.line("  ", None));
+            }
+        }
+        if !self.links.is_empty() {
+            text.push_str(&format!("  Links ({}):\n", self.links.len()));
+            for link in &self.links {
+                text.push_str(&format!("  - {link}\n"));
+            }
+        }
+        text
     }
 
     /// What `tickets show` answers: the comments themselves only when `full`, otherwise their
@@ -703,6 +754,10 @@ fn work_item_comments(fields: &Value) -> Vec<Comment> {
             );
             read.account = comment["author"]["accountId"].as_str().map(str::to_owned);
             read.restricted = replies::restriction(comment);
+            read.mentions = crate::adf::mentions(&comment["body"])
+                .into_iter()
+                .map(|(account, name)| (masked(&account), masked(&name)))
+                .collect();
             read
         })
         .collect()
@@ -775,7 +830,7 @@ pub(crate) fn comments_said(comments: &[Comment]) -> Vec<crate::items::Said> {
 /// Markdown it was written as (`adf::to_markdown`). Nothing is rendered as HTML.
 pub fn document_text(field: &Value) -> String {
     match field {
-        Value::String(text) => text.trim().to_owned(),
+        Value::String(text) => crate::adf::without_markup(text.trim()),
         Value::Object(_) => crate::adf::to_markdown(field),
         _ => String::new(),
     }
@@ -947,6 +1002,8 @@ struct TicketsCall {
     #[serde(default, deserialize_with = "present")]
     assignee: Option<Option<String>>,
     detail: Option<String>,
+    /// `search` on Jira: at most that many tickets; every one the JQL finds when left out.
+    limit: Option<usize>,
     /// show: read the ticket again even if it was read in the last 30 s.
     #[serde(default)]
     fresh: bool,
@@ -1513,6 +1570,7 @@ pub async fn tickets(daemon: &Arc<Daemon>, agent: &str, place: &Place, args: Val
     }
     let outcome = match asked.action.as_str() {
         "people" => people::people(daemon, &project, &asked).await,
+        "me" => me::me(daemon, &project).await,
         "list" | "search" => listed(daemon, &project, &asked).await,
         "show" => match show(daemon, place, &project, &asked).await {
             Outcome::Done(text) => Outcome::Done(text + &events::subscriptions_text(daemon, agent)),
@@ -1592,6 +1650,8 @@ struct Listed {
     /// The title of its milestone, on GitHub.
     milestone: Option<String>,
     url: Option<String>,
+    /// A Jira search with `detail: full`: the ticket as the search read it, its comments and links.
+    detail: Option<Ticket>,
 }
 
 /// `tickets list` and `tickets search`: every ticket of a state, by label, assignee and, for a
@@ -1635,9 +1695,34 @@ async fn listed(daemon: &Daemon, project: &Project, asked: &TicketsCall) -> Outc
             "refused: tickets takes an updated_within of 1 to 365 days, not {days}"
         ));
     }
+    // Not `full_detail`: a list has always ignored a detail it does not know.
+    let full = asked.detail.as_deref() == Some("full");
+    if !search && (full || asked.limit.is_some()) {
+        return Outcome::Refused(
+            "refused: detail full and limit are search's, on Jira: a list is one line a ticket; \
+             a search brings each ticket's comments and links, show reads one ticket"
+                .into(),
+        );
+    }
+    if let Some(limit) = asked.limit
+        && !(1..=JIRA_ALL).contains(&limit)
+    {
+        return Outcome::Refused(format!(
+            "refused: tickets takes a limit of 1 to {JIRA_ALL}, not {limit}"
+        ));
+    }
     let Some(tracker) = &project.tracker else {
         return Outcome::Refused(format!("refused: {NO_TRACKER}"));
     };
+    if let ProjectTracker::Github { .. } = tracker
+        && (full || asked.limit.is_some())
+    {
+        return Outcome::Refused(
+            "refused: detail full and limit of a search are Jira's: on GitHub, search lists the \
+             issues and show reads one with its comments"
+                .into(),
+        );
+    }
     let jql_asked = match (tracker, asked_jql) {
         (_, None) => None,
         (ProjectTracker::Github { .. }, Some(_)) => {
@@ -1717,6 +1802,8 @@ async fn listed(daemon: &Daemon, project: &Project, asked: &TicketsCall) -> Outc
         jql: jql_asked,
         milestone: milestone.as_deref(),
         version_in: version_in.as_deref(),
+        full,
+        limit: asked.limit,
     };
     // What the items' rounds keep, once one read the tracker; the tracker itself before. A search
     // looks in the descriptions and comments, and a time in the tracker's dates, which the rounds
@@ -1767,6 +1854,9 @@ async fn listed(daemon: &Daemon, project: &Project, asked: &TicketsCall) -> Outc
     if let Some(jql) = asked_jql {
         header.push_str(&format!(" found by the JQL {jql:?}"));
     }
+    if filters.full {
+        header.push_str(", with their comments and links");
+    }
     let mut text = format!("{header}: {}", tickets.len());
     if let Some(cursor) = &cursor {
         text.push_str(&format!(
@@ -1801,8 +1891,15 @@ async fn listed(daemon: &Daemon, project: &Project, asked: &TicketsCall) -> Outc
         }
         text.push_str(&line);
         text.push('\n');
+        if let Some(read) = &ticket.detail {
+            text.push_str(&read.review_text());
+        }
     }
-    if tickets.len() >= LISTED {
+    if filters.full && tickets.len() >= JIRA_ALL {
+        text.push_str(&format!(
+            "(the {JIRA_ALL} most recent: narrow the JQL, or give a limit)\n"
+        ));
+    } else if !filters.full && filters.limit.is_none() && tickets.len() >= LISTED {
         text.push_str(&format!(
             "(the newest {LISTED}: narrow with label, assignee or a search)\n"
         ));
@@ -1883,6 +1980,7 @@ fn stored_tickets(daemon: &Daemon, project: &Project, filters: &Filters<'_>) -> 
             assignees: item.assignees,
             milestone: item.details["milestone"].as_str().map(str::to_owned),
             url: item.url,
+            detail: None,
         })
         .collect()
 }
@@ -1919,6 +2017,10 @@ struct Filters<'a> {
     /// Jira: the project whose version it is, when the call named one: another project's version
     /// of the same name is not kept.
     version_in: Option<&'a str>,
+    /// `search` on Jira, `detail: full`: each ticket with its comments and links, every page read.
+    full: bool,
+    /// `search` on Jira: at most that many tickets.
+    limit: Option<usize>,
 }
 
 /// What a list found on the tracker: its tickets, how many were answered from another site, and
@@ -1963,6 +2065,8 @@ async fn searched_again(
         filters.jql.as_ref().map(|jql| (&jql.clause, &jql.order)),
         filters.milestone,
         filters.version_in,
+        filters.full,
+        filters.limit,
     ])
     .to_string();
     if let Some((found, _)) = daemon.kept_searches.get(&kept) {
@@ -2145,6 +2249,7 @@ async fn list_issues(forge: &Forge, filters: &Filters<'_>) -> Result<(Vec<Listed
                 assignees: names(&issue["assignees"], "login"),
                 milestone: Some(said(&issue["milestone"]["title"])).filter(|m| !m.is_empty()),
                 url: issue["url"].as_str().map(masked),
+                detail: None,
             })
         })
         .collect();
@@ -2207,21 +2312,29 @@ async fn list_work_items(
 ) -> Result<(Vec<Listed>, usize, usize), String> {
     jira_site(site, "read").await?;
     let query = jql(projects, filters);
-    let limit = LISTED.to_string();
-    let (ok, stdout, stderr) = match acli(&[
+    // A review reads the comments and the links, from every page, unless a limit stops it.
+    let limit = filters
+        .limit
+        .unwrap_or(if filters.full { JIRA_ALL } else { LISTED })
+        .to_string();
+    let mut args = vec![
         "jira",
         "workitem",
         "search",
         "--jql",
         &query,
         "--fields",
-        "key,summary,status,assignee,labels",
+        match filters.full {
+            true => "key,summary,status,assignee,labels,comment,issuelinks",
+            false => "key,summary,status,assignee,labels",
+        },
         "--json",
-        "--limit",
-        &limit,
-    ])
-    .await
-    {
+    ];
+    if filters.full {
+        args.push("--paginate");
+    }
+    args.extend(["--limit", &limit]);
+    let (ok, stdout, stderr) = match acli(&args).await {
         Ok(output) => output,
         Err(Gh::Missing) => return Err("Flottille cannot find acli".into()),
         Err(Gh::Failed(why)) => return Err(format!("acli jira workitem search: {why}")),
@@ -2278,6 +2391,7 @@ async fn list_work_items(
             // the filter says is what every item found holds.
             milestone: versions::said_in(fields).or_else(|| filters.milestone.map(masked)),
             url: Some(format!("https://{site}/browse/{}", masked(key))),
+            detail: filters.full.then(|| work_item(key, item, site)),
         });
     }
     Ok((tickets, left_out, nulls))
