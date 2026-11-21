@@ -12,6 +12,7 @@ use serde_json::{Value, json};
 
 use crate::agent::{Agent, AgentState, Choices, GateMode, TurnUsage, Used};
 use crate::approval::{Decision, Delivery, Forward, Judgement, Kind, Leave, Request, RequestState};
+use crate::finding::{self, Finding};
 use crate::item::{Check, Cursor, Filter, Item, Post};
 use crate::notification::{self, New as NewNotification, Notification};
 use crate::protocol::Event;
@@ -977,6 +978,26 @@ const MIGRATIONS: &[&str] = &[
         seeded INTEGER NOT NULL DEFAULT 0
     ) STRICT;
     INSERT INTO notification_cursor (id, seq) SELECT 1, coalesce(max(seq), 0) FROM events;
+",
+    "
+    -- What the agents report about Flottille itself (`docs/developer.md`, \"The findings\"): one
+    -- finding per bug, each time it was met an occurrence. Texts are masked before they are kept.
+    CREATE TABLE findings (
+        id       INTEGER PRIMARY KEY AUTOINCREMENT,
+        title    TEXT NOT NULL,
+        expected TEXT NOT NULL,
+        filed    TEXT
+    ) STRICT;
+    CREATE TABLE finding_occurrences (
+        id       INTEGER PRIMARY KEY AUTOINCREMENT,
+        finding  INTEGER NOT NULL REFERENCES findings (id),
+        at       INTEGER NOT NULL,
+        session  TEXT NOT NULL,
+        called   TEXT NOT NULL,
+        happened TEXT NOT NULL,
+        differs  TEXT
+    ) STRICT;
+    CREATE INDEX finding_occurrences_by_finding ON finding_occurrences (finding, id);
 ",
 ];
 
@@ -4441,6 +4462,104 @@ impl Store {
         Ok(())
     }
 
+    /// Keeps a new finding with its first occurrence: its id.
+    pub fn add_finding(
+        &mut self,
+        title: &str,
+        expected: &str,
+        first: &finding::NewOccurrence,
+    ) -> Result<u64> {
+        let transaction = self.connection.transaction()?;
+        transaction.execute(
+            "INSERT INTO findings (title, expected) VALUES (?1, ?2)",
+            params![title, expected],
+        )?;
+        let id = transaction.last_insert_rowid() as u64;
+        add_occurrence_row(&transaction, id, first)?;
+        transaction.commit()?;
+        Ok(id)
+    }
+
+    /// Adds an occurrence to a finding: `None` when there is no such finding.
+    pub fn add_occurrence(
+        &mut self,
+        finding: u64,
+        occurrence: &finding::NewOccurrence,
+    ) -> Result<Option<u64>> {
+        let transaction = self.connection.transaction()?;
+        let known = transaction
+            .query_row(
+                "SELECT 1 FROM findings WHERE id = ?1",
+                [finding],
+                |_| Ok(()),
+            )
+            .optional()?;
+        if known.is_none() {
+            return Ok(None);
+        }
+        let id = add_occurrence_row(&transaction, finding, occurrence)?;
+        transaction.commit()?;
+        Ok(Some(id))
+    }
+
+    /// Every finding, the oldest first, each with its occurrences in the order they came.
+    pub fn findings(&self) -> Result<Vec<Finding>> {
+        let mut found = self
+            .connection
+            .prepare("SELECT id, title, expected, filed FROM findings ORDER BY id")?;
+        let mut all: Vec<Finding> = found
+            .query_map([], |row| {
+                Ok(Finding {
+                    id: row.get(0)?,
+                    title: row.get(1)?,
+                    expected: row.get(2)?,
+                    count: 0,
+                    first_at: 0,
+                    last_at: 0,
+                    filed: row.get(3)?,
+                    occurrences: Vec::new(),
+                })
+            })?
+            .collect::<std::result::Result<_, _>>()?;
+        let mut rows = self.connection.prepare(
+            "SELECT finding, id, at, session, called, happened, differs \
+             FROM finding_occurrences ORDER BY id",
+        )?;
+        let occurrences = rows.query_map([], |row| {
+            Ok((
+                row.get::<_, u64>(0)?,
+                finding::Occurrence {
+                    id: row.get(1)?,
+                    at: row.get(2)?,
+                    session: row.get(3)?,
+                    called: row.get(4)?,
+                    happened: row.get(5)?,
+                    differs: row.get(6)?,
+                },
+            ))
+        })?;
+        for row in occurrences {
+            let (of, occurrence) = row?;
+            if let Some(finding) = all.iter_mut().find(|finding| finding.id == of) {
+                finding.occurrences.push(occurrence);
+            }
+        }
+        for finding in &mut all {
+            finding.count = finding.occurrences.len();
+            finding.first_at = finding.occurrences.first().map_or(0, |o| o.at);
+            finding.last_at = finding.occurrences.last().map_or(0, |o| o.at);
+        }
+        Ok(all)
+    }
+
+    /// Marks a finding filed, with the address of its issue: whether there was such a finding.
+    pub fn file_finding(&self, id: u64, issue: &str) -> Result<bool> {
+        Ok(self.connection.execute(
+            "UPDATE findings SET filed = ?2 WHERE id = ?1",
+            params![id, issue],
+        )? > 0)
+    }
+
     /// Whether `prune_notifications` would forget any: read, so that a keeper with nothing to do
     /// writes nothing.
     pub fn prunable_notifications(&self, now: u64) -> Result<bool> {
@@ -5109,6 +5228,26 @@ fn path_text(path: &Path) -> Result<&str> {
             path.display()
         ))
     })
+}
+
+fn add_occurrence_row(
+    connection: &Connection,
+    finding: u64,
+    occurrence: &finding::NewOccurrence,
+) -> Result<u64> {
+    connection.execute(
+        "INSERT INTO finding_occurrences (finding, at, session, called, happened, differs) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            finding,
+            occurrence.at,
+            occurrence.session,
+            occurrence.called,
+            occurrence.happened,
+            occurrence.differs
+        ],
+    )?;
+    Ok(connection.last_insert_rowid() as u64)
 }
 
 fn migrate(connection: &mut Connection) -> Result<()> {
