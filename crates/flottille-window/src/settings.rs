@@ -1359,6 +1359,8 @@ impl SettingsPage {
                         div()
                             .flex()
                             .flex_col()
+                            .flex_1()
+                            .min_w_0()
                             .child(
                                 div()
                                     .text_size(px(13.))
@@ -1372,10 +1374,12 @@ impl SettingsPage {
                             ),
                     )
                     .child(
-                        Button::secondary("findings-export", "Export findings")
-                            .leading(Icon::File)
-                            .disabled(count == 0 || self.exporting)
-                            .on_click(cx.listener(|this, _, _, cx| this.export_findings(cx))),
+                        div().flex_none().child(
+                            Button::secondary("findings-export", "Export findings")
+                                .leading(Icon::File)
+                                .disabled(count == 0 || self.exporting)
+                                .on_click(cx.listener(|this, _, _, cx| this.export_findings(cx))),
+                        ),
                     ),
             )
             .child(presence("findings-list-block", count > 0, list).space(space::MD))
