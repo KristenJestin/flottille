@@ -476,9 +476,9 @@ pub async fn workflow_round(daemon: &Arc<Daemon>, project: &str, checkout: &Chec
         let per_page = format!("per_page={RUNS}");
         let mut args = vec![
             "api",
+            &path,
             "--method",
             "GET",
-            &path,
             "--hostname",
             flottille_core::declared::GITHUB,
             "-f",

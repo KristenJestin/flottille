@@ -879,7 +879,7 @@ waits for is read by the rounds of the items, as a subscription's is.
   nothing.
 - **A workflow run that ends** is read with the pull requests of its repository, by their round,
   one request a routine waiting for one in the project and none while no routine waits: `gh api
-  --method GET repos/<owner>/<name>/actions/runs --hostname github.com -f per_page=50 [-f
+  repos/<owner>/<name>/actions/runs --method GET --hostname github.com -f per_page=50 [-f
   branch=<branch>]`, the REST answer, which says each run's head repository (`gh run list` does
   not). A run is the routine's event once it is `completed` and was not in the routine's last
   read: the first read is no event (what ended before is not news), and the runs read are kept in
