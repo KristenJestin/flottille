@@ -436,6 +436,25 @@ pub fn listed_settings(listed: &str) -> Vec<(String, String)> {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn a_push_default_that_cannot_be_read_refuses_the_push() {
+        let folder = tempfile::tempdir().unwrap();
+        let mut made = PushFolder {
+            objects: folder.path().join("objects"),
+            folder,
+            settings: vec![("branch.main.merge".into(), "refs/heads/elsewhere".into())],
+            kept_from: 0,
+            forge_helpers: Vec::new(),
+            // git cannot run there: what `push.default` is cannot be read.
+            from: PathBuf::from("/nonexistent/flottille-no-repository"),
+            refs: Vec::new(),
+        };
+
+        let unsteered = made.unsteered(&Default::default()).await;
+
+        assert!(unsteered.is_err(), "{unsteered:?}");
+    }
+
     #[test]
     fn only_what_says_which_refs_go_where_is_kept_of_the_repository_s_settings() {
         let listed = [
