@@ -168,6 +168,15 @@ private fun CardStep(phone: Phone, step: Step.Card, deviceName: String, back: ()
             }
         }
     }
+    // Over http, what the phone and the hub say can be read, and changed, on the network.
+    Message(
+        if (step.card.url.trim().startsWith("http://", ignoreCase = true)) {
+            "This hub's link is in clear (http): anyone on the network can read what the phone and the hub say. Join only on a network you trust."
+        } else {
+            null
+        },
+        tag = "clear-warning",
+    )
     Entrance(2) {
         Field("This device is", name, { name = it }, tag = "device-name")
     }
