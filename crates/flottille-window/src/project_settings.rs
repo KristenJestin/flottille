@@ -2892,7 +2892,7 @@ fn shown_folder(folder: &str) -> String {
     }
 }
 
-/// What the settings say when the user's SSH agent is lent to no push: why, and what to do.
+/// What the settings say when no push an agent asks for is run: why, and what to do.
 fn unlifted_said(why: &str) -> SharedString {
     SharedString::from(format!(
         "No push an agent asks for is run: it would run outside the sandbox, signed in as you, \
@@ -2900,6 +2900,7 @@ fn unlifted_said(why: &str) -> SharedString {
     ))
 }
 
+/// What the settings say when the user's SSH agent is lent to no push: why, and what to do.
 fn unlent_said(why: &str) -> SharedString {
     SharedString::from(format!(
         "Pushes over SSH are refused: your SSH agent is lent to no push, since {why}. Fix that \

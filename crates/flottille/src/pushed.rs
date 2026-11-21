@@ -327,7 +327,8 @@ fn landlock_enforced() -> bool {
 pub fn unlifted() -> Option<String> {
     if !landlock_enforced() {
         return Some(
-            "the kernel has no Landlock (its second ABI or later), which keeps the folder a push              runs from, in the daemon's runtime folder, out of a run's reach"
+            "the kernel has no Landlock (its second ABI or later), which keeps the folder a push \
+             runs from, in the daemon's runtime folder, out of a run's reach"
                 .into(),
         );
     }
