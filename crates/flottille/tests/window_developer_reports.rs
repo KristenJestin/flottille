@@ -162,12 +162,18 @@ fn the_developer_section_lists_the_findings(cx: &mut TestAppContext) {
         present(cx, "finding-2")
     });
     settle(cx);
-    let _ = page;
 
+    let titles: Vec<String> = page.read_with(cx, |p, _| {
+        p.findings().iter().map(|f| f.title.clone()).collect()
+    });
     assert_eq!(
-        label(cx, "finding-1-title").as_deref(),
-        Some("Tickets list answers empty")
+        titles,
+        [
+            "A refusal that makes no sense",
+            "Tickets list answers empty"
+        ]
     );
+    assert!(present(cx, "finding-1"), "its row");
     assert_eq!(
         label(cx, "finding-1-count").as_deref(),
         Some("2 occurrences")
@@ -193,6 +199,7 @@ fn the_export_button_writes_the_findings_to_a_file(cx: &mut TestAppContext) {
     until(&shell, cx, "the findings are listed", |cx| {
         present(cx, "finding-1")
     });
+    settle(cx);
 
     click(cx, "findings-export");
 
@@ -233,7 +240,7 @@ fn a_finding_that_arrives_unfolds_and_fades_in_and_the_list_folds_with_the_mode(
     });
     settle(cx);
     let height = |cx: &mut VisualTestContext| {
-        cx.update(|window, _| window.find("finding-2").bounds().size.height)
+        cx.update(|window, _| window.find("findings-item-2").bounds().size.height)
     };
 
     report(&mcp, "A refusal that makes no sense");

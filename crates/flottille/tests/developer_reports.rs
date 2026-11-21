@@ -93,6 +93,10 @@ fn the_report_action_is_offered_only_in_developer_mode() {
 
     developer(&user, &["on"]);
 
+    // A session that lists its tools again is given them (a client keeps the list it holds
+    // until it is told or starts over).
+    let (url, authorization) = server_of(&user, 0);
+    let mcp = Mcp::initialize(&url, &authorization);
     let on = actions(&mcp);
     assert!(on.contains(&"report".to_owned()), "{on:?}");
     assert!(on.contains(&"find_reports".to_owned()), "{on:?}");

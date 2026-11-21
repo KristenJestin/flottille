@@ -1288,6 +1288,18 @@ impl Server {
         outdated
     }
 
+    /// What a tool is listed as changed with no change of any grant (the developer mode adds
+    /// actions to `services` while it is on): every running session that can take it is told
+    /// to list its tools again.
+    pub fn relist(&self) {
+        let mut tokens = self.tokens.lock().unwrap();
+        for notice in tokens.notices.values_mut().filter(|notice| notice.takes) {
+            notice.changed += 1;
+        }
+        drop(tokens);
+        self.changes.send_modify(|n| *n += 1);
+    }
+
     /// The agent's running session now works in `place`: its next calls are decided and
     /// performed there. Nothing when no process of the agent runs.
     pub fn move_place(&self, agent: &str, place: Place) {
