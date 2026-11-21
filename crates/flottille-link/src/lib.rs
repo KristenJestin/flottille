@@ -1,5 +1,5 @@
 //! Flottille's link between the user's devices (`docs/remote.md`): identity, keys, the member
-//! list, the invitation, request signing, and the link itself between two machines, over a
+//! list, the pair code, request signing, and the link itself between two machines, over a
 //! transport only `transport.rs` names.
 //!
 //! A device's identity is the public half of an Ed25519 key. The private half never leaves the
@@ -10,16 +10,15 @@
 mod address;
 mod control;
 mod hello;
-mod invitation;
 mod link;
 mod members;
 mod offers;
+mod pairing;
 mod request;
 mod serial;
 mod sessions;
 mod transport;
 mod tunnel;
-mod words;
 
 use std::fmt;
 use std::fs::{File, OpenOptions};
@@ -34,22 +33,22 @@ use zeroize::Zeroizing;
 
 pub use address::Address;
 pub use control::{
-    Arriving, Ask, Asked, Asker, ControlError, Device, HANDSHAKE_LIMIT, HUB_PORT, HubSession,
-    HubUrl, Joined, Joining, LINE_LIMIT, PresenceOf, Pushed, Requested, Session, SetupCode,
-    SetupProof, Stream, Tls, ToDevice, Told, Transcript, arrive,
+    Arriving, Ask, Asked, Asker, ControlError, Device, Facts, HANDSHAKE_LIMIT, HUB_PORT,
+    HubSession, HubUrl, LINE_LIMIT, PairProof, Paired, Pairing, PresenceOf, Pushed, Session,
+    Stream, Tls, ToDevice, Told, Transcript, arrive,
 };
 pub use hello::{Hello, NeedsUpdate, PeerState, choose};
-pub use invitation::{Invitation, InvitationAsk, InvitationError, Token};
 pub use link::{
     Accepting, Answers, Call, ConnectionShare, Deliver, Endpoint, FRAME_LIMIT, Git, GitFetch,
     GitOffer, GitPlace, GitRepository, LaunchAsk, Link, LinkError, MachineMessage, Message,
     Received, Secret, Share, SharedEntry, Streamed, Traffic,
 };
 pub use members::{
-    Action, Change, ChangeHash, ListError, MANAGING_HEADROOM, MOST_CHANGES, Member, MemberList,
-    Members, Role, Signature,
+    Action, Change, ChangeHash, Colour, Icon, ListError, MANAGING_HEADROOM, MOST_CHANGES, Member,
+    MemberList, Members, Role, Signature, check_name,
 };
 pub use offers::{Capabilities, MOST_AGENTS, MOST_PROJECTS, Offered};
+pub use pairing::{PairCode, PairCodeError, PairSecret, Proposed};
 pub use request::{
     Accepted, CLOSE_LASTS, CLOSES_SERVED_MOST, ClosesServed, FULL_SWITCH_LASTS, NONCES_PER_DEVICE,
     Nonce, REQUEST_WINDOW, Request, RequestError, Requests, Signed, full_switch, kept_close,
@@ -58,7 +57,6 @@ pub use request::{
 pub use sessions::{LightSession, MOST_SESSIONS, STATES, SessionList, TITLE_LIMIT};
 pub use transport::TlsServer;
 pub use tunnel::TunnelStream;
-pub use words::verification_words;
 
 /// The machine key's file in the key folder: the daemon's alone.
 pub const MACHINE_FILE: &str = "machine.key";
@@ -110,7 +108,7 @@ impl PublicKey {
         self.0.as_bytes()
     }
 
-    /// The short form a person compares, on an invitation and on the screens: the first 8 bytes
+    /// The short form a person compares, on the screens: the first 8 bytes
     /// of the key's SHA-256, in hexadecimal by groups of four (`3f2a-91bc-0d4e-77a1`).
     pub fn fingerprint(&self) -> String {
         let digest = Sha256::digest(self.as_bytes());

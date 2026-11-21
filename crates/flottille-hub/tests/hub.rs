@@ -1,6 +1,6 @@
-//! The hub's state (`docs/remote.md`, "The hub", "The first member", "Pairing"): its key, the
-//! setup code, the member list it stores, the invitations, presence and addresses, in a temporary
-//! state folder, with a clock the tests move.
+//! The hub's state (`docs/remote.md`, "The hub", "Pairing"): its key, the member list it stores,
+//! its pair mode, what it knows of the devices, presence and addresses, in a temporary state
+//! folder, with a clock the tests move.
 
 use std::cell::Cell;
 use std::fmt::Debug;
@@ -8,10 +8,10 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use flottille_hub::{Clock, Hub, HubError, JoinRequest, Presence, reset};
+use flottille_hub::{Clock, Hub, HubError, PairEnd, PairedDevice, Presence, reset};
 use flottille_link::{
-    Action, Change, ChangeHash, DeviceKey, InvitationAsk, Keyring, KeyringError, ListError,
-    MemberList, Role, Signature, Token,
+    Action, Change, ChangeHash, Colour, DeviceKey, Icon, Keyring, KeyringError, ListError,
+    MachineKey, MemberList, PairCode, Proposed, Role, Signature,
 };
 use zeroize::Zeroizing;
 
@@ -83,11 +83,6 @@ fn mode(path: &Path) -> u32 {
     std::fs::metadata(path).unwrap().permissions().mode() & 0o777
 }
 
-/// The first member's own entry, as `MemberList::start` signs it.
-fn root_entry(key: &DeviceKey, name: &str) -> Change {
-    MemberList::start(name, key).unwrap().changes()[0].clone()
-}
-
 fn add(key: &DeviceKey, name: &str, role: Role) -> Action {
     Action::Add {
         key: key.public(),
@@ -96,16 +91,39 @@ fn add(key: &DeviceKey, name: &str, role: Role) -> Action {
     }
 }
 
-/// `pc` sets the hub up with its code, and is the root.
-fn set_up(hub: &mut Hub<Time>, pc: &DeviceKey) {
-    let code = hub.setup_code().unwrap().to_owned();
-    hub.setup(&code, vec![root_entry(pc, "pc")]).unwrap();
+/// The card `key` proposes when it pairs.
+fn proposed(key: &DeviceKey, name: &str, role: Role) -> Proposed {
+    Proposed {
+        key: key.public(),
+        name: name.to_owned(),
+        role,
+        icon: Icon::Laptop,
+        colour: Colour::of(&key.public()),
+    }
 }
 
-/// The token `inviter` is given for an invitation asked now.
-fn invite(hub: &mut Hub<Time>, time: &Time, inviter: &DeviceKey) -> Token {
-    let ask = InvitationAsk::sign(&hub.key(), time.now(), inviter).unwrap();
-    hub.invite(&ask).unwrap()
+/// Pair mode opened, as `flottille-hub pair` opens it: its number and its code.
+fn open_pairing(hub: &mut Hub<Time>) -> (u64, PairCode) {
+    hub.open_pairing("https://hub.example.net", None).unwrap()
+}
+
+/// `key` pairs as `name` with `role`, with the code it was given: its proof checks against the
+/// code's secret, as the session's does.
+fn pair_with(
+    hub: &mut Hub<Time>,
+    code: &PairCode,
+    key: &DeviceKey,
+    name: &str,
+    role: Role,
+) -> Result<PairedDevice, HubError> {
+    let secret = code.secret;
+    hub.pair(&proposed(key, name, role), |held| *held == secret, "0.4.0")
+}
+
+/// Pair mode opened, and `key` paired with its code.
+fn pair(hub: &mut Hub<Time>, key: &DeviceKey, name: &str, role: Role) {
+    let (_, code) = open_pairing(hub);
+    pair_with(hub, &code, key, name, role).unwrap();
 }
 
 /// `signer`'s change after the hub's last one.
@@ -113,10 +131,10 @@ fn next(hub: &Hub<Time>, action: Action, signer: &DeviceKey) -> Change {
     Change::sign(hub.list().head(), action, signer)
 }
 
-/// The members the hub's list leaves, checked back to `root`.
-fn members(hub: &Hub<Time>, root: &DeviceKey) -> Vec<(String, Role)> {
+/// The members the hub's list leaves, checked back to `root` and the hub's key.
+fn members(hub: &Hub<Time>, root: &flottille_link::PublicKey) -> Vec<(String, Role)> {
     hub.list()
-        .check(&root.public())
+        .check(root, &hub.key())
         .unwrap()
         .members()
         .iter()
@@ -124,160 +142,357 @@ fn members(hub: &Hub<Time>, root: &DeviceKey) -> Vec<(String, Role)> {
         .collect()
 }
 
+/// A state folder holding `list`, as a hub of before pair mode wrote it.
+fn written(folder: &Path, list: &MemberList) {
+    let state = serde_json::json!({"version": 1, "members": list});
+    std::fs::write(folder.join("hub.json"), state.to_string()).unwrap();
+    std::fs::set_permissions(folder.join("hub.json"), PermissionsExt::from_mode(0o600)).unwrap();
+}
+
 #[test]
-fn the_setup_code_is_printed_once_and_makes_the_first_member() {
+fn pair_mode_pairs_one_device_with_its_code_once() {
     let (_dir, folder) = folder();
     let time = Time::new();
     let mut hub = open(&folder, &time);
+    assert!(hub.members().is_none());
+    let (pc, laptop) = (key(1), key(2));
 
-    let code = hub.setup_code().unwrap().to_owned();
-    let groups: Vec<&str> = code.split('-').collect();
-    assert_eq!(groups.len(), 4, "{code}");
-    for group in groups {
-        assert_eq!(group.len(), 4, "{code}");
-        assert!(
-            group
-                .chars()
-                .all(|c| "0123456789ABCDEFGHJKMNPQRSTVWXYZ".contains(c)),
-            "{code}"
-        );
-    }
+    let (number, code) = open_pairing(&mut hub);
+    assert_eq!(code.hub_key, hub.key());
+    assert_eq!(code.hub_url, "https://hub.example.net");
+    assert_eq!(hub.pairing_ended(number), None);
+    let paired = pair_with(&mut hub, &code, &pc, "pc", Role::Runner).unwrap();
+    assert_eq!(paired.name, "pc");
+    assert!(!paired.again);
     assert_eq!(
-        hub.take_announcement(),
-        Some(format!(
-            "setup code: {code}, valid until a first member joins"
-        ))
+        hub.pairing_ended(number),
+        Some(PairEnd::Paired(Box::new(paired)))
     );
-    assert_eq!(hub.take_announcement(), None);
-    assert_eq!(mode(&folder.join("hub.json")), 0o600);
 
-    // Started again: the same code, kept, and not printed again.
-    drop(hub);
-    let mut hub = open(&folder, &time);
-    assert_eq!(hub.take_announcement(), None);
-    assert_eq!(hub.setup_code().unwrap(), code);
-    assert!(hub.list().changes().is_empty());
+    // The list is the hub's: its root names the hub's key, and the entry is signed with it.
+    assert_eq!(hub.list().root(), Some(hub.key()));
+    assert_eq!(members(&hub, &hub.key()), [("pc".to_owned(), Role::Runner)]);
+    let entry = hub.list().changes()[1].clone();
+    assert_eq!(entry.signer, hub.key());
 
-    // Typed as a person may (Crockford's base32 is read in any case, hyphens or spaces between).
-    let pc = key(1);
-    let typed = code.to_lowercase().replace('-', " ");
-    hub.setup(&typed, vec![root_entry(&pc, "pc")]).unwrap();
-    assert_eq!(members(&hub, &pc), [("pc".to_owned(), Role::Runner)]);
-    assert_eq!(hub.list().root(), Some(pc.public()));
+    // The code served once: another device holding it pairs nothing.
+    let used = error(pair_with(&mut hub, &code, &laptop, "laptop", Role::Runner));
+    assert!(
+        used.starts_with("pair mode is not open on this hub"),
+        "{used}"
+    );
+    assert_eq!(members(&hub, &hub.key()).len(), 1);
 
-    // Stored: a hub started again holds the same list.
-    let list = hub.list().clone();
+    // What the hub knows of the device: when it was paired and seen, and its version.
+    let facts = &hub.facts()[0];
+    assert_eq!(facts.key, pc.public());
+    assert_eq!(facts.paired_at, Some(START));
+    assert_eq!(facts.version.as_deref(), Some("0.4.0"));
+
+    // Kept: the hub started again holds the list and the facts.
     drop(hub);
     let hub = open(&folder, &time);
-    assert_eq!(hub.list(), &list);
-    assert_eq!(members(&hub, &pc), [("pc".to_owned(), Role::Runner)]);
+    assert_eq!(members(&hub, &hub.key()), [("pc".to_owned(), Role::Runner)]);
+    assert_eq!(hub.facts().len(), 1);
 }
 
 #[test]
-fn the_setup_code_works_only_while_no_member_exists() {
+fn pair_mode_ends_when_its_minutes_pass_or_its_command_stops() {
     let (_dir, folder) = folder();
     let time = Time::new();
     let mut hub = open(&folder, &time);
-    let code = hub.setup_code().unwrap().to_owned();
-    let (pc, pixel) = (key(1), key(2));
+    let pc = key(1);
 
-    // The same code but its first symbol.
-    let first = if code.starts_with('0') { "1" } else { "0" };
-    let not_it = format!("{first}{}", &code[1..]);
-    let not_the_hub_s = "this setup code is not the hub's: copy it again from the hub's log, or \
-                         from flottille-hub setup-code on the hub's machine";
-    for wrong in [not_it.as_str(), "7KQ2-M4XP", "not a code", ""] {
-        assert_eq!(
-            error(hub.setup(wrong, vec![root_entry(&pc, "pc")])),
-            not_the_hub_s,
-            "{wrong:?}"
+    let (number, code) = hub
+        .open_pairing("https://hub.example.net", Some(2))
+        .unwrap();
+    // One pair mode at a time.
+    let again = error(hub.open_pairing("https://hub.example.net", None));
+    assert!(
+        again.starts_with("pair mode is open already, 120 s more"),
+        "{again}"
+    );
+    time.pass(2 * 60);
+    assert_eq!(
+        hub.pairing_ended(number),
+        Some(PairEnd::Over(
+            "pair mode's minutes passed with no device paired".to_owned()
+        ))
+    );
+    assert!(
+        error(pair_with(&mut hub, &code, &pc, "pc", Role::Runner))
+            .starts_with("pair mode is not open")
+    );
+
+    let (number, code) = open_pairing(&mut hub);
+    hub.close_pairing(number);
+    assert_eq!(
+        hub.pairing_ended(number),
+        Some(PairEnd::Over("pair mode was closed".to_owned()))
+    );
+    assert!(pair_with(&mut hub, &code, &pc, "pc", Role::Runner).is_err());
+    assert!(hub.members().is_none());
+
+    // Minutes out of bounds, and a URL that is none, are refused before anything opens.
+    assert!(
+        error(hub.open_pairing("https://hub.example.net", Some(16))).contains("1 to 15 minutes")
+    );
+    assert!(hub.open_pairing("hub.example.net", None).is_err());
+    assert_eq!(hub.pairing_left(), None);
+}
+
+#[test]
+fn wrong_proofs_pair_nothing_and_leave_pair_mode_open() {
+    let (_dir, folder) = folder();
+    let time = Time::new();
+    let mut hub = open(&folder, &time);
+    let (pc, stranger) = (key(1), key(9));
+    let (number, code) = open_pairing(&mut hub);
+    // Far more wrong proofs than any count would allow: nothing is paired, pair mode stays open.
+    for _ in 0..20 {
+        let wrong = error(hub.pair(&proposed(&stranger, "x", Role::Runner), |_| false, "0.4.0"));
+        assert!(
+            wrong.starts_with("this device did not prove it holds the pair code"),
+            "{wrong}"
         );
     }
-    // The entry must be its signer's own, and a runner's.
-    let not_own = Change::sign(
-        ChangeHash::default(),
-        add(&pixel, "pixel", Role::Runner),
-        &pc,
-    );
-    assert_eq!(
-        error(hub.setup(&code, vec![not_own])),
-        "the hub refuses this change: its root is not the first member's"
-    );
-    let as_viewer = Change::sign(ChangeHash::default(), add(&pc, "pc", Role::Viewer), &pc);
-    assert_eq!(
-        error(hub.setup(&code, vec![as_viewer])),
-        "the hub refuses this change: change 1 is not the root's own entry as a runner"
-    );
-    assert!(hub.list().changes().is_empty());
+    assert!(hub.members().is_none());
+    assert_eq!(hub.pairing_ended(number), None);
+    assert!(hub.pairing_left().is_some());
+    // The user's device still pairs, with the code.
+    let paired = pair_with(&mut hub, &code, &pc, "pc", Role::Runner).unwrap();
+    assert_eq!(paired.name, "pc");
+    assert_eq!(members(&hub, &hub.key()).len(), 1);
+}
 
-    hub.setup(&code, vec![root_entry(&pc, "pc")]).unwrap();
-    let has_members = "the hub has a member already: a setup code serves only before the first \
-                       member joins (flottille-hub setup-code --reset empties the list and makes a \
-                       new one)";
-    assert_eq!(
-        error(hub.setup(&code, vec![root_entry(&pixel, "pixel")])),
-        has_members
-    );
-    assert_eq!(error(hub.setup_code()), has_members);
-    assert_eq!(members(&hub, &pc), [("pc".to_owned(), Role::Runner)]);
-
-    // The code is gone from the state folder: a hub started again has none.
-    drop(hub);
+#[test]
+fn a_pairing_whose_facts_cannot_be_written_spends_pair_mode_all_the_same() {
+    let (_dir, folder) = folder();
+    let time = Time::new();
     let mut hub = open(&folder, &time);
-    assert_eq!(hub.take_announcement(), None);
-    assert_eq!(error(hub.setup_code()), has_members);
+    let pc = key(1);
+    pair(&mut hub, &pc, "pc", Role::Runner);
+
+    // Paired again, an entry the hub keeps: only the facts are written, and the disk refuses
+    // them (a folder sits where the temporary file goes).
+    let (number, code) = open_pairing(&mut hub);
+    let blocked = folder.join(format!(".hub.json.{}.new", std::process::id()));
+    std::fs::create_dir(&blocked).unwrap();
+    let failed = error(pair_with(&mut hub, &code, &pc, "pc", Role::Runner));
+    assert!(failed.contains("cannot be written"), "{failed}");
+    // The device is paired: its code is spent, and does not pair a second time.
+    assert!(matches!(
+        hub.pairing_ended(number),
+        Some(PairEnd::Paired(device)) if device.key == pc.public()
+    ));
+    assert_eq!(hub.pairing_left(), None);
+    std::fs::remove_dir(&blocked).unwrap();
+    let again = error(pair_with(&mut hub, &code, &pc, "pc", Role::Runner));
+    assert!(again.contains("pair mode is not open"), "{again}");
+}
+
+#[test]
+fn a_device_paired_again_keeps_its_card() {
+    let (_dir, folder) = folder();
+    let time = Time::new();
+    let mut hub = open(&folder, &time);
+    let pc = key(1);
+    pair(&mut hub, &pc, "pc", Role::Runner);
+    let changes = hub.list().changes().len();
+
+    // Paired again with a new code, proposing another name and role: nothing changes.
+    time.pass(60);
+    let (_, code) = open_pairing(&mut hub);
+    let again = pair_with(&mut hub, &code, &pc, "renamed", Role::Viewer).unwrap();
+    assert!(again.again);
+    assert_eq!((again.name.as_str(), again.role), ("pc", Role::Runner));
+    assert_eq!(hub.list().changes().len(), changes);
+    assert_eq!(hub.facts()[0].paired_at, Some(START + 60));
+
+    // Removed, then paired again with the same key: it is a member again.
+    hub.remove("pc").unwrap();
     assert!(
-        !std::fs::read_to_string(folder.join("hub.json"))
+        hub.list()
+            .check(&hub.key(), &hub.key())
             .unwrap()
-            .contains(&code)
+            .was_removed(&pc.public())
+    );
+    pair(&mut hub, &pc, "pc", Role::Controller);
+    assert_eq!(
+        members(&hub, &hub.key()),
+        [("pc".to_owned(), Role::Controller)]
     );
 }
 
 #[test]
-fn a_reset_empties_the_list_and_makes_a_new_code() {
+fn only_the_hub_changes_a_role_and_no_member_adds_a_device() {
     let (_dir, folder) = folder();
     let time = Time::new();
     let mut hub = open(&folder, &time);
-    let old = hub.setup_code().unwrap().to_owned();
     let (pc, pixel) = (key(1), key(2));
-    set_up(&mut hub, &pc);
-    let made = hub.key();
+    pair(&mut hub, &pc, "pc", Role::Runner);
+    pair(&mut hub, &pixel, "pixel", Role::Controller);
 
-    // A reset is `flottille-hub setup-code --reset`, a process of its own: the hub is stopped.
+    // A member's addition is refused, whatever it adds.
+    let added = error(hub.submit(next(&hub, add(&key(3), "tablet", Role::Viewer), &pc)));
+    assert_eq!(
+        added,
+        "the hub refuses this change: a device is paired on the hub (flottille-hub pair), no \
+         member adds one"
+    );
+    // A role change a member signed is refused by the list's check.
+    let raised = next(
+        &hub,
+        Action::Role {
+            key: pixel.public(),
+            role: Role::Runner,
+        },
+        &pc,
+    );
+    assert!(error(hub.submit(raised)).contains("only the hub may change the role of a device"));
+
+    // The hub's host changes it, by name or fingerprint.
+    hub.change_role("pixel", Role::Viewer).unwrap();
+    hub.change_role(&pc.public().fingerprint(), Role::Controller)
+        .unwrap();
+    assert_eq!(
+        members(&hub, &hub.key()),
+        [
+            ("pc".to_owned(), Role::Controller),
+            ("pixel".to_owned(), Role::Viewer)
+        ]
+    );
+    assert_eq!(
+        error(hub.change_role("pixel", Role::Viewer)),
+        "pixel is a viewer already"
+    );
+    assert!(error(hub.change_role("nobody", Role::Viewer)).starts_with("nobody is no member"));
+
+    // A role changed by hand in the state folder: the hub refuses to start on it.
     drop(hub);
-    let new = reset(&folder).unwrap();
-    assert_ne!(new, old);
+    let file = folder.join("hub.json");
+    let text = std::fs::read_to_string(&file).unwrap();
+    std::fs::write(&file, text.replacen("\"controller\"", "\"runner\"", 1)).unwrap();
+    let refused = error(Hub::open(&folder, time.clone()));
+    assert!(
+        refused.contains("does not carry its signer's signature")
+            && refused.ends_with("run flottille-hub reset on this machine to start again"),
+        "{refused}"
+    );
+}
 
-    // Started again, the hub has no member, the new code, printed by the reset already, and its
-    // key.
+#[test]
+fn a_device_is_removed_from_the_hub_or_by_a_member() {
+    let (_dir, folder) = folder();
+    let time = Time::new();
+    let mut hub = open(&folder, &time);
+    let (pc, pixel, tablet) = (key(1), key(2), key(3));
+    pair(&mut hub, &pc, "pc", Role::Runner);
+    pair(&mut hub, &pixel, "pixel", Role::Controller);
+    pair(&mut hub, &tablet, "tablet", Role::Viewer);
+
+    hub.remove("tablet").unwrap();
+    hub.submit(next(
+        &hub,
+        Action::Remove {
+            key: pixel.public(),
+        },
+        &pc,
+    ))
+    .unwrap();
+    assert_eq!(members(&hub, &hub.key()), [("pc".to_owned(), Role::Runner)]);
+    // What the hub knew of them goes with them.
+    assert_eq!(hub.facts().len(), 1);
+}
+
+#[test]
+fn a_hub_set_up_before_pair_mode_keeps_its_members_and_pairs_after_them() {
+    let (_dir, folder) = folder();
+    let time = Time::new();
+    drop(open(&folder, &time));
+    // The state of a hub set up with a setup code: its first member and its machine.
+    let pc = key(1);
+    let machine_dir = tempfile::tempdir().unwrap();
+    let machine = MachineKey::load_or_make(&machine_dir.path().join("pc")).unwrap();
+    let mut list = MemberList::start("pc", &pc).unwrap();
+    list.declare(&pc, &machine);
+    let state = serde_json::json!({"version": 1, "setup_code": null, "members": list});
+    std::fs::write(folder.join("hub.json"), state.to_string()).unwrap();
+    std::fs::set_permissions(folder.join("hub.json"), PermissionsExt::from_mode(0o600)).unwrap();
+
+    let mut hub = open(&folder, &time);
+    assert_eq!(
+        members(&hub, &pc.public()),
+        [("pc".to_owned(), Role::Runner)]
+    );
+    assert!(
+        hub.welcome(&machine.public(), Some(list.changes()[0].hash()))
+            .is_ok()
+    );
+    assert!(hub.welcome(&pc.public(), None).is_ok());
+
+    // The next device pairs after them, its entry the hub's; the old member's own changes go on.
+    pair(&mut hub, &key(2), "phone", Role::Controller);
+    hub.submit(next(
+        &hub,
+        Action::Rename {
+            key: pc.public(),
+            name: "desktop".to_owned(),
+        },
+        &pc,
+    ))
+    .unwrap();
+    assert_eq!(
+        members(&hub, &pc.public()),
+        [
+            ("desktop".to_owned(), Role::Runner),
+            ("phone".to_owned(), Role::Controller)
+        ]
+    );
+    // A device that pinned the old list takes the new one.
+    assert!(
+        hub.list()
+            .check_update(&pc.public(), &hub.key(), &list)
+            .is_ok()
+    );
+}
+
+#[test]
+fn a_reset_empties_the_list_and_the_next_pairing_makes_a_new_one() {
+    let (_dir, folder) = folder();
+    let time = Time::new();
+    let mut hub = open(&folder, &time);
+    let (pc, pixel) = (key(1), key(2));
+    pair(&mut hub, &pc, "pc", Role::Runner);
+    let made = hub.key();
+    let old = hub.list().clone();
+
+    // A reset is `flottille-hub reset`, a process of its own: the hub is stopped.
+    drop(hub);
+    reset(&folder).unwrap();
     let mut hub = open(&folder, &time);
     assert_eq!(hub.key(), made);
     assert!(hub.list().changes().is_empty());
-    assert_eq!(hub.setup_code().unwrap(), new);
-    assert_eq!(hub.take_announcement(), None);
+    assert!(hub.facts().is_empty());
+    assert!(hub.welcome(&pc.public(), None).is_err());
 
-    assert_eq!(
-        error(hub.setup(&old, vec![root_entry(&pixel, "pixel")])),
-        "this setup code is not the hub's: copy it again from the hub's log, or from \
-         flottille-hub setup-code on the hub's machine"
-    );
-    hub.setup(&new, vec![root_entry(&pixel, "pixel")]).unwrap();
-    assert_eq!(members(&hub, &pixel), [("pixel".to_owned(), Role::Runner)]);
-    // A device that pinned the old root refuses the new list, saying the hub was reset.
+    pair(&mut hub, &pixel, "pixel", Role::Runner);
+    // A device that pinned the old list refuses the new one, saying the hub was reset: its first
+    // change names another list's id.
     assert!(matches!(
-        hub.list().check(&pc.public()),
+        hub.list().check_update(&made, &made, &old),
         Err(ListError::Reset)
     ));
 }
 
 #[test]
-fn a_list_change_no_member_signed_is_refused_by_the_hub() {
+fn a_list_change_neither_the_hub_nor_a_member_signed_is_refused() {
     let (_dir, folder) = folder();
     let time = Time::new();
     let mut hub = open(&folder, &time);
     let (pc, stranger) = (key(1), key(9));
 
-    // Before the first member, no change is taken but the setup code's.
+    // Before the first device, no change is taken.
     let early = Change::sign(
         ChangeHash::default(),
         Action::Remove { key: pc.public() },
@@ -285,9 +500,9 @@ fn a_list_change_no_member_signed_is_refused_by_the_hub() {
     );
     assert_eq!(
         error(hub.submit(early)),
-        "the hub has no member yet: the first one joins with the setup code"
+        "the hub has no member yet: pair a first device with flottille-hub pair"
     );
-    set_up(&mut hub, &pc);
+    pair(&mut hub, &pc, "pc", Role::Runner);
     let rename = Action::Rename {
         key: pc.public(),
         name: "laptop".to_owned(),
@@ -300,87 +515,28 @@ fn a_list_change_no_member_signed_is_refused_by_the_hub() {
     claimed.signer = pc.public();
     let off_the_chain = Change::sign(ChangeHash([3; 32]), rename.clone(), &pc);
     for (change, why) in [
-        (by_a_stranger, "is signed by a key that is not a member"),
+        (
+            by_a_stranger,
+            "is signed by a key that is neither a member nor the hub",
+        ),
         (broken, "does not carry its signer's signature"),
         (claimed, "does not carry its signer's signature"),
         (off_the_chain, "does not follow the change before it"),
     ] {
         assert_eq!(
             error(hub.submit(change)),
-            format!("the hub refuses this change: change 2 {why}")
+            format!("the hub refuses this change: change 3 {why}")
         );
     }
-    assert_eq!(hub.list().changes().len(), 1);
+    assert_eq!(hub.list().changes().len(), 2);
 
     // The member's own change is stored, and kept.
     hub.submit(next(&hub, rename, &pc)).unwrap();
     drop(hub);
     let hub = open(&folder, &time);
-    assert_eq!(members(&hub, &pc), [("laptop".to_owned(), Role::Runner)]);
-}
-
-#[test]
-fn the_hub_cannot_add_a_member_or_change_a_role() {
-    let (_dir, folder) = folder();
-    let time = Time::new();
-    let mut hub = open(&folder, &time);
-    let (pc, pixel, stranger) = (key(1), key(2), key(9));
-    set_up(&mut hub, &pc);
-
-    // The hub's key is no device key: it signs no change, and the hub has no method that adds.
-    // An addition answers a join request, signed by the member that invited.
-    let no_request = "the hub refuses this change: it adds a key no join request to its signer \
-                      holds (a device joins through an invitation)";
     assert_eq!(
-        error(hub.submit(next(&hub, add(&pixel, "pixel", Role::Viewer), &pc))),
-        no_request
-    );
-    let token = invite(&mut hub, &time, &pc);
-    hub.join(&token, pixel.public()).unwrap();
-    assert_eq!(
-        error(hub.submit(next(&hub, add(&pixel, "pixel", Role::Runner), &stranger))),
-        no_request
-    );
-
-    // The role is in the signed entry: one changed after signing is refused.
-    let signed = next(&hub, add(&pixel, "pixel", Role::Viewer), &pc);
-    let mut raised = signed.clone();
-    raised.action = add(&pixel, "pixel", Role::Runner);
-    assert_eq!(
-        error(hub.submit(raised)),
-        "the hub refuses this change: change 2 does not carry its signer's signature"
-    );
-    hub.submit(signed).unwrap();
-    assert_eq!(
-        members(&hub, &pc),
-        [
-            ("pc".to_owned(), Role::Runner),
-            ("pixel".to_owned(), Role::Viewer)
-        ]
-    );
-
-    // A viewer may not invite.
-    let ask = InvitationAsk::sign(&hub.key(), time.now(), &pixel).unwrap();
-    assert_eq!(
-        error(hub.invite(&ask)),
-        "pixel may only view: a controller or a runner may invite a device"
-    );
-
-    // A role changed by hand in the state folder: the hub refuses to start on it.
-    drop(hub);
-    let file = folder.join("hub.json");
-    let text = std::fs::read_to_string(&file).unwrap();
-    assert!(text.contains("\"viewer\""), "{text}");
-    std::fs::write(&file, text.replace("\"viewer\"", "\"runner\"")).unwrap();
-    let refused = error(Hub::open(&folder, time.clone()));
-    assert_eq!(
-        refused,
-        format!(
-            "the member list in {} does not check: change 2 does not carry its signer's \
-             signature; the hub stores only what members signed, so the file was changed or \
-             damaged: run flottille-hub setup-code --reset on this machine to start again",
-            file.display()
-        )
+        members(&hub, &hub.key()),
+        [("laptop".to_owned(), Role::Runner)]
     );
 }
 
@@ -390,7 +546,7 @@ fn a_reset_works_on_a_state_that_does_not_check() {
     let time = Time::new();
     let mut hub = open(&folder, &time);
     let made = hub.key();
-    set_up(&mut hub, &key(1));
+    pair(&mut hub, &key(1), "pc", Role::Runner);
     drop(hub);
 
     let file = folder.join("hub.json");
@@ -402,9 +558,8 @@ fn a_reset_works_on_a_state_that_does_not_check() {
         std::fs::write(&file, broken).unwrap();
         assert!(Hub::open(&folder, time.clone()).is_err());
 
-        let code = reset(&folder).unwrap();
+        reset(&folder).unwrap();
         let hub = open(&folder, &time);
-        assert_eq!(hub.setup_code().unwrap(), code);
         assert!(hub.list().changes().is_empty());
         assert_eq!(hub.key(), made);
     }
@@ -416,167 +571,22 @@ fn a_second_hub_on_the_same_folder_is_refused_until_the_first_is_dropped() {
     let (_dir, folder) = folder();
     let time = Time::new();
     let mut hub = open(&folder, &time);
-    let code = hub.setup_code().unwrap().to_owned();
 
-    // Another process, or `setup-code` and `setup-code --reset`, while the hub runs: refused, so
-    // that a reset is never undone by the running hub's next write, nor its old code left valid.
+    // Another process, or `reset`, while the hub runs: refused, so that a reset is never undone
+    // by the running hub's next write.
     let another = format!(
         "another flottille-hub uses {}: stop it first",
         folder.display()
     );
     assert_eq!(error(Hub::open(&folder, time.clone())), another);
     assert_eq!(error(reset(&folder)), another);
-    assert_eq!(hub.setup_code().unwrap(), code);
-    hub.setup(&code, vec![root_entry(&key(1), "pc")]).unwrap();
+    pair(&mut hub, &key(1), "pc", Role::Runner);
 
     drop(hub);
     let hub = open(&folder, &time);
-    assert_eq!(hub.list().changes().len(), 1);
+    assert_eq!(hub.list().changes().len(), 2);
     drop(hub);
     reset(&folder).unwrap();
-}
-
-#[test]
-fn an_invitation_works_once_and_expires_after_five_minutes() {
-    let (_dir, folder) = folder();
-    let time = Time::new();
-    let mut hub = open(&folder, &time);
-    let (pc, pixel, tablet, stranger) = (key(1), key(2), key(3), key(9));
-    set_up(&mut hub, &pc);
-
-    // Once.
-    let token = invite(&mut hub, &time, &pc);
-    hub.join(&token, pixel.public()).unwrap();
-    assert_eq!(
-        error(hub.join(&token, tablet.public())),
-        "this invitation was answered already: ask for a new one"
-    );
-    assert_eq!(
-        hub.requests(&pc.public()),
-        [JoinRequest {
-            token,
-            key: pixel.public(),
-            inviter: pc.public(),
-        }]
-    );
-    assert!(hub.requests(&pixel.public()).is_empty());
-
-    // Valid 5 minutes: at 4:59 a device still joins; at 5:00 it does not.
-    let token = invite(&mut hub, &time, &pc);
-    time.pass(299);
-    hub.join(&token, tablet.public()).unwrap();
-    let token = invite(&mut hub, &time, &pc);
-    time.pass(300);
-    let expired = "this invitation is unknown or expired: ask for a new one";
-    assert_eq!(error(hub.join(&token, tablet.public())), expired);
-    assert_eq!(error(hub.join(&Token([5; 16]), tablet.public())), expired);
-    assert!(hub.requests(&pc.public()).is_empty());
-
-    // The ask: signed by a member, for this hub, within 5 minutes, taken once.
-    let ask = InvitationAsk::sign(&hub.key(), time.now(), &pc).unwrap();
-    hub.invite(&ask).unwrap();
-    assert_eq!(error(hub.invite(&ask)), "this ask was taken already");
-    let old = InvitationAsk::sign(&hub.key(), time.now() - 300, &pc).unwrap();
-    let ahead = InvitationAsk::sign(&hub.key(), time.now() + 300, &pc).unwrap();
-    for ask in [old, ahead] {
-        assert_eq!(
-            error(hub.invite(&ask)),
-            "this ask was not signed within 5 minutes of the hub's time: check the device's \
-             clock"
-        );
-    }
-    let mut forged = InvitationAsk::sign(&hub.key(), time.now(), &stranger).unwrap();
-    forged.member = pc.public();
-    assert_eq!(
-        error(hub.invite(&forged)),
-        "this ask does not carry its member's signature"
-    );
-    let elsewhere = InvitationAsk::sign(&stranger.public(), time.now(), &pc).unwrap();
-    assert_eq!(error(hub.invite(&elsewhere)), "this ask is for another hub");
-    let not_member = InvitationAsk::sign(&hub.key(), time.now(), &stranger).unwrap();
-    assert_eq!(
-        error(hub.invite(&not_member)),
-        format!("{} is not a member", stranger.public().fingerprint())
-    );
-}
-
-#[test]
-fn a_refused_or_expired_join_request_adds_nothing() {
-    let (_dir, folder) = folder();
-    let time = Time::new();
-    let mut hub = open(&folder, &time);
-    let (pc, pixel, tablet) = (key(1), key(2), key(3));
-    set_up(&mut hub, &pc);
-    let no_request = "the hub refuses this change: it adds a key no join request to its signer \
-                      holds (a device joins through an invitation)";
-
-    // Refused, by the member that invited only.
-    let token = invite(&mut hub, &time, &pc);
-    hub.join(&token, pixel.public()).unwrap();
-    assert_eq!(
-        error(hub.refuse(&token, &tablet.public())),
-        "only the member that invited may refuse its join request"
-    );
-    hub.refuse(&token, &pc.public()).unwrap();
-    assert!(hub.requests(&pc.public()).is_empty());
-    assert_eq!(
-        error(hub.submit(next(&hub, add(&pixel, "pixel", Role::Controller), &pc))),
-        no_request
-    );
-    assert_eq!(
-        error(hub.join(&token, tablet.public())),
-        "this invitation is unknown or expired: ask for a new one"
-    );
-    assert_eq!(
-        error(hub.refuse(&token, &pc.public())),
-        "no join request holds this invitation"
-    );
-
-    // Expired with its token, 5 minutes after the invitation, whenever the device joined.
-    let token = invite(&mut hub, &time, &pc);
-    time.pass(200);
-    hub.join(&token, pixel.public()).unwrap();
-    time.pass(100);
-    assert!(hub.requests(&pc.public()).is_empty());
-    assert_eq!(
-        error(hub.submit(next(&hub, add(&pixel, "pixel", Role::Controller), &pc))),
-        no_request
-    );
-
-    assert_eq!(hub.list().changes().len(), 1);
-    drop(hub);
-    let hub = open(&folder, &time);
-    assert_eq!(members(&hub, &pc), [("pc".to_owned(), Role::Runner)]);
-}
-
-#[test]
-fn an_accepted_join_request_adds_the_member_once() {
-    let (_dir, folder) = folder();
-    let time = Time::new();
-    let mut hub = open(&folder, &time);
-    let (pc, pixel) = (key(1), key(2));
-    set_up(&mut hub, &pc);
-
-    let token = invite(&mut hub, &time, &pc);
-    hub.join(&token, pixel.public()).unwrap();
-    let entry = next(&hub, add(&pixel, "pixel", Role::Controller), &pc);
-    hub.submit(entry.clone()).unwrap();
-    assert!(hub.requests(&pc.public()).is_empty());
-    assert_eq!(
-        error(hub.submit(entry)),
-        "the hub refuses this change: it adds a key no join request to its signer holds (a \
-         device joins through an invitation)"
-    );
-
-    drop(hub);
-    let hub = open(&folder, &time);
-    assert_eq!(
-        members(&hub, &pc),
-        [
-            ("pc".to_owned(), Role::Runner),
-            ("pixel".to_owned(), Role::Controller)
-        ]
-    );
 }
 
 #[test]
@@ -600,7 +610,7 @@ fn presence_and_addresses_are_kept_in_memory_for_members_only() {
     let time = Time::new();
     let mut hub = open(&folder, &time);
     let (pc, stranger) = (key(1), key(9));
-    set_up(&mut hub, &pc);
+    pair(&mut hub, &pc, "pc", Role::Runner);
 
     let presence = Presence {
         active: true,
@@ -638,7 +648,7 @@ fn a_member_makes_at_most_30_changes_an_hour() {
     let time = Time::new();
     let mut hub = open(&folder, &time);
     let pc = key(1);
-    set_up(&mut hub, &pc);
+    pair(&mut hub, &pc, "pc", Role::Runner);
     let rename = |hub: &Hub<Time>, n: usize| {
         next(
             hub,
@@ -680,8 +690,7 @@ fn the_hub_refuses_a_change_past_the_most_a_device_takes() {
             &pc,
         );
     }
-    let state = serde_json::json!({"version": 1, "members": list});
-    std::fs::write(folder.join("hub.json"), state.to_string()).unwrap();
+    written(&folder, &list);
     let mut hub = open(&folder, &time);
     let change = next(
         &hub,
@@ -716,8 +725,7 @@ fn a_full_list_still_removes_a_member() {
             &pc,
         );
     }
-    let state = serde_json::json!({"version": 1, "members": list});
-    std::fs::write(folder.join("hub.json"), state.to_string()).unwrap();
+    written(&folder, &list);
     let mut hub = open(&folder, &time);
     // The viewer's own change stays refused...
     let own = next(
@@ -746,33 +754,24 @@ fn a_full_list_still_removes_a_member() {
         &pc,
     );
     hub.submit(removal).unwrap();
-    assert_eq!(members(&hub, &pc).len(), 1);
+    assert_eq!(members(&hub, &pc.public()).len(), 1);
 }
 
 #[test]
-fn a_setup_is_stored_whole_or_not_at_all() {
+fn what_a_device_says_of_itself_is_kept_with_its_facts() {
     let (_dir, folder) = folder();
     let time = Time::new();
     let mut hub = open(&folder, &time);
-    let code = hub.setup_code().unwrap().to_owned();
-    let pc = key(1);
-    // Its second change does not check: nothing of the setup is kept, and the code still works.
-    let mut list = MemberList::start("pc", &pc).unwrap();
-    list.sign(
-        Action::Machine {
-            key: pc.public(),
-            machine: key(10).public(),
-        },
-        &pc,
-    );
-    let refused = error(hub.setup(&code, list.changes().to_vec()));
-    assert!(
-        refused.contains("change 2 does not carry its machine's signature"),
-        "{refused}"
-    );
-    assert!(hub.list().changes().is_empty());
-    drop(hub);
-    let mut hub = open(&folder, &time);
-    assert_eq!(hub.setup_code().unwrap(), code);
-    hub.setup(&code, vec![list.changes()[0].clone()]).unwrap();
+    let (pc, stranger) = (key(1), key(9));
+    pair(&mut hub, &pc, "pc", Role::Runner);
+    time.pass(30);
+    hub.about(&pc.public(), "computer", "linux").unwrap();
+    hub.seen(&pc.public(), "0.4.1").unwrap();
+    let facts = hub.facts()[0].clone();
+    assert_eq!(facts.kind.as_deref(), Some("computer"));
+    assert_eq!(facts.system.as_deref(), Some("linux"));
+    assert_eq!(facts.version.as_deref(), Some("0.4.1"));
+    assert_eq!(facts.last_seen, Some(START + 30));
+    assert!(hub.about(&pc.public(), "a b", "linux").is_err());
+    assert!(hub.about(&stranger.public(), "computer", "linux").is_err());
 }

@@ -57,8 +57,9 @@ fn three() -> (DeviceKey, DeviceKey, DeviceKey, MemberList) {
     (pc, pixel, tablet, list)
 }
 
+/// The list's members, its hub's key that of no member: the list was made before pair mode.
 fn members(list: &MemberList) -> Members {
-    list.check(&key(1).public()).unwrap()
+    list.check(&key(1).public(), &key(9).public()).unwrap()
 }
 
 /// A fixed moment, the time of the tests.
@@ -516,22 +517,17 @@ fn a_refusal_shows_no_control_character_nor_a_long_text() {
 }
 
 #[test]
-fn remote_setup_is_answered_only_on_its_own_machine() {
+fn remote_pair_is_answered_only_on_its_own_machine() {
     let (_, pixel, _, list) = three();
     let members = members(&list);
     let mut requests = Requests::new(time(0));
-    let text = signed(
-        &pixel,
-        "remote.setup",
-        json!({"url": "http://hub.example.net"}),
-        0,
-    );
+    let text = signed(&pixel, "remote.pair", json!({"code": "0123"}), 0);
     let refused = requests
         .check(&text, "pc", &members, time(0))
         .unwrap_err()
         .to_string();
     assert!(
-        refused.contains("remote.setup is answered only on its own machine"),
+        refused.contains("remote.pair is answered only on its own machine"),
         "{refused}"
     );
 }
@@ -551,8 +547,7 @@ fn a_refusal_says_which_role_allows_it() {
         ("agent.stop", "stop a session"),
         ("agent.cancel", "stop a turn"),
         ("agent.mode", "switch the mode"),
-        ("remote.invite", "invite a device"),
-        ("remote.change", "add, remove or rename a device"),
+        ("remote.change", "remove, rename or restyle a device"),
         // A method with no words of its own is named.
         ("project.add", "call project.add"),
     ] {

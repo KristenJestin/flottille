@@ -689,8 +689,8 @@ fn a_client_link_s_requests_are_refused_on_a_machine_with_no_member_list() {
         assert_eq!(refused["error"]["code"], "refused");
         assert_eq!(
             refused["error"]["message"],
-            "refused: this machine is not set up with a hub: flottille remote setup, or \
-             flottille remote join"
+            "refused: this machine is paired with no hub: flottille remote pair, with the code \
+             flottille-hub pair prints on the hub's host"
         );
         assert!(answers.next().await.is_none());
         client.close().await;

@@ -514,11 +514,11 @@ impl Shell {
                 cx,
             );
             modals.add(
-                crate::machines_page::JOIN_MODAL,
+                crate::machines_page::CONNECT_MODAL,
                 &machines,
-                MachinesSection::join_dialog,
-                MachinesSection::join_is_open,
-                MachinesSection::join_focus,
+                MachinesSection::connect_dialog,
+                MachinesSection::connect_is_open,
+                MachinesSection::connect_focus,
                 cx,
             );
             modals.add(

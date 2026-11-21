@@ -212,12 +212,13 @@ esac"#,
 }
 
 #[test]
-fn the_image_starts_prints_a_setup_code_and_answers_on_its_port() {
+fn the_image_starts_says_how_to_pair_and_answers_on_its_port() {
     let work = tempfile::tempdir().unwrap();
     fake_docker(
         work.path(),
-        "flottille-hub: state in /var/lib/flottille-hub; the hub's key is SHA256:abc\n\
-         flottille-hub: setup code: 482-193-775, valid until a first member joins\n\
+        "flottille-hub: state in /var/lib/flottille-hub; the hub's key is 3f2a-91bc-0d4e-77a1\n\
+         flottille-hub: no device is paired yet: run flottille-hub --state /var/lib/flottille-hub \
+         pair beside this hub, as its user (in a container, with docker exec)\n\
          flottille-hub: listening on 0.0.0.0:7448 (plain: the traffic is in clear)",
         "426",
     );
@@ -239,10 +240,7 @@ fn the_image_starts_prints_a_setup_code_and_answers_on_its_port() {
     ] {
         assert!(calls.contains(flag), "{flag}: {calls}");
     }
-    // The code is never printed by the check: CI logs are public.
-    assert!(!said(&output).contains("482-193-775"), "{}", said(&output));
-
-    // No setup code in its log: refused.
+    // Its log does not say how to pair: refused.
     fake_docker(
         work.path(),
         "flottille-hub: listening on 0.0.0.0:7448 (plain)",
@@ -258,7 +256,7 @@ fn the_image_starts_prints_a_setup_code_and_answers_on_its_port() {
     // Nothing answering on the port: refused.
     fake_docker(
         work.path(),
-        "flottille-hub: setup code: 482-193-775, valid until a first member joins",
+        "flottille-hub: no device is paired yet: run flottille-hub --state /data pair",
         "000",
     );
     let output = with_fakes(
@@ -350,8 +348,11 @@ fn the_compose_example_is_valid() {
     assert!(
         !compose.contains("ghcr.io/KristenJestin") && !compose.contains("ghcr.io/kristenjestin")
     );
-    // Where the setup code is, and the port to open.
-    assert!(compose.contains("logs hub"), "{compose}");
+    // How to pair a device beside the hub that runs, and the port to open.
+    assert!(
+        compose.contains("exec hub /flottille-hub --state /var/lib/flottille-hub pair"),
+        "{compose}"
+    );
 
     let workflow = text(".github/workflows/ci.yml");
     let hub = job(&workflow, "hub");
@@ -395,7 +396,11 @@ fn the_systemd_unit_example_runs_the_hub_as_a_service_of_its_own() {
     // Loopback behind a proxy by default; the state in the unit's own folder.
     assert!(exec.contains("--listen 127.0.0.1:7448"), "{exec}");
     assert!(exec.contains("--state /var/lib/flottille-hub"), "{exec}");
-    // Where the first log shows the setup code.
+    // How to pair a device beside the service, and where its log is.
+    assert!(
+        unit.contains("sudo flottille-hub --state /var/lib/flottille-hub pair"),
+        "{unit}"
+    );
     assert!(unit.contains("journalctl -u flottille-hub"), "{unit}");
 }
 
@@ -446,7 +451,7 @@ fn the_hub_jobs_run_on_a_pull_request_only_when_the_hub_or_the_release_changes()
         "tools/check-static.sh",
         "tools/check-hub-image.sh",
         "the_static_binary_runs_with_no_shared_library",
-        "the_image_starts_prints_a_setup_code_and_answers_on_its_port",
+        "the_image_starts_says_how_to_pair_and_answers_on_its_port",
     ] {
         assert!(hub.contains(part), "{part}: {hub}");
     }
@@ -584,7 +589,8 @@ fn the_docs_say_what_is_published_and_how_to_run_it() {
         "ghcr.io/<owner>/<repository>-hub",
         "crates/flottille-hub/compose.example.yml",
         "crates/flottille-hub/flottille-hub.service",
-        "logs hub",
+        "/flottille-hub --state /var/lib/flottille-hub pair",
+        "sudo flottille-hub --state",
         "journalctl -u flottille-hub",
         "7448",
         // The first release's image is private until the package is switched to public, once.
@@ -596,8 +602,7 @@ fn the_docs_say_what_is_published_and_how_to_run_it() {
         assert!(releases.contains(part), "{part}");
     }
     let remote = text("docs/remote.md");
-    let hub =
-        &remote[remote.find("## The hub").unwrap()..remote.find("### The first member").unwrap()];
+    let hub = &remote[remote.find("## The hub").unwrap()..remote.find("## Pairing").unwrap()];
     assert!(hub.contains("docs/releases.md"), "linked from \"The hub\"");
     assert!(hub.contains("compose.example.yml"));
 }

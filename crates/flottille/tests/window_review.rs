@@ -1339,8 +1339,19 @@ fn instructions_for_this_check_fold_under_each_check(cx: &mut TestAppContext) {
             Some("Instructions for this check"),
             "{key}"
         );
+        // The summary says "none" before the daemon has answered too: it is the editor that
+        // tells the instructions were read, and an edit made before that is not kept.
+        let editor = shell
+            .read_with(cx, |s, cx| {
+                s.extensions()
+                    .read(cx)
+                    .check_guidance("review", key)
+                    .cloned()
+            })
+            .unwrap();
         until(&shell, cx, "the instructions are read", |cx| {
-            label(cx, &format!("{fold}-summary")).as_deref() == Some("none")
+            editor.read_with(cx, |e, _| e.shown().is_some())
+                && label(cx, &format!("{fold}-summary")).as_deref() == Some("none")
         });
         assert!(
             bounds(cx, &fold).top() > bounds(cx, &format!("review-check-{key}-switch")).bottom(),
