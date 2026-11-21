@@ -25,6 +25,11 @@ and an agent running outside Flottille drives it through [`flottille mcp`](#the-
 - **The program answers to `flottille` and to `flot`** (see [The `flot` name](#the-flot-name)).
   The examples below write `flottille`.
 - The examples below use invented projects and paths.
+- **Each command has its place in the window**, except the few a script alone has a use for
+  (`daemon`, `watch`, `agent run`, `vault provide`, `window`, `bridge`, `read-page`, `mcp`): the
+  screen, dialog or menu entry that calls the same daemon method. The table is
+  `crates/flottille-window/src/parity.rs`, and the test `every_cli_command_has_its_place_in_the_window`
+  refuses a command heading of this file that is in neither list.
 
 ## The `flot` name
 
