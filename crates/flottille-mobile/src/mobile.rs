@@ -507,13 +507,13 @@ impl Inner {
             return;
         };
         for (name, machine) in runners {
-            if !connection.linking.contains_key(&name) {
-                let task = self
-                    .handle
-                    .spawn(keep_linked(self.clone(), name.clone(), machine));
-                connection
-                    .linking
-                    .insert(name, (machine, task.abort_handle()));
+            if let std::collections::hash_map::Entry::Vacant(vacant) =
+                connection.linking.entry(name)
+            {
+                let task =
+                    self.handle
+                        .spawn(keep_linked(self.clone(), vacant.key().clone(), machine));
+                vacant.insert((machine, task.abort_handle()));
             }
         }
     }
@@ -640,9 +640,10 @@ impl Inner {
                 // The first watch of a runner: where its events start for this phone, a position
                 // and no event, kept at once so that the next start resumes there.
                 let mut state = self.state();
-                let id = machine_id(&key);
-                if !state.seen.contains_key(&id) {
-                    state.seen.insert(id, started);
+                if let std::collections::btree_map::Entry::Vacant(vacant) =
+                    state.seen.entry(machine_id(&key))
+                {
+                    vacant.insert(started);
                     keep_seen(&self.folder, &state.seen);
                 }
             }
