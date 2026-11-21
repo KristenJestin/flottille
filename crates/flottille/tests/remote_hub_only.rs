@@ -188,7 +188,10 @@ fn a_store_with_addresses_migrates() {
     let folder = user.path("state/flottille/remote");
     std::fs::create_dir_all(&folder).unwrap();
     use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+    // The user's only, as the daemon makes them.
+    for made in [user.path("state/flottille"), folder.clone()] {
+        std::fs::set_permissions(&made, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
     let other = MachineKey::load_or_make(&user.path("other"))
         .unwrap()
         .public();
