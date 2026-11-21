@@ -2279,12 +2279,15 @@ pub(crate) async fn forward(
     }
 }
 
-/// Every round: dials each machine trusted and not linked whose turn has come.
+/// Every round, and whenever the hub says another list of the members online: dials each machine
+/// trusted and not linked whose turn has come, and lets go of the links of those gone from it.
 async fn dial(remote: Arc<Remote>, mut stopping: tokio::sync::watch::Receiver<bool>) {
     let mut round = tokio::time::interval(ROUND);
     loop {
         tokio::select! {
             _ = round.tick() => {}
+            // A machine that stops and starts again is off the hub for less than a round.
+            _ = remote.endpoint.online_changed() => {}
             _ = stopping.wait_for(|stopping| *stopping) => return,
         }
         if remote.holding() {
@@ -2301,11 +2304,15 @@ async fn dial(remote: Arc<Remote>, mut stopping: tokio::sync::watch::Receiver<bo
         let mut due = Vec::new();
         {
             let mut seen = remote.seen.lock().unwrap();
-            for (key, seen) in seen.iter() {
-                if !online.iter().any(|member| member.as_bytes() == key)
-                    && let Some((_, link, _)) = &seen.link
-                {
+            for (key, seen) in seen.iter_mut() {
+                if online.iter().any(|member| member.as_bytes() == key) {
+                    continue;
+                }
+                if let Some((_, link, _)) = &seen.link {
                     link.close(GONE_FROM_HUB);
+                }
+                if let Some(client) = seen.client.take() {
+                    client.close(GONE_FROM_HUB);
                 }
             }
             // A machine no longer trusted is let go.
