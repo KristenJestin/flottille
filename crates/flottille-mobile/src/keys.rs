@@ -65,6 +65,16 @@ impl Sealed {
     }
 }
 
+impl Sealed {
+    /// Removes the kept device key: a join replaces it with the one the hub admitted.
+    pub(crate) fn forget_kept(&self) -> std::io::Result<()> {
+        match std::fs::remove_file(self.folder.join(DEVICE_SEALED)) {
+            Err(error) if error.kind() != ErrorKind::NotFound => Err(error),
+            _ => Ok(()),
+        }
+    }
+}
+
 impl Keyring for Sealed {
     fn read(
         &self,

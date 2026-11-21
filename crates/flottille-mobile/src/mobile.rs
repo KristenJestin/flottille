@@ -359,15 +359,20 @@ impl Inner {
             .map_err(|error| MobileError::new(format!("the core failed: {error}")))?
     }
 
-    /// The join accepted: the hub and the key kept, the view told.
+    /// The join accepted: the hub and the key kept, the view told. A join again starts anew:
+    /// the connection to the hub before, and what the view held of it, end.
     fn joined(&self, device: Device, key: DeviceKey) -> Result<(), MobileError> {
         write_json(&self.folder.join(HUB_FILE), &device)?;
         let mut state = self.state();
+        let ended = state.connection.take();
+        state.view = View::default();
         if let Ok(members) = device.members() {
             state.view.members(&members, &key.public());
         }
         state.device = Some(device);
         state.key = Some(Arc::new(key));
+        drop(state);
+        drop(ended);
         Ok(())
     }
 

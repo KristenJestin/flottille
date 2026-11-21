@@ -16,6 +16,12 @@ use flottille_link::{
 use crate::MobileError;
 use crate::keys::Sealed;
 
+fn failed_to_keep(error: std::io::Error) -> MobileError {
+    MobileError::new(format!(
+        "the device key kept before cannot be removed: {error}"
+    ))
+}
+
 /// Pairs with the hub of the QR's `code` as `name` with `role` (`controller` or `viewer`): the
 /// hub as pinned, with the list checked, and the device key kept.
 pub(crate) async fn pair(
@@ -69,6 +75,15 @@ pub(crate) async fn pair(
         .submit(&mut paired.session, declared)
         .await
         .map_err(said)?;
+    // Joined again (after its removal, its hub's reset, a key the Keystore lost): the key the hub
+    // just admitted replaces the one kept, which signs for no member any more.
+    let admitted = key.public();
+    sealed.forget_kept().map_err(failed_to_keep)?;
     let key = key.promote(sealed, folder).map_err(failed)?;
+    if key.public() != admitted {
+        return Err(MobileError::new(
+            "another device key was kept while this one joined: join again",
+        ));
+    }
     Ok((device, key))
 }
