@@ -911,13 +911,23 @@ Keystore there.
   no role and says it was removed.
 - **Connected** (`connect`, the Kotlin `Flow` of batches): the control session (what it is and
   its presence told), a
-  link to each runner of the list, dialled by one function of the core (today the addresses the hub
-  tells; through the hub with #1151), each request signed with the device key, and each runner's
+  link to each runner of the list, dialled by one function of the core (the addresses the hub
+  tells, then through the hub, #1167), each request signed with the device key, and each runner's
   `events.watch` resumed after the last event handed over of it, kept in the folder by its machine
   key: a new link, or the app's next start, misses nothing and repeats nothing. An event counts as
   seen once its batch reached the app, so that one on its way when the connection ends, or the app
   is killed, is sent again. `request`, `answer` (Allow, Deny), `stop`
   (the turn) and `follow` (a conversation) go over those links.
+- **The links go through the hub** (#1167): the core gives the endpoint of the connection the
+  relay of its session (`Session::relay`, `Endpoint::through`), as a daemon does, and dials each
+  runner by its machine key: the addresses the hub told first, then the hub when the runner is
+  online there, so that a phone on mobile data reaches a runner that listens nowhere. The core
+  links to the runners once the hub told its addresses for the first time, so that a runner with an
+  address is never taken through the hub by haste. The key of the runner is the one the signed
+  member list holds for its machine on every path: a hub that hands the phone another member's
+  packets as the runner's is refused by the link's handshake, and the view says why. The view's
+  machine says `through_hub` when its link goes through the hub, as the window's Machines page
+  does.
 - **The view state** is computed in Rust and handed whole with every batch: the runners and their
   state, one list of sessions for every machine by project (#1150), the followed conversation, the
   requests and the questions that wait for the user, and this device's name and role. A batch is
