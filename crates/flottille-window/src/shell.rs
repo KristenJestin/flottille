@@ -438,7 +438,9 @@ impl Shell {
             let reading = connections.clone();
             cx.defer(move |cx| reading.update(cx, |section, cx| section.read(cx)));
         }
-        let settings = cx.new(|_| {
+        let settings = cx.new(|cx| {
+            // A provider's row draws its sign-in from the section: it follows the section's list.
+            cx.observe(&sign_in, |_, _, cx| cx.notify()).detach();
             SettingsPage::new(
                 this.clone(),
                 rules.clone(),
