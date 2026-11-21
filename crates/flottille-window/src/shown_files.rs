@@ -446,6 +446,8 @@ mod tests {
         let runtime = root.path().join("run");
         let temp = root.path().join("tmp");
         std::fs::create_dir_all(&runtime).unwrap();
+        // As the system makes the user's runtime folder.
+        std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700)).unwrap();
         std::fs::create_dir_all(&temp).unwrap();
 
         let folder = private_folder(Some(&runtime), &temp, 7, 1).unwrap();
