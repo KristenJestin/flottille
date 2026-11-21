@@ -526,6 +526,11 @@ fn session(daemon: &Arc<Daemon>, routine: &Routine, run: &Run) -> Result<String,
         .read(|store| store.set_routine_run_session(run.id, &agent.id))
         .map_err(|error| error.to_string())?;
     agents::write_new(daemon, &agent).map_err(|f| f.message)?;
+    if routine.mode == routine::READ_ONLY {
+        daemon
+            .read(|store| store.set_read_only(&agent.id))
+            .map_err(|error| error.to_string())?;
+    }
     deliveries::deliver(
         daemon,
         &agent.id,
@@ -877,9 +882,19 @@ pub fn refuses(daemon: &Daemon, agent: &str, tool: &str, args: &Value) -> Option
     if reads(tool, args) {
         return None;
     }
+    // The flag on the session's own row first: it holds whatever becomes of the routine (a
+    // removal forgets its runs). Its root's, and the run's mode, for the moment between the
+    // run's start and the flag.
     let root = tree::root_of(daemon, agent);
-    let run = daemon.read(|store| store.routine_run_of(&root)).ok()??;
-    (run.mode == routine::READ_ONLY).then(|| {
+    let flagged = |id: &str| daemon.read(|store| store.read_only(id)).unwrap_or(false);
+    let read_only = flagged(agent)
+        || flagged(&root)
+        || daemon
+            .read(|store| store.routine_run_of(&root))
+            .ok()
+            .flatten()
+            .is_some_and(|run| run.mode == routine::READ_ONLY);
+    read_only.then(|| {
         format!(
             "refused: this session is the run of a read-only routine: it reads, and writes \
              nothing, in every mode ({tool} {}writes or acts)",

@@ -1030,6 +1030,9 @@ const NAMED_MIGRATIONS: &[(&str, &str)] = &[(
     ) STRICT;
     CREATE INDEX routine_runs_by_routine ON routine_runs (routine, id);
     CREATE INDEX routine_runs_by_session ON routine_runs (session);
+    -- A run's session that may write nothing, set when the run starts and given to the children
+    -- it makes: the gate reads it on the session's own row, whatever becomes of its routine.
+    ALTER TABLE agents ADD COLUMN read_only INTEGER NOT NULL DEFAULT 0;
 "#,
 )];
 
@@ -1620,6 +1623,13 @@ impl Store {
                 agent.detached_from,
                 agent.titled_by,
             ],
+        )?;
+        // A child of a session that may write nothing may write nothing either, whatever becomes
+        // of its parent (a detach): the flag is its own.
+        transaction.execute(
+            "UPDATE agents SET read_only = 1 WHERE id = ?1 \
+             AND (SELECT read_only FROM agents WHERE id = ?2) = 1",
+            params![agent.id, agent.parent],
         )?;
         let event = append_agent_event(&transaction, &agent.id, event.0, event.1)?;
         transaction.commit()?;
@@ -6157,6 +6167,42 @@ mod tests {
         assert_eq!(store.agents().unwrap(), std::slice::from_ref(&agent));
         assert_eq!(store.agent("other").unwrap(), None);
         assert_eq!(store.agent_events(&agent.id, 0, 10).unwrap(), [event]);
+    }
+
+    #[test]
+    fn a_child_of_a_read_only_session_is_read_only_whatever_its_parent_becomes() {
+        let mut store = Store::open_in_memory().unwrap();
+        let root = an_agent();
+        store
+            .create_agent(&root, ("agent.created", json!({})))
+            .unwrap();
+        assert!(!store.read_only(&root.id).unwrap());
+        store.set_read_only(&root.id).unwrap();
+        let child = Agent {
+            id: "child0000000".into(),
+            parent: Some(root.id.clone()),
+            ..an_agent()
+        };
+        store
+            .create_agent(&child, ("agent.created", json!({})))
+            .unwrap();
+        let other = Agent {
+            id: "other0000000".into(),
+            ..an_agent()
+        };
+        store
+            .create_agent(&other, ("agent.created", json!({})))
+            .unwrap();
+
+        store
+            .connection
+            .execute("UPDATE agents SET parent = NULL WHERE id = ?1", [&child.id])
+            .unwrap();
+
+        assert!(store.read_only(&root.id).unwrap());
+        assert!(store.read_only(&child.id).unwrap(), "its own flag");
+        assert!(!store.read_only(&other.id).unwrap());
+        assert!(!store.read_only("gone").unwrap());
     }
 
     #[test]

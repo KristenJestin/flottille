@@ -253,4 +253,26 @@ impl Store {
         let rows = statement.query_map([], run_row)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
+
+    /// The session may write nothing from now on: a read-only run's. Never cleared.
+    pub fn set_read_only(&self, agent: &str) -> Result<()> {
+        self.connection.execute(
+            "UPDATE agents SET read_only = 1 WHERE id = ?1",
+            params![agent],
+        )?;
+        Ok(())
+    }
+
+    /// Whether the session may write nothing; false for one Flottille has no row of.
+    pub fn read_only(&self, agent: &str) -> Result<bool> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT read_only FROM agents WHERE id = ?1",
+                params![agent],
+                |row| row.get(0),
+            )
+            .optional()?
+            .unwrap_or(false))
+    }
 }
