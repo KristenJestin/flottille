@@ -1398,7 +1398,8 @@ fn a_spec_section_is_edited_in_the_window(cx: &mut TestAppContext) {
         .as_u64()
         .unwrap();
     let (shell, cx) = window(&user, cx);
-    open_spec(&shell, cx, spec);
+    let page = open_spec(&shell, cx, spec);
+    assert!(page.read_with(cx, |p, _| p.can_edit()), "a Draft is edited");
 
     // The Problem is a text: the editor opens on it, and Save writes it whole.
     click(cx, "spec-problem-edit");
@@ -1456,19 +1457,18 @@ fn a_spec_section_is_edited_in_the_window(cx: &mut TestAppContext) {
         "C1",
         "nothing was written"
     );
-    click(cx, "spec-edit-cancel");
+    click(cx, "spec-edit-modal-cancel");
     until(&shell, cx, "the dialog closes", |cx| {
         !found(cx, "spec-edit-modal")
     });
 
-    // Past Draft nothing is edited: the section has no Edit.
+    // Past Draft nothing is edited: the daemon refuses it, so the buttons wait.
     user.call("spec.ready", json!({"spec": spec})).unwrap();
     until(&shell, cx, "the page is Ready", |cx| {
         label(cx, "spec-status").as_deref() == Some("Ready")
     });
     settle(cx);
-    assert!(!found(cx, "spec-problem-edit"));
-    assert!(!found(cx, "spec-behaviour-edit"));
+    assert!(!page.read_with(cx, |p, _| p.can_edit()));
 }
 
 #[gpui_kit::test]
