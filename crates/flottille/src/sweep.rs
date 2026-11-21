@@ -53,6 +53,7 @@ pub fn sweep(daemon: &Arc<Daemon>) {
     agents::forget_kept_sessions(daemon);
     crate::inactive::check(daemon);
     crate::quota::check(daemon);
+    crate::routines::check(daemon);
     crate::models::check(daemon);
     forget_runs(daemon);
     let agents = daemon.read(Store::live_agents).unwrap_or_default();

@@ -237,6 +237,14 @@ pub const METHODS: &[(&str, Class)] = &[
     ("inbox.list", Read),
     ("notifications.list", Read),
     ("notifications.read", Drive),
+    ("routine.list", Read),
+    ("routine.show", Read),
+    ("routine.add", Drive),
+    ("routine.edit", Drive),
+    ("routine.run", Drive),
+    ("routine.pause", Drive),
+    ("routine.resume", Drive),
+    ("routine.remove", Drive),
     ("provider.list", Read),
     ("provider.enable", Drive),
     ("provider.disable", Drive),
@@ -263,6 +271,7 @@ pub const LAUNCHES: &[&str] = &[
     "spec.from_ticket",
     "spec.develop",
     "review.start",
+    "routine.run",
 ];
 
 /// Whether `method` starts an agent's process.
