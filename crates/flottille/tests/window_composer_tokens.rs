@@ -558,15 +558,23 @@ fn a_sent_command_shows_as_typed(cx: &mut TestAppContext) {
     let (shell, reply, cx) = open_session(&user, &lead, cx);
     knowing_commands(&shell, &reply, cx);
     let page = page_of(&shell, cx);
+    let sent = user.received_requests("session/prompt").len();
     focus(cx);
     // The word finished, it is a chip and the `/` list is closed: Enter sends.
     cx.simulate_input("fix the test, then /ship ");
     settle(cx);
     cx.simulate_keystrokes("enter");
+    // The daemon's record is in the conversation before it is drawn: a record held for the answer
+    // to the send is shown in the place of the message being sent once that answer is in.
     until(&shell, cx, "the message shows", |cx| {
-        commanded(&page, cx).is_some()
+        commanded(&page, cx)
+            .is_some_and(|(at, _)| has(chip(&format!("row-{at}-message-tokens"), 0), cx))
     });
     settle(cx);
+    // The agent is handed the message a moment after the window shows it.
+    until(&shell, cx, "the agent got the message", |_| {
+        user.received_requests("session/prompt").len() > sent
+    });
 
     let (at, block) = commanded(&page, cx).unwrap();
     let Block::Message { text, .. } = block else {

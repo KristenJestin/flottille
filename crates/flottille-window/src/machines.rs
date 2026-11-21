@@ -347,6 +347,10 @@ pub enum Ask {
     },
     AddressAdd(String),
     AddressRemove(String),
+    /// Turns remote on or off (`remote.configure`).
+    Configure {
+        on: bool,
+    },
 }
 
 impl Ask {
@@ -357,6 +361,7 @@ impl Ask {
             Ask::Remove { name } => Asked::Remove(name.clone()),
             Ask::AddressAdd(address) => Asked::AddressAdd(address.clone()),
             Ask::AddressRemove(address) => Asked::AddressRemove(address.clone()),
+            Ask::Configure { on } => Asked::Configure { on: *on },
         }
     }
 }
@@ -369,6 +374,7 @@ pub enum Asked {
     Remove(String),
     AddressAdd(String),
     AddressRemove(String),
+    Configure { on: bool },
 }
 
 /// What the machines' worker tells the window.
@@ -583,6 +589,10 @@ impl Remote {
             }
             Ask::AddressRemove(address) => {
                 request("remote.address.remove", json!({"address": address}))?;
+                Ok(())
+            }
+            Ask::Configure { on } => {
+                request("remote.configure", json!({"on": on}))?;
                 Ok(())
             }
         }

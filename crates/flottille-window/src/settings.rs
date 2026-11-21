@@ -1,8 +1,9 @@
-//! The settings page, in five tabs by subject (`docs/reference/gpui.md`, rule 13): Agents (the
+//! The settings page, in six tabs by subject (`docs/reference/gpui.md`, rule 13): Agents (the
 //! providers, the rules for every project, the long tool results, the sessions), Approvals (the
 //! Auto judge and what it is told), Features (a list of rows, each opening its page: the compaction
-//! here, the others drawn from their declaration, `crate::extensions`), Vault and General (the
-//! appearance, the workspaces folder, the developer mode). Every provider Flottille knows is
+//! here, the others drawn from their declaration, `crate::extensions`), Vault, Machines (Remote:
+//! whether it is on, where this machine is reached, the hub, the devices, the addresses) and
+//! General (the appearance, the workspaces folder, the developer mode). Every provider Flottille knows is
 //! enabled or not with a switch, as the daemon says it (`provider.list`). The window never writes
 //! `providers.toml` itself: a switch asks the daemon (`provider.enable`, `provider.disable`), and
 //! the page follows what the daemon lists next. The Auto judge is chosen here too
@@ -39,13 +40,15 @@ use crate::shell::Shell;
 use crate::vault::VaultSection;
 use crate::workspaces_folder::WorkspacesFolder;
 
-/// The tabs of the page, in order: each one's key and label. A new part of Flottille adds none
-/// (rule 13): it is a row of Features.
-pub const SECTIONS: [(&str, &str); 5] = [
+/// The tabs of the page, in order: each one's key and label. A part of Flottille gets a tab of its
+/// own when it fits (rule 13): a subject the user goes to on its own, with several sections of its
+/// own, as Machines; a smaller part is a row of Features or a section of its subject's tab.
+pub const SECTIONS: [(&str, &str); 6] = [
     ("agents", "Agents"),
     ("approvals", "Approvals"),
     ("features", "Features"),
     ("vault", "Vault"),
+    ("machines", "Machines"),
     ("general", "General"),
 ];
 
@@ -60,14 +63,7 @@ const AGENTS_BLOCKS: [&str; 5] = [
 ];
 
 /// The blocks of the General tab, top to bottom.
-const GENERAL_BLOCKS: [&str; 6] = [
-    "about",
-    "appearance",
-    "workspaces",
-    "developer",
-    "machines",
-    "version",
-];
+const GENERAL_BLOCKS: [&str; 5] = ["about", "appearance", "workspaces", "developer", "version"];
 
 /// The blocks of the Approvals tab: the Auto judge, then what it is told.
 const APPROVALS_BLOCKS: [&str; 2] = ["judge", "guidance"];
@@ -203,9 +199,20 @@ pub enum Reveal {
     Feature(String),
     /// This build's version and its update (the sidebar's foot): General, scrolled to it.
     Version,
+    /// The user's machines: their tab.
+    Machines,
 }
 
 impl Reveal {
+    /// The setting an old link names: Machines were a section of General, and a link to it opens
+    /// their tab (`general#machines`, `settings:general#machines`).
+    pub fn from_link(link: &str) -> Option<Reveal> {
+        match link.strip_prefix("settings:").unwrap_or(link) {
+            "general#machines" | "machines" => Some(Reveal::Machines),
+            _ => None,
+        }
+    }
+
     /// The index of its tab in [`SECTIONS`].
     fn tab(&self) -> usize {
         let key = match self {
@@ -214,6 +221,7 @@ impl Reveal {
             Reveal::Compaction | Reveal::Feature(_) => "features",
             Reveal::Vault => "vault",
             Reveal::Version => "general",
+            Reveal::Machines => "machines",
         };
         SECTIONS
             .iter()
@@ -483,7 +491,7 @@ impl SettingsPage {
                 self.scroll.set_offset(Point::default());
             }
             Reveal::Judge | Reveal::Providers => self.scroll.set_offset(Point::default()),
-            Reveal::Vault => {}
+            Reveal::Vault | Reveal::Machines => {}
             Reveal::Version => self.scroll_to(&GENERAL_BLOCKS, "version"),
         }
         cx.notify();
@@ -2347,13 +2355,13 @@ impl Render for SettingsPage {
             ],
             "features" => vec![("features", self.features_tab(cx))],
             "vault" => vec![("vault", self.vault.clone().into_any_element())],
+            // Remote (#814, #1144): whether it is on, the hub, the devices.
+            "machines" => vec![("machines", self.machines.clone().into_any_element())],
             _ => vec![
                 ("about", self.about.clone().into_any_element()),
                 ("appearance", self.appearance_section(cx).into_any_element()),
                 ("workspaces", self.workspaces.clone().into_any_element()),
                 ("developer", self.developer_section(cx).into_any_element()),
-                // The user's machines (#814): Set up a hub, Devices, Add a device, Addresses.
-                ("machines", self.machines.clone().into_any_element()),
                 ("version", self.version.clone().into_any_element()),
             ],
         };
