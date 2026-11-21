@@ -489,8 +489,11 @@ pub struct Rang {
     pub session: Option<String>,
     pub title: String,
     pub excerpt: String,
-    /// The request's number, for a request: what Allow and Deny answer.
+    /// The request's number, for a request: what Deny answers, and Allow when `whole` says it.
     pub request: Option<u64>,
+    /// The call and why it was held, uncut, when the daemon can say them whole: Allow is offered
+    /// on it alone, what the user allows being what they read.
+    pub whole: Option<String>,
 }
 
 impl Rang {
@@ -505,6 +508,7 @@ impl Rang {
             title: data["title"].as_str()?.to_owned(),
             excerpt: data["excerpt"].as_str().unwrap_or_default().to_owned(),
             request: data["request"].as_u64(),
+            whole: data["whole"].as_str().map(str::to_owned),
         })
     }
 }

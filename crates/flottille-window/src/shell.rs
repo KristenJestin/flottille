@@ -3454,23 +3454,26 @@ impl Shell {
     }
 
     /// The daemon rang a notification in this window, which is focused and does not show its
-    /// session: the same title and excerpt as the system's would have had, in a toast of the kit.
-    /// A request has Allow and Deny, a click opens the session; it folds away after a few seconds
-    /// unless hovered, and at once when the notification is answered or read.
+    /// session: the same title and text as the system's would have had, in a toast of the kit.
+    /// A request has Deny, and Allow (primary) only when the toast says the whole call and why it
+    /// was held; a click opens the session; it folds away after a few seconds unless hovered, and
+    /// at once when the notification is answered or read.
     fn rang(&mut self, rang: Rang, window: &Window, cx: &mut Context<Self>) {
-        // Another window's, or this one lost the focus since: the desktop's is for it.
+        // This window lost the focus since: the daemon has the desktop show it.
         if !window.is_window_active() {
+            self.presence.unshown(rang.id);
             return;
         }
         let key = format!("notification-{}", rang.id);
         let mut toast = gpui_design_system::Toast::notice(rang.title.clone()).keyed(key);
-        if !rang.excerpt.is_empty() {
-            toast = toast.detail(rang.excerpt.clone());
+        let said = rang.whole.as_ref().unwrap_or(&rang.excerpt);
+        if !said.is_empty() {
+            toast = toast.detail(said.clone());
         }
         if let (Some(number), Some(session)) = (rang.request, rang.session.clone()) {
-            for (label, answer) in [("Allow", Answer::Once), ("Deny", Answer::Deny)] {
+            let answer = |answer: Answer| {
                 let (shell, session) = (cx.entity().downgrade(), session.clone());
-                toast = toast.action(label, move |_, cx| {
+                move |_: &mut Window, cx: &mut App| {
                     shell
                         .update(cx, |shell, _| {
                             shell.perform(Command::Answer {
@@ -3480,8 +3483,12 @@ impl Shell {
                             })
                         })
                         .ok();
-                });
+                }
+            };
+            if rang.whole.is_some() {
+                toast = toast.primary_action("Allow", answer(Answer::Once));
             }
+            toast = toast.quiet_action("Deny", answer(Answer::Deny));
         }
         if let Some(session) = rang.session {
             let shell = cx.entity().downgrade();
