@@ -2068,6 +2068,10 @@ impl ServerHandler for Handler {
                 if definition.name == "ask" {
                     tool.description = Some(ask_goes(&self.daemon, &grant.agent).into());
                 }
+                // The actions that file a finding exist only while the developer mode is on.
+                if definition.name == "services" && self.daemon.developer.on() {
+                    crate::findings::offer(&mut tool);
+                }
                 tool
             })
             .collect();
@@ -2757,6 +2761,10 @@ fn verdict_of(
     if tool == "web" && crate::show::is(args) {
         return crate::show::verdict(&grant.place, args);
     }
+    // A finding about Flottille itself changes nothing: harmless in every mode.
+    if tool == "services" && crate::findings::is(args) {
+        return gate::Verdict::Allow;
+    }
     if tool == "web" {
         return crate::web::classify(daemon, grant, args);
     }
@@ -3438,6 +3446,7 @@ async fn performed_once(
     match tool {
         "web" if crate::show::is(&args) => crate::show::show(daemon, grant, args),
         "web" => crate::web::web(daemon, grant, args).await,
+        "services" if crate::findings::is(&args) => crate::findings::tool(daemon, grant, args),
         "services" => crate::services::tool(daemon, grant, args, first).await,
         // An accepted request's `first` is the words the user read (`approvals`).
         "connections" => crate::extensions::family_call(daemon, args, first, &grant.place).await,

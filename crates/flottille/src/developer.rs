@@ -206,6 +206,10 @@ struct Set {
 pub fn call(daemon: &Daemon, method: &str, params: Value) -> Result<Value, Failure> {
     let paths = &daemon.paths;
     match method {
+        // The findings agents filed about Flottille itself (`docs/developer.md`, "The findings").
+        method if method.starts_with("developer.report") => {
+            return crate::findings::call(daemon, method, params);
+        }
         // The file is the user's to edit by hand too: read again, it is what the log follows.
         "developer.show" => {
             let on = setting(paths).map_err(|e| Failure::new("invalid-config", e))?;
