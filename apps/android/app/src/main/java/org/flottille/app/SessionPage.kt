@@ -331,7 +331,8 @@ private fun ConversationList(phone: Phone, key: SessionKey, page: Conversation, 
             val animated = remember { line.key !in initial && line.key !in appeared }
             LaunchedEffect(line.key) { if (animated) appeared += line.key }
             val move = Modifier.animateItem(placementSpec = Motion.spec(Motion.PANEL))
-            Unfold(animated, move) {
+            // The tag is on what unfolds: the line's own size is what grows.
+            Unfold(animated, move.testTag("line:${line.key}")) {
                 when (line) {
                     is Block.Message -> MessageView(phone, key, line.entry)
                     is Block.Steps -> StepsView(line.steps, open = line.key in unfolded) {

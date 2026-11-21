@@ -6,6 +6,8 @@ import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertTextContains
+import androidx.compose.ui.test.hasAnyDescendant
+import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.assertCountEquals
@@ -150,8 +152,8 @@ class SessionPageTest {
         open()
 
         assertEquals(listOf("server" to "a1"), phone.follows)
-        rule.onNodeWithTag("entry:1").assertTextContains("Fix the login", substring = true)
-        rule.onNodeWithTag("entry:4").assertTextContains("On it.", substring = true)
+        assertHas("entry:1", "Fix the login")
+        assertHas("entry:4", "On it.")
         // Its steps are folded as in the window: one line until a click unfolds it.
         rule.onNodeWithText("2 steps").assertIsDisplayed()
         rule.onNodeWithText("Read login.rs").assertDoesNotExist()
@@ -160,7 +162,7 @@ class SessionPageTest {
 
         // Live: the agent's next words come in.
         update(phone) { it.copy(entries = it.entries + Entry(5, "agent", "Done."), working = true) }
-        rule.onNodeWithTag("entry:5").assertTextContains("Done.", substring = true)
+        assertHas("entry:5", "Done.")
 
         // A long conversation pages in: the earlier ones are asked for, never loaded whole.
         phone.earlier["a1"] = phone.state.value.conversation!!.copy(
@@ -186,9 +188,9 @@ class SessionPageTest {
         rule.mainClock.autoAdvance = false
         update(phone) { it.copy(entries = it.entries + Entry(3, "agent", "A new message that is rather long, so that it wraps on a narrow phone")) }
         rule.mainClock.advanceTimeBy(60)
-        val during = rule.onNodeWithTag("entry:3").fetchSemanticsNode().size.height
+        val during = rule.onNodeWithTag("line:m:3").fetchSemanticsNode().size.height
         rule.mainClock.advanceTimeBy(1000)
-        val after = rule.onNodeWithTag("entry:3").fetchSemanticsNode().size.height
+        val after = rule.onNodeWithTag("line:m:3").fetchSemanticsNode().size.height
         assertTrue("it unfolds: $during, then $after", during < after)
     }
 
@@ -313,9 +315,9 @@ class SessionPageTest {
         open()
 
         // The call as the daemon gave it, never re-summarised, and the strong warning of a base one.
-        rule.onNodeWithTag("request:4").assertTextContains("rm -rf build", substring = true)
-        rule.onNodeWithTag("request:4").assertTextContains("Always asks", substring = true)
-        rule.onNodeWithTag("request:5").assertTextContains("fs_read {\"path\":\".env\"}", substring = true)
+        assertHas("request:4", "rm -rf build")
+        assertHas("request:4", "Always asks")
+        assertHas("request:5", "fs_read {\"path\":\".env\"}")
         rule.onAllNodesWithText("Always asks", substring = true).assertCountEquals(1)
     }
 
@@ -344,9 +346,14 @@ class SessionPageTest {
         rule.mainClock.autoAdvance = false
         rule.onNodeWithTag("allow:4").performClick()
         rule.mainClock.advanceTimeBy(300)
-        rule.onNodeWithTag("request:4").assertTextContains("request #4 is decided already", substring = true)
+        assertHas("request:4", "request #4 is decided already")
         rule.mainClock.advanceTimeBy(6_000)
         rule.onNodeWithTag("request:4").assertDoesNotExist()
+    }
+
+    /** The node tagged [tag] holds [text] somewhere inside it: a card is a few texts, not one. */
+    private fun assertHas(tag: String, text: String) {
+        rule.onNode(hasTestTag(tag) and hasAnyDescendant(hasText(text, substring = true))).assertExists()
     }
 
     private fun fill(tag: String) = rule.onNodeWithTag(tag).fetchSemanticsNode().config.getOrNull(FillColour)
@@ -406,7 +413,7 @@ class SessionPageTest {
         rule.onNodeWithTag("send").assertDoesNotExist()
         rule.onNodeWithTag("stop").assertDoesNotExist()
         rule.onNodeWithTag("mode:full").assertDoesNotExist()
-        rule.onNodeWithTag("child:c1").assertTextContains("running cargo test", substring = true)
+        assertHas("child:c1", "running cargo test")
     }
 
     @Test
@@ -440,7 +447,7 @@ class SessionPageTest {
         open()
         // It reads: the conversation, the question and the request are there...
         rule.onNodeWithTag("entry:2").assertIsDisplayed()
-        rule.onNodeWithTag("request:4").assertTextContains("rm -rf build", substring = true)
+        assertHas("request:4", "rm -rf build")
         rule.onNodeWithTag("ask:12").assertIsDisplayed()
         // ...and nothing writes: no composer, no answer, no mode, no Stop.
         for (tag in listOf("composer", "send", "stop", "allow:4", "deny:4", "ask-answer", "mode:full", "mode:ask", "option:0:Yes")) {
