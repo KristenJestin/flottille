@@ -121,32 +121,135 @@ pub async fn output_remote(
 /// its setting's name and the helper it names, read at the daemon's start: never a credential.
 static HELPERS: OnceLock<Vec<(String, String)>> = OnceLock::new();
 
+/// The credential helpers the user's own settings give one forge alone, read at the daemon's
+/// start: each `includeIf "hasconfig:remote.*.url:…"` condition (its key) with the helpers of the
+/// file it includes. Git includes such a file only where a repository's remotes match, which no
+/// read without a repository says.
+static FORGE_HELPERS: OnceLock<Vec<ForgeHelpers>> = OnceLock::new();
+
+/// An `includeIf "hasconfig:…"` condition of the user's settings, and the credential helpers of
+/// the file it includes.
+pub type ForgeHelpers = (String, Vec<(String, String)>);
+
+/// The settings `args` of `git config` lists, read at the daemon's start by its own git, confined:
+/// a git only root may change is not always found, and the one of the `PATH` may be a run's.
+pub(crate) fn start_read<S: AsRef<OsStr>>(args: &[S]) -> String {
+    let mut command = command_of(own(), Path::new("/"), args);
+    crate::landlock::confined(&mut command);
+    let mut command = command.into_std();
+    command.stderr(Stdio::null());
+    crate::children::spawn_std(&mut command)
+        .and_then(std::process::Child::wait_with_output)
+        .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+        .unwrap_or_default()
+}
+
+/// The entries of `git config --null --get-regexp`, each its key and its value.
+pub(crate) fn entries(listed: &str) -> Vec<(String, String)> {
+    listed
+        .split('\0')
+        .filter_map(|entry| entry.split_once('\n'))
+        .map(|(name, value)| (name.to_owned(), value.to_owned()))
+        .collect()
+}
+
 /// Reads the user's credential helpers, before the daemon reads any repository: git sends a
 /// sign-in to `store` on every helper it knows, a repository's own too.
 pub fn find_helpers() {
+    const HELPER: &str = r"^credential\.(.*\.)?helper$";
     HELPERS.get_or_init(|| {
         ["--system", "--global"]
             .into_iter()
             .flat_map(|scope| {
-                let listed = crate::children::spawn_std(
-                    std::process::Command::new(own())
-                        .args(["config", scope, "--includes", "--null", "--get-regexp"])
-                        .arg(r"^credential\.(.*\.)?helper$")
-                        .stdin(Stdio::null())
-                        .stdout(Stdio::piped())
-                        .stderr(Stdio::null()),
-                )
-                .and_then(std::process::Child::wait_with_output)
-                .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
-                .unwrap_or_default();
-                listed
-                    .split('\0')
-                    .filter_map(|entry| entry.split_once('\n'))
-                    .map(|(name, helper)| (name.to_owned(), helper.to_owned()))
-                    .collect::<Vec<_>>()
+                entries(&start_read(&[
+                    "config",
+                    scope,
+                    "--includes",
+                    "--null",
+                    "--get-regexp",
+                    HELPER,
+                ]))
             })
             .collect()
     });
+    FORGE_HELPERS.get_or_init(|| {
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let mut found = Vec::new();
+        for scope in ["--system", "--global"] {
+            let listed = start_read(&[
+                "config",
+                scope,
+                "--includes",
+                "--null",
+                "--show-origin",
+                "--get-regexp",
+                r"^includeif\.hasconfig:.*\.path$",
+            ]);
+            let mut parts = listed.split('\0');
+            while let (Some(origin), Some(entry)) = (parts.next(), parts.next()) {
+                let Some((condition, value)) = entry.split_once('\n') else {
+                    continue;
+                };
+                let file = match value.strip_prefix("~/") {
+                    Some(rest) => home.as_ref().map(|home| home.join(rest)),
+                    None => origin
+                        .strip_prefix("file:")
+                        .and_then(|file| Path::new(file).parent())
+                        .map(|folder| folder.join(value)),
+                };
+                let Some(file) = file else { continue };
+                let file = file.to_string_lossy().into_owned();
+                let helpers = entries(&start_read(&[
+                    "config",
+                    "--file",
+                    &file,
+                    "--includes",
+                    "--null",
+                    "--get-regexp",
+                    HELPER,
+                ]));
+                if !helpers.is_empty() {
+                    found.push((condition.to_owned(), helpers));
+                }
+            }
+        }
+        found
+    });
+}
+
+/// [`FORGE_HELPERS`].
+pub fn forge_helpers() -> &'static [ForgeHelpers] {
+    FORGE_HELPERS.get().map(Vec::as_slice).unwrap_or_default()
+}
+
+/// A settings file of git's that holds `helpers` (each a setting's name, `credential.helper` or
+/// `credential.<url>.helper`, and its value), and nothing else.
+pub fn helpers_file(helpers: &[(String, String)]) -> String {
+    let quoted = |text: &str| {
+        text.replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('\n', "\\n")
+            .replace('\t', "\\t")
+    };
+    let mut file = String::new();
+    for (name, helper) in helpers {
+        let Some(middle) = name
+            .strip_prefix("credential.")
+            .and_then(|rest| rest.strip_suffix("helper"))
+        else {
+            continue;
+        };
+        match middle.strip_suffix('.') {
+            Some(url) if !url.contains('\n') => {
+                file.push_str(&format!("[credential \"{}\"]\n", quoted(url)));
+            }
+            Some(_) => continue,
+            None if middle.is_empty() => file.push_str("[credential]\n"),
+            None => continue,
+        }
+        file.push_str(&format!("\thelper = \"{}\"\n", quoted(helper)));
+    }
+    file
 }
 
 /// The protocols a push the gate let through may use outside the sandbox
@@ -198,14 +301,7 @@ static OWN: OnceLock<Option<PathBuf>> = OnceLock::new();
 /// of it. Never read by a release build, never the git of a push the gate let through.
 const TEST_GIT: &str = "FLOTTILLE_TEST_GIT";
 
-/// The folders of the daemon's `PATH` that only root may change (each of them and every folder
-/// on the way is root's, and no one else may write it), found at its start: the `PATH` of a push
-/// the gate let through, so that a program the user's settings name by a bare name (a credential
-/// helper's `!gh auth git-credential`, `ssh` in a wrapper) is never one a run put first.
-static ROOTED_PATH: OnceLock<OsString> = OnceLock::new();
-
-/// Finds the `git` of [`GIT`] and [`OWN`], and [`ROOTED_PATH`], at the daemon's start, before
-/// anything runs.
+/// Finds the `git` of [`GIT`] and [`OWN`] at the daemon's start, before anything runs.
 pub fn find_git() {
     let chosen = crate::ssh_agent::chosen(crate::ssh_agent::candidates("git"));
     GIT.get_or_init(|| {
@@ -226,14 +322,62 @@ pub fn find_git() {
         }
         chosen.map(|(git, _)| git)
     });
-    ROOTED_PATH.get_or_init(|| {
-        let path = std::env::var_os("PATH").unwrap_or_default();
-        let rooted: Vec<PathBuf> = std::env::split_paths(&path)
-            .filter_map(|folder| folder.canonicalize().ok())
-            .filter(|folder| only_root_may_change(folder))
-            .collect();
-        std::env::join_paths(rooted).unwrap_or_default()
-    });
+}
+
+/// The `PATH` that finds nothing: a path to no folder. An empty one is the current folder to
+/// `execvp` and to some shells, where git runs from.
+pub const NO_PATH: &str = "/nonexistent/flottille-no-path";
+
+/// Makes `folder`, in the daemon's runtime folder (out of every confined command's reach), the
+/// one folder of the `PATH` of a push the gate let through, made for each push (`push_folder`):
+/// a link to each program of the daemon's `PATH` that only root may change, under its name, in
+/// the folders the `PATH` names that only root may change (each, and every folder on the way, is
+/// root's, and no one else may write it). A program the user's settings name by a bare name (a
+/// credential helper's `!gh auth git-credential`, `ssh` in a wrapper) is then never one a run
+/// put first. A name whose first program is not only root's (a file of the user's in
+/// `/usr/local/bin`, a link to one, a link that leads nowhere) has none. Each link names the
+/// program under its own name, not where it leads now: a versioned link (`python3`) follows an
+/// upgrade, which only root makes. [`NO_PATH`] where the folder cannot be made.
+pub fn rooted_folder(folder: &Path) -> PathBuf {
+    let _ = std::fs::remove_dir_all(folder);
+    use std::os::unix::fs::DirBuilderExt;
+    let made = std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(folder);
+    if let Err(error) = made {
+        eprintln!(
+            "flottille daemon: cannot make {}, so a push the gate lets through finds no program \
+             by its bare name: {error}",
+            folder.display()
+        );
+        return PathBuf::from(NO_PATH);
+    }
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let mut named: std::collections::BTreeSet<OsString> = Default::default();
+    for dir in std::env::split_paths(&path).filter_map(|dir| dir.canonicalize().ok()) {
+        if !only_root_may_change(&dir) {
+            continue;
+        }
+        for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+            let name = entry.file_name();
+            let target = entry.path().canonicalize();
+            if target.as_ref().is_ok_and(|target| target.is_dir()) || !named.insert(name.clone()) {
+                continue;
+            }
+            match target {
+                Ok(target) if only_root_may_change(&target) => {
+                    let _ = std::os::unix::fs::symlink(entry.path(), folder.join(&name));
+                }
+                _ => eprintln!(
+                    "flottille daemon: {} is not only root's to change, so a push the gate lets \
+                     through does not run it by its bare name",
+                    entry.path().display()
+                ),
+            }
+        }
+    }
+    folder.to_owned()
 }
 
 /// Whether only root may change `path`, a program or a folder: it and every folder on the way to
@@ -247,11 +391,6 @@ pub(crate) fn only_root_may_change(path: &Path) -> bool {
 fn root_s_alone(folder: &Path) -> bool {
     use std::os::unix::fs::MetadataExt;
     std::fs::metadata(folder).is_ok_and(|m| m.uid() == 0 && m.mode() & 0o022 == 0)
-}
-
-/// The `PATH` of a push the gate let through: [`ROOTED_PATH`].
-pub fn rooted_path() -> OsString {
-    ROOTED_PATH.get().cloned().unwrap_or_default()
 }
 
 /// The `git` the daemon runs for itself: [`OWN`]'s, `git` of the `PATH` where nothing was
@@ -574,6 +713,31 @@ pub(crate) mod tests {
     use super::*;
 
     #[test]
+    fn a_bare_name_links_to_the_program_of_its_own_name_in_the_path() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let folder = rooted_folder(&dir.path().join("path"));
+
+        // `sh` is a link to another program almost everywhere (`dash`, `bash`): the link to the
+        // name, not to what it leads to now, follows an upgrade that moves it.
+        let sh = std::fs::read_link(folder.join("sh")).unwrap();
+        assert_eq!(sh.file_name(), Some(OsStr::new("sh")), "{sh:?}");
+    }
+
+    #[test]
+    fn a_link_folder_that_cannot_be_made_is_a_path_that_finds_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("file");
+        std::fs::write(&file, "").unwrap();
+
+        let folder = rooted_folder(&file.join("path"));
+
+        // An empty one is the current folder to `execvp`: where git runs from.
+        assert!(folder.is_absolute(), "{folder:?}");
+        assert!(!folder.exists(), "{folder:?}");
+    }
+
+    #[test]
     fn the_ssh_git_runs_shares_no_connection_and_forwards_no_agent() {
         // First, so that neither `~/.ssh/config` nor a later option sets them: a master socket
         // in the read-only `~/.ssh` could not be made, and one made elsewhere any run could use.
@@ -648,6 +812,35 @@ pub(crate) mod tests {
         ] {
             assert!(!FETCHED.contains(&super::protocol(url)), "{url}");
         }
+    }
+
+    #[test]
+    fn the_helpers_of_one_forge_are_written_as_git_reads_them() {
+        let helpers = vec![
+            (
+                "credential.helper".to_owned(),
+                "!f() { echo \"a\\b\"; }; f".to_owned(),
+            ),
+            (
+                "credential.https://forge.invalid/a\"b.helper".to_owned(),
+                "store --file ~/.forge\tcredentials".to_owned(),
+            ),
+            ("credential.helper".to_owned(), String::new()),
+        ];
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("helpers");
+        std::fs::write(&file, helpers_file(&helpers)).unwrap();
+
+        let read = std::process::Command::new("git")
+            .args(["config", "--null", "--file"])
+            .arg(&file)
+            .args(["--get-regexp", "^credential"])
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .unwrap();
+
+        assert!(read.status.success(), "{read:?}");
+        assert_eq!(entries(&String::from_utf8_lossy(&read.stdout)), helpers);
     }
 
     #[tokio::test]

@@ -536,15 +536,17 @@ or a setup step runs in it…), with the key at fault.
 
 `{"name"}`. The project's forges and tracker as its Settings show them (`docs/forges.md`, "The
 forge of a repository"): `{"name", "folder", "repositories": [{"path", "remote", "depends_on",
-"url", "forge", "proposal", "disagrees"}], "tracker", "obsolete", "pushes_unlent"}`. `depends_on` lists the paths
+"url", "forge", "proposal", "disagrees"}], "tracker", "obsolete", "pushes_unlifted", "pushes_unlent"}`. `depends_on` lists the paths
 of the repositories it depends on (`[]` when none), `url` is the remote's address (credentials taken
 out, masked; `null` when it has none), `forge` the one declared (`null` when none), `proposal` what
 the address proposes (`null` when nothing), `disagrees` why the declared forge is not where the
 remote leads (`null` when it is). `obsolete` lists the keys of the file that are no longer read
 (the old `[forges]`, `[agent_actions]`, a command's former `grants` and `children`), each with what
-replaces it. `pushes_unlent` says why the user's SSH agent is lent to no push, so that a push over
-SSH is refused (`docs/vault.md`, "The runtime folder"), as `flottille doctor` says it; `null` when
-it is lent. Nothing is asked of a forge.
+replaces it. `pushes_unlifted` says why no push an agent asks for is run outside the sandbox, so
+that every such push is refused (no Landlock, no `git` only root may change: `docs/vault.md`, "The
+runtime folder"); `null` when pushes are run. `pushes_unlent` says why the user's SSH agent is lent
+to no push, so that a push over SSH is refused, as `flottille doctor` says it; `null` when it is
+lent. Nothing is asked of a forge.
 
 #### `project.programs`
 
