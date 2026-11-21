@@ -490,7 +490,7 @@ fn the_release_carries_the_hub_archives_and_its_image_is_pushed_by_a_job_that_ru
     // after; a release is made whole or not at all.
     let publish = job(&workflow, "publish");
     assert!(
-        publish.contains("needs: [verified-on-dev, changes, verify, build, hub]"),
+        publish.contains("needs: [verified-on-dev, changes, verify, build, hub, android]"),
         "{publish}"
     );
     assert!(
