@@ -21,6 +21,9 @@ use crate::workspace::{Action, Failure, Step, StepState, Workspace};
 use crate::{Error, Result};
 
 /// The code of one repository that travelled for a launch (`travels`).
+mod routines;
+pub use routines::NewRun;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Travel {
     /// `out` when it went to `machine`, `in` when it came from it.
@@ -977,6 +980,46 @@ const MIGRATIONS: &[&str] = &[
         seeded INTEGER NOT NULL DEFAULT 0
     ) STRICT;
     INSERT INTO notification_cursor (id, seq) SELECT 1, coalesce(max(seq), 0) FROM events;
+",
+    "
+    -- The routines (`docs/design.md`, \"Routines\"): work the daemon starts by itself, as a new
+    -- root session, at its time. `next_at` is when its next run is due, null while it is paused;
+    -- `delayed` why that is later than its schedule says (a spent quota).
+    CREATE TABLE routines (
+        id           TEXT PRIMARY KEY,
+        name         TEXT NOT NULL UNIQUE,
+        project      TEXT NOT NULL,
+        prompt       TEXT NOT NULL,
+        provider     TEXT,
+        model        TEXT,
+        effort       TEXT,
+        schedule     TEXT NOT NULL,
+        zone         TEXT,
+        mode         TEXT NOT NULL,
+        rings        TEXT NOT NULL,
+        paused       INTEGER NOT NULL DEFAULT 0,
+        missed_hours INTEGER NOT NULL,
+        next_at      INTEGER,
+        delayed      TEXT,
+        created_at   INTEGER NOT NULL,
+        updated_at   INTEGER NOT NULL
+    ) STRICT;
+    -- Each run of a routine: its session (none for a skipped run), kept with the run once the
+    -- session ended, and the mode it started in.
+    CREATE TABLE routine_runs (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        routine    TEXT NOT NULL REFERENCES routines (id) ON DELETE CASCADE,
+        due_at     INTEGER NOT NULL,
+        started_at INTEGER NOT NULL,
+        ended_at   INTEGER,
+        session    TEXT,
+        mode       TEXT NOT NULL,
+        outcome    TEXT NOT NULL,
+        summary    TEXT,
+        why        TEXT
+    ) STRICT;
+    CREATE INDEX routine_runs_by_routine ON routine_runs (routine, id);
+    CREATE INDEX routine_runs_by_session ON routine_runs (session);
 ",
 ];
 
