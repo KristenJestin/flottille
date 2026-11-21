@@ -45,5 +45,4 @@ class FakePhone(initial: PhoneView = PhoneView()) : Phone {
         state.value = afterLeave
     }
 
-    override suspend fun presence(active: Boolean) {}
 }
