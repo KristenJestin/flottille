@@ -1277,14 +1277,20 @@ fn notes_are_grouped_by_area_with_fixes_last() {
 #[test]
 fn the_token_is_given_to_the_step_that_reads_the_notes_only() {
     let workflow = std::fs::read_to_string(tool(".github/workflows/ci.yml")).unwrap();
+    // The build job: from its environment (the head's commit and branch) to its first step's run.
     let build = workflow
-        .split("      HEAD_REF: ${{ github.head_ref }}")
+        .split("      HEAD_SHA: ${{ github.event.pull_request.head.sha }}\n    outputs:")
         .nth(1)
-        .unwrap();
+        .expect("the build job");
     let (job, steps) = build.split_once("    steps:").unwrap();
     // The job's own environment reaches every step, the build scripts and the dependencies.
     assert!(!job.contains("GH_TOKEN"), "{job}");
-    let (version, _) = steps.split_once("        run: |").unwrap();
+    let (version, _) = steps
+        .split_once("name: The channel and the version")
+        .unwrap()
+        .1
+        .split_once("        run: |")
+        .unwrap();
     assert!(
         version.contains("GH_TOKEN: ${{ github.token }}"),
         "{version}"
