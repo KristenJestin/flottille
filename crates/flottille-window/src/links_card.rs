@@ -12,7 +12,8 @@ use std::sync::Arc;
 use gpui_design_system::Type as _;
 use gpui_design_system::color::mix;
 use gpui_design_system::{
-    Button, Card, Icon, Item, Listing, enter, icon, palette, presence, pressable, space,
+    Button, Card, Icon, Item, Listing, Skeleton, awaiting, enter, icon, palette, presence,
+    pressable, space,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -64,6 +65,11 @@ fn picture_type(target: &str) -> Option<&'static str> {
     }
 }
 
+/// Whether the target is a picture, by its extension.
+pub fn is_picture(target: &str) -> bool {
+    picture_type(target).is_some()
+}
+
 /// Whether the target is a file of the place: an address gets no thumbnail.
 fn is_file(target: &str) -> bool {
     !(target.starts_with("http://") || target.starts_with("https://"))
@@ -96,20 +102,31 @@ impl LinksCard {
     /// The card shows these links: the pictures among them are read, once each.
     pub fn show<T: 'static>(&mut self, links: &[ShownLink], cx: &mut Context<T>, of: Of<T>) {
         // A file of another machine is that machine's: a path of the same name here is none of
-        // its picture, and nothing of it is read.
+        // its picture, so that machine is asked for it (`crate::shown_files`).
         let elsewhere = crate::machines::shown_machine(cx).is_some();
+        let connect = crate::shown_files::connect(cx);
         for link in links {
-            if !is_file(&link.target)
-                || elsewhere
-                || picture_type(&link.target).is_none()
-                || self.pictures.contains_key(&link.target)
-            {
+            let Some(mime) = picture_type(&link.target) else {
+                continue;
+            };
+            if !is_file(&link.target) || self.pictures.contains_key(&link.target) {
                 continue;
             }
+            let reading = match (elsewhere, &connect) {
+                (false, _) => {
+                    let path = PathBuf::from(&link.target);
+                    cx.background_spawn(async move { read(path) })
+                }
+                (true, Some(connect)) => {
+                    let (connect, link) = (connect.clone(), link.clone());
+                    cx.background_spawn(async move {
+                        crate::shown_files::picture(&connect, &link, mime, THUMB_PIXELS)
+                    })
+                }
+                (true, None) => continue,
+            };
             self.pictures.insert(link.target.clone(), Picture::Reading);
             let target = link.target.clone();
-            let path = PathBuf::from(&target);
-            let reading = cx.background_spawn(async move { read(path) });
             cx.spawn(async move |this, cx| {
                 let picture = reading.await;
                 this.update(cx, |this, cx| {
@@ -158,16 +175,27 @@ impl LinksCard {
             .map(|row| {
                 let n: usize = row.key.parse().unwrap_or_default();
                 let link = row.value;
-                // A file of the machine shown is said where it is, and not opened here.
+                // A file of the machine shown is said where it is, and not opened here, but for a
+                // picture or a video, which that machine sends.
                 let elsewhere = machine.as_ref().filter(|_| is_file(&link.target));
-                let said = match elsewhere {
-                    Some(machine) => format!(
+                let video = crate::shown_files::is_video(&link.target);
+                let media = picture_type(&link.target).is_some() || video;
+                let sent = elsewhere.filter(|_| media);
+                let kind = if video { "Video" } else { "Picture" };
+                let said = match (elsewhere, sent) {
+                    (Some(machine), Some(_)) => format!(
+                        "{kind} of {machine} shared by the agent: {}, {}",
+                        link.name(),
+                        link.whence
+                    ),
+                    (Some(machine), None) => format!(
                         "File of {machine} shared by the agent: {}, {}",
                         link.name(),
                         link.target
                     ),
-                    None => format!("Link shared by the agent: {}, {}", link.name(), link.whence),
+                    _ => format!("Link shared by the agent: {}, {}", link.name(), link.whence),
                 };
+                let reading = matches!(self.pictures.get(&link.target), Some(Picture::Reading));
                 let picture = match self.pictures.get(&link.target) {
                     Some(Picture::Ready(image)) => Some(image.clone()),
                     _ => None,
@@ -185,9 +213,10 @@ impl LinksCard {
                             .child(SharedString::from(link.name().to_owned())),
                     )
                     .when(link.title.is_some() || elsewhere.is_some(), |d| {
-                        let whence = match elsewhere {
-                            Some(machine) => format!("{machine}: {}", link.target),
-                            None => link.whence.clone(),
+                        let whence = match (elsewhere, sent) {
+                            (Some(machine), Some(_)) => format!("{machine} · {}", link.whence),
+                            (Some(machine), None) => format!("{machine}: {}", link.target),
+                            _ => link.whence.clone(),
                         };
                         d.child(
                             div()
@@ -198,9 +227,16 @@ impl LinksCard {
                         )
                     });
                 let target = link.target.clone();
-                let opens = open.clone();
+                // Open of a picture or a video another machine sends opens a copy of it here.
+                let opens: Open = match sent {
+                    Some(_) => {
+                        let link = link.clone();
+                        Rc::new(move |_: &str, cx: &mut App| crate::shown_files::open(&link, cx))
+                    }
+                    None => open.clone(),
+                };
                 let thumb = {
-                    let (target, opens) = (target.clone(), open.clone());
+                    let (target, opens) = (target.clone(), opens.clone());
                     // The click goes where Open goes, through the same checks.
                     let frame = pressable(
                         div()
@@ -226,13 +262,35 @@ impl LinksCard {
                                 .opacity(1.0 - 0.2 * press)
                         },
                     );
-                    // It unfolds and fades in once the picture is read; a line that has none
-                    // takes no room.
-                    presence(
-                        card(&format!("link-{n}-thumb-presence")),
-                        picture.is_some(),
-                        div().flex_none().pr(space::MD).child(frame),
-                    )
+                    let remote = sent.is_some() && !video;
+                    // Nothing came from the other machine: the placeholder gives way to nothing.
+                    let shown = div()
+                        .flex_none()
+                        .pr(space::MD)
+                        .when(!remote || picture.is_some(), |d| d.child(frame));
+                    match remote {
+                        // Another machine sends it: a placeholder stands in its place while it
+                        // comes, and fades into it.
+                        true => awaiting(
+                            card(&format!("link-{n}-thumb-awaiting")),
+                            reading,
+                            div().flex_none().pr(space::MD).child(
+                                Skeleton::new(card(&format!("link-{n}-thumb-skeleton")))
+                                    .w(px(THUMB.0))
+                                    .h(px(THUMB.1)),
+                            ),
+                            shown,
+                        )
+                        .into_any_element(),
+                        // It unfolds and fades in once the picture is read; a line that has none
+                        // takes no room.
+                        false => presence(
+                            card(&format!("link-{n}-thumb-presence")),
+                            picture.is_some(),
+                            shown,
+                        )
+                        .into_any_element(),
+                    }
                 };
                 let line = div()
                     .id(card(&format!("link-{n}")))
@@ -250,10 +308,15 @@ impl LinksCard {
                     )
                     .child(thumb)
                     .child(words)
-                    .when(elsewhere.is_none(), |d| {
+                    .when(elsewhere.is_none() || sent.is_some(), |d| {
+                        let words = if video && sent.is_some() {
+                            "Play"
+                        } else {
+                            "Open"
+                        };
                         d.child(
                             div().flex_none().ml(space::MD).child(
-                                Button::secondary(card(&format!("link-{n}-open")), "Open")
+                                Button::secondary(card(&format!("link-{n}-open")), words)
                                     .on_click(move |_, _, cx| opens(&target, cx)),
                             ),
                         )

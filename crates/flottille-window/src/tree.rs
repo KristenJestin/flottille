@@ -11,9 +11,8 @@ use gpui_design_system::color::mix;
 use gpui_design_system::motion::{ENTER, PANEL};
 use gpui_design_system::rows::TWO_LINES;
 use gpui_design_system::{
-    Button, Field, Fold, Icon, Item, Listing, Menu, Modal, Select, SelectOption, Tie, TreeRow,
-    changing, fade, hoverable, meta, palette, presence, presence_of, section_label, space, tipped,
-    tree_children, tree_tie,
+    Button, Fold, Icon, Item, Listing, Menu, Modal, Tie, TreeRow, changing, fade, hoverable, meta,
+    palette, presence, presence_of, section_label, space, tipped, tree_children, tree_tie,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -22,7 +21,6 @@ use gpui_kit::{
     TestSupportExt as _, WeakEntity, Window, div, px,
 };
 
-use crate::actions::Command;
 use crate::end_led::{self, LedEnd};
 use crate::model::{Place, ago};
 use crate::session::end_sentence;
@@ -259,11 +257,6 @@ impl Mark {
 /// The side panel: the primary button, the `PROJECTS` label, the projects and, pinned at the
 /// panel's bottom under a line whatever the tree's length, the "Ended" group, which unfolds upward
 /// over the tree.
-/// The machine switcher at the top of the sidebar; each option is `machine-switcher-<name>`.
-pub const SWITCHER: &str = "machine-switcher";
-/// This machine's option in the switcher.
-pub const SWITCHER_THIS: &str = "this-machine";
-
 pub struct Sidebar {
     shell: WeakEntity<Shell>,
     projects: Vec<Entity<ProjectNode>>,
@@ -285,9 +278,6 @@ pub struct Sidebar {
     refused: Option<SharedString>,
     /// Whether the daemon has not told yet what the tree shows: its rows are skeletons until then.
     loading: bool,
-    /// The user's machines as this machine last said them, and the one shown (`None`: this one).
-    machines: Option<crate::machines::Machines>,
-    shown: Option<String>,
     /// What the foot says of an update of Flottille, when there is one to act on.
     version_line: Option<SharedString>,
     /// The quiet mark of what is new since the version last run, until its page is opened.
@@ -307,64 +297,9 @@ impl Sidebar {
             asked: HashSet::new(),
             refused: None,
             loading: true,
-            machines: None,
-            shown: None,
             version_line: None,
             whats_new: None,
         }
-    }
-
-    /// The machines the switcher offers, and the one shown.
-    pub fn set_machines(
-        &mut self,
-        machines: crate::machines::Machines,
-        shown: Option<String>,
-        cx: &mut Context<Self>,
-    ) {
-        if self.machines.as_ref() != Some(&machines) || self.shown != shown {
-            self.machines = Some(machines);
-            self.shown = shown;
-            cx.notify();
-        }
-    }
-
-    /// The machine switcher: this machine first, then each runner with its state. Shown once
-    /// there is another machine to show.
-    fn switcher(&self) -> impl IntoElement + use<> {
-        let read = self.machines.clone().unwrap_or_default();
-        let runners: Vec<crate::machines::Machine> = read.runners().cloned().collect();
-        let this_name = read
-            .this
-            .clone()
-            .unwrap_or_else(|| "This machine".to_owned());
-        let options =
-            std::iter::once(SelectOption::new(SWITCHER_THIS, this_name).line("This machine"))
-                .chain(runners.iter().map(|machine| {
-                    SelectOption::new(machine.name.clone(), machine.name.clone())
-                        .line(machine.state_words())
-                }));
-        let chosen = self
-            .shown
-            .as_ref()
-            .and_then(|shown| runners.iter().position(|m| &m.name == shown))
-            .map_or(0, |at| at + 1);
-        let names: Vec<String> = runners.iter().map(|m| m.name.clone()).collect();
-        let shell = self.shell.clone();
-        let select = Select::new(SWITCHER, options, chosen).on_choose(move |at, _, cx| {
-            let name = at.checked_sub(1).and_then(|at| names.get(at)).cloned();
-            shell
-                .update(cx, |shell, cx| shell.choose_machine(name, cx))
-                .ok();
-        });
-        presence(
-            "machine-switcher-block",
-            !runners.is_empty(),
-            div().pt(space::MD).px(space::MD).child(Field::new(
-                "machine-switcher-field",
-                "Machine",
-                select,
-            )),
-        )
     }
 
     pub fn projects(&self) -> &[Entity<ProjectNode>] {
@@ -419,14 +354,18 @@ impl Sidebar {
         }
     }
 
-    fn confirm_end(&mut self, cx: &mut Context<Self>) {
+    fn confirm_end(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some((session, _)) = self.ending.take() else {
             return;
         };
         self.asked.insert(session.clone());
-        self.shell
-            .update(cx, |shell, _| shell.perform(Command::Stop { session }))
-            .ok();
+        let shell = self.shell.clone();
+        // Once this update is done: the shell draws the tree again, this sidebar's included.
+        window.defer(cx, move |window, cx| {
+            shell
+                .update(cx, |shell, cx| shell.end_confirmed(session, window, cx))
+                .ok();
+        });
         cx.notify();
     }
 
@@ -570,16 +509,14 @@ impl Render for Sidebar {
             .child(end_led::block("sidebar-end", &self.led, cx))
             .action(
                 Button::danger("sidebar-end-confirm", end_led::end_label(count, &self.led))
-                    .on_click(cx.listener(|this, _, _, cx| this.confirm_end(cx))),
+                    .on_click(cx.listener(|this, _, window, cx| this.confirm_end(window, cx))),
             );
-        let switcher = self.switcher();
         div()
             .id("sidebar")
             .size_full()
             .bg(p.side)
             .flex()
             .flex_col()
-            .child(switcher)
             .child(
                 div()
                     .flex_none()
@@ -1090,8 +1027,13 @@ pub struct SessionRow {
     /// It runs on another machine: its second line says which and its state as last known, and
     /// opening it shows that machine.
     elsewhere: Option<crate::model::Elsewhere>,
+    /// The machine it runs on, when it is not this one: its second line says it.
+    tag: Option<SharedString>,
     shell: WeakEntity<Shell>,
 }
+
+/// How far the ink of a session whose machine is off fades.
+const GREYED: f32 = 0.45;
 
 /// What a session's row offers under the pointer.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -1136,8 +1078,26 @@ impl SessionRow {
             tie: None,
             tie_shown: Tie::default(),
             elsewhere: None,
+            tag: None,
             shell,
         }
+    }
+
+    /// The machine it runs on, when it is not this one.
+    pub fn tag(&self) -> Option<&str> {
+        self.tag.as_deref()
+    }
+
+    pub fn set_tag(&mut self, tag: Option<&str>, cx: &mut Context<Self>) {
+        if self.tag.as_deref() != tag {
+            self.tag = tag.map(|tag| SharedString::from(tag.to_owned()));
+            cx.notify();
+        }
+    }
+
+    /// Its machine is off: the row is greyed, and does not open.
+    pub fn offline(&self) -> bool {
+        self.elsewhere.as_ref().is_some_and(|there| there.offline)
     }
 
     /// The machine it runs on and its state, for a session on another machine.
@@ -1301,13 +1261,15 @@ impl SessionRow {
         self.actions = actions;
         self.detach = detach.map(|by| SharedString::from(by.to_owned()));
         let detach = self.detach.clone();
+        // A session another machine lists is renamed there, never from its light row.
+        let renamed = self.elsewhere.is_none();
         self.menu = match actions {
             Actions::None => None,
             offered => {
                 let (shell, id) = (self.shell.clone(), self.id.clone());
                 let menu = cx.new(|cx| {
                     let mut menu = Menu::new(session_menu_id(&id), "Session actions", cx);
-                    {
+                    if renamed {
                         let (shell, id) = (shell.clone(), id.clone());
                         menu = menu.entry(
                             session_rename_id(&id),
@@ -1546,6 +1508,10 @@ impl Render for SessionRow {
                 let elsewhere = elsewhere.clone();
                 shell
                     .update(cx, |shell, cx| match elsewhere {
+                        // Its machine is off: nothing of it can be read now.
+                        Some(there) if there.offline => {}
+                        // This machine's, listed while another is in front: this one comes back.
+                        Some(there) if there.here => shell.open_here(there.agent, cx),
                         // Another machine's: the window shows that machine, on that session.
                         Some(there) => shell.open_elsewhere(there.machine, there.agent, cx),
                         None => shell.open(Selection::Session(session), window, cx),
@@ -1635,8 +1601,17 @@ impl Render for SessionRow {
             None => (TWO_LINES - (FIRST + LINE)) / 2. + FIRST / 2.,
             Some(_) => 14.,
         };
+        // A session whose machine is off fades its ink, and takes it back when the machine is.
+        let greyed = fade(
+            ElementId::Name(format!("session-greyed-fade-{}", self.id).into()),
+            self.offline(),
+            PANEL,
+            window,
+            cx,
+        );
         div()
             .relative()
+            .opacity(1.0 - GREYED * greyed)
             .pl(space::XL * (self.tie_shown.depth() as f32 * tied))
             .when(tied > 0.0, |d| {
                 d.child(tree_tie(
@@ -1747,8 +1722,11 @@ impl SessionRow {
             .chain(pull.as_ref().map(pull_said))
             .collect::<Vec<_>>()
             .join(" · ");
-        if let Some(there) = self.elsewhere.clone() {
+        if let Some(there) = self.elsewhere.clone().filter(|there| !there.listed) {
             return self.machine_line(there, window, cx);
+        }
+        if let Some(tag) = self.tag.clone() {
+            return self.tag_line(tag, window, cx);
         }
         let place = div()
             .id(session_place_id(&self.id))
@@ -1878,6 +1856,66 @@ impl SessionRow {
                     .test_support()
             }));
         tipped(line, SharedString::from(tip), LINE, window, cx).into_any_element()
+    }
+
+    /// The second line of a session of another machine in the one list: the machine's name, and
+    /// since when it is off while it is, whose words fade as they change.
+    fn tag_line(
+        &self,
+        tag: SharedString,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::AnyElement {
+        let p = palette(cx);
+        let off = self
+            .elsewhere
+            .as_ref()
+            .filter(|there| there.offline)
+            .map(|there| there.state.clone());
+        let said = SharedString::from(match &off {
+            Some(state) => format!("{tag} {state}"),
+            None => tag.to_string(),
+        });
+        let line = div()
+            .id(session_machine_id(&self.id))
+            .aria_label(said.clone())
+            .flex()
+            .items_center()
+            .gap(space::XS)
+            .min_w_0()
+            .h(px(LINE))
+            .overflow_hidden()
+            .text_size(px(11.5))
+            .text_color(p.faint)
+            .child(
+                div().flex_none().child(
+                    gpui_design_system::icon(Icon::Service)
+                        .size(px(11.))
+                        .text_color(p.faint),
+                ),
+            )
+            .child(div().flex_none().whitespace_nowrap().child(tag))
+            .child(changing(
+                ElementId::Name(format!("session-machine-off-{}", self.id).into()),
+                SharedString::from(off.unwrap_or_default()),
+                move |state| {
+                    div()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .child(state)
+                        .into_any_element()
+                },
+            ))
+            .test_support();
+        let tip = div()
+            .id(ElementId::Name(
+                format!("session-machine-tip-{}", self.id).into(),
+            ))
+            .h(px(LINE))
+            .child(line);
+        tipped(tip, said, LINE, window, cx).into_any_element()
     }
 
     /// The second line of a session on another machine: the machine's name, then its state as

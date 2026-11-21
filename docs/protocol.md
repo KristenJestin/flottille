@@ -222,9 +222,11 @@ no device calls a `local` one over a link (`docs/remote.md`, "Roles").
 | `remote.address.remove` | drive |
 | `remote.members` | read |
 | `remote.launches` | read |
+| `remote.sessions` | read |
 | `remote.change` | drive |
 | `remote.pair` | local |
 | `remote.declare` | local |
+| `remote.close` | local |
 | `remote.settings` | local |
 | `remote.configure` | local |
 | `tunnel.open` | drive |
@@ -289,6 +291,7 @@ no device calls a `local` one over a link (`docs/remote.md`, "Roles").
 | `agent.unqueue` | drive |
 | `agent.answer` | drive |
 | `agent.image` | read |
+| `agent.file` | read |
 | `agent.cancel` | drive |
 | `agent.stop` | drive |
 | `agent.resume` | drive |
@@ -1405,6 +1408,21 @@ not listen, `unavailable`, with the reason. No method answers a private key.
   there, `request` its number), `started`, or `ended` once its end came back; `heard` the kind of
   the last delivery it sent here (`child-report`, `session-turn-ended`, `child-question`…) and
   `heard_at` when, `null` before any: what the window shows as its state as last known.
+- `remote.sessions` answers the sessions of every machine, light (`docs/remote.md`, "One list of
+  every machine"): `{"this": [session…], "machines": [{"name", "sessions": [session…], "at"}]}`,
+  `this` this machine's live root sessions, each other machine's as it last listed them over its
+  link (`at` when), kept while it is off, without those whose close waits to be sent; a machine no
+  longer among the user's is not listed. A session is `{"id", "title", "project", "state",
+  "exchanged_at", "created_at", "pilot"}`, `state` `running`, `needs you`, `waiting` or `idle`,
+  `pilot` the session of the agent that leads it on that machine, or `null`; never its
+  conversation. The event `remote.sessions {name}` says that a machine's list changed.
+- `remote.close {request}` keeps the user's close of a session of another machine: `request` is
+  `agent.stop {agent}` for that machine, signed by the client with the device key as any request
+  for another machine. This machine stores it before it sends it, sends it once that machine is
+  linked (now, or when it links again), and drops it from that machine's list at once; one close
+  of a session is kept once. `refused` for a request for this machine, for a method other than
+  `agent.stop`, for a session not named, for a name that is no machine of the user's, or when 100
+  messages wait for that machine already. A local method: never over a link.
 - `remote.change {change}` carries a member's signed change of the list (`flottille_link::Change`:
   a removal, a renaming, an icon and colour), signed by the client after `remote.members`' `head`.
   A member's addition is refused: a device is paired on the hub. It answers `remote.members` once
@@ -2209,6 +2227,20 @@ waiting messages, which stay queued in their order. Refused and not found as `ag
 `{"agent", "name"}`. An image of the agent's, by a name `agent.prompted` gave: `{"mime", "data"}`.
 `not-found` when there is none. A pasted text of the agent's (`agent.send`, `texts`) is given the
 same way, by the file name its marker ends in: `{"mime": "text/plain", "data"}`.
+
+#### `agent.file`
+
+`{"agent", "shown", "offset"?, "length"?}`. A chunk of a picture or a video the agent showed
+(`web` `show_link`), named by `shown`, the number of the `agent.link_shown` event that showed it,
+never by a path (`docs/remote.md`, "A file an agent showed"): `{"mime", "size", "offset", "data"}`,
+`data` at most 512 KiB (`length`, 512 KiB by default and at most, so that a chunk in base64 fits a
+link's frame) of the file from `offset` (0 by
+default), in base64; nothing past its end. `not-found` when `shown` is no file the agent showed;
+`refused` when the file is no picture or video (by its extension), is larger than 2 GiB, or is no
+longer the file shown (a link, a folder made a link, another file at its path, a file with
+several hard links, a program). The machine serves 2 MiB a second, all askers together: a chunk
+waits its turn up to 3 seconds, and past that, or when 8 calls are in flight, the call is `refused`
+at once with a sentence starting `busy:`: ask again.
 
 #### `agent.cancel`
 

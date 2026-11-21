@@ -1081,7 +1081,11 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   chooses it, and the pointer marks the row it is on and a click chooses it. Ctrl K waits while
   a dialog or a list is open. It searches what the window already holds from the daemon (the
   tree, the projects), never the content of conversations (that needs an index);
-- left: the sidebar, each project and, under it, **its sessions in one flat list**, sorted by
+- left: the sidebar, each project and, under it, **its sessions in one flat list**, those of every
+  machine of the user together (a project of the same name on several machines is one group; a
+  session of another machine carries that machine's name on its second line, `server`, greyed
+  with `server offline since 22:14` while it is off, `docs/remote.md`, "One list of every
+  machine"), sorted by
   last exchange (the later of the last message the user gave it and the end of its root's last
   turn, its creation before either: the session that last had one on top. Work done during a turn
   never moves a row, so two sessions working at once keep their places; a state is drawn by the
