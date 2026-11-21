@@ -114,7 +114,8 @@ tasks.withType<Test>().configureEach {
 dependencies {
     // The bindings reach the library through JNA; on the phone, its Android archive.
     implementation("net.java.dev.jna:jna:5.17.0@aar")
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
+    // The Phone interface hands out Flows: the app sees them too.
+    api("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
     // The unit tests run on this machine's JVM: JNA's own jar, with its native part for it.
     testImplementation("net.java.dev.jna:jna:5.17.0")
     testImplementation("junit:junit:4.13.2")

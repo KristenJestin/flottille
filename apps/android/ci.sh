@@ -1,8 +1,9 @@
 #!/bin/bash
 # The Android job of CI (`docs/remote.md`, "The Android app"), from the repository's root on a
 # GitHub runner (ubuntu, the Android SDK and NDK, KVM): the core built with cargo ndk, the Gradle
-# unit tests (the bindings on the JVM, the libraries' 16 KB alignment), then the instrumentation
-# tests on an emulator. As #823's spike ran them.
+# unit tests (the bindings on the JVM, the libraries' 16 KB alignment, the app's screens played by
+# Robolectric against a fake core), then the instrumentation tests of both modules on an emulator.
+# The APK is `apk.sh`'s, the next step of the job.
 #   apps/android/ci.sh
 set -euo pipefail
 started=$SECONDS
@@ -34,11 +35,12 @@ adb=$ANDROID_HOME/platform-tools/adb
 "$emulator" -avd core -no-window -no-audio -no-boot-anim -no-snapshot -gpu swiftshader_indirect \
   -camera-back none -camera-front none >"$out/emulator.log" 2>&1 &
 
-step "the core, the unit tests and the test APK, while it boots"
-"$android/gradle.sh" :core:testDebugUnitTest :core:assembleDebugAndroidTest >"$out/gradle.log" 2>&1 || {
+step "the core and the app, the unit tests and the test APKs, while it boots"
+"$android/gradle.sh" :core:testDebugUnitTest :app:testDebugUnitTest :core:assembleDebugAndroidTest \
+  :app:assembleDebug :app:assembleDebugAndroidTest >"$out/gradle.log" 2>&1 || {
   grep -E '^e: |error|FAILED|FAILURE|What went wrong|Exception' -A4 "$out/gradle.log" | head -80; exit 1; }
 grep -E 'Test.*(PASSED|FAILED)|tests completed' "$out/gradle.log" || true
-for result in "$android"/core/build/test-results/testDebugUnitTest/*.xml; do
+for result in "$android"/core/build/test-results/testDebugUnitTest/*.xml "$android"/app/build/test-results/testDebugUnitTest/*.xml; do
   grep -o 'testcase name="[^"]*"' "$result" || true
 done
 
@@ -52,11 +54,18 @@ done
 
 step "the instrumentation tests"
 "$adb" install -r "$android/core/build/outputs/apk/androidTest/debug/core-debug-androidTest.apk" >/dev/null
-set +e
-timeout 600 "$adb" shell am instrument -w -r org.flottille.core.test/androidx.test.runner.AndroidJUnitRunner \
-  >"$out/instrument.txt" 2>&1
-set -e
-grep -E 'INSTRUMENTATION_STATUS: (test|stack)=|OK \(|FAILURES|Tests run|INSTRUMENTATION_CODE|Error|Exception' \
-  "$out/instrument.txt" | head -60
+"$adb" install -r "$android/app/build/outputs/apk/debug/app-debug.apk" >/dev/null
+"$adb" install -r "$android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk" >/dev/null
+failed=false
+for runner in org.flottille.core.test org.flottille.app.test; do
+  set +e
+  timeout 600 "$adb" shell am instrument -w -r "$runner/androidx.test.runner.AndroidJUnitRunner" \
+    >"$out/instrument-$runner.txt" 2>&1
+  set -e
+  echo "== $runner"
+  grep -E 'INSTRUMENTATION_STATUS: (test|stack)=|OK \(|FAILURES|Tests run|INSTRUMENTATION_CODE|Error|Exception' \
+    "$out/instrument-$runner.txt" | head -60
+  grep -q '^OK (' "$out/instrument-$runner.txt" || failed=true
+done
 step "done"
-grep -q '^OK (' "$out/instrument.txt"
+[ "$failed" = false ]

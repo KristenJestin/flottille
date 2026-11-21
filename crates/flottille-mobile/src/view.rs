@@ -6,7 +6,9 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use flottille_link::{Members, PublicKey, Role};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use flottille_link::{Members, PeerState, PublicKey, Role};
 use serde_json::Value;
 
 /// What the app draws, whole, with every batch.
@@ -20,6 +22,8 @@ pub struct ViewState {
     /// unreachable since 22:14`).
     pub hub: String,
     pub machines: Vec<MachineView>,
+    /// The members of the user's list, in the order they were added: this device among them.
+    pub members: Vec<MemberView>,
     /// The sessions of every machine, by project: a project of the same name on two machines is
     /// one group. Projects by name, so that groups never move; sessions by last exchange.
     pub projects: Vec<ProjectView>,
@@ -37,10 +41,31 @@ pub struct MachineView {
     pub name: String,
     pub role: String,
     pub online: bool,
-    /// Why it is not, when it is not: the link's own sentence.
+    /// `online`, `offline` or `needs an update`: a machine that needs an update is never said
+    /// offline (`docs/remote.md`, "The version").
+    pub state: String,
+    /// When it came to be in that state, in milliseconds since the Unix epoch.
+    pub since: u64,
+    /// Why it is not online, when it is not: the link's own sentence (which address was tried,
+    /// which side to update).
     pub why: String,
     /// Whether its link goes through the hub, not to an address (#1167).
     pub through_hub: bool,
+}
+
+/// A member of the user's list.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct MemberView {
+    pub name: String,
+    pub role: String,
+    /// `desktop`, `laptop`, `server`, `phone`, `tablet`; empty for a member added before icons.
+    pub icon: String,
+    /// One of the eight colours; empty for a member added before colours.
+    pub colour: String,
+    /// Whether this member is this device.
+    pub you: bool,
+    /// Who added it: `the hub`, or a member's name; empty for the root.
+    pub added_by: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
@@ -104,6 +129,7 @@ pub(crate) struct View {
     hub: String,
     /// The runners, in the list's order, with whether each is linked.
     machines: Vec<MachineView>,
+    members: Vec<MemberView>,
     /// The sessions by machine and agent.
     sessions: BTreeMap<(String, String), Session>,
     requests: BTreeMap<(String, u64), RequestView>,
@@ -143,6 +169,33 @@ impl View {
                 self.name.clear();
             }
         }
+        self.members = members
+            .members()
+            .iter()
+            .map(|member| MemberView {
+                name: member.name.clone(),
+                role: member.role.word().to_owned(),
+                icon: member
+                    .icon
+                    .map(|icon| icon.word().to_owned())
+                    .unwrap_or_default(),
+                colour: member
+                    .colour
+                    .map(|colour| colour.word().to_owned())
+                    .unwrap_or_default(),
+                you: member.key == *own,
+                added_by: if member.added_by == members.hub() {
+                    "the hub".to_owned()
+                } else if member.added_by == member.key {
+                    String::new()
+                } else {
+                    members
+                        .get(&member.added_by)
+                        .map(|adder| adder.name.clone())
+                        .unwrap_or_default()
+                },
+            })
+            .collect();
         let before: HashMap<String, MachineView> = self
             .machines
             .drain(..)
@@ -158,6 +211,8 @@ impl View {
                     name: member.name.clone(),
                     role: member.role.word().to_owned(),
                     online: false,
+                    state: PeerState::Offline.to_string(),
+                    since: now_millis(),
                     why: "not linked yet".to_owned(),
                     through_hub: false,
                 },
@@ -186,12 +241,26 @@ impl View {
         }
     }
 
-    pub(crate) fn online(&mut self, machine: &str, online: bool, through_hub: bool, why: &str) {
+    /// The link to `machine` is in `state`, for `why`. `since` moves only when the state does: a
+    /// machine that fails again is offline since the first time.
+    pub(crate) fn online(&mut self, machine: &str, state: PeerState, through_hub: bool, why: &str) {
         if let Some(view) = self.machines.iter_mut().find(|view| view.name == machine) {
-            view.online = online;
-            view.through_hub = online && through_hub;
+            let state = state.to_string();
+            if view.state != state {
+                view.since = now_millis();
+                view.state = state;
+            }
+            view.online = view.state == PeerState::Online.to_string();
+            view.through_hub = view.online && through_hub;
             why.clone_into(&mut view.why);
         }
+    }
+
+    /// This phone removed itself from the list: the hub does not send the list to a device it just
+    /// removed, so nothing of the user's is left to show, and the user is told why.
+    pub(crate) fn removed(&mut self) {
+        *self = View::default();
+        self.say("this phone was removed from the user's hub: pair it again".to_owned());
     }
 
     pub(crate) fn hub(&mut self, hub: &str) {
@@ -382,6 +451,7 @@ impl View {
             name: self.name.clone(),
             hub: self.hub.clone(),
             machines: self.machines.clone(),
+            members: self.members.clone(),
             projects,
             conversation: self
                 .followed
@@ -431,6 +501,13 @@ fn entries<'a>(events: impl Iterator<Item = &'a Value>) -> Vec<Entry> {
         message = if piece { id } else { None };
     }
     entries
+}
+
+fn now_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|since| since.as_millis() as u64)
+        .unwrap_or_default()
 }
 
 fn text(value: &Value) -> String {

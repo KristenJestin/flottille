@@ -21,7 +21,7 @@ use flottille_link::{
     Keyring, KeyringError, Link, MachineKey, Members, Message, PairCode, Proposed, PublicKey,
     Pushed, Requests, Role, Tls, ToDevice, arrive,
 };
-use flottille_mobile::{Batch, Core, Listener, MobileError, Sealer, ViewState};
+use flottille_mobile::{Batch, Core, Listener, MobileError, Sealer, ViewState, hub_card};
 use serde_json::{Value, json};
 use zeroize::Zeroizing;
 
@@ -156,6 +156,9 @@ struct Runner {
     watching: Arc<AtomicUsize>,
     /// The phone's links that ended.
     ended: Arc<AtomicUsize>,
+    /// What it says first on a link: another protocol than the phone's makes it a runner that needs
+    /// an update.
+    hello: Hello,
     name: String,
     /// Its endpoint's key: the machine the phone dials.
     machine: PublicKey,
@@ -176,6 +179,7 @@ impl Runner {
             requests: Arc::new(Mutex::new(Requests::new(SystemTime::now()))),
             watching: Arc::default(),
             ended: Arc::default(),
+            hello: hello(),
             name: name.to_owned(),
             machine,
         }
@@ -258,7 +262,7 @@ impl Runner {
                     accepting.refuse("refused: this machine's key is not one of the user's");
                     return;
                 }
-                let Ok(link) = accepting.handshake(&hello(), "phone").await else {
+                let Ok(link) = accepting.handshake(&runner.hello, "phone").await else {
                     return;
                 };
                 runner.links.lock().unwrap().push(link.clone());
@@ -399,6 +403,19 @@ impl Place {
         add_runner(&self.served, self.dir.path(), name, seed, Reach::Address).await
     }
 
+    /// Another runner, which differs as `behaviour` says.
+    async fn runner_as(&self, name: &str, seed: u8, behaviour: Behaviour) -> Runner {
+        add_runner_as(
+            &self.served,
+            self.dir.path(),
+            name,
+            seed,
+            Reach::Address,
+            behaviour,
+        )
+        .await
+    }
+
     /// Pair mode opened on the hub, as `flottille-hub pair` opens it: the code its QR holds.
     fn pair_code(&self) -> String {
         self.pair_code_at(self.served.address())
@@ -455,6 +472,26 @@ async fn add_runner(
     seed: u8,
     reach: Reach,
 ) -> Runner {
+    add_runner_as(served, dir, name, seed, reach, Behaviour::default()).await
+}
+
+/// How a runner of a test differs from the one a phone links to.
+#[derive(Default)]
+struct Behaviour {
+    /// It tells the hub no address: the phone has none to dial.
+    no_address: bool,
+    /// What it says first on a link, when not this build's.
+    hello: Option<Hello>,
+}
+
+async fn add_runner_as(
+    served: &Served<SystemClock>,
+    dir: &Path,
+    name: &str,
+    seed: u8,
+    reach: Reach,
+    behaviour: Behaviour,
+) -> Runner {
     let server = device_key(seed);
     let machine = MachineKey::load_or_make(&dir.join(format!("machines/{name}-{seed}"))).unwrap();
     let code = served.with_hub(|hub| hub.open_pairing(&url(served.address()), None).unwrap().1);
@@ -486,7 +523,10 @@ async fn add_runner(
     device.submit(&mut paired.session, declared).await.unwrap();
     let mut session = paired.session;
 
-    let runner = Runner::new(name, machine.public());
+    let mut runner = Runner::new(name, machine.public());
+    if let Some(hello) = behaviour.hello {
+        runner.hello = hello;
+    }
     *runner.members.lock().unwrap() = Some(device.members().unwrap());
     let endpoint = match reach {
         // Listens nowhere and tells no address: only the hub reaches it.
@@ -494,12 +534,14 @@ async fn add_runner(
         Reach::Address | Reach::Both => {
             let endpoint = Endpoint::bind(&machine, "127.0.0.1:0".parse().unwrap()).unwrap();
             let at: SocketAddr = endpoint.listening().unwrap();
-            session
-                .ask(Ask::Addresses {
-                    addresses: vec![at.to_string()],
-                })
-                .await
-                .unwrap();
+            if !behaviour.no_address {
+                session
+                    .ask(Ask::Addresses {
+                        addresses: vec![at.to_string()],
+                    })
+                    .await
+                    .unwrap();
+            }
             endpoint
         }
     };
@@ -1284,6 +1326,141 @@ async fn an_event_not_handed_over_before_the_app_was_killed_comes_at_the_next_st
         .await;
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert_eq!(again.texts(), ["1", "2", "3"]);
+    place.served.stop().await;
+}
+
+fn now_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pair_code_shows_the_hub_s_card_before_anything_is_sent() {
+    let place = Place::new().await;
+    let code = place.pair_code();
+    let card = hub_card(code).unwrap();
+    assert_eq!(card.url, url(place.served.address()));
+    assert_eq!(
+        card.fingerprint,
+        place.served.with_hub(|hub| hub.key().fingerprint())
+    );
+    // Nothing crossed the network: the hub is not asked, and no pair mode was spent.
+    let refused = hub_card("not a code".to_owned()).unwrap_err();
+    assert!(!refused.to_string().is_empty());
+    place.served.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_machine_says_its_state_and_since_when() {
+    let place = Place::new().await;
+    // No address the phone knows for it: offline, and why.
+    place
+        .runner_as(
+            "far",
+            2,
+            Behaviour {
+                no_address: true,
+                ..Behaviour::default()
+            },
+        )
+        .await;
+    // Another protocol than the phone's: it needs an update, which is not being offline.
+    let mut other = hello();
+    other.flottille = "9.9.9".to_owned();
+    other.protocols = vec![99];
+    place
+        .runner_as(
+            "old",
+            3,
+            Behaviour {
+                hello: Some(other),
+                ..Behaviour::default()
+            },
+        )
+        .await;
+    let before = now_millis();
+    let (phone, _taken) = place.linked().await;
+    let view = until(&phone, "each machine said", |view| {
+        let state = |name: &str| {
+            view.machines
+                .iter()
+                .find(|machine| machine.name == name)
+                .map(|machine| machine.state.clone())
+        };
+        state("server").as_deref() == Some("online")
+            && state("far").as_deref() == Some("offline")
+            && state("old").as_deref() == Some("needs an update")
+    })
+    .await;
+    let machine = |name: &str| view.machines.iter().find(|m| m.name == name).unwrap();
+    for name in ["server", "far", "old"] {
+        let since = machine(name).since;
+        assert!(
+            since >= before && since <= now_millis(),
+            "{name} since {since}"
+        );
+    }
+    assert!(machine("server").why.is_empty());
+    assert!(
+        !machine("far").why.is_empty(),
+        "the sentence says why it is not linked"
+    );
+    assert!(
+        machine("old").why.contains("9.9.9"),
+        "the sentence names the version to update: {}",
+        machine("old").why
+    );
+    place.served.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_view_lists_the_members_and_marks_this_device() {
+    let place = Place::new().await;
+    let (phone, _taken) = place.linked().await;
+    let view = phone.view();
+    let names: Vec<&str> = view
+        .members
+        .iter()
+        .map(|member| member.name.as_str())
+        .collect();
+    assert_eq!(names, ["server", "phone"]);
+    let me = view.members.iter().find(|member| member.you).unwrap();
+    assert_eq!(
+        (me.name.as_str(), me.role.as_str(), me.icon.as_str()),
+        ("phone", "controller", "phone")
+    );
+    assert!(!view.members[0].you);
+    assert_eq!(view.members[0].role, "runner");
+    assert_eq!(view.members[0].icon, "server");
+    assert_eq!(me.added_by, "the hub");
+    place.served.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn leaving_removes_this_device_from_the_list_and_says_it() {
+    let place = Place::new().await;
+    let (phone, _taken) = place.linked().await;
+    tokio::time::timeout(Duration::from_secs(10), phone.leave())
+        .await
+        .expect("left within 10 s")
+        .unwrap();
+    let gone = place.served.with_hub(|hub| {
+        hub.members()
+            .unwrap()
+            .members()
+            .iter()
+            .all(|member| member.name != "phone")
+    });
+    assert!(gone, "the hub's list no longer holds the phone");
+    let view = until(&phone, "the removal said", |view| view.role.is_empty()).await;
+    assert!(view.members.iter().all(|member| !member.you));
+    assert!(
+        view.said.iter().any(|said| said.contains("removed")),
+        "{:?}",
+        view.said
+    );
     place.served.stop().await;
 }
 

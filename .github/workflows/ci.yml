@@ -494,7 +494,10 @@ jobs:
     env:
       CARGO_INCREMENTAL: 0
     steps:
+      # The whole history, with its tags: the APK's version is `tools/version.sh`'s.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - run: rustup target add aarch64-linux-android x86_64-linux-android
       - uses: Swatinem/rust-cache@v2
         with:
@@ -504,6 +507,30 @@ jobs:
         with:
           tool: cargo-ndk@4.1.2
       - run: apps/android/ci.sh
+      # The APK (`docs/releases.md`, "The version"), on every pull request that touches the app and
+      # every push, for every channel: the version of `tools/version.sh`, signed with the release
+      # key when the repository's secrets hold it and debug-signed (and said so) when they do not.
+      # A pull request's APK is an artefact to install on a phone for a test.
+      - name: The APK, with the version
+        id: apk
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          # Never in a pull request's run, which runs the branch's own scripts: its APK is
+          # debug-signed. A push runs code that was merged.
+          KEYSTORE_BASE64: ${{ github.event_name != 'pull_request' && secrets.ANDROID_KEYSTORE_BASE64 || '' }}
+          FLOTTILLE_KEYSTORE_PASSWORD: ${{ github.event_name != 'pull_request' && secrets.ANDROID_KEYSTORE_PASSWORD || '' }}
+          FLOTTILLE_KEY_ALIAS: ${{ github.event_name != 'pull_request' && secrets.ANDROID_KEY_ALIAS || '' }}
+          FLOTTILLE_KEY_PASSWORD: ${{ github.event_name != 'pull_request' && secrets.ANDROID_KEY_PASSWORD || '' }}
+          APK_OUT: ${{ runner.temp }}/apk
+        run: apps/android/apk.sh
+      - name: Keep the APK
+        if: steps.apk.outputs.dir != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-apk
+          path: ${{ steps.apk.outputs.dir }}
+          retention-days: 14
       - name: Disk left
         if: always()
         run: df -h /
@@ -833,7 +860,7 @@ jobs:
           retention-days: 1
 
   publish:
-    needs: [verified-on-dev, changes, verify, build, hub]
+    needs: [verified-on-dev, changes, verify, build, hub, android]
     # `verify` passed here, or was skipped because this commit passed it on dev: never on a commit
     # no `verify` passed on. A failed or skipped `build` publishes nothing.
     if: >-
@@ -842,6 +869,7 @@ jobs:
         || needs.changes.outputs.alpha == 'true')
       && needs.build.result == 'success' && needs.build.outputs.skip != 'true'
       && needs.hub.result == 'success'
+      && (needs.android.result == 'success' || needs.android.result == 'skipped')
       && (needs.verify.result == 'success'
         || (needs.verify.result == 'skipped' && needs.verified-on-dev.outputs.verified == 'true'))
     runs-on: ubuntu-latest
@@ -868,6 +896,13 @@ jobs:
           pattern: hub-assets-*
           path: hub
           merge-multiple: true
+      # The app's APK (`android`): attached to the release of its version when it is signed with the
+      # release key. One that is debug-signed, or none (the job was skipped), attaches nothing.
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: android-apk
+          path: android
       - name: Publish
         id: publish
         env:
@@ -890,6 +925,13 @@ jobs:
             cat "$RUNNER_TEMP/tip.err" >&2; exit 1
           fi
           title="Flottille v$VERSION"
+          apk=()
+          for file in android/flottille-*.apk; do
+            case "$file" in
+              *-debug-signed.apk | 'android/flottille-*.apk') ;;
+              *) apk+=("$file") ;;
+            esac
+          done
           # Nothing is replaced, ever (releases are immutable): a version already published, of any
           # channel, stays as it is; a draft left by a failed upload is made again.
           if draft=$(gh release view "$TAG" --json isDraft --jq .isDraft 2> /dev/null); then
@@ -898,7 +940,7 @@ jobs:
           # The files go with the release in this one call: an immutable release takes none after.
           if [ "$CHANNEL" = stable ] && [ "$branch" = main ]; then
             # On the commit released, the same on main and on dev: the next betas count from it.
-            gh release create "$TAG" release/assets/* hub/assets/* --target "$sha" --title "$title" --notes-file release/notes.md --latest
+            gh release create "$TAG" release/assets/* hub/assets/* "${apk[@]}" --target "$sha" --title "$title" --notes-file release/notes.md --latest
           elif [ "$CHANNEL" = stable ]; then
             # A line's, on its tag: the stable channel takes the latest release, so it is marked
             # latest when above the one marked (the newest line's fix reaches its users), never
@@ -911,9 +953,9 @@ jobs:
             elif ! grep -q 'HTTP 404' "$RUNNER_TEMP/latest.err"; then
               cat "$RUNNER_TEMP/latest.err" >&2; exit 1
             fi
-            gh release create "$TAG" release/assets/* hub/assets/* --target "$sha" --title "$title" --notes-file release/notes.md "$latest"
+            gh release create "$TAG" release/assets/* hub/assets/* "${apk[@]}" --target "$sha" --title "$title" --notes-file release/notes.md "$latest"
           else
-            gh release create "$TAG" release/assets/* hub/assets/* --target "$sha" --title "$title" --notes-file release/notes.md --prerelease --latest=false
+            gh release create "$TAG" release/assets/* hub/assets/* "${apk[@]}" --target "$sha" --title "$title" --notes-file release/notes.md --prerelease --latest=false
           fi
 
   # The hub's image (docs/releases.md): once its release is published, the image the `hub` job made
