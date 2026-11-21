@@ -595,7 +595,7 @@ fn a_fast_forward_release_after_the_two_squash_releases() {
     );
     assert_eq!(
         repo.changelog(&[]),
-        "### Other changes\n\n- **repo**: say more (#352)\n"
+        "### All changes\n\n#### Other changes\n\n- **repo**: say more (#352)\n"
     );
 }
 
