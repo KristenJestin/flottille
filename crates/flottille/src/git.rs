@@ -129,7 +129,7 @@ pub fn find_helpers() {
             .into_iter()
             .flat_map(|scope| {
                 let listed = crate::children::spawn_std(
-                    std::process::Command::new("git")
+                    std::process::Command::new(own())
                         .args(["config", scope, "--includes", "--null", "--get-regexp"])
                         .arg(r"^credential\.(.*\.)?helper$")
                         .stdin(Stdio::null())
@@ -189,10 +189,28 @@ pub const UNFOUND: &str = "no git of the daemon's PATH is owned by root in a fol
      root, and a push goes outside the sandbox only through one: install git from the system's \
      packages, then restart the daemon";
 
-/// Finds the `git` of [`GIT`], at the daemon's start, before anything runs.
+/// The `git` the daemon runs for itself (statuses, worktrees, its fetch), confined: the one
+/// only root may change when there is one, else the first of its `PATH`, found at its start and
+/// its links followed. Never one a run put in the `PATH` since. `None` where none was found.
+static OWN: OnceLock<Option<PathBuf>> = OnceLock::new();
+
+/// The `git` a test build runs for itself in place of [`OWN`]'s, to watch what the daemon asks
+/// of it. Never read by a release build, never the git of a push the gate let through.
+const TEST_GIT: &str = "FLOTTILLE_TEST_GIT";
+
+/// The folders of the daemon's `PATH` that only root may change (each of them and every folder
+/// on the way is root's, and no one else may write it), found at its start: the `PATH` of a push
+/// the gate let through, so that a program the user's settings name by a bare name (a credential
+/// helper's `!gh auth git-credential`, `ssh` in a wrapper) is never one a run put first.
+static ROOTED_PATH: OnceLock<OsString> = OnceLock::new();
+
+/// Finds the `git` of [`GIT`] and [`OWN`], and [`ROOTED_PATH`], at the daemon's start, before
+/// anything runs.
 pub fn find_git() {
+    let chosen = crate::ssh_agent::chosen(crate::ssh_agent::candidates("git"));
     GIT.get_or_init(|| {
-        let found = crate::ssh_agent::chosen(crate::ssh_agent::candidates("git"))
+        let found = chosen
+            .clone()
             .filter(|(_, rooted)| *rooted)
             .map(|(git, _)| git);
         if found.is_none() {
@@ -200,6 +218,52 @@ pub fn find_git() {
         }
         found
     });
+    OWN.get_or_init(|| {
+        if cfg!(debug_assertions)
+            && let Some(git) = std::env::var_os(TEST_GIT)
+        {
+            return Some(PathBuf::from(git));
+        }
+        chosen.map(|(git, _)| git)
+    });
+    ROOTED_PATH.get_or_init(|| {
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let rooted: Vec<PathBuf> = std::env::split_paths(&path)
+            .filter_map(|folder| folder.canonicalize().ok())
+            .filter(|folder| only_root_may_change(folder))
+            .collect();
+        std::env::join_paths(rooted).unwrap_or_default()
+    });
+}
+
+/// Whether only root may change `path`, a program or a folder: it and every folder on the way to
+/// it are root's, and neither their group nor others may write them. The one rule of what a
+/// push the gate let through, or the daemon's own git, may run.
+pub(crate) fn only_root_may_change(path: &Path) -> bool {
+    path.ancestors().all(root_s_alone)
+}
+
+/// Whether `path` is root's, and neither its group nor others may write it.
+fn root_s_alone(folder: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(folder).is_ok_and(|m| m.uid() == 0 && m.mode() & 0o022 == 0)
+}
+
+/// The `PATH` of a push the gate let through: [`ROOTED_PATH`].
+pub fn rooted_path() -> OsString {
+    ROOTED_PATH.get().cloned().unwrap_or_default()
+}
+
+/// The `git` the daemon runs for itself: [`OWN`]'s, `git` of the `PATH` where nothing was
+/// searched (the command line, the crate's own tests), and none where the daemon found none.
+pub fn own() -> &'static OsStr {
+    match OWN.get() {
+        None => OsStr::new("git"),
+        Some(Some(git)) => git.as_os_str(),
+        // A path that is no program: the call says git is missing, and nothing planted since
+        // in the `PATH` runs.
+        Some(None) => OsStr::new("/nonexistent/flottille-found-no-git"),
+    }
 }
 
 /// The `git` found at the start, if one only root may change was.
@@ -272,16 +336,18 @@ pub async fn run_in<S: AsRef<OsStr>>(
     bounded(command, dir, &words[1..], limit, OUTPUT_LIMIT, input).await
 }
 
-/// [`run_in`] outside the sandbox: for what a push the gate let through reads of its remote
-/// before it goes (its dry run), which signs in as the push itself does (`runs::lifted`).
+/// [`run_in`] outside the sandbox: for what a push the gate let through reads before it goes (its
+/// dry run, what its remote has, the commits it sends), from the folder it runs from and signed
+/// in as the push itself is (`runs::lifted`).
 pub async fn run_outside<S: AsRef<OsStr>>(
     dir: &Path,
     words: &[S],
     env: &BTreeMap<OsString, OsString>,
+    input: Option<Vec<u8>>,
 ) -> Result<Output, String> {
-    let command = read_in(dir, words, env, false);
+    let command = read_in(dir, words, env, input.is_some());
     let limit = Class::Read.limit();
-    bounded(command, dir, &words[1..], limit, OUTPUT_LIMIT, None).await
+    bounded(command, dir, &words[1..], limit, OUTPUT_LIMIT, input).await
 }
 
 /// The command of [`run_in`] and [`run_outside`]: never a prompt, nowhere to answer it.
@@ -316,7 +382,7 @@ pub fn blocking<S: AsRef<OsStr>>(git: &OsStr, dir: &Path, args: &[S]) -> std::pr
 }
 
 fn command<S: AsRef<OsStr>>(dir: &Path, args: &[S]) -> tokio::process::Command {
-    command_of(OsStr::new("git"), dir, args)
+    command_of(own(), dir, args)
 }
 
 fn command_of<S: AsRef<OsStr>>(git: &OsStr, dir: &Path, args: &[S]) -> tokio::process::Command {

@@ -992,3 +992,24 @@ fn a_project_overrides_a_subject_and_goes_back_to_settings(cx: &mut TestAppConte
         "nothing moves at rest"
     );
 }
+
+#[gpui_kit::test]
+fn the_project_settings_say_why_the_agent_is_not_lent(cx: &mut TestAppContext) {
+    // A kernel without Landlock, as a test build can play it: the user's SSH agent is then lent
+    // to no push.
+    let user = user().with_env("FLOTTILLE_TEST_NO_LANDLOCK", "1");
+    project(&user, "app");
+    let settings = user
+        .call("project.settings", json!({"name": "app"}))
+        .unwrap();
+    let why = settings["pushes_unlent"].as_str().unwrap_or_default();
+    assert!(why.contains("no Landlock"), "{settings}");
+    let (shell, cx) = window(&user, cx);
+    open_settings(&shell, "app", cx);
+
+    assert!(visible(cx, "project-settings-unlent"));
+    let said = label(cx, "project-settings-unlent").unwrap_or_default();
+    assert!(said.contains("refused"), "{said}");
+    assert!(said.contains("no Landlock"), "the reason: {said}");
+    assert!(said.contains("flottille doctor"), "what to do: {said}");
+}
