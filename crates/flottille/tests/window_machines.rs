@@ -1716,7 +1716,7 @@ fn one_click_is_one_request_and_one_toast(cx: &mut TestAppContext) {
     let why = why.expect("the toast says why");
     assert!(why.contains("try again"), "{why}");
     assert!(
-        !why.contains("withheld") && !why.contains("asked now"),
+        !why.contains("withheld") && !why.contains("sent back no list"),
         "{why}"
     );
 }
@@ -1824,23 +1824,28 @@ fn change_look_sets_the_icon_and_colour(cx: &mut TestAppContext) {
             .machines()
             .update(cx, |section, cx| section.choose_look_icon(3, cx))
     });
-    click(&shell, cx, "look-colour-orange");
+    // Another colour than the one the device has (its key proposed one of the eight).
+    let colour = match pc.member("server").unwrap()["colour"].as_str() {
+        Some("orange") => "blue",
+        _ => "orange",
+    };
+    click(&shell, cx, &format!("look-colour-{colour}"));
     // A live preview of the row: the icon and colour chosen, before anything is saved.
     settle(&shell, cx);
     assert_eq!(
-        label(cx, "look-preview").as_deref(),
-        Some("phone in orange")
+        label(cx, "look-preview"),
+        Some(format!("phone in {colour}"))
     );
-    assert_ne!(pc.member("server").unwrap()["colour"], "orange");
+    assert_ne!(pc.member("server").unwrap()["colour"], colour);
     click(&shell, cx, "member-look-save");
     until(&shell, cx, "the row shows the new look", |cx| {
-        label(cx, "member-icon-server").as_deref() == Some("phone in orange")
+        label(cx, "member-icon-server") == Some(format!("phone in {colour}"))
     });
     // A signed change, as `flottille remote icon` and `colour` make it.
     let server = pc.member("server").unwrap();
     assert_eq!(
         (server["icon"].as_str(), server["colour"].as_str()),
-        (Some("phone"), Some("orange"))
+        (Some("phone"), Some(colour))
     );
     assert!(
         toasts(&shell, cx)
