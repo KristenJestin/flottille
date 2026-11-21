@@ -324,7 +324,10 @@ fn one_device_asking_without_end_does_not_starve_another() {
             )
         })
         .collect();
-    pc.user.status();
+    // The link to the server is up before the burst, as it is for a window that has shown it
+    // (dials are limited, apart from this test: a cold burst would be refused by the link).
+    let first = ask(&pc, params.clone());
+    assert!(first["result"].is_object(), "{first}");
 
     let began = Instant::now();
     let burst: Vec<_> = lines
