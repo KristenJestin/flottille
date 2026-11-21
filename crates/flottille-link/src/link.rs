@@ -450,7 +450,7 @@ impl Endpoint {
     /// (`the hub is unreachable`), and a dial through the hub waits for the next session.
     pub fn through(&self, port: crate::RelayPort) {
         let (out, incoming, mut online) = port.split();
-        let socket = Arc::new(RelaySocket::new(out, incoming));
+        let socket = Arc::new(RelaySocket::new(out, incoming, online.clone()));
         let alpns = [Traffic::Machine.alpn(), Traffic::Client.alpn()];
         let transport = match self.transport.relayed(socket, &alpns) {
             Ok(transport) => Arc::new(transport),

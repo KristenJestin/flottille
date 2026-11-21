@@ -26,7 +26,7 @@ use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
 use rustls::sign::CertifiedKey;
 use rustls::{DigitallySignedStruct, DistinguishedName, SignatureScheme};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 use crate::link::FRAME_LIMIT;
 use zeroize::Zeroizing;
@@ -260,11 +260,14 @@ pub(crate) type Packet = ([u8; 32], Vec<u8>);
 /// stands for, and what the hub brings from a key comes in from its address. QUIC knows no keys,
 /// only addresses: each key is given one of the relay's own making, in a range of unique local
 /// IPv6 addresses no network reaches through this socket. A packet that finds no room on its way
-/// is dropped, as a network drops one, and QUIC sends it again.
+/// is dropped, as a network drops one, and QUIC sends it again. A packet from a key this machine
+/// did not dial is let in only from a member the hub says online: a hub that makes up senders
+/// spends none of the names this machine's own dials need.
 pub(crate) struct RelaySocket {
     out: mpsc::Sender<Packet>,
     incoming: std::sync::Mutex<mpsc::Receiver<Packet>>,
     names: std::sync::Mutex<Names>,
+    online: watch::Receiver<Vec<crate::PublicKey>>,
 }
 
 #[derive(Default)]
@@ -286,12 +289,31 @@ pub(crate) fn is_relayed(address: &SocketAddr) -> bool {
 }
 
 impl RelaySocket {
-    pub(crate) fn new(out: mpsc::Sender<Packet>, incoming: mpsc::Receiver<Packet>) -> RelaySocket {
+    pub(crate) fn new(
+        out: mpsc::Sender<Packet>,
+        incoming: mpsc::Receiver<Packet>,
+        online: watch::Receiver<Vec<crate::PublicKey>>,
+    ) -> RelaySocket {
         RelaySocket {
             out,
             incoming: std::sync::Mutex::new(incoming),
             names: std::sync::Mutex::new(Names::default()),
+            online,
         }
+    }
+
+    /// The address a packet from `key` comes in from: the one it was given, else one made if the
+    /// hub says `key` online.
+    fn address_from(&self, key: &[u8; 32]) -> Option<SocketAddr> {
+        if let Some(address) = self.names.lock().unwrap().by_key.get(key) {
+            return Some(*address);
+        }
+        let online = self
+            .online
+            .borrow()
+            .iter()
+            .any(|member| member.as_bytes() == key);
+        online.then(|| self.address_of(key)).flatten()
     }
 
     fn address_of(&self, key: &[u8; 32]) -> Option<SocketAddr> {
@@ -369,7 +391,7 @@ impl quinn::AsyncUdpSocket for RelaySocket {
             let Poll::Ready(Some((key, packet))) = incoming.poll_recv(cx) else {
                 return Poll::Pending;
             };
-            let (Some(buffer), Some(address)) = (bufs.first_mut(), self.address_of(&key)) else {
+            let (Some(buffer), Some(address)) = (bufs.first_mut(), self.address_from(&key)) else {
                 continue;
             };
             if packet.len() > buffer.len() {
@@ -1005,8 +1027,15 @@ mod tests {
     #[tokio::test]
     async fn a_hub_that_makes_up_senders_is_given_none_of_their_names() {
         let (out, _sent) = mpsc::channel(8);
-        let (given, incoming) = mpsc::channel(MOST_NAMED + 1);
-        let socket = RelaySocket::new(out, incoming);
+        let (given, incoming) = mpsc::channel(MOST_NAMED + 2);
+        let member = crate::PublicKey::from_bytes(
+            ed25519_dalek::SigningKey::from_bytes(&[5; 32])
+                .verifying_key()
+                .as_bytes(),
+        )
+        .unwrap();
+        let (_online, online) = watch::channel(vec![member]);
+        let socket = RelaySocket::new(out, incoming, online);
 
         // A hub brings packets from as many keys as a relay names, none of them online.
         for n in 0..MOST_NAMED as u32 {
@@ -1026,7 +1055,19 @@ mod tests {
         })
         .await;
         assert!(received.is_pending(), "a made-up sender came in");
-        // This machine still dials whom it chooses.
+        // This machine still dials whom it chooses, and a member online comes in.
         assert!(socket.address_of(&[9; 32]).is_some());
+        given.try_send((*member.as_bytes(), vec![4, 5])).unwrap();
+        let received = std::future::poll_fn(|cx| {
+            let mut bufs = [std::io::IoSliceMut::new(&mut buffer)];
+            let mut meta = [quinn::udp::RecvMeta::default()];
+            Poll::Ready(
+                socket
+                    .poll_recv(cx, &mut bufs, &mut meta)
+                    .map(Result::unwrap),
+            )
+        })
+        .await;
+        assert_eq!(received, Poll::Ready(1));
     }
 }
