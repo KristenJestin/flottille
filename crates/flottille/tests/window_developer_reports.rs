@@ -14,7 +14,7 @@ use flottille_window::Shell;
 use flottille_window::settings::SettingsPage;
 use gpui_design_system::motion::PANEL;
 use gpui_design_system::omarchy::Environment;
-use gpui_kit::test::{TestQueryExt as _, TestWindowExt};
+use gpui_kit::test::TestWindowExt;
 use gpui_kit::{Entity, TestAppContext, VisualTestContext, px, size};
 use serde_json::{Value, json};
 
