@@ -39,6 +39,8 @@ const ROUND: Duration = Duration::from_secs(1);
 const LONGEST_WAIT: Duration = Duration::from_secs(5);
 /// What a machine this one does not trust is told.
 const NOT_TRUSTED: &str = "refused: this machine's key is not one of the user's";
+/// What closes the link to a machine the hub no longer says online.
+const GONE_FROM_HUB: &str = "it is no longer connected to the hub";
 /// What closes the second link two machines that dialled each other at once made.
 const LINKED_ALREADY: &str = "linked already";
 /// How long a key refused is not said again in the log.
@@ -209,7 +211,8 @@ pub fn start(
     let endpoint = Endpoint::new(&key).map_err(|error| error.to_string())?;
     if crate::remote::says_listen(paths) {
         eprintln!(
-            "flottille daemon: [remote] listen in daemon.toml is no longer read: every link goes              through the hub, and nothing listens (the key may be removed)"
+            "flottille daemon: [remote] listen in daemon.toml is no longer read: every link goes through \
+             the hub, and nothing listens (the key may be removed)"
         );
     }
     let folder = crate::remote::folder(paths);
@@ -2291,9 +2294,20 @@ async fn dial(remote: Arc<Remote>, mut stopping: tokio::sync::watch::Receiver<bo
             eprintln!("flottille daemon: {line}");
         }
         let peers = remote.peers().machines;
+        // Every link goes through the hub: a machine it no longer says online has none, though the
+        // close it sent may have been lost with its session. Its link is let go now, not when it
+        // times out, so that the link it makes again is not refused for the dead one.
+        let online = remote.endpoint.online();
         let mut due = Vec::new();
         {
             let mut seen = remote.seen.lock().unwrap();
+            for (key, seen) in seen.iter() {
+                if !online.iter().any(|member| member.as_bytes() == key)
+                    && let Some((_, link, _)) = &seen.link
+                {
+                    link.close(GONE_FROM_HUB);
+                }
+            }
             // A machine no longer trusted is let go.
             seen.retain(|key, seen| {
                 let trusted = peers.iter().any(|peer| peer.key.as_bytes() == key);
