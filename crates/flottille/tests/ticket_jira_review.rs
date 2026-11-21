@@ -107,19 +107,6 @@ fn item(key: &str, title: &str, status: Value, comments: Value, links: Value) ->
             "comment": {"comments": comments}, "issuelinks": links}})
 }
 
-fn link(outward: bool, kind: (&str, &str, &str), other: &str, status: &str) -> Value {
-    let issue = json!({"key": other, "fields": {"summary": "The other one",
-        "status": {"name": status}}});
-    let mut link = json!({"id": "10001",
-        "type": {"name": kind.0, "inward": kind.1, "outward": kind.2}});
-    link[if outward {
-        "outwardIssue"
-    } else {
-        "inwardIssue"
-    }] = issue;
-    link
-}
-
 fn user(jira: &Jira) -> User {
     User::with_fake_agent()
         .with_fake_acli()
@@ -282,12 +269,15 @@ fn review_script() -> Value {
                 document(json!([text("Looking now")]))
             )
         ]),
-        json!([link(
-            true,
-            ("Blocks", "is blocked by", "blocks"),
-            "ABC-9",
-            "To Do"
-        )]),
+        json!([]),
+    );
+    // ABC-1 blocks ABC-9: the fake gives the links of a view from the script's own `links`.
+    let blocked = item(
+        "ABC-9",
+        "The other one",
+        status("To Do", "new"),
+        json!([]),
+        json!([]),
     );
     let second = item(
         "ABC-2",
@@ -316,7 +306,9 @@ fn review_script() -> Value {
     // A page holds two: only `--paginate` reads them all.
     // The search lists them, each is then read (`view`) with its comments and links.
     json!({"search": [first, second, third], "page": 2,
-        "items": {"ABC-1": first, "ABC-2": second, "ABC-3": third}})
+        "items": {"ABC-1": first, "ABC-2": second, "ABC-3": third, "ABC-9": blocked},
+        "link_types": [{"name": "Blocks", "inward": "is blocked by", "outward": "blocks"}],
+        "links": [{"id": "500", "type": "Blocks", "out": "ABC-9", "in": "ABC-1"}]})
 }
 
 const JQL: &str = "project = ABC AND statusCategory != Done AND comment ~ \"Ada\"";

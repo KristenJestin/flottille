@@ -406,9 +406,7 @@ const SERVED: [Definition; 33] = [
         title: "Tickets",
         description: "The tracker's tickets (GitHub #123, Jira ABC-123), via the user's gh/acli \
             (never run them). list: by state (default open), label, assignee, updated_within; search (query), \
-            on Jira also in_comments, jql, detail full (each ticket with its status category, comments with \
-            authors, dates and mentions, and links; every page) and limit; me: which account of the \
-            tracker is the user's (\"my comments\"); show: a workspace's ticket (in \
+            on Jira also in_comments, jql, limit; me: the user's account; show: a workspace's ticket (in \
             main, name workspace) or ticket, with links; detail full adds comments, \
             with ids; Jira images and files are named, not shown; \
             types: a Jira project's work item types; fields: a type's (kind); link_types; \
