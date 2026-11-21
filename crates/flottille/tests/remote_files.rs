@@ -310,9 +310,12 @@ fn one_device_asking_without_end_does_not_starve_another() {
     let (_hub, pc, server, agent) = machines();
     std::fs::write(server.user.path("work/app/clip.mp4"), clip(CHUNK * 2)).unwrap();
     let shown = show(&server, &agent, "SHOW CLIP");
-    let socket = pc.user.path("runtime/flottille/daemon.sock");
     let params = json!({"agent": agent, "shown": shown});
-    // One device asks forty chunks at once: each is one more call waiting for the machine's rate.
+    // One device asks forty chunks at once, on the server's own socket: what the daemon promises
+    // is its pacing (a chunk waits 3 s at most, else it is refused at once), and the time of a
+    // call that crosses the link, eight answers of 700 KB at once on one connection, is the
+    // link's (seconds, in a build without optimisation) and not the pacing's.
+    let socket = server.user.path("runtime/flottille/daemon.sock");
     let lines: Vec<String> = (0..40)
         .map(|n| {
             signed(
@@ -324,8 +327,8 @@ fn one_device_asking_without_end_does_not_starve_another() {
             )
         })
         .collect();
-    // The link to the server is up before the burst, as it is for a window that has shown it
-    // (dials are limited, apart from this test: a cold burst would be refused by the link).
+    // Another device, meanwhile, asks through the link as a window does: the link is up before
+    // the burst (dials are limited, apart from this test: a cold link would refuse a burst).
     let first = ask(&pc, params.clone());
     assert!(first["result"].is_object(), "{first}");
 
@@ -354,18 +357,28 @@ fn one_device_asking_without_end_does_not_starve_another() {
     );
 
     let (mut refused, mut served_in_burst) = (0, 0);
-    for call in burst {
+    let mut table = Vec::new();
+    for (n, call) in burst.into_iter().enumerate() {
         let (answer, took) = call.join().unwrap();
-        if answer["result"].is_object() {
+        let ok = answer["result"].is_object();
+        table.push(format!(
+            "{n}:{}:{:.2}",
+            if ok { "served" } else { "refused" },
+            took.as_secs_f64()
+        ));
+        if ok {
             served_in_burst += 1;
-            assert!(took < Duration::from_secs(5), "a chunk waited {took:?}");
+            assert!(
+                took < Duration::from_secs(5),
+                "a chunk waited {took:?}; the burst: {table:?}"
+            );
         } else {
             refused += 1;
             let why = error_of(&answer);
             assert!(why.contains("busy"), "{why}");
             assert!(
                 took < Duration::from_secs(2),
-                "a refusal came after {took:?}"
+                "a refusal came after {took:?}; the burst: {table:?}"
             );
         }
     }
