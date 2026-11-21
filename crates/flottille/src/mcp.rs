@@ -3206,7 +3206,7 @@ fn pushed(place: &Place, folder: Option<&Resolved>) -> bool {
     let Some(folder) = folder else {
         return false;
     };
-    match remote_refs("git".as_ref(), &folder.path, PUSHED_WAIT) {
+    match remote_refs(crate::git::own(), &folder.path, PUSHED_WAIT) {
         Some(refs) => refs
             .lines()
             .any(|name| name.ends_with(&format!("/{}", place.branch))),

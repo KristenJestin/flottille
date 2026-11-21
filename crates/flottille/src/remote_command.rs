@@ -21,6 +21,29 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 #[derive(Subcommand)]
 pub enum RemoteAction {
+    /// Turn remote on: this machine can join a hub and link to your other machines. Nothing is
+    /// opened until you say where it is reached
+    On {
+        /// Where this machine is reached: an address and its port (7447 when it has none),
+        /// `tailnet` (its first Tailscale or WireGuard address) or `nowhere` (the default: it
+        /// dials the others, nobody dials it)
+        #[arg(long)]
+        listen: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Turn remote off: the links close, this machine stays paired with its hub
+    Off {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Say where this machine is reached: an address and its port (7447 when it has none),
+    /// `tailnet` or `nowhere`
+    Listen {
+        address: String,
+        #[arg(long)]
+        json: bool,
+    },
     /// Pair this machine with the user's hub, with the code `flottille-hub pair` printed on the
     /// hub's host, read on the standard input (asked for on a terminal), never on the command line.
     /// The name, icon and role proposed are this machine's own unless given
@@ -178,6 +201,29 @@ pub fn run(paths: &Paths, action: RemoteAction) -> Result<ExitCode> {
     };
     let action = match action {
         RemoteAction::Address { action } => action,
+        RemoteAction::On { listen, json } => {
+            let mut params = json!({"on": true});
+            if let Some(listen) = listen {
+                params["listen"] = json!(listen);
+            }
+            let settings = ask("remote.configure", params)?;
+            say_settings(&settings, "Remote is on.", json);
+            return Ok(ExitCode::SUCCESS);
+        }
+        RemoteAction::Off { json } => {
+            let settings = ask("remote.configure", json!({"on": false}))?;
+            say_settings(
+                &settings,
+                "Remote is off: the links are closed, this machine stays paired with its hub.",
+                json,
+            );
+            return Ok(ExitCode::SUCCESS);
+        }
+        RemoteAction::Listen { address, json } => {
+            let settings = ask("remote.configure", json!({"listen": address}))?;
+            say_settings(&settings, "", json);
+            return Ok(ExitCode::SUCCESS);
+        }
         RemoteAction::Members {
             runners: true,
             project,
@@ -446,6 +492,31 @@ fn offer_line(machine: &Value) -> String {
         or_none(projects.join(", ")),
         or_none(agents.join(", "))
     )
+}
+
+/// What `remote.configure` answered, as `--json` prints it or in words: what was done, then where
+/// this machine is reached.
+fn say_settings(settings: &Value, done: &str, json: bool) {
+    if json {
+        println!("{settings}");
+        return;
+    }
+    let mut line = done.to_owned();
+    if settings["on"] == true {
+        let at = match settings["listen"].as_str() {
+            Some(at) => format!("This machine is reached at {at}."),
+            None => {
+                "This machine is reached nowhere: it dials the others, nobody dials it.".to_owned()
+            }
+        };
+        line = format!("{line} {at}").trim().to_owned();
+        if settings["waits"] == true {
+            line.push_str(" An agent runs: the change waits for the next start of Flottille.");
+        }
+    } else if line.is_empty() {
+        line = "Remote is off: the choice is kept for when it is turned on.".to_owned();
+    }
+    println!("{line}");
 }
 
 /// The key of the member named `name` in `remote.members`' answer.

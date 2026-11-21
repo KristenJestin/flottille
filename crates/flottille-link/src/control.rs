@@ -20,7 +20,19 @@
 //! hub → device   {"welcome": {}}  or  {"refused": {"reason": "…", "reset": true | false}}
 //! then           device → hub {"ask": {"id": n, …}}; hub → device {"answer": {"id": n, …}},
 //!                {"list": […]}, {"addresses": […]}, {"presence": […]}, {"facts": […]}
+//! and            device → hub {"relay": {"to": K', "packet": P}}; hub → device
+//!                {"relayed": {"from": K, "packet": P}}, {"online": [K, …]}
+//! and each way   {"keepalive": {}}
 //! ```
+//!
+//! `relay` carries the links between the user's devices (`docs/remote.md`, "The transport"): `P`
+//! is one QUIC packet of a link, in base64, encrypted end to end between the two devices; the hub
+//! hands it to the session of the member whose key is `K'`, saying it is from `K`, and never
+//! opens it. `online` is the members' keys whose session is open, sent to members whenever it
+//! changes. A side with nothing to say says `keepalive` every `KEEPALIVE`, so that a reverse
+//! proxy on the way does not take the session for idle; a side that hears nothing from the other
+//! for `SILENCE` takes the session as lost, and so does the hub when a device reads nothing it
+//! sends for as long.
 //!
 //! `session` is `flottille-hub-session-v1` and a zero byte: nothing else a key signs starts so.
 //! Each side signs the other's fresh nonce and the other's key, so that a proof cannot be played
@@ -51,7 +63,7 @@ use std::time::Duration;
 use ed25519_dalek::{Signer, SigningKey};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
@@ -84,6 +96,19 @@ const SHOWN: usize = 400;
 const HEAD_LIMIT: usize = 8 << 10;
 /// How long reaching the hub, or its handshake, may take.
 const WAIT: Duration = Duration::from_secs(10);
+/// How often each side of a session says something when it has nothing to say: under the idle
+/// timeout of the common reverse proxies, 60 s.
+pub const KEEPALIVE: Duration = Duration::from_secs(25);
+/// A side that hears nothing from the other for this long takes the session as lost: a device its
+/// hub's, the hub a device's, which is said offline then rather than left online on a connection
+/// that died.
+pub const SILENCE: Duration = Duration::from_secs(80);
+/// The packets of links waiting in a device's session, each way: past them a packet is dropped,
+/// as a network drops one.
+const RELAY_WAITING: usize = 256;
+/// The longest packet of a link a session carries: QUIC through the hub starts at 1200 bytes, and
+/// its discovery of the path's size goes up to 1452.
+pub const RELAY_PACKET: usize = 1500;
 
 /// Anything a session runs over: a TCP stream, or TLS over one.
 pub trait Stream: AsyncRead + AsyncWrite + Unpin + Send + 'static {}
@@ -166,9 +191,34 @@ impl HubUrl {
         })
     }
 
-    /// `host:port`, as a sentence names the hub.
+    /// `host:port`, which is reached: the port is always there.
     pub fn authority(&self) -> String {
         format!("{}:{}", self.host, self.port)
+    }
+
+    /// The host, with its port only when it is not the scheme's own (80, 443): how a sentence
+    /// names the hub.
+    pub fn host_shown(&self) -> String {
+        let own = if self.tls { 443 } else { 80 };
+        if self.port == own {
+            self.host.clone()
+        } else {
+            self.authority()
+        }
+    }
+
+    /// The URL as a user writes it: `https://hub.example.net`, the port only when it is not the
+    /// scheme's own and the path only when there is one. What is stored and sent is
+    /// [`Display`](fmt::Display)'s, whole.
+    pub fn shown(&self) -> String {
+        let scheme = if self.tls { "https" } else { "http" };
+        let path = if self.path == "/" { "" } else { &self.path };
+        format!("{scheme}://{}{path}", self.host_shown())
+    }
+
+    /// `text` as [`HubUrl::shown`] says it, or as it is when it is no hub URL.
+    pub fn shown_text(text: &str) -> String {
+        HubUrl::parse(text).map_or_else(|_| text.to_owned(), |url| url.shown())
     }
 
     /// The host as TLS names it: an IPv6 address without its brackets.
@@ -450,6 +500,145 @@ pub enum ToDevice {
     Presence(Vec<PresenceOf>),
     /// What the hub knows of each member's device, in place of what it sent before.
     Facts(Vec<Facts>),
+    /// A packet of a link, as the device of `from` sent it for this one.
+    Relayed { from: PublicKey, packet: LinkPacket },
+    /// The members' keys whose session to the hub is open now: the devices a link reaches.
+    Online(Vec<PublicKey>),
+    /// Nothing to say: the session is alive.
+    Keepalive {},
+}
+
+/// A packet of a link, in base64 in a session's line.
+#[derive(Clone, PartialEq, Eq)]
+pub struct LinkPacket(pub Vec<u8>);
+
+impl fmt::Debug for LinkPacket {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "LinkPacket({} bytes)", self.0.len())
+    }
+}
+
+impl Serialize for LinkPacket {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use base64::Engine;
+        serializer.serialize_str(&base64::engine::general_purpose::STANDARD.encode(&self.0))
+    }
+}
+
+impl<'de> Deserialize<'de> for LinkPacket {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<LinkPacket, D::Error> {
+        use base64::Engine;
+        let text = String::deserialize(deserializer)?;
+        if text.len() > RELAY_PACKET.div_ceil(3) * 4 {
+            return Err(serde::de::Error::custom("a packet is too long"));
+        }
+        base64::engine::general_purpose::STANDARD
+            .decode(text)
+            .map(LinkPacket)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+/// What a device sends the hub for another device: a packet of a link, and the key it is for.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RelayFrame {
+    #[serde(serialize_with = "key_bytes", deserialize_with = "key_of_hex")]
+    to: [u8; 32],
+    packet: LinkPacket,
+}
+
+fn key_bytes<S: Serializer>(key: &[u8; 32], serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str(&to_hex(key))
+}
+
+fn key_of_hex<'de, D: Deserializer<'de>>(deserializer: D) -> Result<[u8; 32], D::Error> {
+    from_hex_text::<_, 32>(deserializer, "a key")
+}
+
+/// A device's end of the links its session to the hub carries (`Session::relay`): the packets it
+/// sends other devices and those they send it, and the members online. It ends with the session.
+pub struct RelayPort {
+    out: mpsc::Sender<crate::transport::Packet>,
+    incoming: mpsc::Receiver<crate::transport::Packet>,
+    online: watch::Receiver<Vec<PublicKey>>,
+}
+
+impl fmt::Debug for RelayPort {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("RelayPort")
+    }
+}
+
+impl RelayPort {
+    /// Sends `packet` to the device of `to` through the hub, once there is room for it: whether
+    /// the session took it.
+    pub async fn send(&self, to: &PublicKey, packet: Vec<u8>) -> bool {
+        self.out.send((*to.as_bytes(), packet)).await.is_ok()
+    }
+
+    /// Sends `packet` to the device of `to` if there is room for it now: whether it was taken.
+    pub fn try_send(&self, to: &PublicKey, packet: Vec<u8>) -> bool {
+        self.out.try_send((*to.as_bytes(), packet)).is_ok()
+    }
+
+    /// The next packet another device sent this one, and its key; `None` once the session ended.
+    pub async fn recv(&mut self) -> Option<(PublicKey, Vec<u8>)> {
+        loop {
+            let (from, packet) = self.incoming.recv().await?;
+            if let Ok(from) = PublicKey::from_bytes(&from) {
+                return Some((from, packet));
+            }
+        }
+    }
+
+    /// The members' keys whose session to the hub is open, as the hub last said.
+    pub fn online(&self) -> Vec<PublicKey> {
+        self.online.borrow().clone()
+    }
+
+    /// Until the hub says another list of the members online; never, once the session ended.
+    pub async fn online_changed(&mut self) {
+        if self.online.changed().await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    }
+
+    /// The packets out, the packets in, and the members online, for the transport.
+    pub(crate) fn split(
+        self,
+    ) -> (
+        mpsc::Sender<crate::transport::Packet>,
+        mpsc::Receiver<crate::transport::Packet>,
+        watch::Receiver<Vec<PublicKey>>,
+    ) {
+        (self.out, self.incoming, self.online)
+    }
+}
+
+/// The session's end of its relay port.
+struct Carried {
+    out: mpsc::Receiver<crate::transport::Packet>,
+    incoming: mpsc::Sender<crate::transport::Packet>,
+    online: watch::Sender<Vec<PublicKey>>,
+}
+
+fn relay_ends() -> (RelayPort, Carried) {
+    let (out, out_taken) = mpsc::channel(RELAY_WAITING);
+    let (incoming_given, incoming) = mpsc::channel(RELAY_WAITING);
+    let (online_given, online) = watch::channel(Vec::new());
+    (
+        RelayPort {
+            out,
+            incoming,
+            online,
+        },
+        Carried {
+            out: out_taken,
+            incoming: incoming_given,
+            online: online_given,
+        },
+    )
 }
 
 /// What the hub pushes to a device, as the session hands it over.
@@ -634,7 +823,7 @@ impl Device {
         match session.refused {
             Some((_, true)) => Err(ControlError::Reset),
             Some((reason, false)) => Err(ControlError::Refused {
-                hub: url.authority(),
+                hub: url.host_shown(),
                 reason,
             }),
             None => Ok(session),
@@ -657,7 +846,7 @@ impl Device {
             reason: why,
         })?;
         proposed.check().map_err(|why| ControlError::Refused {
-            hub: url.authority(),
+            hub: url.host_shown(),
             reason: why,
         })?;
         let pairing = Pairing {
@@ -676,7 +865,7 @@ impl Device {
         .await?;
         if let Some((reason, _)) = &session.refused {
             return Err(ControlError::Refused {
-                hub: url.authority(),
+                hub: url.host_shown(),
                 reason: reason.clone(),
             });
         }
@@ -759,6 +948,8 @@ pub struct Session {
     /// When the hub refused the device: its reason, and whether the list the device pinned was
     /// reset.
     refused: Option<(String, bool)>,
+    /// The device's end of the links the session carries, until it is taken.
+    relay: Option<RelayPort>,
 }
 
 impl fmt::Debug for Session {
@@ -903,9 +1094,17 @@ impl Session {
         let (asks, asked) = mpsc::unbounded_channel();
         let (pushing, pushed) = mpsc::unbounded_channel();
         let ended = Arc::new(Mutex::new(None));
+        let (relay, carried) = relay_ends();
         let refused = match welcome {
             ToDevice::Welcome {} => {
-                tokio::spawn(drive(reader, writer, asked, pushing, ended.clone()));
+                tokio::spawn(drive(
+                    reader,
+                    writer,
+                    asked,
+                    pushing,
+                    carried,
+                    ended.clone(),
+                ));
                 None
             }
             ToDevice::Refused { reason, reset } => Some((shown(&reason, SHOWN), reset)),
@@ -923,7 +1122,14 @@ impl Session {
             pushed,
             ended,
             refused,
+            relay: Some(relay),
         })
+    }
+
+    /// This device's end of the links the session carries to the other devices through the hub:
+    /// given once, `None` after.
+    pub fn relay(&mut self) -> Option<RelayPort> {
+        self.relay.take()
     }
 
     /// The hub's key, as it proved it.
@@ -1089,6 +1295,7 @@ async fn drive(
     mut writer: Writer,
     mut asked: mpsc::UnboundedReceiver<(Ask, Answered)>,
     pushing: mpsc::UnboundedSender<Pushed>,
+    mut carried: Carried,
     ended: Arc<Mutex<Option<String>>>,
 ) {
     let (lines_in, mut lines) = mpsc::channel::<Result<ToDevice, String>>(16);
@@ -1103,8 +1310,25 @@ async fn drive(
     });
     let mut waiting: Vec<(u64, Answered)> = Vec::new();
     let mut next_id = 1u64;
+    let mut keepalive = tokio::time::interval(KEEPALIVE);
+    keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut heard = tokio::time::Instant::now();
     let why = loop {
         tokio::select! {
+            Some((to, packet)) = carried.out.recv() => {
+                let frame = serde_json::json!({"relay": RelayFrame { to, packet: LinkPacket(packet) }});
+                if let Err(error) = write_line(&mut writer, &frame).await {
+                    break error.to_string();
+                }
+            }
+            _ = keepalive.tick() => {
+                if heard.elapsed() > SILENCE {
+                    break format!("it said nothing in {} s", SILENCE.as_secs());
+                }
+                if let Err(error) = write_line(&mut writer, &serde_json::json!({"keepalive": {}})).await {
+                    break error.to_string();
+                }
+            }
             ask = asked.recv() => {
                 let Some((ask, answer)) = ask else {
                     break "this device closed it".to_owned();
@@ -1120,7 +1344,14 @@ async fn drive(
                 waiting.push((id, answer));
             }
             line = lines.recv() => {
+                heard = tokio::time::Instant::now();
                 match line {
+                    Some(Ok(ToDevice::Relayed { from, packet })) => {
+                        // A packet with no room is dropped, as a network drops one.
+                        let _ = carried.incoming.try_send((*from.as_bytes(), packet.0));
+                    }
+                    Some(Ok(ToDevice::Online(keys))) => { carried.online.send_replace(keys); }
+                    Some(Ok(ToDevice::Keepalive {})) => {}
                     Some(Ok(ToDevice::Answer { id, refused })) => {
                         if let Some(at) = waiting.iter().position(|(waits, _)| *waits == id) {
                             let (_, answer) = waiting.swap_remove(at);
@@ -1207,14 +1438,42 @@ impl Arriving {
         let _ = self.writer.shutdown().await;
     }
 
-    /// Welcomes the device: the session, whose asks come in on `asks`.
-    pub async fn welcome(mut self) -> std::io::Result<HubSession> {
+    /// Welcomes the device: the session, whose asks come in on `asks`, lost after `SILENCE`
+    /// without a word from the device.
+    pub async fn welcome(self) -> std::io::Result<HubSession> {
+        self.welcome_within(SILENCE).await
+    }
+
+    /// [`Arriving::welcome`], the session lost after `silence` without a word from the device, or
+    /// a line it does not read for as long.
+    pub async fn welcome_within(mut self, silence: Duration) -> std::io::Result<HubSession> {
         write_line(&mut self.writer, &ToDevice::Welcome {}).await?;
         let (sender, asks) = mpsc::channel(16);
+        let (relaying, relays) = mpsc::channel(RELAY_WAITING);
         let mut reader = self.reader;
         let reading = tokio::spawn(async move {
             loop {
-                let frame = read_frame::<serde_json::Value>(&mut reader, ASK_LIMIT).await;
+                let read = read_frame::<serde_json::Value>(&mut reader, ASK_LIMIT);
+                let Ok(frame) = tokio::time::timeout(silence, read).await else {
+                    let why = format!("it said nothing in {} s", silence.as_secs());
+                    let _ = sender.send(Err(why)).await;
+                    return;
+                };
+                if let Ok(frame) = &frame {
+                    if frame.get("keepalive").is_some() {
+                        continue;
+                    }
+                    if let Some(relay) = frame.get("relay") {
+                        if let Ok(RelayFrame { to, packet }) =
+                            serde_json::from_value::<RelayFrame>(relay.clone())
+                            && let Ok(to) = PublicKey::from_bytes(&to)
+                        {
+                            // A packet with no room is dropped: the asks are read on.
+                            let _ = relaying.try_send((to, packet.0));
+                        }
+                        continue;
+                    }
+                }
                 let asked = frame.and_then(|frame| {
                     frame
                         .get("ask")
@@ -1232,9 +1491,24 @@ impl Arriving {
             transcript: self.transcript,
             pinned: self.pinned,
             asks,
+            relays: Some(Relays(relays)),
             writer: self.writer,
+            silence,
             reading,
         })
+    }
+}
+
+/// The packets of links a device sends the hub for other devices, each with the key it is for.
+pub struct Relays(mpsc::Receiver<(PublicKey, Vec<u8>)>);
+
+impl Relays {
+    /// The next one; it waits for ever once the device is gone (`HubSession::ask` says why).
+    pub async fn next(&mut self) -> (PublicKey, Vec<u8>) {
+        match self.0.recv().await {
+            Some(relayed) => relayed,
+            None => std::future::pending().await,
+        }
     }
 }
 
@@ -1243,7 +1517,11 @@ pub struct HubSession {
     transcript: Transcript,
     pinned: Option<ChangeHash>,
     asks: mpsc::Receiver<Result<Asked, String>>,
+    /// The packets of links the device sent for others, until they are taken.
+    relays: Option<Relays>,
     writer: Writer,
+    /// How long a line may wait for the device to read it.
+    silence: Duration,
     /// The task that reads the device's asks: it holds the connection's other half, so it ends
     /// with the session, or the device would not see the hub go.
     reading: tokio::task::JoinHandle<()>,
@@ -1273,8 +1551,19 @@ impl HubSession {
             .unwrap_or_else(|| Err("it closed the connection".to_owned()))
     }
 
+    /// The packets of links the device sends for other devices: given once, `None` after.
+    pub fn relays(&mut self) -> Option<Relays> {
+        self.relays.take()
+    }
+
     pub async fn send(&mut self, frame: &ToDevice) -> std::io::Result<()> {
-        write_line(&mut self.writer, frame).await
+        match tokio::time::timeout(self.silence, write_line(&mut self.writer, frame)).await {
+            Ok(written) => written,
+            Err(_) => Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("it read nothing in {} s", self.silence.as_secs()),
+            )),
+        }
     }
 
     pub async fn close(mut self) {
@@ -1388,11 +1677,47 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_hubs_address_is_shown_without_its_default_port_or_a_trailing_slash() {
+        // What is stored and reached keeps the port and the path whole; what is shown is how a
+        // user writes it.
+        let shown = |text: &str| HubUrl::parse(text).unwrap().shown();
+        assert_eq!(shown("https://hub.example.net"), "https://hub.example.net");
+        assert_eq!(
+            shown("https://Hub.Example.net:443/"),
+            "https://hub.example.net"
+        );
+        assert_eq!(shown("http://hub.example.net:80"), "http://hub.example.net");
+        // A port that is not the scheme's own stays, and so does a path a proxy routes by.
+        assert_eq!(
+            shown("https://hub.example.net:80"),
+            "https://hub.example.net:80"
+        );
+        assert_eq!(shown("http://192.0.2.10:7448/"), "http://192.0.2.10:7448");
+        assert_eq!(
+            shown("http://192.0.2.10:7448/flottille"),
+            "http://192.0.2.10:7448/flottille"
+        );
+        assert_eq!(shown("http://[fd7a::7]:7448"), "http://[fd7a::7]:7448");
+        assert_eq!(
+            HubUrl::parse("https://hub.example.net")
+                .unwrap()
+                .host_shown(),
+            "hub.example.net"
+        );
+        assert_eq!(HubUrl::shown_text("not a url"), "not a url");
+        // Reached as it always was.
+        let url = HubUrl::parse("https://hub.example.net").unwrap();
+        assert_eq!(url.authority(), "hub.example.net:443");
+        assert_eq!(url.to_string(), "https://hub.example.net:443/");
+    }
+
+    #[test]
     fn a_hub_url_says_its_port_or_takes_the_scheme_s() {
         let url = HubUrl::parse("https://Hub.Example.net").unwrap();
         assert_eq!(url.to_string(), "https://hub.example.net:443/");
         let url = HubUrl::parse("http://192.0.2.10:7448/flottille").unwrap();
         assert_eq!(url.authority(), "192.0.2.10:7448");
+
         assert_eq!(url.path, "/flottille");
         let url = HubUrl::parse("http://[fd7a::7]:7448").unwrap();
         assert_eq!(url.tls_name(), "fd7a::7");

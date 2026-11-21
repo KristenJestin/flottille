@@ -148,6 +148,9 @@ struct Going {
     /// Its runtime folder holding the session's Wayland socket alone, when its project lets its
     /// runs open windows: removed once it ends.
     display: Mutex<Option<crate::display::Folder>>,
+    /// The folder a push the gate let through runs from: what the push set of the
+    /// repository's settings is written back once it ends, and the folder removed.
+    push_folder: Mutex<Option<crate::push_folder::PushFolder>>,
 }
 
 /// How a run is told ready: its probe, and whether its agent asked to be told.
@@ -534,11 +537,21 @@ pub async fn run(
         Some(why) => format!("{}\n", crate::pushed::said(why)),
         None => String::new(),
     };
+    // It runs from a folder of the daemon's, with none of the repository's settings but which
+    // refs go where: a proxy, a rewritten URL or a header a run wrote never applies to it.
+    let push_folder = match &judged {
+        Some(_) => match push_folder(daemon, &folder.path, &pushed_words).await {
+            Ok(made) => Some(made),
+            Err(why) => return Outcome::Refused(format!("refused: {why}")),
+        },
+        None => None,
+    };
     let lifted = judged.map(|judged| {
         lifted(
             judged.ssh,
             crate::mounts::bus_replaced(),
             judged.unlent.is_none(),
+            push_folder.as_ref(),
         )
     });
     // Outside the sandbox, the `git` found at the daemon's start, never one a run put first in
@@ -635,6 +648,7 @@ pub async fn run(
         pushed_words,
         to_paths.unwrap_or(env),
         lifted,
+        push_folder,
         secret_values,
         Phase::Waited,
         Readying { probe, notify },
@@ -741,6 +755,7 @@ pub async fn run_for_user(
         run,
         words,
         env,
+        None,
         None,
         secret_values,
         Phase::Waited,
@@ -946,6 +961,74 @@ async fn to_paths(folder: &Path, words: &[String], env: &BTreeMap<OsString, OsSt
     }
 }
 
+/// The folder a push the gate let through runs from (`push_folder`), made for the repository
+/// its `words` push from: `folder`, then each `-C` of its line. Of git's global options, the line
+/// may hold `-C` and those that change nothing of where the push goes or what it runs
+/// ([`HARMLESS_GLOBALS`]): another is refused, since outside the sandbox it would take a program
+/// (`--exec-path`), a setting that wins over the daemon's own (`-c`, `--config-env`) or another
+/// git folder (`--git-dir`) of a run's.
+async fn push_folder(
+    daemon: &Daemon,
+    folder: &Path,
+    words: &[String],
+) -> Result<crate::push_folder::PushFolder, String> {
+    if !crate::pushed::landlock_enforced() {
+        return Err(
+            "the kernel has no Landlock (its second ABI or later), so the folder a push the gate \
+             let through runs from, in the daemon's runtime folder, would be within a run's \
+             reach: push from a terminal of your own (docs/vault.md, \"The gaps\")"
+                .into(),
+        );
+    }
+    let (_, globals) = gate::git_globals(&words[1..]);
+    let mut from = folder.to_owned();
+    for (option, value) in globals {
+        match option {
+            "-C" => from = from.join(value.unwrap_or_default()),
+            "-c" | "--config-env" => {
+                return Err(format!(
+                    "a push the gate let through takes no setting on its line ({option}), which \
+                     would win over the daemon's own: set it in your own git settings, or push \
+                     without it"
+                ));
+            }
+            option if HARMLESS_GLOBALS.contains(&option) => {}
+            option => {
+                return Err(format!(
+                    "a push the gate let through takes no {option} on its line, which outside \
+                     the sandbox could run a program, read another git folder or change how \
+                     git runs: push without it, from the repository's folder"
+                ));
+            }
+        }
+    }
+    let user = crate::pushed::user_settings(&from).await?;
+    crate::push_folder::made(&daemon.paths.runtime.join("pushes"), &from, user)
+        .await
+        .map_err(|why| {
+            format!(
+                "the push cannot be made to read none of the repository's network settings: {why}"
+            )
+        })
+}
+
+/// git's global options a push the gate let through may hold on its line besides `-C`: none
+/// names a program, a setting or a git folder.
+const HARMLESS_GLOBALS: [&str; 12] = [
+    "--no-pager",
+    "-P",
+    "-p",
+    "--paginate",
+    "--no-replace-objects",
+    "--literal-pathspecs",
+    "--glob-pathspecs",
+    "--noglob-pathspecs",
+    "--icase-pathspecs",
+    "--no-optional-locks",
+    "--no-advice",
+    "--no-lazy-fetch",
+];
+
 /// The push's `words`, its submodules not pushed, whatever the line or the settings say: last
 /// among its options, it wins over theirs.
 fn unrecursed(words: &[String]) -> Vec<String> {
@@ -972,8 +1055,24 @@ fn unrecursed(words: &[String]) -> Vec<String> {
 /// own credential helpers over a repository's, and no signing program runs. No session bus where the one found at
 /// the daemon's start was replaced (`mounts::bus_replaced`): what is at its path now may be a
 /// run's.
-fn lifted(ssh: OsString, bus_replaced: bool, lent: bool) -> BTreeMap<OsString, OsString> {
+fn lifted(
+    ssh: OsString,
+    bus_replaced: bool,
+    lent: bool,
+    from: Option<&crate::push_folder::PushFolder>,
+) -> BTreeMap<OsString, OsString> {
     let mut env: BTreeMap<OsString, OsString> = std::env::vars_os().collect();
+    // From the folder made for it, given the user's settings and what it keeps of the
+    // repository's first: the daemon's own below win over them.
+    if let Some(from) = from {
+        env.extend(from.env());
+        for (key, value) in from.settings() {
+            configure(&mut env, key, value);
+        }
+    }
+    // A program the user's settings name by a bare name is found in the folders only root may
+    // change, never in one a run could put a program of its own in.
+    env.insert("PATH".into(), crate::git::rooted_path());
     configure(&mut env, "core.hooksPath", "/dev/null");
     env.insert("GIT_SSH_COMMAND".into(), ssh);
     env.insert(
@@ -1043,6 +1142,7 @@ fn start(
     words: Vec<String>,
     mut env: BTreeMap<OsString, OsString>,
     lifted: Option<BTreeMap<OsString, OsString>>,
+    push_folder: Option<crate::push_folder::PushFolder>,
     secrets: Vec<String>,
     phase: Phase,
     readying: Readying,
@@ -1129,6 +1229,7 @@ fn start(
         needs: crate::services::reached(daemon, needs),
         needs_stopped: Mutex::default(),
         display: Mutex::new(display),
+        push_folder: Mutex::new(push_folder),
     });
     daemon
         .mcp
@@ -1404,6 +1505,10 @@ async fn follow(
     crate::children::end_session(pid).await;
     // Its display goes with it.
     going.display.lock().unwrap().take();
+    let push_folder = going.push_folder.lock().unwrap().take();
+    if let Some(push_folder) = push_folder {
+        push_folder.written_back().await;
+    }
     while let Ok(read) = reader.try_read(&mut buffer) {
         if read == 0 {
             break;
@@ -1859,6 +1964,7 @@ pub async fn restart_by_user(
             run,
             words,
             env,
+            None,
             None,
             secret_values,
             phase,
@@ -2414,6 +2520,7 @@ pub(crate) fn start_service(
         start.words,
         start.env,
         None,
+        None,
         start.secrets,
         Phase::Waited,
         Readying {
@@ -2825,7 +2932,7 @@ mod tests {
 
     #[test]
     fn a_lifted_push_keeps_the_daemon_s_environment_but_its_hooks() {
-        let env = lifted("'/usr/bin/ssh'".into(), false, true);
+        let env = lifted("'/usr/bin/ssh'".into(), false, true, None);
         let daemon: BTreeMap<OsString, OsString> = std::env::vars_os().collect();
         let count: usize = daemon
             .get(&OsString::from("GIT_CONFIG_COUNT"))
@@ -2838,6 +2945,7 @@ mod tests {
                     "GIT_ALLOW_PROTOCOL",
                     "GIT_PROXY_COMMAND",
                     "GIT_ASKPASS",
+                    "PATH",
                 ]
                 .contains(&name_text)
             {
@@ -2858,9 +2966,11 @@ mod tests {
         assert_eq!(get(format!("GIT_CONFIG_VALUE_{}", count + 1)), "");
         assert_eq!(get("GIT_PROXY_COMMAND".into()), "");
         assert_eq!(get("GIT_ASKPASS".into()), "");
-        let replaced = lifted("ssh".into(), true, true);
+        // The folders only root may change, found at the daemon's start: none in this test.
+        assert_eq!(env[&OsString::from("PATH")], crate::git::rooted_path());
+        let replaced = lifted("ssh".into(), true, true, None);
         assert!(!replaced.contains_key(&OsString::from("DBUS_SESSION_BUS_ADDRESS")));
-        let unlent = lifted("ssh".into(), false, false);
+        let unlent = lifted("ssh".into(), false, false, None);
         assert_eq!(
             unlent[&OsString::from("GIT_ALLOW_PROTOCOL")],
             OsString::from("https:http:git")

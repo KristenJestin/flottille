@@ -1,0 +1,6 @@
+# The Kotlin bindings of the mobile core: the Gradle build generates them from the library.
+[bindings.kotlin]
+package_name = "org.flottille.core.ffi"
+cdylib_name = "flottille_mobile"
+# JNA's cleaner, on the phone and on the JVM of the unit tests alike: the system's needs API 34.
+disable_java_cleaner = true

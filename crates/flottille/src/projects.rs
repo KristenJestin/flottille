@@ -578,9 +578,15 @@ async fn settings_of(project: &Project) -> Value {
             "disagrees": disagrees,
         }));
     }
+    // Why the user's SSH agent is lent to no push, which the settings say with what to do: the
+    // machine's, the same for every project.
+    let pushes_unlent = tokio::task::spawn_blocking(crate::pushed::unlent)
+        .await
+        .unwrap_or_else(|_| Some("the judgement of what ssh reads failed".into()));
     json!({
         "name": project.name,
         "folder": project.folder,
+        "pushes_unlent": pushes_unlent,
         "repositories": repositories,
         "tracker": project.tracker,
         "message_checks": project.message_checks,

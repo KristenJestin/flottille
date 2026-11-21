@@ -143,16 +143,19 @@ pub fn run(paths: &Paths) -> Result<()> {
     // What a daemon that died left: the display folders it made, which only a daemon holding the
     // lock makes, so none is this daemon's; it makes its own again.
     crate::display::clean(paths);
+    // The folders of pushes a daemon that died left: none is in use.
+    let _ = std::fs::remove_dir_all(paths.runtime.join("pushes"));
     // Before anything runs: where the SSH agent's socket is, which every run is kept from.
     crate::ssh_agent::find();
     crate::mounts::find_bus();
     if crate::mounts::namespaces() == crate::mounts::Namespaces::Refused {
         eprintln!("flottille daemon: {}", crate::mounts::REFUSED_GAP);
     }
+    // Before anything runs: the git a push the gate let through runs, and the daemon's own,
+    // never one planted later.
+    crate::git::find_git();
     // Before any repository is read: the user's own credential helpers, the only ones it runs.
     crate::git::find_helpers();
-    // Before anything runs: the git a push the gate let through runs, never one planted later.
-    crate::git::find_git();
     // Before anything runs: what a push reads, which every run has read-only.
     crate::pushed::find(true);
     let machine_key = crate::remote::machine_key(paths)?;
@@ -312,9 +315,10 @@ pub struct Daemon {
     pub extensions: extensions::Live,
     /// What the watchdog reads: the requests that wait, and whether the runtime runs.
     pub watch: Arc<watchdog::Watch>,
-    /// The link to the user's other machines, with remote on: unset with remote off, the reason
-    /// when it could not start.
-    pub remote: std::sync::OnceLock<std::result::Result<Arc<crate::link::Remote>, String>>,
+    /// The link to the user's other machines, with remote on: none with remote off, the reason
+    /// when it could not start. Remote is turned on and off while the daemon runs
+    /// (`remote_config`), so it is read through [`Daemon::link`].
+    remote: std::sync::RwLock<Option<std::result::Result<Arc<crate::link::Remote>, String>>>,
     /// What the daemon knows of an update of Flottille (`updates`).
     pub updates: crate::updates::Live,
     /// What is new since the version last run (`whatsnew`).
@@ -338,7 +342,47 @@ struct Subscription {
     last: u64,
 }
 
+/// Starts the link with `key`, where `daemon.toml` says it listens, and keeps it as the daemon's
+/// (or, when it could not start, why). Called at the daemon's start with remote on, and when the
+/// user turns remote on.
+pub(crate) fn start_link(
+    daemon: &Arc<Daemon>,
+    key: flottille_link::MachineKey,
+) -> std::result::Result<(), String> {
+    // Held weakly: the daemon holds the link, which must not hold the daemon.
+    let emitting = Arc::downgrade(daemon);
+    let emit: crate::link::Emit = Arc::new(move |name: &str, data: Value| {
+        if let Some(daemon) = emitting.upgrade()
+            && let Err(error) = daemon.emit(name, data)
+        {
+            eprintln!("flottille daemon: the event {name} was not stored: {error}");
+        }
+    });
+    let link = crate::link::start(
+        &daemon.paths,
+        key,
+        daemon.stopping.subscribe(),
+        emit,
+        Arc::downgrade(daemon),
+    );
+    daemon.set_link(Some(link.clone()));
+    link.map(|_| ())
+}
+
 impl Daemon {
+    /// The link to the other machines: none while remote is off, the reason when it could not
+    /// start.
+    pub fn link(&self) -> Option<std::result::Result<Arc<crate::link::Remote>, String>> {
+        self.remote.read().unwrap().clone()
+    }
+
+    pub(crate) fn set_link(
+        &self,
+        link: Option<std::result::Result<Arc<crate::link::Remote>, String>>,
+    ) {
+        *self.remote.write().unwrap() = link;
+    }
+
     /// A daemon over its store and projects, its tools served on `port`.
     pub fn new(
         paths: &Paths,
@@ -385,7 +429,7 @@ impl Daemon {
             vault: crate::vault::Keyring::open(paths),
             extensions: extensions::Live::default(),
             watch: Arc::default(),
-            remote: std::sync::OnceLock::new(),
+            remote: std::sync::RwLock::new(None),
             updates: crate::updates::Live::default(),
             whatsnew: crate::whatsnew::Live::default(),
             stopping: watch::Sender::new(false),
@@ -640,27 +684,10 @@ async fn serve(
         Some(bus),
     ));
     watchdog::start(&daemon.watch)?;
-    if let Some(key) = machine_key {
-        // Held weakly: the daemon holds the link, which must not hold the daemon.
-        let emitting = Arc::downgrade(&daemon);
-        let emit: crate::link::Emit = Arc::new(move |name: &str, data: Value| {
-            if let Some(daemon) = emitting.upgrade()
-                && let Err(error) = daemon.emit(name, data)
-            {
-                eprintln!("flottille daemon: the event {name} was not stored: {error}");
-            }
-        });
-        let link = crate::link::start(
-            paths,
-            key,
-            daemon.stopping.subscribe(),
-            emit,
-            Arc::downgrade(&daemon),
-        );
-        if let Err(why) = &link {
-            eprintln!("flottille daemon: the link is not up: {why}");
-        }
-        let _ = daemon.remote.set(link);
+    if let Some(key) = machine_key
+        && let Err(why) = start_link(&daemon, key)
+    {
+        eprintln!("flottille daemon: the link is not up: {why}");
     }
     let mut terminate = signal(SignalKind::terminate())?;
     let mut interrupt = signal(SignalKind::interrupt())?;
@@ -759,7 +786,7 @@ async fn serve(
     if judge(socket_identity(&socket), ours) == Socket::Ours {
         std::fs::remove_file(&socket)?;
     }
-    if let Some(Ok(remote)) = daemon.remote.get() {
+    if let Some(Ok(remote)) = daemon.link() {
         remote.close().await;
     }
     agents::stop_all(&daemon).await;
