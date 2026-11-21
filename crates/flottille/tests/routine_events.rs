@@ -1146,6 +1146,10 @@ fn at_most_once_holds_past_fifty_rows_of_its_day() {
         json!({"agent": first["session"].as_str().unwrap()}),
     )
     .unwrap();
+    let session = first["session"].as_str().unwrap().to_owned();
+    eventually("its session's end", || {
+        agent(&user, &session)["state"] == "ended"
+    });
 
     advance(&user, HOUR);
     failed.insert(0, workflow_run(62, "schedule", Some("failure")));
