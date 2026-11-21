@@ -19,11 +19,13 @@ mod mobile;
 mod panic;
 mod view;
 
+pub use join::{HubCard, hub_card};
 pub use keys::Sealer;
 pub use mobile::{Batch, Core, Event, Listener};
 pub use panic::{PANIC_FILE, keep_panics, last_panic};
 pub use view::{
-    AskView, ConversationView, Entry, MachineView, ProjectView, RequestView, SessionView, ViewState,
+    AskView, ConversationView, Entry, MachineView, MemberView, ProjectView, RequestView,
+    SessionView, ViewState,
 };
 
 /// Why the core could not do what it was asked: a sentence for the user.

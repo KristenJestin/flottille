@@ -17,8 +17,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use flottille_link::{
-    Ask, Device, DeviceKey, Endpoint, Link, MachineKey, Message, PublicKey, Pushed, Request, Role,
-    Session, Tls, Told,
+    Action, Ask, Change, Device, DeviceKey, Endpoint, Link, MachineKey, Message, PeerState,
+    PublicKey, Pushed, Request, Role, Session, Tls, Told,
 };
 use serde_json::{Value, json};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
@@ -260,6 +260,37 @@ impl Core {
                         active,
                         last_input: now_seconds(),
                     })
+                    .await
+                    .map_err(|error| MobileError::new(error.to_string()))
+            })
+            .await
+    }
+
+    /// Removes this device from the user's list: its own removal, signed with its device key and
+    /// sent to the hub, which sends the list back without it. The view then claims no role and
+    /// says the phone was removed; joining again is the way back.
+    pub async fn leave(&self) -> Result<(), MobileError> {
+        let (asker, change) = {
+            let state = self.inner.state();
+            let asker = state
+                .connection
+                .as_ref()
+                .map(|connection| connection.asker.clone())
+                .ok_or_else(|| MobileError::new("the phone is not connected to its hub"))?;
+            let (Some(device), Some(key)) = (&state.device, &state.key) else {
+                return Err(MobileError::new("this phone has joined no hub"));
+            };
+            let change = Change::sign(
+                device.list.head(),
+                Action::Remove { key: key.public() },
+                key,
+            );
+            (asker, change)
+        };
+        self.inner
+            .on(async move {
+                asker
+                    .ask(Ask::Submit { change })
                     .await
                     .map_err(|error| MobileError::new(error.to_string()))
             })
@@ -652,7 +683,14 @@ impl Inner {
 
     /// The link to the runner `machine`, whose machine key is `key`, up or down. A task the list
     /// ended in the meantime changes nothing.
-    fn online(&self, machine: &str, key: PublicKey, link: Option<Link>, why: &str) {
+    fn online(
+        &self,
+        machine: &str,
+        key: PublicKey,
+        link: Option<Link>,
+        state: PeerState,
+        why: &str,
+    ) {
         let mut state = self.state();
         let current = state.connection.as_ref().is_some_and(|connection| {
             connection
@@ -666,7 +704,7 @@ impl Inner {
             }
             return;
         }
-        state.view.online(machine, link.is_some(), why);
+        state.view.online(machine, state, why);
         if let Some(connection) = &mut state.connection {
             match link {
                 Some(link) => {
@@ -780,14 +818,14 @@ async fn keep_linked(inner: Arc<Inner>, name: String, machine: PublicKey) {
         match link::dial(&endpoint, machine, &told, &name).await {
             Ok(linked) => {
                 wait = FIRST_WAIT;
-                inner.online(&name, machine, Some(linked.clone()), "");
+                inner.online(&name, machine, Some(linked.clone()), PeerState::Online, "");
                 if !loaded {
                     loaded = inner.load(&name, &linked).await.is_ok();
                 }
                 inner.watch(&name, machine, &linked).await;
-                inner.online(&name, machine, None, "its link ended");
+                inner.online(&name, machine, None, PeerState::Offline, "its link ended");
             }
-            Err(error) => inner.online(&name, machine, None, &error.to_string()),
+            Err(error) => inner.online(&name, machine, None, error.state(), &error.to_string()),
         }
         let still = Inner::runners(&inner.state())
             .iter()
