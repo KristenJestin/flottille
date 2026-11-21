@@ -19,7 +19,9 @@ import org.junit.Test
  */
 class PhoneViewTest {
     private fun machine(name: String, state: String) =
-        MachineView(name = name, role = "runner", online = state == "online", state = state, since = 5uL, why = "")
+        MachineView(
+            name = name, role = "runner", online = state == "online", throughHub = false, state = state, since = 5uL, why = "",
+        )
 
     private fun session(machine: String, agent: String) =
         SessionView(machine = machine, agent = agent, title = "t", state = "idle", last = 7uL)

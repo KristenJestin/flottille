@@ -49,6 +49,8 @@ pub struct MachineView {
     /// Why it is not online, when it is not: the link's own sentence (which address was tried,
     /// which side to update).
     pub why: String,
+    /// Whether its link goes through the hub, not to an address (#1167).
+    pub through_hub: bool,
 }
 
 /// A member of the user's list.
@@ -212,6 +214,7 @@ impl View {
                     state: PeerState::Offline.to_string(),
                     since: now_millis(),
                     why: "not linked yet".to_owned(),
+                    through_hub: false,
                 },
             })
             .collect();
@@ -240,7 +243,7 @@ impl View {
 
     /// The link to `machine` is in `state`, for `why`. `since` moves only when the state does: a
     /// machine that fails again is offline since the first time.
-    pub(crate) fn online(&mut self, machine: &str, state: PeerState, why: &str) {
+    pub(crate) fn online(&mut self, machine: &str, state: PeerState, through_hub: bool, why: &str) {
         if let Some(view) = self.machines.iter_mut().find(|view| view.name == machine) {
             let state = state.to_string();
             if view.state != state {
@@ -248,6 +251,7 @@ impl View {
                 view.state = state;
             }
             view.online = view.state == PeerState::Online.to_string();
+            view.through_hub = view.online && through_hub;
             why.clone_into(&mut view.why);
         }
     }

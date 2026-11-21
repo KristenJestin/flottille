@@ -1081,7 +1081,11 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   chooses it, and the pointer marks the row it is on and a click chooses it. Ctrl K waits while
   a dialog or a list is open. It searches what the window already holds from the daemon (the
   tree, the projects), never the content of conversations (that needs an index);
-- left: the sidebar, each project and, under it, **its sessions in one flat list**, sorted by
+- left: the sidebar, each project and, under it, **its sessions in one flat list**, those of every
+  machine of the user together (a project of the same name on several machines is one group; a
+  session of another machine carries that machine's name on its second line, `server`, greyed
+  with `server offline since 22:14` while it is off, `docs/remote.md`, "One list of every
+  machine"), sorted by
   last exchange (the later of the last message the user gave it and the end of its root's last
   turn, its creation before either: the session that last had one on top. Work done during a turn
   never moves a row, so two sessions working at once keep their places; a state is drawn by the
@@ -1598,10 +1602,10 @@ to the front.
 ## 12. Later: remote
 
 Designed for, not built before the milestone "Remote": the user's machines and devices, members
-of their own hub (a control plane: the signed member list, pair mode, presence and addresses;
-it never carries a link's bytes), linked peer to peer, directly, by their own keys over an
-end-to-end encrypted transport, over whatever network the user has (Flottille handles no network
-channel: no relay, no NAT traversal), each with a
+of their own hub (the signed member list, pair mode, presence, and the links' packets, which it
+forwards between members and can neither read nor change), linked by their own keys over an
+end-to-end encrypted transport through that hub, so that only the hub needs to be reachable (no
+NAT traversal, no relay of anyone else's), each with a
 role (`runner`, `controller`, `viewer`); sessions started on another machine through the same
 `agent_launch`, the code sent over Flottille's own link and the new commits brought back, with the
 tree spanning machines through deliveries; a native Android app, tunnels to a run's port, and
