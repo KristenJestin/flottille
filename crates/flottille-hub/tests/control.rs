@@ -89,6 +89,7 @@ impl Place {
         let waits = flottille_hub::Waits {
             arrival: QUICK_ARRIVAL,
             pair_idle: QUICK_PAIR,
+            ..flottille_hub::Waits::default()
         };
         flottille_hub::serve_with(hub, listener, None, hello(), waits).unwrap()
     }

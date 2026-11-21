@@ -4,9 +4,12 @@
 //! connection of its own to this machine, whichever machine it shows: the list and the pairing are
 //! this machine's, signed with this session's device key ([`crate::device`]).
 //!
-//! The machine the window shows is chosen in the sidebar's switcher: [`Aim`] makes every other
-//! connection of the window go to it, each request signed with the device key and carried by this
-//! machine's daemon (`docs/remote.md`, "Requests from another machine's clients").
+//! The sidebar lists the sessions of every machine (`docs/remote.md`, "One list of every
+//! machine"): this machine's daemon keeps the light list each other machine tells it, and says it
+//! with its own ([`Lists`]). The machine in front is the one whose session is open: [`Aim`] makes
+//! every other connection of the window go to it, each request signed with the device key and
+//! carried by this machine's daemon (`docs/remote.md`, "Requests from another machine's
+//! clients").
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -229,6 +232,53 @@ impl Launched {
     }
 }
 
+/// A session as a machine's light list says it (`remote.sessions`): what its row shows of a
+/// machine whose conversation the window does not read.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Listed {
+    pub id: String,
+    pub title: String,
+    pub project: String,
+    /// `running`, `needs you`, `waiting` or `idle`.
+    pub state: String,
+    pub exchanged_at: u64,
+    pub created_at: u64,
+    /// The session of the agent that leads it, on the same machine.
+    pub pilot: Option<String>,
+}
+
+impl Listed {
+    fn of(value: &Value) -> Listed {
+        Listed {
+            id: text(&value["id"]),
+            title: text(&value["title"]),
+            project: text(&value["project"]),
+            state: text(&value["state"]),
+            exchanged_at: value["exchanged_at"].as_u64().unwrap_or_default(),
+            created_at: value["created_at"].as_u64().unwrap_or_default(),
+            pilot: value["pilot"].as_str().map(str::to_owned),
+        }
+    }
+
+    fn all(value: &Value) -> Vec<Listed> {
+        value
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(Listed::of)
+            .collect()
+    }
+}
+
+/// The sessions of every machine, as this machine's daemon says them: its own, and each other
+/// machine's as it last told them, kept while that machine is off.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Lists {
+    pub this: Vec<Listed>,
+    /// Each other machine's, by its name.
+    pub machines: Vec<(String, Vec<Listed>)>,
+}
+
 impl Hub {
     /// Whether what needs the hub (a device added, a change of the list) can work now.
     pub fn usable(&self) -> bool {
@@ -298,6 +348,8 @@ pub struct Machines {
     pub proposed: Proposed,
     /// The sessions this machine's agents started on the others.
     pub launches: Vec<Launched>,
+    /// The sessions of every machine.
+    pub lists: Lists,
 }
 
 impl Machines {
@@ -306,7 +358,7 @@ impl Machines {
         self.hub.is_some() && self.this.is_some()
     }
 
-    /// The machines the switcher offers beside this one: those that run agents.
+    /// The machines beside this one that run agents.
     pub fn runners(&self) -> impl Iterator<Item = &Machine> {
         self.machines.iter().filter(|machine| machine.runs())
     }
@@ -498,6 +550,48 @@ impl Remote {
             .expect("a thread for what is asked of the machines");
     }
 
+    /// Closes the session `agent` of the machine `machine`, off the UI's thread: this machine's
+    /// daemon keeps the close, signed by this device, until that machine takes it, now or when it
+    /// links again (`docs/remote.md`, "One list of every machine"). The answer comes back as
+    /// [`Update::Closed`], then the lists read again.
+    pub fn close(&self, machine: String, agent: String) {
+        let remote = self.clone();
+        std::thread::Builder::new()
+            .name("flottille-machines-close".into())
+            .spawn(move || {
+                let done = remote.closing(&machine, &agent);
+                let _ = remote.updates.unbounded_send(Update::Closed {
+                    machine,
+                    agent,
+                    refused: done.err(),
+                });
+                if let Ok(stream) = (remote.local)()
+                    && let Ok(mut conn) = Conn::new(stream)
+                    && let Ok(read) = read(&mut conn)
+                {
+                    remote.tell(News::Read(Box::new(read)));
+                }
+            })
+            .expect("a thread for a close");
+    }
+
+    fn closing(&self, machine: &str, agent: &str) -> Result<()> {
+        let key = self.key()?;
+        let close = flottille_link::Request::sign(
+            &key,
+            &format!("close-{agent}"),
+            machine,
+            "agent.stop",
+            &json!({"agent": agent}),
+            std::time::SystemTime::now(),
+        )
+        .map_err(|error| error.to_string())?;
+        let stream = (self.local)().map_err(|error| format!("cannot reach Flottille: {error}"))?;
+        let mut conn = Conn::new(stream).map_err(|error| error.to_string())?;
+        conn.ask_within("remote.close", json!({"request": close}), BOUND)??;
+        Ok(())
+    }
+
     /// The device key, which signs the requests for the machine the window shows.
     pub fn key(&self) -> Result<DeviceKey> {
         self.device
@@ -643,7 +737,19 @@ fn read(conn: &mut Conn) -> Result<Machines> {
             role: text(&machines["proposed"]["role"]),
         },
         launches: Vec::new(),
+        lists: Lists::default(),
     };
+    if let Ok(lists) = conn.ask_within("remote.sessions", json!({}), BOUND)? {
+        read.lists = Lists {
+            this: Listed::all(&lists["this"]),
+            machines: lists["machines"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|list| (text(&list["name"]), Listed::all(&list["sessions"])))
+                .collect(),
+        };
+    }
     if let Ok(launched) = conn.ask_within("remote.launches", json!({}), BOUND)? {
         read.launches = launched["launches"]
             .as_array()

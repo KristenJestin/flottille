@@ -132,11 +132,13 @@ pub const METHODS: &[(&str, Class)] = &[
     ("remote.address.remove", Drive),
     ("remote.members", Read),
     ("remote.launches", Read),
+    ("remote.sessions", Read),
     ("remote.change", Drive),
     // It points this machine at a hub, with the code its host printed: the machine's user only.
     ("remote.pair", Local),
     // As `remote.pair`: the declaration of this machine by the device that paired.
     ("remote.declare", Local),
+    ("remote.close", Local),
     // Whether remote is on and where this machine is reached, and its change: the machine's own
     // user, never another machine's device (a link could turn the machine off from afar).
     ("remote.settings", Local),
@@ -213,6 +215,7 @@ pub const METHODS: &[(&str, Class)] = &[
     ("agent.unqueue", Drive),
     ("agent.answer", Drive),
     ("agent.image", Read),
+    ("agent.file", Read),
     ("agent.cancel", Drive),
     ("agent.stop", Drive),
     ("agent.resume", Drive),

@@ -16,6 +16,7 @@ mod offers;
 mod pairing;
 mod request;
 mod serial;
+mod sessions;
 mod transport;
 mod tunnel;
 
@@ -33,8 +34,9 @@ use zeroize::Zeroizing;
 pub use address::Address;
 pub use control::{
     Arriving, Ask, Asked, Asker, ControlError, Device, Facts, HANDSHAKE_LIMIT, HUB_PORT,
-    HubSession, HubUrl, LINE_LIMIT, PairProof, Paired, Pairing, PresenceOf, Pushed, Session,
-    Stream, Tls, ToDevice, Told, Transcript, arrive,
+    HubSession, HubUrl, KEEPALIVE, LINE_LIMIT, LinkPacket, PairProof, Paired, Pairing, PresenceOf,
+    Pushed, RELAY_PACKET, RelayPort, Relays, SILENCE, Session, Stream, Tls, ToDevice, Told,
+    Transcript, arrive,
 };
 pub use hello::{Hello, NeedsUpdate, PeerState, choose};
 pub use link::{
@@ -49,9 +51,11 @@ pub use members::{
 pub use offers::{Capabilities, MOST_AGENTS, MOST_PROJECTS, Offered};
 pub use pairing::{PairCode, PairCodeError, PairSecret, Proposed};
 pub use request::{
-    Accepted, FULL_SWITCH_LASTS, NONCES_PER_DEVICE, Nonce, REQUEST_WINDOW, Request, RequestError,
-    Requests, Signed, full_switch, runs_agents,
+    Accepted, CLOSE_LASTS, CLOSES_SERVED_MOST, ClosesServed, FULL_SWITCH_LASTS, NONCES_PER_DEVICE,
+    Nonce, REQUEST_WINDOW, Request, RequestError, Requests, Signed, full_switch, kept_close,
+    runs_agents,
 };
+pub use sessions::{LightSession, MOST_SESSIONS, STATES, SessionList, TITLE_LIMIT};
 pub use transport::TlsServer;
 pub use tunnel::TunnelStream;
 

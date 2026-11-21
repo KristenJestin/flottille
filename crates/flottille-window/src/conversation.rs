@@ -237,6 +237,10 @@ pub struct ShownLink {
     pub title: Option<String>,
     pub whence: String,
     pub target: String,
+    /// The agent that showed it, and the number of the event that did: what names the file to
+    /// the machine that serves it (`agent.file`).
+    pub agent: String,
+    pub seq: u64,
 }
 
 impl ShownLink {
@@ -1060,6 +1064,8 @@ impl Conversation {
                     title: shown.title,
                     whence: shown.whence,
                     target: shown.target,
+                    agent: shown.agent,
+                    seq: event.seq,
                 };
                 let mut changes = self.close(Some(event.at));
                 // Links shown in a row are one card: only thoughts, and the calls that show them,
@@ -2764,11 +2770,13 @@ mod tests {
         )
     }
 
-    fn line(target: &str, title: Option<&str>) -> ShownLink {
+    fn line(seq: u64, target: &str, title: Option<&str>) -> ShownLink {
         ShownLink {
             title: title.map(str::to_owned),
             whence: target.trim_start_matches("https://").to_owned(),
             target: target.to_owned(),
+            agent: "a1".to_owned(),
+            seq,
         }
     }
 
@@ -2780,7 +2788,7 @@ mod tests {
         assert_eq!(
             &c.blocks()[1..],
             [Block::Links {
-                links: vec![line("https://example.org/t/42", Some("Ticket 42"))]
+                links: vec![line(2, "https://example.org/t/42", Some("Ticket 42"))]
             }]
         );
     }
@@ -2817,9 +2825,9 @@ mod tests {
         assert_eq!(
             links,
             &[
-                line("https://example.org/1", Some("One")),
-                line("https://example.org/2", Some("Two")),
-                line("https://example.org/3", None),
+                line(2, "https://example.org/1", Some("One")),
+                line(5, "https://example.org/2", Some("Two")),
+                line(6, "https://example.org/3", None),
             ]
         );
         // The card is drawn again, not added again.
@@ -2839,7 +2847,7 @@ mod tests {
             .collect();
         assert_eq!(cards.len(), 2);
         assert!(
-            matches!(cards[1], Block::Links { links } if links == &[line("https://example.org/2", None)])
+            matches!(cards[1], Block::Links { links } if links == &[line(3, "https://example.org/2", None)])
         );
     }
 
@@ -3042,7 +3050,7 @@ mod tests {
     #[test]
     fn a_shared_link_stays_in_sight_between_the_groups() {
         let link = Block::Links {
-            links: vec![line("https://example.org", None)],
+            links: vec![line(1, "https://example.org", None)],
         };
         assert!(in_sight(&link));
     }

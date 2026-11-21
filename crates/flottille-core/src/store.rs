@@ -978,6 +978,18 @@ const MIGRATIONS: &[&str] = &[
     ) STRICT;
     INSERT INTO notification_cursor (id, seq) SELECT 1, coalesce(max(seq), 0) FROM events;
 ",
+    "
+    -- The light copy of each other machine's list of sessions (`docs/remote.md`, \"One list of
+    -- every machine\"): the list it last told over its link, kept whole as JSON (each live root
+    -- session's id, title, project, state and last exchange, never its conversation), so that
+    -- the clients list the sessions of a machine that is off. One row per machine, by its key.
+    CREATE TABLE machine_sessions (
+        machine TEXT PRIMARY KEY,
+        name    TEXT NOT NULL,
+        list    TEXT NOT NULL,
+        at      INTEGER NOT NULL
+    ) STRICT;
+",
 ];
 
 /// How many of each extension's own migrations were applied (`docs/extensions.md`, "Data"): its
@@ -3351,6 +3363,62 @@ impl Store {
             params![machine, launch],
         )?;
         Ok(())
+    }
+
+    /// Keeps `list`, the sessions the machine of key `machine` (named `name`) told at `at`, in
+    /// place of the one it told before.
+    pub fn keep_machine_sessions(
+        &mut self,
+        machine: &str,
+        name: &str,
+        list: &Value,
+        at: u64,
+    ) -> Result<()> {
+        self.connection.execute(
+            "INSERT INTO machine_sessions (machine, name, list, at) VALUES (?1, ?2, ?3, ?4) \
+             ON CONFLICT (machine) DO UPDATE SET name = ?2, list = ?3, at = ?4",
+            params![machine, name, list.to_string(), at as i64],
+        )?;
+        Ok(())
+    }
+
+    /// Forgets the list of each machine but those of keys `machines`: the others left the members or
+    /// are no runner any more.
+    pub fn forget_machine_sessions_except(&mut self, machines: &[String]) -> Result<()> {
+        let transaction = self.connection.transaction()?;
+        let kept: Vec<String> = {
+            let mut statement = transaction.prepare("SELECT machine FROM machine_sessions")?;
+            let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+            rows.collect::<std::result::Result<_, _>>()?
+        };
+        for machine in kept.iter().filter(|machine| !machines.contains(machine)) {
+            transaction.execute(
+                "DELETE FROM machine_sessions WHERE machine = ?1",
+                params![machine],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Each other machine's list as it last told it: its key, its name, the list, and when.
+    pub fn machine_sessions(&self) -> Result<Vec<(String, String, Value, u64)>> {
+        let mut statement = self
+            .connection
+            .prepare_cached("SELECT machine, name, list, at FROM machine_sessions ORDER BY name")?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)? as u64,
+            ))
+        })?;
+        rows.map(|row| {
+            let (machine, name, list, at) = row?;
+            Ok((machine, name, serde_json::from_str(&list)?, at))
+        })
+        .collect()
     }
 
     /// Keeps a message for another machine, after those kept before it; one of an id kept already
@@ -8895,5 +8963,35 @@ mod tests {
             (read.state.as_str(), read.workspace_id),
             ("refused", Some(id))
         );
+    }
+
+    #[test]
+    fn a_machine_s_list_is_forgotten_when_it_leaves_the_members_or_stops_being_a_runner() {
+        let mut store = Store::open_in_memory().unwrap();
+        for (machine, name) in [("aa", "pc"), ("bb", "server"), ("cc", "tablet")] {
+            store
+                .keep_machine_sessions(machine, name, &json!({"sessions": []}), 1)
+                .unwrap();
+        }
+        let kept = |store: &Store| -> Vec<String> {
+            store
+                .machine_sessions()
+                .unwrap()
+                .into_iter()
+                .map(|(machine, ..)| machine)
+                .collect()
+        };
+        // Only the machines still among the members keep a list.
+        store
+            .forget_machine_sessions_except(&["aa".to_owned(), "bb".to_owned()])
+            .unwrap();
+        assert_eq!(kept(&store), ["aa", "bb"]);
+        // A machine that is no runner any more is left out of the runners.
+        store
+            .forget_machine_sessions_except(&["bb".to_owned()])
+            .unwrap();
+        assert_eq!(kept(&store), ["bb"]);
+        store.forget_machine_sessions_except(&[]).unwrap();
+        assert!(kept(&store).is_empty());
     }
 }

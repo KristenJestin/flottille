@@ -348,7 +348,9 @@ server  projects: app (12 free), site (none free)  agents: claude
 
 Renames a member: a change signed by this session's device key. `remote.change`.
 
-### `flottille remote icon <name> <icon> [--json]`, `flottille remote colour <name> <colour> [--json]`
+### `flottille remote icon <name> <icon> [--json]`
+
+### `flottille remote colour <name> <colour> [--json]`
 
 Changes how a member is drawn, its icon or its colour, the other kept: a change signed by this
 session's device key. A role is changed on the hub's host only (`flottille-hub role`).
@@ -364,8 +366,8 @@ before it links to anything. The device comes back only paired again on the hub.
 
 With remote on (`docs/remote.md`, "Identity and keys"), the addresses another machine reaches this
 one at: the one its link listens on, `found` (its interfaces' when it listens on all of them; none
-until `[remote] listen` is set), and those declared by hand, `declared`. Flottille finds no path by itself, and relays nothing: how two
-machines reach each other (a LAN, a VPN, a public address, a tunnel) is the user's to arrange.
+until `[remote] listen` is set), and those declared by hand, `declared`. They serve the direct path
+only, unused by default: links go through the hub (`docs/remote.md`, "The transport").
 `remote.machines` (`docs/protocol.md`).
 
 ```

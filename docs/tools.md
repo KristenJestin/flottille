@@ -2297,9 +2297,12 @@ agent never drives the user's desktop through a program (`run` has no graphical 
   unfolds into it as a line.
 - **On another machine** (the window shows it, `docs/remote.md`, "Tunnels"): a `localhost` link
   opens through a tunnel to the run that serves its port, then the system's handler is given the
-  local address; a link of the web opens as it is; a file is the agent's machine's, so its line
-  says `server: <path>` with no **Open** and no thumbnail, and the toast says `The agent shares a
-  file of server: <path>` with no button.
+  local address; a link of the web opens as it is; a picture or a video is sent by the agent's machine
+  (`docs/remote.md`, "A file an agent showed"): a picture's line draws a placeholder that fades
+  into it, with **Open**, a video's has **Play**, each opening a copy written on this machine, and
+  the toast says `The agent shares a picture of server: shot.png` with the same button; any other
+  file is the agent's machine's, so its line says `server: <path>` with no **Open** and no
+  thumbnail, and the toast says `The agent shares a file of server: <path>` with no button.
 - **One toast, only when it is needed**: a row of links gives one toast, `The agent shares a
   link: <title or host>` with an **Open** button when it holds one, `The agent shares 3 links`
   with **Show** (it goes to the conversation) when it holds more, and only while the

@@ -65,7 +65,7 @@ const RETRY: Duration = Duration::from_secs(30);
 
 /// Why a message from another machine is not taken: never, or not now (its sender keeps it and
 /// sends it again).
-enum Refused {
+pub(crate) enum Refused {
     Never(String),
     Now(String),
 }
@@ -77,7 +77,7 @@ impl From<String> for Refused {
 }
 
 /// The answer to another machine of `answer`: a refusal for now is an answer saying `later`.
-fn answer_of(answer: Result<Value, Refused>, what: &str) -> Result<Value, String> {
+pub(crate) fn answer_of(answer: Result<Value, Refused>, what: &str) -> Result<Value, String> {
     match answer {
         Ok(value) => Ok(value),
         Err(Refused::Never(why)) => {
@@ -446,7 +446,7 @@ pub(crate) fn tell(
         let outgoing = outgoing(&launch, &name, String::new(), &message, back);
         let _ = daemon.emit(
             "remote.delivery_dropped",
-            dropped(&outgoing, None, Some(&why)),
+            dropped(daemon, &outgoing, None, Some(&why)),
         );
     }
     true
@@ -494,6 +494,69 @@ fn keep(
         .map_err(|error| format!("it cannot be kept: {error}"))?;
     send_kept(daemon, &launch.machine);
     Ok(())
+}
+
+/// The id under which the close of `agent` of the machine of key `machine` is kept: one close
+/// of a session is kept once, however often it is asked.
+fn close_id(machine: &str, agent: &str) -> String {
+    format!("close-{}-{agent}", &machine[..machine.len().min(16)])
+}
+
+/// Keeps the user's close of the session `agent` of the machine of key `machine`, named `name`
+/// (`docs/remote.md`, "One list of every machine"), and sends it when it can; refused when as many
+/// messages wait for that machine as may.
+pub(crate) fn keep_close(
+    daemon: &Arc<Daemon>,
+    machine: &str,
+    name: &str,
+    agent: &str,
+    request: flottille_link::Request,
+) -> Result<(), String> {
+    let id = close_id(machine, agent);
+    let kept = daemon
+        .read(|store| store.outgoing(Some(machine)))
+        .map_err(|error| format!("it cannot be kept: {error}"))?;
+    // A close kept for this session is replaced: the latest is the user's word now.
+    let replacing = kept.iter().any(|outgoing| outgoing.id == id);
+    if !replacing && kept.len() >= MOST_KEPT {
+        return Err(format!("{MOST_KEPT} messages wait for {name} already"));
+    }
+    let outgoing = Outgoing {
+        seq: 0,
+        id,
+        machine: machine.to_owned(),
+        name: name.to_owned(),
+        launch: String::new(),
+        message: serde_json::to_value(MachineMessage::Close(Box::new(request))).unwrap_or_default(),
+        back: false,
+        at: now_ms(),
+    };
+    daemon
+        .write(|store| {
+            store.forget_outgoing(&outgoing.id)?;
+            store.keep_outgoing(&outgoing).map(|()| ((), None))
+        })
+        .map_err(|error| format!("it cannot be kept: {error}"))?;
+    send_kept(daemon, machine);
+    Ok(())
+}
+
+/// The sessions whose close waits to be sent, each by its machine's key and its id there.
+pub(crate) fn closing(daemon: &Daemon) -> std::collections::HashSet<(String, String)> {
+    daemon
+        .read(|store| store.outgoing(None))
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|outgoing| {
+            match serde_json::from_value::<MachineMessage>(outgoing.message).ok()? {
+                MachineMessage::Close(request) => {
+                    let params: Value = serde_json::from_str(&request.signed.params).ok()?;
+                    Some((outgoing.machine, params["agent"].as_str()?.to_owned()))
+                }
+                _ => None,
+            }
+        })
+        .collect()
 }
 
 /// Sends what is kept for `machine` again in a while: it could not take it now.
@@ -602,7 +665,7 @@ async fn send_each(daemon: &Arc<Daemon>, machine: &str) {
                     forget(daemon, &outgoing.id);
                     let _ = daemon.emit(
                         "remote.delivery_dropped",
-                        dropped(&outgoing, Some(&reason), None),
+                        dropped(daemon, &outgoing, Some(&reason), None),
                     );
                 }
                 // The link went: what is left goes when it comes back.
@@ -648,14 +711,40 @@ fn with_commits(message: Value, name: &str, came: Result<Value, String>) -> Valu
 
 /// What the inbox says of a message dropped: for whom, what, since when, and why: refused by the
 /// other machine, or not kept by this one (`unkept`).
-fn dropped(outgoing: &Outgoing, refused: Option<&str>, unkept: Option<&str>) -> Value {
+fn dropped(
+    daemon: &Daemon,
+    outgoing: &Outgoing,
+    refused: Option<&str>,
+    unkept: Option<&str>,
+) -> Value {
+    let mut title = None;
     let (kind, agent) = match serde_json::from_value::<MachineMessage>(outgoing.message.clone()) {
         Ok(MachineMessage::Deliver(deliver)) => (deliver.kind, deliver.agent),
         Ok(MachineMessage::Call(call)) => (call.tool, call.agent),
+        Ok(MachineMessage::Close(request)) => {
+            let params: Value = serde_json::from_str(&request.signed.params).unwrap_or_default();
+            let agent = params["agent"].as_str().unwrap_or_default().to_owned();
+            title = session_title(daemon, &outgoing.machine, &agent);
+            ("close".to_owned(), agent)
+        }
         _ => (String::new(), String::new()),
     };
     json!({"machine": outgoing.name, "launch": outgoing.launch, "kind": kind, "agent": agent,
-        "kept_at": outgoing.at, "refused": refused, "unkept": unkept})
+        "title": title, "kept_at": outgoing.at, "refused": refused, "unkept": unkept})
+}
+
+/// The title of the session `agent` of the machine of key `machine`, as that machine last listed
+/// it, when it is known.
+fn session_title(daemon: &Daemon, machine: &str, agent: &str) -> Option<String> {
+    let lists = daemon.read(|store| store.machine_sessions()).ok()?;
+    let (_, _, list, _) = lists.into_iter().find(|(key, ..)| key == machine)?;
+    list["sessions"]
+        .as_array()?
+        .iter()
+        .find(|session| session["id"] == agent)
+        .and_then(|session| session["title"].as_str())
+        .filter(|title| !title.is_empty())
+        .map(str::to_owned)
 }
 
 /// Drops what waited for its machine for 30 days, each with an entry in the inbox.
@@ -669,28 +758,38 @@ pub(crate) fn drop_old(daemon: &Daemon) {
             "flottille daemon: a message kept 30 days for {} is dropped",
             outgoing.name
         );
-        let _ = daemon.emit("remote.delivery_dropped", dropped(&outgoing, None, None));
+        let _ = daemon.emit(
+            "remote.delivery_dropped",
+            dropped(daemon, &outgoing, None, None),
+        );
     }
 }
 
 /// The inbox's words of a message dropped (`remote.delivery_dropped`).
 pub(crate) fn dropped_text(data: &Value) -> String {
     let machine = data["machine"].as_str().unwrap_or("another machine");
-    let what = match data["kind"].as_str().unwrap_or_default() {
-        "" => "A message".to_owned(),
-        kind => format!("A {kind}"),
-    };
     let agent = data["agent"].as_str().unwrap_or_default();
+    let what = match data["kind"].as_str().unwrap_or_default() {
+        // The session is named as its owner knows it: its title, else its id.
+        "close" => {
+            let session = data["title"].as_str().filter(|title| !title.is_empty());
+            format!("The close of session {}", session.unwrap_or(agent))
+        }
+        kind => {
+            let what = match kind {
+                "" => "A message".to_owned(),
+                kind => format!("A {kind}"),
+            };
+            format!("{what} for agent {agent}")
+        }
+    };
     if let Some(why) = data["unkept"].as_str() {
-        return format!("{what} for agent {agent} of {machine} was not sent: {why}.");
+        return format!("{what} of {machine} was not sent: {why}.");
     }
     match data["refused"].as_str() {
-        Some(why) => format!(
-            "{what} for agent {agent} of {machine} was dropped: {machine} refused it ({why})."
-        ),
+        Some(why) => format!("{what} of {machine} was dropped: {machine} refused it ({why})."),
         None => format!(
-            "{what} for agent {agent} of {machine} was dropped: {machine} did not link to this \
-             machine for 30 days."
+            "{what} of {machine} was dropped: {machine} did not link to this machine for 30 days."
         ),
     }
 }
@@ -1289,5 +1388,26 @@ pub(crate) async fn call(
                 )),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_close_dropped_names_the_session_and_that_it_was_a_close() {
+        let named = json!({"machine": "pc", "kind": "close", "agent": "a1", "title": "Ship it",
+            "refused": "the close is older than thirty days"});
+        let text = dropped_text(&named);
+        assert!(text.contains("close"), "{text}");
+        assert!(text.contains("Ship it"), "{text}");
+        assert!(text.contains("pc"), "{text}");
+        assert!(!text.contains("agent  of"), "{text}");
+        // Its title not known: its id.
+        let unnamed = json!({"machine": "pc", "kind": "close", "agent": "a1", "title": null,
+            "refused": null});
+        let text = dropped_text(&unnamed);
+        assert!(text.contains("close") && text.contains("a1"), "{text}");
     }
 }

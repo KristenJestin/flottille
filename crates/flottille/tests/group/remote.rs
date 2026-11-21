@@ -25,6 +25,8 @@ mod remote_asks;
 mod remote_code;
 #[path = "../remote_deliveries.rs"]
 mod remote_deliveries;
+#[path = "../remote_files.rs"]
+mod remote_files;
 #[path = "../remote_hub.rs"]
 mod remote_hub;
 #[path = "../remote_keys.rs"]
@@ -33,8 +35,12 @@ mod remote_keys;
 mod remote_launch;
 #[path = "../remote_link.rs"]
 mod remote_link;
+#[path = "../remote_relay.rs"]
+mod remote_relay;
 #[path = "../remote_requests.rs"]
 mod remote_requests;
+#[path = "../remote_sessions.rs"]
+mod remote_sessions;
 #[path = "../remote_settings.rs"]
 mod remote_settings;
 #[path = "../remote_tunnels.rs"]
