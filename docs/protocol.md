@@ -2856,8 +2856,9 @@ session of the routine's project, at its time or when its event comes. A routine
   ```
 
   `kind` and its own fields: `workflow_run` (`repository`, `workflow`, `branch`, each null for any
-  of the project's; `started_by` one of `schedule`, `push`, `manual`, `any`; `outcome` `failed` or
-  `any`), `review_requested` (`repository`, null for any), `mentioned` (`tracker_project`, null for
+  of the project's; `started_by` one of `schedule`, `push`, `manual`, `pull_request`, `any`: `any`
+  is a schedule, a push or a run by hand, never a pull request's, and a fork's run never counts;
+  `outcome` `failed` or `any`), `review_requested` (`repository`, null for any), `mentioned` (`tracker_project`, null for
   any), `assigned` (`tracker_project`, `type`, each null for any). A repository is named by its
   path in the project or `owner/name`; a tracker's project by its Jira key (`ABC`), or the
   `owner/name` of a tracker of GitHub issues. Every kind also has `not_before` (`HH:MM` in the

@@ -869,21 +869,35 @@ waits for is read by the rounds of the items, as a subscription's is.
 - **A review asked of the user** is a pull request whose `details.requested` holds the user (whom
   the forge says they are signed in as, `docs/items.md`, "Stored") when the round before did not:
   a pull request first seen with it counts, one whose asked reviewers were never read before does
-  not.
+  not. Only people are matched, by their login: a review asked of a team is not the user's, even
+  one of theirs, and Bitbucket, whose pull requests name their reviewers by display name, says no
+  `requested` (its reviews asked are not read yet).
+- **A mention** is `@login` in a new comment, its capitals aside, by someone else: a comment of the
+  user's own, and one Flottille recorded as posted by an agent (as the user), is no mention.
+- A live read (`forge show`, a subscription's) that stores an item before the round hears what
+  changed in it as the round would, so that the round after it, which finds nothing new, loses
+  nothing.
 - **A workflow run that ends** is read with the pull requests of its repository, by their round,
-  one request a routine waiting for one in the project and none while no routine waits: `gh run
-  list -R github.com/<owner>/<name> [--workflow <workflow>] [--branch <branch>] --limit 20 --json
-  databaseId,workflowName,displayTitle,status,conclusion,event,headBranch,url`. A run is the
-  routine's event once it is `completed` and was not in the routine's last read: the first read
-  is no event (what ended before is not news), and the runs read are kept in the store, so that a
-  restart of the daemon neither misses one that ended meanwhile nor says one twice. How it started
-  is GitHub's `event`: `schedule`, `push`, `workflow_dispatch` (`manual`); it failed when its
-  `conclusion` is `failure`, `timed_out` or `startup_failure` (`cancelled` is no failure).
-  `--workflow` takes the workflow's file (`nightly.yml`) or its name, as `gh` does.
+  one request a routine waiting for one in the project and none while no routine waits: `gh api
+  --method GET repos/<owner>/<name>/actions/runs --hostname github.com -f per_page=50 [-f
+  branch=<branch>]`, the REST answer, which says each run's head repository (`gh run list` does
+  not). A run is the routine's event once it is `completed` and was not in the routine's last
+  read: the first read is no event (what ended before is not news), and the runs read are kept in
+  the store once what they said is held, so that a restart of the daemon neither misses one that
+  ended meanwhile nor says one twice. The workflow is its file (`nightly.yml`) or its name. How it
+  started is GitHub's `event`: `schedule`, `push`, `workflow_dispatch` (`manual`) or
+  `pull_request`; `any` is the first three only, what the repository's own people start: a run
+  of a pull request, `pull_request_target`, a comment's (`issue_comment`) or another workflow's
+  can be an outsider's, and counts only for a routine that names `pull_request` (the
+  `pull_request` event alone). **A run whose head repository is not the repository itself (a
+  fork's) never counts**, whatever its branch is called. It failed when its `conclusion` is
+  `failure`, `timed_out` or `startup_failure` (`cancelled` is no failure).
 - **Not yet**: the pipelines of Bitbucket for a workflow run (its runs are read for `forge runs`
   only).
 - **Assumed**, and the maintainer checks it on a real forge: that `gh pr view --json
-  reviewRequests` lists `{login}` for a person and `{name}` for a team, and that asking a review
+  reviewRequests` lists `{login}` for a person and `{name}` for a team, that the runs' REST answer
+  is `{"workflow_runs": [{"id", "name", "path", "display_title", "event", "status", "conclusion",
+  "head_branch", "html_url", "head_repository": {"full_name"}}]}`, and that asking a review
   moves the pull request's `updatedAt`, which is how a round of what changed lists it again.
 
 ## Why a check failed

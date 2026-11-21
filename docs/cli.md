@@ -1483,9 +1483,10 @@ start within `--missed-hours` (12).
 
 Instead of `--schedule`, `--on` names the event it runs on (`docs/protocol.md`, "The routine
 methods"): `workflow-run` (`--repository`, `--workflow`, `--branch`, `--started-by
-schedule|push|manual|any`, `--outcome failed|any`), `review-requested` (`--repository`),
-`mentioned` (`--tracker-project`) or `assigned` (`--tracker-project`, `--type`); each with
-`--not-before HH:MM`, `--at-most-once day|hour` and `--new-session`. What is not given is any.
+schedule|push|manual|pull_request|any`, `--outcome failed|any`), `review-requested`
+(`--repository`), `mentioned` (`--tracker-project`) or `assigned` (`--tracker-project`,
+`--type`); each with `--not-before HH:MM`, `--at-most-once day|hour` and `--new-session`. What is
+not given is any (`any` start is never a pull request's).
 
 ```
 $ flottille routine add "Nightly fix" --project app --on workflow-run --workflow nightly.yml \
