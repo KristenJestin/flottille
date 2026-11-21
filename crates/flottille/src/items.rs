@@ -523,6 +523,24 @@ async fn me_of(daemon: &Daemon, found: &forge::Forge) -> Option<String> {
     me
 }
 
+/// Whom the forge of `item` says the user is, as a round last asked it; none before one did, and
+/// for Jira, which says no one.
+fn me_known(daemon: &Daemon, item: &Item) -> Option<String> {
+    let host = match item.source.as_str() {
+        "github" => flottille_core::declared::GITHUB.to_owned(),
+        "bitbucket" => item
+            .url
+            .as_deref()?
+            .split_once("://")?
+            .1
+            .split('/')
+            .next()?
+            .to_owned(),
+        _ => return None,
+    };
+    daemon.items.me.lock().unwrap().get(&host).cloned()
+}
+
 /// Whether `item` was opened by, or is assigned to, `me`.
 fn mine_of(item: &Item, me: &str) -> bool {
     item.author.as_deref() == Some(me) || item.assignees.iter().any(|a| a == me)
@@ -758,13 +776,20 @@ pub fn put_live(daemon: &Arc<Daemon>, mut fetched: Fetched) {
             true => Vec::new(),
             false => events_of(None, &fetched),
         };
+        let mut heard = match made_before {
+            true => Vec::new(),
+            false => {
+                let me = me_known(daemon, &fetched.item);
+                crate::routines::events::heard_of(None, &fetched, me.as_deref())
+            }
+        };
         let project = fetched.item.project.clone();
         if let Err(error) = flush(
             daemon,
             &project,
             &mut vec![fetched.item],
             &mut events,
-            &mut Vec::new(),
+            &mut heard,
         ) {
             eprintln!("flottille daemon: items of {project}: {error}");
         }
@@ -798,13 +823,17 @@ pub fn put_live(daemon: &Arc<Daemon>, mut fetched: Fetched) {
             .collect();
     }
     let mut events = events_of(Some(&old), &fetched);
+    // What the user was asked, or told, is heard here: the next round compares with this read,
+    // and would find nothing new.
+    let me = me_known(daemon, &fetched.item);
+    let mut heard = crate::routines::events::heard_of(Some(&old), &fetched, me.as_deref());
     let project = fetched.item.project.clone();
     if let Err(error) = flush(
         daemon,
         &project,
         &mut vec![fetched.item],
         &mut events,
-        &mut Vec::new(),
+        &mut heard,
     ) {
         eprintln!("flottille daemon: items of {project}: {error}");
     }
