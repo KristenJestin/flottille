@@ -207,8 +207,17 @@ fn the_export_button_writes_the_findings_to_a_file(cx: &mut TestAppContext) {
         exported["findings"][0]["title"],
         "Tickets list answers empty"
     );
-    until(&shell, cx, "the window says where", |cx| {
-        label(cx, "findings-export-path").as_deref() == file.to_str()
+    // A result is a toast: the file's path is its second line.
+    until(&shell, cx, "a toast says where", |cx| {
+        shell.read_with(cx, |s, cx| {
+            s.toasts()
+                .read(cx)
+                .toasts()
+                .find(|toast| toast.title() == "Findings exported")
+                .and_then(|toast| toast.second_line().map(str::to_owned))
+                .as_deref()
+                == file.to_str()
+        })
     });
 }
 
