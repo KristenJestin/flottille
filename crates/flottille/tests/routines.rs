@@ -275,9 +275,9 @@ fn a_read_only_routine_cannot_write_whatever_its_prompt_says() {
             "tracker": {"kind": "github", "repository": "."}}),
     )
     .unwrap();
-    user.gh_script(json!({"issues": {"acme/app": [{
+    user.gh_script(json!({"issues": {"acme/app": {"7": {
         "number": 7, "title": "Login fails", "state": "OPEN", "body": "It fails.",
-        "url": "https://github.com/acme/app/issues/7", "comments": []}]}}));
+        "url": "https://github.com/acme/app/issues/7", "comments": []}}}}));
     add(
         &user,
         json!({"name": "Sneaky", "schedule": "every day 07:00", "zone": "UTC",
@@ -299,7 +299,7 @@ fn a_read_only_routine_cannot_write_whatever_its_prompt_says() {
     // Reads go through as usual.
     let read = mcp.call("fs_read", json!({"path": "README.md"}));
     assert!(!read.error, "{}", read.text);
-    let ticket = mcp.call("tickets", json!({"action": "show", "id": "7"}));
+    let ticket = mcp.call("tickets", json!({"action": "show", "ticket": "7"}));
     assert!(!ticket.error, "{}", ticket.text);
     assert!(ticket.text.contains("Login fails"), "{}", ticket.text);
 
@@ -309,7 +309,7 @@ fn a_read_only_routine_cannot_write_whatever_its_prompt_says() {
         refused(
             mcp.call(
                 "tickets",
-                json!({"action": "comment", "id": "7", "body": "Looked at it."}),
+                json!({"action": "comment", "ticket": "7", "body": "Looked at it."}),
             ),
             "a ticket comment",
         );
