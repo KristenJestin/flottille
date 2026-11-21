@@ -2419,7 +2419,7 @@ fn a_url_rewrite_of_the_user_s_settings_for_the_remote_s_forge_still_applies() {
     std::fs::write(
         &settings,
         format!(
-            "[includeIf \"hasconfig:remote.*.url:git@forge.invalid:**\"]\n\tpath = {}\n",
+            "[includeIf \"hasconfig:remote.*.url:git@forge.invalid:acme/**\"]\n\tpath = {}\n",
             included.display()
         ),
     )
