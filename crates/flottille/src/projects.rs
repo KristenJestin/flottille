@@ -586,6 +586,7 @@ async fn settings_of(project: &Project) -> Value {
     json!({
         "name": project.name,
         "folder": project.folder,
+        "pushes_unlifted": crate::pushed::unlifted(),
         "pushes_unlent": pushes_unlent,
         "repositories": repositories,
         "tracker": project.tracker,

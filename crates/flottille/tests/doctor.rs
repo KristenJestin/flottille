@@ -76,7 +76,15 @@ fn doctor_reports_claude_its_version_and_its_login() {
     assert_eq!(claude["program"]["version"], "2.1.295");
     assert_eq!(claude["program"]["checked"], "2.1.295");
     assert_eq!(claude["login"]["present"], true);
-    assert_eq!(report["warnings"], serde_json::json!([]));
+    // No git in its `PATH`: doctor says no push is lifted, and nothing else.
+    let warnings = report["warnings"].as_array().unwrap();
+    assert_eq!(warnings.len(), 1, "{report}");
+    assert!(
+        warnings[0]
+            .to_string()
+            .contains("no git of the daemon's PATH"),
+        "{report}"
+    );
     assert_eq!(report["ready"], true);
     assert!(text.contains("2.1.295"), "{text}");
     for gone in ["Node", "node", "npm", "adapter"] {
@@ -130,7 +138,15 @@ fn doctor_takes_claude_s_token_variables_for_a_login_and_never_prints_them() {
 
         assert!(ok, "{report}");
         assert_eq!(claude_of(&report)["login"]["api_key"], name);
-        assert_eq!(report["warnings"], serde_json::json!([]), "{report}");
+        // No git in its `PATH`: doctor says no push is lifted, and nothing else.
+        let warnings = report["warnings"].as_array().unwrap();
+        assert_eq!(warnings.len(), 1, "{report}");
+        assert!(
+            warnings[0]
+                .to_string()
+                .contains("no git of the daemon's PATH"),
+            "{report}"
+        );
         assert!(!report.to_string().contains("invented"), "{report}");
         assert!(!text.contains("invented"), "{text}");
     }

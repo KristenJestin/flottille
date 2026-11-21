@@ -430,6 +430,8 @@ pub struct ProjectSettingsPage {
     forms: Vec<RepositoryForm>,
     tracker: Option<ProjectTracker>,
     obsolete: Vec<String>,
+    /// Why no push an agent asks for is run, as the daemon judges it now.
+    pushes_unlifted: Option<String>,
     /// Why the user's SSH agent is lent to no push, as the daemon judges it now.
     pushes_unlent: Option<String>,
     /// The repositories as their checkouts stand, added, removed and detected again.
@@ -581,6 +583,7 @@ impl ProjectSettingsPage {
             forms: Vec::new(),
             tracker: None,
             obsolete: Vec::new(),
+            pushes_unlifted: None,
             pushes_unlent: None,
             repositories,
             programs,
@@ -885,6 +888,7 @@ impl ProjectSettingsPage {
         self.skills
             .update(cx, |section, _| section.set_folder(&folder));
         self.obsolete = strings(&settings["obsolete"]);
+        self.pushes_unlifted = settings["pushes_unlifted"].as_str().map(str::to_owned);
         self.pushes_unlent = settings["pushes_unlent"].as_str().map(str::to_owned);
         let forge = |value: &Value| serde_json::from_value::<RepositoryForge>(value.clone()).ok();
         self.forms = settings["repositories"]
@@ -2888,6 +2892,14 @@ fn shown_folder(folder: &str) -> String {
     }
 }
 
+/// What the settings say when no push an agent asks for is run: why, and what to do.
+fn unlifted_said(why: &str) -> SharedString {
+    SharedString::from(format!(
+        "No push an agent asks for is run: it would run outside the sandbox, signed in as you, \
+         and {why}. Push from a terminal of your own; flottille doctor says the same."
+    ))
+}
+
 /// What the settings say when the user's SSH agent is lent to no push: why, and what to do.
 fn unlent_said(why: &str) -> SharedString {
     SharedString::from(format!(
@@ -2952,7 +2964,11 @@ impl Render for ProjectSettingsPage {
             .child(
                 presence_of(
                     "project-settings-unlent-block",
-                    self.pushes_unlent.as_deref().map(unlent_said),
+                    // Where no push is run, the agent's lending to one is moot.
+                    match self.pushes_unlifted.as_deref() {
+                        Some(why) => Some(unlifted_said(why)),
+                        None => self.pushes_unlent.as_deref().map(unlent_said),
+                    },
                     move |line| {
                         div()
                             .id("project-settings-unlent")
