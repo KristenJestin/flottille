@@ -13,7 +13,7 @@
 
 use gpui_design_system::color::mix;
 use gpui_design_system::{
-    Button, Disclosure, EmptyLine, Icon, ListCard, ListRow, PageHeader, Section, Skeleton,
+    Button, Disclosure, EmptyLine, Icon, ListCard, ListRow, PageHeader, Section, Skeleton, Type,
     awaiting, enter, hoverable, palette, presence, presence_of, space,
 };
 use gpui_kit::{
