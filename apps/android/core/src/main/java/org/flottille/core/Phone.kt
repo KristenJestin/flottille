@@ -121,8 +121,11 @@ data class PhoneView(
     val joined: Boolean get() = role.isNotEmpty()
 }
 
-/** Why the core could not do what it was asked: a sentence for the user. */
-class PhoneException(val why: String) : Exception(why)
+/**
+ * Why the core could not do what it was asked: a sentence for the user. [gone] says that what was
+ * answered is no longer waiting (decided already, or not on the machine): its card folds.
+ */
+class PhoneException(val why: String, val gone: Boolean = false) : Exception(why)
 
 /**
  * The core as the screens see it (`docs/remote.md`, "The Android app"): the module's own types, never

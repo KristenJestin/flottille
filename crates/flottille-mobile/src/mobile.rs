@@ -77,6 +77,13 @@ pub struct Reply {
 const PICTURES_MOST: usize = 20;
 const PICTURE_MOST: usize = 5 * 1024 * 1024;
 const PICTURE_TYPES: [&str; 4] = ["image/png", "image/jpeg", "image/gif", "image/webp"];
+/// What the daemon says of a request or a question that is decided already (`approvals.rs`,
+/// `agents.rs`, `agent_command.rs`): the card that asked for the answer folds.
+const GONE: [&str; 3] = [
+    " is already decided",
+    " does not wait for an answer",
+    " has no question waiting for you",
+];
 /// A `before` past every event: the daemon then gives the latest page.
 const LATEST: u64 = i64::MAX as u64;
 
@@ -834,12 +841,20 @@ impl Inner {
         let mut answers = self.ask(machine, link, method, params).await?;
         match answers.next().await {
             Some(Ok(answer)) => match answer.get("error") {
-                Some(error) => Err(MobileError::new(
-                    error["message"]
+                Some(error) => {
+                    let why = error["message"]
                         .as_str()
                         .unwrap_or("the runner refused it")
-                        .to_owned(),
-                )),
+                        .to_owned();
+                    // The daemon's own words for a request or a question it does not wait for any
+                    // more.
+                    let gone = error["code"] == "not-found"
+                        || GONE.iter().any(|words| why.contains(words));
+                    Err(match gone {
+                        true => MobileError::Gone { why },
+                        false => MobileError::new(why),
+                    })
+                }
                 None => Ok(answer["result"].clone()),
             },
             Some(Err(error)) => Err(MobileError::new(error.to_string())),

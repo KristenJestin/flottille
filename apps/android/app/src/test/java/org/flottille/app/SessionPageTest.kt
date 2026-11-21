@@ -305,6 +305,7 @@ class SessionPageTest {
     fun an_ask_the_machine_no_longer_waits_for_says_so_and_folds() {
         val phone = phone(asks = listOf(ask()))
         phone.refusals["answerAsk"] = "that question does not wait for an answer"
+        phone.gone += "answerAsk"
         start(phone)
         open()
         rule.onNodeWithTag("option:0:No").performClick()

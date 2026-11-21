@@ -31,7 +31,14 @@ pub use view::{
 /// Why the core could not do what it was asked: a sentence for the user.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Error)]
 pub enum MobileError {
-    Refused { why: String },
+    Refused {
+        why: String,
+    },
+    /// What was answered is no longer waiting: the request or the question is decided already,
+    /// or the machine has none of that number. Its card folds; any other refusal keeps it.
+    Gone {
+        why: String,
+    },
 }
 
 impl MobileError {
@@ -43,7 +50,7 @@ impl MobileError {
 impl std::fmt::Display for MobileError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            MobileError::Refused { why } => f.write_str(why),
+            MobileError::Refused { why } | MobileError::Gone { why } => f.write_str(why),
         }
     }
 }

@@ -85,7 +85,7 @@ class RealPhone(private val core: FlottilleCore) : Phone {
         try {
             work()
         } catch (refused: MobileException) {
-            throw PhoneException(refused.sentence())
+            throw PhoneException(refused.sentence(), gone = refused is MobileException.Gone)
         }
 
     private companion object {
@@ -94,7 +94,8 @@ class RealPhone(private val core: FlottilleCore) : Phone {
     }
 }
 
-private fun MobileException.sentence(): String = (this as? MobileException.Refused)?.why ?: message.orEmpty()
+private fun MobileException.sentence(): String =
+    (this as? MobileException.Refused)?.why ?: (this as? MobileException.Gone)?.why ?: message.orEmpty()
 
 /** What the core's view state says, in the module's own types. */
 internal fun ViewState.toPhoneView(): PhoneView {

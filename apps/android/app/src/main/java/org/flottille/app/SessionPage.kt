@@ -218,10 +218,17 @@ fun SessionPage(
                             try {
                                 phone.answerAsk(ask.machine, ask.agent, ask.asked, replies)
                             } catch (refused: PhoneException) {
-                                refusedAsks[ask.asked] = ask to refused.why
-                                delay(REFUSED_MILLIS)
-                                folded += "ask:${ask.asked}"
-                                refusedAsks.remove(ask.asked)
+                                if (refused.gone) {
+                                    // Answered already or gone: said on its card, which then folds.
+                                    refusedAsks[ask.asked] = ask to refused.why
+                                    delay(REFUSED_MILLIS)
+                                    folded += "ask:${ask.asked}"
+                                    refusedAsks.remove(ask.asked)
+                                } else {
+                                    // A link that ended, a time out: the question still waits, so
+                                    // does its card, and the user can answer again.
+                                    onToast(refused.why)
+                                }
                             } finally {
                                 answering -= "ask:${ask.asked}"
                             }
@@ -246,10 +253,17 @@ fun SessionPage(
                             try {
                                 phone.answer(request.machine, request.number, allow)
                             } catch (refused: PhoneException) {
-                                refusedRequests[request.number] = request to refused.why
-                                delay(REFUSED_MILLIS)
-                                folded += "request:${request.number}"
-                                refusedRequests.remove(request.number)
+                                if (refused.gone) {
+                                    // Decided already or gone: said on its card, which then folds.
+                                    refusedRequests[request.number] = request to refused.why
+                                    delay(REFUSED_MILLIS)
+                                    folded += "request:${request.number}"
+                                    refusedRequests.remove(request.number)
+                                } else {
+                                    // A link that ended, a time out: the request still waits, so
+                                    // does its card, and the user can answer again.
+                                    onToast(refused.why)
+                                }
                             } finally {
                                 answering -= "request:${request.number}"
                             }
