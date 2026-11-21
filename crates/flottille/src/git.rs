@@ -121,32 +121,131 @@ pub async fn output_remote(
 /// its setting's name and the helper it names, read at the daemon's start: never a credential.
 static HELPERS: OnceLock<Vec<(String, String)>> = OnceLock::new();
 
+/// The credential helpers the user's own settings give one forge alone, read at the daemon's
+/// start: each `includeIf "hasconfig:remote.*.url:…"` condition (its key) with the helpers of the
+/// file it includes. Git includes such a file only where a repository's remotes match, which no
+/// read without a repository says.
+static FORGE_HELPERS: OnceLock<Vec<(String, Vec<(String, String)>)>> = OnceLock::new();
+
+/// The settings `args` of `git config` lists, read at the daemon's start by its own git, confined:
+/// a git only root may change is not always found, and the one of the `PATH` may be a run's.
+pub(crate) fn start_read<S: AsRef<OsStr>>(args: &[S]) -> String {
+    let mut command = command_of(own(), Path::new("/"), args);
+    crate::landlock::confined(&mut command);
+    let mut command = command.into_std();
+    command.stderr(Stdio::null());
+    crate::children::spawn_std(&mut command)
+        .and_then(std::process::Child::wait_with_output)
+        .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+        .unwrap_or_default()
+}
+
+/// The entries of `git config --null --get-regexp`, each its key and its value.
+fn entries(listed: &str) -> Vec<(String, String)> {
+    listed
+        .split('\0')
+        .filter_map(|entry| entry.split_once('\n'))
+        .map(|(name, value)| (name.to_owned(), value.to_owned()))
+        .collect()
+}
+
 /// Reads the user's credential helpers, before the daemon reads any repository: git sends a
 /// sign-in to `store` on every helper it knows, a repository's own too.
 pub fn find_helpers() {
+    const HELPER: &str = r"^credential\.(.*\.)?helper$";
     HELPERS.get_or_init(|| {
         ["--system", "--global"]
             .into_iter()
             .flat_map(|scope| {
-                let listed = crate::children::spawn_std(
-                    std::process::Command::new(own())
-                        .args(["config", scope, "--includes", "--null", "--get-regexp"])
-                        .arg(r"^credential\.(.*\.)?helper$")
-                        .stdin(Stdio::null())
-                        .stdout(Stdio::piped())
-                        .stderr(Stdio::null()),
-                )
-                .and_then(std::process::Child::wait_with_output)
-                .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
-                .unwrap_or_default();
-                listed
-                    .split('\0')
-                    .filter_map(|entry| entry.split_once('\n'))
-                    .map(|(name, helper)| (name.to_owned(), helper.to_owned()))
-                    .collect::<Vec<_>>()
+                entries(&start_read(&[
+                    "config",
+                    scope,
+                    "--includes",
+                    "--null",
+                    "--get-regexp",
+                    HELPER,
+                ]))
             })
             .collect()
     });
+    FORGE_HELPERS.get_or_init(|| {
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let mut found = Vec::new();
+        for scope in ["--system", "--global"] {
+            let listed = start_read(&[
+                "config",
+                scope,
+                "--includes",
+                "--null",
+                "--show-origin",
+                "--get-regexp",
+                r"^includeif\.hasconfig:.*\.path$",
+            ]);
+            let mut parts = listed.split('\0');
+            while let (Some(origin), Some(entry)) = (parts.next(), parts.next()) {
+                let Some((condition, value)) = entry.split_once('\n') else {
+                    continue;
+                };
+                let file = match value.strip_prefix("~/") {
+                    Some(rest) => home.as_ref().map(|home| home.join(rest)),
+                    None => origin
+                        .strip_prefix("file:")
+                        .and_then(|file| Path::new(file).parent())
+                        .map(|folder| folder.join(value)),
+                };
+                let Some(file) = file else { continue };
+                let file = file.to_string_lossy().into_owned();
+                let helpers = entries(&start_read(&[
+                    "config",
+                    "--file",
+                    &file,
+                    "--includes",
+                    "--null",
+                    "--get-regexp",
+                    HELPER,
+                ]));
+                if !helpers.is_empty() {
+                    found.push((condition.to_owned(), helpers));
+                }
+            }
+        }
+        found
+    });
+}
+
+/// [`FORGE_HELPERS`].
+pub fn forge_helpers() -> &'static [(String, Vec<(String, String)>)] {
+    FORGE_HELPERS.get().map(Vec::as_slice).unwrap_or_default()
+}
+
+/// A settings file of git's that holds `helpers` (each a setting's name, `credential.helper` or
+/// `credential.<url>.helper`, and its value), and nothing else.
+pub fn helpers_file(helpers: &[(String, String)]) -> String {
+    let quoted = |text: &str| {
+        text.replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('\n', "\\n")
+            .replace('\t', "\\t")
+    };
+    let mut file = String::new();
+    for (name, helper) in helpers {
+        let Some(middle) = name
+            .strip_prefix("credential.")
+            .and_then(|rest| rest.strip_suffix("helper"))
+        else {
+            continue;
+        };
+        match middle.strip_suffix('.') {
+            Some(url) if !url.contains('\n') => {
+                file.push_str(&format!("[credential \"{}\"]\n", quoted(url)));
+            }
+            Some(_) => continue,
+            None if middle.is_empty() => file.push_str("[credential]\n"),
+            None => continue,
+        }
+        file.push_str(&format!("\thelper = \"{}\"\n", quoted(helper)));
+    }
+    file
 }
 
 /// The protocols a push the gate let through may use outside the sandbox
@@ -231,9 +330,42 @@ pub fn find_git() {
         let rooted: Vec<PathBuf> = std::env::split_paths(&path)
             .filter_map(|folder| folder.canonicalize().ok())
             .filter(|folder| only_root_may_change(folder))
+            .filter(|folder| match changeable_entry(folder) {
+                None => true,
+                Some(entry) => {
+                    eprintln!(
+                        "flottille daemon: {} is left out of the PATH of a push the gate lets \
+                         through: {} is not only root's to change",
+                        folder.display(),
+                        entry.display()
+                    );
+                    false
+                }
+            })
             .collect();
         std::env::join_paths(rooted).unwrap_or_default()
     });
+}
+
+/// An entry of `folder`, one of the `PATH`, that is not only root's to change
+/// ([`only_root_may_change`], what its links lead to, a link that leads nowhere among them): a
+/// program a bare name finds there would be one a run could write.
+fn changeable_entry(folder: &Path) -> Option<PathBuf> {
+    let entries = match std::fs::read_dir(folder) {
+        Ok(entries) => entries,
+        Err(_) => return Some(folder.to_owned()),
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let target = path.canonicalize();
+        if target.as_ref().is_ok_and(|target| target.is_dir()) {
+            continue;
+        }
+        if !target.is_ok_and(|target| only_root_may_change(&target)) {
+            return Some(path);
+        }
+    }
+    None
 }
 
 /// Whether only root may change `path`, a program or a folder: it and every folder on the way to
@@ -648,6 +780,35 @@ pub(crate) mod tests {
         ] {
             assert!(!FETCHED.contains(&super::protocol(url)), "{url}");
         }
+    }
+
+    #[test]
+    fn the_helpers_of_one_forge_are_written_as_git_reads_them() {
+        let helpers = vec![
+            (
+                "credential.helper".to_owned(),
+                "!f() { echo \"a\\b\"; }; f".to_owned(),
+            ),
+            (
+                "credential.https://forge.invalid/a\"b.helper".to_owned(),
+                "store --file ~/.forge\tcredentials".to_owned(),
+            ),
+            ("credential.helper".to_owned(), String::new()),
+        ];
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("helpers");
+        std::fs::write(&file, helpers_file(&helpers)).unwrap();
+
+        let read = std::process::Command::new("git")
+            .args(["config", "--null", "--file"])
+            .arg(&file)
+            .args(["--get-regexp", "^credential"])
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .unwrap();
+
+        assert!(read.status.success(), "{read:?}");
+        assert_eq!(entries(&String::from_utf8_lossy(&read.stdout)), helpers);
     }
 
     #[tokio::test]

@@ -529,6 +529,13 @@ pub async fn run(
         }
         false => None,
     };
+    // Before anything of it runs outside the sandbox: where no push goes out, none is judged.
+    if pushing
+        && to_paths.is_none()
+        && let Some(why) = crate::pushed::unlifted()
+    {
+        return Outcome::Refused(format!("refused: {}", crate::pushed::unlifted_said(&why)));
+    }
     let judged = match pushing && to_paths.is_none() {
         true => Some(crate::pushed::judged(&folder.path).await),
         false => None,
@@ -539,21 +546,35 @@ pub async fn run(
     };
     // It runs from a folder of the daemon's, with none of the repository's settings but which
     // refs go where: a proxy, a rewritten URL or a header a run wrote never applies to it.
-    let push_folder = match &judged {
+    let mut push_folder = match &judged {
         Some(_) => match push_folder(daemon, &folder.path, &pushed_words).await {
             Ok(made) => Some(made),
             Err(why) => return Outcome::Refused(format!("refused: {why}")),
         },
         None => None,
     };
-    let lifted = judged.map(|judged| {
-        lifted(
-            judged.ssh,
-            crate::mounts::bus_replaced(),
-            judged.unlent.is_none(),
-            push_folder.as_ref(),
-        )
-    });
+    let lifted = match judged {
+        Some(judged) => {
+            let env = |from: Option<&crate::push_folder::PushFolder>| {
+                lifted(
+                    judged.ssh.clone(),
+                    crate::mounts::bus_replaced(),
+                    judged.unlent.is_none(),
+                    from,
+                )
+            };
+            let mut lifted_env = env(push_folder.as_ref());
+            // Read with every setting the push reads: the user's `push.default` may be set for
+            // one forge alone.
+            if let Some(made) = push_folder.as_mut()
+                && made.unsteered(&lifted_env).await
+            {
+                lifted_env = env(Some(made));
+            }
+            Some(lifted_env)
+        }
+        None => None,
+    };
     // Outside the sandbox, the `git` found at the daemon's start, never one a run put first in
     // the `PATH`.
     let pushed_words = match &lifted {
@@ -972,14 +993,6 @@ async fn push_folder(
     folder: &Path,
     words: &[String],
 ) -> Result<crate::push_folder::PushFolder, String> {
-    if !crate::pushed::landlock_enforced() {
-        return Err(
-            "the kernel has no Landlock (its second ABI or later), so the folder a push the gate \
-             let through runs from, in the daemon's runtime folder, would be within a run's \
-             reach: push from a terminal of your own (docs/vault.md, \"The gaps\")"
-                .into(),
-        );
-    }
     let (_, globals) = gate::git_globals(&words[1..]);
     let mut from = folder.to_owned();
     for (option, value) in globals {
@@ -1082,9 +1095,13 @@ fn lifted(
     env.insert("GIT_PROXY_COMMAND".into(), "".into());
     env.insert("GIT_ASKPASS".into(), "".into());
     // The user's own credential helpers alone: an empty one empties those read before, the
-    // repository's among them, and these are read last.
+    // repository's among them, and these are read last. Those the user set for one forge alone
+    // are included where the push's remotes are that forge's, as the user's settings say.
     for (key, value) in crate::git::helper_settings() {
         configure(&mut env, &key, &value);
+    }
+    for (key, value) in from.map(|from| from.forge_helpers()).unwrap_or_default() {
+        configure(&mut env, key, value);
     }
     // Nor the signing program a repository's settings name: a push is not signed.
     for (key, value) in UNSIGNED {

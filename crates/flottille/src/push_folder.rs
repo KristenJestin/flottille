@@ -53,8 +53,12 @@ pub struct PushFolder {
     /// The repository's object folder.
     objects: PathBuf,
     /// The settings given to the push, in the order git reads them: the user's, then the
-    /// repository's that are [`KEPT`].
+    /// repository's that are [`KEPT`], from `kept_from` on.
     settings: Vec<(String, String)>,
+    kept_from: usize,
+    /// The includes of the credential helpers the user set for one forge alone
+    /// (`git::forge_helpers`), each naming a file of this folder that holds them.
+    forge_helpers: Vec<(String, String)>,
     /// Where the push was run from: the repository an upstream it sets is written back to.
     from: PathBuf,
     /// The repository's refs when the folder was made, each with its object: what the push
@@ -76,6 +80,42 @@ impl PushFolder {
     /// The settings to give the push before the daemon's own.
     pub fn settings(&self) -> &[(String, String)] {
         &self.settings
+    }
+
+    /// The settings to give the push after the daemon's emptied its credential helpers: the
+    /// user's helpers for one forge, included where the push's remotes are that forge's.
+    pub fn forge_helpers(&self) -> &[(String, String)] {
+        &self.forge_helpers
+    }
+
+    /// Drops the repository's `branch.<name>.merge` that names another branch than its own,
+    /// where the push, read with `env` (its own), sends a branch to its upstream
+    /// (`push.default=upstream`, the user's choice): one a run wrote would send a plain `git push`
+    /// to another branch. Whether it dropped one, so that the push's settings are made again.
+    pub async fn unsteered(
+        &mut self,
+        env: &std::collections::BTreeMap<OsString, OsString>,
+    ) -> bool {
+        let Some(git) = crate::git::program() else {
+            return false;
+        };
+        let git = git.to_string_lossy().into_owned();
+        let words = [git.as_str(), "config", "--get", "push.default"].map(str::to_owned);
+        let Ok(read) = crate::git::run_outside(&self.from, &words, env, None).await else {
+            return false;
+        };
+        let default = read.stdout.trim().to_ascii_lowercase();
+        if !["upstream", "tracking"].contains(&default.as_str()) {
+            return false;
+        }
+        let before = self.settings.len();
+        let mut at = 0;
+        let kept_from = self.kept_from;
+        self.settings.retain(|(key, value)| {
+            at += 1;
+            at <= kept_from || !steering(key, value)
+        });
+        self.settings.len() != before
     }
 
     /// Writes back to the repository what the push changed in the folder: the remote-tracking
@@ -208,6 +248,16 @@ fn folder_refs(folder: &Path) -> Vec<(String, String)> {
     refs
 }
 
+/// Whether the repository's `key` is a `branch.<name>.merge` naming another branch than
+/// `<name>`.
+fn steering(key: &str, value: &str) -> bool {
+    matches("branch.*.merge", key)
+        && key
+            .strip_prefix("branch.")
+            .and_then(|rest| rest.strip_suffix(".merge"))
+            .is_some_and(|name| value != format!("refs/heads/{name}"))
+}
+
 /// Makes the folder a push from the repository at `from` runs from, in `under` (the daemon's
 /// runtime folder, which no run reaches), with the user's own settings `user` as they apply
 /// there. Why it cannot be made, when it cannot: the push is then refused.
@@ -239,6 +289,7 @@ pub async fn made(
         .collect();
     let (repository, kept) = repository_settings(&listed)?;
     let mut settings = user;
+    let kept_from = settings.len();
     settings.extend(kept);
     std::fs::create_dir_all(under).map_err(|e| format!("cannot make {}: {e}", under.display()))?;
     let folder = tempfile::Builder::new()
@@ -266,10 +317,21 @@ pub async fn made(
         std::fs::write(folder.path().join("shallow"), shallow)
             .map_err(|e| format!("cannot write the push's shallow: {e}"))?;
     }
+    // Each in a file of its own, where only the daemon reaches: a setting given to a command
+    // includes no file but by its path.
+    let mut forge_helpers = Vec::new();
+    for (index, (condition, helpers)) in crate::git::forge_helpers().iter().enumerate() {
+        let name = format!("forge-helpers-{index}");
+        write(&name, &crate::git::helpers_file(helpers))?;
+        let path = folder.path().join(name).to_string_lossy().into_owned();
+        forge_helpers.push((condition.clone(), path));
+    }
     Ok(PushFolder {
         folder,
         objects: common.join("objects"),
         settings,
+        kept_from,
+        forge_helpers,
         from: from.to_owned(),
         refs,
     })
