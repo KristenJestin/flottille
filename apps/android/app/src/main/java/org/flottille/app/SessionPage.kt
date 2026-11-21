@@ -54,6 +54,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.flottille.app.ui.ButtonKind
+import org.flottille.app.ui.Confirm
 import org.flottille.app.ui.FButton
 import org.flottille.app.ui.Field
 import org.flottille.app.ui.FillColour
@@ -180,117 +181,144 @@ fun SessionPage(
         .filter { "ask:${it.asked}" !in folded }
         .sortedBy { it.asked }
 
-    Column(Modifier.fillMaxSize().background(palette.bg).testTag("page")) {
-        Header(page, key, readOnly, onBack)
-        Box(Modifier.weight(1f).fillMaxWidth()) {
-            if (page == null) {
-                Label(
-                    if (online) "Loading the conversation…" else "This machine is not reachable.",
-                    color = palette.mute,
-                    modifier = Modifier.padding(Space.Lg),
-                )
-            } else {
-                ConversationList(phone, key, page, onOlder = {
-                    scope.launch {
-                        try {
-                            phone.older(key.machine, key.agent)
-                        } catch (refused: PhoneException) {
-                            onToast(refused.why)
-                        }
-                    }
-                })
+    // Full lets the agents act without asking: on the phone one tap is not enough to give it, so
+    // the one confirmation dialog asks first (Ask and Auto are one tap).
+    var askingFull by remember(key) { mutableStateOf(false) }
+    fun setMode(mode: String) {
+        scope.launch {
+            try {
+                phone.setMode(key.machine, key.agent, mode)
+            } catch (refused: PhoneException) {
+                onToast(refused.why)
             }
         }
-        if (page != null && page.children.isNotEmpty()) Tree(page.children)
+    }
 
-        // The asks and the requests wait docked above the composer, never scrolled away with the
-        // conversation: each unfolds in, and folds away once answered.
-        LazyColumn(Modifier.fillMaxWidth().heightIn(max = 360.dp).padding(horizontal = Space.Lg)) {
-            items(asks, key = { "ask:${it.asked}" }) { ask ->
-                AskCard(
-                    ask = ask,
-                    readOnly = readOnly,
-                    answering = "ask:${ask.asked}" in answering,
-                    refusal = refusedAsks[ask.asked]?.second,
-                    onAnswer = { replies ->
-                        answering += "ask:${ask.asked}"
+    Box(Modifier.fillMaxSize()) {
+        Column(Modifier.fillMaxSize().background(palette.bg).testTag("page")) {
+            Header(page, key, readOnly, onBack)
+            Box(Modifier.weight(1f).fillMaxWidth()) {
+                if (page == null) {
+                    Label(
+                        if (online) "Loading the conversation…" else "This machine is not reachable.",
+                        color = palette.mute,
+                        modifier = Modifier.padding(Space.Lg),
+                    )
+                } else {
+                    ConversationList(phone, key, page, onOlder = {
                         scope.launch {
                             try {
-                                phone.answerAsk(ask.machine, ask.agent, ask.asked, replies)
+                                phone.older(key.machine, key.agent)
                             } catch (refused: PhoneException) {
-                                if (refused.gone) {
-                                    // Answered already or gone: said on its card, which then folds.
-                                    refusedAsks[ask.asked] = ask to refused.why
-                                    delay(REFUSED_MILLIS)
-                                    folded += "ask:${ask.asked}"
-                                    refusedAsks.remove(ask.asked)
-                                } else {
-                                    // A link that ended, a time out: the question still waits, so
-                                    // does its card, and the user can answer again.
-                                    onToast(refused.why)
-                                }
-                            } finally {
-                                answering -= "ask:${ask.asked}"
+                                onToast(refused.why)
                             }
                         }
-                    },
-                    modifier = Modifier.animateItem(
-                        fadeInSpec = Motion.spec(Motion.ENTER),
-                        placementSpec = Motion.spec(Motion.PANEL),
-                        fadeOutSpec = Motion.spec(Motion.HOVER),
-                    ),
-                )
+                    })
+                }
             }
-            items(requests, key = { "request:${it.number}" }) { request ->
-                RequestCard(
-                    request = request,
-                    readOnly = readOnly,
-                    answering = "request:${request.number}" in answering,
-                    refusal = refusedRequests[request.number]?.second,
-                    onAnswer = { allow ->
-                        answering += "request:${request.number}"
-                        scope.launch {
-                            try {
-                                phone.answer(request.machine, request.number, allow)
-                            } catch (refused: PhoneException) {
-                                if (refused.gone) {
-                                    // Decided already or gone: said on its card, which then folds.
-                                    refusedRequests[request.number] = request to refused.why
-                                    delay(REFUSED_MILLIS)
-                                    folded += "request:${request.number}"
-                                    refusedRequests.remove(request.number)
-                                } else {
-                                    // A link that ended, a time out: the request still waits, so
-                                    // does its card, and the user can answer again.
-                                    onToast(refused.why)
-                                }
-                            } finally {
-                                answering -= "request:${request.number}"
-                            }
-                        }
-                    },
-                    modifier = Modifier.animateItem(
-                        fadeInSpec = Motion.spec(Motion.ENTER),
-                        placementSpec = Motion.spec(Motion.PANEL),
-                        fadeOutSpec = Motion.spec(Motion.HOVER),
-                    ),
-                )
-            }
-        }
+            if (page != null && page.children.isNotEmpty()) Tree(page.children)
 
-        when {
-            page == null || readOnly || page.child -> Unit
-            page.ended -> Label("This session has ended.", color = palette.mute, modifier = Modifier.padding(Space.Lg))
-            else -> Composer(
-                phone = phone,
-                page = page,
-                key = key,
-                attached = attached,
-                pictures = pictures,
-                offline = if (online) null else offlineSentence(key.machine, machine, zone),
-                onToast = onToast,
-            )
+            // The asks and the requests wait docked above the composer, never scrolled away with the
+            // conversation: each unfolds in, and folds away once answered.
+            LazyColumn(Modifier.fillMaxWidth().heightIn(max = 360.dp).padding(horizontal = Space.Lg)) {
+                items(asks, key = { "ask:${it.asked}" }) { ask ->
+                    AskCard(
+                        ask = ask,
+                        readOnly = readOnly,
+                        answering = "ask:${ask.asked}" in answering,
+                        refusal = refusedAsks[ask.asked]?.second,
+                        onAnswer = { replies ->
+                            answering += "ask:${ask.asked}"
+                            scope.launch {
+                                try {
+                                    phone.answerAsk(ask.machine, ask.agent, ask.asked, replies)
+                                } catch (refused: PhoneException) {
+                                    if (refused.gone) {
+                                        // Answered already or gone: said on its card, which then folds.
+                                        refusedAsks[ask.asked] = ask to refused.why
+                                        delay(REFUSED_MILLIS)
+                                        folded += "ask:${ask.asked}"
+                                        refusedAsks.remove(ask.asked)
+                                    } else {
+                                        // A link that ended, a time out: the question still waits, so
+                                        // does its card, and the user can answer again.
+                                        onToast(refused.why)
+                                    }
+                                } finally {
+                                    answering -= "ask:${ask.asked}"
+                                }
+                            }
+                        },
+                        modifier = Modifier.animateItem(
+                            fadeInSpec = Motion.spec(Motion.ENTER),
+                            placementSpec = Motion.spec(Motion.PANEL),
+                            fadeOutSpec = Motion.spec(Motion.HOVER),
+                        ),
+                    )
+                }
+                items(requests, key = { "request:${it.number}" }) { request ->
+                    RequestCard(
+                        request = request,
+                        readOnly = readOnly,
+                        answering = "request:${request.number}" in answering,
+                        refusal = refusedRequests[request.number]?.second,
+                        onAnswer = { allow ->
+                            answering += "request:${request.number}"
+                            scope.launch {
+                                try {
+                                    phone.answer(request.machine, request.number, allow)
+                                } catch (refused: PhoneException) {
+                                    if (refused.gone) {
+                                        // Decided already or gone: said on its card, which then folds.
+                                        refusedRequests[request.number] = request to refused.why
+                                        delay(REFUSED_MILLIS)
+                                        folded += "request:${request.number}"
+                                        refusedRequests.remove(request.number)
+                                    } else {
+                                        // A link that ended, a time out: the request still waits, so
+                                        // does its card, and the user can answer again.
+                                        onToast(refused.why)
+                                    }
+                                } finally {
+                                    answering -= "request:${request.number}"
+                                }
+                            }
+                        },
+                        modifier = Modifier.animateItem(
+                            fadeInSpec = Motion.spec(Motion.ENTER),
+                            placementSpec = Motion.spec(Motion.PANEL),
+                            fadeOutSpec = Motion.spec(Motion.HOVER),
+                        ),
+                    )
+                }
+            }
+
+            when {
+                page == null || readOnly || page.child -> Unit
+                page.ended -> Label("This session has ended.", color = palette.mute, modifier = Modifier.padding(Space.Lg))
+                else -> Composer(
+                    phone = phone,
+                    page = page,
+                    key = key,
+                    attached = attached,
+                    pictures = pictures,
+                    offline = if (online) null else offlineSentence(key.machine, machine, zone),
+                    onToast = onToast,
+                    onMode = { mode -> if (mode == "full") askingFull = true else setMode(mode) },
+                )
+            }
         }
+        Confirm(
+            visible = askingFull,
+            title = "Switch to Full mode?",
+            body = "In Full the agents of this session run commands and change files without asking you, until you switch back to Ask or Auto.",
+            confirm = "Switch to Full",
+            onConfirm = {
+                askingFull = false
+                setMode("full")
+            },
+            onCancel = { askingFull = false },
+        )
     }
 }
 
@@ -476,6 +504,7 @@ private fun Composer(
     pictures: PictureSource,
     offline: String?,
     onToast: (String) -> Unit,
+    onMode: (String) -> Unit,
 ) {
     val palette = LocalPalette.current
     val scope = rememberCoroutineScope()
@@ -514,15 +543,7 @@ private fun Composer(
         Modifier.fillMaxWidth().background(palette.side).padding(Space.Md),
         verticalArrangement = Arrangement.spacedBy(Space.Sm),
     ) {
-        ModeControl(page.mode) { mode ->
-            scope.launch {
-                try {
-                    phone.setMode(key.machine, key.agent, mode)
-                } catch (refused: PhoneException) {
-                    onToast(refused.why)
-                }
-            }
-        }
+        ModeControl(page.mode, onMode)
         // What is attached unfolds in the composer and folds away when it leaves.
         AnimatedVisibility(
             visible = attached.isNotEmpty(),
