@@ -250,7 +250,7 @@ fn the_window_draws_no_frame_at_rest_on_the_routines_tab_its_page_and_a_result(
         "routine.add",
         json!({"name": "Tickets to review", "project": "app",
             "prompt": "List the tickets waiting for my review",
-            "schedule": "weekdays 08:30", "zone": "UTC"}),
+            "schedule": "weekdays 08:30"}),
     )
     .unwrap();
     let run = user

@@ -1220,9 +1220,23 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   message; its place's menu ends with New workspace…; with no provider ready it says "No provider
   is ready. **Open Settings**", which opens Agents, Providers); then its tabs, **Work**, **Pull
   requests** and **Tickets**, **Specs** while Specs is on in the project, and **Progress** while
-  the project declares a tracker (the fifth), the chosen one alone below them (`reference/gpui.md`,
-  rule 13). **Progress** is a project's milestones and their tickets (`tickets.md`, "Progress"),
-  read when the tab opens. Creating a
+  the project declares a tracker (the fifth), and **Routines** in every project, after Progress,
+  the chosen one alone below them (`reference/gpui.md`, rule 13). **Progress** is a project's
+  milestones and their tickets (`tickets.md`, "Progress"), read when the tab opens. **Routines**
+  (§5.10) lists the project's routines, each with its trigger, its mode and its last run, and a
+  dot while its last result with something to say is not opened; the tab's label counts the
+  results not opened (hidden at zero). A routine opens its page in the tab (`Routines / Tickets to
+  review`): its trigger, mode, agent and prompt, **Run now**, **Pause** or **Resume**, **Edit**,
+  **Remove…** and its history, each run a session, ended ones too. A run's **result** page,
+  opened from the tab, the history or a notification, shows its report as a reply is drawn, with
+  **Open the session** (read only once it ended); a skipped run has no session and says so; a
+  run whose work goes on shows, read live, only what Flottille knows of its session (its state,
+  its branch, its pull request with its checks, the requests that wait, the agent's last
+  message). A routine is made and edited in the kit's dialog: name, project, prompt; the agent,
+  model and effort side by side; the trigger (a schedule, or an event and the fields of its
+  kind); the mode, each with its line; where the result rings; and one sentence that says the
+  next run. A project without a routine says what one is and offers **New routine**. No entry in
+  the sidebar: a run whose session goes on shows there as any session. Creating a
   workspace shows the preparation's progress and failure output, removing one asks first.
   **Work** is one column of the project's places: `main` first, then the workspaces from the
   newest to the oldest, in an order nothing changes (activity orders the sidebar, never this

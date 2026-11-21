@@ -1777,6 +1777,11 @@ impl Shell {
             Update::News(news) => self.news(news, cx),
             Update::Link(link) => self.linked(link, cx),
             Update::Prompted(agent) => self.spoke(&agent),
+            Update::Routines { project } => {
+                if let Some(routines) = self.project_routines_of(&project, cx) {
+                    routines.update(cx, |routines, cx| routines.changed(cx));
+                }
+            }
             Update::Items { project, item } => {
                 if let Some(page) = self.main.read(cx).progress_page(cx)
                     && page.read(cx).project() == project
@@ -2368,6 +2373,24 @@ impl Shell {
                 section.update(cx, |section, cx| section.answered(then, answer, window, cx));
             }
             Outcome::Asked {
+                then: crate::extensions::Then::Routines(then),
+                answer,
+            } => {
+                if let Some(routines) = self.project_routines_of(then.project(), cx) {
+                    routines.update(cx, |routines, cx| routines.answered(then, answer, cx));
+                }
+            }
+            Outcome::RunStatus {
+                project,
+                run,
+                asked,
+                read,
+            } => {
+                if let Some(routines) = self.project_routines_of(&project, cx) {
+                    routines.update(cx, |routines, cx| routines.statused(run, asked, read, cx));
+                }
+            }
+            Outcome::Asked {
                 then: crate::extensions::Then::ConnectionRequest(then),
                 answer,
             } => {
@@ -2801,6 +2824,16 @@ impl Shell {
     ) -> Option<Entity<crate::items::ProjectItems>> {
         let page = self.main.read(cx).project_page()?.read(cx);
         (page.name() == project).then(|| page.items().clone())
+    }
+
+    /// The Routines tab of the open project page, when it is `project`'s.
+    fn project_routines_of(
+        &self,
+        project: &str,
+        cx: &App,
+    ) -> Option<Entity<crate::routines::RoutinesTab>> {
+        let page = self.main.read(cx).project_page()?.read(cx);
+        (page.name() == project).then(|| page.routines().clone())
     }
 
     /// The tasks of the open project page, when it is `project`'s.

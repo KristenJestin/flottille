@@ -70,7 +70,7 @@ fn eventually(what: &str, check: impl Fn() -> bool) {
 /// A routine of `app`, on weekdays at 08:30 UTC unless `extra` says otherwise.
 fn add(user: &User, name: &str, prompt: &str, extra: Value) -> Value {
     let mut params = json!({"name": name, "project": "app", "prompt": prompt,
-        "schedule": "weekdays 08:30", "zone": "UTC"});
+        "schedule": "weekdays 08:30"});
     for (key, value) in extra.as_object().into_iter().flatten() {
         params[key] = value.clone();
     }
@@ -651,7 +651,7 @@ fn the_form_offers_the_efforts_of_the_model(cx: &mut TestAppContext) {
         present(cx, "routine-model-model")
     });
     click(cx, "routine-model-model");
-    click(cx, "routine-model-model-fake-large");
+    click(cx, "routine-model-model-claude-fake-large");
     until(&shell, cx, "its efforts are offered", |cx| {
         present(cx, "routine-model-effort")
     });
@@ -736,6 +736,7 @@ fn the_form_saves_a_routine_the_daemon_keeps(cx: &mut TestAppContext) {
                 .update(cx, |f, cx| f.set_value("08:30", window, cx));
         })
     });
+    settle(cx);
     click(cx, "routine-days");
     click(cx, "routine-days-weekdays");
     click(cx, "routine-save");
