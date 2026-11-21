@@ -178,6 +178,10 @@ pub enum Command {
     DeveloperSet {
         log: bool,
     },
+    /// The findings agents filed about Flottille itself (`developer.reports`).
+    FindingsRead,
+    /// Writes them to a file (`developer.reports_export`).
+    FindingsExport,
     /// A request of the update's (`update.show`, `.set`, `.check`, `.download`, `.restart`).
     Update {
         method: &'static str,
@@ -1092,6 +1096,10 @@ pub enum Outcome {
         written: bool,
         shown: Result<crate::settings::Developer, String>,
     },
+    /// The findings as the daemon lists them.
+    Findings(Result<Vec<crate::findings::Finding>, String>),
+    /// Where the findings were exported, or why not.
+    FindingsExported(Result<String, String>),
     /// The daemon's answer to a [`Command::Update`]: what `update.show` says, or why not.
     Update {
         method: &'static str,
@@ -2291,6 +2299,24 @@ fn perform(connect: &Connect, sign: Option<Sign>, command: Command, bounds: Boun
             });
             Outcome::Developer { written, shown }
         }
+        Command::FindingsRead => Outcome::Findings(
+            answer(ask_alone(
+                connect,
+                "developer.reports",
+                json!({}),
+                bounds.quick,
+            ))
+            .map(|said| crate::findings::Finding::all(&said)),
+        ),
+        Command::FindingsExport => Outcome::FindingsExported(
+            answer(ask_alone(
+                connect,
+                "developer.reports_export",
+                json!({}),
+                bounds.quick,
+            ))
+            .map(|said| said["file"].as_str().unwrap_or_default().to_owned()),
+        ),
         Command::Update { method, params } => {
             let answer = answer(ask_alone(connect, method, params, bounds.quick));
             Outcome::Update { method, answer }

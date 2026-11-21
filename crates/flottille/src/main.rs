@@ -33,6 +33,7 @@ mod display;
 mod drafts;
 mod extensions;
 mod files;
+mod findings;
 mod follow;
 mod forge;
 mod gate;
@@ -376,6 +377,28 @@ enum DeveloperAction {
     On,
     /// Stop logging
     Off,
+    /// The findings agents filed about Flottille itself, with their occurrences
+    Reports {
+        /// The findings as JSON: the export the lead agent reads
+        #[arg(long)]
+        json: bool,
+        /// Write them to a file of the state folder, and say where
+        #[arg(long)]
+        export: bool,
+        #[command(subcommand)]
+        action: Option<ReportsAction>,
+    },
+}
+
+#[derive(Subcommand)]
+enum ReportsAction {
+    /// Mark a finding filed, with the address of its issue
+    Filed {
+        /// The finding's number
+        id: u64,
+        /// The issue's address
+        issue: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -573,6 +596,38 @@ fn run(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
                     client.request("developer.set", json!({"log": false}))?,
                     false,
                 ),
+                DeveloperAction::Reports {
+                    json,
+                    export,
+                    action,
+                } => {
+                    match (action, export) {
+                        (Some(ReportsAction::Filed { id, issue }), _) => {
+                            client.request(
+                                "developer.report_filed",
+                                json!({"id": id, "issue": issue}),
+                            )?;
+                            println!("Finding #{id} is marked filed: {issue}");
+                        }
+                        (None, true) => {
+                            let said = client.request("developer.reports_export", json!({}))?;
+                            println!(
+                                "{} finding(s) written to {}",
+                                said["count"],
+                                said["file"].as_str().unwrap_or_default()
+                            );
+                        }
+                        (None, false) => {
+                            let said = client.request("developer.reports", json!({}))?;
+                            if json {
+                                println!("{said}");
+                            } else {
+                                print!("{}", findings::listing(&said));
+                            }
+                        }
+                    }
+                    return Ok(ExitCode::SUCCESS);
+                }
             };
             if json {
                 println!("{answer}");
