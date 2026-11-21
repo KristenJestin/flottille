@@ -59,24 +59,35 @@ fn note(version: &str, body: &str) -> Value {
     json!({"version": version, "published_at": "2026-11-10T10:00:00Z", "body": body})
 }
 
-/// Three betas' notes, one change in two of them (a rerun of the same fix), and a line without
-/// a scope.
+/// Three betas' notes in the shape the changelog gives them (#1178): one note in two of them (a
+/// rerun of the same fix), a Remote and a Window note in the last, and a commit that has no note,
+/// which is only in the raw list.
 fn betas() -> Value {
     json!([
         note(
             "0.4.0-beta.104",
-            "### Features\n\n- **gui**: the sidebar says what is new (#1101)\n- **cli**: changes prints it (#1102)\n\n### Fixes\n\n- **gui**: a link opens (#1103)"
+            "### Window\n\n- See what is new from the sidebar. (#1101)\n\n### Other\n\n- Read what is new from the command line. (#1102)\n\n### Fixed\n\n- A link opens. (#1103)\n\n### All changes\n\n#### Features\n\n- **gui**: the sidebar says what is new (#1101)\n- **cli**: changes prints it (#1102)\n\n#### Fixes\n\n- **gui**: a link opens (#1103)"
         ),
         note(
             "0.4.0-beta.105",
-            "### Fixes\n\n- **gui**: a link opens (#1103)\n- **daemon**: the check waits (#1104)"
+            "### Fixed\n\n- A link opens. (#1103)\n- The check for updates waits for the network. (#1104)\n\n### All changes\n\n#### Fixes\n\n- **gui**: a link opens (#1103)\n- **daemon**: the check waits (#1104)"
         ),
         note(
             "0.4.0-beta.106",
-            "### Breaking changes\n\n- **protocol**: update.show says more (#1105)\n\n### Features\n\n- **protocol**: update.show says more (#1105)\n- one line with no scope (#1106)\n\n### Other changes\n\n- **repo**: tidy (#1107)"
+            "### Remote\n\n- Update a machine from the hub. (#1105)\n\n### Window\n\n- Open a link from a note. (#1106)\n\n### All changes\n\n#### Features\n\n- **protocol**: update.show says more (#1105)\n- **gui**: a link in a note (#1106)\n- one line with no scope (#1107)\n\n#### Other changes\n\n- **repo**: tidy (#1108)"
         ),
     ])
 }
+
+/// The notes of `betas()`, in the order of the page: the areas in theirs, each oldest first.
+const NOTES: [&str; 6] = [
+    "Update a machine from the hub.",
+    "See what is new from the sidebar.",
+    "Open a link from a note.",
+    "Read what is new from the command line.",
+    "A link opens.",
+    "The check for updates waits for the network.",
+];
 
 fn window<'a>(
     user: &User,
@@ -153,6 +164,13 @@ fn opened_links(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Arc<Mutex<
     opened
 }
 
+/// What the page's title says of this build: `What's new in 0.4`.
+fn title() -> String {
+    let version = this_version();
+    let line: Vec<&str> = version.split('.').take(2).collect();
+    format!("What's new in {}", line.join("."))
+}
+
 /// The change lines the page draws, in order: their words.
 fn changes(cx: &mut VisualTestContext) -> Vec<String> {
     (0..)
@@ -212,7 +230,11 @@ fn clicking_the_mark_opens_what_is_new_and_clears_its_dot(cx: &mut TestAppContex
     settle(cx);
     assert_eq!(
         label(cx, "whats-new-header-title").as_deref(),
-        Some(format!("What's new since {SINCE}").as_str())
+        Some(title().as_str())
+    );
+    assert_eq!(
+        label(cx, "whats-new-range").as_deref(),
+        Some(format!("since {SINCE}").as_str())
     );
     assert!(!visible(cx, "sidebar-whats-new-dot"));
     // Opened once, for good: the daemon keeps it.
@@ -237,40 +259,32 @@ fn what_is_new_spans_every_beta_since_the_version_last_run(cx: &mut TestAppConte
     });
     settle(cx);
 
-    // As the changelog groups them (breaking changes, features, fixes, other), then by scope,
-    // each change once: the fix two betas share is one line, and a change that is both breaking
-    // and a feature is said under each group, as the changelog says it.
+    // One section per area, in the order of the areas, each with its count; the fixes last. A
+    // note two betas share is one row, and an area with nothing is not drawn.
     assert_eq!(
         [
-            "whats-new-group-breaking",
-            "whats-new-group-features",
-            "whats-new-group-fixes",
-            "whats-new-group-other",
+            "remote", "window", "agents", "tools", "projects", "other", "fixed"
         ]
-        .map(|id| visible(cx, id)),
-        [true; 4]
-    );
-    assert!(
-        !visible(cx, "whats-new-group-performance"),
-        "a group with nothing is not drawn"
+        .map(|key| visible(cx, &format!("whats-new-area-{key}"))),
+        [true, true, false, false, false, true, true]
     );
     assert_eq!(
-        changes(cx),
-        [
-            "update.show says more",
-            "changes prints it",
-            "the sidebar says what is new",
-            "update.show says more",
-            "one line with no scope",
-            "the check waits",
-            "a link opens",
-            "tidy",
-        ]
+        label(cx, "whats-new-area-window-title").as_deref(),
+        Some("Window")
     );
+    assert_eq!(
+        ["remote", "window", "other", "fixed"].map(|key| label(
+            cx,
+            &format!("whats-new-area-{key}-count")
+        )
+        .unwrap()),
+        ["1", "2", "1", "2"]
+    );
+    assert_eq!(changes(cx), NOTES);
     assert_eq!(label(cx, "whats-new-change-0-pr").as_deref(), Some("#1105"));
 
     // A pull request opens with the system's handler.
-    click(cx, "whats-new-change-2-pr");
+    click(cx, "whats-new-change-1-pr");
     assert_eq!(
         *opened.lock().unwrap(),
         [PathBuf::from(
@@ -307,7 +321,7 @@ fn what_is_new_is_found_again_in_settings(cx: &mut TestAppContext) {
     until(&shell, cx, "the page opens", |cx| {
         visible(cx, "whats-new-change-0")
     });
-    assert_eq!(changes(cx).len(), 8);
+    assert_eq!(changes(cx).len(), NOTES.len());
     // The page says the build it is of: version, channel and commit.
     assert!(
         label(cx, "whats-new-build").is_some_and(|said| said.starts_with(&this_version())),
@@ -362,4 +376,115 @@ fn notes_that_cannot_be_fetched_are_said(cx: &mut TestAppContext) {
     );
     assert!(!visible(cx, "whats-new-change-0"));
     assert!(visible(cx, "whats-new-again"));
+}
+
+/// The page opened on `notes`, settled.
+fn opened_on<'a>(
+    user: &User,
+    notes: Value,
+    cx: &'a mut TestAppContext,
+) -> (Entity<Shell>, &'a mut VisualTestContext) {
+    kept(user, Some(SINCE), false, notes);
+    let (shell, cx) = window(user, cx);
+    until(&shell, cx, "the mark appears", |cx| {
+        visible(cx, "sidebar-whats-new")
+    });
+    settle(cx);
+    click(cx, "sidebar-whats-new");
+    until(&shell, cx, "the page opens", |cx| {
+        visible(cx, "whats-new-page")
+    });
+    until(&shell, cx, "the notes are drawn", |cx| {
+        visible(cx, "whats-new-area-fixed")
+    });
+    settle(cx);
+    (shell, cx)
+}
+
+#[gpui_kit::test]
+fn a_pull_request_without_a_note_is_not_on_the_page(cx: &mut TestAppContext) {
+    let user = User::new();
+    let (_, cx) = opened_on(&user, betas(), cx);
+
+    // "one line with no scope" and "tidy" have no note: they are not rows of an area...
+    let said = changes(cx);
+    assert!(
+        !said
+            .iter()
+            .any(|row| row.contains("tidy") || row.contains("no scope")),
+        "{said:?}"
+    );
+    // ... and no section is made for them: their commits only exist in the raw list.
+    assert!(!visible(cx, "whats-new-area-agents"));
+    assert_eq!(said.len(), NOTES.len());
+    assert!(!visible(cx, "whats-new-raw-0"), "the raw list is folded");
+}
+
+#[gpui_kit::test]
+fn the_raw_list_is_in_a_closed_fold(cx: &mut TestAppContext) {
+    let user = User::new();
+    let (_, cx) = opened_on(&user, betas(), cx);
+
+    // Closed by default, at the foot, with how many lines it holds.
+    assert!(visible(cx, "whats-new-all"));
+    assert_eq!(label(cx, "whats-new-all").as_deref(), Some("All changes"));
+    assert!(!visible(cx, "whats-new-raw-0"));
+    assert_eq!(cx.update(|window, cx| window.simulate_next_frame(cx)), 0);
+
+    click(cx, "whats-new-all");
+
+    // The raw subjects, as the release bodies list them: by type, then scope, each once.
+    assert!(visible(cx, "whats-new-raw-0"));
+    let raw: Vec<String> = (0..)
+        .map(|n| label(cx, &format!("whats-new-raw-{n}")))
+        .take_while(Option::is_some)
+        .flatten()
+        .collect();
+    assert!(
+        raw.iter().any(|line| line == "update.show says more"),
+        "{raw:?}"
+    );
+    assert!(raw.iter().any(|line| line == "tidy"), "{raw:?}");
+    assert!(
+        raw.iter().any(|line| line == "one line with no scope"),
+        "{raw:?}"
+    );
+    assert_eq!(
+        raw.iter().filter(|line| *line == "a link opens").count(),
+        1,
+        "{raw:?}"
+    );
+
+    click(cx, "whats-new-all");
+    assert!(!visible(cx, "whats-new-raw-0"), "it folds again");
+}
+
+#[gpui_kit::test]
+fn highlights_are_shown_when_the_release_has_some(cx: &mut TestAppContext) {
+    let user = User::new();
+    let mut notes = betas();
+    notes[2]["body"] = json!(format!(
+        "### Highlights\n\n- Drive another machine from the window.\n- Read what changed in your own words.\n\n{}",
+        notes[2]["body"].as_str().unwrap()
+    ));
+    let (_, cx) = opened_on(&user, notes, cx);
+
+    assert!(visible(cx, "whats-new-highlights"));
+    assert_eq!(
+        [0, 1].map(|n| label(cx, &format!("whats-new-highlight-{n}")).unwrap()),
+        [
+            "Drive another machine from the window.",
+            "Read what changed in your own words."
+        ]
+    );
+    // They are not counted among the notes.
+    assert_eq!(changes(cx), NOTES);
+}
+
+#[gpui_kit::test]
+fn a_release_without_highlights_draws_no_block_for_them(cx: &mut TestAppContext) {
+    let user = User::new();
+    let (_, cx) = opened_on(&user, betas(), cx);
+
+    assert!(!visible(cx, "whats-new-highlights"));
 }
