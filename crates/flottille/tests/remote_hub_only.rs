@@ -250,7 +250,7 @@ fn a_peer_that_still_sends_addresses_links() {
         .enable_all()
         .build()
         .unwrap();
-    let (endpoint, answered) = runtime.block_on(async {
+    let (endpoint, link, answered) = runtime.block_on(async {
         let endpoint = remote::endpoint_of(&server.folder()).await;
         let link = remote::dial(&endpoint, pc_key, Traffic::Machine, "pc")
             .await
@@ -259,10 +259,11 @@ fn a_peer_that_still_sends_addresses_links() {
             .send_raw(br#"{"machine": {"addresses": ["192.0.2.7:7447"]}}"#)
             .await
             .map_err(|error| error.to_string());
-        (endpoint, answered)
+        (endpoint, link, answered)
     });
     // The pc sees the server online over this very link.
     pc.wait_for("server", "online");
+    drop(link);
     runtime.block_on(endpoint.close());
     assert_eq!(answered.unwrap(), json!({}));
     // Nothing of them is kept.
