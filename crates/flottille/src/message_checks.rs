@@ -1302,6 +1302,23 @@ mod tests {
         split_line(line).unwrap()
     }
 
+    #[test]
+    fn a_forced_deletion_the_line_asks_for_is_let_through() {
+        let tried = vec![(
+            "git@forge.invalid:acme/app.git".to_owned(),
+            vec![(
+                "-".to_owned(),
+                "(delete)".to_owned(),
+                "refs/heads/old".to_owned(),
+            )],
+        )];
+
+        let asked = asked_for(&[], &words("origin +:refs/heads/old"), &tried);
+
+        assert!(asked.is_ok(), "{asked:?}");
+        assert!(asked_for(&[], &words("origin +main"), &tried).is_err());
+    }
+
     /// A place of one repository, in `root`.
     fn place(root: &Path) -> Place {
         Place {
