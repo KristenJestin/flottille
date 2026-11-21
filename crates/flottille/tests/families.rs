@@ -4892,7 +4892,7 @@ fn workspace_remove_on_a_workspace_with_an_unpushed_commit_names_it_and_is_refus
     assert!(!folder.exists());
 }
 
-/// This user with a `git` first in its `PATH` that, before the `look`th `git status` of the
+/// This user with a daemon's `git` that, before the `look`th `git status` of the
 /// workspace `login`, writes an uncommitted file in it: work that appears while a removal is
 /// under way. Everything else is the real `git`.
 fn with_work_appearing_before_the_look(user: User, look: u32) -> User {
@@ -4918,8 +4918,8 @@ fn with_work_appearing_before_the_look(user: User, look: u32) -> User {
     )
     .unwrap();
     std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
-    user.with_env("PATH", &path)
+    // The daemon's own git is the one found at its start, not the `PATH`'s first.
+    user.with_env("FLOTTILLE_TEST_GIT", program.to_str().unwrap())
 }
 
 #[test]

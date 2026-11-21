@@ -311,8 +311,10 @@ pub fn ssh_unlent() -> Option<String> {
     }
 }
 
-/// Whether the commands Flottille confines are confined by Landlock (`landlock::confined`).
-fn landlock_enforced() -> bool {
+/// Whether the commands Flottille confines are confined by Landlock (`landlock::confined`): what
+/// keeps them from the daemon's runtime folder, the mount namespace's empty folder being reached
+/// through `/proc` too.
+pub(crate) fn landlock_enforced() -> bool {
     if cfg!(debug_assertions) && std::env::var_os(NO_LANDLOCK).is_some() {
         return false;
     }
@@ -801,7 +803,7 @@ fn included(file: &Path, home: Option<&Path>, seen: &mut Vec<PathBuf>) -> Result
 /// them (`git config --file`, not what they include).
 fn include_paths(file: &Path) -> Vec<String> {
     let listed = crate::children::spawn_std(
-        std::process::Command::new("git")
+        std::process::Command::new(crate::git::own())
             .args(["config", "--null", "--file"])
             .arg(file)
             .args(["--get-regexp", r"^include(if\..*)?\.path$"])
@@ -862,6 +864,82 @@ pub async fn ssh_command(folder: &Path) -> Result<OsString, String> {
             checked(&own, found()).map_err(|why| format!("the user's ssh command ({own}) {why}"))
         }
     }
+}
+
+/// The user's own git settings as they apply to the repository at `folder` (an `includeIf` for
+/// its folder or its branch), read from the files found at the daemon's start alone, in the
+/// order git reads them: what a push the gate let through is given of them, since it runs from a
+/// folder of the daemon's (`push_folder`), where git would read them otherwise. A file that is
+/// gone is none, as git reads it.
+pub async fn user_settings(folder: &Path) -> Result<Vec<(String, String)>, String> {
+    let mut settings = Vec::new();
+    for file in found()
+        .map(|found| found.git.as_slice())
+        .unwrap_or_default()
+    {
+        if std::fs::metadata(file).is_err() {
+            continue;
+        }
+        let read = crate::git::run_with(
+            folder,
+            &[
+                "config",
+                "--global",
+                "--includes",
+                "--null",
+                "--show-origin",
+                "--list",
+            ],
+            crate::git::Class::Read,
+            &[("GIT_CONFIG_GLOBAL", file.as_os_str())],
+        )
+        .await?;
+        if !read.success {
+            return Err(format!(
+                "the user's git settings in {} cannot be read: {}",
+                file.display(),
+                read.stderr.trim()
+            ));
+        }
+        settings.extend(given(&read.stdout));
+    }
+    Ok(settings)
+}
+
+/// Of the user's settings as `git config --null --show-origin --list` writes them, with what
+/// they include: those a push is given. What they include is listed already, and named again it
+/// would be read twice; but what an `includeIf "hasconfig:remote.*.url:…"` includes depends on
+/// the URLs of the push's own remotes, which git knows only once it reads them all: it is given
+/// as it is, its file named by its full path (a setting given to a command names no file
+/// relative to another), for git to include where it applies.
+fn given(listed: &str) -> Vec<(String, String)> {
+    let mut parts = listed.split('\0');
+    let mut given = Vec::new();
+    while let (Some(origin), Some(entry)) = (parts.next(), parts.next()) {
+        let (key, value) = entry.split_once('\n').unwrap_or((entry, "true"));
+        if key == "include.path" {
+            continue;
+        }
+        if key.starts_with("includeif.") && key.ends_with(".path") {
+            if !key.starts_with("includeif.hasconfig:") {
+                continue;
+            }
+            let path = match (origin.strip_prefix("file:"), value) {
+                (_, value) if value.starts_with('/') || value.starts_with("~/") => value.to_owned(),
+                (Some(file), value) => Path::new(file)
+                    .parent()
+                    .unwrap_or(Path::new("/"))
+                    .join(value)
+                    .to_string_lossy()
+                    .into_owned(),
+                (None, _) => continue,
+            };
+            given.push((key.to_owned(), path));
+            continue;
+        }
+        given.push((key.to_owned(), value.to_owned()));
+    }
+    given
 }
 
 /// The user's own `ssh` command, as a push may run it: `ssh` named alone is the one found at the
@@ -937,6 +1015,36 @@ fn checked(own: &str, found: Option<&Found>) -> Result<OsString, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_user_s_includes_for_a_remote_s_url_are_given_for_git_to_include() {
+        let listed = [
+            "file:/home/u/.gitconfig\0include.path\nother.gitconfig",
+            "file:/home/u/.gitconfig\0includeif.gitdir:~/work/.path\nwork.gitconfig",
+            "file:/home/u/.gitconfig\0includeif.hasconfig:remote.*.url:git@forge.invalid:**.path\nforge.gitconfig",
+            "file:/home/u/.gitconfig\0includeif.hasconfig:remote.*.url:https://a.invalid/**.path\n~/a.gitconfig",
+            "file:/home/u/work.gitconfig\0user.name\nWork",
+            "file:/home/u/.gitconfig\0core.askpass",
+            "",
+        ]
+        .join("\0");
+
+        assert_eq!(
+            given(&listed),
+            [
+                (
+                    "includeif.hasconfig:remote.*.url:git@forge.invalid:**.path".to_owned(),
+                    "/home/u/forge.gitconfig".to_owned()
+                ),
+                (
+                    "includeif.hasconfig:remote.*.url:https://a.invalid/**.path".to_owned(),
+                    "~/a.gitconfig".to_owned()
+                ),
+                ("user.name".to_owned(), "Work".to_owned()),
+                ("core.askpass".to_owned(), "true".to_owned()),
+            ]
+        );
+    }
 
     #[test]
     fn an_include_outside_ssh_or_not_read_is_refused() {
