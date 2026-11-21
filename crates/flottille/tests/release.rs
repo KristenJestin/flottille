@@ -29,7 +29,8 @@ fn tool(name: &str) -> PathBuf {
 struct Repo {
     dir: tempfile::TempDir,
     /// A `gh` standing for GitHub's API (`bin/gh`), and the descriptions of the pull requests it
-    /// knows (`prs/<number>`): the changelog reads their `Note:` lines through it.
+    /// knows (`prs/<number>`, and beside it the author's association and whether it can be read): the
+    /// changelog reads their `Note:` lines through it.
     gh: tempfile::TempDir,
 }
 
@@ -43,11 +44,16 @@ impl Repo {
         std::fs::create_dir_all(repo.gh.path().join("bin")).unwrap();
         std::fs::create_dir_all(repo.gh.path().join("prs")).unwrap();
         let gh = repo.gh.path().join("bin/gh");
-        // `gh api repos/{owner}/{repo}/pulls/<n> --jq .body`: the body, or a failure.
+        // `gh api repos/{owner}/{repo}/pulls/<n> --jq <expression>`: the answer the changelog asks
+        // for (the author's association on a line, then the body), or a failure for a pull
+        // request marked unreadable. One known by neither is an empty description by an owner.
         std::fs::write(
             &gh,
-            "#!/bin/sh\n[ \"$1\" = api ] && [ \"$3\" = --jq ] && [ \"$4\" = .body ] || exit 2\n\
-             cat \"$(dirname \"$0\")/../prs/${2##*/}\" 2>/dev/null\n",
+            "#!/bin/sh\n[ \"$1\" = api ] && [ \"$3\" = --jq ] || exit 2\n\
+             prs=$(dirname \"$0\")/../prs n=${2##*/}\n\
+             [ ! -e \"$prs/$n.unreadable\" ] || exit 1\n\
+             cat \"$prs/$n.association\" 2>/dev/null || echo OWNER\n\
+             cat \"$prs/$n\" 2>/dev/null || true\n",
         )
         .unwrap();
         std::fs::set_permissions(&gh, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
@@ -57,6 +63,21 @@ impl Repo {
     /// The description of pull request `number`, as GitHub's API says it.
     fn pr(&self, number: u32, body: &str) {
         std::fs::write(self.gh.path().join(format!("prs/{number}")), body).unwrap();
+    }
+
+    /// Pull request `number` was written by someone who is `association` to the repository
+    /// (`OWNER`, `MEMBER`, `COLLABORATOR`, `CONTRIBUTOR`, ...), as GitHub's API says it.
+    fn pr_by(&self, number: u32, association: &str) {
+        std::fs::write(
+            self.gh.path().join(format!("prs/{number}.association")),
+            format!("{association}\n"),
+        )
+        .unwrap();
+    }
+
+    /// The API fails to read pull request `number`.
+    fn pr_unreadable(&self, number: u32) {
+        std::fs::write(self.gh.path().join(format!("prs/{number}.unreadable")), "").unwrap();
     }
 
     /// The environment that puts the fake `gh` first on the `PATH`.
@@ -595,7 +616,7 @@ fn a_fast_forward_release_after_the_two_squash_releases() {
     );
     assert_eq!(
         repo.changelog(&[]),
-        "### Other changes\n\n- **repo**: say more (#352)\n"
+        "### All changes\n\n#### Other changes\n\n- **repo**: say more (#352)\n"
     );
 }
 
@@ -1112,8 +1133,49 @@ fn a_pull_request_without_a_note_is_only_in_the_raw_list() {
     repo.commit("docs(repo): say more");
     repo.pr(21, "I split a module.\n\nCloses #5");
     repo.pr(22, "Note: Read what changed on a page of its own.");
-    // 23 is unknown to the API: it fails, there is no note, and the script says which.
+    repo.pr(23, "I fix a typo.");
 
+    assert_eq!(
+        repo.changelog(&[]),
+        "### Window\n\n- Read what changed on a page of its own. (#22)\n\n\
+         ### All changes\n\n\
+         #### Features\n\n- **gui**: a page for the changes (#22)\n\n\
+         #### Fixes\n\n- **cli**: a typo (#23)\n\n\
+         #### Other changes\n\n- **store**: split a module (#21)\n- **repo**: say more\n"
+    );
+}
+
+#[test]
+fn a_note_from_an_outside_author_is_not_used() {
+    let repo = Repo::new();
+    repo.commit("feat(core): start");
+    repo.tag("v0.3.0");
+    repo.commit("feat(gui): a page for the changes (#14)");
+    repo.commit("feat(gui): a second page (#15)");
+    // The description is read at release time, after the merge: whoever wrote the pull request
+    // can have changed it since. Only a maintainer's note is the release's.
+    repo.pr(14, "Note: Read what changed on a page of its own.");
+    repo.pr_by(14, "CONTRIBUTOR");
+    repo.pr(15, "Note: See the second page.");
+    repo.pr_by(15, "COLLABORATOR");
+
+    assert_eq!(
+        repo.changelog(&[]),
+        "### Window\n\n- See the second page. (#15)\n\n\
+         ### All changes\n\n#### Features\n\n\
+         - **gui**: a page for the changes (#14)\n- **gui**: a second page (#15)\n"
+    );
+}
+
+#[test]
+fn a_pull_request_that_cannot_be_read_fails_the_changelog() {
+    let repo = Repo::new();
+    repo.commit("feat(core): start");
+    repo.tag("v0.3.0");
+    repo.commit("fix(cli): a typo (#23)");
+    repo.pr_unreadable(23);
+
+    // A release built without its note cannot be edited afterwards: the build stops instead.
     let output = repo
         .with_gh(
             Command::new(tool("tools/changelog.sh"))
@@ -1124,15 +1186,7 @@ fn a_pull_request_without_a_note_is_only_in_the_raw_list() {
         .output()
         .unwrap();
 
-    assert!(output.status.success(), "{output:?}");
-    assert_eq!(
-        String::from_utf8_lossy(&output.stdout),
-        "### Window\n\n- Read what changed on a page of its own. (#22)\n\n\
-         ### All changes\n\n\
-         #### Features\n\n- **gui**: a page for the changes (#22)\n\n\
-         #### Fixes\n\n- **cli**: a typo (#23)\n\n\
-         #### Other changes\n\n- **store**: split a module (#21)\n- **repo**: say more\n"
-    );
+    assert!(!output.status.success(), "{output:?}");
     assert!(
         String::from_utf8_lossy(&output.stderr).contains("#23"),
         "{output:?}"
@@ -1275,6 +1329,15 @@ fn the_shape_check_warns_on_a_feature_without_a_note() {
         ),
         ""
     );
+    // The title is the author's: it is never said inside a workflow command, where a newline or
+    // `%0A` in it would start another one.
+    let said = note_check(
+        "feat(gui): a page%0A::error::injected\r",
+        &product,
+        "Closes #1",
+    );
+    assert!(said.starts_with("::warning"), "{said}");
+    assert!(!said.contains("injected"), "{said}");
     // The workflow runs it, and its step cannot fail the check.
     let workflow = std::fs::read_to_string(tool(".github/workflows/pull-request.yml")).unwrap();
     assert!(
