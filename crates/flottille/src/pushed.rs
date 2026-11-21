@@ -311,8 +311,10 @@ pub fn ssh_unlent() -> Option<String> {
     }
 }
 
-/// Whether the commands Flottille confines are confined by Landlock (`landlock::confined`).
-fn landlock_enforced() -> bool {
+/// Whether the commands Flottille confines are confined by Landlock (`landlock::confined`): what
+/// keeps them from the daemon's runtime folder, the mount namespace's empty folder being reached
+/// through `/proc` too.
+pub(crate) fn landlock_enforced() -> bool {
     if cfg!(debug_assertions) && std::env::var_os(NO_LANDLOCK).is_some() {
         return false;
     }

@@ -972,6 +972,14 @@ async fn push_folder(
     folder: &Path,
     words: &[String],
 ) -> Result<crate::push_folder::PushFolder, String> {
+    if !crate::pushed::landlock_enforced() {
+        return Err(
+            "the kernel has no Landlock (its second ABI or later), so the folder a push the gate \
+             let through runs from, in the daemon's runtime folder, would be within a run's \
+             reach: push from a terminal of your own (docs/vault.md, \"The gaps\")"
+                .into(),
+        );
+    }
     let (_, globals) = gate::git_globals(&words[1..]);
     let mut from = folder.to_owned();
     for (option, value) in globals {
