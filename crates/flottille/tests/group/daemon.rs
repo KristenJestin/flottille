@@ -57,3 +57,5 @@ mod tool_list_cost;
 mod update_staged;
 #[path = "../whats_new.rs"]
 mod whats_new;
+#[path = "../window_parity.rs"]
+mod window_parity;

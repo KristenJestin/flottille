@@ -4256,3 +4256,62 @@ fn the_vault_page_and_the_connections_page_open_their_forms_through_the_host(
     });
     assert_eq!(stack(&shell, cx), ["vault-modal"]);
 }
+
+#[gpui_kit::test]
+fn a_connection_s_client_id_is_set_in_its_dialog(cx: &mut TestAppContext) {
+    let user = user();
+    turn_on(&user);
+    let (shell, cx) = window(&user, cx);
+    open_page(&shell, cx);
+    click(cx, "new-connection");
+    // Only a URL signs in with OAuth: a program's dialog has no such field.
+    assert!(!visible(cx, "connection-client-id"));
+    click(cx, "connection-reach-url");
+    until(&shell, cx, "the client id's field unfolds", |cx| {
+        visible(cx, "connection-client-id")
+    });
+    assert_eq!(
+        label(cx, "connection-client-id-field-label").as_deref(),
+        Some("OAuth client id")
+    );
+    let section = section(&shell, cx);
+    let fields = section.read_with(cx, |s, _| s.form_fields().unwrap());
+    type_in(&fields.name, "remote", cx);
+    type_in(&fields.about, "A notes server elsewhere.", cx);
+    type_in(&fields.url, "https://notes.example.com/mcp", cx);
+    click(cx, "connection-client-id");
+    cx.simulate_input("client-123");
+    click(cx, "save-connection");
+    until(&shell, cx, "the dialog closes", |cx| {
+        !visible(cx, "connection-modal")
+    });
+    // The daemon holds what the command line's `--client-id` writes.
+    assert_eq!(
+        connection(&user, "remote").unwrap()["client_id"],
+        "client-123"
+    );
+
+    // Edited: the field holds what is saved, so that saving another field keeps it...
+    open_the_form_of(&shell, cx, "remote");
+    let fields = section.read_with(cx, |s, _| s.form_fields().unwrap());
+    type_in(&fields.about, "A notes server, said again.", cx);
+    click(cx, "save-connection");
+    until(&shell, cx, "the dialog closes again", |cx| {
+        !visible(cx, "connection-modal")
+    });
+    let kept = connection(&user, "remote").unwrap();
+    assert_eq!(kept["about"], "A notes server, said again.");
+    assert_eq!(kept["client_id"], "client-123");
+    // ... and emptying it takes it away.
+    open_the_form_of(&shell, cx, "remote");
+    click(cx, "connection-client-id");
+    cx.simulate_keystrokes("ctrl-a backspace");
+    click(cx, "save-connection");
+    until(&shell, cx, "the dialog closes a last time", |cx| {
+        !visible(cx, "connection-modal")
+    });
+    assert_eq!(
+        connection(&user, "remote").unwrap()["client_id"],
+        Value::Null
+    );
+}
