@@ -8,7 +8,7 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use flottille_hub::{Hub, RELAY_BURST, RELAY_RATE, Served, SystemClock};
+use flottille_hub::{Hub, RELAY_BURST, RELAY_RATE, Served, SystemClock, Waits};
 use flottille_link::{
     Action, Ask, Change, Colour, Device, DeviceKey, Hello, Icon, Keyring, KeyringError, MachineKey,
     PairCode, Paired, Proposed, PublicKey, RelayPort, Role, Session, Tls,
@@ -58,10 +58,15 @@ struct Place {
 
 impl Place {
     async fn new() -> Place {
+        Place::with(Waits::default()).await
+    }
+
+    /// [`Place::new`], the hub's waits `waits`.
+    async fn with(waits: Waits) -> Place {
         let dir = tempfile::tempdir().unwrap();
         let hub = Hub::open(&dir.path().join("hub"), SystemClock).unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let served = flottille_hub::serve(hub, listener, None, hello()).unwrap();
+        let served = flottille_hub::serve_with(hub, listener, None, hello(), waits).unwrap();
         let pc_machine = machine_in(dir.path(), "pc");
         let mut paired = pair(&served, &device_key(1), &pc_machine, "pc").await;
         let (pc_device, _) = paired.listed().await.unwrap();
@@ -500,4 +505,38 @@ async fn a_member_removed_is_sent_nothing_while_its_session_is_open() {
             .await
             .is_empty()
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_silent_device_is_said_offline() {
+    // A session lost after two seconds without a word, not eighty.
+    let waits = Waits {
+        silence: Duration::from_secs(2),
+        ..Waits::default()
+    };
+    let mut place = Place::with(waits).await;
+    let (laptop, laptop_machine) = (device_key(3), place.machine("laptop"));
+    let mut laptop_session = place.add(&laptop, &laptop_machine, "laptop").await;
+    let mut laptop_port = port(&mut laptop_session);
+    let laptop = laptop_session.asker();
+    let _laptop_session = drain(laptop_session);
+    let present = Ask::Presence {
+        active: true,
+        last_input: 0,
+    };
+    place.pc_session.ask(present.clone()).await.unwrap();
+    online(&mut laptop_port, &[place.pc_machine.public()]).await;
+
+    // The laptop keeps talking; the pc says nothing more after its ask, as a device whose
+    // connection died says nothing: the hub lets it go, and the laptop is told.
+    let started = Instant::now();
+    while laptop_port.online().contains(&place.pc_machine.public()) {
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the silent pc is still said online"
+        );
+        laptop.ask(present.clone()).await.unwrap();
+        let _ =
+            tokio::time::timeout(Duration::from_millis(300), laptop_port.online_changed()).await;
+    }
 }
