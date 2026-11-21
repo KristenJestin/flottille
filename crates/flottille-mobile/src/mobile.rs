@@ -77,9 +77,6 @@ pub struct Reply {
 const PICTURES_MOST: usize = 20;
 const PICTURE_MOST: usize = 5 * 1024 * 1024;
 const PICTURE_TYPES: [&str; 4] = ["image/png", "image/jpeg", "image/gif", "image/webp"];
-/// What a signed request holds besides its parameters (the key, the signature, the nonce), and the
-/// escapes of the parameters, which travel as a string: the room kept in a frame.
-const FRAME_MARGIN: usize = 16 * 1024;
 /// A `before` past every event: the daemon then gives the latest page.
 const LATEST: u64 = i64::MAX as u64;
 
@@ -495,13 +492,6 @@ impl Core {
                 })
                 .collect();
         }
-        // The request travels in one frame of the link, signed: pictures in base64 included. A
-        // message that cannot fit is refused here, saying why, rather than ending the link.
-        if params.to_string().len() + FRAME_MARGIN > flottille_link::FRAME_LIMIT {
-            return Err(MobileError::new(
-                "this message is too big for the link: its pictures and its words take 1 MiB at most together, about 700 KiB of pictures",
-            ));
-        }
         let inner = self.inner.clone();
         self.inner
             .on(async move { inner.call(&machine, "agent.send", params).await.map(drop) })
@@ -811,7 +801,19 @@ impl Inner {
         let request = Request::sign(&key, &id, machine, method, &params, SystemTime::now())
             .map_err(|error| MobileError::new(error.to_string()))?;
         let request = serde_json::to_value(&request).expect("a request is JSON");
-        link.ask(&Message::Client(request))
+        let message = Message::Client(request);
+        // A request is one frame of the link: what cannot fit, once signed (its parameters travel
+        // as a string, escaped again, besides the key, the signature and the nonce), is refused
+        // here saying why, rather than ending the link.
+        let size = serde_json::to_vec(&message)
+            .expect("a message is JSON")
+            .len();
+        if size > flottille_link::FRAME_LIMIT {
+            return Err(MobileError::new(
+                "this message is too big for the link: its pictures and its words take 1 MiB at most together, about 700 KiB of pictures",
+            ));
+        }
+        link.ask(&message)
             .await
             .map_err(|error| MobileError::new(error.to_string()))
     }
