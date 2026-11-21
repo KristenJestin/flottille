@@ -756,6 +756,13 @@ pub fn turn_ended(daemon: &Arc<Daemon>, agent: &flottille_core::agent::Agent, st
 /// The tool only a routine's session has.
 pub const TOOL: &str = "routine_result";
 
+/// Whether the session is a routine's run.
+pub fn is_run(daemon: &Daemon, session: &str) -> bool {
+    daemon
+        .read(|store| store.routine_run_of(session))
+        .is_ok_and(|run| run.is_some())
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Result_ {

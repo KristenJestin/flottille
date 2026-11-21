@@ -1630,7 +1630,7 @@ pub fn grant_of(daemon: &Daemon, agent: &Agent) -> Result<Grant, String> {
 /// changed.
 pub fn with_tools_now(daemon: &Daemon, agent: &Agent, project: &Project) -> Option<Agent> {
     let provider = providers::of(agent).ok()?;
-    let tools = crate::agents::tools_of(
+    let mut tools = crate::agents::tools_of(
         daemon,
         provider,
         project,
@@ -1640,6 +1640,10 @@ pub fn with_tools_now(daemon: &Daemon, agent: &Agent, project: &Project) -> Opti
         crate::extensions::launched(daemon, &agent.id)
             .map(|(extension, kind)| (extension.name, kind)),
     );
+    // A routine's session keeps the tool of its result, which its role alone does not give.
+    if crate::routines::is_run(daemon, &agent.id) {
+        tools.push(format!("{}{}", provider.tool_prefix, crate::routines::TOOL));
+    }
     // The same tools in another order are the same list: a new order would only cost the
     // session its prompt cache.
     let (now, had): (HashSet<&String>, HashSet<&String>) =
