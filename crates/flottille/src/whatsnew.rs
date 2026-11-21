@@ -234,9 +234,9 @@ fn parse(body: &str) -> Body {
             let raw = RAW.iter().find(|(_, name)| *name == title);
             at = if top && title == "Highlights" {
                 In::Highlights
-            } else if let (true, Some((key, _))) = (top, AREAS.iter().find(|(_, t)| *t == title)) {
+            } else if let (true, Some(&(key, _))) = (top, AREAS.iter().find(|(_, t)| *t == title)) {
                 In::Area(key)
-            } else if let Some((key, _)) = raw {
+            } else if let Some(&(key, _)) = raw {
                 found.legacy |= top;
                 In::Raw(key)
             } else {
@@ -302,7 +302,7 @@ fn change_of(line: &str) -> Change {
         None => (None, line),
     };
     Change {
-        scope: scope.map(str::to_owned),
+        scope,
         ..with_pr(text)
     }
 }
