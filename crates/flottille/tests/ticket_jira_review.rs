@@ -314,7 +314,9 @@ fn review_script() -> Value {
         json!([]),
     );
     // A page holds two: only `--paginate` reads them all.
-    json!({"search": [first, second, third], "page": 2})
+    // The search lists them, each is then read (`view`) with its comments and links.
+    json!({"search": [first, second, third], "page": 2,
+        "items": {"ABC-1": first, "ABC-2": second, "ABC-3": third}})
 }
 
 const JQL: &str = "project = ABC AND statusCategory != Done AND comment ~ \"Ada\"";
