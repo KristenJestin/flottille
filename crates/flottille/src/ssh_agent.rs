@@ -5,8 +5,8 @@
 //! own fetch or listing of an SSH remote is lent it, with the `ssh` found at the start
 //! (`git::remote`).
 
-use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
-use std::path::{Path, PathBuf};
+use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+use std::path::PathBuf;
 use std::sync::OnceLock;
 
 pub const VARIABLE: &str = "SSH_AUTH_SOCK";
@@ -54,13 +54,12 @@ pub(crate) fn candidates(name: &str) -> Vec<PathBuf> {
         .collect()
 }
 
-/// The first of `candidates` that only root may change (its file and its folder are root's),
-/// else the first, said not to be (`false`): open by default, as the user's own `PATH` is.
+/// The first of `candidates` that only root may change (`git::only_root_may_change`), else the
+/// first, said not to be (`false`): open by default, as the user's own `PATH` is.
 pub(crate) fn chosen(candidates: Vec<PathBuf>) -> Option<(PathBuf, bool)> {
-    let root = |path: &Path| std::fs::metadata(path).is_ok_and(|m| m.uid() == 0);
     if let Some(rooted) = candidates
         .iter()
-        .find(|ssh| root(ssh) && ssh.parent().is_some_and(root))
+        .find(|ssh| crate::git::only_root_may_change(ssh))
     {
         return Some((rooted.clone(), true));
     }
@@ -80,6 +79,8 @@ pub fn ssh() -> Option<&'static std::path::Path> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::MetadataExt;
+    use std::path::Path;
 
     #[test]
     fn an_ssh_owned_by_root_is_chosen_over_one_earlier_in_the_path() {

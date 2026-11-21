@@ -670,8 +670,10 @@ impl User {
             .iter()
             .map(|(alias, host)| format!("  {alias}) host={host} ;;\n"))
             .collect();
+        // Its own programs from the test's `PATH`: a push's is the system's folders alone.
         let script = format!(
             "#!/bin/sh\n\
+             PATH='{path}'\n\
              echo \"$*\" >> '{calls}'\n\
              if [ \"$1\" = -G ]; then\n\
              case \"$2\" in\n{cases}  *) echo \"ssh: Could not resolve hostname $2\" >&2; exit 255 ;;\n\
@@ -685,6 +687,7 @@ impl User {
              exec git \"${{service#git-}}\" '{remotes}'/\"$repository\"\n",
             calls = self.path("ssh-calls").display(),
             remotes = self.path("remotes").display(),
+            path = std::env::var("PATH").unwrap_or_default(),
         );
         let ssh = self.path("ssh-bin/ssh");
         std::fs::write(&ssh, script).unwrap();

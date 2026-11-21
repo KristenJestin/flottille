@@ -296,7 +296,7 @@ fn links_go_on_while_the_hub_is_down() {
     server.wait_for("pc", "online");
     let hub_seen = pc.remote()["hub"].clone();
     assert_eq!(hub_seen["state"], "connected", "{hub_seen}");
-    assert_eq!(hub_seen["url"], format!("{}/", hub.url()));
+    assert_eq!(hub_seen["url"], hub.url());
 
     hub.down();
     // What needs the hub says so, with since when...
@@ -346,70 +346,26 @@ fn the_hub_s_state_is_said_as_an_event_when_it_changes() {
 }
 
 #[test]
-fn two_machines_that_cannot_reach_each_other_say_which_address_failed() {
+fn two_machines_whose_addresses_answer_nothing_link_through_the_hub() {
     let hub = TestHub::new();
-    // Neither listens; each declares an address nobody listens on, which the hub tells the other.
+    // Neither listens; each declares an address nobody listens on, which the hub tells the other:
+    // the direct path fails, and the link goes through the hub (`docs/remote.md`, "The transport").
     let (pc, server) = (Machine::new(None), Machine::new(None));
-    let (pc_dead, server_dead) = (free_port(), free_port());
-    for (machine, port) in [(&pc, pc_dead), (&server, server_dead)] {
+    for machine in [&pc, &server] {
         machine
             .user
             .call(
                 "remote.address.add",
-                json!({"address": format!("127.0.0.1:{port}")}),
+                json!({"address": format!("127.0.0.1:{}", free_port())}),
             )
             .unwrap();
     }
     members(&hub, &pc, &server);
 
-    let seen = pc.wait_until("pc does not say the server is unreachable", |seen| {
-        seen["machines"].as_array().unwrap().iter().any(|machine| {
-            machine["name"] == "server"
-                && machine["reason"]
-                    .as_str()
-                    .is_some_and(|reason| reason.contains("is unreachable"))
-        })
-    });
-    let server_seen = seen["machines"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|machine| machine["name"] == "server")
-        .unwrap()
-        .clone();
-    assert_eq!(server_seen["state"], "offline");
-    assert_eq!(
-        server_seen["reason"],
-        format!("server is unreachable: tried 127.0.0.1:{server_dead} from pc, no answer in 10 s")
-    );
-    assert!(
-        pc.log().contains(&format!(
-            "no link to server: server is unreachable: tried 127.0.0.1:{server_dead} from pc"
-        )),
-        "{}",
-        pc.log()
-    );
-
-    // And on the other side, the other way.
-    let seen = server.wait_until("the server does not say pc is unreachable", |seen| {
-        seen["machines"].as_array().unwrap().iter().any(|machine| {
-            machine["name"] == "pc"
-                && machine["reason"]
-                    .as_str()
-                    .is_some_and(|reason| reason.contains("is unreachable"))
-        })
-    });
-    let pc_seen = seen["machines"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|machine| machine["name"] == "pc")
-        .unwrap()
-        .clone();
-    assert_eq!(
-        pc_seen["reason"],
-        format!("pc is unreachable: tried 127.0.0.1:{pc_dead} from server, no answer in 10 s")
-    );
+    for (machine, other) in [(&pc, "server"), (&server, "pc")] {
+        let seen = machine.wait_for(other, "online");
+        assert_eq!(seen["reached"]["address"], "the hub", "{seen}");
+    }
 }
 
 #[test]
@@ -666,6 +622,7 @@ fn a_machine_paired_with_a_hub_pairs_with_another_only_when_asked_to_replace_it(
     let pinned: Value =
         serde_json::from_str(&std::fs::read_to_string(pc.folder().join("hub.json")).unwrap())
             .unwrap();
+    // The file keeps the address as it was given; only what is shown drops the slash.
     assert_eq!(pinned["url"], format!("{}/", first.url()));
 
     pair_call(&pc, &second, &seeded(41), "pc", true).unwrap();
@@ -731,7 +688,7 @@ fn a_headless_machine_pairs_with_the_code_and_is_in_every_list() {
     let paired = pair(&hub, &server, "server", "runner");
     assert!(
         paired.contains(&format!(
-            "server is paired with the hub at {}/ as a runner",
+            "server is paired with the hub at {} as a runner",
             hub.url()
         )),
         "{paired}"
@@ -1559,4 +1516,38 @@ fn a_machine_that_wakes_from_a_suspend_judges_links_by_the_next_list() {
         pc.log()
     );
     drop(trusting.hub.runtime);
+}
+
+#[test]
+fn the_hubs_address_is_shown_without_its_default_port_or_a_trailing_slash() {
+    let hub = TestHub::new();
+    let pc = Machine::new(None);
+    // A code whose address has a trailing slash: it is not shown with one, and the port the hub is
+    // on, which is not its scheme's own, stays. The default ports are the unit test's of
+    // `HubUrl::shown`.
+    let typed = format!("{}/", hub.url());
+    let (_, code) = hub
+        .served()
+        .with_hub(|served| served.open_pairing(&typed, None).unwrap());
+    let output = pc.user.run_with_input(
+        &["remote", "pair", "--name", "pc", "--role", "runner"],
+        &format!("{}\n", code.code().unwrap()),
+    );
+    assert!(output.status.success(), "{}", pc.log());
+    let said = String::from_utf8_lossy(&output.stdout).into_owned();
+    assert!(said.contains(&format!("hub at {} as", hub.url())), "{said}");
+    assert!(!said.contains(&typed), "{said}");
+
+    let seen = pc.remote();
+    assert_eq!(seen["hub"]["url"], hub.url());
+    let members = pc.user.call("remote.members", json!({})).unwrap();
+    assert_eq!(members["hub"], hub.url());
+    // A second pairing without --replace is refused, naming the hub as it is shown. The refusal
+    // comes before the code is used, so any hub's code will do.
+    let other = TestHub::new();
+    let (_, refused) = pair_call(&pc, &other, &seeded(43), "pc", false).unwrap_err();
+    assert!(
+        refused.contains(&format!("hub at {} already", hub.url())),
+        "{refused}"
+    );
 }
