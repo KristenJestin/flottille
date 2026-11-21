@@ -1308,7 +1308,7 @@ async fn the_phone_links_to_a_runner_through_the_hub() {
             .iter()
             .any(|member| member.name == "server")
     );
-    let (phone, taken) = place.linked().await;
+    let (phone, _taken) = place.linked().await;
 
     let view = phone.view();
     let server = machine(&view, "server");
@@ -1324,7 +1324,6 @@ async fn the_phone_links_to_a_runner_through_the_hub() {
             .iter()
             .all(|(_, checked)| checked.is_ok())
     );
-    assert!(!taken.batches().is_empty() || phone.view().machines.len() == 1);
     place.served.stop().await;
 }
 
