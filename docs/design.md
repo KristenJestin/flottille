@@ -647,29 +647,38 @@ methods"; `flottille routine`, `docs/cli.md`).
   one-shot: it ends with its result, the tool `routine_result` that only a routine's session has
   (`docs/tools.md`), and the session ends with that turn. A run whose work goes on (an Ask or Auto
   routine that opened a branch) says `goes_on`: its session stays open as any session, and the
-  notification says so. A session that ends its turn without its result is reminded once; then,
-  or when it ends or fails without one, its run failed, and the session stays as any session.
+  notification says so. A session whose turn ends without its result (its end, its tokens spent,
+  a refusal) is reminded once; then, or when it ends or fails without one, or when the user stops
+  its turn, or when its session is gone, its run failed, and the session stays as any session.
   The routine's history is the list of its runs, each with its session, ended ones too; a skipped
   run has none.
 - **The schedule** is days and an hour, never a cron line: `every day 07:00`, `weekdays 08:30`,
   `mondays 09:00`, in the user's time zone (the machine's, or the routine's own). The clock
   starts a session; no timer wakes an agent, and routines add no timer to the daemon: the next
   run due of every routine is one deadline, read by the sweep that already runs every few
-  seconds, so the daemon stays at rest between runs.
-- **A run missed** while the machine was off runs **once** at the next start of the daemon, when
-  it was due less than 12 hours before (the routine's `missed_hours`), never once for each missed
-  day; an older one is skipped and said. The next run is the schedule's next after now.
+  seconds (which also reads the runs under way, to fail one whose session ended without its
+  result), so the daemon stays at rest between runs.
+- **A run missed** while the machine was off runs **once** at the next start of the daemon: the
+  last time the schedule names before now, when it was less than 12 hours before (the routine's
+  `missed_hours`), never once for each missed day (off from Saturday to Monday 07:30, Monday's
+  07:00 runs); when even the last is older, it is skipped and said. The next run is the
+  schedule's next after now.
 - **A spent quota** delays the run to the reset: while a session of the routine's provider waits
   for its quota's known reset (§5.9), the run waits until a minute after it, said in the
   routine's `delayed`.
-- **One at a time**: a run due while the last one still runs is skipped, and said in the history
-  and by `routine.ran`; `routine.run` (the user's Run now) is refused then.
+- **One at a time**: a run due while an earlier one still runs, or while the session of one whose
+  work goes on is still open, is skipped, and said in the history and by `routine.ran`;
+  `routine.run` (the user's Run now) is refused then.
 - **The mode**. **Read only** (the default): the gate refuses every call that writes (a ticket's
   comment or edit, a forge write, a file write, a run, a commit, a session written to, a vault
   ask), in every mode the session is switched to, Full included, whatever the prompt says; reads
-  go through as usual (the files, the tracker's and the forge's reads, a `GET`). It is checked
-  before the call's class, against a list of what reads: a tool or an action it does not list is
-  a write. This is what makes "change nothing in the tracker" true. **Ask** or **Auto**: the gate
+  go through as usual (the files, the tracker's and the forge's reads, a `GET` with no header
+  and no vault entry). It is checked before the call's class and before anything is read for the
+  call, against a list of what reads, each action checked against its code (`forge checks`
+  reruns failed runs: it is a write): a tool or an action it does not list is a write. The session
+  is marked read only on its own row when the run starts, and so is any child it makes: removing
+  the routine or its runs never lifts it. This is what makes "change nothing in the tracker"
+  true. **Ask** or **Auto**: the gate
   as for any session in that mode; its requests come to the inbox. The run keeps the mode it
   started in: an edit of the routine does not reach a session under way.
 - **The result** says whether there is **something to say**, with a one-line summary, or

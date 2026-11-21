@@ -2337,14 +2337,17 @@ says who answers a call to judge (`docs/design.md` §7.1).
    - every call that writes, made by the session of a read-only routine (`docs/design.md`
      §5.10), checked before anything else: it reads only `fs_read`, `fs_list`, `search`,
      `skill_read`, `agent_status`, `session_read`, `session_title`, `wake`, `report`, `ask`,
-     `routine_result`, `run_status` `output`, `forge` `list`, `show`, `people`, `checks`,
-     `pipelines`, `runs`, `run_view`, `run_logs`, `tickets` `list`, `search`, `show`, `people`,
+     `routine_result`, `run_status` `output`, `forge` `list`, `show`, `people`,
+     `pipelines`, `runs`, `run_view`, `run_logs` (not `checks`, which reruns the failed runs),
+     `tickets` `list`, `search`, `show`, `people`,
      `types`, `fields`, `link_types`, `sprints`, `milestones`, `progress`, `time_spent`,
      `worklogs`, the `list` and `show` of `tasks`, `skills`, `commands`, `workspace`,
      `services` and `connections`, `setup` and `vault` `list`, `project` `settings` and `rules`,
-     and a `web` `GET` with no body that shows nothing. Any other tool or action, one of an
-     extension or a connection included, is a write (`refused: this session is the run of a
-     read-only routine: …`), in Ask, Auto and Full alike;
+     and a `web` `GET` with no body, no header, no vault entry and no auth that shows nothing.
+     Any other tool or action, one of an extension or a connection included, is a write
+     (`refused: this session is the run of a read-only routine: …`), in Ask, Auto and Full
+     alike, refused before anything is read for it. The session is read only by a mark on its
+     own row, given to its children, which removing the routine does not lift;
    - shell syntax in a line (`run` splits a line without a shell, and refuses what it
      cannot split), and a call whose arguments do not fit the tool;
    - a login printed: `gh auth token`, `glab auth token`, `auth status` with `--show-token` (`-t`);
