@@ -17,7 +17,8 @@ use flottille_core::pasted;
 use flottille_core::paths::ensure_private_dir;
 use flottille_core::project::Project;
 use flottille_core::protocol::{
-    AgentAnswer, AgentImage, AgentName, AgentRun, AgentSend, AgentTrees, ImageUpload, TextUpload,
+    AgentAnswer, AgentFile, AgentImage, AgentName, AgentRun, AgentSend, AgentTrees, ImageUpload,
+    TextUpload,
 };
 use flottille_core::secrets::{self, Secrets};
 use flottille_core::store::{AgentChange, Store, now_ms};
@@ -286,6 +287,11 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Answer {
             let (mime, data) = deliveries::read_image(daemon, &agent.id, &asked.name)
                 .ok_or_else(|| Failure::new("not-found", format!("no image {}", asked.name)))?;
             Ok(json!({"mime": mime, "data": data}))
+        }
+        "agent.file" => {
+            let mut asked: AgentFile = serde_json::from_value(params)?;
+            asked.agent = find(daemon, &asked.agent)?.id;
+            crate::show::serve_file(daemon, asked).await
         }
         "agent.stop" => {
             let asked: AgentName = serde_json::from_value(params)?;

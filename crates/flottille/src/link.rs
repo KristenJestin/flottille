@@ -1,11 +1,12 @@
 //! The daemon's link to the user's other machines (`docs/remote.md`, "Architecture", "The
-//! transport", "The version"), with remote on: one endpoint, listening where `daemon.toml` says
-//! (`[remote] listen`), nowhere when it says nothing; a link kept to every machine this one trusts, dialled at the addresses it
-//! knows for it; each side telling the other its addresses whenever they change.
+//! transport", "The version"), with remote on: one endpoint, whose links go through the user's hub
+//! over the session this machine keeps to it (`hub_session.rs`); a link kept to every machine this
+//! one trusts that the hub says is online. The direct path stays: listening where `daemon.toml`
+//! says (`[remote] listen`, nowhere by default), dialling the addresses it knows for a machine
+//! first, each side telling the other its addresses whenever they change.
 //!
-//! Flottille handles no network channel: no relay, no NAT traversal, no discovery. How two machines
-//! reach each other (a LAN, a VPN, a public address, a tunnel) is the user's; a machine dials what
-//! it is told.
+//! No NAT traversal, no discovery: with the hub unreachable, machines that know no address of
+//! each other do not link, and say so with the hub's own sentence.
 //!
 //! The machines it trusts, and their addresses, are in `remote/peers.json`, which the control
 //! session to the hub writes from the member list once the machine is set up (`hub_session.rs`);
@@ -182,6 +183,8 @@ pub struct Remote {
     refused: Mutex<Refused>,
     /// The machines whose addresses told are being written: the latest told, not written yet.
     learning: Mutex<HashMap<[u8; 32], Option<Vec<String>>>>,
+    /// The closes of sessions of this machine served, so that one is served once.
+    closes: Mutex<flottille_link::ClosesServed>,
     /// Held while the peers' file is read and written again: apart from `peers`, so that a link
     /// coming in is not judged after a write to the disk.
     writing: Mutex<()>,
@@ -212,6 +215,9 @@ pub struct Remote {
     offered: tokio::sync::watch::Sender<Option<Capabilities>>,
     /// Asks `keep_offering` to look at what this machine offers now: a link was made.
     offer_now: tokio::sync::Notify,
+    /// This machine's live root sessions, light, while its member is a runner; none otherwise.
+    /// Each link sends it when made and whenever it changes, as `offered`.
+    sessions: tokio::sync::watch::Sender<Option<flottille_link::SessionList>>,
     /// Counts the member lists taken: a watch carried for a device looks again whether the
     /// device is still a member.
     pub(crate) lists: tokio::sync::watch::Sender<u64>,
@@ -222,6 +228,9 @@ pub struct Remote {
     pub(crate) receiving: crate::travel::Receiving,
     /// The tunnels this machine carries and serves (`tunnel.rs`).
     pub(crate) tunnels: crate::tunnel::Tunnels,
+    /// Becomes true when this link stops, for its own tasks: the daemon's stop, or remote turned
+    /// off, or the link made again somewhere else.
+    halt: Arc<tokio::sync::watch::Sender<bool>>,
 }
 
 /// Starts the link: the endpoint, the loop that accepts and the one that dials. A link that
@@ -240,9 +249,9 @@ pub fn start(
     .map_err(|error| error.to_string())?;
     match endpoint.listening() {
         Some(local) => eprintln!("flottille daemon: the link listens on {local}"),
-        None => eprintln!(
-            "flottille daemon: the link listens nowhere ([remote] listen in daemon.toml); it dials"
-        ),
+        None => {
+            eprintln!("flottille daemon: the link listens nowhere (Settings, Machines); it dials")
+        }
     }
     let remote = Arc::new(Remote::new(
         endpoint,
@@ -250,6 +259,17 @@ pub fn start(
         emit.clone(),
     ));
     let _ = remote.daemon.set(daemon);
+    // The daemon's stop is this link's, and so is the link's own.
+    tokio::spawn({
+        let halt = remote.halt.clone();
+        async move {
+            tokio::select! {
+                _ = stopped(stopping) => { halt.send_replace(true); }
+                _ = stopped(halt.subscribe()) => {}
+            }
+        }
+    });
+    let stopping = remote.halt.subscribe();
     // Read before the first link comes in, which is judged by the file as last read.
     remote.peers();
     let control = Arc::new(crate::hub_session::Control::new(
@@ -267,6 +287,11 @@ pub fn start(
     tokio::spawn(keep_offering(remote.clone(), stopping.clone()));
     tokio::spawn(dial(remote.clone(), stopping));
     Ok(remote)
+}
+
+/// Until `stopping` says so; nothing held of it, so that a `select!` holding it stays `Send`.
+async fn stopped(mut stopping: tokio::sync::watch::Receiver<bool>) {
+    let _ = stopping.wait_for(|stop| *stop).await;
 }
 
 /// This build's hello; a test build may make it another's.
@@ -314,6 +339,7 @@ impl Remote {
             links: Default::default(),
             refused: Mutex::new(Refused::new(Instant::now())),
             learning: Mutex::new(HashMap::new()),
+            closes: Mutex::new(flottille_link::ClosesServed::default()),
             writing: Mutex::new(()),
             control: std::sync::OnceLock::new(),
             heard: tokio::sync::watch::Sender::new(Some(tokio::time::Instant::now())),
@@ -325,10 +351,36 @@ impl Remote {
             daemon: std::sync::OnceLock::new(),
             offered: tokio::sync::watch::Sender::new(None),
             offer_now: tokio::sync::Notify::new(),
+            sessions: tokio::sync::watch::Sender::new(None),
             lists: tokio::sync::watch::Sender::new(0),
             tunnels: crate::tunnel::Tunnels::default(),
+            halt: Arc::new(tokio::sync::watch::Sender::new(false)),
             transfers: Default::default(),
             receiving: Default::default(),
+        }
+    }
+
+    /// Carries the links through the hub over a session to it just opened, until it ends.
+    pub(crate) fn through(&self, port: flottille_link::RelayPort) {
+        self.endpoint.through(port);
+    }
+
+    /// Why the hub cannot be reached now, when this machine has one and is not connected to it:
+    /// what the links that go through it say.
+    fn hub_down(&self) -> Option<String> {
+        let seen = self.control.get()?.seen();
+        if seen["state"] == "connected" {
+            return None;
+        }
+        seen["reason"].as_str().map(str::to_owned)
+    }
+
+    /// `error` in a sentence: a machine with no address and no hub to go through says why the hub
+    /// is out of reach.
+    fn said(&self, error: &LinkError) -> String {
+        match (error, self.hub_down()) {
+            (LinkError::NoAddress(name), Some(why)) => format!("{name} cannot be reached: {why}"),
+            _ => error.to_string(),
         }
     }
 
@@ -456,6 +508,18 @@ impl Remote {
     /// Closes every link, telling the other machines.
     pub async fn close(&self) {
         self.endpoint.close().await;
+    }
+
+    /// Stops this link for good: its tasks end and every link closes (remote turned off, or the
+    /// link made again where it listens).
+    pub async fn stop(&self) {
+        self.halt.send_replace(true);
+        self.close().await;
+    }
+
+    /// Where the link listens, when it does.
+    pub fn listening(&self) -> Option<SocketAddr> {
+        self.endpoint.listening()
     }
 
     /// The machines this one trusts: the file as last read whole.
@@ -660,7 +724,16 @@ impl Remote {
             json!({"name": name, "fingerprint": link.peer().fingerprint()}),
         );
         tokio::spawn(tell(link.clone(), self.told_addresses()));
-        tokio::spawn(offer(link.clone(), self.offered.subscribe()));
+        tokio::spawn(offer(
+            link.clone(),
+            self.offered.subscribe(),
+            MachineMessage::Capabilities,
+        ));
+        tokio::spawn(offer(
+            link.clone(),
+            self.sessions.subscribe(),
+            MachineMessage::Sessions,
+        ));
         self.offer_now.notify_one();
         // What was kept for that machine while it was off goes now, in order.
         if let Some(daemon) = self.daemon() {
@@ -674,7 +747,7 @@ impl Remote {
 
     /// A link that could not be made, or that ended: the machine's state, said once in the log.
     fn failed(&self, key: [u8; 32], name: &str, error: &LinkError) {
-        let reason = error.to_string();
+        let reason = self.said(error);
         let mut seen = self.seen.lock().unwrap();
         let seen = seen.entry(key).or_insert_with(Seen::new);
         if seen.reason.as_deref() != Some(reason.as_str()) {
@@ -818,7 +891,12 @@ impl Remote {
                     "reason": seen.reason,
                     // Where the live link goes (`dialled`) or came from.
                     "reached": seen.link.as_ref().map(|(_, link, dialled)| {
-                        json!({"address": link.remote().to_string(), "dialled": dialled})
+                        let address = if link.through_hub() {
+                            "the hub".to_owned()
+                        } else {
+                            link.remote().to_string()
+                        };
+                        json!({"address": address, "dialled": dialled})
                     }),
                     "addresses": peer.known(),
                 })
@@ -864,6 +942,21 @@ impl Remote {
         runner.then(|| offered(&daemon))
     }
 
+    /// This machine's live root sessions, light, as `listed` says its member: none unless it is
+    /// a runner. It reads the store: called on a blocking thread.
+    fn sessions_here(
+        &self,
+        listed: Option<&(flottille_link::Members, String)>,
+    ) -> Option<flottille_link::SessionList> {
+        let (members, name) = listed?;
+        let runner = members
+            .members()
+            .iter()
+            .any(|member| member.name == *name && member.role == Role::Runner);
+        let daemon = self.daemon.get().and_then(std::sync::Weak::upgrade)?;
+        runner.then(|| sessions_of(&daemon))
+    }
+
     /// Whether a machine is linked to this one now.
     fn linked_to_any(&self) -> bool {
         self.seen
@@ -877,13 +970,23 @@ impl Remote {
     /// from the tasks that take links: the list is checked, the projects' files read.
     async fn offer_if_changed(self: &Arc<Self>) {
         let remote = self.clone();
-        let offers =
-            tokio::task::spawn_blocking(move || remote.offers_here(remote.listed().ok().as_ref()))
-                .await
-                .unwrap_or_default();
+        let (offers, sessions) = tokio::task::spawn_blocking(move || {
+            let listed = remote.listed().ok();
+            (
+                remote.offers_here(listed.as_ref()),
+                remote.sessions_here(listed.as_ref()),
+            )
+        })
+        .await
+        .unwrap_or_default();
         self.offered.send_if_modified(|current| {
             let changed = *current != offers;
             *current = offers;
+            changed
+        });
+        self.sessions.send_if_modified(|current| {
+            let changed = *current != sessions;
+            *current = sessions;
             changed
         });
     }
@@ -911,6 +1014,19 @@ impl Remote {
         offers.check()?;
         self.keep_offers(key, generation, offers);
         Ok(json!({}))
+    }
+
+    /// Whether the link of `generation` is the one kept for the machine of `key`.
+    fn on_link(&self, key: &PublicKey, generation: u64) -> bool {
+        self.seen
+            .lock()
+            .unwrap()
+            .get(key.as_bytes())
+            .is_some_and(|seen| {
+                seen.link
+                    .as_ref()
+                    .is_some_and(|(at, _, _)| *at == generation)
+            })
     }
 
     /// Keeps what the machine of `key` offers, when its link of `generation` is the one kept: a
@@ -944,10 +1060,22 @@ fn offer_poll() -> Duration {
     OFFER_POLL
 }
 
-/// Whether what this machine offers may have changed with the event `name`: a project added,
-/// edited or removed, a provider changed, a session that started or ended.
+/// Whether what this machine offers, or its list of sessions, may have changed with the event
+/// `name`: a project added, edited or removed, a provider changed, a session that started,
+/// ended, was written to, answered or asked; never what an agent streams during a turn.
 fn moves_offer(name: &str) -> bool {
-    name.starts_with("project.")
+    (name.starts_with("agent.")
+        && !matches!(
+            name,
+            "agent.message"
+                | "agent.thought"
+                | "agent.tool_call"
+                | "agent.tool_served"
+                | "agent.usage"
+                | "agent.plan"
+        ))
+        || name.starts_with("approval.")
+        || name.starts_with("project.")
         || name.starts_with("provider.")
         || matches!(
             name,
@@ -1040,22 +1168,102 @@ pub(crate) fn offered(daemon: &Daemon) -> Capabilities {
     Capabilities { projects, agents }
 }
 
+/// This machine's live root sessions, light (`docs/remote.md`, "One list of every machine"):
+/// each one's id, title, project, state and last exchange, and the session of the agent that
+/// leads it here; never its conversation. Those of the latest exchange when there are more than
+/// a list holds.
+pub(crate) fn sessions_of(daemon: &Daemon) -> flottille_link::SessionList {
+    use flottille_core::agent::AgentState;
+    let agents = daemon.read(|store| store.agents()).unwrap_or_default();
+    let parents: HashMap<&str, Option<&str>> = agents
+        .iter()
+        .map(|agent| (agent.id.as_str(), agent.parent.as_deref()))
+        .collect();
+    fn root<'a>(parents: &HashMap<&'a str, Option<&'a str>>, mut id: &'a str) -> &'a str {
+        while let Some(Some(parent)) = parents.get(id) {
+            id = parent;
+        }
+        id
+    }
+    let root_of = |id: &str| root(&parents, id).to_owned();
+    // The trees where a turn runs, by their root.
+    let busy: HashSet<String> = agents
+        .iter()
+        .filter(|agent| matches!(agent.state, AgentState::Working | AgentState::Starting))
+        .map(|agent| root_of(&agent.id))
+        .collect();
+    let mut sessions: Vec<flottille_link::LightSession> = agents
+        .iter()
+        .filter(|agent| agent.parent.is_none() && !agent.state.is_final())
+        .map(|agent| {
+            let title = agent
+                .title
+                .clone()
+                .or_else(|| {
+                    agent
+                        .brief
+                        .as_deref()
+                        .and_then(|brief| brief.lines().find(|line| !line.trim().is_empty()))
+                        .map(|line| line.trim().to_owned())
+                })
+                .unwrap_or_default();
+            let busy = busy.contains(&agent.id);
+            let state = if agent.waiting_on_answer {
+                "needs you"
+            } else if busy {
+                "running"
+            } else {
+                "idle"
+            };
+            flottille_link::LightSession {
+                id: agent.id.clone(),
+                title: shown_text(&title, flottille_link::TITLE_LIMIT),
+                project: agent.project.clone(),
+                state: state.to_owned(),
+                exchanged_at: agent.exchanged_at.unwrap_or(agent.created_at),
+                created_at: agent.created_at,
+                pilot: agent
+                    .launched_by
+                    .as_deref()
+                    .filter(|_| agent.led)
+                    .filter(|pilot| parents.contains_key(pilot))
+                    .map(root_of),
+            }
+        })
+        .collect();
+    sessions.sort_by(|a, b| b.exchanged_at.cmp(&a.exchanged_at).then(a.id.cmp(&b.id)));
+    sessions.truncate(flottille_link::MOST_SESSIONS);
+    flottille_link::SessionList { sessions }
+}
+
+/// `text` as another machine may show it: its first `most` characters, without a control
+/// character.
+fn shown_text(text: &str, most: usize) -> String {
+    text.chars()
+        .filter(|c| !c.is_control())
+        .take(most)
+        .collect()
+}
+
 /// The first wait before an offer the other machine did not take is sent again; it doubles up to
 /// `OFFER_RETRY_MOST`.
 const OFFER_RETRY: Duration = Duration::from_secs(1);
 const OFFER_RETRY_MOST: Duration = Duration::from_secs(60);
 
-/// Sends a machine what this one offers when the link is made, then each time it changes, in
-/// order, until the link ends. One it did not take is sent again, waiting longer each time.
-async fn offer(link: Link, mut offered: tokio::sync::watch::Receiver<Option<Capabilities>>) {
+/// Sends a machine what this one offers (or its list of sessions) when the link is made, then
+/// each time it changes, in order, until the link ends, as the message `message` makes. One it
+/// did not take is sent again, waiting longer each time.
+async fn offer<T: Clone>(
+    link: Link,
+    mut offered: tokio::sync::watch::Receiver<Option<T>>,
+    message: fn(T) -> MachineMessage,
+) {
     let mut wait = OFFER_RETRY;
     loop {
         let offers = offered.borrow_and_update().clone();
         let mut again = None;
         if let Some(offers) = offers {
-            let sent = link
-                .send(&Message::Machine(MachineMessage::Capabilities(offers)))
-                .await;
+            let sent = link.send(&Message::Machine(message(offers))).await;
             match sent {
                 Ok(_) => wait = OFFER_RETRY,
                 Err(_) => {
@@ -1180,6 +1388,27 @@ async fn serve(remote: Arc<Remote>, link: Link, name: String, generation: u64) {
                 }
                 received.answer(answer);
             }
+            Message::Machine(MachineMessage::Sessions(list)) => {
+                // The list is checked, the store written: away from the tasks that take links.
+                let (taking, key, list) = (remote.clone(), link.peer(), list.clone());
+                let answer = tokio::task::spawn_blocking(move || {
+                    taking.took_sessions(&key, generation, list)
+                })
+                .await
+                .unwrap_or_else(|_| Err("the list could not be taken".to_owned()));
+                if let Err(why) = &answer {
+                    eprintln!("flottille daemon: the sessions {name} lists were not kept: {why}");
+                }
+                received.answer(answer);
+            }
+            // In a task of its own: the session's stop may take a moment.
+            Message::Machine(MachineMessage::Close(request)) => {
+                let (remote, request, peer) = (remote.clone(), (**request).clone(), link.peer());
+                tokio::spawn(async move {
+                    let answered = remote.closed(&peer, request).await;
+                    received.answer(crate::across::answer_of(answered, "a close"));
+                });
+            }
             // Each in a task of its own: a bundle offered is read back on this same link.
             Message::Machine(MachineMessage::Git(git)) => {
                 let git = git.clone();
@@ -1282,6 +1511,254 @@ impl Remote {
         seen.next_try = Instant::now();
         true
     }
+}
+
+impl Remote {
+    /// The live root sessions the machine of `key` lists, said over its link: kept in place of
+    /// those it said before when its member is a runner and the list within its bounds; refused
+    /// otherwise, with why. It checks the list and writes the store: called on a blocking thread.
+    fn took_sessions(
+        &self,
+        key: &PublicKey,
+        generation: u64,
+        list: flottille_link::SessionList,
+    ) -> Result<Value, String> {
+        let (members, _) = self.listed()?;
+        let member = members
+            .by_machine(key)
+            .ok_or_else(|| "this machine is no member's".to_owned())?;
+        if member.role != Role::Runner {
+            return Err(format!(
+                "{} is a {}: only a runner lists sessions",
+                member.name,
+                member.role.word()
+            ));
+        }
+        list.check()?;
+        // A link replaced since says nothing of the machine any more.
+        if !self.on_link(key, generation) {
+            return Ok(json!({}));
+        }
+        let daemon = self
+            .daemon()
+            .ok_or_else(|| "the daemon is stopping".to_owned())?;
+        let machine = hex_of(key);
+        let list = serde_json::to_value(&list).map_err(|error| error.to_string())?;
+        daemon
+            .write(|store| {
+                store
+                    .keep_machine_sessions(&machine, &member.name, &list, now())
+                    .map(|()| ((), None))
+            })
+            .map_err(|error| error.to_string())?;
+        (self.emit)("remote.sessions", json!({"name": member.name}));
+        Ok(json!({}))
+    }
+
+    /// The user's close of a session of this machine, kept by the machine of `from` while this one
+    /// was off (`docs/remote.md`, "One list of every machine"): checked (`kept_close`), then
+    /// served as that device's `agent.stop`, once: a close sent again, or played by a member that
+    /// saw it signed, is answered and does nothing, as is one of a session started or resumed
+    /// after it was signed. A session ended already, or no longer here, is answered as closed.
+    /// A device this machine's member list does not hold may be one it has not heard of yet: that
+    /// refusal is for now.
+    async fn closed(
+        self: &Arc<Self>,
+        from: &PublicKey,
+        request: flottille_link::Request,
+    ) -> Result<Value, crate::across::Refused> {
+        use crate::across::Refused;
+        let Some(daemon) = self.daemon() else {
+            return Err(Refused::Now("the daemon is stopping".to_owned()));
+        };
+        let checking = (self.clone(), request.clone());
+        let (member, agent) = tokio::task::spawn_blocking(move || {
+            let (remote, request) = checking;
+            let (members, name) = remote.listed().map_err(Refused::Now)?;
+            if members.get(&request.signed.device).is_none() {
+                return Err(Refused::Now(
+                    "the close is not signed by a member this machine knows yet".to_owned(),
+                ));
+            }
+            flottille_link::kept_close(&request, &name, &members, wall_now())
+                .map_err(|error| Refused::Never(error.to_string()))
+        })
+        .await
+        .map_err(|_| Refused::Now("the close could not be checked".to_owned()))??;
+        let over = |daemon: &Daemon| {
+            daemon
+                .read(|store| store.agent(&agent))
+                .ok()
+                .flatten()
+                .is_none_or(|found| found.state.is_final())
+        };
+        let signed_at = request.signed.at;
+        let since = |daemon: &Daemon| {
+            daemon
+                .read(|store| {
+                    let started = store
+                        .agent(&agent)?
+                        .is_none_or(|found| found.created_at > signed_at);
+                    let resumed = store
+                        .last_agent_events(&agent, "agent.resumed", 1)?
+                        .first()
+                        .is_some_and(|event| event.at > signed_at);
+                    Ok(started || resumed)
+                })
+                .unwrap_or(false)
+        };
+        if over(&daemon)
+            || since(&daemon)
+            || !self.closes.lock().unwrap().serve(&request, wall_now())
+        {
+            return Ok(json!({}));
+        }
+        let from = self.name_of(from).unwrap_or_default();
+        let accepted = flottille_link::Accepted {
+            device: member,
+            id: request.id.clone(),
+            method: "agent.stop".to_owned(),
+            params: json!({"agent": agent}),
+        };
+        let signed = serde_json::to_string(&request).unwrap_or_default();
+        let mut serving = match self.start(accepted, signed, &from).await {
+            Ok(serving) => serving,
+            Err(refused) => {
+                self.closes.lock().unwrap().release(&request);
+                return Err(Refused::Never(
+                    serde_json::to_value(&*refused)
+                        .ok()
+                        .and_then(|answer| answer["error"]["message"].as_str().map(str::to_owned))
+                        .unwrap_or_else(|| "the close could not be served".to_owned()),
+                ));
+            }
+        };
+        let line = serving.lines.next_line().await.ok().flatten();
+        let answer: Value = line
+            .as_deref()
+            .and_then(|line| serde_json::from_str(line).ok())
+            .unwrap_or_default();
+        if answer["error"].is_null() && line.is_some() || over(&daemon) {
+            return Ok(json!({}));
+        }
+        self.closes.lock().unwrap().release(&request);
+        Err(Refused::Never(
+            answer["error"]["message"]
+                .as_str()
+                .map_or_else(|| "the close was not answered".to_owned(), str::to_owned),
+        ))
+    }
+}
+
+impl Remote {
+    /// Forgets the list of each machine that is no runner among the members any more (removed, or
+    /// added again as another role): what it told before is no one's to show. Left as it is when
+    /// the member list cannot be read now.
+    fn unlist(&self, daemon: &Arc<Daemon>) {
+        let Ok((members, _)) = self.listed() else {
+            return;
+        };
+        let runners: Vec<String> = members
+            .members()
+            .iter()
+            .filter(|member| member.role == Role::Runner)
+            .filter_map(|member| member.machine.as_ref().map(hex_of))
+            .collect();
+        let _ = daemon.write(|store| {
+            store
+                .forget_machine_sessions_except(&runners)
+                .map(|()| ((), None))
+        });
+    }
+
+    /// `remote.sessions`: this machine's live root sessions, and each other machine's as it last
+    /// listed them, without those whose close waits to be sent. It reads the store: called on a
+    /// blocking thread.
+    fn lists(&self, daemon: &Arc<Daemon>) -> Result<Value, String> {
+        self.unlist(daemon);
+        let closing = crate::across::closing(daemon);
+        let kept = daemon
+            .read(|store| store.machine_sessions())
+            .map_err(|error| error.to_string())?;
+        let peers = self.peers().machines;
+        let machines: Vec<Value> = kept
+            .into_iter()
+            // A machine no longer among the user's lists nothing.
+            .filter(|(machine, _, _, _)| peers.iter().any(|peer| hex_of(&peer.key) == *machine))
+            .map(|(machine, name, mut list, at)| {
+                if let Some(sessions) = list["sessions"].as_array_mut() {
+                    sessions.retain(|session| {
+                        !closing.contains(&(
+                            machine.clone(),
+                            session["id"].as_str().unwrap_or_default().to_owned(),
+                        ))
+                    });
+                }
+                json!({"name": name, "sessions": list["sessions"], "at": at})
+            })
+            .collect();
+        let this = serde_json::to_value(sessions_of(daemon).sessions)
+            .map_err(|error| error.to_string())?;
+        Ok(json!({"this": this, "machines": machines}))
+    }
+
+    /// `remote.close`: keeps the user's close of a session of another machine (`agent.stop`,
+    /// signed by their device for that machine), stored before it is sent, then sent once that
+    /// machine is linked, now or when it links again. It reads the peers and writes the store:
+    /// called on a blocking thread.
+    fn keep_close(
+        &self,
+        daemon: &Arc<Daemon>,
+        request: flottille_link::Request,
+    ) -> Result<Value, String> {
+        let own = self.listed().ok().map(|(_, name)| name);
+        if own.as_deref() == Some(request.machine.as_str()) {
+            return Err(format!(
+                "the close is for {}, this machine: only a close for another machine is kept",
+                request.machine
+            ));
+        }
+        if request.signed.method != "agent.stop" {
+            return Err(format!(
+                "only a close is kept for another machine: agent.stop, not {}",
+                request.signed.method.chars().take(64).collect::<String>()
+            ));
+        }
+        let params: Value = serde_json::from_str(&request.signed.params).unwrap_or_default();
+        let agent = params["agent"]
+            .as_str()
+            .filter(|agent| {
+                !agent.is_empty()
+                    && agent.len() <= 64
+                    && agent
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            })
+            .ok_or_else(|| "the close names no session".to_owned())?
+            .to_owned();
+        let peer = self
+            .peers()
+            .machines
+            .into_iter()
+            .find(|peer| peer.name == request.machine)
+            .ok_or_else(|| {
+                format!(
+                    "{} is no machine of the user's",
+                    request.machine.chars().take(64).collect::<String>()
+                )
+            })?;
+        crate::across::keep_close(daemon, &hex_of(&peer.key), &peer.name, &agent, request)?;
+        (self.emit)("remote.sessions", json!({"name": peer.name}));
+        Ok(json!({}))
+    }
+}
+
+/// A key as the outbox and the copies of the lists name its machine.
+fn hex_of(key: &PublicKey) -> String {
+    key.as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 /// A client link: each request of the user's another machine carried, checked and served as one
@@ -1401,10 +1878,14 @@ impl Remote {
                 "{machine} needs an update: {}",
                 seen.reason.clone().unwrap_or_default()
             )),
-            Some(seen) => Err(format!(
-                "{machine} is offline since {}",
-                time_of_day(seen.since)
-            )),
+            // With the hub down, why: links go through it.
+            Some(seen) => Err(match self.hub_down() {
+                Some(why) => format!(
+                    "{machine} is offline since {}: {why}",
+                    time_of_day(seen.since)
+                ),
+                None => format!("{machine} is offline since {}", time_of_day(seen.since)),
+            }),
             None => Err(format!("{machine} is offline")),
         }
     }
@@ -1936,7 +2417,7 @@ pub(crate) async fn forward(
             Ok(asked) => break asked,
             Err(_) if tries < 2 => continue,
             Err(why) => {
-                send(error("unavailable", why.to_string())).await;
+                send(error("unavailable", remote.said(&why))).await;
                 return false;
             }
         }
@@ -2126,6 +2607,10 @@ fn stamp(file: &Path) -> Option<Stamp> {
 
 /// The link's methods (`docs/protocol.md`, "Remote").
 pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Result<Value, Failure> {
+    // Said of this machine, on or off: before a link is needed.
+    if matches!(method, "remote.settings" | "remote.configure") {
+        return crate::remote_config::call(daemon, method, params).await;
+    }
     let remote = remote_of(&daemon)?;
     let params = if params.is_null() { json!({}) } else { params };
     match method {
@@ -2145,6 +2630,34 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Result<Va
         }
         "remote.launches" => crate::across::launched(&daemon)
             .map_err(|why| Failure::new(flottille_protocol::code::UNAVAILABLE, why)),
+        "remote.sessions" => {
+            let (reading, daemon) = (remote.clone(), daemon.clone());
+            tokio::task::spawn_blocking(move || reading.lists(&daemon))
+                .await
+                .map_err(|_| {
+                    Failure::new(
+                        flottille_protocol::code::UNAVAILABLE,
+                        "the lists could not be read",
+                    )
+                })?
+                .map_err(|why| Failure::new(flottille_protocol::code::UNAVAILABLE, why))
+        }
+        "remote.close" => {
+            let request: flottille_link::Request = param(&params, "request")?;
+            let keeping = (remote.clone(), daemon.clone());
+            tokio::task::spawn_blocking(move || {
+                let (remote, daemon) = keeping;
+                remote.keep_close(&daemon, request)
+            })
+            .await
+            .map_err(|_| {
+                Failure::new(
+                    flottille_protocol::code::UNAVAILABLE,
+                    "the close could not be kept",
+                )
+            })?
+            .map_err(Failure::refused)
+        }
         "remote.members" => control_of(&remote)?.members().map_err(Failure::refused),
         "remote.change" => {
             let change: flottille_link::Change = param(&params, "change")?;
@@ -2239,10 +2752,8 @@ fn control_of(remote: &Remote) -> Result<Arc<crate::hub_session::Control>, Failu
 }
 
 pub(crate) fn remote_of(daemon: &Daemon) -> Result<Arc<Remote>, Failure> {
-    match daemon.remote.get() {
-        None => Err(Failure::refused(
-            "remote is off: turn it on in daemon.toml ([remote] on = true)",
-        )),
+    match daemon.link() {
+        None => Err(Failure::refused(crate::remote_config::OFF)),
         Some(Err(why)) => Err(Failure::new(
             flottille_protocol::code::UNAVAILABLE,
             format!("the link is not up: {why}"),
@@ -2602,7 +3113,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (_ends, ours, theirs) = linked(dir.path()).await;
         let (_offered, receiver) = tokio::sync::watch::channel(Some(app()));
-        tokio::spawn(offer(ours, receiver));
+        tokio::spawn(offer(ours, receiver, MachineMessage::Capabilities));
         let is_offer = |message: &Message| matches!(message, Message::Machine(MachineMessage::Capabilities(offers)) if *offers == app());
 
         // Refused, as by a machine whose list does not say yet that this one is a runner.
@@ -2646,5 +3157,24 @@ mod tests {
         assert_eq!(kept(&remote), None);
         remote.keep_offers(&key, 2, app());
         assert_eq!(kept(&remote), Some(app()));
+    }
+
+    #[tokio::test]
+    async fn a_late_list_of_a_link_replaced_is_not_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let (remote, keys) = remote_in(dir.path(), 1);
+        let (_ends, link, _other) = linked(dir.path()).await;
+        let key = keys[0];
+        remote
+            .seen
+            .lock()
+            .unwrap()
+            .entry(*key.as_bytes())
+            .or_insert_with(Seen::new)
+            .link = Some((2, link, true));
+
+        // The link of generation 1 was replaced by the 2nd: its sessions are not the machine's.
+        assert!(!remote.on_link(&key, 1));
+        assert!(remote.on_link(&key, 2));
     }
 }

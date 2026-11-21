@@ -49,6 +49,13 @@ pub(crate) fn signer() -> Option<Sign> {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Update {
+    /// The close of the session `agent` of the machine `machine` was kept by this machine's
+    /// daemon, or why not.
+    Closed {
+        machine: String,
+        agent: String,
+        refused: Option<String>,
+    },
     /// A fresh read of everything the shell shows, with the generation of the machine shown its
     /// connection was made for ([`crate::machines::Aim::generation`]).
     Snapshot(Snapshot, u64),

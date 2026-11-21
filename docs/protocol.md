@@ -225,9 +225,13 @@ no device calls a `local` one over a link (`docs/remote.md`, "Roles").
 | `remote.address.remove` | drive |
 | `remote.members` | read |
 | `remote.launches` | read |
+| `remote.sessions` | read |
 | `remote.change` | drive |
 | `remote.pair` | local |
 | `remote.declare` | local |
+| `remote.close` | local |
+| `remote.settings` | local |
+| `remote.configure` | local |
 | `tunnel.open` | drive |
 | `tunnel.list` | local |
 | `tunnel.close` | local |
@@ -290,6 +294,7 @@ no device calls a `local` one over a link (`docs/remote.md`, "Roles").
 | `agent.unqueue` | drive |
 | `agent.answer` | drive |
 | `agent.image` | read |
+| `agent.file` | read |
 | `agent.cancel` | drive |
 | `agent.stop` | drive |
 | `agent.resume` | drive |
@@ -523,13 +528,15 @@ or a setup step runs in it…), with the key at fault.
 
 `{"name"}`. The project's forges and tracker as its Settings show them (`docs/forges.md`, "The
 forge of a repository"): `{"name", "folder", "repositories": [{"path", "remote", "depends_on",
-"url", "forge", "proposal", "disagrees"}], "tracker", "obsolete"}`. `depends_on` lists the paths
+"url", "forge", "proposal", "disagrees"}], "tracker", "obsolete", "pushes_unlent"}`. `depends_on` lists the paths
 of the repositories it depends on (`[]` when none), `url` is the remote's address (credentials taken
 out, masked; `null` when it has none), `forge` the one declared (`null` when none), `proposal` what
 the address proposes (`null` when nothing), `disagrees` why the declared forge is not where the
 remote leads (`null` when it is). `obsolete` lists the keys of the file that are no longer read
 (the old `[forges]`, `[agent_actions]`, a command's former `grants` and `children`), each with what
-replaces it. Nothing is asked of a forge.
+replaces it. `pushes_unlent` says why the user's SSH agent is lent to no push, so that a push over
+SSH is refused (`docs/vault.md`, "The runtime folder"), as `flottille doctor` says it; `null` when
+it is lent. Nothing is asked of a forge.
 
 #### `project.programs`
 
@@ -1334,9 +1341,27 @@ The requests agents made for an entry (`docs/vault.md`, "Asking the user for an 
 ### The remote methods
 
 The link to the user's other machines (`docs/remote.md`, "Architecture", "The transport"), with
-remote on (`[remote] on = true` in `daemon.toml`). With it off, each is `refused` (`remote is off:
-turn it on in daemon.toml ([remote] on = true)`); with a link that could not listen, `unavailable`,
-with the reason. No method answers a private key.
+remote on (Settings, Machines, or `flottille remote on`, which write `[remote] on = true` in
+`daemon.toml`). With it off, each is `refused` (`remote is off: turn it on in Settings, Machines,
+or with flottille remote on`), but `remote.settings` and `remote.configure`; with a link that could
+not listen, `unavailable`, with the reason. No method answers a private key.
+
+- `remote.settings` (local) answers `{"on", "listen", "listening", "waits", "port", "problem",
+  "interfaces": [{"name", "address", "tailnet"}]}`: whether remote is on, where `daemon.toml` says
+  the link listens (`"100.64.0.7:7447"`, `null` for nowhere), where it listens now (`null` while
+  it listens nowhere or remote is off), whether a change of `listen` `waits` for the next start
+  (an agent ran when it was made), the port an address is given without one (7447), why `listen`
+  cannot be read when it cannot (`problem`), and the addresses of this machine's own interfaces
+  (IPv4, loopback and interfaces that are down left out), a Tailscale or WireGuard one first
+  (`tailnet`: an address of 100.64.0.0/10, or an interface named `tailscale*` or `wg*`).
+- `remote.configure {on?, listen?}` (local) changes either and answers `remote.settings`'. `listen`
+  is `nowhere`, `tailnet` (this machine's first tailnet address, `invalid-params` when it has
+  none) or an address, its port 7447 when it gives none. It writes `daemon.toml` itself, every
+  other key and comment kept, and takes the change without a restart: the link starts, stops, or
+  listens elsewhere. Closing a link cuts what it carries, so a new `listen` on a running link is
+  only written, and `waits` says so, while an agent runs. A change that cannot be taken (an
+  address no interface holds, a file that is not TOML) is `refused` and leaves the file as it was.
+  Turning remote off keeps the pairing with the hub and the keys; turned on again, the same hub.
 
 - `remote.machines` answers `{"this": {"name", "key", "fingerprint", "listening", "addresses": [{"address",
   "how"}]}, "machines": [{"name", "key", "fingerprint", "state", "since", "reason",
@@ -1347,10 +1372,10 @@ with the reason. No method answers a private key.
   `state` `online`, `offline` or `needs an update`, `since` when it is so (milliseconds since the
   Unix epoch), `reason` why it is not online (`server refused the link: …`, the sentence of
   `docs/remote.md`, "The version"), or `null`, `reached` where its live link goes or came from
-  (`{"address", "dialled"}`, `dialled` saying whether this machine dialled it; `null` while it is
-  not linked), and `addresses` those it knows it at: given (by the hub, by hand), then told by it. `hub` is the hub this machine pinned (`docs/remote.md`, "The
+  (`{"address", "dialled"}`, `address` being `the hub` for a link through it, `dialled` saying
+  whether this machine dialled it; `null` while it is not linked), and `addresses` those it knows it at: given (by the hub, by hand), then told by it. `hub` is the hub this machine pinned, its `url` written as a user writes it (`https://hub.example.net`: the port only when it is not the scheme's own, 80 or 443, and no trailing slash; the commands, the window and the sentences say it so) (`docs/remote.md`, "The
   hub"), `null` until it is set up: `{"url", "key", "fingerprint", "state", "since", "reason"}`,
-  `state` being `connected`, `unreachable` (`reason`: `the hub at hub.example.net:443 is
+  `state` being `connected`, `unreachable` (`reason`: `the hub at hub.example.net is
   unreachable since 22:14: …`), `reset` (`the hub's member list was reset: set this device up
   again`), `refused` (the hub has another key than when this device joined, refused this device,
   or sent a member list that does not check: the sentence says which), `needs an update`, or
@@ -1395,6 +1420,21 @@ with the reason. No method answers a private key.
   there, `request` its number), `started`, or `ended` once its end came back; `heard` the kind of
   the last delivery it sent here (`child-report`, `session-turn-ended`, `child-question`…) and
   `heard_at` when, `null` before any: what the window shows as its state as last known.
+- `remote.sessions` answers the sessions of every machine, light (`docs/remote.md`, "One list of
+  every machine"): `{"this": [session…], "machines": [{"name", "sessions": [session…], "at"}]}`,
+  `this` this machine's live root sessions, each other machine's as it last listed them over its
+  link (`at` when), kept while it is off, without those whose close waits to be sent; a machine no
+  longer among the user's is not listed. A session is `{"id", "title", "project", "state",
+  "exchanged_at", "created_at", "pilot"}`, `state` `running`, `needs you`, `waiting` or `idle`,
+  `pilot` the session of the agent that leads it on that machine, or `null`; never its
+  conversation. The event `remote.sessions {name}` says that a machine's list changed.
+- `remote.close {request}` keeps the user's close of a session of another machine: `request` is
+  `agent.stop {agent}` for that machine, signed by the client with the device key as any request
+  for another machine. This machine stores it before it sends it, sends it once that machine is
+  linked (now, or when it links again), and drops it from that machine's list at once; one close
+  of a session is kept once. `refused` for a request for this machine, for a method other than
+  `agent.stop`, for a session not named, for a name that is no machine of the user's, or when 100
+  messages wait for that machine already. A local method: never over a link.
 - `remote.change {change}` carries a member's signed change of the list (`flottille_link::Change`:
   a removal, a renaming, an icon and colour), signed by the client after `remote.members`' `head`.
   A member's addition is refused: a device is paired on the hub. It answers `remote.members` once
@@ -2199,6 +2239,20 @@ waiting messages, which stay queued in their order. Refused and not found as `ag
 `{"agent", "name"}`. An image of the agent's, by a name `agent.prompted` gave: `{"mime", "data"}`.
 `not-found` when there is none. A pasted text of the agent's (`agent.send`, `texts`) is given the
 same way, by the file name its marker ends in: `{"mime": "text/plain", "data"}`.
+
+#### `agent.file`
+
+`{"agent", "shown", "offset"?, "length"?}`. A chunk of a picture or a video the agent showed
+(`web` `show_link`), named by `shown`, the number of the `agent.link_shown` event that showed it,
+never by a path (`docs/remote.md`, "A file an agent showed"): `{"mime", "size", "offset", "data"}`,
+`data` at most 512 KiB (`length`, 512 KiB by default and at most, so that a chunk in base64 fits a
+link's frame) of the file from `offset` (0 by
+default), in base64; nothing past its end. `not-found` when `shown` is no file the agent showed;
+`refused` when the file is no picture or video (by its extension), is larger than 2 GiB, or is no
+longer the file shown (a link, a folder made a link, another file at its path, a file with
+several hard links, a program). The machine serves 2 MiB a second, all askers together: a chunk
+waits its turn up to 3 seconds, and past that, or when 8 calls are in flight, the call is `refused`
+at once with a sentence starting `busy:`: ask again.
 
 #### `agent.cancel`
 

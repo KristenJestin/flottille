@@ -824,6 +824,7 @@ nothing to tell a row apart: the window makes the rows from the events in order.
 | `title` | The few words the agent gave, masked; `null` when it gave none. |
 | `host` | The URL's host; `null` for a file. |
 | `shown` | Only for a file: its path as the place shows it, relative to the place. |
+| `dev`, `ino` | Only for a file: the device and inode it had when shown, which `agent.file` compares at each chunk (`null` when they could not be read: nothing is then served). |
 
 #### `agent.tools_changed`
 

@@ -339,6 +339,20 @@ pub struct AgentImage {
     pub name: String,
 }
 
+/// The parameters of `agent.file`: a chunk of a picture or a video the agent showed
+/// (`web` `show_link`), named by the event that showed it, never by a path.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentFile {
+    pub agent: String,
+    /// The number of the `agent.link_shown` event.
+    pub shown: u64,
+    #[serde(default)]
+    pub offset: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub length: Option<u64>,
+}
+
 /// The parameters of `agent.trees`: a page of root agents with their trees, newest first.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

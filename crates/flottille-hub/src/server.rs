@@ -6,8 +6,12 @@
 //! hub knows of each member's device, and, to a runner, the presence of the members' clients; then
 //! sends them again whenever they change. The device's asks (a member's change, what it says of
 //! itself, its addresses, its presence) go through the hub's rules (`Hub`), each checked again
-//! against the members as they are when it comes in. The hub carries no link's bytes: a session
-//! holds no message and no queue.
+//! against the members as they are when it comes in.
+//!
+//! A session also carries the links between the user's devices (`relay.rs`): each packet a
+//! member's device sends for another member's device goes to that device's session, if it is open;
+//! any other is dropped. Members are told which members' sessions are open. Each side says
+//! `keepalive` when it has nothing to say, so that a reverse proxy does not close the session.
 //!
 //! A device that is no member yet may pair (`flottille_link::Pairing`) while pair mode is open:
 //! its proof is checked against the pair mode's secret, the device is paired, and its session is
@@ -33,14 +37,15 @@
 //! `ARRIVAL_WAIT` for the TLS handshake and the hub's, and `PAIR_IDLE` from its start a pairing's
 //! session. When the process runs out of file descriptors, it waits before it accepts again.
 
+use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use flottille_link::{
-    Address, Ask, Facts, Hello, HubSession, MemberList, PresenceOf, PublicKey, Role, ToDevice,
-    Told, arrive,
+    Address, Ask, Facts, Hello, HubSession, KEEPALIVE, LinkPacket, MemberList, PresenceOf,
+    PublicKey, Role, ToDevice, Told, arrive,
 };
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -48,6 +53,7 @@ use tokio::net::{TcpListener, UnixListener, UnixStream};
 use tokio::sync::{Semaphore, watch};
 use tokio::task::JoinSet;
 
+use crate::relay::Relay;
 use crate::{Clock, Hub, HubError, PairEnd, Presence};
 
 /// Where the hub listens unless told otherwise: loopback, behind a reverse proxy on the same
@@ -79,13 +85,16 @@ const ARRIVAL_WAIT: Duration = Duration::from_secs(5);
 const MOST_ADDRESSES: usize = 64;
 const LONGEST_ADDRESS: usize = 300;
 
-/// The waits of the server: how long a connection may take to arrive, and how long a pairing's
-/// session lasts. The production's are the default; a test serves with shorter ones
-/// (`serve_with`).
+/// The waits of the server: how long a connection may take to arrive, how long a pairing's
+/// session lasts, and how long a session may stay silent before it is let go. The production's
+/// are the default; a test serves with shorter ones (`serve_with`).
 #[derive(Clone, Copy, Debug)]
 pub struct Waits {
     pub arrival: Duration,
     pub pair_idle: Duration,
+    /// Without a word from its device, or with a line it does not read, for this long, a session
+    /// is lost, and its device said offline: `flottille_link::SILENCE`.
+    pub silence: Duration,
 }
 
 impl Default for Waits {
@@ -93,6 +102,7 @@ impl Default for Waits {
         Waits {
             arrival: ARRIVAL_WAIT,
             pair_idle: PAIR_IDLE,
+            silence: flottille_link::SILENCE,
         }
     }
 }
@@ -104,10 +114,37 @@ struct Shared<C: Clock> {
     changed: watch::Sender<u64>,
     hello: Hello,
     waits: Waits,
+    /// The sessions the links between devices go through.
+    relay: Relay,
     /// The URL a pair code holds unless its command gives one: `--public-url`, else the address
     /// the hub listens on; `None` when that one is no address another device dials (`0.0.0.0`, the
     /// loopback): a code that holds it would pair nothing, and says so when it is asked for.
     url: Mutex<Option<String>>,
+}
+
+impl<C: Clock> Shared<C> {
+    /// Every session is told that the hub changed, the links going between its members as they
+    /// are now: those the forwarding knows are set again first, so that a member removed is sent
+    /// nothing from now on, before its session is closed.
+    fn tell(&self) {
+        let members = links_between(&self.hub.lock().unwrap());
+        self.relay.set_members(members);
+        self.changed.send_modify(|at| *at += 1);
+    }
+}
+
+/// The keys links go between: each member's device, and its machine.
+fn links_between<C: Clock>(hub: &Hub<C>) -> HashSet<[u8; 32]> {
+    hub.members()
+        .map(|members| {
+            members
+                .members()
+                .iter()
+                .flat_map(|member| std::iter::once(member.key).chain(member.machine))
+                .map(|key| *key.as_bytes())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// A hub serving on the network, until `stop`.
@@ -140,12 +177,15 @@ pub fn serve_with<C: Clock + Send + 'static>(
     let scheme = if tls.is_some() { "https" } else { "http" };
     let url = (!address.ip().is_unspecified() && !address.ip().is_loopback())
         .then(|| format!("{scheme}://{address}"));
+    let relay = Relay::default();
+    relay.set_members(links_between(&hub));
     let shared = Arc::new(Shared {
         key: hub.key.clone(),
         hub: Mutex::new(hub),
         changed: watch::channel(0).0,
         hello,
         waits,
+        relay,
         url: Mutex::new(url),
     });
     let (stop, stopping) = watch::channel(false);
@@ -168,7 +208,7 @@ impl<C: Clock + Send + 'static> Served<C> {
     /// that come in another way than a session, and for the tests.
     pub fn with_hub<R>(&self, act: impl FnOnce(&mut Hub<C>) -> R) -> R {
         let result = act(&mut self.shared.hub.lock().unwrap());
-        self.shared.changed.send_modify(|at| *at += 1);
+        self.shared.tell();
         result
     }
 
@@ -327,7 +367,7 @@ async fn accept<C: Clock + Send + 'static>(
                 (welcome, member)
             };
             // Told at once: a pairing changed the list or ended pair mode; a member was seen.
-            shared.changed.send_modify(|at| *at += 1);
+            shared.tell();
             let paired = match welcome {
                 Ok(paired) => paired,
                 Err(refusal) => {
@@ -342,7 +382,7 @@ async fn accept<C: Clock + Send + 'static>(
             };
             // A member's session is not counted; a pairing's is, while it lasts.
             let _permit = paired.is_some().then_some(permit);
-            let Ok(session) = arriving.welcome().await else {
+            let Ok(session) = arriving.welcome_within(shared.waits.silence).await else {
                 return;
             };
             match &paired {
@@ -373,6 +413,7 @@ struct Sent {
     addresses: Option<Vec<Told>>,
     presence: Option<Vec<PresenceOf>>,
     facts: Option<Vec<Facts>>,
+    online: Option<Vec<PublicKey>>,
 }
 
 /// The member a session is: its device's, its machine's, or, for a pairing's, the device paired.
@@ -417,26 +458,60 @@ async fn run<C: Clock + Send + 'static>(
     let mut sent = Sent::default();
     // Set once: a pairing's session that keeps asking is closed as one that asks nothing.
     let pair_ends = tokio::time::Instant::now() + shared.waits.pair_idle;
+    let mut relays = session.relays();
+    // Every session is told when this one closes, once it is no longer open to the links: this is
+    // let go after `opened`.
+    struct SayClosed<'a>(&'a watch::Sender<u64>);
+    impl Drop for SayClosed<'_> {
+        fn drop(&mut self) {
+            self.0.send_modify(|at| *at += 1);
+        }
+    }
+    let _say_closed = SayClosed(&shared.changed);
+    // Open to the links once the device is a member's.
+    let mut opened = None;
+    let mut keepalive = tokio::time::interval(KEEPALIVE);
+    keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // The news are looked for again when the hub changed only: a packet of a link changes
+    // nothing, and takes neither the hub's lock nor its list.
+    let mut stale = true;
+    let mut pairing = false;
     loop {
-        let frames = {
-            let hub = shared.hub.lock().unwrap();
-            standing(&hub, &device, pinned, paired.as_ref()).map(|()| {
-                // Until it declared its machine, or when it is the device itself (a phone).
-                let pairing = paired.is_some() && hub.welcome(&device, pinned).is_err();
-                (news(&hub, &device, paired.as_ref(), &mut sent), pairing)
-            })
-        };
-        let (frames, pairing) = match frames {
-            Ok(frames) => frames,
-            Err((reason, reset)) => {
-                let _ = session.send(&ToDevice::Refused { reason, reset }).await;
-                session.close().await;
-                return "it is not a member any more".to_owned();
-            }
-        };
-        for frame in frames {
-            if let Err(error) = session.send(&frame).await {
-                return error.to_string();
+        if stale {
+            stale = false;
+            let frames = {
+                let hub = shared.hub.lock().unwrap();
+                standing(&hub, &device, pinned, paired.as_ref()).map(|()| {
+                    // Until it declared its machine, or when it is the device itself (a phone).
+                    pairing = paired.is_some() && hub.welcome(&device, pinned).is_err();
+                    let mut frames = news(&hub, &device, paired.as_ref(), &mut sent);
+                    let member = is_member(&hub, &device);
+                    if member && opened.is_none() {
+                        opened = Some(shared.relay.open(device));
+                        shared.changed.send_modify(|at| *at += 1);
+                    }
+                    if member {
+                        let online = shared.relay.online();
+                        if sent.online.as_ref() != Some(&online) {
+                            frames.push(ToDevice::Online(online.clone()));
+                            sent.online = Some(online);
+                        }
+                    }
+                    frames
+                })
+            };
+            let frames = match frames {
+                Ok(frames) => frames,
+                Err((reason, reset)) => {
+                    let _ = session.send(&ToDevice::Refused { reason, reset }).await;
+                    session.close().await;
+                    return "it is not a member any more".to_owned();
+                }
+            };
+            for frame in frames {
+                if let Err(error) = session.send(&frame).await {
+                    return error.to_string();
+                }
             }
         }
         let idle = async {
@@ -446,7 +521,37 @@ async fn run<C: Clock + Send + 'static>(
                 std::future::pending::<()>().await;
             }
         };
+        let relayed = async {
+            match relays.as_mut() {
+                Some(relays) => relays.next().await,
+                None => std::future::pending().await,
+            }
+        };
+        let forwarded = async {
+            match opened.as_mut() {
+                Some(opened) => opened.recv().await,
+                None => std::future::pending().await,
+            }
+        };
         tokio::select! {
+            (to, packet) = relayed => {
+                // Only from a member's device open to the links: the forwarding charges it and
+                // drops what is not between members.
+                if opened.is_some() {
+                    shared.relay.forward(device, &to, packet);
+                }
+            }
+            Some((from, packet)) = forwarded => {
+                let frame = ToDevice::Relayed { from, packet: LinkPacket(packet) };
+                if let Err(error) = session.send(&frame).await {
+                    return error.to_string();
+                }
+            }
+            _ = keepalive.tick() => {
+                if let Err(error) = session.send(&ToDevice::Keepalive {}).await {
+                    return error.to_string();
+                }
+            }
             asked = session.ask() => {
                 let asked = match asked {
                     Ok(asked) => asked,
@@ -460,7 +565,7 @@ async fn run<C: Clock + Send + 'static>(
                     return "it closed the connection".to_owned();
                 }
             }
-            _ = changed.changed() => {}
+            _ = changed.changed() => stale = true,
             _ = idle => {
                 let reason = format!(
                     "a pairing's session lasts {} s: this machine declared none in time",
@@ -476,6 +581,16 @@ async fn run<C: Clock + Send + 'static>(
             }
         }
     }
+}
+
+/// Whether `key` is a member's device or a member's machine: the only keys links go between.
+fn is_member<C: Clock>(hub: &Hub<C>, key: &PublicKey) -> bool {
+    hub.members().is_some_and(|members| {
+        members
+            .get(key)
+            .or_else(|| members.by_machine(key))
+            .is_some()
+    })
 }
 
 /// What `device` was not sent yet of the hub's state.
@@ -580,7 +695,7 @@ fn handle<C: Clock>(
     };
     drop(hub);
     if done.is_ok() {
-        shared.changed.send_modify(|at| *at += 1);
+        shared.tell();
     }
     done
 }
@@ -652,7 +767,7 @@ async fn command<C: Clock + Send + 'static>(
                 // The command stopped: nothing more comes on its socket.
                 _ = lines.next_line() => {
                     shared.hub.lock().unwrap().close_pairing(number);
-                    shared.changed.send_modify(|at| *at += 1);
+                    shared.tell();
                     return;
                 }
                 _ = stopped(&mut stopping) => {
@@ -677,7 +792,7 @@ async fn command<C: Clock + Send + 'static>(
                 .change_role(device, word)
                 .map(|member| json!({"name": member.name, "role": member.role})),
         };
-        shared.changed.send_modify(|at| *at += 1);
+        shared.tell();
         answer(done)
     } else if let Some(removed) = asked.get("remove") {
         let device = removed["device"].as_str().unwrap_or_default();
@@ -687,7 +802,7 @@ async fn command<C: Clock + Send + 'static>(
             .unwrap()
             .remove(device)
             .map(|member| json!({"name": member.name}));
-        shared.changed.send_modify(|at| *at += 1);
+        shared.tell();
         answer(done)
     } else if asked.get("devices").is_some() {
         answer(Ok(devices(&shared.hub.lock().unwrap())))

@@ -4,4 +4,15 @@ The Android app of `v0.4 - Remote`: a client of the user's own machines, over th
 hub (`docs/remote.md`). A Gradle project that uses the mobile core (`crates/flottille-mobile`,
 a UniFFI library) for everything that talks to a daemon.
 
-Nothing lives here yet: the app comes with its own tickets.
+- `core/`: the Kotlin module of the mobile core. It builds the library with `cargo ndk` for
+  `arm64-v8a` and `x86_64` (16 KB pages, symbols kept apart in `core/build/rust/symbols`), generates
+  the Kotlin bindings from it, and wraps them (`FlottilleCore`, `KeystoreSealer`): the screens use
+  the wrapper, never the bindings.
+- `gradle.sh <tasks…>`: Gradle without a wrapper (downloaded once into `~/.cache/flottille-android`),
+  with a JDK 17 or 21, the Android SDK and NDK (`ANDROID_HOME`, `ANDROID_NDK_HOME`), Rust's targets
+  `aarch64-linux-android` and `x86_64-linux-android`, and `cargo-ndk`.
+  `apps/android/gradle.sh :core:testDebugUnitTest` runs the unit tests.
+- `ci.sh`: CI's `android` job, from the repository's root on a GitHub runner: the unit tests, then
+  the instrumentation tests on an emulator.
+
+The screens come with #826.
