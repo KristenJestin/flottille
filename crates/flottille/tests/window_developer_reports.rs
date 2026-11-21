@@ -204,7 +204,28 @@ fn the_export_button_writes_the_findings_to_a_file(cx: &mut TestAppContext) {
     click(cx, "findings-export");
 
     let file = user.path("state/flottille/findings.json");
-    until(&shell, cx, "the file is written", |_| file.exists());
+    let shown = |cx: &mut VisualTestContext| -> Vec<String> {
+        shell.read_with(cx, |s, cx| {
+            s.toasts()
+                .read(cx)
+                .toasts()
+                .map(|t| format!("{} / {:?}", t.title(), t.second_line()))
+                .collect()
+        })
+    };
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !file.exists() {
+        shell.update_in(cx, |shell, window, cx| shell.poll(window, cx));
+        cx.run_until_parked();
+        cx.update(|window, cx| window.simulate_next_frame(cx));
+        assert!(
+            Instant::now() < deadline,
+            "the file was never written; toasts: {:?}; export button label: {:?}",
+            shown(cx),
+            label(cx, "findings-export")
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
     let exported: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
     assert_eq!(
         exported["findings"][0]["title"],
