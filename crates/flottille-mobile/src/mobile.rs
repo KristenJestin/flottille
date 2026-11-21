@@ -145,9 +145,18 @@ impl Core {
         let sealed = Sealed::new(&folder, sealer);
         let endpoint = endpoint_key(&folder)?;
         let device: Option<Device> = read_json(&folder.join(HUB_FILE))?;
-        let key = DeviceKey::load(&sealed, &folder)
-            .map_err(|error| MobileError::new(error.to_string()))?
-            .map(Arc::new);
+        // A key the app cannot open (its Keystore key lost: a restore, a new phone) leaves the
+        // phone not joined, to pair again, never a core that cannot start.
+        let (device, key, lost) = match DeviceKey::load(&sealed, &folder) {
+            Ok(key) => (device, key.map(Arc::new), None),
+            Err(error) => (
+                None,
+                None,
+                Some(format!(
+                    "this phone's device key cannot be opened ({error}): pair it again"
+                )),
+            ),
+        };
         let seen = read_json(&folder.join(SEEN_FILE))?.unwrap_or_default();
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
@@ -160,6 +169,9 @@ impl Core {
             && let Ok(members) = device.members()
         {
             view.members(&members, &key.public());
+        }
+        if let Some(lost) = lost {
+            view.say(lost);
         }
         let inner = Arc::new(Inner {
             folder,

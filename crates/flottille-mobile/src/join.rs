@@ -44,7 +44,15 @@ pub(crate) async fn pair(
         }
     };
     let failed = |error: flottille_link::KeyError| MobileError::new(error.to_string());
-    let key = match DeviceKey::load_pending(sealed, folder).map_err(failed)? {
+    // A pending key the app cannot open is no member's: a new one is made.
+    let pending = match DeviceKey::load_pending(sealed, folder) {
+        Ok(pending) => pending,
+        Err(_) => {
+            DeviceKey::discard_pending(sealed, folder).map_err(failed)?;
+            None
+        }
+    };
+    let key = match pending {
         Some(key) => key,
         None => DeviceKey::make()
             .and_then(|key| key.keep_pending(sealed, folder))
