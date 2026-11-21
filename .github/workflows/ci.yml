@@ -581,7 +581,7 @@ jobs:
           for unsigned in "${apks[@]}"; do
             name=${unsigned##*/}
             signed=signed/${name%-unsigned.apk}.apk
-            "$apksigner" sign --ks "$ks" --ks-key-alias "$KEY_ALIAS" \
+            "$apksigner" sign --v4-signing-enabled false --ks "$ks" --ks-key-alias "$KEY_ALIAS" \
               --ks-pass env:KEYSTORE_PASSWORD --key-pass env:KEY_PASSWORD --out "$signed" "$unsigned"
             "$apksigner" verify "$signed"
           done

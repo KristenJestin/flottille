@@ -72,7 +72,7 @@ scratch=$(mktemp -d)
 trap 'rm -rf "$scratch"' EXIT
 keytool -genkeypair -keystore "$scratch/debug.jks" -storepass debug-key -keypass debug-key \
   -alias debug -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Flottille debug" 2>/dev/null
-"$apksigner" sign --ks "$scratch/debug.jks" --ks-pass pass:debug-key --key-pass pass:debug-key \
+"$apksigner" sign --v4-signing-enabled false --ks "$scratch/debug.jks" --ks-pass pass:debug-key --key-pass pass:debug-key \
   --out "$test_apk" "$unsigned"
 "$apksigner" verify "$test_apk"
 echo "::notice::the APK is built unsigned; the debug-signed copy is to install for a test and never to release. The release key signs it in the signing job, on a push only."
