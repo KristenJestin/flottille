@@ -166,7 +166,7 @@ pub fn run(paths: &Paths, action: RemoteAction) -> Result<ExitCode> {
                 "Remote is on: its links go through the hub.",
                 json,
             );
-            return Ok(ExitCode::SUCCESS);
+            Ok(ExitCode::SUCCESS)
         }
         RemoteAction::Off { json } => {
             let settings = ask("remote.configure", json!({"on": false}))?;
@@ -175,7 +175,7 @@ pub fn run(paths: &Paths, action: RemoteAction) -> Result<ExitCode> {
                 "Remote is off: the links are closed, this machine stays paired with its hub.",
                 json,
             );
-            return Ok(ExitCode::SUCCESS);
+            Ok(ExitCode::SUCCESS)
         }
         RemoteAction::Members {
             runners: true,
@@ -201,7 +201,7 @@ pub fn run(paths: &Paths, action: RemoteAction) -> Result<ExitCode> {
                     println!("{name}  {}", offer_line(machine));
                 }
             }
-            return Ok(ExitCode::SUCCESS);
+            Ok(ExitCode::SUCCESS)
         }
         RemoteAction::Members { json, .. } => {
             let members = ask("remote.members", json!({}))?;
@@ -223,7 +223,7 @@ pub fn run(paths: &Paths, action: RemoteAction) -> Result<ExitCode> {
                     );
                 }
             }
-            return Ok(ExitCode::SUCCESS);
+            Ok(ExitCode::SUCCESS)
         }
         RemoteAction::Rename {
             name,
@@ -247,15 +247,15 @@ pub fn run(paths: &Paths, action: RemoteAction) -> Result<ExitCode> {
             } else {
                 println!("{name} is now {new_name}");
             }
-            return Ok(ExitCode::SUCCESS);
+            Ok(ExitCode::SUCCESS)
         }
         RemoteAction::Icon { name, icon, json } => {
             look(paths, &mut ask, &name, Some(icon.icon()), None, json)?;
-            return Ok(ExitCode::SUCCESS);
+            Ok(ExitCode::SUCCESS)
         }
         RemoteAction::Colour { name, colour, json } => {
             look(paths, &mut ask, &name, None, Some(colour.colour()), json)?;
-            return Ok(ExitCode::SUCCESS);
+            Ok(ExitCode::SUCCESS)
         }
         RemoteAction::Remove { name, json } => {
             let device = device_key(paths)?;
@@ -271,7 +271,7 @@ pub fn run(paths: &Paths, action: RemoteAction) -> Result<ExitCode> {
                      the hub"
                 );
             }
-            return Ok(ExitCode::SUCCESS);
+            Ok(ExitCode::SUCCESS)
         }
         RemoteAction::Pair {
             name,
@@ -338,9 +338,9 @@ pub fn run(paths: &Paths, action: RemoteAction) -> Result<ExitCode> {
                     paired["role"].as_str().unwrap_or_default(),
                 );
             }
-            return Ok(ExitCode::SUCCESS);
+            Ok(ExitCode::SUCCESS)
         }
-    };
+    }
 }
 
 /// A member's icon or colour changed, the other kept, signed with this device's key.
