@@ -1,5 +1,6 @@
 package org.flottille.core
 
+import android.content.Context
 import java.io.File
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.awaitClose
@@ -21,6 +22,9 @@ import org.flottille.core.ffi.lastPanic as lastPanicIn
  */
 class FlottilleCore(folder: File, sealer: Sealer = KeystoreSealer()) : AutoCloseable {
     private val core = Core(folder.path, sealer)
+
+    /** The core in the app's own [folder], which no backup copies. */
+    constructor(context: Context, sealer: Sealer = KeystoreSealer()) : this(folder(context), sealer)
 
     /** The device key's fingerprint, once this phone joined its hub. */
     val fingerprint: String? get() = core.fingerprint()
@@ -71,6 +75,13 @@ class FlottilleCore(folder: File, sealer: Sealer = KeystoreSealer()) : AutoClose
     override fun close() = core.close()
 
     companion object {
+        /**
+         * The core's folder: in `noBackupFilesDir`, never in a backup. The endpoint's key is there
+         * in clear (the app's private storage), and a device key copied to another phone would be
+         * one its Keystore cannot open.
+         */
+        fun folder(context: Context): File = File(context.noBackupFilesDir, "flottille-core")
+
         /** At the app's start: a panic of the core is kept in `folder`. */
         fun keepPanics(folder: File) = keepPanicsIn(folder.path)
 
