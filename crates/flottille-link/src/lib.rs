@@ -33,8 +33,9 @@ use zeroize::Zeroizing;
 pub use address::Address;
 pub use control::{
     Arriving, Ask, Asked, Asker, ControlError, Device, Facts, HANDSHAKE_LIMIT, HUB_PORT,
-    HubSession, HubUrl, LINE_LIMIT, PairProof, Paired, Pairing, PresenceOf, Pushed, Session,
-    Stream, Tls, ToDevice, Told, Transcript, arrive,
+    HubSession, HubUrl, KEEPALIVE, LINE_LIMIT, LinkPacket, PairProof, Paired, Pairing, PresenceOf,
+    Pushed, RELAY_PACKET, RelayPort, Relays, SILENCE, Session, Stream, Tls, ToDevice, Told,
+    Transcript, arrive,
 };
 pub use hello::{Hello, NeedsUpdate, PeerState, choose};
 pub use link::{
