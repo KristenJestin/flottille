@@ -84,8 +84,8 @@ fn tracked(user: &User) {
     user.write_project_file(
         "shop",
         &format!(
-            "folder = \"{}\"\n\n[tracker]\nkind = \"jira\"\nsite = \"example.atlassian.net\"\n\
-             projects = [\"ABC\"]\n",
+            "folder = \"{}\"\n\n[[repositories]]\npath = \"api\"\n\n[tracker]\nkind = \"jira\"\n\
+             site = \"example.atlassian.net\"\nprojects = [\"ABC\"]\n",
             folder.display()
         ),
     );
@@ -353,7 +353,7 @@ fn a_program_without_a_flow_says_the_line_to_type() {
     let user = User::new().with_sign_in_programs(&["bkt"]);
     // OpenCode's own sign-in asks its questions in a terminal: a stand-in that only says its
     // version is all the row needs.
-    let opencode = user.path("programs/opencode");
+    let opencode = user.path("sign-in-bin/opencode");
     std::fs::write(&opencode, "#!/bin/sh\necho 1.19.0\n").unwrap();
     let mut permissions = std::fs::metadata(&opencode).unwrap().permissions();
     std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o755);

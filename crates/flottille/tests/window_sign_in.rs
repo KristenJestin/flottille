@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use common::User;
 use flottille_window::Shell;
 use gpui_design_system::omarchy::Environment;
-use gpui_kit::test::{TestQueryExt as _, TestWindowExt};
+use gpui_kit::test::TestWindowExt;
 use gpui_kit::{Entity, TestAppContext, VisualTestContext, px, size};
 use serde_json::{Value, json};
 
@@ -50,6 +50,8 @@ fn until(
     loop {
         shell.update_in(cx, |shell, window, cx| shell.poll(window, cx));
         cx.run_until_parked();
+        // The window's clock goes on: what unfolds and fades in gets there.
+        cx.executor().advance_clock(Duration::from_millis(16));
         cx.update(|window, cx| window.simulate_next_frame(cx));
         cx.run_until_parked();
         if check(cx) {
@@ -260,7 +262,7 @@ fn sign_out_is_asked_once(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn a_program_without_a_flow_says_the_line_to_type(cx: &mut TestAppContext) {
     let user = user(&[]);
-    let opencode = user.path("programs/opencode");
+    let opencode = user.path("sign-in-bin/opencode");
     std::fs::write(&opencode, "#!/bin/sh\necho 1.19.0\n").unwrap();
     let mut permissions = std::fs::metadata(&opencode).unwrap().permissions();
     std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o755);

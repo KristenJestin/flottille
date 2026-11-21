@@ -189,7 +189,7 @@ impl User {
             .prefix("flottille-test")
             .tempdir()
             .unwrap();
-        for sub in ["home", "state", "config", "data", "programs"] {
+        for sub in ["home", "state", "config", "data", "sign-in-bin"] {
             std::fs::DirBuilder::new()
                 .mode(0o700)
                 .create(dir.path().join(sub))
@@ -202,7 +202,7 @@ impl User {
         std::os::unix::fs::symlink(runtime.path(), dir.path().join("runtime")).unwrap();
         // The programs a sign-in runs are looked for there alone (`docs/agents.md`, "Signing in"):
         // a program the machine has installed is never run, and a test puts its fakes there.
-        let programs = dir.path().join("programs").display().to_string();
+        let programs = dir.path().join("sign-in-bin").display().to_string();
         let mut user = User {
             dir,
             _runtime: runtime,
@@ -442,7 +442,7 @@ impl User {
                 "codex" => fake_codex(),
                 other => panic!("no fake {other}"),
             };
-            std::os::unix::fs::symlink(fake, user.path("programs").join(name)).unwrap();
+            std::os::unix::fs::symlink(fake, user.path("sign-in-bin").join(name)).unwrap();
             let dir = user.path(&format!("sign-in-{name}"));
             std::fs::create_dir(&dir).unwrap();
             let variable = format!("FLOTTILLE_FAKE_{}_DIR", name.to_uppercase());
