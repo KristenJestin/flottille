@@ -84,14 +84,14 @@ use crate::subscriptions::SubscriptionList;
 use crate::text_viewer::TextViewer;
 use crate::to_end::ToEnd;
 use crate::tree::place_name;
-use crate::waiting::{Waiting, sentences};
+use crate::waiting::Waiting;
+use flottille_protocol::words::{forwarded, judged, sentences, source as source_line};
 use gpui_design_system::drawer::Closed;
 
 /// Width of the session page's right rail.
 pub const RAIL: f32 = 290.;
 
-/// How the screen names the root agent, which has no name of its own there.
-pub const THE_CONVERSATION: &str = "the conversation";
+pub use flottille_protocol::words::THE_CONVERSATION;
 
 /// What the confirmation of ending a session says: how many agents end.
 pub fn end_sentence(count: usize) -> String {
@@ -2052,10 +2052,7 @@ impl SessionPage {
             base: request.is_some_and(|r| r.base),
             judgement: request
                 .and_then(|r| r.judgement.as_ref())
-                .map(|(by, verdict, reason)| match verdict.as_str() {
-                    "failed" => format!("The judge ({by}) could not decide: {reason}"),
-                    _ => format!("The judge ({by}) asks you: {reason}"),
-                }),
+                .map(|(by, verdict, reason)| judged(by, verdict, reason)),
             kind: request.map_or_else(|| "call".to_owned(), |r| r.kind.clone()),
             says: request.map(|r| r.says.clone()).unwrap_or_default(),
             asked: request.map(Request::asked),
@@ -2064,7 +2061,7 @@ impl SessionPage {
                 let forwards: Vec<String> = r
                     .forwards
                     .iter()
-                    .map(|(by, said)| format!("{} forwards it: {said}", self.said_name(by)))
+                    .map(|(by, said)| forwarded(&self.said_name(by), said))
                     .collect();
                 sentences(
                     r.reasons
@@ -2074,11 +2071,16 @@ impl SessionPage {
                 )
             }),
             source: request.map(|r| {
-                let mut source = format!("asked by {}", self.said_name(&r.agent));
-                for (by, _) in &r.forwards {
-                    source.push_str(&format!(" · forwarded by {}", self.said_name(by)));
-                }
-                format!("{source} · #{number}")
+                let forwarders: Vec<String> = r
+                    .forwards
+                    .iter()
+                    .map(|(by, _)| self.said_name(by))
+                    .collect();
+                source_line(
+                    number,
+                    &self.said_name(&r.agent),
+                    forwarders.iter().map(String::as_str),
+                )
             }),
             asker: request.map(|r| self.said_name(&r.agent)),
             decision,
@@ -4112,14 +4114,7 @@ impl ApprovalCard {
     /// Why a base card always comes back: a session's first message to another asks a leave,
     /// which the daemon's reason names.
     pub fn always_says(&self) -> &'static str {
-        let leave = self
-            .why
-            .as_deref()
-            .is_some_and(|why| why.contains("has not written to that one before"));
-        match leave {
-            true => LEAVE_SAYS,
-            false => BASE_SAYS,
-        }
+        flottille_protocol::words::always_says(self.why.as_deref().unwrap_or_default())
     }
 
     /// The one-line record a decided card folds into.
@@ -6731,15 +6726,7 @@ impl SessionPage {
     }
 }
 
-/// Why a base card comes back whatever the mode, said on it.
-pub const BASE_SAYS: &str = "Flottille always asks you for this, in Ask and in Auto: it may lose \
-                             work or reach what must stay private, so no judge decides it.";
-
-/// Why the first message of a session to another always comes back, said on its card instead of
-/// `BASE_SAYS`: what it asks is a lasting leave, in every mode.
-pub const LEAVE_SAYS: &str = "Flottille always asks you this, in every mode: allowing it lets \
-                              this session write to that one until either ends or you withdraw \
-                              it.";
+pub use flottille_protocol::words::{BASE_SAYS, LEAVE_SAYS};
 
 /// The time a thought took, or has taken so far: it ticks only while the thought runs.
 pub struct ThinkingTimer {
