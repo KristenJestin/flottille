@@ -2315,11 +2315,12 @@ async fn dial(remote: Arc<Remote>, mut stopping: tokio::sync::watch::Receiver<bo
                     client.close(GONE_FROM_HUB);
                 }
             }
-            // A machine no longer trusted is let go.
+            // A machine no longer trusted is let go, once its link ended and said so.
             seen.retain(|key, seen| {
                 let trusted = peers.iter().any(|peer| peer.key.as_bytes() == key);
                 if !trusted && let Some((_, link, _)) = &seen.link {
                     link.close(NOT_TRUSTED);
+                    return true;
                 }
                 trusted
             });
