@@ -125,8 +125,9 @@ window, the command line, the tools and the docs.
 13. **One system of port forwarding**: tunnels over the link, to the ports of runs Flottille started
     only.
 14. **The Android app is native**: Kotlin and Jetpack Compose, over a Rust core shared with the
-    desktop through UniFFI. Notifications through UnifiedPush, carrying ids only, encrypted, never
-    while the user is active at another client.
+    desktop through UniFFI. The phone is woken by its own connection to the hub, kept in a
+    foreground service (no push service: no UnifiedPush, no FCM), never while the user is active at
+    another client.
 15. **Versions are checked at connection**, and a mismatch is said in a sentence.
 16. **One repository** for the daemon, the hub, the mobile core, the Android app and the site, with
     CI split by paths.
@@ -819,32 +820,36 @@ As built (#818):
   list ordered by last exchange, led sessions indented under their pilot; the state is the row's
   mark, so rows never jump between groups. **Machines**: their state, their agents, their slots.
   The app opens on Needs you; a notification opens its session.
-- **The link lives only while the app is in the foreground** (Android limits background sync to a few
-  hours a day); a push wakes it otherwise. A known problem of the transport's library on mobile
+- **The connection to the hub lives in a foreground service**, as long as the device is paired: the
+  same session every device keeps, which carries the links (#1151). Android requires its permanent
+  notification ("Flottille is connected", silent, which the user can hide) and the app asks to be
+  exempted from battery optimisation; a little battery goes to the keepalive. Links to runners are
+  opened over it when the app needs them. A known problem of the transport's library on mobile
   networks is worked around inside `flottille-link`, never in the screens.
-- **First thing proven**, before the screens: answering Allow or Deny from a notification while the
-  app is killed and the phone in Doze, which needs the link opened, the request signed and answered
-  within the few seconds Android gives.
+- **What a real phone must prove**: the service holds a whole night in deep sleep (Doze, and a
+  Samsung's own battery rules), what battery it costs, and answering Allow or Deny from a
+  notification with the screen off, the request signed and answered within the few seconds Android
+  gives.
 
 ## Notifications
 
-- **UnifiedPush**, with a distributor the user chooses (ntfy, self-hosted or not). The phone gives
-  each runner its push endpoint and keys (`push.register`, a signed request); the runner sends
-  **Web Push, encrypted** (RFC 8291, the machine's VAPID key): the distributor sees an opaque blob.
-  The blob holds only a kind (`request`, `question`, `report`, `failure`, `dismissed`) and ids. The
-  app wakes, links, reads what it needs (`inbox.list`, `approval.list`), and draws its own
-  notification: a request with **Allow** and **Deny** (not on a `viewer`), a question that opens its
-  card, a report.
+- **Through the hub, no push service** (decided by the maintainer on 2026-11-20): neither a
+  distributor app (UnifiedPush, ntfy) nor Google's FCM. The phone's foreground service keeps its
+  session with the hub; when something needs the user, the runner tells the hub, and the hub tells
+  the phone over that session. What travels holds only a kind (`request`, `question`, `report`,
+  `failure`, `dismissed`) and ids, as every hub message. The app links, reads what it needs
+  (`inbox.list`, `approval.list`), and draws its own notification: a request with **Allow** and
+  **Deny** (not on a `viewer`), a question that opens its card, a report.
 - **Never while the user is at another client.** Each client tells the hub its presence (the
   window: focused, last input; the app: in the foreground), and the hub tells the runners. A thing
-  to notify waits 30 seconds; it is pushed only if no client of the user had an input in the last 2
+  to notify waits 30 seconds; it is sent only if no client of the user had an input in the last 2
   minutes, and dropped if it was seen or answered meanwhile (the request answered, the session
-  opened at a client). When the hub is unreachable, the runner counts the user as away and pushes.
+  opened at a client).
 - **Dismissal follows**: what is answered or seen elsewhere sends `dismissed` with its ids, and the
   phone removes its notification. A request answered at the desk never stays on the lock screen.
 - One setting, Settings, Machines: **Notify the phone**: `when I am away` (the default) or `always`.
-- No push service of Google's in the first version; an embedded FCM distributor is a later option if
-  the app is ever distributed.
+- When the hub is unreachable, nothing reaches the phone: it says so in its permanent notification
+  ("Not connected to your hub") and reconnects with a backoff.
 
 ## Tunnels
 
