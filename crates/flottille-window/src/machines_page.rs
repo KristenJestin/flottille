@@ -1,16 +1,19 @@
-//! Settings, General, Machines (`docs/remote.md`, "The hub", "Pairing", "Roles"): **Connect to your
-//! hub** while this machine is in no member list, a dialog where the code `flottille-hub pair`
-//! printed is pasted and the card this machine proposes confirmed; then the devices of the list,
-//! each renamed or removed from its "⋯", and the addresses this machine is reached at. A device is
-//! added on the hub only: every new member is a toast. What is asked goes to this machine's daemon, signed with the
+//! Settings, Machines (`docs/remote.md`, "Identity and keys", "The hub", "Pairing", "Roles"):
+//! whether remote is on (a **Turn on** button while it is off, a **Remote** switch once it is),
+//! **Connect to your hub** while this machine is in no member list, a dialog where the code
+//! `flottille-hub pair` printed is pasted and the card this machine proposes confirmed; then the
+//! devices of the list, each renamed or removed from its "⋯", and the addresses this machine is
+//! reached at. The page says the state and holds the buttons: what is typed is a dialog of the
+//! window's host. A device is added on the hub only: every new member, and every result, is a
+//! toast. What is asked goes to this machine's daemon, signed with the
 //! device key ([`crate::machines::Remote`]); what it answers comes back as news.
 
 use std::collections::HashMap;
 
 use gpui_design_system::{
     Button, Confirm, EmptyLine, Field, Icon, ListCard, ListRow, Listing, Menu, Modal, RadioChoices,
-    Section, Select, SelectOption, Toast, changed, changing, enter, palette, presence, presence_of,
-    space, tipped_when_cut, toast,
+    Section, Select, SelectOption, Switch, Toast, changed, changing, enter, palette, presence,
+    presence_of, space, tipped_when_cut, toast,
 };
 use gpui_kit::base::input::{Input, InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -36,6 +39,10 @@ pub const REMOVAL_DIALOG: &str = "member-removal-dialog";
 /// The dialog that declares an address.
 pub const ADDRESS_MODAL: &str = "address-new";
 
+const REMOTE_OFF: &str = "Remote is off. This machine can join a hub and link to your other \
+                          machines.";
+const REMOTE_HINT: &str =
+    "Turn it off and the links close; this machine stays paired with your hub.";
 const CONNECT_SENTENCE: &str = "Your machines find each other through a hub you run on a host \
                                 that is always on. Run flottille-hub pair there, then paste the \
                                 code it prints: the first machine and the next ones connect the \
@@ -57,6 +64,8 @@ const ADDRESSES_SENTENCE: &str = "Where your other machines reach this one: foun
 pub enum Removal {
     Member(String),
     Address(String),
+    /// Turning remote off: the links close.
+    Remote,
 }
 
 pub struct MachinesSection {
@@ -72,6 +81,10 @@ pub struct MachinesSection {
     connect_icon: usize,
     connect_role: usize,
     connect_error: Option<SharedString>,
+    /// What was read while remote was on: drawn while the settings fold away as it is turned off.
+    kept: Option<Machines>,
+    /// A change of remote was asked and not answered yet.
+    configuring: bool,
     members: Listing<Member>,
     addresses: Listing<crate::machines::Address>,
     menus: HashMap<String, Entity<Menu>>,
@@ -98,6 +111,8 @@ impl MachinesSection {
             connect_icon: 0,
             connect_role: 1,
             connect_error: None,
+            kept: None,
+            configuring: false,
             members: Listing::default(),
             addresses: Listing::default(),
             menus: HashMap::new(),
@@ -207,6 +222,9 @@ impl MachinesSection {
     pub fn news(&mut self, news: News, window: &mut Window, cx: &mut Context<Self>) {
         match news {
             News::Read(read) => {
+                if read.off.is_none() {
+                    self.kept = Some((*read).clone());
+                }
                 if self.read.as_ref() != Some(&*read) {
                     self.read = Some(*read);
                     cx.notify();
@@ -259,6 +277,16 @@ impl MachinesSection {
             (Asked::Pair, Err(why)) => {
                 self.connecting = false;
                 self.connect_error = Some(why.into());
+            }
+            (Asked::Configure { on }, done) => {
+                self.configuring = false;
+                match done {
+                    Ok(_) => {
+                        let said = if on { "Remote is on" } else { "Remote is off" };
+                        toast(Toast::success(said), cx);
+                    }
+                    Err(why) => toast(Toast::failure("Remote was not changed").detail(why), cx),
+                }
             }
             (Asked::Rename(name), Ok(_)) => toast(Toast::success(format!("Renamed {name}")), cx),
             (Asked::Rename(name), Err(why)) => toast(
@@ -315,6 +343,13 @@ impl MachinesSection {
         cx.notify();
     }
 
+    /// Turns remote on or off.
+    fn configure(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.configuring = true;
+        self.remote.ask(Ask::Configure { on });
+        cx.notify();
+    }
+
     pub fn choose_icon(&mut self, icon: usize, cx: &mut Context<Self>) {
         if self.connect_icon != icon {
             self.connect_icon = icon;
@@ -366,6 +401,7 @@ impl MachinesSection {
         match self.removal.take() {
             Some(Removal::Member(name)) => self.remote.ask(Ask::Remove { name }),
             Some(Removal::Address(address)) => self.remote.ask(Ask::AddressRemove(address)),
+            Some(Removal::Remote) => self.configure(false, cx),
             None => {}
         }
         cx.notify();
@@ -569,6 +605,43 @@ impl MachinesSection {
     }
 
     // ── The page ──────────────────────────────────────────────────────────────────────────
+
+    /// Whether remote is on: its notice and **Turn on** while it is off, the **Remote** switch once
+    /// it is. Each folds away as the other unfolds.
+    fn remote_section(&mut self, off: bool, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let p = palette(cx);
+        let notice = div()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .id("remote-notice")
+                    .aria_label(REMOTE_OFF)
+                    .text_size(px(13.))
+                    .text_color(p.mute)
+                    .child(REMOTE_OFF)
+                    .test_support(),
+            )
+            .child(spaced(
+                space::MD,
+                div().child(
+                    Button::primary("turn-on-remote", "Turn on")
+                        .disabled(self.configuring)
+                        .on_click(cx.listener(|this, _, _, cx| this.configure(true, cx))),
+                ),
+            ));
+        let switch = Switch::new("remote-switch", true, "Remote")
+            .hint(REMOTE_HINT)
+            .disabled(self.configuring)
+            .on_click(cx.listener(|this, _, _, cx| this.ask_removal(Removal::Remote, cx)));
+        div()
+            .id("remote")
+            .flex()
+            .flex_col()
+            .child(presence("remote-off-block", off, notice))
+            .child(presence("remote-on-block", !off, switch))
+            .test_support()
+    }
 
     /// With no hub: what a hub is, and the one way in.
     fn connect_section(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -849,6 +922,11 @@ impl MachinesSection {
                 "Your other machines no longer try this machine there.",
                 "Remove address",
             ),
+            Removal::Remote => (
+                "Turn remote off?".to_owned(),
+                "The links close; this machine stays paired with your hub.",
+                "Turn off",
+            ),
         };
         let (this, again) = (cx.entity().downgrade(), cx.entity().downgrade());
         Confirm::new("member-removal", question)
@@ -863,7 +941,9 @@ impl MachinesSection {
             })
     }
 
-    /// The sections of the tab, top to bottom, each entering on its own.
+    /// The sections of the tab, top to bottom, each entering on its own: whether remote is on, then
+    /// (while it is) where this machine is reached, the hub, the devices and the addresses. They
+    /// fold away, as they were, when remote is turned off.
     pub fn blocks(
         &mut self,
         window: &mut Window,
@@ -873,19 +953,46 @@ impl MachinesSection {
             let waiting = gpui_design_system::Skeleton::new("machines-skeleton").h(px(120.));
             return vec![("machines-loading", waiting.into_any_element())];
         };
-        if let Some(off) = read.off {
-            let line = EmptyLine::new(
-                "machines-off",
-                Icon::Service,
-                format!("Your other machines are not reached from this one: {off}"),
-            );
-            return vec![("machines-off", line.into_any_element())];
+        let off = read.off.is_some();
+        let mut blocks = vec![("remote", self.remote_section(off, cx).into_any_element())];
+        let shown = if off { self.kept.clone() } else { Some(read) };
+        if let Some(shown) = shown {
+            let live = self.read.replace(shown);
+            let rest = self.rest(window, cx);
+            self.read = live;
+            let column = div()
+                .flex()
+                .flex_col()
+                .children(rest.into_iter().enumerate().map(|(n, (part, block))| {
+                    div().when(n > 0, |d| d.mt(space::XXL)).child(enter(
+                        ElementId::Name(format!("enter-machines-{part}").into()),
+                        n,
+                        block,
+                    ))
+                }));
+            blocks.push((
+                "machines-rest",
+                presence("machines-rest", !off, column)
+                    .space(space::XXL)
+                    .into_any_element(),
+            ));
         }
+        blocks
+    }
+
+    /// What remote on shows under its switch.
+    fn rest(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<(&'static str, gpui_kit::AnyElement)> {
+        let read = self.read.clone().unwrap_or_default();
+        let mut blocks = Vec::new();
         if !read.member() {
-            return vec![("hub-connect", self.connect_section(cx).into_any_element())];
+            blocks.push(("hub-connect", self.connect_section(cx).into_any_element()));
+            return blocks;
         }
         let hub = read.hub.as_ref().map(|hub| self.hub_section(hub, cx));
-        let mut blocks = Vec::new();
         blocks.extend(hub.map(|hub| ("hub", hub.into_any_element())));
         blocks.push((
             "devices",
@@ -905,6 +1012,10 @@ impl Render for MachinesSection {
             .flex()
             .flex_col()
             .children(blocks.into_iter().enumerate().map(|(n, (part, block))| {
+                // The settings under the switch hold their own space and enter section by section.
+                if part == "machines-rest" {
+                    return div().child(block);
+                }
                 div().when(n > 0, |d| d.mt(space::XXL)).child(enter(
                     ElementId::Name(format!("enter-machines-{part}").into()),
                     n,

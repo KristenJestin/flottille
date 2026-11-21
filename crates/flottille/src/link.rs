@@ -1,11 +1,12 @@
 //! The daemon's link to the user's other machines (`docs/remote.md`, "Architecture", "The
-//! transport", "The version"), with remote on: one endpoint, listening where `daemon.toml` says
-//! (`[remote] listen`), nowhere when it says nothing; a link kept to every machine this one trusts, dialled at the addresses it
-//! knows for it; each side telling the other its addresses whenever they change.
+//! transport", "The version"), with remote on: one endpoint, whose links go through the user's hub
+//! over the session this machine keeps to it (`hub_session.rs`); a link kept to every machine this
+//! one trusts that the hub says is online. The direct path stays: listening where `daemon.toml`
+//! says (`[remote] listen`, nowhere by default), dialling the addresses it knows for a machine
+//! first, each side telling the other its addresses whenever they change.
 //!
-//! Flottille handles no network channel: no relay, no NAT traversal, no discovery. How two machines
-//! reach each other (a LAN, a VPN, a public address, a tunnel) is the user's; a machine dials what
-//! it is told.
+//! No NAT traversal, no discovery: with the hub unreachable, machines that know no address of
+//! each other do not link, and say so with the hub's own sentence.
 //!
 //! The machines it trusts, and their addresses, are in `remote/peers.json`, which the control
 //! session to the hub writes from the member list once the machine is set up (`hub_session.rs`);
@@ -227,6 +228,9 @@ pub struct Remote {
     pub(crate) receiving: crate::travel::Receiving,
     /// The tunnels this machine carries and serves (`tunnel.rs`).
     pub(crate) tunnels: crate::tunnel::Tunnels,
+    /// Becomes true when this link stops, for its own tasks: the daemon's stop, or remote turned
+    /// off, or the link made again somewhere else.
+    halt: Arc<tokio::sync::watch::Sender<bool>>,
 }
 
 /// Starts the link: the endpoint, the loop that accepts and the one that dials. A link that
@@ -245,9 +249,9 @@ pub fn start(
     .map_err(|error| error.to_string())?;
     match endpoint.listening() {
         Some(local) => eprintln!("flottille daemon: the link listens on {local}"),
-        None => eprintln!(
-            "flottille daemon: the link listens nowhere ([remote] listen in daemon.toml); it dials"
-        ),
+        None => {
+            eprintln!("flottille daemon: the link listens nowhere (Settings, Machines); it dials")
+        }
     }
     let remote = Arc::new(Remote::new(
         endpoint,
@@ -255,6 +259,17 @@ pub fn start(
         emit.clone(),
     ));
     let _ = remote.daemon.set(daemon);
+    // The daemon's stop is this link's, and so is the link's own.
+    tokio::spawn({
+        let halt = remote.halt.clone();
+        async move {
+            tokio::select! {
+                _ = stopped(stopping) => { halt.send_replace(true); }
+                _ = stopped(halt.subscribe()) => {}
+            }
+        }
+    });
+    let stopping = remote.halt.subscribe();
     // Read before the first link comes in, which is judged by the file as last read.
     remote.peers();
     let control = Arc::new(crate::hub_session::Control::new(
@@ -272,6 +287,11 @@ pub fn start(
     tokio::spawn(keep_offering(remote.clone(), stopping.clone()));
     tokio::spawn(dial(remote.clone(), stopping));
     Ok(remote)
+}
+
+/// Until `stopping` says so; nothing held of it, so that a `select!` holding it stays `Send`.
+async fn stopped(mut stopping: tokio::sync::watch::Receiver<bool>) {
+    let _ = stopping.wait_for(|stop| *stop).await;
 }
 
 /// This build's hello; a test build may make it another's.
@@ -334,8 +354,33 @@ impl Remote {
             sessions: tokio::sync::watch::Sender::new(None),
             lists: tokio::sync::watch::Sender::new(0),
             tunnels: crate::tunnel::Tunnels::default(),
+            halt: Arc::new(tokio::sync::watch::Sender::new(false)),
             transfers: Default::default(),
             receiving: Default::default(),
+        }
+    }
+
+    /// Carries the links through the hub over a session to it just opened, until it ends.
+    pub(crate) fn through(&self, port: flottille_link::RelayPort) {
+        self.endpoint.through(port);
+    }
+
+    /// Why the hub cannot be reached now, when this machine has one and is not connected to it:
+    /// what the links that go through it say.
+    fn hub_down(&self) -> Option<String> {
+        let seen = self.control.get()?.seen();
+        if seen["state"] == "connected" {
+            return None;
+        }
+        seen["reason"].as_str().map(str::to_owned)
+    }
+
+    /// `error` in a sentence: a machine with no address and no hub to go through says why the hub
+    /// is out of reach.
+    fn said(&self, error: &LinkError) -> String {
+        match (error, self.hub_down()) {
+            (LinkError::NoAddress(name), Some(why)) => format!("{name} cannot be reached: {why}"),
+            _ => error.to_string(),
         }
     }
 
@@ -463,6 +508,18 @@ impl Remote {
     /// Closes every link, telling the other machines.
     pub async fn close(&self) {
         self.endpoint.close().await;
+    }
+
+    /// Stops this link for good: its tasks end and every link closes (remote turned off, or the
+    /// link made again where it listens).
+    pub async fn stop(&self) {
+        self.halt.send_replace(true);
+        self.close().await;
+    }
+
+    /// Where the link listens, when it does.
+    pub fn listening(&self) -> Option<SocketAddr> {
+        self.endpoint.listening()
     }
 
     /// The machines this one trusts: the file as last read whole.
@@ -690,7 +747,7 @@ impl Remote {
 
     /// A link that could not be made, or that ended: the machine's state, said once in the log.
     fn failed(&self, key: [u8; 32], name: &str, error: &LinkError) {
-        let reason = error.to_string();
+        let reason = self.said(error);
         let mut seen = self.seen.lock().unwrap();
         let seen = seen.entry(key).or_insert_with(Seen::new);
         if seen.reason.as_deref() != Some(reason.as_str()) {
@@ -834,7 +891,12 @@ impl Remote {
                     "reason": seen.reason,
                     // Where the live link goes (`dialled`) or came from.
                     "reached": seen.link.as_ref().map(|(_, link, dialled)| {
-                        json!({"address": link.remote().to_string(), "dialled": dialled})
+                        let address = if link.through_hub() {
+                            "the hub".to_owned()
+                        } else {
+                            link.remote().to_string()
+                        };
+                        json!({"address": address, "dialled": dialled})
                     }),
                     "addresses": peer.known(),
                 })
@@ -1816,10 +1878,14 @@ impl Remote {
                 "{machine} needs an update: {}",
                 seen.reason.clone().unwrap_or_default()
             )),
-            Some(seen) => Err(format!(
-                "{machine} is offline since {}",
-                time_of_day(seen.since)
-            )),
+            // With the hub down, why: links go through it.
+            Some(seen) => Err(match self.hub_down() {
+                Some(why) => format!(
+                    "{machine} is offline since {}: {why}",
+                    time_of_day(seen.since)
+                ),
+                None => format!("{machine} is offline since {}", time_of_day(seen.since)),
+            }),
             None => Err(format!("{machine} is offline")),
         }
     }
@@ -2351,7 +2417,7 @@ pub(crate) async fn forward(
             Ok(asked) => break asked,
             Err(_) if tries < 2 => continue,
             Err(why) => {
-                send(error("unavailable", why.to_string())).await;
+                send(error("unavailable", remote.said(&why))).await;
                 return false;
             }
         }
@@ -2541,6 +2607,10 @@ fn stamp(file: &Path) -> Option<Stamp> {
 
 /// The link's methods (`docs/protocol.md`, "Remote").
 pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Result<Value, Failure> {
+    // Said of this machine, on or off: before a link is needed.
+    if matches!(method, "remote.settings" | "remote.configure") {
+        return crate::remote_config::call(daemon, method, params).await;
+    }
     let remote = remote_of(&daemon)?;
     let params = if params.is_null() { json!({}) } else { params };
     match method {
@@ -2682,10 +2752,8 @@ fn control_of(remote: &Remote) -> Result<Arc<crate::hub_session::Control>, Failu
 }
 
 pub(crate) fn remote_of(daemon: &Daemon) -> Result<Arc<Remote>, Failure> {
-    match daemon.remote.get() {
-        None => Err(Failure::refused(
-            "remote is off: turn it on in daemon.toml ([remote] on = true)",
-        )),
+    match daemon.link() {
+        None => Err(Failure::refused(crate::remote_config::OFF)),
         Some(Err(why)) => Err(Failure::new(
             flottille_protocol::code::UNAVAILABLE,
             format!("the link is not up: {why}"),

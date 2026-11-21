@@ -139,6 +139,10 @@ pub const METHODS: &[(&str, Class)] = &[
     // As `remote.pair`: the declaration of this machine by the device that paired.
     ("remote.declare", Local),
     ("remote.close", Local),
+    // Whether remote is on and where this machine is reached, and its change: the machine's own
+    // user, never another machine's device (a link could turn the machine off from afar).
+    ("remote.settings", Local),
+    ("remote.configure", Local),
     // It opens a port on the client's machine for a run's port on this one: a user's act.
     ("tunnel.open", Drive),
     // What a machine's daemon carries is its own: the listeners are here, never over a link.

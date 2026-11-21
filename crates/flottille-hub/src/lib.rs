@@ -34,9 +34,11 @@ use flottille_link::{
 };
 
 mod qr;
+mod relay;
 mod server;
 
 pub use qr::qr;
+pub use relay::{RELAY_BURST, RELAY_QUEUE, RELAY_RATE};
 use serde::{Deserialize, Serialize};
 pub use server::{
     KEPT_FOR_MEMBERS, LISTEN, MOST_ARRIVING, PAIR_IDLE, SOCKET_FILE, Served, Waits, serve,

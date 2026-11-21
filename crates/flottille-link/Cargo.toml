@@ -33,6 +33,9 @@ tokio = { version = "1.54.1", features = ["rt", "net", "io-util", "sync", "time"
 tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring"] }
 rustls-native-certs = "0.8.5"
 zeroize = "1.9.1"
+# The packets of links the control session carries through the hub (`src/control.rs`), in its JSON
+# lines. Already built for the daemon and the window.
+base64 = "0.22.1"
 
 [dev-dependencies]
 tempfile = "3.27.0"

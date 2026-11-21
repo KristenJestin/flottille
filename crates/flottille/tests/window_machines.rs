@@ -315,15 +315,15 @@ fn toasts(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Vec<String> {
     })
 }
 
-/// Settings, General, Machines: the last section of the General tab.
+/// Settings, Machines: the tab of its own, after Vault and before General.
 fn machines_tab(shell: &Entity<Shell>, cx: &mut VisualTestContext) {
-    // Tall enough for the whole of General: what is clicked must be in view.
+    // Tall enough for the whole of the tab: what is clicked must be in view.
     cx.simulate_resize(size(px(1280.), px(3000.)));
     click(shell, cx, "settings");
     until(shell, cx, "the settings page is shown", |cx| {
-        present(cx, "settings-tabs-general")
+        present(cx, "settings-tabs-machines")
     });
-    click(shell, cx, "settings-tabs-general");
+    click(shell, cx, "settings-tabs-machines");
 }
 
 /// Whether the window read the machine `name` from this machine's daemon.
@@ -410,7 +410,7 @@ fn bringing_a_machine_in_front_shows_its_sessions(cx: &mut TestAppContext) {
     assert_eq!(shell.read_with(cx, |s, _| s.machine_shown()), None);
 }
 
-/// Settings, General, Machines: Connect to your hub opened, the code of `hub`'s pair mode pasted,
+/// Settings, Machines: Connect to your hub opened, the code of `hub`'s pair mode pasted,
 /// the name `name` and the role `runner` chosen, and Connect clicked; the code.
 fn connect_from_the_page(
     hub: &TestHub,
@@ -496,6 +496,14 @@ fn the_first_machine_connects_with_the_hubs_code_in_one_dialog(cx: &mut TestAppC
     let members = pc.members();
     assert_eq!(members.len(), 1, "{members:#?}");
     assert_eq!(members[0]["role"], "runner");
+    // The hub's address is shown as a user writes it: no trailing slash.
+    let shown = shell.read_with(cx, |s, cx| {
+        s.machines()
+            .read(cx)
+            .machines()
+            .and_then(|m| m.hub.as_ref().map(|h| h.url.clone()))
+    });
+    assert_eq!(shown, Some(hub.url()));
     assert_eq!(members[0]["added_by"], "the hub");
     assert!(
         toasts(&shell, cx)
@@ -699,7 +707,7 @@ fn every_change_of_the_machines_page_is_animated(cx: &mut TestAppContext) {
     set_up(&hub, &pc);
     pair(&hub, &laptop, "laptop", "controller");
     let (shell, cx) = window(&pc, cx);
-    // Tall enough for the whole of General and the rows of the devices.
+    // Tall enough for the whole of the tab and the rows under it.
     cx.simulate_resize(size(px(1280.), px(3000.)));
     // Read whole before the page is measured: what the daemon answers later moves the sections.
     until(&shell, cx, "the machines are read", |cx| {
@@ -712,12 +720,12 @@ fn every_change_of_the_machines_page_is_animated(cx: &mut TestAppContext) {
     settle(&shell, cx);
     click(&shell, cx, "settings");
     until(&shell, cx, "the settings page is shown", |cx| {
-        present(cx, "settings-tabs-general")
+        present(cx, "settings-tabs-machines")
     });
 
     // The sections show up one after the other, each rising into place: the second measured
     // from the first's bottom, which moves as the first's rows unfold.
-    cx.update(|window, cx| window.click("settings-tabs-general", cx));
+    cx.update(|window, cx| window.click("settings-tabs-machines", cx));
     let mut offsets = Vec::new();
     for _ in 0..60 {
         step(&shell, Duration::from_millis(16), cx);
@@ -1289,5 +1297,159 @@ impl flottille_link::Keyring for NoKeyring {
         _secret: &[u8],
     ) -> Result<(), flottille_link::KeyringError> {
         Err(flottille_link::KeyringError::Absent)
+    }
+}
+
+// ── Remote in its own tab, turned on and configured from the window (#1144) ────────────────────
+
+/// A machine with remote off.
+fn off_machine() -> Machine {
+    let user = User::new();
+    std::fs::write(user.path("os-release"), "NAME=Test\nID=test\n").unwrap();
+    user.status();
+    Machine { user }
+}
+
+#[gpui_kit::test]
+fn machines_is_a_tab_of_settings(cx: &mut TestAppContext) {
+    let keys: Vec<&str> = flottille_window::settings::SECTIONS
+        .iter()
+        .map(|(key, _)| *key)
+        .collect();
+    let vault = keys.iter().position(|k| *k == "vault").unwrap();
+    assert_eq!(keys[vault + 1], "machines", "after Vault: {keys:?}");
+    assert_eq!(keys[vault + 2], "general", "before General: {keys:?}");
+
+    let hub = TestHub::new();
+    let pc = Machine::new();
+    set_up(&hub, &pc);
+    let (shell, cx) = window(&pc, cx);
+    machines_tab(&shell, cx);
+    // Its sections, and none of them in General.
+    until(&shell, cx, "remote", |cx| present(cx, "remote"));
+    for section in ["hub", "devices", "addresses"] {
+        let title = format!("{section}-title");
+        until(&shell, cx, section, |cx| present(cx, &title));
+    }
+    click(&shell, cx, "settings-tabs-general");
+    settle(&shell, cx);
+    for section in ["devices-title", "addresses-title", "remote"] {
+        assert!(!present(cx, section), "{section} is not in General");
+    }
+
+    // An old link to General's machines section opens the tab.
+    let machines = flottille_window::settings::SECTIONS
+        .iter()
+        .position(|(key, _)| *key == "machines")
+        .unwrap();
+    for link in ["general#machines", "settings:general#machines"] {
+        let at = flottille_window::settings::Reveal::from_link(link)
+            .unwrap_or_else(|| panic!("{link} is no link"));
+        shell.update_in(cx, |shell, window, cx| {
+            shell.open_settings_at(at, window, cx)
+        });
+        settle(&shell, cx);
+        let page = shell
+            .read_with(cx, |s, cx| s.main().read(cx).settings_page().cloned())
+            .unwrap();
+        assert_eq!(page.read_with(cx, |page, _| page.tab()), machines, "{link}");
+        click(&shell, cx, "settings-tabs-general");
+    }
+    assert!(flottille_window::settings::Reveal::from_link("general#appearance").is_none());
+}
+
+#[gpui_kit::test]
+fn turning_remote_on_in_settings_starts_the_link(cx: &mut TestAppContext) {
+    let pc = off_machine();
+    let (shell, cx) = window(&pc, cx);
+    machines_tab(&shell, cx);
+    until(&shell, cx, "the notice is shown", |cx| {
+        present(cx, "remote-notice")
+    });
+    assert!(present(cx, "turn-on-remote"));
+    assert!(
+        !present(cx, "remote-switch"),
+        "the switch comes once it is on"
+    );
+    let said = label(cx, "remote-notice").unwrap();
+    assert!(said.contains("join a hub"), "{said}");
+    assert!(
+        !said.contains("reached"),
+        "no address is chosen here: {said}"
+    );
+    assert!(!said.contains("daemon.toml"), "{said}");
+
+    click(&shell, cx, "turn-on-remote");
+    until(&shell, cx, "the daemon says it is on", |cx| {
+        pc.user.call("remote.settings", json!({})).unwrap()["on"] == true
+            && present(cx, "remote-switch")
+    });
+    settle(&shell, cx);
+    assert!(pc.user.call("remote.machines", json!({})).is_ok());
+    assert!(!present(cx, "remote-notice"), "the notice is gone");
+    assert!(!present(cx, "turn-on-remote"));
+    // A machine with no hub is offered the one way in.
+    assert!(present(cx, "connect-hub"));
+}
+
+#[gpui_kit::test]
+fn turning_remote_off_closes_the_links_and_keeps_the_hub(cx: &mut TestAppContext) {
+    let (_hub, pc, server) = pc_and_server(User::new());
+    let (shell, cx) = window(&pc, cx);
+    machines_tab(&shell, cx);
+    until(&shell, cx, "the switch is shown", |cx| {
+        present(cx, "remote-switch")
+    });
+    settle(&shell, cx);
+    // One confirmation, a dialog: nothing closes until it is confirmed.
+    click(&shell, cx, "remote-switch");
+    assert!(present(cx, "member-removal-action"));
+    assert_eq!(
+        pc.user.call("remote.settings", json!({})).unwrap()["on"],
+        true
+    );
+    click(&shell, cx, "member-removal-action");
+    until(&shell, cx, "the notice is back", |cx| {
+        present(cx, "remote-notice")
+    });
+    assert_eq!(
+        pc.user.call("remote.settings", json!({})).unwrap()["on"],
+        false
+    );
+    server.wait_for("pc", "offline");
+    // Turned on again, this machine is paired with the same hub. The confirmation has faded out (its scrim takes
+    // no click while it does) and the notice has unfolded before it is pressed.
+    until(&shell, cx, "the confirmation is gone", |cx| {
+        !present(cx, "member-removal-action")
+    });
+    settle(&shell, cx);
+    // The notice unfolds over wall-clock time: a press that lands while it is still folded hits
+    // nothing, so it is pressed again until the daemon is on.
+    let mut pressed = Instant::now() - Duration::from_secs(1);
+    let deadline = Instant::now() + WAIT;
+    while !(present(cx, "member-server") && present(cx, "member-pc")) {
+        step(&shell, Duration::from_millis(16), cx);
+        if present(cx, "turn-on-remote") && pressed.elapsed() > Duration::from_millis(500) {
+            click(&shell, cx, "turn-on-remote");
+            pressed = Instant::now();
+        }
+        assert!(
+            Instant::now() < deadline,
+            "its devices are not listed again: toasts {:?}, notice {}, settings {:?}, switch {}, no hub {}, rest {}, read {:?}\n{}",
+            toasts(&shell, cx),
+            present(cx, "turn-on-remote"),
+            pc.user.call("remote.settings", json!({})),
+            present(cx, "remote-switch"),
+            present(cx, "hub-connect-title"),
+            present(cx, "devices-title"),
+            shell.read_with(cx, |s, cx| s.machines().read(cx).machines().map(|m| (
+                m.off.clone(),
+                m.this.clone(),
+                m.hub.is_some(),
+                m.members.len()
+            ))),
+            pc.log()
+        );
+        std::thread::sleep(Duration::from_millis(25));
     }
 }
