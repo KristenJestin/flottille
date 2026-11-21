@@ -291,6 +291,7 @@ no device calls a `local` one over a link (`docs/remote.md`, "Roles").
 | `agent.unqueue` | drive |
 | `agent.answer` | drive |
 | `agent.image` | read |
+| `agent.file` | read |
 | `agent.cancel` | drive |
 | `agent.stop` | drive |
 | `agent.resume` | drive |
@@ -2223,6 +2224,20 @@ waiting messages, which stay queued in their order. Refused and not found as `ag
 `{"agent", "name"}`. An image of the agent's, by a name `agent.prompted` gave: `{"mime", "data"}`.
 `not-found` when there is none. A pasted text of the agent's (`agent.send`, `texts`) is given the
 same way, by the file name its marker ends in: `{"mime": "text/plain", "data"}`.
+
+#### `agent.file`
+
+`{"agent", "shown", "offset"?, "length"?}`. A chunk of a picture or a video the agent showed
+(`web` `show_link`), named by `shown`, the number of the `agent.link_shown` event that showed it,
+never by a path (`docs/remote.md`, "A file an agent showed"): `{"mime", "size", "offset", "data"}`,
+`data` at most 512 KiB (`length`, 512 KiB by default and at most, so that a chunk in base64 fits a
+link's frame) of the file from `offset` (0 by
+default), in base64; nothing past its end. `not-found` when `shown` is no file the agent showed;
+`refused` when the file is no picture or video (by its extension), is larger than 2 GiB, or is no
+longer the file shown (a link, a folder made a link, another file at its path, a file with
+several hard links, a program). The machine serves 2 MiB a second, all askers together: a chunk
+waits its turn up to 3 seconds, and past that, or when 8 calls are in flight, the call is `refused`
+at once with a sentence starting `busy:`: ask again.
 
 #### `agent.cancel`
 

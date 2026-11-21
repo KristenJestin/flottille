@@ -2536,6 +2536,7 @@ dependencies = [
  "lyon_tessellation",
  "serde_json",
  "syn 2.0.119",
+ "tempfile",
  "zeroize",
 ]
 
