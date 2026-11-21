@@ -392,8 +392,10 @@ A notification of the centre rang while a window is focused and does not show it
 (`docs/design.md`, §11): the daemon sends no system notification, and the focused window draws a
 toast of its own. `id` (the notification's number, `notifications.list`), `in` (`window`), `kind`,
 `session`, `project`, `workspace`, `title`, `excerpt` (masked, as the centre keeps them),
-`needs_you`, and `request` (the request's number for a request, what Allow and Deny answer; `null`
-for the others). A notification that rings with no window focused is sent to the desktop and says
+`needs_you`, `request` (the request's number for a request, what Deny answers; `null` for the
+others), and `whole`: the call and why the gate held it, one line each and uncut, when they can
+be said whole (`docs/design.md`, §11), the toast's text then and the only case it offers Allow;
+`null` otherwise. A notification that rings with no window focused is sent to the desktop and says
 no event. Its sound is played by the daemon in either case.
 
 ### `remote.member_added`, `remote.member_removed`, `remote.member_renamed`, `remote.member_role`
