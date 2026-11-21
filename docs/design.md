@@ -351,7 +351,8 @@ Exactly the mechanism of `reference/hemera.md` §5: stored before sent (idempote
 at a lineage, `between-turns` / `urgent` / `redirect`, pumped as one prompt when the agent is
 between turns, pinned as a note on the next tool result when it is mid-turn (with the 30 s
 fallback that cancels the turn and sends it as a prompt), given back when a turn fails, escaped so
-data can never forge a marker. No timers wake an agent: waking is always a delivery.
+data can never forge a marker. No timers wake an agent: waking is always a delivery. The clock
+starts a session only for a routine (§5.10), as a click would: a new session, never a wake.
 
 The same path wakes an agent about its own command: a command that outlived its call (it keeps
 running, or ran past the call's wait) delivers `command-ended` to the agent that started it when it
@@ -632,6 +633,50 @@ off ends the wait and sends nothing. A reset already past when the daemon starts
 then: it resumes at once when allowed. The wait ends with a message of the user's (which starts a
 turn anyway), a turn that ran without the limit, the reset, and the end of the session. Only a
 root waits: a child's limit is its parent's to read (§5.3).
+
+### 5.10 Routines
+
+Work that starts by itself: every weekday morning, the list of tickets waiting for the user's
+review, read from the tracker without changing anything. A **routine** is kept by the daemon: a
+name, a project, a prompt (the user's own words), an agent with its provider, model and effort, a
+**schedule**, a **mode** and where its result **rings** (`docs/protocol.md`, "The routine
+methods"; `flottille routine`, `docs/cli.md`).
+
+- **Each run is a new root session** of the project, in its folder, started by the daemon as a
+  click would start it, the prompt its first message and the routine's name its title. It is
+  one-shot: it ends with its result, the tool `routine_result` that only a routine's session has
+  (`docs/tools.md`), and the session ends with that turn. A run whose work goes on (an Ask or Auto
+  routine that opened a branch) says `goes_on`: its session stays open as any session, and the
+  notification says so. A session that ends its turn without its result is reminded once; then,
+  or when it ends or fails without one, its run failed, and the session stays as any session.
+  The routine's history is the list of its runs, each with its session, ended ones too; a skipped
+  run has none.
+- **The schedule** is days and an hour, never a cron line: `every day 07:00`, `weekdays 08:30`,
+  `mondays 09:00`, in the user's time zone (the machine's, or the routine's own). The clock
+  starts a session; no timer wakes an agent, and routines add no timer to the daemon: the next
+  run due of every routine is one deadline, read by the sweep that already runs every few
+  seconds, so the daemon stays at rest between runs.
+- **A run missed** while the machine was off runs **once** at the next start of the daemon, when
+  it was due less than 12 hours before (the routine's `missed_hours`), never once for each missed
+  day; an older one is skipped and said. The next run is the schedule's next after now.
+- **A spent quota** delays the run to the reset: while a session of the routine's provider waits
+  for its quota's known reset (§5.9), the run waits until a minute after it, said in the
+  routine's `delayed`.
+- **One at a time**: a run due while the last one still runs is skipped, and said in the history
+  and by `routine.ran`; `routine.run` (the user's Run now) is refused then.
+- **The mode**. **Read only** (the default): the gate refuses every call that writes (a ticket's
+  comment or edit, a forge write, a file write, a run, a commit, a session written to, a vault
+  ask), in every mode the session is switched to, Full included, whatever the prompt says; reads
+  go through as usual (the files, the tracker's and the forge's reads, a `GET`). It is checked
+  before the call's class, against a list of what reads: a tool or an action it does not list is
+  a write. This is what makes "change nothing in the tracker" true. **Ask** or **Auto**: the gate
+  as for any session in that mode; its requests come to the inbox. The run keeps the mode it
+  started in: an edit of the routine does not reach a session under way.
+- **The result** says whether there is **something to say**, with a one-line summary, or
+  **nothing** (`Nightly green: nothing to do`). Nothing does not ring: it is kept in the history.
+  Something to say is one notification in the centre (`routine.ran`, `docs/events.md`), the
+  summary its excerpt, the run's session its session, unless the routine rings **never** (its
+  history only). A run that could not start rings as a failure.
 
 ## 6. Projects and workspaces
 
@@ -1631,3 +1676,7 @@ nothing built, in [`extensions.md`](extensions.md).
 - A judge silent for 30 seconds, or whose answer is not the JSON verdict, asks the user.
 - Commits and pushes are calls to judge; a forced push, even with a lease, and a rewrite of
   history on a remote are base.
+- Routines (§5.10): read only by default; a run missed while the daemon was off runs within 12
+  hours of its time; the schedule is read in the machine's time zone unless the routine names
+  one; a spent quota delays a run only when its reset is known (an unknown reset starts it, and
+  its session then waits as any session); a routine's name is unique among all routines.
