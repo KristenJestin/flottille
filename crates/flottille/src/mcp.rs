@@ -406,7 +406,7 @@ const SERVED: [Definition; 34] = [
         title: "Tickets",
         description: "The tracker's tickets (GitHub #123, Jira ABC-123), via the user's gh/acli \
             (never run them). list: by state (default open), label, assignee, updated_within; search (query), \
-            on Jira also in_comments, jql; show: a workspace's ticket (in \
+            on Jira also in_comments, jql, limit; me: the user's account; show: a workspace's ticket (in \
             main, name workspace) or ticket, with links; detail full adds comments, \
             with ids; Jira images and files are named, not shown; \
             types: a Jira project's work item types; fields: a type's (kind); link_types; \
@@ -423,7 +423,7 @@ const SERVED: [Definition; 34] = [
         destructive: false,
         schema: || {
             json!({"type": "object", "properties": {
-                "action": {"type": "string", "enum": ["list", "search", "show", "people", "types", "fields", "link_types", "sprints", "milestones", "progress", "subscribe", "unsubscribe", "create", "comment", "reply", "edit", "close", "reopen", "status", "link", "unlink", "comment_edit", "comment_delete", "milestone_create", "milestone_edit", "log_time", "worklog_edit", "worklog_delete", "time_spent", "worklogs"]},
+                "action": {"type": "string", "enum": ["list", "search", "show", "people", "me", "types", "fields", "link_types", "sprints", "milestones", "progress", "subscribe", "unsubscribe", "create", "comment", "reply", "edit", "close", "reopen", "status", "link", "unlink", "comment_edit", "comment_delete", "milestone_create", "milestone_edit", "log_time", "worklog_edit", "worklog_delete", "time_spent", "worklogs"]},
                 "ticket": {"type": "string", "description": "#123 or ABC-123; the workspace's when left out."},
                 "duration": {"type": "string", "description": "log_time (Jira): the time spent, in Jira's form: 2h 30m, 1d, 45m (weeks, days, hours, minutes). worklog_edit: the new time spent."},
                 "started": {"type": "string", "description": "log_time: when the work started, RFC 3339 with its offset (2026-11-06T09:00:00+01:00); the duration before now when left out. worklog_edit: the new start."},
@@ -436,10 +436,11 @@ const SERVED: [Definition; 34] = [
                 "state": {"type": "string", "enum": ["open", "closed", "all"], "description": "list, search, milestones; milestone_edit: open or closed."},
                 "label": {"type": "string"},
                 "assignee": {"type": ["string", "null"], "description": "list, search: only those assigned to them. create, edit on Jira: whom to assign: \"me\" is the user you work for (\"assign it to me\", \"to the user\"), else an email or an account id, not a display name; edit: null removes the assignee."},
-                "detail": {"type": "string", "enum": ["short", "full"]},
+                "detail": {"type": "string", "enum": ["short", "full"], "description": "show: full adds the comments, with ids. search on Jira: full brings each ticket's status and its category, its comments (author, date, text, who they mention, as names with their account ids beside) and its links; the whole answer is read, every page."},
+                "limit": {"type": "integer", "minimum": 1, "description": "search on Jira: at most that many tickets; all those the JQL finds when left out."},
                 "fresh": {"type": "boolean", "description": "show: read the ticket again; one read in the last 30 s is given again otherwise (detail full always reads)."},
                 "title": {"type": "string"},
-                "body": {"type": "string", "description": "create, edit: description; comment, reply, comment_edit, log_time: the comment. Markdown, converted for Jira. Jira: [@Display Name](mention:<accountId>) notifies that person, an @Name alone does not (people, show give the ids); GitHub: @login."},
+                "body": {"type": "string", "description": "create, edit: description; comment, reply, comment_edit, log_time: the comment. Markdown, converted for Jira. Jira: [@Display Name](mention:<accountId>) notifies that person, an @Name alone does not (people gives the ids; show, detail full, says whom a comment mentions, with their account ids); GitHub: @login."},
                 "labels": {"type": "array", "items": {"type": "string"}, "description": "create, edit: labels to add."},
                 "reason": {"enum": ["completed", "not planned"], "description": "close: completed or not planned (GitHub)."},
                 "remove_labels": {"type": "array", "items": {"type": "string"}, "description": "edit: labels to remove."},

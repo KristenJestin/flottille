@@ -67,12 +67,22 @@ fn plain(nodes: &[Node]) -> String {
         .collect()
 }
 
+/// How a mention node is said: `@Display Name`, whatever its text carried; `@someone` when the
+/// site gave it no name.
+fn mention_name(node: &Value) -> String {
+    let name = node["attrs"]["text"].as_str().unwrap_or_default();
+    match name.trim().trim_start_matches('@').trim() {
+        "" => "@someone".to_owned(),
+        name => format!("@{name}"),
+    }
+}
+
 /// The people a document mentions, as `(account id, "@Display Name")`, in the order of the text.
 pub(crate) fn mentions(node: &Value) -> Vec<(String, String)> {
     let mut found = Vec::new();
     if node["type"] == "mention" {
-        let text = |name: &str| node["attrs"][name].as_str().unwrap_or_default().to_owned();
-        found.push((text("id"), text("text")));
+        let id = node["attrs"]["id"].as_str().unwrap_or_default().to_owned();
+        found.push((id, mention_name(node)));
     }
     for child in node["content"].as_array().into_iter().flatten() {
         found.extend(mentions(child));
@@ -589,26 +599,15 @@ fn inline(nodes: &[Value], hard: &str) -> String {
     for node in nodes {
         let marks: Vec<&Value> = node["marks"].as_array().into_iter().flatten().collect();
         let text = match node["type"].as_str().unwrap_or_default() {
-            "text" => node["text"].as_str().unwrap_or_default().to_owned(),
+            "text" => without_markup(node["text"].as_str().unwrap_or_default()),
             "hardBreak" => {
                 runs.push((hard.to_owned(), vec![&Value::Null]));
                 continue;
             }
-            // The form an agent writes back, so a mention read can be repeated: a name alone
-            // would notify no one. An id that is no account id is not put into a link, where its
-            // characters could break the text around it.
-            "mention"
-                if crate::tickets::is_account(node["attrs"]["id"].as_str().unwrap_or_default()) =>
-            {
-                let name = node["attrs"]["text"].as_str().unwrap_or("@");
-                let id = node["attrs"]["id"].as_str().unwrap_or_default();
-                runs.push((
-                    format!("[{}]({MENTION}{id})", escaped(name)),
-                    vec![&Value::Null],
-                ));
-                continue;
-            }
-            "mention" | "emoji" => node["attrs"]["text"]
+            // A name, as a person reads it: the account id is the structured form (`mentions`),
+            // never in the text, where it reads as noise and a comparison cannot rely on it.
+            "mention" => format!("@{}", escaped(&mention_name(node)[1..])),
+            "emoji" => node["attrs"]["text"]
                 .as_str()
                 .or(node["attrs"]["shortName"].as_str())
                 .unwrap_or_default()
@@ -676,6 +675,34 @@ fn run(text: &str, marks: &[&Value]) -> String {
             (false, true) => format!("[{out}](<{href}>)"),
             (false, false) => format!("[{out}]({href})"),
         };
+    }
+    out
+}
+
+/// A text without the markup a tracker adds to it (`<custom data-type="…">`, `</custom>`): the
+/// words between stay, the tags are kept nowhere.
+pub(crate) fn without_markup(text: &str) -> String {
+    let lower = text.to_ascii_lowercase();
+    let mut out = String::with_capacity(text.len());
+    let mut at = 0;
+    while at < text.len() {
+        let rest = &lower[at..];
+        let tag = ["<custom", "</custom"].iter().find_map(|open| {
+            let after = rest.strip_prefix(open)?;
+            // `<customer>` is a word, not the tag.
+            after
+                .starts_with(|c: char| c.is_whitespace() || c == '>' || c == '/')
+                .then(|| rest.find('>').map(|end| end + 1))
+                .flatten()
+        });
+        match tag {
+            Some(len) => at += len,
+            None => {
+                let c = text[at..].chars().next().unwrap_or_default();
+                out.push(c);
+                at += c.len_utf8();
+            }
+        }
     }
     out
 }
@@ -820,26 +847,29 @@ mod tests {
     }
 
     #[test]
-    fn a_mention_read_in_a_comment_keeps_its_account_id() {
+    fn a_mention_read_in_a_comment_is_a_name() {
         let adf = json!({"type": "doc", "version": 1, "content": [{"type": "paragraph",
             "content": [{"type": "text", "text": "Hi "},
                 {"type": "mention", "attrs": {"id": "5b10ac8d82e05b22cc7d4ef5",
                     "text": "@Ana Example"}}]}]});
+        assert_eq!(to_markdown(&adf), "Hi @Ana Example");
+        // The account id is the structured form.
         assert_eq!(
-            to_markdown(&adf),
-            "Hi [@Ana Example](mention:5b10ac8d82e05b22cc7d4ef5)"
+            mentions(&adf),
+            [(
+                "5b10ac8d82e05b22cc7d4ef5".to_owned(),
+                "@Ana Example".to_owned()
+            )]
         );
-        // What was read is what is written back: the same node.
-        assert_eq!(from_markdown(&to_markdown(&adf)), adf);
     }
 
     #[test]
-    fn a_mention_whose_id_is_no_account_id_reads_as_its_text() {
-        // An id that holds `)` or a space would break the link it is written into, and is no
-        // account a mention could be written back with.
-        let adf = json!({"type": "doc", "version": 1, "content": [{"type": "paragraph",
-            "content": [{"type": "mention", "attrs": {"id": "ana) x", "text": "@Ana Example"}}]}]});
-        assert_eq!(to_markdown(&adf), "@Ana Example");
+    fn the_markup_a_tracker_adds_is_removed_and_its_words_stay() {
+        assert_eq!(
+            without_markup("a <custom data-type=\"x\">b</custom> <Custom>c</CUSTOM> <customer>"),
+            "a b c <customer>"
+        );
+        assert_eq!(without_markup("1 < 2 <custom"), "1 < 2 <custom");
     }
 
     #[test]
