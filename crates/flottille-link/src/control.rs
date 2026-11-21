@@ -106,7 +106,8 @@ pub const SILENCE: Duration = Duration::from_secs(80);
 /// The packets of links waiting in a device's session, each way: past them a packet is dropped,
 /// as a network drops one.
 const RELAY_WAITING: usize = 256;
-/// The longest packet of a link a session carries: QUIC through the hub sends 1200 bytes at most.
+/// The longest packet of a link a session carries: QUIC through the hub starts at 1200 bytes, and
+/// its discovery of the path's size goes up to 1452.
 pub const RELAY_PACKET: usize = 1500;
 
 /// Anything a session runs over: a TCP stream, or TLS over one.
