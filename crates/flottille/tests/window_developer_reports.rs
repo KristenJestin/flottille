@@ -204,11 +204,7 @@ fn the_export_button_writes_the_findings_to_a_file(cx: &mut TestAppContext) {
     click(cx, "findings-export");
 
     let file = user.path("state/flottille/findings.json");
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !file.exists() {
-        assert!(Instant::now() < deadline, "the file was never written");
-        std::thread::sleep(Duration::from_millis(25));
-    }
+    until(&shell, cx, "the file is written", |_| file.exists());
     let exported: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
     assert_eq!(
         exported["findings"][0]["title"],
