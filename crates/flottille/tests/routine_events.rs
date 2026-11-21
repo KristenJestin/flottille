@@ -292,9 +292,8 @@ fn a_failed_run_of_the_workflow_starts_the_routine() {
                 .iter()
                 .filter_map(Value::as_str)
                 .collect();
-            args.starts_with(&["run", "list"])
-                && args.windows(2).any(|w| w == ["--workflow", "nightly.yml"])
-                && args.windows(2).any(|w| w == ["--branch", "dev"])
+            args.starts_with(&["api", "--method", "GET", "repos/acme/app/actions/runs"])
+                && args.windows(2).any(|w| w == ["-f", "branch=dev"])
         }),
         "{:?}",
         user.gh_received()
