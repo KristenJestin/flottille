@@ -908,6 +908,7 @@ pub fn reads(tool: &str, args: &Value) -> bool {
                 | "search"
                 | "show"
                 | "people"
+                | "me"
                 | "types"
                 | "fields"
                 | "link_types"

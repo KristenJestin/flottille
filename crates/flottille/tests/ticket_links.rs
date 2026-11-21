@@ -1281,7 +1281,7 @@ fn show_gives_each_comment_author_s_account_id() {
 }
 
 #[test]
-fn a_mention_read_in_a_comment_keeps_its_account_id() {
+fn a_mention_read_in_a_comment_is_a_name_and_its_account_id_stays_beside_it() {
     let user = user();
     on_jira(&user);
     let mut comment = person("20000", "");
@@ -1298,8 +1298,9 @@ fn a_mention_read_in_a_comment_keeps_its_account_id() {
         &mcp,
         json!({"action": "show", "ticket": "ABC-1", "detail": "full"}),
     );
+    assert!(shown.contains("Thanks @Ana Example"), "{shown}");
     assert!(
-        shown.contains("Thanks [@Ana Example](mention:5b10ac8d82e05b22cc7d4ef5)"),
+        shown.contains("mentions @Ana Example (account 5b10ac8d82e05b22cc7d4ef5)"),
         "{shown}"
     );
 }

@@ -29,6 +29,8 @@ mod ticket_edit_rest;
 mod ticket_fields;
 #[path = "../ticket_jira_replies.rs"]
 mod ticket_jira_replies;
+#[path = "../ticket_jira_review.rs"]
+mod ticket_jira_review;
 #[path = "../ticket_links.rs"]
 mod ticket_links;
 #[path = "../ticket_milestones.rs"]
