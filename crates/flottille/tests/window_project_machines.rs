@@ -195,6 +195,14 @@ fn homes(shell: &Entity<Shell>, name: &str, cx: &mut VisualTestContext) -> Vec<S
     })
 }
 
+fn bounds(
+    cx: &mut VisualTestContext,
+    id: impl Into<gpui_kit::ElementId>,
+) -> gpui_kit::Bounds<gpui_kit::Pixels> {
+    let id = id.into();
+    cx.update(|window, _| window.find(id).bounds())
+}
+
 const APP: &str = "https://git.example/acme/app.git";
 const SITE: &str = "git@git.example:acme/site.git";
 
@@ -236,6 +244,17 @@ fn one_project_on_two_machines_is_one_row_with_both_icons(cx: &mut TestAppContex
 
     assert!(present(cx, project_mark_id("app", "pc")));
     assert!(present(cx, project_mark_id("app", "server")));
+    // The marks come after the name, at the end of the row, as the approved prototype draws them.
+    let row = bounds(cx, project_id("app"));
+    let (pc, server) = (
+        bounds(cx, project_mark_id("app", "pc")),
+        bounds(cx, project_mark_id("app", "server")),
+    );
+    assert!(
+        pc.origin.x > row.origin.x + row.size.width / 2.0,
+        "the marks are in the right half of the row: {pc:?} in {row:?}"
+    );
+    assert!(pc.origin.x < server.origin.x, "side by side, in order");
     assert!(!present(cx, project_id("ledgerly")), "one row, not two");
     assert!(!present(cx, project_id("app@server")));
 }

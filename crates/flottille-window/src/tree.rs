@@ -817,7 +817,7 @@ pub struct ProjectNode {
     title: SharedString,
     /// The machine that has a project of this name which this is not: said in small after it.
     apart: Option<SharedString>,
-    /// The machines that have it, each marked before the name; none while this machine is alone.
+    /// The machines that have it, each marked after the name; none while this machine is alone.
     homes: Vec<Home>,
     open: bool,
     mark: Mark,
@@ -1067,18 +1067,28 @@ impl Render for ProjectNode {
                 .child(meta(machine, cx))
                 .test_support()
         });
+        // After the name, before the project's own mark, as the approved prototype draws them.
+        let marks = (!marks.is_empty()).then(|| {
+            div()
+                .flex()
+                .items_center()
+                .gap(px(3.))
+                .opacity(shown)
+                .children(marks)
+        });
         let trailing = div()
             .flex()
             .items_center()
             .gap(space::SM)
             .children(apart)
+            .children(marks)
             .child(trailing(
                 project_commands_id(&key),
                 self.commands,
                 self.mark.icon(&format!("project-{key}")),
                 cx,
             ));
-        let mut row = TreeLevel::Project
+        let row = TreeLevel::Project
             .row(id, self.title.clone())
             .expanded(self.open)
             .trailing(trailing)
@@ -1093,16 +1103,6 @@ impl Render for ProjectNode {
                     })
                     .ok();
             });
-        if !marks.is_empty() {
-            row = row.leading(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(3.))
-                    .opacity(shown)
-                    .children(marks),
-            );
-        }
         // A project only machines that are off have: its row fades its ink, and says since when.
         let greyed = fade(
             ElementId::Name(format!("project-greyed-fade-{key}").into()),

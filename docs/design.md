@@ -1085,8 +1085,8 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   machine of the user together (a session of another machine carries that machine's name on its
   second line, `server`, greyed with `server offline since 22:14` while it is off,
   `docs/remote.md`, "One list of every machine"). **Each project row says where it lives**: with
-  another machine paired, a mark before its name for every machine that has it, the machine's
-  icon in its colour (`docs/remote.md`, "A device's card"), side by side, this machine's
+  another machine paired, a mark after its name for every machine that has it (at the end of the row,
+  before the row's own mark of what it holds), the machine's icon in its colour (`docs/remote.md`, "A device's card"), side by side, this machine's
   included; hovering a mark says `server · online`, `server · offline since 14:02` or `pc · this
   machine`. **A project several machines have is one row**: two projects are the same when the
   remotes of their repositories are the same (normalised: scheme, user, port, `.git` and the
