@@ -233,10 +233,22 @@ fn settings_show_and_change_another_machine_s(cx: &mut TestAppContext) {
         present(cx, "settings-machine-here"),
         "this machine is offered"
     );
+    assert_eq!(
+        label(cx, "settings-machine-server-label").as_deref(),
+        Some("server")
+    );
+    // Its role and its state are its line, and each machine is marked by its icon and colour:
+    // this one's on the chooser, the server's in its row.
     assert!(
-        label(cx, "settings-machine-server").is_some_and(|said| said.starts_with("server")),
+        label(cx, "settings-machine-server-detail")
+            .is_some_and(|said| said.contains("runner") && said.contains("online")),
         "{:?}",
-        label(cx, "settings-machine-server")
+        label(cx, "settings-machine-server-detail")
+    );
+    assert!(
+        label(cx, "settings-machine-mark").is_some_and(|said| said.contains(" in ")),
+        "{:?}",
+        label(cx, "settings-machine-mark")
     );
     click(&shell, "settings-machine-server", cx);
     until(&shell, cx, "the server is shown", |cx| {
@@ -554,10 +566,10 @@ fn a_machine_that_is_off_shows_greyed_and_sends_nothing(cx: &mut TestAppContext)
     settings_of(&shell, "here", cx);
     click(&shell, "settings-machine", cx);
     assert!(
-        label(cx, "settings-machine-server-line")
+        label(cx, "settings-machine-server-detail")
             .is_some_and(|said| said.contains("offline since")),
         "{:?}",
-        label(cx, "settings-machine-server-line")
+        label(cx, "settings-machine-server-detail")
     );
 }
 
@@ -627,4 +639,119 @@ fn every_request_of_a_page_goes_to_its_machine_signed(cx: &mut TestAppContext) {
     }
     // What is the window's own is asked of this machine only.
     assert!(!log.contains("appearance.show asked by pc"), "{log}");
+}
+
+/// The page of the project `name`, open on the machine in front.
+fn open_project(shell: &Entity<Shell>, name: &str, cx: &mut VisualTestContext) {
+    let project = name.to_owned();
+    shell.update_in(cx, |shell, window, cx| {
+        shell.open(Selection::Project(project), window, cx)
+    });
+    let project = name.to_owned();
+    until(shell, cx, "the project's page", |cx| {
+        shell.read_with(cx, |s, cx| {
+            s.main()
+                .read(cx)
+                .project_page()
+                .is_some_and(|page| page.read(cx).name() == project)
+        })
+    });
+    settle(shell, cx);
+}
+
+fn shown(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Option<String> {
+    shell.read_with(cx, |s, _| s.machine_shown())
+}
+
+#[gpui_kit::test]
+fn the_composer_picks_the_machine_among_those_that_have_the_project(cx: &mut TestAppContext) {
+    let (_hub, pc, _server) = pc_and_server();
+    project(&pc.user, "solo");
+    let (shell, cx) = window(&pc, cx);
+
+    // A project on one machine has no picker.
+    open_project(&shell, "solo", cx);
+    assert!(!present(cx, "machine-picker"), "one machine: no picker");
+
+    // On two, the picker says the machine in front and lists the machines that have the project.
+    open_project(&shell, "app", cx);
+    until(&shell, cx, "the machine picker", |cx| {
+        present(cx, "machine-picker")
+    });
+    assert_eq!(label(cx, "machine-picker").as_deref(), Some("pc"));
+    click(&shell, "machine-picker", cx);
+    assert_eq!(label(cx, "machine-choice-here-label").as_deref(), Some("pc"));
+    assert_eq!(
+        label(cx, "machine-choice-server-label").as_deref(),
+        Some("server")
+    );
+
+    // Choosing the server shows its page of the project, the place back on `main`.
+    click(&shell, "machine-choice-server", cx);
+    until(&shell, cx, "the server's page of the project", |cx| {
+        shell.read_with(cx, |s, cx| {
+            s.machine_shown().as_deref() == Some("server")
+                && s.main()
+                    .read(cx)
+                    .project_page()
+                    .is_some_and(|page| page.read(cx).name() == "app")
+        })
+    });
+    settle(&shell, cx);
+    assert_eq!(label(cx, "machine-picker").as_deref(), Some("server"));
+    assert_eq!(label(cx, "place-picker").as_deref(), Some("main"));
+}
+
+#[gpui_kit::test]
+fn an_offline_machine_is_disabled_in_the_picker_and_says_since_when(cx: &mut TestAppContext) {
+    let (_hub, pc, server) = pc_and_server();
+    let (shell, cx) = window(&pc, cx);
+    open_project(&shell, "app", cx);
+    until(&shell, cx, "the machine picker", |cx| {
+        present(cx, "machine-picker")
+    });
+    assert!(server.user.run(&["daemon", "stop"]).status.success());
+    pc.wait_for("server", "offline");
+    until(&shell, cx, "the picker lists the server as off", |cx| {
+        if !present(cx, "machine-choice-server") {
+            cx.update(|window, cx| window.click("machine-picker".to_owned(), cx));
+        }
+        label(cx, "machine-choice-server-detail")
+            .is_some_and(|said| said.starts_with("offline since "))
+    });
+    click(&shell, "machine-choice-server", cx);
+    assert_eq!(shown(&shell, cx), None, "an offline machine is not chosen");
+}
+
+#[gpui_kit::test]
+fn a_chosen_machine_that_goes_off_says_to_pick_another_or_wait(cx: &mut TestAppContext) {
+    let (_hub, pc, server) = pc_and_server();
+    let (shell, cx) = window(&pc, cx);
+    open_project(&shell, "app", cx);
+    until(&shell, cx, "the machine picker", |cx| {
+        present(cx, "machine-picker")
+    });
+    click(&shell, "machine-picker", cx);
+    click(&shell, "machine-choice-server", cx);
+    until(&shell, cx, "the server is shown", |cx| {
+        shown(&shell, cx).as_deref() == Some("server")
+    });
+    settle(&shell, cx);
+    assert!(!present(cx, "composer-machine-off"), "online: no notice");
+
+    assert!(server.user.run(&["daemon", "stop"]).status.success());
+    pc.wait_for("server", "offline");
+    until(&shell, cx, "the notice under the composer", |cx| {
+        label(cx, "composer-machine-off").is_some_and(|said| {
+            said.starts_with("server is offline since ") && said.contains("pick another")
+        })
+    });
+    // It can be left: this machine is still chosen from the picker.
+    click(&shell, "machine-picker", cx);
+    click(&shell, "machine-choice-here", cx);
+    until(&shell, cx, "this machine is back in front", |cx| {
+        shown(&shell, cx).is_none()
+    });
+    settle(&shell, cx);
+    assert!(!present(cx, "composer-machine-off"));
 }
