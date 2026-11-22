@@ -335,7 +335,10 @@ fn read(
     key: (String, String),
 ) -> Result<(Vec<ImageUpload>, Vec<TextUpload>), Failure> {
     use base64::Engine as _;
-    let upload = {
+    // The files are read and the folder deleted under the guard that took the upload out of the
+    // table: a chunk of the same name that comes after finds the table without it and its own
+    // folder to make, never this one to lose.
+    let read = {
         let mut uploads = held.lock().unwrap();
         let Some(upload) = uploads.get(&key) else {
             return Err(Failure::new(
@@ -359,33 +362,38 @@ fn read(
                 file.size
             )));
         }
-        uploads.remove(&key).expect("it is there")
+        let upload = uploads.remove(&key).expect("it is there");
+        let files: Result<Vec<_>, Failure> = upload
+            .files
+            .iter()
+            .map(|((kind, number), file)| {
+                let bytes =
+                    std::fs::read(upload.folder.join(file_name(*kind, *number))).map_err(|e| {
+                        Failure::new(
+                            "unavailable",
+                            format!("{} {number} cannot be read: {e}", kind.said()),
+                        )
+                    })?;
+                Ok((*kind, *number, file.mime.clone(), bytes))
+            })
+            .collect();
+        let _ = std::fs::remove_dir_all(&upload.folder);
+        files?
     };
-    let taken = (|| {
-        let (mut images, mut texts) = (Vec::new(), Vec::new());
-        for ((kind, number), file) in &upload.files {
-            let bytes =
-                std::fs::read(upload.folder.join(file_name(*kind, *number))).map_err(|e| {
-                    Failure::new(
-                        "unavailable",
-                        format!("{} {number} cannot be read: {e}", kind.said()),
-                    )
-                })?;
-            match kind {
-                Kind::Picture => images.push(ImageUpload {
-                    mime: file.mime.clone().unwrap_or_default(),
-                    data: base64::engine::general_purpose::STANDARD.encode(bytes),
-                }),
-                Kind::Text => texts.push(TextUpload {
-                    name: pasted::NAME.to_owned(),
-                    text: String::from_utf8(bytes).map_err(|_| {
-                        Failure::refused(format!("pasted text {number} is not UTF-8 text"))
-                    })?,
-                }),
-            }
+    let (mut images, mut texts) = (Vec::new(), Vec::new());
+    for (kind, number, mime, bytes) in read {
+        match kind {
+            Kind::Picture => images.push(ImageUpload {
+                mime: mime.unwrap_or_default(),
+                data: base64::engine::general_purpose::STANDARD.encode(bytes),
+            }),
+            Kind::Text => texts.push(TextUpload {
+                name: pasted::NAME.to_owned(),
+                text: String::from_utf8(bytes).map_err(|_| {
+                    Failure::refused(format!("pasted text {number} is not UTF-8 text"))
+                })?,
+            }),
         }
-        Ok((images, texts))
-    })();
-    let _ = std::fs::remove_dir_all(&upload.folder);
-    taken
+    }
+    Ok((images, texts))
 }
