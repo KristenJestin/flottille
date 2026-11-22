@@ -676,13 +676,18 @@ offline.
 **What the hub's hello proves.** On an `http://` hub, anything on the way could add a protocol to
 the hub's hello, to have the device say it needs an update, or take one out, to have both speak a
 lower one. So the hub signs its hello with its key, in its handshake and in its refusal before it,
-over `flottille-hub-hello-v1`, a zero byte, the device's key, both nonces, its version and its
-protocols (`crates/flottille-link/src/control.rs`), so that it holds for this session only; its
+over `flottille-hub-hello-v1`, a zero byte, the device's key, both nonces, the device's hello as
+the hub received it (which it chose the protocol from) and its own, each its version and its
+protocols (`crates/flottille-link/src/control.rs`), so that it holds for this session only and
+does not check for a device whose hello was changed on the way; its
 refusal before the handshake carries its key and its nonce for it. A device says it needs an
 update, or the hub does, and speaks a lower protocol than its newest, only from a hello the key it
-pinned signed. A hello unsigned, or whose signature does not check, opens a session only when it
-offers the device's newest protocol, nothing being lower then; otherwise the device says the hub
-could not be reached, and keeps trying. A hub of before 2026-11-22 signs nothing: a device of this
+pinned signed. A hello whose signature does not check (one of the two hellos was changed on the
+way) is the hub not reached. A hello unsigned opens a session only when it offers the device's
+newest protocol, nothing being lower then; otherwise the device says the hub could not be reached,
+and keeps trying. Something on the way that takes the signature out and changes the device's hello
+can still have a hub of this version speak a lower protocol than the device does: the two then
+disagree on the protocol, and the device draws no verdict from it. A hub of before 2026-11-22 signs nothing: a device of this
 version reaches it while it speaks the device's newest protocol, as before, and otherwise says it
 cannot reach it (its words say that an older hub is updated on its host) instead of that it needs
 an update; a device of before reads this hub's hello as it did, the signature beside it ignored. At first each side speaks one version; the list lets the Android app, published apart,

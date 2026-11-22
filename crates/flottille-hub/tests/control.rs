@@ -2625,3 +2625,44 @@ async fn a_hub_that_does_not_sign_its_hello_is_reached_on_the_device_s_newest_pr
         .await;
     assert_hello_not_taken(said, "an unsigned refusal of protocol 1");
 }
+
+/// The device's hello, `{"key": …, "hello": …}`, its protocols made `protocols` on its way to the
+/// hub.
+fn device_hello_made(
+    protocols: serde_json::Value,
+) -> std::sync::Arc<dyn Fn(&str) -> String + Send + Sync> {
+    std::sync::Arc::new(move |line: &str| {
+        if !line.starts_with(r#"{"key":"#) {
+            return line.to_owned();
+        }
+        let mut said: serde_json::Value = serde_json::from_str(line).unwrap();
+        said["hello"]["protocols"] = protocols.clone();
+        format!("{said}\n")
+    })
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_device_hello_changed_on_the_way_never_lowers_the_hub_s_protocol() {
+    let place = Place::new();
+    let key = hub_signer(&place.hub_folder());
+    let both = Hello {
+        flottille: "0.4.0".to_owned(),
+        protocols: vec![1, 2],
+    };
+    let hub = hub_saying(hub_signer(&place.hub_folder()), both.clone()).await;
+    let machine = place.machine("pc");
+    // The device's hello made [1] on its way: the hub would speak 1, the device 2. The hub signs
+    // its hello over the device's hello as it received it, which the device does not check.
+    let (middle, _) = relay(hub, device_hello_made(serde_json::json!([1]))).await;
+    let said = pinned_to(middle, &key)
+        .connect(&machine, &both, &Tls::System)
+        .await;
+    assert_hello_not_taken(said, "the device's protocols made [1]");
+
+    // Made [999], the hub refuses it: no verdict either.
+    let (middle, _) = relay(hub, device_hello_made(serde_json::json!([999]))).await;
+    let said = pinned_to(middle, &key)
+        .connect(&machine, &hello(), &Tls::System)
+        .await;
+    assert_hello_not_taken(said, "the device's protocols made [999]");
+}
