@@ -6001,3 +6001,488 @@ fn verify_and_the_partitions_both_put_the_flaky_tests_in_their_summary() {
         ci_job("verify")
     );
 }
+
+// The release's APK, the Android tests offline and the betas' clean-up (#1196).
+
+/// The `if:` of the first job or step in `text`, the way GitHub reads it: on one line, or folded
+/// (`>-`) over the lines indented under it.
+fn condition_of(text: &str) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let at = lines
+        .iter()
+        .position(|l| l.trim_start().starts_with("if:"))
+        .unwrap_or_else(|| panic!("no condition in {text}"));
+    let indent = lines[at].len() - lines[at].trim_start().len();
+    let first = lines[at].trim_start()["if:".len()..].trim();
+    let mut expression = if first == ">-" {
+        String::new()
+    } else {
+        first.to_owned()
+    };
+    for line in &lines[at + 1..] {
+        if line.trim().is_empty() || line.len() - line.trim_start().len() <= indent {
+            break;
+        }
+        expression.push(' ');
+        expression.push_str(line.trim());
+    }
+    expression
+        .trim()
+        .trim_start_matches("${{")
+        .trim_end_matches("}}")
+        .trim()
+        .to_owned()
+}
+
+/// Whether `expression` holds for `context`, with the operators `ci.yml` uses: `!`, `==`, `!=`,
+/// `&&`, `||`, parentheses, quoted strings, `cancelled()` and `always()`. A name the context does
+/// not give fails the test: a condition that reads something new says so here.
+fn holds(expression: &str, context: &[(&str, &str)]) -> bool {
+    #[derive(Debug, PartialEq, Clone)]
+    enum Token {
+        Open,
+        Close,
+        Not,
+        Equal,
+        Different,
+        And,
+        Or,
+        Text(String),
+        Name(String),
+    }
+    let chars: Vec<char> = expression.chars().collect();
+    let mut tokens = Vec::new();
+    let mut at = 0;
+    while at < chars.len() {
+        let two: String = chars[at..].iter().take(2).collect();
+        match chars[at] {
+            ' ' => at += 1,
+            '(' => {
+                tokens.push(Token::Open);
+                at += 1;
+            }
+            ')' => {
+                tokens.push(Token::Close);
+                at += 1;
+            }
+            '\'' => {
+                let end = at + 1 + chars[at + 1..].iter().position(|c| *c == '\'').unwrap();
+                tokens.push(Token::Text(chars[at + 1..end].iter().collect()));
+                at = end + 1;
+            }
+            _ if two == "==" => {
+                tokens.push(Token::Equal);
+                at += 2;
+            }
+            _ if two == "!=" => {
+                tokens.push(Token::Different);
+                at += 2;
+            }
+            _ if two == "&&" => {
+                tokens.push(Token::And);
+                at += 2;
+            }
+            _ if two == "||" => {
+                tokens.push(Token::Or);
+                at += 2;
+            }
+            '!' => {
+                tokens.push(Token::Not);
+                at += 1;
+            }
+            c if c.is_alphanumeric() || "._-".contains(c) => {
+                let end = at
+                    + chars[at..]
+                        .iter()
+                        .take_while(|c| c.is_alphanumeric() || "._-".contains(**c))
+                        .count();
+                let mut name: String = chars[at..end].iter().collect();
+                at = end;
+                if chars[at..].starts_with(&['(', ')']) {
+                    name.push_str("()");
+                    at += 2;
+                }
+                tokens.push(Token::Name(name));
+            }
+            c => panic!("{c:?} in {expression}"),
+        }
+    }
+
+    // or := and ("||" and)*, and := not ("&&" not)*, not := "!" not | compare,
+    // compare := atom (("==" | "!=") atom)?, atom := "(" or ")" | text | name.
+    struct Parser<'a> {
+        tokens: Vec<Token>,
+        at: usize,
+        context: &'a [(&'a str, &'a str)],
+    }
+    impl Parser<'_> {
+        fn eat(&mut self, token: &Token) -> bool {
+            let found = self.tokens.get(self.at) == Some(token);
+            self.at += usize::from(found);
+            found
+        }
+        fn truthy(value: &str) -> bool {
+            !matches!(value, "" | "false" | "0")
+        }
+        fn or(&mut self) -> bool {
+            let mut value = self.and();
+            while self.eat(&Token::Or) {
+                let next = self.and();
+                value = value || next;
+            }
+            value
+        }
+        fn and(&mut self) -> bool {
+            let mut value = self.not();
+            while self.eat(&Token::And) {
+                let next = self.not();
+                value = value && next;
+            }
+            value
+        }
+        fn not(&mut self) -> bool {
+            if self.eat(&Token::Not) {
+                return !self.not();
+            }
+            let left = self.atom();
+            if self.eat(&Token::Equal) {
+                return left == self.atom();
+            }
+            if self.eat(&Token::Different) {
+                return left != self.atom();
+            }
+            Self::truthy(&left)
+        }
+        fn atom(&mut self) -> String {
+            if self.eat(&Token::Open) {
+                let value = self.or();
+                assert!(self.eat(&Token::Close), "a closing parenthesis");
+                return value.to_string();
+            }
+            match self.tokens.get(self.at).cloned() {
+                Some(Token::Text(text)) => {
+                    self.at += 1;
+                    text
+                }
+                Some(Token::Name(name)) => {
+                    self.at += 1;
+                    match name.as_str() {
+                        "cancelled()" => "false".into(),
+                        "always()" => "true".into(),
+                        _ => self
+                            .context
+                            .iter()
+                            .find(|(key, _)| *key == name)
+                            .unwrap_or_else(|| panic!("the condition reads {name}"))
+                            .1
+                            .to_owned(),
+                    }
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+    }
+    let mut parser = Parser {
+        tokens,
+        at: 0,
+        context,
+    };
+    let value = parser.or();
+    assert_eq!(parser.at, parser.tokens.len(), "{expression}");
+    value
+}
+
+/// The text of the step of `job` named `name`: from its `- name:` line to the next step's.
+fn step_of(job: &str, name: &str) -> String {
+    let lines: Vec<&str> = job.lines().collect();
+    let start = lines
+        .iter()
+        .position(|l| *l == format!("      - name: {name}"))
+        .unwrap_or_else(|| panic!("no step {name}"));
+    let end = lines[start + 1..]
+        .iter()
+        .position(|l| l.starts_with("      - "))
+        .map_or(lines.len(), |at| start + 1 + at);
+    lines[start..end].join("\n")
+}
+
+#[test]
+fn android_sign_runs_on_a_push_and_on_a_release_build_of_main_only() {
+    // A release build of main is `Release`'s workflow_dispatch of ci.yml on main: a commit main
+    // holds is always a released commit of dev. A run started by hand on any other ref, a stable
+    // line's tag included, a pull request's run, and a build that failed reach no key.
+    let runs = [
+        ("push", "refs/heads/main", true),
+        ("push", "refs/heads/dev", true),
+        ("push", "refs/heads/stable/0.4", true),
+        ("workflow_dispatch", "refs/heads/main", true),
+        ("workflow_dispatch", "refs/heads/dev", false),
+        ("workflow_dispatch", "refs/heads/fix/1-a", false),
+        ("workflow_dispatch", "refs/heads/next/0.5", false),
+        ("workflow_dispatch", "refs/heads/stable/0.4", false),
+        ("workflow_dispatch", "refs/tags/v0.4.1", false),
+        ("pull_request", "refs/pull/7/merge", false),
+    ];
+    let sign = condition_of(&ci_job("android-sign"));
+    let attach = condition_of(&step_of(&ci_job("publish"), "The signed APK"));
+    for (event, git_ref, signs) in runs {
+        let context = [
+            ("github.event_name", event),
+            ("github.ref", git_ref),
+            ("needs.android.result", "success"),
+        ];
+        assert_eq!(
+            holds(&sign, &context),
+            signs,
+            "android-sign: {event} {git_ref}"
+        );
+        // `publish` attaches the signed APK on the very runs that signed it, no others.
+        assert_eq!(
+            holds(&attach, &context),
+            signs,
+            "publish: {event} {git_ref}"
+        );
+    }
+    for result in ["failure", "skipped", "cancelled"] {
+        let context = [
+            ("github.event_name", "push"),
+            ("github.ref", "refs/heads/main"),
+            ("needs.android.result", result),
+        ];
+        assert!(!holds(&sign, &context), "android {result}");
+    }
+}
+
+/// Every file under `dir`, folders walked.
+fn files_under(dir: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            files.extend(files_under(&path));
+        } else {
+            files.push(path);
+        }
+    }
+    files
+}
+
+#[test]
+fn the_android_tests_never_fetch_at_test_time() {
+    let gradle = std::fs::read_to_string(tool("apps/android/app/build.gradle.kts")).unwrap();
+    // The jars Robolectric loads are a Gradle dependency, resolved to a folder by a task of their
+    // own, and every test task is told to read that folder and to fetch nothing.
+    assert!(
+        gradle.contains("org.robolectric:android-all-instrumented:"),
+        "the jars are a dependency: {gradle}"
+    );
+    assert!(
+        gradle.contains("\"robolectric.offline\", \"true\""),
+        "{gradle}"
+    );
+    assert!(
+        gradle.contains("\"robolectric.dependency.dir\""),
+        "{gradle}"
+    );
+    assert!(
+        gradle.contains("dependsOn(fetchRobolectricJars)"),
+        "a test never runs before its jars are there: {gradle}"
+    );
+
+    // One jar per SDK a test can run on: the SDKs the tests name (`@Config(sdk = [..])`) and the
+    // app's `targetSdk`, which Robolectric asks for too (the first run of this job found 35's
+    // missing: every test failed with "Path is not a file"). The version of each is the one
+    // Robolectric 4.14.1's `DefaultSdkProvider` names for it.
+    let jar = |sdk: u32| match sdk {
+        34 => "14-robolectric-10818077-i7",
+        35 => "15-robolectric-12650502-i7",
+        other => panic!("SDK {other}: add its Robolectric version to this test"),
+    };
+    let mut sdks = std::collections::BTreeSet::new();
+    let target = gradle
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("targetSdk = "))
+        .expect("a targetSdk");
+    sdks.insert(target.trim().parse::<u32>().unwrap());
+    let tests = tool("apps/android/app/src/test");
+    for entry in files_under(&tests) {
+        let text = std::fs::read_to_string(&entry).unwrap_or_default();
+        for list in text.split("sdk = [").skip(1) {
+            let list = &list[..list.find(']').unwrap()];
+            sdks.extend(list.split(',').map(|n| n.trim().parse::<u32>().unwrap()));
+        }
+    }
+    for sdk in sdks {
+        assert!(
+            gradle.contains(&format!("\"{}\"", jar(sdk))),
+            "the jar of SDK {sdk} is a dependency: {gradle}"
+        );
+    }
+    // Each in a configuration of its own: in one, Gradle keeps the newest version of the module
+    // and drops the others (the second run of this job found only SDK 35's jar in the folder).
+    assert!(gradle.contains("detachedConfiguration("), "{gradle}");
+    assert!(!gradle.contains("robolectricJars("), "{gradle}");
+
+    // The job fetches them in a step of their own, before the tests, which may retry; the tests
+    // are not run with the network's help.
+    let script = std::fs::read_to_string(tool("apps/android/ci.sh")).unwrap();
+    let fetch = script
+        .find(":app:fetchRobolectricJars")
+        .expect("ci.sh fetches the jars");
+    let tests = script
+        .find(":app:testDebugUnitTest")
+        .expect("ci.sh runs the unit tests");
+    assert!(fetch < tests, "the jars before the tests: {script}");
+    assert!(
+        script[..fetch].contains("for attempt in"),
+        "a network hiccup is retried: {script}"
+    );
+    assert!(
+        script[..fetch].contains("the Robolectric jars"),
+        "the step says what it does: {script}"
+    );
+    assert!(
+        ci_job("android").contains("apps/android/ci.sh"),
+        "the job runs it"
+    );
+}
+
+/// The `prune` step of `beta-cleanup.yml`, run against `FAKE_RELEASES_GH`, with no pause between
+/// two deletions: the other settings of the workflow (`env`) are the ones the tests below read.
+fn prune(fake: &Fake) -> Output {
+    fake.run(
+        &step_script(".github/workflows/beta-cleanup.yml", "prune"),
+        &[
+            ("GH_TOKEN", "unused"),
+            ("KEEP", &prune_setting("KEEP")),
+            ("MAX_DELETIONS", &prune_setting("MAX_DELETIONS")),
+            ("PAUSE", "0"),
+        ],
+    )
+}
+
+/// The value of an `env` entry of the pruning step, as the workflow says it.
+fn prune_setting(name: &str) -> String {
+    let text = std::fs::read_to_string(tool(".github/workflows/beta-cleanup.yml")).unwrap();
+    let prefix = format!("{name}: ");
+    text.lines()
+        .find_map(|l| l.trim().strip_prefix(&prefix).map(str::to_owned))
+        .unwrap_or_else(|| panic!("beta-cleanup.yml sets no {name}"))
+}
+
+#[test]
+fn the_betas_of_a_version_keep_the_last_ten() {
+    let fake = Fake::new();
+    let mut state: Vec<String> = (1..=14).map(|n| format!("v0.4.0-beta.{n}")).collect();
+    // Another version: eleven, and only the oldest goes.
+    state.extend((1..=11).map(|n| format!("v0.5.0-beta.{n}")));
+    // Few of a version: kept. Never a stable release, a release candidate, a next build or an alpha,
+    // however many.
+    state.extend((1..=3).map(|n| format!("v0.3.0-beta.{n}")));
+    state.extend((1..=12).map(|n| format!("v0.4.1-rc.{n}")));
+    state.extend((1..=12).map(|n| format!("v0.6.0-next.{n}")));
+    state.extend((1..=12).map(|n| format!("v0.4.0-alpha.feat-a.{n}")));
+    state.extend(["v0.4.0".into(), "v0.3.0".into(), "v0.4.1".into()]);
+    let before = state.clone();
+    fake.state(&state.iter().map(String::as_str).collect::<Vec<_>>());
+
+    let output = prune(&fake);
+
+    assert!(output.status.success(), "{output:?}");
+    let kept = fake.tags();
+    // 1..=4 of 0.4.0 are gone (2 and 10 are not ordered as text), and 0.5.0's first.
+    let gone: Vec<String> = before
+        .iter()
+        .filter(|tag| !kept.contains(tag))
+        .cloned()
+        .collect();
+    let expected: Vec<String> = (1..=4)
+        .map(|n| format!("v0.4.0-beta.{n}"))
+        .chain(["v0.5.0-beta.1".to_owned()])
+        .collect();
+    assert_eq!(gone, expected, "kept: {kept:?}");
+    // Their tags go with them.
+    let log = fake.log();
+    let deletes: Vec<&str> = log
+        .lines()
+        .filter(|l| l.starts_with("release delete"))
+        .collect();
+    assert_eq!(deletes.len(), expected.len(), "{log}");
+    for line in deletes {
+        assert!(
+            line.contains("--cleanup-tag") && line.contains("--yes"),
+            "{line}"
+        );
+    }
+
+    // Run again, nothing more goes.
+    let again = prune(&fake);
+    assert!(again.status.success(), "{again:?}");
+    assert_eq!(fake.tags(), kept);
+}
+
+#[test]
+fn the_pruning_of_the_betas_never_touches_a_release_run() {
+    let ci = std::fs::read_to_string(tool(".github/workflows/ci.yml")).unwrap();
+    // In a workflow of its own, not a job of `ci`: its failure, or its cancellation by a
+    // concurrency group, would fail or cancel the push run `verified-on-dev` reads, and `main`
+    // would run the whole verification again.
+    assert!(
+        !ci.contains("prune") && !ci.contains("--cleanup-tag"),
+        "ci.yml prunes nothing (it deletes its own failed draft, and only that)"
+    );
+    let workflow = std::fs::read_to_string(tool(".github/workflows/beta-cleanup.yml")).unwrap();
+    let triggers = &workflow[..workflow.find("\npermissions:").expect("permissions")];
+    // On a schedule and by hand: a release made with the workflow's token starts no `release`
+    // run, and nothing here runs on a push or a pull request.
+    assert!(
+        triggers.contains("schedule:") && triggers.contains("workflow_dispatch:"),
+        "{triggers}"
+    );
+    for event in ["push:", "pull_request", "workflow_run:", "release:"] {
+        assert!(!triggers.contains(event), "{event} in {triggers}");
+    }
+    // Least privilege: it deletes releases and their tags, and nothing else.
+    assert!(
+        workflow.contains("permissions:\n  contents: write\n"),
+        "{workflow}"
+    );
+    assert!(!workflow.contains("actions/"), "no action, no checkout");
+    assert!(!workflow.contains("secrets."), "{workflow}");
+    // Nothing of the event reaches a command.
+    let script = step_script(".github/workflows/beta-cleanup.yml", "prune");
+    assert!(!script.contains("${{"), "{script}");
+    // One at a time, none cancelled half-way.
+    assert!(workflow.contains("concurrency:"), "{workflow}");
+    assert!(workflow.contains("cancel-in-progress: false"), "{workflow}");
+    // The betas' tags only: a release candidate, a release or an alpha is never listed.
+    assert!(script.contains("-beta\\."), "{script}");
+}
+
+#[test]
+fn the_pruning_deletes_a_few_betas_per_run_with_a_pause_between_calls() {
+    let fake = Fake::new();
+    // The pile of today: far more than a run may delete (GitHub's secondary rate limit).
+    let state: Vec<String> = (1..=80).map(|n| format!("v0.2.0-beta.{n}")).collect();
+    fake.state(&state.iter().map(String::as_str).collect::<Vec<_>>());
+    let per_run: usize = prune_setting("MAX_DELETIONS").parse().expect("a number");
+    assert_eq!(per_run, 30, "the issue says thirty");
+
+    // 70 are older than the last ten: thirty go, then thirty, then ten, then nothing.
+    let mut gone = 0;
+    for (run, expected) in [(1, 30), (2, 30), (3, 10), (4, 0)] {
+        let output = prune(&fake);
+        assert!(output.status.success(), "run {run}: {output:?}");
+        let now = state.len() - fake.tags().len();
+        assert_eq!(now - gone, expected, "run {run}");
+        gone = now;
+    }
+    let expected: Vec<String> = (71..=80).map(|n| format!("v0.2.0-beta.{n}")).collect();
+    assert_eq!(fake.tags(), expected);
+
+    // A pause between two calls, as the workflow says it, never none.
+    let script = step_script(".github/workflows/beta-cleanup.yml", "prune");
+    assert!(script.contains("sleep \"$PAUSE\""), "{script}");
+    let pause: u32 = prune_setting("PAUSE").parse().expect("a number");
+    assert!(pause >= 1, "a pause of {pause} s");
+}
