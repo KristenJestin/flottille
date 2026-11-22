@@ -43,6 +43,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.SemanticsPropertyKey
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
@@ -130,6 +131,7 @@ fun Field(
     modifier: Modifier = Modifier,
     hidden: Boolean = false,
     singleLine: Boolean = true,
+    maxLines: Int = if (singleLine) 1 else Int.MAX_VALUE,
 ) {
     val palette = LocalPalette.current
     var focused by remember { mutableStateOf(false) }
@@ -140,6 +142,7 @@ fun Field(
             value = value,
             onValueChange = onChange,
             singleLine = singleLine,
+            maxLines = maxLines,
             textStyle = Type.Body.copy(color = palette.text),
             cursorBrush = SolidColor(palette.acc),
             visualTransformation = if (hidden) PasswordVisualTransformation() else VisualTransformation.None,
@@ -153,6 +156,27 @@ fun Field(
                 .onFocusChanged { focused = it.isFocused },
         )
     }
+}
+
+/** The fill a control draws now, for the tests: the colour in the middle of its move is no pixel to read. */
+val FillColour = SemanticsPropertyKey<Color>("FillColour")
+
+/**
+ * A block that unfolds and fades in once when [animated] (a message that arrives), and is simply
+ * there otherwise (what the page held when it opened).
+ */
+@Composable
+fun Unfold(animated: Boolean, modifier: Modifier = Modifier, content: @Composable () -> Unit) {
+    if (!animated) {
+        Box(modifier) { content() }
+        return
+    }
+    val state = remember { MutableTransitionState(false).apply { targetState = true } }
+    AnimatedVisibility(
+        visibleState = state,
+        modifier = modifier,
+        enter = fadeIn(Motion.spec(Motion.ENTER)) + expandVertically(Motion.spec(Motion.ENTER)),
+    ) { content() }
 }
 
 /** A small tag, such as the machine a session runs on. */

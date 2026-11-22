@@ -10,6 +10,8 @@ import kotlinx.coroutines.flow.callbackFlow
 import org.flottille.core.ffi.Batch
 import org.flottille.core.ffi.Core
 import org.flottille.core.ffi.Listener
+import org.flottille.core.ffi.Picture
+import org.flottille.core.ffi.Reply
 import org.flottille.core.ffi.Sealer
 import org.flottille.core.ffi.ViewState
 import org.flottille.core.ffi.hubCard as hubCardOf
@@ -75,6 +77,26 @@ class FlottilleCore(folder: File, sealer: Sealer = KeystoreSealer()) : AutoClose
 
     /** The conversation of `agent` of `machine`, in the view state from now on. */
     suspend fun follow(machine: String, agent: String) = core.follow(machine, agent)
+
+    /** The page leaves the screen: the conversation goes from the view state. */
+    fun unfollow() = core.unfollow()
+
+    /** The messages before the oldest held. */
+    suspend fun older(machine: String, agent: String) = core.older(machine, agent)
+
+    /** A message of the user with its pictures, which the core checks before it sends. */
+    suspend fun send(machine: String, agent: String, text: String, pictures: List<Picture>) =
+        core.send(machine, agent, text, pictures)
+
+    /** The answers to the ask `asked`, one [Reply] per question. */
+    suspend fun answerAsk(machine: String, agent: String, asked: Long, replies: List<Reply>) =
+        core.answerAsk(machine, agent, asked.toULong(), replies)
+
+    /** The session's mode: `ask`, `auto` or `full`. */
+    suspend fun setMode(machine: String, agent: String, mode: String) = core.setMode(machine, agent, mode)
+
+    /** The bytes of a picture of the conversation. */
+    suspend fun image(machine: String, agent: String, name: String): ByteArray = core.image(machine, agent, name)
 
     override fun close() = core.close()
 

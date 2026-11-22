@@ -15,11 +15,41 @@
         <activity
             android:name=".MainActivity"
             android:exported="true"
+            android:launchMode="singleTop"
             android:windowSoftInputMode="adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            <!-- The share sheet: pictures only. They open the composer of a session the user picks,
+                 and are never sent without a tap. -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="image/*" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="image/*" />
+            </intent-filter>
         </activity>
+        <!-- The entry point of the app's own PendingIntents (a notification's): not exported, so no
+             other app can name it. A session's machine and agent are taken from an intent that came
+             through it, and from no other. -->
+        <activity-alias
+            android:name=".OpenSession"
+            android:exported="false"
+            android:targetActivity=".MainActivity" />
+        <!-- The camera's shot: one file of the app's cache, handed to the camera app alone. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.pictures"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/picture_paths" />
+        </provider>
     </application>
 </manifest>

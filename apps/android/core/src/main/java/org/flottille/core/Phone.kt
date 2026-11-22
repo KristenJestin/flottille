@@ -18,6 +18,74 @@ data class SessionRow(
     val waiting: Boolean = false,
 )
 
+/** One entry of a conversation: `user`, `agent`, `thought` or `tool`. [seq] orders and names it. */
+data class Entry(val seq: Long, val kind: String, val text: String, val images: List<String> = emptyList())
+
+/** An agent of the session's tree, read only. */
+data class Child(val agent: String, val title: String, val doing: String, val role: String, val depth: Int)
+
+/** The conversation a session page follows, and what its controls depend on. */
+data class Conversation(
+    val machine: String,
+    val agent: String,
+    val title: String,
+    /** `ask`, `auto` or `full`; empty before the machine said it. */
+    val mode: String,
+    /** Whether a turn runs: what Stop interrupts. */
+    val working: Boolean,
+    /** A child is written to by its parent only: its page has no composer. */
+    val child: Boolean,
+    val ended: Boolean,
+    /** Whether older messages remain on the machine. */
+    val more: Boolean,
+    val entries: List<Entry>,
+    val children: List<Child>,
+)
+
+/**
+ * A request of an agent's that waits for Allow or Deny. What the card says comes from the core as
+ * the window says it, never summarised here: [call] the call, [why] every reason and who forwarded
+ * it, [always] why a base request always asks, [source] who asked.
+ */
+data class Request(
+    val machine: String,
+    val number: Long,
+    val agent: String,
+    val tool: String,
+    /** `call`, or `action`; an `action` of `connections` is never allowed from a card. */
+    val kind: String,
+    val call: String,
+    /** A base request always asks, in every mode. */
+    val base: Boolean,
+    val judgement: String,
+    val why: String,
+    val always: String,
+    val source: String,
+    val says: List<String>,
+) {
+    /** A proposal to write a connection: what it would write is read on a computer, as in the window. */
+    val proposesAConnection: Boolean get() = tool == "connections" && kind == "action"
+}
+
+data class AskOption(val label: String, val description: String)
+
+data class AskQuestion(val question: String, val options: List<AskOption>, val multiple: Boolean)
+
+/** A question of an agent's that waits for the user: [asked] is the number `agent.answer` names. */
+data class Ask(
+    val machine: String,
+    val agent: String,
+    val asked: Long,
+    val question: String,
+    val questions: List<AskQuestion>,
+)
+
+/** A picture of a message: its type, its bytes and the name shown for it. */
+class Picture(val mime: String, val bytes: ByteArray, val name: String = "")
+
+/** What the user answered to one question: the options chosen and the words written. */
+data class Reply(val choices: List<String>, val text: String)
+
 /** The sessions of every machine under a project's name: one group, whichever machine runs them. */
 data class Project(val name: String, val sessions: List<SessionRow>)
 
@@ -44,12 +112,20 @@ data class PhoneView(
     val projects: List<Project> = emptyList(),
     val members: List<Member> = emptyList(),
     val said: List<String> = emptyList(),
+    /** The conversation the page on screen follows, none when no page is. */
+    val conversation: Conversation? = null,
+    /** What waits for the user's Allow or Deny, and the questions that wait for an answer. */
+    val requests: List<Request> = emptyList(),
+    val asks: List<Ask> = emptyList(),
 ) {
     val joined: Boolean get() = role.isNotEmpty()
 }
 
-/** Why the core could not do what it was asked: a sentence for the user. */
-class PhoneException(val why: String) : Exception(why)
+/**
+ * Why the core could not do what it was asked: a sentence for the user. [gone] says that what was
+ * answered is no longer waiting (decided already, or not on the machine): its card folds.
+ */
+class PhoneException(val why: String, val gone: Boolean = false) : Exception(why)
 
 /**
  * The core as the screens see it (`docs/remote.md`, "The Android app"): the module's own types, never
@@ -70,4 +146,31 @@ interface Phone {
 
     /** Removes this device from the user's list. */
     suspend fun leave()
+
+    /** Follows the conversation of [agent] of [machine]: in the view while it is on screen. */
+    suspend fun follow(machine: String, agent: String)
+
+    /** The page before the oldest messages held. */
+    suspend fun older(machine: String, agent: String)
+
+    /** The page is left: nothing of it is kept. */
+    fun unfollow()
+
+    /** A message of the user, with pictures, as the window's composer sends it. */
+    suspend fun send(machine: String, agent: String, text: String, pictures: List<Picture>)
+
+    /** The answers to the ask [asked], one per question. */
+    suspend fun answerAsk(machine: String, agent: String, asked: Long, replies: List<Reply>)
+
+    /** Allow ([allow]) or Deny for the request [number] of [machine]. */
+    suspend fun answer(machine: String, number: Long, allow: Boolean)
+
+    /** Puts the session's tree in `ask`, `auto` or `full`. */
+    suspend fun setMode(machine: String, agent: String, mode: String)
+
+    /** Stops the turn the session runs; the agent stays. */
+    suspend fun stop(machine: String, agent: String)
+
+    /** The bytes of a picture of the conversation, by name. */
+    suspend fun picture(machine: String, agent: String, name: String): ByteArray
 }
