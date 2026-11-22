@@ -1074,10 +1074,99 @@ pub fn mark(
         .test_support()
 }
 
-/// A picker of the machines: the machine chosen as its mark, in its colour, and its name, and
-/// the list of the machines, each with its icon, its role and its state, the machine chosen
-/// filled. One that is off or needs an update is greyed and says why; it is not picked. The
-/// owner keeps whether the list is open.
+/// What a chooser of the machines last had to show: kept so that it can fold away with its
+/// words once the user has no choice left (the project is on one machine only).
+struct Kept(Vec<Choice>);
+
+/// `choices` while there are two or more, else the ones the chooser `id` last showed (none if it
+/// never showed any), and whether there is a choice now.
+pub fn kept(
+    id: &'static str,
+    choices: Vec<Choice>,
+    window: &mut gpui_kit::Window,
+    cx: &mut gpui_kit::App,
+) -> (Vec<Choice>, bool) {
+    let present = choices.len() >= 2;
+    let state = window.use_keyed_state(id, cx, |_, _| Kept(Vec::new()));
+    let shown = state.update(cx, |kept, _| {
+        if present {
+            kept.0 = choices;
+        }
+        kept.0.clone()
+    });
+    (shown, present)
+}
+
+/// What [`narrowing`] remembers: how far the block is in, and its width as the last frame
+/// measured it.
+struct Narrow {
+    motion: gpui_design_system::motion::Motion,
+    width: std::rc::Rc<std::cell::Cell<f32>>,
+}
+
+/// `content`, a block of a toolbar that goes while the toolbar stays: it narrows to nothing and
+/// fades over `PANEL` when `present` turns false, and widens in when it turns true again, what
+/// is beside it moving with it. Present at its first frame it is simply there. None once it has
+/// folded away. Build it on every frame, also when it is absent: it is its own state.
+pub fn narrowing(
+    id: &'static str,
+    present: bool,
+    content: gpui_kit::AnyElement,
+    window: &mut gpui_kit::Window,
+    cx: &mut gpui_kit::App,
+) -> Option<gpui_kit::AnyElement> {
+    use gpui_design_system::motion::{Motion, PANEL};
+    use gpui_kit::{Bounds, InteractiveElement as _, IntoElement as _, ParentElement as _};
+    use gpui_kit::{Pixels, Styled as _, TestSupportExt as _, canvas, div, px};
+    let state = window.use_keyed_state(id, cx, move |_, _| Narrow {
+        motion: Motion::settled(if present { 1.0 } else { 0.0 }),
+        width: Default::default(),
+    });
+    let now = cx.background_executor().now();
+    let reduce = cx.reduce_motion();
+    let target = if present { 1.0 } else { 0.0 };
+    let (t, running, width) = state.update(cx, |narrow, _| {
+        if narrow.motion.target() != target {
+            narrow.motion.animate(target, PANEL, now, reduce);
+        }
+        let running = narrow.motion.is_running(now);
+        if !running {
+            narrow.motion.settle(now);
+        }
+        (narrow.motion.value(now), running, narrow.width.clone())
+    });
+    if running {
+        window.request_animation_frame();
+    }
+    if t == 0.0 && !present {
+        return None;
+    }
+    let measured = width.clone();
+    let measure = canvas(
+        move |bounds: Bounds<Pixels>, _, _| measured.set(f32::from(bounds.size.width)),
+        |_, _, _, _| {},
+    )
+    .absolute()
+    .size_full();
+    // Clipped only while it moves, so that a list the content opens is not.
+    let moving = t < 1.0;
+    Some(
+        div()
+            .id(id)
+            .flex_none()
+            .when(moving, |d| {
+                d.overflow_hidden().w(px(width.get() * t)).opacity(t)
+            })
+            .child(div().relative().flex_none().child(content).child(measure))
+            .test_support()
+            .into_any_element(),
+    )
+}
+
+/// A picker of the machines: the machine chosen as its icon, in its colour, and its name, and
+/// the list of the machines, each with its icon in its colour, its role and its state, a check
+/// on the one chosen. One that is off or needs an update is greyed and says why; it is not
+/// picked. The owner keeps whether the list is open.
 #[allow(clippy::too_many_arguments)]
 pub fn picker(
     id: &'static str,
@@ -1087,11 +1176,9 @@ pub fn picker(
     open: bool,
     on_toggle: impl Fn(&mut gpui_kit::Window, &mut gpui_kit::App) + 'static,
     on_choose: impl Fn(Option<String>, &mut gpui_kit::Window, &mut gpui_kit::App) + 'static,
-    window: &mut gpui_kit::Window,
-    cx: &mut gpui_kit::App,
 ) -> gpui_kit::AnyElement {
-    use gpui_design_system::{Dropdown, MenuItem, space};
-    use gpui_kit::{IntoElement as _, ParentElement as _, Styled as _, div};
+    use gpui_design_system::{Dropdown, MenuItem};
+    use gpui_kit::{IntoElement as _, div};
     let current = choices.get(chosen).or(choices.first());
     let Some(current) = current else {
         return div().into_any_element();
@@ -1100,8 +1187,10 @@ pub fn picker(
     let items = choices.iter().enumerate().map(|(at, choice)| {
         let item = MenuItem::new(format!("{entries}-{}", choice.key()), choice.title.clone())
             .leading(crate::glyphs::device(&choice.icon))
+            .tint(shade(&choice.colour))
             .detail(choice.detail())
-            .selected(at == chosen);
+            .selected(at == chosen)
+            .checked(at == chosen);
         let item = match choice.name.is_none() {
             true => item.note("this machine"),
             false => item,
@@ -1114,24 +1203,12 @@ pub fn picker(
             }
         }
     });
-    div()
-        .flex()
-        .items_center()
-        .gap(space::XS)
-        .child(mark(
-            format!("{id}-mark"),
-            &current.icon,
-            &current.colour,
-            14.,
-            window,
-            cx,
-        ))
-        .child(
-            Dropdown::new(id, current.title.clone())
-                .open(open)
-                .on_toggle(on_toggle)
-                .items(items),
-        )
+    Dropdown::new(id, current.title.clone())
+        .leading(crate::glyphs::device(&current.icon))
+        .tint(shade(&current.colour))
+        .open(open)
+        .on_toggle(on_toggle)
+        .items(items)
         .into_any_element()
 }
 

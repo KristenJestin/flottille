@@ -440,6 +440,7 @@ impl AddProject {
                         radios
                             .choice(choice.key(), choice.title.clone(), choice.line())
                             .leading(crate::glyphs::device(&choice.icon))
+                            .tint(crate::machines::shade(&choice.colour))
                     },
                 )
                 .chosen(chosen)
@@ -449,7 +450,10 @@ impl AddProject {
             let options = choices
                 .iter()
                 .map(|choice| {
-                    SelectOption::new(choice.key(), choice.title.clone()).line(choice.line())
+                    SelectOption::new(choice.key(), choice.title.clone())
+                        .leading(crate::glyphs::device(&choice.icon))
+                        .tint(crate::machines::shade(&choice.colour))
+                        .line(choice.line())
                 })
                 .collect::<Vec<_>>();
             Select::new("add-project-machine", options, chosen)

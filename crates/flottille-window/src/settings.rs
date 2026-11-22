@@ -2613,11 +2613,10 @@ impl Render for SettingsPage {
             .child(column(
                 enter(key("header"), 0, div().pb(space::LG).child(header)).into_any_element(),
             ))
-            .children(self.machine_chooser(window, cx).map(|chooser| {
-                column(
-                    enter(key("machine"), 1, div().pb(space::LG).child(chooser)).into_any_element(),
-                )
-            }))
+            .children(
+                self.machine_chooser(window, cx)
+                    .map(|chooser| column(enter(key("machine"), 1, chooser).into_any_element())),
+            )
             .child(column(enter(key("tabs"), 1, tabs).into_any_element()))
             .child(column(self.own_line(cx).into_any_element()));
         // Each section enters as it is shown (its state is dropped while it is not drawn, so it
@@ -2661,8 +2660,17 @@ impl SettingsPage {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<impl IntoElement + use<>> {
-        let choices = crate::machines::choices(self.machines.read(cx).machines()?);
-        if choices.len() < 2 {
+        let (choices, present) = crate::machines::kept(
+            "settings-machine-kept",
+            self.machines
+                .read(cx)
+                .machines()
+                .map(crate::machines::choices)
+                .unwrap_or_default(),
+            window,
+            cx,
+        );
+        if choices.is_empty() {
             return None;
         }
         let shown = crate::machines::shown_machine(cx);
@@ -2696,10 +2704,15 @@ impl SettingsPage {
                     .update(cx, |shell, cx| shell.choose_machine(name, cx))
                     .ok();
             },
-            window,
-            cx,
         );
-        Some(Field::new("settings-machine-field", "Settings of", picker))
+        // The chooser folds away, with its words, once there is no other machine to choose.
+        Some(presence(
+            "settings-machine-presence",
+            present,
+            div()
+                .pb(space::LG)
+                .child(Field::new("settings-machine-field", "Settings of", picker)),
+        ))
     }
 
     /// One line under the tabs while another machine is shown, whichever tab: the appearance and

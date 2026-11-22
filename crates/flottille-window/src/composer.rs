@@ -852,8 +852,11 @@ impl Composer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<gpui_kit::AnyElement> {
-        let choices = self.machine_choices(cx);
-        if choices.len() < 2 {
+        // Once the project is on one machine only, the picker narrows and fades away with the
+        // choices it had.
+        let (choices, present) =
+            crate::machines::kept("machine-picker-kept", self.machine_choices(cx), window, cx);
+        if choices.is_empty() {
             return None;
         }
         let shown = crate::machines::shown_machine(cx);
@@ -884,11 +887,16 @@ impl Composer {
                     .update(cx, |shell, cx| shell.choose_machine_for(name, &project, cx))
                     .ok();
             },
+        );
+        // It enters when the project turns out to be on several machines, and leaves when it is
+        // not any more.
+        crate::machines::narrowing(
+            "machine-picker-fold",
+            present,
+            enter("machine-picker-enter", 0, picker).into_any_element(),
             window,
             cx,
-        );
-        // It enters when the project turns out to be on several machines.
-        Some(enter("machine-picker-enter", 0, picker).into_any_element())
+        )
     }
 
     /// Whether the list of `menu` is open.

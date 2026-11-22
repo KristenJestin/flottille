@@ -29,8 +29,8 @@ use gpui_design_system::card::Block as CardBlock;
 use gpui_design_system::color::mix;
 use gpui_design_system::motion::{HOVER, Motion, PANEL};
 use gpui_design_system::{
-    Badge, Button, Card, Confirm, Drawer, Icon, ListRow, Listing, Menu, Modal, Palette, Piece,
-    PulsingLabel, Side, Skeleton, Toast, TokenEvent, TokenField, TokenText, Type, awaiting,
+    Badge, Button, Card, Confirm, Drawer, Icon, Item, ListRow, Listing, Menu, Modal, Palette,
+    Piece, PulsingLabel, Side, Skeleton, Toast, TokenEvent, TokenField, TokenText, Type, awaiting,
     changed, changing, enter, fade, fold_frame, follow_theme, hoverable, icon, palette, path_line,
     presence, presence_of, section_label, selectable, space, text_region, tint, tipped_when_cut,
     toast, toggle_id, turning,
@@ -303,6 +303,9 @@ pub struct SessionPage {
     statuses: HashMap<String, Entity<Status>>,
     /// One state per session or child this tree started on another machine, by its row's key.
     remote_statuses: RefCell<HashMap<String, Entity<Status>>>,
+    /// The launches on other machines the lists were last built from: a change of them rebuilds
+    /// the sub-agents lists, so that a child that goes folds away.
+    remote_launched: Vec<crate::model::RemoteAgent>,
     conversation: Entity<ConversationView>,
     rail: Entity<SessionRail>,
     drawer: Entity<Drawer>,
@@ -461,6 +464,7 @@ impl SessionPage {
             unchecked: false,
             statuses: HashMap::new(),
             remote_statuses: RefCell::new(HashMap::new()),
+            remote_launched: Vec::new(),
             conversation,
             rail,
             drawer,
@@ -2143,6 +2147,14 @@ impl SessionPage {
 impl Render for SessionPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.renders += 1;
+        let launched = cx
+            .try_global::<crate::model::RemoteAgents>()
+            .map(|launched| launched.0.clone())
+            .unwrap_or_default();
+        if self.remote_launched != launched {
+            self.remote_launched = launched;
+            self.refresh_conversation(cx);
+        }
         let asks = self.asks(cx);
         let room = self.room.take();
         self.ask_dock.update(cx, |dock, cx| {
@@ -4325,6 +4337,8 @@ pub struct Row {
     thinking: Option<(Entity<PulsingLabel>, Entity<ThinkingTimer>)>,
     calls: Vec<(Entity<Status>, Entity<StateIcon>)>,
     sub_agents: Vec<SubAgent>,
+    /// The children of other machines, which fold away when they go.
+    remote_rows: Listing<SubAgent>,
     card: Option<ApprovalCard>,
     icons: HashMap<String, Entity<StateIcon>>,
     pills: HashMap<String, Entity<Pill>>,
@@ -4401,6 +4415,7 @@ impl Row {
                 thinking: None,
                 calls: Vec::new(),
                 sub_agents,
+                remote_rows: Listing::default().at_rest(),
                 card,
                 icons: HashMap::new(),
                 pills: HashMap::new(),
@@ -6094,59 +6109,80 @@ impl Render for Row {
                         self.pills.insert(agent.id.clone(), pill);
                     }
                 }
-                let rows: Vec<ListRow> = self
+                // A child on another machine folds away when it is gone (its machine ended it, or
+                // the launch is no longer listed), and unfolds as it comes.
+                self.remote_rows.sync(
+                    self.sub_agents
+                        .iter()
+                        .filter(|agent| agent.machine.is_some())
+                        .map(|agent| (agent.id.clone(), agent.clone())),
+                    cx.background_executor().now(),
+                    cx.reduce_motion(),
+                );
+                let build = |agent: &SubAgent, window: &mut Window, cx: &mut gpui_kit::App| {
+                    let target = agent.id.clone();
+                    let page = self.page.clone();
+                    let there = agent.machine.clone();
+                    // A child on another machine carries that machine's icon, in its
+                    // colour, beside its state.
+                    let leading = div()
+                        .flex()
+                        .items_center()
+                        .gap(space::SM)
+                        .child(self.icons[&agent.id].clone())
+                        .children(agent.machine.as_ref().map(|there| {
+                            crate::machines::mark(
+                                format!("sub-agent-{}-mark", agent.id),
+                                &there.icon,
+                                &there.colour,
+                                12.,
+                                window,
+                                cx,
+                            )
+                        }));
+                    ListRow::new(
+                        ElementId::Name(format!("sub-agent-{}", agent.id).into()),
+                        SharedString::from(agent.name.clone()),
+                    )
+                    .leading(leading)
+                    .detail(SharedString::from(agent.runs_on.clone()))
+                    .meta(SharedString::from(agent.doing.clone()))
+                    .trailing(self.pills[&agent.id].clone())
+                    .on_click(move |_, _, cx| {
+                        let Some(page) = page.upgrade() else {
+                            return;
+                        };
+                        match &there {
+                            // Its page is that machine's: it is brought in front.
+                            Some(there) => {
+                                let shell = page.read(cx).shell.clone();
+                                let (machine, agent) = (there.machine.clone(), there.agent.clone());
+                                shell
+                                    .update(cx, |shell, cx| {
+                                        shell.open_elsewhere(machine, agent, cx)
+                                    })
+                                    .ok();
+                            }
+                            None => page.update(cx, |page, cx| page.select(&target, cx)),
+                        }
+                    })
+                };
+                let mut rows: Vec<AnyElement> = self
                     .sub_agents
                     .iter()
-                    .map(|agent| {
-                        let target = agent.id.clone();
-                        let page = self.page.clone();
-                        let there = agent.machine.clone();
-                        // A child on another machine carries that machine's icon, in its
-                        // colour, beside its state.
-                        let leading = div()
-                            .flex()
-                            .items_center()
-                            .gap(space::SM)
-                            .child(self.icons[&agent.id].clone())
-                            .children(agent.machine.as_ref().map(|there| {
-                                crate::machines::mark(
-                                    format!("sub-agent-{}-mark", agent.id),
-                                    &there.icon,
-                                    &there.colour,
-                                    12.,
-                                    window,
-                                    cx,
-                                )
-                            }));
-                        ListRow::new(
-                            ElementId::Name(format!("sub-agent-{}", agent.id).into()),
-                            SharedString::from(agent.name.clone()),
-                        )
-                        .leading(leading)
-                        .detail(SharedString::from(agent.runs_on.clone()))
-                        .meta(SharedString::from(agent.doing.clone()))
-                        .trailing(self.pills[&agent.id].clone())
-                        .on_click(move |_, _, cx| {
-                            let Some(page) = page.upgrade() else {
-                                return;
-                            };
-                            match &there {
-                                // Its page is that machine's: it is brought in front.
-                                Some(there) => {
-                                    let shell = page.read(cx).shell.clone();
-                                    let (machine, agent) =
-                                        (there.machine.clone(), there.agent.clone());
-                                    shell
-                                        .update(cx, |shell, cx| {
-                                            shell.open_elsewhere(machine, agent, cx)
-                                        })
-                                        .ok();
-                                }
-                                None => page.update(cx, |page, cx| page.select(&target, cx)),
-                            }
-                        })
-                    })
+                    .filter(|agent| agent.machine.is_none())
+                    .map(|agent| build(agent, window, cx).into_any_element())
                     .collect();
+                for listed in self.remote_rows.rows() {
+                    rows.push(
+                        Item::new(
+                            ElementId::Name(format!("sub-agent-{}-item", listed.key).into()),
+                            listed.placement,
+                            build(listed.value, window, cx),
+                        )
+                        .into_any_element(),
+                    );
+                }
                 // Folded to one line that counts them until a click opens the list: twenty
                 // sub-agents would fill several screens of the conversation.
                 let turn = turning(id("sub-agents-toggle"), self.open, window, cx);
