@@ -2912,7 +2912,11 @@ async fn a_tunnel_carries_at_most_64_connections_at_once() {
     let port = opened.tunnel.local_port;
     let mut held = Vec::new();
     for _ in 0..64 {
-        held.push(tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap());
+        held.push(
+            tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .unwrap(),
+        );
     }
     for _ in 0..500 {
         if place.runner.tunnel_connections.load(Ordering::SeqCst) == 64 {
@@ -2922,7 +2926,9 @@ async fn a_tunnel_carries_at_most_64_connections_at_once() {
     }
     assert_eq!(place.runner.tunnel_connections.load(Ordering::SeqCst), 64);
     // The 65th is closed at once, and never reaches the machine.
-    let mut past = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    let mut past = tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .unwrap();
     let mut byte = [0u8; 1];
     let read = tokio::time::timeout(
         Duration::from_secs(5),
@@ -2936,7 +2942,9 @@ async fn a_tunnel_carries_at_most_64_connections_at_once() {
     drop(held.pop());
     let mut carried = false;
     for _ in 0..250 {
-        let _again = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        let _again = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .unwrap();
         tokio::time::sleep(Duration::from_millis(20)).await;
         if place.runner.tunnel_connections.load(Ordering::SeqCst) > 64 {
             carried = true;
@@ -2951,7 +2959,12 @@ async fn a_tunnel_carries_at_most_64_connections_at_once() {
 async fn still_held(phone: &Core, tunnel: &str, for_how_long: Duration) -> bool {
     let end = tokio::time::Instant::now() + for_how_long;
     while tokio::time::Instant::now() < end {
-        if !phone.view().tunnels.iter().any(|held| held.tunnel == tunnel) {
+        if !phone
+            .view()
+            .tunnels
+            .iter()
+            .any(|held| held.tunnel == tunnel)
+        {
             return false;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -2980,7 +2993,9 @@ async fn a_tunnel_for_the_browser_ends_when_it_is_idle_and_the_view_says_why() {
     })
     .await;
     assert!(
-        view.tunnels_ended[0].reason.starts_with("no connection for"),
+        view.tunnels_ended[0]
+            .reason
+            .starts_with("no connection for"),
         "{:?}",
         view.tunnels_ended
     );
