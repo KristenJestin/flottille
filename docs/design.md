@@ -727,7 +727,24 @@ methods"; `flottille routine`, `docs/cli.md`).
   **nothing** (`Nightly green: nothing to do`). Nothing does not ring: it is kept in the history.
   Something to say is one notification in the centre (`routine.ran`, `docs/events.md`), the
   summary its excerpt, the run's session its session, unless the routine rings **never** (its
-  history only). A run that could not start rings as a failure.
+  history only), or rings **only when something is new** (see below). A run that could not start
+  rings as a failure.
+- **A list.** Most routines return one: tickets to review, pull requests waiting, failing tests.
+  The result then carries `items` (`routine_result`, `docs/tools.md`), each with a stable `id`, a
+  `title`, and optionally a `link`, a sentence, tags and a group, in the order the agent chose, and
+  markdown beside them (`body`). The items are masked as every stored text, one line each with no
+  control character and no invisible one (a bidirectional override, a zero-width space, U+2028),
+  the summary too, and a link is a web address with no user name in it (`https://a.com@b.example/`
+  is refused), shown as it is, with its host on the row, and never fetched.
+  - **Compared with the last run, by id.** The last run is the routine's last **result** (a run
+    that failed or was skipped gave none). An item whose id the last result did not list is **new**
+    (the first result has no last: every item is new), and the ids the last result listed that
+    this one does not are what **left**, said once, with this run: the run after it is compared
+    with this one alone. A routine can ring **only when something is new** (`rings: new`): a result
+    with no new item is kept in its history and rings nothing.
+  - **The next run remembers.** The session of a run is given the last result's items, ids and
+    titles, as data after every word of Flottille's (`<routine-last-items>`, which no title can
+    close), the first 100 items and each title cut at 120 characters, so that the prompt can ask "what changed since yesterday".
 
 ## 6. Projects and workspaces
 
@@ -1270,13 +1287,18 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   results not opened (hidden at zero). A routine opens its page in the tab (`Routines / Tickets to
   review`): its trigger, mode, agent and prompt, **Run now**, **Pause** or **Resume**, **Edit**,
   **Remove…** and its history, each run a session, ended ones too. A run's **result** page,
-  opened from the tab, the history or a notification, shows its report as a reply is drawn, with
+  opened from the tab, the history or a notification, shows its report as a reply is drawn (the
+  markdown the result gave beside its items, else its summary), then its **items** as the kit's
+  rows, in the agent's order: the title (the row opens its link with the system's handler), the
+  sentence under it, the tags as chips, `New` first on an item new since the last run, under the
+  heading of their group; at the foot what left (`Left since the last run: ABC-377`), with
   **Open the session** (read only once it ended); a skipped run has no session and says so; a
   run whose work goes on shows, read live, only what Flottille knows of its session (its state,
   its branch, its pull request with its checks, the requests that wait, the agent's last
   message). A routine is made and edited in the kit's dialog: name, project, prompt; the agent,
   model and effort side by side; the trigger (a schedule, or an event and the fields of its
-  kind); the mode, each with its line; where the result rings; and one sentence that says the
+  kind); the mode, each with its line; where the result rings (when it has something to say, only
+  when an item is new, never); and one sentence that says the
   next run. A project without a routine says what one is and offers **New routine**. No entry in
   the sidebar: a run whose session goes on shows there as any session. Creating a
   workspace shows the preparation's progress and failure output, removing one asks first.

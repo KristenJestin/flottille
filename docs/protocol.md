@@ -2964,8 +2964,8 @@ session of the routine's project, at its time or when its event comes. A routine
   (`docs/design.md`, "Routines").
 - `mode`: `read_only` (every call that writes is refused, in every mode of the session, whatever
   the prompt says; reads go through), `ask` or `auto` (the gate as for any session in that mode).
-- `rings`: `something` (a notification when the run has something to say) or `never` (its
-  history only).
+- `rings`: `something` (a notification when the run has something to say), `new` (only when its
+  result lists an item the last result did not) or `never` (its history only).
 - `agent`: the provider, model and effort each run starts on; null for those of a new session.
 - `next_at`: when the next run is due, null while it is paused and for a routine of an event;
   `delayed`: why that is later than
@@ -2975,13 +2975,19 @@ session of the routine's project, at its time or when its event comes. A routine
   due less than that many hours before (1 to 168, 12 by default); an older one is skipped.
 
 A run in a result: `{"id", "routine", "due_at", "started_at", "ended_at", "session", "mode",
-"outcome", "summary", "why", "trigger", "opened"}`. `session` is its root session (null for a skipped run), kept once it
+"outcome", "summary", "why", "trigger", "opened", "items", "left", "body"}`. `session` is its root session (null for a skipped run), kept once it
 ended; `mode` the routine's when it started; `outcome` is `running`, `something`, `nothing`,
 `goes_on` (it said something and its session goes on as any session), `skipped` or `failed`;
 `summary` the one line its result said; `why` why it was skipped or failed (`delivered to its
 session still open, <session>` for an event given to the last run's session instead); `trigger`
 what started a run of an event, as the forge or the tracker said it (masked), null otherwise; `opened` whether the
-user opened its result (`routine.open`).
+user opened its result (`routine.open`). `items` is the list its result gave, in the agent's
+order (`routine_result`, `docs/tools.md`): each `{"id", "title", "link", "text", "tags", "group",
+"new"}`, `link`, `text` and `group` null when not given, `tags` an array, and `new` true when the
+routine's last result (the last run that gave one) did not list its id, which every item of a first
+result is; `left` is what that last result listed and this one does not, `[{"id", "title"}]`, said
+with this run only; `body` the markdown given beside the items, null without. Both lists are empty
+for a run with no list. The texts are masked and have no control character.
 
 #### `routine.list`
 

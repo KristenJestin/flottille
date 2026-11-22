@@ -27,6 +27,19 @@ fn authority(url: &str) -> Option<(String, Option<u16>)> {
     ))
 }
 
+/// The authority (host, and port when written) of a web address (`http` or `https`) that has no
+/// userinfo. An address with one (`https://github.com@evil.example/`) reads as another place than
+/// it goes to, so it is none, as is any other scheme and an authority with a backslash, which a
+/// browser reads as the slash that ends it (`https://evil.example\.github.com/` goes to
+/// evil.example).
+pub fn web_authority(url: &str) -> Option<&str> {
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))?;
+    let authority = rest.split(['/', '?', '#']).next()?;
+    (!authority.is_empty() && !authority.contains(['@', '\\'])).then_some(authority)
+}
+
 /// Whether the host is a name of the machine it is read on: `localhost`, a name under it,
 /// `127.0.0.1`, `::1` or `0.0.0.0`.
 fn here(host: &str) -> bool {
@@ -78,6 +91,29 @@ pub fn through(url: &str, local_port: u16) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_web_address_names_its_authority_and_no_userinfo() {
+        assert_eq!(
+            web_authority("https://example.org:8443/a?b#c"),
+            Some("example.org:8443")
+        );
+        assert_eq!(web_authority("http://example.org"), Some("example.org"));
+        assert_eq!(web_authority("https://github.com@evil.example/x"), None);
+        assert_eq!(web_authority("http://user:pw@host.example/"), None);
+        assert_eq!(
+            web_authority("https://host.example?next=a@b"),
+            Some("host.example")
+        );
+        assert_eq!(web_authority("javascript:alert(1)"), None);
+        assert_eq!(web_authority("https:///path"), None);
+        // A browser reads a backslash as a slash: this goes to evil.example.
+        assert_eq!(web_authority("https://evil.example\\.github.com/"), None);
+        assert_eq!(
+            web_authority("http://host.example/a\\b"),
+            Some("host.example")
+        );
+    }
 
     #[test]
     fn a_run_s_address_is_a_port_of_this_machine_or_none() {

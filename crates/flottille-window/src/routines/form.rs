@@ -49,6 +49,8 @@ const AT_MOST_ONCE: [(&str, &str); 3] = [
 ];
 
 const MODES: [&str; 3] = ["read_only", "ask", "auto"];
+/// What the form's choices of where the result rings are, in their order.
+const RINGS: [&str; 3] = ["something", "new", "never"];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Trigger {
@@ -249,7 +251,7 @@ impl RoutineForm {
         }
         self.effort = routine.effort.clone();
         self.mode = MODES.iter().position(|m| *m == routine.mode).unwrap_or(0);
-        self.rings = usize::from(routine.rings == "never");
+        self.rings = RINGS.iter().position(|r| *r == routine.rings).unwrap_or(0);
         if let Some(schedule) = &routine.schedule
             && let Some((days, hour)) = schedule.rsplit_once(' ')
         {
@@ -389,15 +391,7 @@ impl RoutineForm {
             self.f().prompt.read(cx).value().trim().to_owned().into(),
         );
         put("mode", MODES[self.mode].into());
-        put(
-            "rings",
-            if self.rings == 0 {
-                "something"
-            } else {
-                "never"
-            }
-            .into(),
-        );
+        put("rings", RINGS[self.rings].into());
         match self.trigger {
             Trigger::Schedule => {
                 let hour = hour_of(&Self::typed(&self.f().hour, cx)).unwrap_or((8, 0));
@@ -775,6 +769,11 @@ impl Render for RoutineForm {
                     "something",
                     "When it has something to say",
                     "A notification, with its summary.",
+                )
+                .choice(
+                    "new",
+                    "Only when something is new",
+                    "A notification when its list has an item the last run's had not.",
                 )
                 .choice("never", "Never", "Its history only.")
                 .chosen(self.rings)

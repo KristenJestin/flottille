@@ -1457,12 +1457,13 @@ Work the daemon starts by itself: each run of a routine is a new session of its 
 at its time, or when its event comes, as a click would start it, one-shot (`docs/design.md`, "Routines"). Every command takes
 `--json`, which prints the daemon's answer (`docs/protocol.md`, "The routine methods").
 
-### `flottille routine add <name> --project <project> --prompt <text> (--schedule <when> | --on <event> [<its fields>]) [--zone <zone>] [--mode read-only|ask|auto] [--rings something|never] [--provider P] [--model M] [--effort E] [--missed-hours N]`
+### `flottille routine add <name> --project <project> --prompt <text> (--schedule <when> | --on <event> [<its fields>]) [--zone <zone>] [--mode read-only|ask|auto] [--rings something|new|never] [--provider P] [--model M] [--effort E] [--missed-hours N]`
 
 Adds a routine. `--schedule` is days and an hour: `every day 07:00`, `weekdays 08:30`,
 `mondays 09:00`, read in `--zone` (an IANA zone, the machine's by default). `--mode` is
 `read-only` by default: its session reads, and every call that writes is refused. `--rings
 something` (the default) puts a notification in the centre when a run has something to say;
+`new` only when its list has an item the last run's had not (`docs/design.md`, "Routines");
 `never` keeps it in its history only. A run missed while Flottille was off runs once at its next
 start within `--missed-hours` (12).
 
@@ -1498,13 +1499,14 @@ run.
 The routine, its prompt, why its next run waits when it does (a spent quota), and its history:
 each run, when it was due, its outcome and its session; a skipped one says why (`skipped:
 delivered to its session still open, 3f2a9c1b7d4e` for an event given to the last run's open
-session).
+session). A run that gave a list says how many items, how many are new and how many left.
 
 ```
 $ flottille routine show "Tickets to review"
 Tickets to review (app): weekdays 08:30, read only, next Tue 2026-11-24 08:30, last: 4 to review
 Prompt: List the tickets waiting for my review
 Mon 2026-11-23 08:30: 4 to review (session 3f2a9c1b7d4e)
+  4 items, 1 new, 1 left
 ```
 
 ### `flottille routine edit <name> [--rename <name>] [--project P] [--prompt T] [--schedule W | --on E [<its fields>]] [--zone Z] [--mode M] [--rings R] [--provider P] [--model M] [--effort E] [--missed-hours N]`

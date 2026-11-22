@@ -599,7 +599,14 @@ fn note(
             let run = &data["run"];
             let name = data["routine"]["name"].as_str().unwrap_or_default();
             let summary = run["summary"].as_str().unwrap_or_default();
-            let rings = data["routine"]["rings"] == flottille_core::routine::RINGS_SOMETHING;
+            let rings = match data["routine"]["rings"].as_str() {
+                Some(flottille_core::routine::RINGS_SOMETHING) => true,
+                // Only a list with an item the last run's had not: one without a list has none.
+                Some(flottille_core::routine::RINGS_NEW) => run["items"]
+                    .as_array()
+                    .is_some_and(|items| items.iter().any(|item| item["new"] == true)),
+                _ => false,
+            };
             let source = format!("routine-run:{}", run["id"]);
             match run["outcome"].as_str().unwrap_or_default() {
                 flottille_core::routine::SOMETHING if rings => add(

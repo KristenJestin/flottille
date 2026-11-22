@@ -32,7 +32,7 @@ pub struct Routine {
     pub event: Option<Event>,
     /// `read_only`, `ask` or `auto`.
     pub mode: String,
-    /// `something` or `never`.
+    /// `something`, `new` (only when an item is new) or `never`.
     pub rings: String,
     pub paused: bool,
     pub next_at: Option<u64>,
@@ -76,6 +76,37 @@ pub struct Run {
     pub summary: Option<String>,
     pub why: Option<String>,
     pub opened: bool,
+    /// The list its result gave, in the agent's order.
+    pub items: Vec<Item>,
+    /// The ids of what the last run's list had that this one has not.
+    pub left: Vec<String>,
+    /// Markdown the result gave beside its items.
+    pub body: Option<String>,
+}
+
+/// One item of a run's list: what the agent said, which comes from outside, so it is shown with
+/// no control character.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Item {
+    pub id: String,
+    pub title: String,
+    /// Opened by the system's handler when clicked, never fetched by the window.
+    pub link: Option<String>,
+    pub text: Option<String>,
+    pub tags: Vec<String>,
+    pub group: Option<String>,
+    /// Not in the last run's list.
+    pub new: bool,
+}
+
+impl Item {
+    /// Where the link goes (its host and port), said on the row so that a title cannot pass for
+    /// another place.
+    pub fn host(&self) -> Option<&str> {
+        self.link
+            .as_deref()
+            .and_then(flottille_core::address::web_authority)
+    }
 }
 
 fn text(value: &Value) -> Option<String> {
@@ -177,7 +208,57 @@ impl Event {
     }
 }
 
+/// A line of the agent's, with no control and no invisible character (a bidirectional override
+/// would make it read as another text).
+fn plain(value: &Value) -> Option<String> {
+    text(value)
+        .map(|line| {
+            line.chars()
+                .filter(|c| !c.is_control() && !flottille_link::hidden(*c))
+                .collect::<String>()
+        })
+        .filter(|line| !line.trim().is_empty())
+}
+
+impl Item {
+    fn of(value: &Value) -> Option<Item> {
+        Some(Item {
+            id: plain(&value["id"])?,
+            title: plain(&value["title"])?,
+            link: text(&value["link"]).filter(|link| {
+                flottille_core::address::web_authority(link).is_some()
+                    && !link
+                        .chars()
+                        .any(|c| c.is_control() || c.is_whitespace() || flottille_link::hidden(c))
+            }),
+            text: plain(&value["text"]),
+            tags: value["tags"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(plain)
+                .collect(),
+            group: plain(&value["group"]),
+            new: value["new"] == true,
+        })
+    }
+}
+
 impl Run {
+    /// The items under their group headings, in the agent's order: a group stands where its first
+    /// item does, and the items without one are listed as the first group is, with no heading.
+    pub fn sections(&self) -> Vec<(Option<&str>, Vec<&Item>)> {
+        let mut sections: Vec<(Option<&str>, Vec<&Item>)> = Vec::new();
+        for item in &self.items {
+            let group = item.group.as_deref();
+            match sections.iter_mut().find(|(name, _)| *name == group) {
+                Some((_, items)) => items.push(item),
+                None => sections.push((group, vec![item])),
+            }
+        }
+        sections
+    }
+
     pub fn of(value: &Value) -> Option<Run> {
         Some(Run {
             id: value["id"].as_u64()?,
@@ -188,6 +269,19 @@ impl Run {
             summary: text(&value["summary"]),
             why: text(&value["why"]),
             opened: value["opened"] == true,
+            items: value["items"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Item::of)
+                .collect(),
+            left: value["left"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|left| plain(&left["id"]))
+                .collect(),
+            body: text(&value["body"]),
         })
     }
 
@@ -469,6 +563,64 @@ mod tests {
         );
         assert_eq!(run("failed", Some("no result")).said(), "Failed: no result");
         assert!(!run("something", None).unread(), "an opened result is read");
+    }
+
+    #[test]
+    fn the_items_of_a_result_are_listed_under_their_groups_in_the_agents_order() {
+        let run = Run::of(&json!({"id": 1, "started_at": 0, "outcome": "something",
+            "items": [
+                {"id": "a", "title": "A", "group": "Blocking", "new": true},
+                {"id": "b", "title": "B", "group": "Later"},
+                {"id": "c", "title": "C"},
+                {"id": "d", "title": "D", "group": "Blocking",
+                 "link": "javascript:alert(1)", "text": "one\u{1b}[31m"},
+            ],
+            "left": [{"id": "z", "title": "Z"}]}))
+        .unwrap();
+
+        let sections = run.sections();
+
+        let names: Vec<Option<&str>> = sections.iter().map(|(name, _)| *name).collect();
+        assert_eq!(names, [Some("Blocking"), Some("Later"), None]);
+        let blocking: Vec<&str> = sections[0].1.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(blocking, ["a", "d"]);
+        assert!(sections[0].1[0].new && !sections[0].1[1].new);
+        assert_eq!(run.left, ["z"]);
+        // What comes from outside: no link but the web's, no control character.
+        assert_eq!(sections[0].1[1].link, None);
+        assert_eq!(sections[0].1[1].text.as_deref(), Some("one[31m"));
+    }
+
+    #[test]
+    fn what_an_agent_said_shows_no_invisible_character() {
+        let item = Item::of(&json!({
+            "id": "a\u{200B}b", "title": "ok \u{202E}gnp.exe", "text": "one\u{2028}two",
+            "tags": ["\u{2067}x"], "group": "G\u{FEFF}",
+        }))
+        .unwrap();
+        assert_eq!(item.id, "ab");
+        assert_eq!(item.title, "ok gnp.exe");
+        assert_eq!(item.text.as_deref(), Some("onetwo"));
+        assert_eq!(item.tags, ["x"]);
+        assert_eq!(item.group.as_deref(), Some("G"));
+    }
+
+    #[test]
+    fn a_link_with_userinfo_is_no_link_and_a_row_says_the_host() {
+        let of = |link: &str| Item::of(&json!({"id": "a", "title": "A", "link": link})).unwrap();
+        assert_eq!(of("https://github.com@evil.example/x").link, None);
+        assert_eq!(of("http://user:pw@host.example/").link, None);
+        assert_eq!(of("https://a\u{202E}b.example/").link, None);
+        let linked = of("https://github.com/org/repo/issues/1");
+        assert_eq!(linked.host(), Some("github.com"));
+        assert_eq!(
+            of("https://host.example:8443/x").host(),
+            Some("host.example:8443")
+        );
+        assert_eq!(
+            Item::of(&json!({"id": "a", "title": "A"})).unwrap().host(),
+            None
+        );
     }
 
     #[test]

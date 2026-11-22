@@ -53,6 +53,7 @@ pub use request::{
     Nonce, REQUEST_WINDOW, Request, RequestError, Requests, Signed, full_switch, kept_close,
     runs_agents,
 };
+pub use serial::hidden;
 pub use sessions::{LightSession, MOST_SESSIONS, STATES, SessionList, TITLE_LIMIT};
 pub use transport::TlsServer;
 pub use tunnel::TunnelStream;

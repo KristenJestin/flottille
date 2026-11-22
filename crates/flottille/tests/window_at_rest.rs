@@ -243,7 +243,11 @@ fn the_window_draws_no_frame_at_rest_on_the_routines_tab_its_page_and_a_result(
     user.fake_script(json!({"turns": [
         {"when": "List the tickets waiting for my review", "do": [
             {"say": "Four tickets wait."},
-            {"mcp": {"tool": "routine_result", "arguments": {"summary": "4 to review"}}}]},
+            {"mcp": {"tool": "routine_result", "arguments": {"summary": "4 to review",
+                "items": [
+                    {"id": "ABC-1", "title": "Login fails", "text": "Twice this week.",
+                     "tags": ["urgent"], "group": "Blocking", "link": "https://tracker.example/1"},
+                    {"id": "ABC-2", "title": "Slow start"}]}}}]},
     ]}));
     idle_session(&user);
     user.call(
@@ -292,10 +296,14 @@ fn the_window_draws_no_frame_at_rest_on_the_routines_tab_its_page_and_a_result(
 
     cx.update(|window, cx| window.click(format!("routine-run-{run}"), cx));
     until(&shell, cx, "the result shows", |cx| {
-        present(cx, "result-report")
+        present(cx, "result-item-ABC-1")
     });
     settle(&shell, cx);
-    assert_eq!(frames_at_rest(&shell, cx), (0, 0), "the result page");
+    assert_eq!(
+        frames_at_rest(&shell, cx),
+        (0, 0),
+        "the result page, with its items"
+    );
 }
 
 #[gpui_kit::test]

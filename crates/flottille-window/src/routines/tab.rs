@@ -2,8 +2,9 @@
 //! with its history, and a run's result. The three are pages of one pager: the routine's page
 //! slides in from the list, the result's from the routine's. What moves: the pages slide, a row
 //! of a list unfolds when it arrives and folds away when it goes, the unread dot fades, a page's
-//! blocks enter one after another, the status of a run whose work goes on unfolds when it is
-//! read, and every button, row and link fades its hover.
+//! blocks enter one after another, the items of a result enter one after another with their
+//! group, which unfolds, and what left since the last run unfolds at the foot, the status of a run
+//! whose work goes on unfolds when it is read, and every button, row and link fades its hover.
 
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -11,8 +12,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use gpui_design_system::color::mix;
 use gpui_design_system::motion::HOVER;
 use gpui_design_system::{
-    Button, Confirm, EmptyLine, Icon, LINE_GAP, LabelledLine, ListCard, ListRow, Listing, Menu,
-    PageHeader, Section, Skeleton, Toast, Type as _, awaiting, enter, fade, hoverable, icon,
+    Button, Confirm, EmptyLine, Group, Icon, LINE_GAP, LabelledLine, ListCard, ListRow, Listing,
+    Menu, PageHeader, Section, Skeleton, Toast, Type as _, awaiting, enter, fade, hoverable, icon,
     palette, presence, presence_of, sliding, space, toast,
 };
 use gpui_kit::prelude::FluentBuilder as _;
@@ -23,7 +24,7 @@ use gpui_kit::{
 };
 use serde_json::{Value, json};
 
-use super::{Routine, RoutineForm, Run, Status, mode_line, mode_said};
+use super::{Item, Routine, RoutineForm, Run, Status, mode_line, mode_said};
 use crate::actions::Command;
 use crate::commands::{perform_later, spaced, stack};
 use crate::extensions::Then as Extension;
@@ -875,6 +876,7 @@ impl RoutinesTab {
                 "Rings",
                 match routine.rings.as_str() {
                     "never" => "Never: its history only".to_owned(),
+                    "new" => "When an item of its list is new".to_owned(),
                     _ => "When it has something to say".to_owned(),
                 },
             ));
@@ -959,12 +961,13 @@ impl RoutinesTab {
                 .into_any_element();
         };
         let summary = run.said();
-        // The report is the run's summary, drawn as a reply is: the conversation stays on the
-        // session's page. Its items come with #1124.
-        let report_text = match (&run.summary, &run.why) {
-            (Some(summary), _) => summary.clone(),
-            (None, Some(why)) => why.clone(),
-            (None, None) => String::new(),
+        // The report is the markdown the result gave beside its items, else its summary, drawn as
+        // a reply is: the conversation stays on the session's page.
+        let report_text = match (&run.body, &run.summary, &run.why) {
+            (Some(body), _, _) => body.clone(),
+            (None, Some(summary), _) => summary.clone(),
+            (None, None, Some(why)) => why.clone(),
+            (None, None, None) => String::new(),
         };
         if self
             .report
@@ -1041,17 +1044,116 @@ impl RoutinesTab {
             .child(enter("result-enter-head", 1, head))
             .child(enter("result-enter-summary", 2, summary_line))
             .child(enter("result-enter-report", 3, report))
-            .child(
-                // The place of the items of #1124: a run that gave some lists them here.
-                div().id("result-items-place"),
-            )
-            .child(enter("result-enter-session", 4, session_block))
+            .child(self.items_block(&run, cx))
+            .child(enter("result-enter-session", 5, session_block))
             .child(status);
         div()
             .id("result-page")
             .child(column)
             .test_support()
             .into_any_element()
+    }
+
+    /// A result's list: its items as rows under their group headings, in the agent's order, the
+    /// new ones marked, and at the foot what left since the last run. Each row enters after the
+    /// one before it, and a group unfolds as it arrives.
+    fn items_block(&self, run: &Run, cx: &mut Context<Self>) -> AnyElement {
+        let p = palette(cx);
+        let left = (!run.left.is_empty()).then(|| {
+            SharedString::from(format!("Left since the last run: {}", run.left.join(", ")))
+        });
+        let mut column = stack(space::MD);
+        let mut at = 0;
+        for (n, (group, items)) in run.sections().into_iter().enumerate() {
+            let mut rows = div().w_full().flex().flex_col().gap(px(2.));
+            let count = items.len();
+            for item in items {
+                rows = rows.child(self.item_row(run.id, item, at, cx));
+                at += 1;
+            }
+            column = column.child(match group {
+                Some(group) => Group::new(
+                    ElementId::Name(format!("result-group-{group}").into()),
+                    group.to_owned(),
+                    count,
+                )
+                .child(rows)
+                .into_any_element(),
+                None => div()
+                    .id(format!("result-ungrouped-{n}"))
+                    .child(rows)
+                    .into_any_element(),
+            });
+        }
+        let said = left.clone();
+        let foot = presence_of(
+            ElementId::Name(format!("result-left-block-{}", run.id).into()),
+            said,
+            move |said| {
+                div()
+                    .id("result-left")
+                    .aria_label(said.clone())
+                    .text_size(px(12.5))
+                    .text_color(p.mute)
+                    .child(said)
+                    .test_support()
+                    .into_any_element()
+            },
+        )
+        .space(space::MD);
+        let shown = !run.items.is_empty();
+        let items = Section::new("result-items", "Items")
+            .count(run.items.len().to_string())
+            .sentence("In the order the agent gave them.")
+            .child(column);
+        div()
+            .id("result-items-block")
+            .flex()
+            .flex_col()
+            .child(presence(
+                ElementId::Name(format!("result-items-presence-{}", run.id).into()),
+                shown,
+                items,
+            ))
+            .child(foot)
+            .into_any_element()
+    }
+
+    /// One item: its title, its sentence under it, its tags as chips (`New` first), and its link,
+    /// which the system's handler opens as it is; the window never fetches it.
+    fn item_row(&self, run: u64, item: &Item, index: usize, cx: &mut Context<Self>) -> AnyElement {
+        let p = palette(cx);
+        let id = format!("result-item-{}", item.id);
+        let mut row = ListRow::new(ElementId::Name(id.clone().into()), item.title.clone());
+        if let Some(text) = &item.text {
+            row = row.line(text.clone());
+        }
+        if item.new {
+            row = row.tag("New");
+        }
+        for tag in &item.tags {
+            row = row.tag(tag.clone());
+        }
+        if let Some(link) = &item.link {
+            let (shell, link) = (self.shell.clone(), link.clone());
+            if let Some(host) = item.host() {
+                row = row.meta(host.to_owned());
+            }
+            // A `localhost` link of another machine opens through a tunnel, as a session's does.
+            row = row
+                .on_click(move |_, _, cx| {
+                    if let Some(shell) = shell.upgrade() {
+                        shell.update(cx, |shell, cx| shell.open_address(None, &link, cx));
+                    }
+                })
+                .trailing(icon(Icon::OpenInEditor).text_color(p.faint));
+        }
+        enter(
+            ElementId::Name(format!("result-enter-item-{run}-{}", item.id).into()),
+            index,
+            row,
+        )
+        .into_any_element()
     }
 
     /// What Flottille knows of the session of a run whose work goes on, read live.
