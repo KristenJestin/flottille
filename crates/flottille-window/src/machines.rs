@@ -1620,6 +1620,7 @@ mod tests {
         read.lists = Lists {
             this: Vec::new(),
             machines: vec![("server".to_owned(), vec![listing("site")])],
+            ..Lists::default()
         };
         read
     }
