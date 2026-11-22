@@ -41,6 +41,9 @@ pub struct Routine {
     pub unread: u64,
     /// Its last run, from `routine.list`.
     pub last: Option<Run>,
+    /// The session that made it with the tool `routine`, as the window names it: its title, the
+    /// agent's words; none for the user's own.
+    pub made_by: Option<String>,
 }
 
 /// The event a routine runs on: its kind, and the fields of its kind (`docs/protocol.md`).
@@ -347,6 +350,9 @@ impl Routine {
             delayed: text(&value["delayed"]),
             unread: value["unread"].as_u64().unwrap_or_default(),
             last: Run::of(&value["last"]),
+            made_by: value["made_by"]["session"].as_str().map(|session| {
+                plain(&value["made_by"]["title"]).unwrap_or_else(|| format!("session {session}"))
+            }),
         })
     }
 

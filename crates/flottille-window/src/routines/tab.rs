@@ -847,6 +847,11 @@ impl RoutinesTab {
             )
         };
         let next = routine.next(now);
+        // An agent's routine says whose it is: the user reads it as theirs to keep or remove.
+        let made_by = routine
+            .made_by
+            .clone()
+            .map(|title| fact("routine-made-by", Icon::Edit, "Made by", title));
         let facts = stack(LINE_GAP)
             .child(fact(
                 "routine-trigger",
@@ -879,7 +884,8 @@ impl RoutinesTab {
                     "new" => "When an item of its list is new".to_owned(),
                     _ => "When it has something to say".to_owned(),
                 },
-            ));
+            ))
+            .children(made_by);
         let prompt = div()
             .id("routine-prompt")
             .aria_label(SharedString::from(routine.prompt.clone()))
