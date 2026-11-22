@@ -865,19 +865,69 @@ fn verify(
     )
 }
 
-/// Stub: the roots Android trusts.
-#[cfg_attr(not(target_os = "android"), allow(dead_code))]
-fn android_roots(_system: &[&Path], _user: &Path) -> Vec<CertificateDer<'static>> {
-    Vec::new()
+/// The roots this system trusts. On Android they are the phone's own, as Android trusts them:
+/// `rustls_native_certs` looks only where a Linux distribution keeps them, none of which a phone
+/// has.
+#[cfg(target_os = "android")]
+fn system_roots() -> Vec<CertificateDer<'static>> {
+    // An app's user is its uid's hundred thousands, as Android numbers them.
+    let user = unsafe { libc::getuid() } / 100_000;
+    android_roots(
+        &[
+            // Android 14 and later: the roots come with the module of Conscrypt.
+            Path::new("/apex/com.android.conscrypt/cacerts"),
+            Path::new("/system/etc/security/cacerts"),
+        ],
+        Path::new(&format!("/data/misc/user/{user}")),
+    )
 }
 
-/// Stub: a store of the system's roots.
+#[cfg(not(target_os = "android"))]
+fn system_roots() -> Vec<CertificateDer<'static>> {
+    rustls_native_certs::load_native_certs().certs
+}
+
+/// The roots Android trusts, from its folders: the certificates of the first of `system` that
+/// exists, but those the user removed (a file of the same name in `user`'s `cacerts-removed`),
+/// and those the user added (`user`'s `cacerts-added`). Each file is a certificate in PEM, text
+/// may follow it; a file that is not is passed over.
+// Not gated, so that its tests run off Android.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+fn android_roots(system: &[&Path], user: &Path) -> Vec<CertificateDer<'static>> {
+    use rustls::pki_types::pem::PemObject;
+    fn files(folder: &Path) -> Vec<std::path::PathBuf> {
+        std::fs::read_dir(folder)
+            .map(|entries| entries.flatten().map(|entry| entry.path()).collect())
+            .unwrap_or_default()
+    }
+    let removed = user.join("cacerts-removed");
+    let system = system
+        .iter()
+        .find(|folder| folder.is_dir())
+        .map(|folder| files(folder))
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|file| {
+            file.file_name()
+                .is_none_or(|name| !removed.join(name).exists())
+        });
+    system
+        .chain(files(&user.join("cacerts-added")))
+        .filter_map(|file| CertificateDer::from_pem_file(file).ok())
+        .collect()
+}
+
+/// A store of the system's roots, or why there is none.
 fn system_store(
     certificates: Vec<CertificateDer<'static>>,
 ) -> Result<rustls::RootCertStore, String> {
     let mut store = rustls::RootCertStore::empty();
     for certificate in certificates {
         let _ = store.add(certificate);
+    }
+    if store.is_empty() {
+        // Said as such, rather than as every hub's certificate refused.
+        return Err("no root certificate found on this system".to_owned());
     }
     Ok(store)
 }
@@ -890,19 +940,16 @@ pub(crate) async fn tls_client(
     roots: Option<&[Vec<u8>]>,
 ) -> Result<Box<dyn crate::Stream>, String> {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let mut store = rustls::RootCertStore::empty();
-    match roots {
-        None => {
-            for certificate in rustls_native_certs::load_native_certs().certs {
-                let _ = store.add(certificate);
-            }
-        }
+    let store = match roots {
+        None => system_store(system_roots())?,
         Some(roots) => {
+            let mut store = rustls::RootCertStore::empty();
             for certificate in roots {
                 let _ = store.add(CertificateDer::from(certificate.clone()));
             }
+            store
         }
-    }
+    };
     let config = rustls::ClientConfig::builder_with_provider(provider)
         .with_protocol_versions(&[&rustls::version::TLS13])
         .map_err(|error| error.to_string())?
