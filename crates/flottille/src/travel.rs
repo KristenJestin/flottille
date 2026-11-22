@@ -720,7 +720,14 @@ async fn offered(
 fn folders_inside(root: &Path, path: &str) -> Result<(), String> {
     let cannot =
         |at: &Path, why: &dyn std::fmt::Display| format!("cannot make {}: {why}", at.display());
-    std::fs::create_dir_all(root).map_err(|error| cannot(root, &error))?;
+    // The repository `.` is the project folder itself: the clone makes it.
+    let first = match path {
+        "." => root.parent(),
+        _ => Some(root),
+    };
+    if let Some(first) = first {
+        std::fs::create_dir_all(first).map_err(|error| cannot(first, &error))?;
+    }
     let mut at = root.to_path_buf();
     for part in Path::new(path)
         .parent()
