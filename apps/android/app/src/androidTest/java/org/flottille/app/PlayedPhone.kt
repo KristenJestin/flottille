@@ -20,8 +20,11 @@ import org.flottille.core.TunnelEnd
  * A fake server standing for a run's port on a machine: it answers each request with a page and
  * keeps what it was asked, and by whom (the web view's `User-Agent` says it was the app's).
  */
+/** What the real core listens on: `127.0.0.1`, never another address. */
+val IPV4_LOOPBACK: InetAddress = InetAddress.getByAddress(byteArrayOf(127, 0, 0, 1))
+
 class FakeRunServer : AutoCloseable {
-    private val socket = ServerSocket(0, 50, InetAddress.getLoopbackAddress())
+    private val socket = ServerSocket(0, 50, IPV4_LOOPBACK)
     val port: Int get() = socket.localPort
     val requests: MutableList<String> = java.util.Collections.synchronizedList(mutableListOf())
 
@@ -97,7 +100,7 @@ class PlayedPhone(private val server: FakeRunServer, initial: PhoneView) : Phone
 
     override suspend fun openAddress(machine: String, run: String?, url: String): OpenedTunnel {
         opened += Triple(machine, run, url)
-        val listener = ServerSocket(0, 50, InetAddress.getLoopbackAddress())
+        val listener = ServerSocket(0, 50, IPV4_LOOPBACK)
         val tunnel = Tunnel("t${++count}", machine, run ?: "r1", server.port, listener.localPort)
         listeners[tunnel.tunnel] = listener
         thread(isDaemon = true) {
@@ -119,7 +122,7 @@ class PlayedPhone(private val server: FakeRunServer, initial: PhoneView) : Phone
     private fun pipe(local: Socket) {
         // A probe of the listener, or a test that ended with the server: the connection just ends.
         val remote = try {
-            Socket(InetAddress.getLoopbackAddress(), server.port)
+            Socket(IPV4_LOOPBACK, server.port)
         } catch (refused: java.io.IOException) {
             local.close()
             return
@@ -157,7 +160,7 @@ class PlayedPhone(private val server: FakeRunServer, initial: PhoneView) : Phone
     /** Whether something still listens on the tunnel's local port. */
     fun listening(tunnel: Tunnel): Boolean =
         try {
-            Socket(InetAddress.getLoopbackAddress(), tunnel.localPort).use { true }
+            Socket(IPV4_LOOPBACK, tunnel.localPort).use { true }
         } catch (refused: java.io.IOException) {
             false
         }
