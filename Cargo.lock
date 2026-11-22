@@ -3095,7 +3095,7 @@ dependencies = [
 [[package]]
 name = "gpui-design-system"
 version = "0.1.0"
-source = "git+https://github.com/KristenJestin/gpui-design-system?tag=v0.3.0-alpha.feat-swatches-and-disabled-menu-entries.9#8c4bf535c5a1b4664bf80e8e64e9fae6be2c674a"
+source = "git+https://github.com/KristenJestin/gpui-design-system?tag=v0.3.0-beta.5#de0e0e38770149f37c7355b24c90b7554de65878"
 dependencies = [
  "gpui-kit",
  "qrcodegen",
