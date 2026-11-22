@@ -907,8 +907,11 @@ local child's work; nothing moves your branch.*
   branch and pull request conventions (its template is text given to the agents, as the rules
   are), and a repository the project lacks, which is checked as one the user adds there: no link
   out of the project's folder, no repository of another project (`It adds the repository lib to
-  the project`). In a project Flottille made, a repository whose folder leads out of the project
-  is never the launch's. The
+  the project`). A repository not there yet is checked too: no folder on its way may lead out
+  through a link. It is checked again when its code comes, right before its folders are made, and
+  those are made one at a time, a link at any of them refused: nothing lands outside the project
+  through a link planted after the launch was allowed. In a project Flottille made, a repository
+  whose folder leads out of the project is never the launch's. The
   launch takes the strongest class: one base change makes it the user's to decide, never the
   judge's (in Full it passes, as a base write does); a line the gate refuses refuses the launch.
   Its words name each line and key that changes (`It adds the task deploy: `make deploy``, `It
