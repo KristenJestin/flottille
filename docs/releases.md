@@ -157,13 +157,16 @@ and keeps it as the artefact `android-apk` (14 days), so a test on a phone insta
 **The build holds no key**: Gradle builds the release APK unsigned (no signing configuration reads
 the environment), and `apk.sh` signs a copy of it with a key made for the run, to install for a test
 (`flottille-<version>-debug-signed.apk`, never released). The release key signs in **`android-sign`**,
-a job of its own that runs on a `push` only (never a pull request's run, nor a run started by hand),
-in the environment `android-release`. It runs no third-party action and no script of the repository:
+a job of its own that runs on a `push`, and on the **release build of `main`** (the `Release`
+workflow starts ci.yml on `main` by `workflow_dispatch`, and a commit `main` holds is always a
+released commit of `dev`, so the release carries its APK as its beta did), never on a pull request's
+run, nor on a run started by hand on any other ref (a stable line's tag included: its release has
+no APK yet), in the environment `android-release`. It runs no third-party action and no script of the repository:
 it downloads the unsigned APK of the build job (`android-unsigned`), signs it with the runner's own
 `apksigner` in one step, the only one that holds the secrets (`--ks-pass env:…`, `--key-pass env:…`),
 and uploads `android-signed`. `publish` attaches that artefact to the GitHub release of its version,
-with the other artefacts, and only that one, and only in a push's run: never an APK of a pull
-request's run, whatever its file is called. A phone that holds a debug-signed build uninstalls it
+with the other artefacts, and only that one, and only in the runs that signed (a push, the release
+build of `main`): never an APK of a pull request's run, whatever its file is called. A phone that holds a debug-signed build uninstalls it
 before the release's.
 
 **What the maintainer sets once** (repository settings, never in the repository; until then the
@@ -172,7 +175,8 @@ job signs nothing and says so in a notice, and the release carries no APK):
 1. *Settings → Environments → New environment*: `android-release`. Create it before the first push that follows
    the merge: a job that names an environment that does not exist creates it, with no protection.
 2. In it, *Deployment branches and tags → Selected branches and tags*, and add these four patterns:
-   `main`, `dev`, `stable/*`, `next/*` (the branches whose pushes run CI). No pull request's
+   `main`, `dev`, `stable/*`, `next/*` (the branches whose pushes run CI, and `main`, which the
+   release build runs on). No pull request's
    branch, no feature branch and no tag then reaches the environment's secrets.
 3. In it, *Environment secrets* (**not** the repository's secrets, which any branch's workflow
    can read): `ANDROID_KEYSTORE_BASE64` (the keystore file, base64), `ANDROID_KEYSTORE_PASSWORD`,
@@ -224,6 +228,14 @@ The jobs of the whole suite's run:
   its own checkout of the repository (`--workspace-remap .`, for the files the tests read). A
   partition compiles nothing.
 - **`doc-tests`** runs the doc tests once (nextest does not), beside the partitions.
+- **`android`** (`apps/android/ci.sh`, when the app or its core changes) builds the mobile core and
+  runs the app's unit tests and its instrumentation tests. **The unit tests never fetch**:
+  Robolectric would download the `android-all` jar of each SDK it runs on from Maven while the
+  tests run, and a hiccup of the network failed a build. The jar is a Gradle dependency
+  (`org.robolectric:android-all-instrumented`, in `apps/android/app/build.gradle.kts`), fetched
+  by `:app:fetchRobolectricJars`, a step of `ci.sh` of its own (tried three times) that runs before
+  any test, and every test task reads it from there with `robolectric.offline=true`: a test that
+  needs a jar it was not given fails, it never goes to the network.
 - **`verify`**, the required check, always concludes. On a push it fails unless `check`,
   `build-tests`, `doc-tests` and every partition passed; on a pull request, unless `check` and
   `test-selected` did (`test-selected` skipped, for a pull request that selects nothing, is a
@@ -288,6 +300,17 @@ cannot write, and a branch of another name never had an alpha):
   left as it is (run again, or a branch pushed over to the same number). A release left as a
   draft by a failed upload is deleted and made again. No alpha is pruned while its branch lives:
   they pile up, one per push, until the branch is deleted.
+
+  **The betas are pruned**: one is published per merge into `dev`, and GitHub counts them all.
+  After a beta is published, **`prune-betas`**, a job of its own after `publish` (a deletion the
+  settings refuse fails it, never a release, and nothing waits for it), keeps the **last ten
+  betas of each version** (`vX.Y.Z-beta.N`, by `N`) and deletes the older, each with its tag
+  (`gh release delete --cleanup-tag`). It holds the token that deletes releases and nothing else
+  (no checkout, no action), lists the pre-releases whose tag is `v<X.Y.Z>-beta.<N>` and no other:
+  **a release, its release candidates, a next build or an alpha is never deleted by it** (the
+  alphas are `alpha-cleanup.yml`'s). A beta a newer one has replaced is no longer a build anyone
+  installs: `install.sh` and `flottille update` read the newest, and a version is counted from
+  the commits, not from the tags, so pruning moves no number.
 
 ### The hub
 
@@ -431,17 +454,27 @@ into `next/*`, below): the `pre-commit` hook refuses a commit on them.
 
 ## GitHub settings
 
-The workflows cannot set these; the maintainer does, once, in the repository's settings:
+The workflows cannot set these; the maintainer does, once, in the repository's settings (rulesets,
+as applied today):
 
-- **`stable/*`**: pull requests required (with `verify` and `commit-messages`), squash only, no
-  force-push, no deletion (a line ends by being deleted by the maintainer).
+- **`main`**: force-push and deletion blocked. It moves forward by `Release` alone
+  (see "Releasing"), never by a pull request.
+- **`stable/*`**: pull requests required (with `verify`, `commit-messages` and `shape`), squash
+  only, no force-push, no deletion (a line ends by being deleted by the maintainer).
 - **`next/*`**: force-push and deletion blocked, **and nothing else**. Pull requests are not
   required there: `forward.yml` merges `dev` into it through the API, and requiring pull
   requests with a bypass for GitHub Actions would let every workflow holding `contents: write`
   write `next/*`. Its pull requests are reviewed as any other, by the maintainer; the forward
   ones are merged with a merge commit, the others by squash.
-- **Tags `v*`**: a ruleset that lets only the maintainer and the `Release` workflow (the
-  repository's GitHub Actions) create them, and nobody update or delete them.
+- **`dev`**: pull requests required (with `verify`, `commit-messages` and `shape`), squash only,
+  no force-push, no deletion.
+- **Tags `v*`, but the alphas' and the betas'**: a ruleset on `refs/tags/v*`, excluding
+  `refs/tags/v*-alpha.*` and `refs/tags/v*-beta.*`, that lets nobody update or delete them. The
+  exclusions are the tags the workflows delete: `alpha-cleanup.yml` deletes a branch's alphas,
+  and `prune-betas` the betas beyond the last ten of a version (a stable release and a release
+  candidate stay protected). **Creating a tag is not restricted**: a personal repository cannot
+  give GitHub Actions a bypass, and the CI creates the betas' tags (and `Release` the lines').
+- **Bypass**: the repository's admin (the maintainer) only.
 - **Labels** `backport X.Y`, one per line kept.
 
 ## Installing
