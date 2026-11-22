@@ -698,6 +698,16 @@ impl Shell {
         self.machines
             .update(cx, |section, cx| section.news(news, window, cx));
         self.say_held(cx);
+        if let Some(read) = self.machines.read(cx).machines() {
+            let launched = crate::model::remote_agents(read);
+            if cx
+                .try_global::<crate::model::RemoteAgents>()
+                .is_none_or(|now| now.0 != launched)
+            {
+                cx.set_global(crate::model::RemoteAgents(launched));
+                cx.refresh_windows();
+            }
+        }
         // The sessions on other machines, or their state, may have changed: their rows follow.
         if read
             && !self.switching

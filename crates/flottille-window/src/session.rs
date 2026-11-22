@@ -2023,15 +2023,9 @@ impl SessionPage {
     /// The sessions and the children this tree started on other machines, those of an agent of
     /// the tree: the rail lists them beside its agents.
     fn remote(&self, cx: &App) -> Vec<crate::model::RemoteAgent> {
-        let Some(shell) = self.shell.upgrade() else {
-            return Vec::new();
-        };
-        let launched = shell
-            .read(cx)
-            .machines()
-            .read(cx)
-            .machines()
-            .map(crate::model::remote_agents)
+        let launched = cx
+            .try_global::<crate::model::RemoteAgents>()
+            .map(|launched| launched.0.clone())
             .unwrap_or_default();
         launched
             .into_iter()
@@ -2214,30 +2208,34 @@ impl Render for SessionPage {
                 )
             })
             .children(machine.map(|machine| {
-                div()
-                    .id("session-machine")
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .gap(space::SM)
-                    .text_color(p.faint)
-                    .aria_label(SharedString::from(machine.title.clone()))
-                    .child(crate::machines::mark(
-                        "session-machine-mark",
-                        &machine.icon,
-                        &machine.colour,
-                        13.,
-                        window,
-                        cx,
-                    ))
-                    .child(
-                        div()
-                            .mono(12.)
-                            .text_color(p.mute)
-                            .child(SharedString::from(machine.title)),
-                    )
-                    .child(div().mono(12.).child("/"))
-                    .test_support()
+                enter(
+                    "session-machine-enter",
+                    0,
+                    div()
+                        .id("session-machine")
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .gap(space::SM)
+                        .text_color(p.faint)
+                        .aria_label(SharedString::from(machine.title.clone()))
+                        .child(crate::machines::mark(
+                            "session-machine-mark",
+                            &machine.icon,
+                            &machine.colour,
+                            13.,
+                            window,
+                            cx,
+                        ))
+                        .child(
+                            div()
+                                .mono(12.)
+                                .text_color(p.mute)
+                                .child(SharedString::from(machine.title)),
+                        )
+                        .child(div().mono(12.).child("/"))
+                        .test_support(),
+                )
             }))
             .child(
                 div()

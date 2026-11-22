@@ -866,7 +866,7 @@ impl Composer {
             self.shell.clone(),
             self.project.clone(),
         );
-        Some(crate::machines::picker(
+        let picker = crate::machines::picker(
             "machine-picker",
             "machine-choice",
             &choices,
@@ -886,7 +886,9 @@ impl Composer {
             },
             window,
             cx,
-        ))
+        );
+        // It enters when the project turns out to be on several machines.
+        Some(enter("machine-picker-enter", 0, picker).into_any_element())
     }
 
     /// Whether the list of `menu` is open.

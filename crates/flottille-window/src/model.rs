@@ -359,6 +359,13 @@ pub struct RemoteAgent {
     pub offline: bool,
 }
 
+/// What [`remote_agents`] says now, kept where a page reads it with no read of the shell, which
+/// may be updating it.
+#[derive(Default)]
+pub struct RemoteAgents(pub Vec<RemoteAgent>);
+
+impl gpui_kit::Global for RemoteAgents {}
+
 /// The sessions and the children the agents of this machine started on others, which a session
 /// page lists beside its own agents when the agent that started them is one of its tree.
 pub fn remote_agents(machines: &crate::machines::Machines) -> Vec<RemoteAgent> {
