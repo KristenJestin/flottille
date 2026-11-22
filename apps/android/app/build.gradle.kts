@@ -38,6 +38,25 @@ android {
     testOptions { unitTests { isIncludeAndroidResources = true } }
 }
 
+// Robolectric runs the app's screens on a real Android's classes, an `android-all` jar per SDK of
+// the tests (`@Config(sdk = [34])`: Android 14). It fetches that jar from Maven while the tests run
+// unless told otherwise: a network hiccup then failed a build. The jar is resolved here, as a
+// Gradle dependency (cached, checked by Gradle like any other), copied to a folder by a task that
+// every test task waits for, and Robolectric is told to read that folder and fetch nothing. The
+// version is the one Robolectric 4.14.1 names for SDK 34 (its `DefaultSdkProvider`); a test on
+// another SDK adds its jar here, and fails offline, never by fetching, until it does.
+val robolectricJars: Configuration by configurations.creating
+val robolectricJarsDir: Provider<Directory> = layout.buildDirectory.dir("robolectric-jars")
+val fetchRobolectricJars by tasks.registering(Sync::class) {
+    from(robolectricJars)
+    into(robolectricJarsDir)
+}
+tasks.withType<Test>().configureEach {
+    dependsOn(fetchRobolectricJars)
+    systemProperty("robolectric.offline", "true")
+    systemProperty("robolectric.dependency.dir", robolectricJarsDir.get().asFile.absolutePath)
+}
+
 dependencies {
     implementation(project(":core"))
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
@@ -58,6 +77,7 @@ dependencies {
     testImplementation("androidx.compose.ui:ui-test-junit4")
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.robolectric:robolectric:4.14.1")
+    robolectricJars("org.robolectric:android-all-instrumented:14-robolectric-10818077-i7")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.9.0")
     debugImplementation("androidx.compose.ui:ui-test-manifest")
 
