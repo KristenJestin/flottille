@@ -537,6 +537,14 @@ impl Shell {
                 MachinesSection::rename_focus,
                 cx,
             );
+            modals.add(
+                crate::machines_page::LOOK_MODAL,
+                &machines,
+                MachinesSection::look_dialog,
+                MachinesSection::look_is_open,
+                |_, _| None,
+                cx,
+            );
             modals.add_view(
                 crate::machines_page::REMOVAL_DIALOG,
                 &removal,

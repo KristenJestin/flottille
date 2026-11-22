@@ -67,16 +67,12 @@ pub const COMMANDS: &[(&str, Place)] = &[
     // ── Remote ───────────────────────────────────────────────────────────────────────────────
     ("remote on", Window(&["remote.configure"])),
     ("remote off", Window(&["remote.configure"])),
-    ("remote listen", Window(&["remote.configure"])),
     ("remote pair", Window(&["remote.pair", "remote.declare"])),
     ("remote members", Window(&["remote.machines"])),
     ("remote rename", Window(&["remote.change"])),
     ("remote icon", Window(&["remote.change"])),
     ("remote colour", Window(&["remote.change"])),
     ("remote remove", Window(&["remote.change"])),
-    ("remote address list", Window(&["remote.machines"])),
-    ("remote address add", Window(&["remote.address.add"])),
-    ("remote address remove", Window(&["remote.address.remove"])),
     // ── Tunnels ──────────────────────────────────────────────────────────────────────────────
     ("tunnel open", Window(&["tunnel.open"])),
     ("tunnel list", Window(&["tunnel.list"])),

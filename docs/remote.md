@@ -532,7 +532,7 @@ colour until one is chosen.
 
 ### What exists stays
 
-A hub set up before pair mode, and the machines in it, keep working as they are: the list a device
+A hub set up before pair mode, and the machines in it, keep working as they are (`a_hub_updated_over_its_data_keeps_its_members` holds it: a `hub.json` of a hub of protocol 1, with its key, is read by the hub of today and its members are welcome): the list a device
 checks may start with the first member's own entry (the root of a list made then) or with the
 hub's (one made since), and the members' additions of before still check. Every device pinned the
 hub's key already, so the hub's changes after them are taken. From the first change the hub signs,
@@ -547,6 +547,20 @@ with the device key; the daemon carries what they signed (`remote.*`, `protocol.
 changed as events (`remote.*`, `events.md`). The phone pairs through the mobile core ("The Android
 app"); its screens are #826.
 
+**Built (#1177), in the window**: the page tells the hub's truth. A hub that answers that it no
+longer knows this machine (its list was reset, or it dropped this device: `hub.forgotten` in
+`remote.machines`) is said at the top of Devices, `The hub no longer knows this machine`, the kept
+list greyed as old, and **Pair again** opens the pairing dialog in place of Connect to your hub; a
+successful pairing replaces the old membership (`remote.pair {replace: true}`). While the hub
+refuses or cannot be reached, a device's Rename, Change look… and Remove… are in its "⋯" disabled
+with the reason in one line, and the section says `Changes wait for the hub, which cannot be reached
+now: …`; one click is one request, its buttons busy until it is answered, a failure one toast, said
+in words (what happened, what to do). Removing this machine says it leaves the hub and its links
+close. Each device row, and the machine of each session of the sidebar, shows its icon in its
+colour (a member with none gets a desktop and the colour of its key), and **Change look…** opens a
+dialog (the five icons as a select, the eight colours as swatches, a live preview) whose save is a
+signed change as `flottille remote icon` and `colour` make. The page shows no addresses (every link goes through the hub, decision 3): its Addresses section is gone, and so is the place that asks where this machine listens; the direct link stays in the daemon, unused here (`flottille remote listen` still sets it).
+
 **Built (#814, #1146, #1144), in the window**: Settings, Machines, a tab of its own, says first
 whether remote is on (a **Turn on** button while it is off, a **Remote** switch once it is, whose
 off asks once), then offers **Connect to your hub** while this machine is in no member list: one button, which opens a dialog where the code is pasted
@@ -555,7 +569,7 @@ device is, a select of the five icons, This device can, Run agents / Control onl
 a refusal stays in the dialog, a success closes it with a toast. There is no Add a device and no
 join request: a device is added on the hub's host. Then the page shows the devices of the
 list (each row its name, its machine's state, its role and who added it; Rename and Remove… in its
-"⋯", Remove asking once).
+"⋯", Remove asking once); #1177 took this machine's addresses off the page.
 Every new member is a toast, `New device: pixel (control only), added at 18:42 by the hub`, with
 Remove. The sidebar lists the sessions of every machine ("One list of every machine"); opening one
 of another machine brings that machine in front, its projects and its sessions, every request of the
@@ -609,7 +623,10 @@ protocol versions it speaks (a number, `protocol` in `daemon.status` too, raised
 method, an answer or an event that an older client would misread). They use the highest one both
 speak; with none in common the link is refused on both sides with a sentence that says which to
 update: `server runs Flottille 0.4.3 (protocol 9), this machine 0.4.1 (protocol 8): update one of
-them (flottille update)`. The window and the app show the machine as **needs an update**, never as
+them (flottille update)`. The hub is said as the hub, with the side to update named by the older
+protocol: `The hub runs 0.1.0 (protocol 1), this machine 0.4.0 (protocol 2): update the hub on its
+host.` or, the hub being the newer, `…: update this machine.`; the hub sends its own hello with its
+refusal so that a device it refuses says the same. The window and the app show the machine as **needs an update**, never as
 offline. At first each side speaks one version; the list lets the Android app, published apart,
 speak two.
 

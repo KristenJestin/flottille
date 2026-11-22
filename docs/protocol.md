@@ -1374,7 +1374,9 @@ was removed on 2026-11-21).
   unreachable since 22:14: …`), `reset` (`the hub's member list was reset: set this device up
   again`), `refused` (the hub has another key than when this device joined, refused this device,
   or sent a member list that does not check: the sentence says which), `needs an update`, or
-  `none` before the first try. Once set up, the machines it trusts are the members' machines of
+  `none` before the first try; `forgotten` is `true` when the hub answered that it no longer knows
+  this machine (its list was reset, or it dropped this device: `state` is `reset` or `refused`) and
+  a client offers to pair again (`remote.pair {replace: true}`). Once set up, the machines it trusts are the members' machines of
   the list as last checked.
 
   Each machine, `this` included, also has its `role` in the list (`runner`, `controller`,
@@ -1428,7 +1430,7 @@ was removed on 2026-11-21).
   a removal, a renaming, an icon and colour), signed by the client after `remote.members`' `head`.
   A member's addition is refused: a device is paired on the hub. It answers `remote.members` once
   the hub sent back a list that holds it and this machine checked it; `refused` with the hub's
-  sentence, or when the hub withheld it (`the hub withheld this change: …`).
+  sentence, or when the hub took it and sent back no list that holds it (`The hub did not confirm this change in 10 s: …`, said with what to do: nothing was changed, try again). Every refusal of a change says what happened and what to do, never the raw cause.
 - `remote.pair {code, proposed, replace?}` pairs this machine's device with the hub of `code`, what
   `flottille-hub pair` printed on the hub's host (`docs/remote.md`, "Pairing"); `proposed` is the
   card the user confirmed (`flottille_link::Proposed`: `{"key", "name", "role", "icon",
