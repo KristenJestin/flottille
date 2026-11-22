@@ -150,7 +150,7 @@ impl Sounds {
             return;
         };
         let played = match &self.backend {
-            Backend::Fake(file) => record(file, sound),
+            Backend::Fake(file) => record(file, sound, volume),
             Backend::System => {
                 let played = tokio::time::timeout(
                     PLAYS_WITHIN,
@@ -200,13 +200,17 @@ fn choice(paths: &Paths) -> Option<PathBuf> {
     }
 }
 
-fn record(file: &std::path::Path, sound: Sound) -> Result<(), String> {
+/// One line a sound: its name, and the volume when it is not full (`needs-you 0.5`).
+fn record(file: &std::path::Path, sound: Sound, volume: f32) -> Result<(), String> {
     use std::io::Write as _;
     std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(file)
-        .and_then(|mut file| writeln!(file, "{}", sound.name()))
+        .and_then(|mut file| match volume < 1.0 {
+            true => writeln!(file, "{} {volume}", sound.name()),
+            false => writeln!(file, "{}", sound.name()),
+        })
         .map_err(|error| format!("the fake sink cannot be written: {error}"))
 }
 

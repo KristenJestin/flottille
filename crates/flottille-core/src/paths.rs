@@ -116,6 +116,12 @@ impl Paths {
         self.config.join("judge.md")
     }
 
+    /// What rings and when, by kind and project (`docs/design.md` §10); absent while they keep
+    /// the defaults.
+    pub fn notifications(&self) -> PathBuf {
+        self.config.join("notifications.toml")
+    }
+
     /// The images the user sent to an agent, one folder per agent: never the project's.
     pub fn images(&self, agent: &str) -> PathBuf {
         self.data.join("images").join(agent)

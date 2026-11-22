@@ -1,5 +1,5 @@
-//! What rings (#1002, `docs/design.md`, §11): each new notification of the centre whose settings
-//! say it rings plays its sound, and is told either to the window, which draws it as a toast, or
+//! What rings (#1002, #1003, `docs/design.md`, §11): each new notification of the centre whose
+//! settings say it rings (`notification_settings.rs`) plays its sound, and is told either to the window, which draws it as a toast, or
 //! to the desktop, as a system notification of its own. Never both, and nothing at all for the
 //! session whose page is open in the focused window: it is in sight.
 //!
@@ -12,30 +12,26 @@
 //! is rung once whatever the number of events that tell of it.
 
 use std::collections::{BTreeMap, HashMap};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use flottille_core::notification::Notification;
+use flottille_core::notification_settings::Level;
 use flottille_core::secrets;
 use flottille_protocol::Event;
 use serde_json::{Value, json};
 use tokio::sync::{broadcast, watch};
 
 use crate::daemon::Daemon;
+use flottille_core::notification_settings::Settings;
+
 use crate::sounds::{Sound, Sounds};
 use crate::system_notifications::{Desktop, Heard, Hears, Outgoing, Shown};
 
-/// The volume every sound plays at, until the settings of #1003 say another.
-const VOLUME: f32 = 1.0;
-
-/// Whether the settings say a notification rings. Until #1003 (on and off, volume, quiet hours,
-/// Do not disturb) lands, the interim rule: the requests, the questions, the failures and the
-/// reports of a root session (the centre holds no other session's: a child's go to its parent).
-/// The one place #1003 plugs in: it answers from the user's settings and the time of day.
-fn rings(notification: &Notification) -> bool {
-    matches!(
-        notification.kind.as_str(),
-        "request" | "question" | "failure" | "report"
-    )
+/// Whether the user's settings say a notification of this kind in this project rings, quiet hours
+/// and Do not disturb aside: the one place #1003's choices plug in.
+fn rings(settings: &Settings, notification: &Notification) -> bool {
+    settings.level(&notification.kind, notification.project.as_deref()) == Level::Ring
 }
 
 /// The sound of a notification that rings: one for what needs the user, another for the rest.
@@ -63,6 +59,11 @@ pub struct Rings {
     sounds: Sounds,
     /// By the server that shows each and its number there.
     shown: Mutex<HashMap<Shown, Showing>>,
+    /// How many notifications the quiet hours or Do not disturb held since the last that rang:
+    /// the next ring says it (`3 new while quiet`). The daemon forgets it when it stops.
+    held: AtomicUsize,
+    /// One change of the settings at a time (`notification_settings.rs`).
+    settings: Mutex<()>,
 }
 
 impl Rings {
@@ -71,7 +72,13 @@ impl Rings {
             desktop: Desktop::new(),
             sounds: Sounds::open(paths),
             shown: Mutex::new(HashMap::new()),
+            held: AtomicUsize::new(0),
+            settings: Mutex::new(()),
         }
+    }
+
+    pub fn settings_lock(&self) -> &Mutex<()> {
+        &self.settings
     }
 
     /// What `notifications.status` says: whether the desktop shows Flottille's notifications.
@@ -153,7 +160,8 @@ async fn follow(daemon: &Arc<Daemon>, hears: &Hears, from: &mut u64) {
 
 /// A notification that is new: its sound, and then the window's or the desktop's.
 async fn ring(daemon: &Arc<Daemon>, hears: &Hears, notification: &Notification, source: &str) {
-    if !rings(notification) {
+    let settings = crate::notification_settings::load(&daemon.paths);
+    if !rings(&settings, notification) {
         return;
     }
     let focused = daemon.presence.focused();
@@ -165,9 +173,18 @@ async fn ring(daemon: &Arc<Daemon>, hears: &Hears, notification: &Notification, 
     {
         return;
     }
-    let sound = sound_of(notification);
-    let sounding = daemon.clone();
-    tokio::spawn(async move { sounding.rings.sounds.play(sound, VOLUME).await });
+    // Inside the quiet hours, or with Do not disturb on, it waits in the centre and is counted:
+    // the first ring after them says how many.
+    if crate::notification_settings::muted(&settings) {
+        daemon.rings.held.fetch_add(1, Ordering::Relaxed);
+        return;
+    }
+    let waited = daemon.rings.held.swap(0, Ordering::Relaxed);
+    if settings.sounds(&notification.kind) && settings.sound.volume > 0 {
+        let (sound, volume) = (sound_of(notification), settings.volume());
+        let sounding = daemon.clone();
+        tokio::spawn(async move { sounding.rings.sounds.play(sound, volume).await });
+    }
     let request = request_of(source);
     let whole = request.and_then(|number| whole_of(daemon, number));
     if !focused.is_empty() {
@@ -185,11 +202,12 @@ async fn ring(daemon: &Arc<Daemon>, hears: &Hears, notification: &Notification, 
                 "needs_you": notification.needs_you,
                 "request": request,
                 "whole": whole,
+                "waited": waited,
             }),
         );
         return;
     }
-    to_the_desktop(daemon, hears, notification, request, whole).await;
+    to_the_desktop(daemon, hears, notification, request, whole, waited).await;
 }
 
 /// A notification told to the desktop. Allow is offered on what the notification says whole
@@ -202,11 +220,12 @@ async fn to_the_desktop(
     notification: &Notification,
     request: Option<u64>,
     whole: Option<String>,
+    waited: usize,
 ) {
     let allows = whole.is_some() && !bus_reachable_by_runs();
     let outgoing = Outgoing {
         summary: masked(&notification.title),
-        body: body_of(daemon, notification, whole.as_deref()),
+        body: waited_line(body_of(daemon, notification, whole.as_deref()), waited),
         allows,
         denies: request.is_some(),
         stays: notification.needs_you,
@@ -271,9 +290,12 @@ pub async fn unshown(daemon: &Arc<Daemon>, notification: u64) -> flottille_core:
     let Some((notification, source)) = found.into_iter().next() else {
         return Ok(());
     };
+    let settings = crate::notification_settings::load(&daemon.paths);
+    // The settings may have changed since the window was told: what they hold now is not shown.
     if notification.resolved
         || notification.read_at.is_some()
-        || !rings(&notification)
+        || !rings(&settings, &notification)
+        || crate::notification_settings::muted(&settings)
         || daemon.rings.shown_as(notification.id).is_some()
     {
         return Ok(());
@@ -281,7 +303,7 @@ pub async fn unshown(daemon: &Arc<Daemon>, notification: u64) -> flottille_core:
     let hears = hears_of(daemon);
     let request = request_of(&source);
     let whole = request.and_then(|number| whole_of(daemon, number));
-    to_the_desktop(daemon, &hears, &notification, request, whole).await;
+    to_the_desktop(daemon, &hears, &notification, request, whole, 0).await;
     Ok(())
 }
 
@@ -295,6 +317,15 @@ fn request_of(source: &str) -> Option<u64> {
 fn masked(text: &str) -> String {
     let env: BTreeMap<_, _> = std::env::vars_os().collect();
     secrets::mask(text, &env)
+}
+
+/// What the first ring after the quiet hours says of what waited: `3 new while quiet`.
+fn waited_line(body: String, waited: usize) -> String {
+    match waited {
+        0 => body,
+        waited if body.is_empty() => format!("{waited} new while quiet"),
+        waited => format!("{body}\n{waited} new while quiet"),
+    }
 }
 
 /// The session and project, then the call whole when it is said so, else the excerpt.
@@ -438,9 +469,10 @@ mod tests {
     }
 
     #[test]
-    fn the_requests_questions_failures_and_reports_ring_and_the_rest_does_not() {
+    fn the_defaults_ring_the_requests_questions_failures_and_reports_and_the_rest_does_not() {
+        let settings = Settings::default();
         for kind in ["request", "question", "failure", "report"] {
-            assert!(rings(&notification(kind, false)), "{kind}");
+            assert!(rings(&settings, &notification(kind, false)), "{kind}");
         }
         for kind in [
             "vault",
@@ -450,8 +482,15 @@ mod tests {
             "unchecked",
             "dropped",
         ] {
-            assert!(!rings(&notification(kind, false)), "{kind}");
+            assert!(!rings(&settings, &notification(kind, false)), "{kind}");
         }
+    }
+
+    #[test]
+    fn what_waited_in_the_quiet_is_said_in_one_line_of_the_body() {
+        assert_eq!(waited_line("body".into(), 0), "body");
+        assert_eq!(waited_line("body".into(), 3), "body\n3 new while quiet");
+        assert_eq!(waited_line(String::new(), 1), "1 new while quiet");
     }
 
     #[test]

@@ -78,6 +78,9 @@ pub fn call(daemon: &Daemon, method: &str, params: Value) -> Result<Value, Failu
         ),
         "notifications.read" => read(daemon, serde_json::from_value(params)?),
         "notifications.status" => Ok(status(daemon)),
+        "notifications.settings" | "notifications.set_settings" => {
+            crate::notification_settings::call(daemon, method, params)
+        }
         method => Err(Failure::new(
             "unknown-method",
             format!("unknown method `{method}`"),
@@ -367,6 +370,12 @@ fn add_while(
             event.data["workspace"].as_str().map(str::to_owned),
         ),
     };
+    // Off for this kind in this project: not kept at all (`notification_settings.rs`).
+    if crate::notification_settings::load(&daemon.paths).level(kind, project.as_deref())
+        == flottille_core::notification_settings::Level::Off
+    {
+        return Ok(Vec::new());
+    }
     let new = New {
         at: event.at,
         kind: kind.to_owned(),

@@ -325,6 +325,8 @@ no device calls a `local` one over a link (`docs/remote.md`, "Roles").
 | `notifications.list` | read |
 | `notifications.read` | drive |
 | `notifications.status` | read |
+| `notifications.settings` | read |
+| `notifications.set_settings` | drive |
 | `notifications.unshown` | local |
 | `presence.set` | local |
 | `routine.list` | read |
@@ -2946,6 +2948,51 @@ server on it), and `why` says it (`no notification server answers on the session
 Settings words as "This desktop shows no notifications"; `sound` says why no sound is played (no
 sound server), `null` while there is one. `window` is the presence the daemon has: a focused
 window's, else any window's, `null` when no window is connected.
+
+### `notifications.settings`
+
+No params. What rings, and when (#1003; `docs/design.md`, §10 and §11), as `notifications.toml` of
+the configuration folder says it, the defaults for what it does not:
+
+```json
+{"kinds": {"request": "ring", "question": "ring", "report": "ring", "failure": "ring",
+           "pull_request": "centre", "ticket": "centre", "paused": "centre", "vault": "centre",
+           "daemon": "centre", "routine": "centre"},
+ "sound": {"on": true, "volume": 100, "kinds": {"request": true, "report": false}},
+ "quiet": {"on": false, "from": "22:00", "to": "08:00",
+           "days": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]},
+ "do_not_disturb": {"on": false, "until": null},
+ "projects": {"app": {"report": "centre"}},
+ "muted": false}
+```
+
+Each kind is **`ring`** (kept in the centre, and rings: the desktop's notification or the window's
+toast, and a sound), **`centre`** (kept in the centre, nothing more) or **`off`** (not kept at
+all). The kinds are the notification centre's, `daemon` being what the daemon says of a run's
+agent folders and of a dropped message. A kind that waits for the user (`request`, `question`,
+`vault`) is never `off`: only its ringing can be lowered to `centre`. `sound.kinds` says for every
+kind whether it rings with its sound; `sound.volume` is from 0 to 100. `quiet` is a daily range on
+the user's clock, `days` the days it starts on (Friday's `22:00`–`08:00` ends on Saturday
+morning). `do_not_disturb.on` is `true` while it holds: until turned off, or until `until`
+(milliseconds since the epoch), after which it is `false` with nobody turning it off. `projects`
+holds only what a project sets itself, which wins over `kinds`. `muted` is `true` inside the quiet
+hours and while Do not disturb holds: nothing rings, everything goes to the centre. A file that
+cannot be read (a syntax error, a request set to `off`) answers `invalid-config` with the file and
+the key, and the daemon follows the defaults until it is fixed.
+
+### `notifications.set_settings`
+
+What changes, each key optional, at least one given: `{"kinds": {"<kind>": "ring" | "centre" |
+"off" | "default"}, "sound": {"on", "volume", "kinds": {"<kind>": true | false}}, "quiet": {"on",
+"from", "to", "days"}, "do_not_disturb": {"on", "until"}}`, and `"project": "<name>"` with `kinds`
+alone to set that project's own levels (`default` removes its own, so that it follows the defaults
+again). `do_not_disturb` with `on: true` holds until turned off, or until `until`; with `on:
+false` it ends. Everything is checked before anything is written: an unknown kind, a level, a
+volume past 100, a time that is not `HH:MM`, a range from and to the same time, a day that is not
+`mon` … `sun`, an unknown project, and `off` for a request, a question or a vault ask are
+`invalid-params` and nothing is kept. Answers what `notifications.settings` answers, and says
+`notifications.settings_changed` (`docs/events.md`). No tool of an agent reaches these methods, and
+no proposal path: what rings is the user's alone.
 
 ### `notifications.unshown`
 
