@@ -233,7 +233,22 @@ fn auth(dir: &Path, script: &Value, args: &[String]) -> Option<i32> {
             0
         }
         ["auth", "login", ..] => sign_in::login(dir, script, args, |address, code| {
-            eprintln!("! First copy your one-time code: {code}");
+            // `sign_in.wording`: what each version of gh prints (observed: 2.104.0 without a
+            // clipboard utility; the parentheses are the wording the issue of #1248 reports).
+            match script["sign_in"]["wording"].as_str() {
+                Some("older") => eprintln!("! First copy your one-time code: {code}"),
+                Some("no clipboard") => {
+                    eprintln!("\n! Failed to copy one-time code to clipboard");
+                    eprintln!(
+                        "  No clipboard utilities available. Please install xsel, xclip, \
+                         wl-clipboard or Termux:API add-on for termux-clipboard-get/set."
+                    );
+                    eprintln!("! First copy your one-time code: {code}");
+                }
+                // A program that shows no code the dialog could read.
+                Some("no code") => eprintln!("\n! One-time code copied to clipboard"),
+                _ => eprintln!("\n! One-time code ({code}) copied to clipboard"),
+            }
             eprintln!("Open this URL to continue in your web browser: {address}");
         }),
         ["auth", "logout", ..] => {
