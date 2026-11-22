@@ -819,18 +819,23 @@ them: no tool of an agent does.
 
 What changed since the version the user last ran (`docs/releases.md`, "What's new").
 
-- `whatsnew.show {since?}` answers `{"version", "since", "seen", "fetching", "failed", "groups"}`:
-  this build's version; the version that ran before it, which the changes are counted from (null
-  when nothing is new: the first version run, the same one again, a step back); whether the page
-  was opened since this build runs; whether the notes are being read; why they could not be read
-  (null otherwise); and the changes, `[{"key", "title", "scopes": [{"scope", "changes": [{"text",
-  "pr", "url"}]}]}]`, or null while the notes were not read. The groups are the changelog's
-  (`breaking`, `features`, `fixes`, `performance`, `other`) in its order, those with something in
-  them; the scopes alphabetical, the changes without one (`scope` null) last; each change once
-  however many releases list it, the oldest first within a scope; `pr` and `url` null when the
-  line names no pull request. With `since`, the changes are counted from that version instead,
-  read now from the releases whatever `check` says and not kept (`unavailable` when they cannot be
-  read, `invalid-params` when `since` is no version).
+- `whatsnew.show {since?}` answers `{"version", "since", "seen", "fetching", "failed", "groups",
+  "highlights", "all"}`: this build's version; the version that ran before it, which the changes
+  are counted from (null when nothing is new: the first version run, the same one again, a step
+  back); whether the page was opened since this build runs; whether the notes are being read; why
+  they could not be read (null otherwise); and, null while the notes were not read, the notes
+  `groups`, `[{"key", "title", "changes": [{"text", "pr", "url"}]}]`, the `highlights` (lines
+  written by hand for a release, none for a beta), and `all`, the raw list of subjects,
+  `[{"key", "title", "scopes": [{"scope", "changes": [{"text", "pr", "url"}]}]}]`. The notes are
+  those of `tools/changelog.sh`'s areas (`remote`, `window`, `agents`, `tools`, `projects`,
+  `other`, then `fixed`), those with a note; `all` has the changelog's types (`breaking`,
+  `features`, `fixes`, `performance`, `other`), the scopes alphabetical and the lines without one
+  (`scope` null) last. Each line is once however many releases list it, the oldest first; `pr`
+  and `url` are null when the line names no pull request. The body of a release made before the
+  notes has only its subjects: each is a note of `other`, with a capital and no scope. With
+  `since`, the changes are counted from that version instead, read now from the releases whatever
+  `check` says and not kept (`unavailable` when they cannot be read, `invalid-params` when `since`
+  is no version).
 - `whatsnew.seen` records that the page was opened, for good: the window's mark goes.
 - `whatsnew.fetch` reads the notes the daemon lacks now, whatever `check` says, and answers as
   `whatsnew.show`; the rest comes in `whatsnew.changed`.
