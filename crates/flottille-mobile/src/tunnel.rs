@@ -302,7 +302,7 @@ async fn hold(
 }
 
 /// What an accept loop listens on: a TCP listener, or what a test plays.
-trait Listen: Send + 'static {
+trait Listen: Send + Sync + 'static {
     fn accept(&self) -> impl Future<Output = std::io::Result<TcpStream>> + Send;
 }
 
@@ -317,7 +317,7 @@ impl Listen for TcpListener {
 /// taken): the reason.
 async fn accept<F>(
     listener: impl Listen,
-    carry: impl Fn(TcpStream) -> F,
+    mut carry: impl FnMut(TcpStream) -> F + Send + 'static,
     idle: Option<Duration>,
 ) -> String
 where
