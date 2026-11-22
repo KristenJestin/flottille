@@ -1532,3 +1532,55 @@ fn the_hubs_address_is_shown_without_its_default_port_or_a_trailing_slash() {
         "{refused}"
     );
 }
+
+#[test]
+fn a_machine_removed_while_its_link_is_made_is_never_linked() {
+    // The pc takes a link it is dialled on only `LATE` after its handshake: the laptop is removed
+    // within that time, after the pc judged the link and before it keeps it.
+    const LATE: Duration = Duration::from_secs(20);
+    let pc = Machine::of(User::new().with_env(
+        "FLOTTILLE_TEST_LINK_ACCEPT_DELAY_MS",
+        &LATE.as_millis().to_string(),
+    ));
+    let (_laptop_dir, laptop) = machine_key_apart();
+    let mut trusting = Trusting::new(&pc, &laptop);
+
+    // The laptop dials the pc, trusted: the pc's handshake is done, its link kept `LATE` after.
+    let endpoint = trusting.endpoint_of(&laptop);
+    let link = trusting
+        .hub
+        .runtime
+        .block_on(crate::remote::dial(
+            &endpoint,
+            pc.key(),
+            Traffic::Machine,
+            "pc",
+        ))
+        .unwrap();
+    let dialled = Instant::now();
+
+    // Meanwhile the laptop is removed, and the pc takes the list that says it.
+    trusting.remove_laptop();
+    trusting.cut(&pc);
+    pc.wait_until("the pc still trusts the removed laptop", |seen| {
+        !trusts_laptop(seen)
+    });
+    assert!(
+        dialled.elapsed() < LATE,
+        "the pc took the list after it kept the link: the test proves nothing\n{}",
+        pc.log()
+    );
+
+    // The pc's time to keep the link it was making has come, and gone: it never kept it.
+    std::thread::sleep((LATE + Duration::from_secs(3)).saturating_sub(dialled.elapsed()));
+    let linked = pc.events("remote.connected");
+    assert!(
+        linked.iter().all(|event| event["name"] != "laptop"),
+        "the pc linked to the laptop removed while its link was made: {linked:#?}\n{}",
+        pc.log()
+    );
+    assert!(!pc.log().contains("linked to laptop"), "{}", pc.log());
+    drop(link);
+    trusting.hub.runtime.block_on(endpoint.close());
+    drop(trusting.hub.runtime);
+}

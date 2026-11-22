@@ -384,7 +384,22 @@ device that pinned the hub's key, from its pair code or since, refuses another o
 it proves anything. The hub then welcomes a member's device, a member's machine, or a device whose
 pairing it took, and refuses any other key; the refusal says the list was reset when the device
 pinned a list that starts otherwise, and nothing else of the list: a stranger learns neither its
-root nor its members. Once welcomed, a device asks (a member's change, what it is, its presence)
+root nor its members. **What a refusal proves**: the hub signs it with its key, over
+`flottille-hub-refused-v1`, a zero byte, the device's key, both nonces, what it received of the
+device's proof (the hash it pinned, or none; the pairing it asked, or none), `reset` and the
+reason, so that it holds for this session, and this request, only. The device's own signature
+covers neither the hash nor the pairing: something on the way could add a pairing to a member's
+proof, or change the hash, to have the hub refuse it; the device checks the refusal against what it
+sent, and such a refusal does not check. A device acts on a refusal (it forgets the hub, or says
+its list was reset) only once that signature checks; an unsigned refusal, or one whose signature
+does not check (said by something on the way to an `http://` hub, answering a request changed on
+the way, or caught in another session), changes nothing, and the device says the hub could not be
+reached. A refusal said before the handshake (`{"refused": "…"}` with no hello both can use) is
+unsigned too: the device says the hub could not be reached, and shows its words as what answered,
+not as the hub's. A hub of before 2026-11-22 signs no
+refusal: a device of this version that it refuses says it cannot reach it, and keeps trying, until
+the hub is updated; a device of before takes this hub's signed refusal as it took an unsigned one.
+A refusal later in a session (a member removed meanwhile) only ends the session. Once welcomed, a device asks (a member's change, what it is, its presence)
 and is answered by number; each ask is taken only while the device is still welcome,
 so that a session opened before a change that leaves it out asks nothing more. The hub sends the
 list whole, what it knows of each device, and, to a runner, the presence, at once and whenever
@@ -1823,7 +1838,10 @@ on a real phone, by hand, and reported.
   replace the hub (`--replace`): a machine has one hub.
 - A removal is carried out by every daemon that takes the list holding it: the machines it trusts
   are written again, and its link to the removed member's machine is cut at once
-  (`remote.disconnected`, `it was removed from the member list`). The removed machine's own session
+  (`remote.disconnected`, `it was removed from the member list`). A link to it that was being made
+  when the list came is judged again as it is kept, and closed (`refused: this machine's key is not
+  one of the user's`): it never gets `remote.connected`. So is a client's link to it dialled for a
+  request then: closed, and the request answered `unavailable`. The removed machine's own session
   to the hub is refused, so it never sees the removal itself; its links are cut by the others.
 - `remote.connected` and `remote.disconnected` are the machines' links, not the hub's session
   (its state is `remote.machines`' `hub`, and `remote.hub` says it changed).
