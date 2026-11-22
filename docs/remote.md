@@ -1187,6 +1187,23 @@ recreated.
 - **On the phone**, the page opens in an in-app browser by default (the tunnel lives with the app in
   the foreground). **Open in browser** hands it to the user's browser and keeps the tunnel alive
   with a foreground service and its notification, closed from that notification.
+  Built (#831): the session page lists the commands of the session that run and report an address
+  (`run.started`, `run.ready`, `run.ended` of the page's events), and a link an agent showed
+  (`agent.link_shown`, a `url`) is a card of the conversation, each with **Open** and **Open in
+  browser**. The phone's core does what a client's daemon does: it signs `tunnel.open {run, port?}`
+  for the machine, listens on `127.0.0.1` of the phone (the run's port when free, another
+  otherwise), opens one stream of the link per connection, and holds the tunnel with the request's
+  stream, which the machine ends with its run and the phone ends by dropping it (`Core.open_address`,
+  `Core.close_tunnel`; the view says the tunnels held and, for each that ended, why). A link names
+  no run: the core asks `run.list`, takes the run that reports its port, else the only one that
+  runs, and the machine checks the port again. A page of the web opens as it is, in the user's
+  browser. The in-app browser is a web view that loads that tunnel's origin only (any other link
+  goes to the user's browser), enters and leaves over the panel's duration, and says when its
+  tunnel ended. **Open in browser** starts a foreground service (type `specialUse`) that holds the
+  core's connection, so that the links stay up with the app in the background, and shows one
+  notification, "Tunnel kept open", with **Close**; the service ends when its tunnels have, and an
+  end that is not the user's own (the run ended, the link dropped) is a notice of its own that says
+  why. A `viewer`'s page draws no tunnel control (the machine would refuse it).
 - **Built (#829), from the command line**: `flottille --machine server tunnel open <run> [--port
   <p>]` signs `tunnel.open {run, port?}` for the machine and carries on listening: the daemon of
   the client's machine listens on `127.0.0.1` (never another address) on the run's port when it is
@@ -1564,6 +1581,15 @@ on a real phone, by hand, and reported.
 - **The window's tunnels are not listed again after a restart (#830).** The listener is the
   window's connection's: a window that quits closes them, and one that opens again starts with
   none (`tunnel.list` still lists what a command line holds).
+- **On the phone (#831), one notification for all the tunnels kept**: the service shows one
+  ongoing notification that lists them, and its Close closes every one, rather than one
+  notification and one Close each (a foreground service has one notification). Reversible: a
+  notification per tunnel is a loop. A tunnel ends with the phone's link to its machine, as the
+  daemon's does: a link that drops and comes back is a tunnel to open again, said as a notice.
+- **A run's address is listed only for the followed session (#831)**: the page derives the runs from
+  the events it holds (the commands of the session's own agent), so a run a child started, or one
+  that started before the page's latest events, is not listed; the links an agent showed are in
+  the conversation as they are for any message. Reversible: the core can ask `run.list {tree}`.
 - A tunnel carries at most 64 connections at once and a device has at most 8 tunnels open on a
   machine: a small cap for one person's pages and APIs, said in the refusal; raising it is one
   constant.
