@@ -7,9 +7,9 @@
 //! other way. The first stream is the handshake: the side that dials sends its hello, the other
 //! answers its own, and each chooses the protocol, or refuses, by itself.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fmt;
-use std::net::{IpAddr, SocketAddr};
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -23,23 +23,19 @@ use crate::{Hello, MachineKey, NeedsUpdate, PeerState, PublicKey, choose};
 /// The longest frame a link takes. Bigger transfers (a git bundle) will have streams of their
 /// own.
 pub const FRAME_LIMIT: usize = 1 << 20;
-/// How long dialling one address, or a handshake, may take.
+/// How long dialling another device, or a handshake, may take.
 const WAIT: Duration = Duration::from_secs(10);
 /// How long the TLS of a link that came in may take: on loopback or a LAN it takes milliseconds.
 const HANDSHAKE: Duration = Duration::from_secs(5);
 /// The most links that came in whose TLS is under way at once: one that stalls holds a place,
 /// not the others. A stalled handshake costs the endpoint a connection's state, a few kilobytes,
-/// for `HANDSHAKE` at most: places are cheap, and many of them leave a distributed staller far
-/// more hosts to find before it holds them all.
+/// for `HANDSHAKE` at most: places are cheap.
 const HANDSHAKES: usize = 256;
-/// The most of them from one host (an IPv4 address, an IPv6 /64): a host that stalls its own
-/// cannot hold the places of the others.
+/// The most of them from one host (an IPv6 /64; the relay gives each key a /64 and a /48 of its
+/// own): a device that stalls its own cannot hold the places of the others.
 const HANDSHAKES_FROM_ONE: usize = 2;
-/// The most of them from one IPv6 /48, which one site is given whole: its /64s are many.
+/// The most of them from one IPv6 /48.
 const HANDSHAKES_FROM_SITE: usize = 8;
-/// The places kept for the addresses of the machines this one trusts (`Endpoint::know`): hosts
-/// it does not know cannot take them.
-const KEPT_FOR_KNOWN: usize = 8;
 /// The codes a side closes a link with.
 const CLOSE_REFUSED: u32 = 1;
 const CLOSE_NEEDS_UPDATE: u32 = 2;
@@ -85,8 +81,9 @@ pub enum Message {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MachineMessage {
-    /// Every address the sender may be reached at now, so that the two can link again without
-    /// the hub.
+    /// The addresses a machine of the previous version tells on every link, for the direct link
+    /// removed on 2026-11-21: taken and ignored, so that such a peer still links while the other
+    /// machine is updated. This version never sends it.
     Addresses(Vec<String>),
     /// What a runner offers: its projects with their free slots, the agents signed in on it
     /// (`docs/remote.md`, "Roles"). Sent when a link is made, and again when it changes.
@@ -335,10 +332,10 @@ enum Answered {
 /// Why a link could not be made, or a message went unanswered: each a sentence for the user.
 #[derive(Debug)]
 pub enum LinkError {
-    /// The endpoint cannot listen where it is told to.
-    Listen(String),
-    /// No address to dial, and no session to the hub to go through.
-    NoAddress(String),
+    /// The endpoint cannot be made with the machine's key.
+    Endpoint(String),
+    /// No session to the hub to go through, which every link takes.
+    NoHub(String),
     /// The other device has no session open to the hub, which links go through.
     Offline(String),
     Unreachable {
@@ -372,8 +369,13 @@ impl LinkError {
 impl fmt::Display for LinkError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            LinkError::Listen(why) => f.write_str(why),
-            LinkError::NoAddress(peer) => write!(f, "{peer} has no address this machine knows"),
+            LinkError::Endpoint(why) => f.write_str(why),
+            LinkError::NoHub(peer) => {
+                write!(
+                    f,
+                    "{peer} cannot be reached: this device has no session to the hub"
+                )
+            }
             LinkError::Offline(peer) => {
                 write!(f, "{peer} is offline: it is not connected to the hub")
             }
@@ -388,15 +390,15 @@ impl fmt::Display for LinkError {
 
 impl std::error::Error for LinkError {}
 
-/// A machine's endpoint: it listens for links, and dials them.
+/// A machine's endpoint: it dials links and takes them in, through the hub only. It opens no
+/// socket of its own.
 #[derive(Clone)]
 pub struct Endpoint {
+    /// The machine's key, which each transport through the hub is made with.
     transport: Arc<Transport>,
     key: PublicKey,
     /// The links that came in, their keys proved, in the order their TLS finished.
     accepted: Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<Accepting>>>,
-    /// The addresses of the machines this one trusts.
-    known: Known,
     /// This machine's name, as a failure to reach another says where it was tried from.
     name: Arc<std::sync::RwLock<String>>,
     /// What hands the links that came in to `accept`, for each transport through the hub; let go
@@ -413,44 +415,22 @@ struct Relayed {
     online: tokio::sync::watch::Receiver<Vec<PublicKey>>,
 }
 
-/// The addresses of the machines an endpoint trusts, which may take the places kept for them.
-type Known = Arc<std::sync::RwLock<HashSet<IpAddr>>>;
-
 impl Endpoint {
-    /// Listens at `listen` with the machine's key, for both kinds of traffic. Within a Tokio
-    /// runtime.
-    pub fn bind(key: &MachineKey, listen: SocketAddr) -> Result<Endpoint, LinkError> {
+    /// The machine's endpoint, with its key, for both kinds of traffic: it links once a session
+    /// to the hub carries it (`Endpoint::through`). Within a Tokio runtime.
+    pub fn new(key: &MachineKey) -> Result<Endpoint, LinkError> {
         let seed = Zeroizing::new(key.0.to_bytes());
         let public = key.public();
-        let alpns = [Traffic::Machine.alpn(), Traffic::Client.alpn()];
-        let transport =
-            Transport::bind(&seed, public.as_bytes(), listen, &alpns).map_err(LinkError::Listen)?;
-        Ok(Endpoint::over(transport, public))
-    }
-
-    /// Listens nowhere, and dials: no socket is open until the first link it dials. Within a
-    /// Tokio runtime.
-    pub fn dialler(key: &MachineKey) -> Result<Endpoint, LinkError> {
-        let seed = Zeroizing::new(key.0.to_bytes());
-        let public = key.public();
-        let transport = Transport::dialler(&seed, public.as_bytes()).map_err(LinkError::Listen)?;
-        Ok(Endpoint::over(transport, public))
-    }
-
-    fn over(transport: Transport, key: PublicKey) -> Endpoint {
-        let transport = Arc::new(transport);
+        let transport = Transport::keyed(&seed, public.as_bytes()).map_err(LinkError::Endpoint)?;
         let (sender, accepted) = tokio::sync::mpsc::channel(HANDSHAKES);
-        let known = Known::default();
-        tokio::spawn(take_in(transport.clone(), sender.clone(), known.clone()));
-        Endpoint {
-            transport,
-            key,
+        Ok(Endpoint {
+            transport: Arc::new(transport),
+            key: public,
             accepted: Arc::new(tokio::sync::Mutex::new(accepted)),
-            known,
-            name: Arc::new(std::sync::RwLock::new(key.fingerprint())),
+            name: Arc::new(std::sync::RwLock::new(public.fingerprint())),
             taking: Arc::new(std::sync::Mutex::new(Some(sender))),
             relayed: Arc::default(),
-        }
+        })
     }
 
     /// Carries links through the hub, over the session whose relay port is `port`
@@ -470,7 +450,7 @@ impl Endpoint {
         };
         let taking = self.taking.lock().unwrap().clone();
         if let Some(taking) = taking {
-            tokio::spawn(take_in(transport.clone(), taking, self.known.clone()));
+            tokio::spawn(take_in(transport.clone(), taking));
         }
         let before = self.relayed.lock().unwrap().replace(Relayed {
             transport: transport.clone(),
@@ -508,6 +488,23 @@ impl Endpoint {
         self.relayed.lock().unwrap().is_some()
     }
 
+    /// Until the hub says another list of the members online; never without a session to it.
+    pub async fn online_changed(&self) {
+        let online = self
+            .relayed
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|relayed| relayed.online.clone());
+        let Some(mut online) = online else {
+            return std::future::pending().await;
+        };
+        online.borrow_and_update();
+        if online.changed().await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    }
+
     /// The members' keys the hub says are online now; none without a session to it.
     pub fn online(&self) -> Vec<PublicKey> {
         self.relayed
@@ -519,122 +516,61 @@ impl Endpoint {
     }
 
     /// The name this machine has among the user's: a failure to reach another says it
-    /// (`tried 192.0.2.10:7447 from pc`). Its key's fingerprint until it is named.
+    /// (`tried through the hub from pc`). Its key's fingerprint until it is named.
     pub fn name_as(&self, name: &str) {
         name.clone_into(&mut self.name.write().unwrap());
-    }
-
-    /// The addresses of the machines this one trusts, in place of those it was told before: a
-    /// link that comes in from one of them may take a place kept for them when every other is
-    /// held.
-    pub fn know(&self, addresses: impl IntoIterator<Item = IpAddr>) {
-        let known: HashSet<IpAddr> = addresses.into_iter().map(unmapped).collect();
-        *self.known.write().unwrap() = known;
     }
 
     pub fn key(&self) -> PublicKey {
         self.key
     }
 
-    /// The socket it listens on.
-    pub fn listening(&self) -> Option<SocketAddr> {
-        self.transport.local()
-    }
-
-    /// The addresses it may be reached at, as far as this machine knows without asking anyone:
-    /// the address it listens on, or, listening on every interface, the interfaces' addresses.
-    pub fn addresses(&self) -> Vec<SocketAddr> {
-        let Some(local) = self.listening() else {
-            return Vec::new();
-        };
-        if !local.ip().is_unspecified() {
-            return vec![local];
-        }
-        interfaces()
-            .into_iter()
-            .filter(|ip| local.is_ipv6() || ip.is_ipv4())
-            .map(|ip| SocketAddr::new(ip, local.port()))
-            .collect()
-    }
-
-    /// A link to the machine whose key is `peer`, named `name`, at the first of `addresses` that
-    /// answers; its protocol chosen from both hellos.
+    /// A link to the machine whose key is `peer`, named `name`, through the hub; its protocol
+    /// chosen from both hellos.
     pub async fn connect(
         &self,
         peer: PublicKey,
-        addresses: &[SocketAddr],
         traffic: Traffic,
         ours: &Hello,
         name: &str,
     ) -> Result<Link, LinkError> {
         let from = self.name.read().unwrap().clone();
-        // Every address tried, and how it failed: the fix is the user's network, so all is said.
-        let mut tried: Vec<String> = Vec::new();
-        for address in addresses {
-            let dialled = tokio::time::timeout(
-                WAIT,
-                self.transport
-                    .connect(peer.as_bytes(), *address, traffic.alpn()),
-            )
-            .await;
-            match dialled {
-                Ok(Ok(conn)) => return dialler_handshake(conn, peer, traffic, ours, name).await,
-                Ok(Err(Failure::Closed(reason) | Failure::Lost(reason))) => {
-                    tried.push(format!("tried {address} from {from}: {reason}"));
-                }
-                Err(_) => tried.push(format!(
-                    "tried {address} from {from}, no answer in {} s",
-                    WAIT.as_secs()
-                )),
-            }
-        }
-        // Through the hub, when a session to it is open: the direct path was tried first, for a
-        // machine whose addresses the user gave. A machine that listens chose the direct path,
-        // and dials only addresses: it still takes the links that come through the hub.
-        let relayed = if self.listening().is_some() {
-            None
-        } else {
-            self.relayed.lock().unwrap().clone()
+        let Some(relayed) = self.relayed.lock().unwrap().clone() else {
+            return Err(LinkError::NoHub(name.to_owned()));
         };
-        if let Some(relayed) = relayed {
-            if !relayed.online.borrow().contains(&peer) {
-                if tried.is_empty() {
-                    return Err(LinkError::Offline(name.to_owned()));
-                }
-                tried.push(format!("{name} is not connected to the hub"));
-            } else if let Some(address) = relayed.transport.address_for(peer.as_bytes()) {
-                let dialled = tokio::time::timeout(
-                    WAIT,
-                    relayed
-                        .transport
-                        .connect(peer.as_bytes(), address, traffic.alpn()),
-                )
-                .await;
-                match dialled {
-                    Ok(Ok(conn)) => {
-                        return dialler_handshake(conn, peer, traffic, ours, name).await;
-                    }
-                    Ok(Err(Failure::Closed(reason) | Failure::Lost(reason))) => {
-                        tried.push(format!("tried through the hub from {from}: {reason}"));
-                    }
-                    Err(_) => tried.push(format!(
-                        "tried through the hub from {from}, no answer in {} s",
-                        WAIT.as_secs()
-                    )),
-                }
+        if !relayed.online.borrow().contains(&peer) {
+            return Err(LinkError::Offline(name.to_owned()));
+        }
+        let Some(address) = relayed.transport.address_for(peer.as_bytes()) else {
+            return Err(LinkError::Unreachable {
+                peer: name.to_owned(),
+                why: format!("tried through the hub from {from}: too many devices"),
+            });
+        };
+        let dialled = tokio::time::timeout(
+            WAIT,
+            relayed
+                .transport
+                .connect(peer.as_bytes(), address, traffic.alpn()),
+        )
+        .await;
+        let why = match dialled {
+            Ok(Ok(conn)) => return dialler_handshake(conn, peer, traffic, ours, name).await,
+            Ok(Err(Failure::Closed(reason) | Failure::Lost(reason))) => {
+                format!("tried through the hub from {from}: {reason}")
             }
-        }
-        if tried.is_empty() {
-            return Err(LinkError::NoAddress(name.to_owned()));
-        }
+            Err(_) => format!(
+                "tried through the hub from {from}, no answer in {} s",
+                WAIT.as_secs()
+            ),
+        };
         Err(LinkError::Unreachable {
             peer: name.to_owned(),
-            why: tried.join("; "),
+            why,
         })
     }
 
-    /// The next machine that dials this one, its key proved; `None` once the endpoint is closed,
-    /// at once when it listens nowhere.
+    /// The next machine that dials this one, its key proved; `None` once the endpoint is closed.
     pub async fn accept(&self) -> Option<Accepting> {
         self.accepted.lock().await.recv().await
     }
@@ -654,12 +590,8 @@ impl Endpoint {
 /// no other; until the endpoint is closed, or every copy of it dropped. One that finds no place
 /// free, for all or for its host, is refused at once: the links that come in are still taken,
 /// and the one refused dials again.
-async fn take_in(
-    transport: Arc<Transport>,
-    accepted: tokio::sync::mpsc::Sender<Accepting>,
-    known: Known,
-) {
-    let places = Places::default();
+async fn take_in(transport: Arc<Transport>, accepted: tokio::sync::mpsc::Sender<Accepting>) {
+    let places = Pool::new(HANDSHAKES);
     loop {
         let incoming = tokio::select! {
             incoming = transport.accept() => incoming,
@@ -668,9 +600,7 @@ async fn take_in(
         let Some(incoming) = incoming else {
             return;
         };
-        let ip = unmapped(incoming.from().ip());
-        let is_known = known.read().unwrap().contains(&ip);
-        let Some(place) = places.take(ip, is_known) else {
+        let Some(place) = places.take(incoming.from().ip()) else {
             incoming.refuse();
             continue;
         };
@@ -703,32 +633,7 @@ async fn take_in(
     }
 }
 
-/// The places of the handshakes under way: those for every host, and those kept for the hosts
-/// this machine knows.
-struct Places {
-    all: Pool,
-    kept: Pool,
-}
-
-impl Default for Places {
-    fn default() -> Places {
-        Places {
-            all: Pool::new(HANDSHAKES),
-            kept: Pool::new(KEPT_FOR_KNOWN),
-        }
-    }
-}
-
-impl Places {
-    /// A place for a link from `ip`: one for every host, or, for a host it knows, one kept.
-    fn take(&self, ip: IpAddr, known: bool) -> Option<Place> {
-        self.all
-            .take(ip)
-            .or_else(|| known.then(|| self.kept.take(ip)).flatten())
-    }
-}
-
-/// Places, and those each host and each IPv6 site holds.
+/// The places of the handshakes under way, and those each host and each IPv6 site holds.
 struct Pool {
     free: Arc<tokio::sync::Semaphore>,
     held: Held,
@@ -791,18 +696,10 @@ impl Drop for Place {
     }
 }
 
-/// An IPv4 address mapped into IPv6 as the IPv4 address it is.
-fn unmapped(ip: IpAddr) -> IpAddr {
-    match ip {
-        IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(ip, IpAddr::V4),
-        IpAddr::V4(_) => ip,
-    }
-}
-
 /// The host an address is: an IPv4 address, or the /64 of an IPv6 one, which one host is given
 /// whole.
 fn host_of(ip: IpAddr) -> IpAddr {
-    match unmapped(ip) {
+    match ip {
         IpAddr::V6(v6) => IpAddr::V6((u128::from(v6) & !u128::from(u64::MAX)).into()),
         v4 => v4,
     }
@@ -810,7 +707,7 @@ fn host_of(ip: IpAddr) -> IpAddr {
 
 /// The site of an IPv6 address, its /48; none for an IPv4 one.
 fn site_of(ip: IpAddr) -> Option<IpAddr> {
-    match unmapped(ip) {
+    match ip {
         IpAddr::V6(v6) => Some(IpAddr::V6((u128::from(v6) & !(u128::MAX >> 48)).into())),
         IpAddr::V4(_) => None,
     }
@@ -944,16 +841,6 @@ impl Link {
 
     pub fn protocol(&self) -> u32 {
         self.protocol
-    }
-
-    /// The other side's address: the one this machine dialled, or the one the link came from.
-    pub fn remote(&self) -> SocketAddr {
-        self.conn.remote()
-    }
-
-    /// Whether the link goes through the hub, not to an address.
-    pub fn through_hub(&self) -> bool {
-        self.conn.through_hub()
     }
 
     /// What the other side said in its hello.
@@ -1237,47 +1124,6 @@ fn answer(answered: Result<Value, String>) -> Vec<u8> {
     serde_json::to_vec(&answered).expect("an answer is JSON")
 }
 
-/// The addresses of this machine's interfaces that another may reach: not a loopback, nor an
-/// IPv6 link-local one (it needs an interface named with it).
-fn interfaces() -> Vec<IpAddr> {
-    let mut found = Vec::new();
-    let mut list: *mut libc::ifaddrs = std::ptr::null_mut();
-    // SAFETY: getifaddrs fills `list` on success; it is freed below, once.
-    if unsafe { libc::getifaddrs(&mut list) } != 0 {
-        return found;
-    }
-    let mut at = list;
-    while !at.is_null() {
-        // SAFETY: `at` is an entry of the list getifaddrs made, not freed yet.
-        let entry = unsafe { &*at };
-        at = entry.ifa_next;
-        if entry.ifa_addr.is_null() {
-            continue;
-        }
-        // SAFETY: `ifa_addr` is a socket address whose family says its layout.
-        let ip = unsafe {
-            match i32::from((*entry.ifa_addr).sa_family) {
-                libc::AF_INET => {
-                    let address = &*(entry.ifa_addr as *const libc::sockaddr_in);
-                    IpAddr::from(u32::from_be(address.sin_addr.s_addr).to_be_bytes())
-                }
-                libc::AF_INET6 => {
-                    let address = &*(entry.ifa_addr as *const libc::sockaddr_in6);
-                    IpAddr::from(address.sin6_addr.s6_addr)
-                }
-                _ => continue,
-            }
-        };
-        let link_local = matches!(ip, IpAddr::V6(v6) if (v6.segments()[0] & 0xffc0) == 0xfe80);
-        if !ip.is_loopback() && !link_local && !found.contains(&ip) {
-            found.push(ip);
-        }
-    }
-    // SAFETY: `list` is what getifaddrs returned, freed once.
-    unsafe { libc::freeifaddrs(list) };
-    found
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1288,60 +1134,23 @@ mod tests {
 
     #[test]
     fn an_ipv6_host_holds_two_places_and_its_site_eight() {
-        let places = Places::default();
+        let places = Pool::new(HANDSHAKES);
         let mut held = Vec::new();
         // Two for one /64, refused a third.
-        held.push(places.take(ip("2001:db8:1:1::1"), false).unwrap());
-        held.push(places.take(ip("2001:db8:1:1::2"), false).unwrap());
-        assert!(places.take(ip("2001:db8:1:1::3"), false).is_none());
+        held.push(places.take(ip("2001:db8:1:1::1")).unwrap());
+        held.push(places.take(ip("2001:db8:1:1::2")).unwrap());
+        assert!(places.take(ip("2001:db8:1:1::3")).is_none());
         // Eight for the /48, whichever of its /64s they come from.
         for subnet in 2..5 {
             for _ in 0..2 {
-                held.push(
-                    places
-                        .take(ip(&format!("2001:db8:1:{subnet}::1")), false)
-                        .unwrap(),
-                );
+                held.push(places.take(ip(&format!("2001:db8:1:{subnet}::1"))).unwrap());
             }
         }
-        assert!(places.take(ip("2001:db8:1:99::1"), false).is_none());
+        assert!(places.take(ip("2001:db8:1:99::1")).is_none());
         // Another site is not counted with it.
-        held.push(places.take(ip("2001:db8:2::1"), false).unwrap());
+        held.push(places.take(ip("2001:db8:2::1")).unwrap());
         // A place let go is free again.
         held.remove(0);
-        assert!(places.take(ip("2001:db8:1:99::1"), false).is_some());
-    }
-
-    #[test]
-    fn an_ipv4_address_mapped_into_ipv6_is_one_host() {
-        let places = Places::default();
-        let _held = [
-            places.take(ip("192.0.2.1"), false).unwrap(),
-            places.take(ip("::ffff:192.0.2.1"), false).unwrap(),
-        ];
-        assert!(places.take(ip("192.0.2.1"), false).is_none());
-        assert!(places.take(ip("::ffff:192.0.2.1"), false).is_none());
-    }
-
-    #[test]
-    fn the_places_kept_are_for_known_hosts_only() {
-        let places = Places::default();
-        // Every place for all held, two by host.
-        let _held: Vec<Place> = (0..HANDSHAKES)
-            .map(|at| {
-                let at = at / 2;
-                places
-                    .take(ip(&format!("10.0.{}.{}", at / 256, at % 256)), false)
-                    .unwrap()
-            })
-            .collect();
-        assert!(places.take(ip("192.0.2.1"), false).is_none());
-        // A known host takes a kept place; still two at most for it.
-        let _kept = [
-            places.take(ip("192.0.2.7"), true).unwrap(),
-            places.take(ip("192.0.2.7"), true).unwrap(),
-        ];
-        assert!(places.take(ip("192.0.2.7"), true).is_none());
-        assert!(places.take(ip("192.0.2.8"), true).is_some());
+        assert!(places.take(ip("2001:db8:1:99::1")).is_some());
     }
 }

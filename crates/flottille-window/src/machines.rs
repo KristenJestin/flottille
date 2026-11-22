@@ -106,18 +106,8 @@ pub struct Machine {
     pub reason: Option<String>,
     /// Its role in the list; `None` before the list is checked.
     pub role: Option<String>,
-    /// The address its live link goes to or came from; `None` while it is not linked.
-    pub reached: Option<Reached>,
-    /// The addresses it is known at, as the hub, the user or it told them.
-    pub addresses: Vec<String>,
-}
-
-/// Where a live link to another machine goes.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Reached {
-    pub address: String,
-    /// Whether this machine dialled it; when not, `address` is where the link came from.
-    pub dialled: bool,
+    /// Whether it has a live link to this machine, which always goes through the hub.
+    pub linked: bool,
 }
 
 impl Machine {
@@ -129,17 +119,7 @@ impl Machine {
             since: value["since"].as_u64(),
             reason: value["reason"].as_str().map(str::to_owned),
             role: value["role"].as_str().map(str::to_owned),
-            reached: value["reached"]["address"].as_str().map(|address| Reached {
-                address: address.to_owned(),
-                dialled: value["reached"]["dialled"].as_bool().unwrap_or(true),
-            }),
-            addresses: value["addresses"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_str)
-                .map(str::to_owned)
-                .collect(),
+            linked: value["reached"].is_object(),
         }
     }
 
@@ -153,28 +133,14 @@ impl Machine {
         self.state == "online"
     }
 
-    /// How it is reached, in words: the address of its link (the host only when it dialled this
-    /// machine: its port is the one it dialled from), or how it failed; with the hub out of
-    /// reach, the address it was last known at, which only the hub could have told.
-    pub fn address_words(&self, hub_usable: bool) -> String {
-        if let Some(reached) = &self.reached {
-            return if reached.dialled {
-                format!("Reached at {}", reached.address)
-            } else {
-                format!("Linked from {}", host_of(&reached.address))
-            };
+    /// How it is reached, in words: through the hub, whichever side dialled, or how it failed.
+    pub fn link_words(&self) -> String {
+        if self.linked {
+            return "Linked through the hub".to_owned();
         }
-        let reason = self.reason.as_deref().map(how_it_failed);
-        let last = self
-            .addresses
-            .first()
-            .filter(|address| !hub_usable && !reason.is_some_and(|r| r.contains(*address)))
-            .map(|address| format!("Last known address {address}."));
-        match (reason, last) {
-            (Some(reason), Some(last)) => format!("{reason} {last}"),
-            (Some(reason), None) => reason.to_owned(),
-            (None, Some(last)) => last,
-            (None, None) => "Not reached yet".to_owned(),
+        match self.reason.as_deref().map(how_it_failed) {
+            Some(reason) => reason.to_owned(),
+            None => "Not reached yet".to_owned(),
         }
     }
 
@@ -384,13 +350,6 @@ pub fn how_it_failed(reason: &str) -> &str {
         .split_once(" is unreachable")
         .and_then(|(_, after)| after.split_once(": "))
         .map_or(reason, |(_, how)| how)
-}
-
-/// The host of a socket address, without its port.
-fn host_of(address: &str) -> String {
-    address
-        .parse::<std::net::SocketAddr>()
-        .map_or_else(|_| address.to_owned(), |socket| socket.ip().to_string())
 }
 
 /// What a machine proposes for itself when it pairs, as `remote.machines` says it.

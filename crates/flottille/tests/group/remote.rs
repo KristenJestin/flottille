@@ -29,6 +29,8 @@ mod remote_deliveries;
 mod remote_files;
 #[path = "../remote_hub.rs"]
 mod remote_hub;
+#[path = "../remote_hub_only.rs"]
+mod remote_hub_only;
 #[path = "../remote_keys.rs"]
 mod remote_keys;
 #[path = "../remote_launch.rs"]

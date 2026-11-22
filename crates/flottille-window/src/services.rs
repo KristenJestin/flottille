@@ -12,7 +12,7 @@ use gpui_design_system::drawer::Closed;
 use gpui_design_system::motion::HOVER;
 use gpui_design_system::{
     Button, Confirm, Drawer, EmptyLine, Field, Icon, LabelledLine, ListCard, ListRow, Listing,
-    Menu, Modal, PageHeader, Palette, Placement, Section, Switch, Toast, Type, enter, fade,
+    Menu, Modal, PageHeader, Palette, Placement, Section, Switch, Toast, Type, enter, fade, icon,
     palette, presence, presence_of, space, toast,
 };
 use gpui_kit::base::input::{Input, InputEvent, InputState};
@@ -27,7 +27,8 @@ use serde_json::{Value, json};
 
 use crate::actions::Command;
 use crate::commands::{
-    boxed, line_field, menu_of, optional_line, perform_later, problem_line, section_blocks, stack,
+    boxed, line_field, menu_of, optional_line, perform_later, problem_line, section_blocks, spaced,
+    stack,
 };
 use crate::runs::{CommandOutput, CommandPanel, address_link, ready_mark};
 use crate::shell::Shell;
@@ -552,6 +553,9 @@ pub struct ServicesPage {
     ticker: Option<Task<()>>,
     narrow: bool,
     scroll: ScrollHandle,
+    /// Every tunnel this machine carries to the runs of other machines, once the daemon said.
+    tunnels: Option<Vec<crate::tunnels::Tunnel>>,
+    tunnel_rows: Listing<crate::tunnels::Tunnel>,
 }
 
 impl ServicesPage {
@@ -582,6 +586,8 @@ impl ServicesPage {
             ticker: None,
             narrow: false,
             scroll: ScrollHandle::new(),
+            tunnels: None,
+            tunnel_rows: Listing::default(),
         }
     }
 
@@ -649,7 +655,137 @@ impl ServicesPage {
     pub fn opened(&mut self, cx: &mut Context<Self>) {
         self.rows = Listing::default();
         self.read(cx);
+        self.read_tunnels(cx);
         cx.notify();
+    }
+
+    /// Asks the daemon for the tunnels this machine carries: a command line or another window
+    /// opens some too.
+    fn read_tunnels(&self, cx: &mut App) {
+        crate::commands::perform_later(
+            &self.shell,
+            Command::Ask {
+                method: "tunnel.list".to_owned(),
+                params: json!({}),
+                then: crate::extensions::Then::Tunnels(crate::tunnels::Then::Listed),
+            },
+            cx,
+        );
+    }
+
+    /// Close: the daemon closes it, whoever opened it.
+    fn close_tunnel(&self, id: &str, cx: &mut App) {
+        crate::commands::perform_later(
+            &self.shell,
+            Command::Ask {
+                method: "tunnel.close".to_owned(),
+                params: json!({"tunnel": id}),
+                then: crate::extensions::Then::Tunnels(crate::tunnels::Then::Closed {
+                    id: id.to_owned(),
+                }),
+            },
+            cx,
+        );
+    }
+
+    /// What the daemon answered about the tunnels.
+    pub fn tunnels_answered(
+        &mut self,
+        then: crate::tunnels::Then,
+        answer: Result<Value, String>,
+        cx: &mut Context<Self>,
+    ) {
+        match (then, answer) {
+            (crate::tunnels::Then::Listed, Ok(listed)) => {
+                let all: Vec<crate::tunnels::Tunnel> = listed["tunnels"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(crate::tunnels::Tunnel::listed)
+                    .collect();
+                self.tunnel_rows.sync(
+                    all.iter().map(|tunnel| (tunnel.id.clone(), tunnel.clone())),
+                    cx.background_executor().now(),
+                    cx.reduce_motion(),
+                );
+                self.tunnels = Some(all);
+            }
+            (crate::tunnels::Then::Listed, Err(_)) => {}
+            (crate::tunnels::Then::Closed { .. }, Ok(_)) => self.read_tunnels(cx),
+            (crate::tunnels::Then::Closed { .. }, Err(why)) => {
+                toast(Toast::failure("Tunnel not closed").detail(why), cx);
+                self.read_tunnels(cx);
+            }
+        }
+        cx.notify();
+    }
+
+    /// The Tunnels section: what this machine carries, by machine, each with Close.
+    fn tunnels_section(&self, cx: &mut Context<Self>) -> Section {
+        let p = palette(cx);
+        let drawn: Vec<(String, Placement, crate::tunnels::Tunnel)> = self
+            .tunnel_rows
+            .rows()
+            .map(|row| (row.key.to_owned(), row.placement, row.value.clone()))
+            .collect();
+        let mut machines: Vec<String> = Vec::new();
+        for (_, _, tunnel) in &drawn {
+            if !machines.contains(&tunnel.machine) {
+                machines.push(tunnel.machine.clone());
+            }
+        }
+        let mut groups = stack(space::MD);
+        for machine in machines {
+            let mut list = ListCard::new(format!("tunnels-list-{machine}"));
+            for (key, placement, tunnel) in drawn.iter().filter(|(_, _, t)| t.machine == machine) {
+                let (this, id) = (cx.entity().downgrade(), tunnel.id.clone());
+                let row = ListRow::new(
+                    ElementId::Name(format!("tunnels-row-{key}").into()),
+                    tunnel.said(),
+                )
+                .mono()
+                .leading(icon(Icon::Service).size(px(14.)).text_color(p.faint))
+                .line(format!("Run {}, port {}", tunnel.run, tunnel.port))
+                .trailing(
+                    Button::quiet(
+                        ElementId::Name(format!("tunnels-row-{key}-close").into()),
+                        "Close",
+                    )
+                    .on_click(move |_, _, cx| {
+                        cx.stop_propagation();
+                        this.update(cx, |this, cx| this.close_tunnel(&id, cx)).ok();
+                    }),
+                );
+                list = list.item(
+                    ElementId::Name(format!("tunnels-item-{key}").into()),
+                    *placement,
+                    row,
+                );
+            }
+            groups = groups.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(space::SM)
+                    .child(
+                        div()
+                            .id(ElementId::Name(format!("tunnels-machine-{machine}").into()))
+                            .text_size(px(12.5))
+                            .text_color(p.mute)
+                            .aria_label(SharedString::from(machine.clone()))
+                            .child(SharedString::from(machine.clone()))
+                            .test_support(),
+                    )
+                    .child(list),
+            );
+        }
+        Section::new("tunnels", "Tunnels")
+            .count(self.tunnel_rows.len().to_string())
+            .sentence(
+                "What this machine carries to the runs of your other machines. Close one to free \
+                 its port.",
+            )
+            .child(groups)
     }
 
     /// Asks the daemon for the list.
@@ -1393,14 +1529,16 @@ impl Render for ServicesPage {
             ));
         let pad = if self.narrow { space::LG } else { space::XXL };
         let key = |part: &str| ElementId::Name(format!("enter-services-{part}").into());
+        let has_tunnels = !self.tunnel_rows.is_empty();
+        let tunnels = self.tunnels_section(cx);
         let column = div()
             .w_full()
             .max_w(space::COLUMN)
             .flex()
             .flex_col()
-            .gap(space::XXL)
             .child(enter(key("header"), 0, header))
-            .child(enter(key("list"), 1, section));
+            .child(spaced(space::XXL, enter(key("list"), 1, section)))
+            .child(presence("tunnels-section-block", has_tunnels, tunnels).space(space::XXL));
         div()
             .id("services-page-frame")
             .relative()

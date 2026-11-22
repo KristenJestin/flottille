@@ -6,6 +6,7 @@
 //! fake `sudo`, `doas`, `pkexec`, `su` and `run0` at the head of its `PATH` (`User::new`).
 
 use crate::common;
+use crate::remote;
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -17,9 +18,7 @@ use std::time::{Duration, Instant, SystemTime};
 use common::mcp::{Mcp, server_of};
 use common::{Spawned, User};
 use flottille_hub::{Hub, Served, SystemClock};
-use flottille_link::{
-    DeviceKey, Endpoint, Hello, Keyring, KeyringError, MachineKey, PublicKey, Request, Traffic,
-};
+use flottille_link::{DeviceKey, Hello, Keyring, KeyringError, PublicKey, Request, Traffic};
 use serde_json::{Value, json};
 use tokio::io::AsyncReadExt;
 use zeroize::Zeroizing;
@@ -99,11 +98,11 @@ struct Machine {
 }
 
 impl Machine {
-    /// `user`'s machine, with remote on, its link on loopback.
+    /// `user`'s machine, with remote on: its links go through the hub.
     fn of(user: User) -> Machine {
         std::fs::write(
             user.path("config/flottille/daemon.toml"),
-            "[remote]\non = true\nlisten = \"127.0.0.1:0\"\n",
+            "[remote]\non = true\n",
         )
         .unwrap();
         user.status();
@@ -789,30 +788,17 @@ fn a_connection_for_a_tunnel_nobody_opened_is_closed() {
     let _web = web_on(&server.user);
     let server_key: PublicKey =
         serde_json::from_value(server.remote()["this"]["key"].clone()).unwrap();
-    let address: SocketAddr = server.remote()["this"]["listening"]
-        .as_str()
-        .unwrap()
-        .parse()
-        .unwrap();
     // pc's daemon is stopped, so that its own link does not replace the one below: the key is
     // what a program that held pc's machine key would have.
     assert!(pc.user.run(&["daemon", "stop"]).status.success());
     server.wait_for("pc", "offline");
-    let machine_key = MachineKey::load_or_make(&pc.folder()).unwrap();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap();
     let read = runtime.block_on(async {
-        let endpoint = Endpoint::dialler(&machine_key).unwrap();
-        let link = endpoint
-            .connect(
-                server_key,
-                &[address],
-                Traffic::Client,
-                &Hello::ours("0.4.1"),
-                "server",
-            )
+        let endpoint = remote::endpoint_of(&pc.folder()).await;
+        let link = remote::dial(&endpoint, server_key, Traffic::Client, "server")
             .await
             .unwrap();
         // A tunnel that does not exist: closed, and no byte of the run's port comes back.
@@ -843,28 +829,15 @@ fn read_through_a_link_of(
 ) -> (bool, Vec<u8>) {
     let server_key: PublicKey =
         serde_json::from_value(server.remote()["this"]["key"].clone()).unwrap();
-    let address: SocketAddr = server.remote()["this"]["listening"]
-        .as_str()
-        .unwrap()
-        .parse()
-        .unwrap();
     assert!(machine.user.run(&["daemon", "stop"]).status.success());
     server.wait_for(name, "offline");
-    let machine_key = MachineKey::load_or_make(&machine.folder()).unwrap();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap();
     runtime.block_on(async {
-        let endpoint = Endpoint::dialler(&machine_key).unwrap();
-        let link = endpoint
-            .connect(
-                server_key,
-                &[address],
-                Traffic::Client,
-                &Hello::ours("0.4.1"),
-                "server",
-            )
+        let endpoint = remote::endpoint_of(&machine.folder()).await;
+        let link = remote::dial(&endpoint, server_key, Traffic::Client, "server")
             .await
             .unwrap();
         let mut stream = link.tunnel(tunnel).await.unwrap();

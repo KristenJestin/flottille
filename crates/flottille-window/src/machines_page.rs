@@ -2,7 +2,8 @@
 //! whether remote is on (a **Turn on** button while it is off, a **Remote** switch once it is),
 //! **Connect to your hub** while this machine is in no member list, a dialog where the code
 //! `flottille-hub pair` printed is pasted and the card this machine proposes confirmed; then the
-//! devices of the list, each renamed, drawn another way or removed from its "⋯". The page says the state and holds the buttons: what is typed is a dialog of the
+//! devices of the list, each renamed, drawn another way or removed from its "⋯". The page says
+//! the state and holds the buttons: what is typed is a dialog of the
 //! window's host. A device is added on the hub only: every new member, and every result, is a
 //! toast. What is asked goes to this machine's daemon, signed with the
 //! device key ([`crate::machines::Remote`]); what it answers comes back as news.
@@ -54,10 +55,9 @@ const CONNECT_SAID: &str = "Paste the code flottille-hub pair printed on your hu
 const DEVICES_SENTENCE: &str = "Each device in this list reaches your machines with the role it \
                                 was given. A device is added on your hub's host, with \
                                 flottille-hub pair, and its role changed there.";
-const HUB_SENTENCE: &str = "The hub tells your machines each other's addresses and keeps the \
-                            list of your devices. A link between two machines may go through \
-                            it, end-to-end encrypted: it carries what they say and cannot read \
-                            it.";
+const HUB_SENTENCE: &str = "The hub keeps the list of your devices and carries their links, \
+                            encrypted end to end: it reads nothing of what they say to each \
+                            other.";
 const FORGOTTEN: &str = "The hub no longer knows this machine";
 const FORGOTTEN_SENTENCE: &str = "The list below is the one this machine saw last, kept as it \
                                   was. Pair again with your hub's code to be one of its devices \
@@ -923,15 +923,14 @@ impl MachinesSection {
             .iter()
             .find(|(key, _, _)| *key == member.role)
             .map_or(member.role.as_str(), |(_, words, _)| words);
-        // Where a machine is reached, or why not: said for each machine this one links to.
-        let address = (!this_one)
+        // How a machine is reached, or why not: said for each machine this one links to.
+        let link = (!this_one)
             .then(|| read.seen(member))
             .flatten()
             .map(|machine| {
-                let usable = read.hub.as_ref().is_none_or(|hub| hub.usable());
-                address_line(
-                    format!("member-address-{name}"),
-                    machine.address_words(usable).into(),
+                link_line(
+                    format!("member-link-{name}"),
+                    machine.link_words().into(),
                     window,
                     cx,
                 )
@@ -948,7 +947,7 @@ impl MachinesSection {
             .leading(leading)
             .tag(state)
             .line(format!("{said}. {added}"))
-            .when_some(address, |row, address| row.below(address))
+            .when_some(link, |row, link| row.below(link))
             .more(menu)
     }
 
@@ -1094,7 +1093,8 @@ impl MachinesSection {
     }
 
     /// The sections of the tab, top to bottom, each entering on its own: whether remote is on, then
-    /// (while it is) the hub and the devices: every link goes through the hub, so no address is shown. They
+    /// (while it is) the hub and the devices: every link goes through the hub, so no address
+    /// is shown. They
     /// fold away, as they were, when remote is turned off.
     pub fn blocks(
         &mut self,
@@ -1210,10 +1210,10 @@ impl Render for RemovalDialog {
     }
 }
 
-/// The line under a machine's row that says where it is reached, or why it is not: the text
+/// The line under a machine's row that says it is linked through the hub, or why it is not: the text
 /// fades back in when it changes, and is cut with its whole text in a tooltip when it is wider
 /// than the row.
-fn address_line(
+fn link_line(
     id: String,
     said: SharedString,
     window: &mut Window,

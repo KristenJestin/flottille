@@ -1,5 +1,5 @@
 //! The control session every device keeps to its hub (`docs/remote.md`, "The hub",
-//! "Architecture"): the member list and its changes, the members' addresses and presence. Both
+//! "Architecture"): the member list and its changes, the members' presence. Both
 //! sides are here: the device's, and the handshake the hub answers with, so that the hub and a
 //! device cannot disagree on the wire.
 //!
@@ -19,7 +19,7 @@
 //! device → hub   {"proof": sign_K(session, 2, H, Nh, Nd), "pinned": P | null, "pair"?: {…}}
 //! hub → device   {"welcome": {}}  or  {"refused": {"reason": "…", "reset": true | false}}
 //! then           device → hub {"ask": {"id": n, …}}; hub → device {"answer": {"id": n, …}},
-//!                {"list": […]}, {"addresses": […]}, {"presence": […]}, {"facts": […]}
+//!                {"list": […]}, {"presence": […]}, {"facts": […]}
 //! and            device → hub {"relay": {"to": K', "packet": P}}; hub → device
 //!                {"relayed": {"from": K, "packet": P}}, {"online": [K, …]}
 //! and each way   {"keepalive": {}}
@@ -88,7 +88,7 @@ const PAIR: &[u8] = b"flottille-hub-pair-v1\0";
 pub const LINE_LIMIT: usize = 4 << 20;
 /// The longest line of a handshake, either side's: some hundred bytes each.
 pub const HANDSHAKE_LIMIT: usize = 4 << 10;
-/// The longest ask the hub takes: a change, or the most addresses a machine tells.
+/// The longest ask the hub takes: a change.
 const ASK_LIMIT: usize = 64 << 10;
 /// The longest text of the hub's a device shows.
 const SHOWN: usize = 400;
@@ -442,7 +442,9 @@ pub enum Ask {
     /// What this device says of itself: what it is (`computer`, `phone`) and its system
     /// (`linux`).
     About { device: String, system: String },
-    /// Every address this machine may be reached at now, in place of those told before.
+    /// The addresses a machine of the previous version tells, for the direct link removed on
+    /// 2026-11-21: answered and ignored, so that such a machine keeps its session while it waits
+    /// for its update. This version never asks it.
     Addresses { addresses: Vec<String> },
     /// Whether a client of this device is active, and when its last input was.
     Presence { active: bool, last_input: u64 },
@@ -454,13 +456,6 @@ pub struct Asked {
     pub id: u64,
     #[serde(flatten)]
     pub ask: Ask,
-}
-
-/// The addresses a member's machine told the hub.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Told {
-    pub key: PublicKey,
-    pub addresses: Vec<String>,
 }
 
 /// Whether a member's client is active, as it told the hub.
@@ -509,8 +504,10 @@ pub enum ToDevice {
     },
     /// The member list, whole, as the members signed it.
     List(MemberList),
-    /// The addresses every member's machine told, in place of those sent before.
-    Addresses(Vec<Told>),
+    /// The addresses of the members' machines, for the direct link removed on 2026-11-21: a hub
+    /// of before sends those its members told; this version's hub sends an empty list, once a
+    /// session, which a phone's core of before waits for before it links. Read and ignored.
+    Addresses(serde_json::Value),
     /// The presence of the members' clients, for a runner.
     Presence(Vec<PresenceOf>),
     /// What the hub knows of each member's device, in place of what it sent before.
@@ -638,6 +635,33 @@ struct Carried {
     online: watch::Sender<Vec<PublicKey>>,
 }
 
+/// Relay ports joined in memory as a hub joins its members' sessions, one for each of `keys`, which
+/// it stands for: a packet sent to a key goes to its port, said to be from the port's key, and
+/// each port sees every key online. For the tests of a link, which run no hub; the ports end when
+/// all of them are dropped.
+#[doc(hidden)]
+pub fn relays_in_memory(keys: &[PublicKey]) -> Vec<RelayPort> {
+    let (ports, carried): (Vec<RelayPort>, Vec<Carried>) =
+        keys.iter().map(|_| relay_ends()).unzip();
+    let incoming: Vec<_> = carried.iter().map(|ends| ends.incoming.clone()).collect();
+    for (from, ends) in keys.iter().zip(carried) {
+        ends.online.send_replace(keys.to_vec());
+        let (from, keys, incoming) = (*from.as_bytes(), keys.to_vec(), incoming.clone());
+        tokio::spawn(async move {
+            let Carried {
+                mut out, online, ..
+            } = ends;
+            while let Some((to, packet)) = out.recv().await {
+                if let Some(at) = keys.iter().position(|key| key.as_bytes() == &to) {
+                    let _ = incoming[at].try_send((from, packet));
+                }
+            }
+            drop(online);
+        });
+    }
+    ports
+}
+
 fn relay_ends() -> (RelayPort, Carried) {
     let (out, out_taken) = mpsc::channel(RELAY_WAITING);
     let (incoming_given, incoming) = mpsc::channel(RELAY_WAITING);
@@ -660,7 +684,6 @@ fn relay_ends() -> (RelayPort, Carried) {
 #[derive(Clone, Debug)]
 pub enum Pushed {
     List(MemberList),
-    Addresses(Vec<Told>),
     Presence(Vec<PresenceOf>),
     Facts(Vec<Facts>),
 }
@@ -1384,7 +1407,7 @@ async fn drive(
                     }
                     Some(Ok(ToDevice::Facts(facts))) => { let _ = pushing.send(Pushed::Facts(facts)); }
                     Some(Ok(ToDevice::List(list))) => { let _ = pushing.send(Pushed::List(list)); }
-                    Some(Ok(ToDevice::Addresses(told))) => { let _ = pushing.send(Pushed::Addresses(told)); }
+                    Some(Ok(ToDevice::Addresses(_))) => {}
                     Some(Ok(ToDevice::Presence(presence))) => { let _ = pushing.send(Pushed::Presence(presence)); }
                     Some(Ok(ToDevice::Refused { reason, .. })) => {
                         break format!("it refused: {}", shown(&reason, SHOWN));
@@ -1810,5 +1833,24 @@ mod tests {
         assert!(!verify(&signer, &proof_bytes(1, &other, &b, &a), &proof));
         assert!(!verify(&signer, &proof_bytes(1, &signer, &a, &b), &proof));
         assert!(proof_bytes(1, &other, &a, &b).starts_with(b"flottille-hub-session-v1\0"));
+    }
+
+    #[test]
+    fn the_addresses_of_the_previous_version_are_read_and_ignored() {
+        // A hub of the previous version tells its members' addresses: read, so that the session
+        // goes on, and nothing of it kept.
+        let told = format!(
+            r#"{{"addresses": [{{"key": "{}", "addresses": ["192.0.2.7:7447"]}}]}}"#,
+            "ab".repeat(32)
+        );
+        assert!(matches!(
+            serde_json::from_str::<ToDevice>(&told),
+            Ok(ToDevice::Addresses(_))
+        ));
+        // A machine of the previous version tells its own: still an ask the hub reads.
+        let asked: Asked =
+            serde_json::from_str(r#"{"id": 3, "kind": "addresses", "addresses": ["192.0.2.7"]}"#)
+                .unwrap();
+        assert!(matches!(asked.ask, Ask::Addresses { .. }));
     }
 }

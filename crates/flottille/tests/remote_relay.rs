@@ -1,5 +1,5 @@
 //! Links between the user's machines through their hub (`docs/remote.md`, "The transport", "The
-//! hub", "When the hub is down"): daemons that listen nowhere, each with its own temporary HOME
+//! hub", "When the hub is down"): daemons, each with its own temporary HOME
 //! and XDG folders, and a hub served in the test on 127.0.0.1 behind a proxy of the test's own,
 //! which the daemons reach it through: the proxy records every byte both ways (what the hub
 //! sees), may change the packets it carries (what a hub that tampers does), and may be cut (the
@@ -303,8 +303,8 @@ fn two_devices_with_no_listen_link_through_the_hub() {
     // Neither listens anywhere, nor has an address to give.
     for machine in [&pc, &server] {
         let this = machine.this();
-        assert_eq!(this["listening"], Value::Null, "{this}");
-        assert_eq!(this["addresses"], json!([]), "{this}");
+        assert!(this.get("listening").is_none(), "{this}");
+        assert!(this.get("addresses").is_none(), "{this}");
     }
     assert_eq!(pc.seen("server")["reached"]["address"], "the hub");
 

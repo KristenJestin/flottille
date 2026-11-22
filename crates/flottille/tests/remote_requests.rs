@@ -9,16 +9,13 @@ use crate::common;
 use crate::remote;
 
 use std::io::{BufRead, BufReader, Write};
-use std::net::SocketAddr;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::time::{Duration, SystemTime};
 
 use common::User;
 use common::mcp::{Mcp, server_of};
-use flottille_link::{
-    DeviceKey, Endpoint, Hello, MachineKey, Message, PublicKey, Request, Traffic,
-};
+use flottille_link::{DeviceKey, Message, PublicKey, Request, Traffic};
 use remote::{
     Machine, NoKeyring, TestHub, WAIT, error_of, eventually, json_of, pair, pc_and_server,
     pc_and_server_on, set_up, signed,
@@ -205,20 +202,14 @@ fn a_request_of_a_removed_device_is_refused() {
         .unwrap();
     let server_key: PublicKey =
         serde_json::from_value(server.remote()["this"]["key"].clone()).unwrap();
-    let address: SocketAddr = server.remote()["this"]["listening"]
-        .as_str()
-        .unwrap()
-        .parse()
-        .unwrap();
-    let endpoint = runtime.block_on(async {
-        Endpoint::dialler(&MachineKey::load_or_make(&laptop.folder()).unwrap()).unwrap()
-    });
+    // Laptop's daemon stopped: the hub keeps one session a key, and the test's is the one.
+    assert!(laptop.user.run(&["daemon", "stop"]).status.success());
+    let endpoint = runtime.block_on(remote::endpoint_of(&laptop.folder()));
     let kept = runtime
-        .block_on(endpoint.connect(
+        .block_on(remote::dial(
+            &endpoint,
             server_key,
-            &[address],
             Traffic::Client,
-            &Hello::ours("0.4.1"),
             "server",
         ))
         .unwrap();
@@ -246,10 +237,10 @@ fn a_request_of_a_removed_device_is_refused() {
             Err(error) => Some(Err(error.to_string())),
         }
     });
-    assert!(
-        matches!(&refused, Some(Err(why)) if why.contains("removed from the member list")),
-        "{refused:?}"
-    );
+    // The server cuts the link at once, and the hub carries nothing of a device removed: the
+    // request is answered by no one, and never served.
+    assert!(matches!(&refused, Some(Err(_)) | None), "{refused:?}");
+    assert_eq!(server.log().matches(SERVED).count(), 1, "{}", server.log());
     runtime.block_on(endpoint.close());
 }
 
@@ -320,11 +311,6 @@ fn a_machine_message_cannot_carry_a_user_method() {
     let (_hub, pc, server) = pc_and_server(User::new());
     let server_key: PublicKey =
         serde_json::from_value(server.remote()["this"]["key"].clone()).unwrap();
-    let address: SocketAddr = server.remote()["this"]["listening"]
-        .as_str()
-        .unwrap()
-        .parse()
-        .unwrap();
     // pc's daemon is stopped, so that no link of its own takes the one below (two links of one
     // machine are not kept: the second closes the first, whoever dials again): the key is only
     // what the test holds.
@@ -332,7 +318,6 @@ fn a_machine_message_cannot_carry_a_user_method() {
     server.wait_for("pc", "offline");
     // pc's machine key, as an agent that read it would hold it: it signs what a machine may
     // send, never what the user asks.
-    let machine_key = MachineKey::load_or_make(&pc.folder()).unwrap();
     let folder = tempfile::tempdir().unwrap();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -340,16 +325,10 @@ fn a_machine_message_cannot_carry_a_user_method() {
         .unwrap();
     let user_request = signed(&pc.device(), "1", "server", "daemon.stop", json!({}));
     let refusals = runtime.block_on(async {
-        let endpoint = Endpoint::dialler(&machine_key).unwrap();
+        let endpoint = remote::endpoint_of(&pc.folder()).await;
         let link = tokio::time::timeout(
             WAIT,
-            endpoint.connect(
-                server_key,
-                &[address],
-                Traffic::Machine,
-                &Hello::ours("0.4.1"),
-                "server",
-            ),
+            remote::dial(&endpoint, server_key, Traffic::Machine, "server"),
         )
         .await
         .unwrap()
@@ -367,14 +346,7 @@ fn a_machine_message_cannot_carry_a_user_method() {
             refusals.push(answer.unwrap_err().to_string());
         }
         // And a client link takes no request the machine key signed.
-        let client = endpoint
-            .connect(
-                server_key,
-                &[address],
-                Traffic::Client,
-                &Hello::ours("0.4.1"),
-                "server",
-            )
+        let client = remote::dial(&endpoint, server_key, Traffic::Client, "server")
             .await
             .unwrap();
         let forged = Request::sign(
@@ -1052,25 +1024,17 @@ fn an_offer_of_a_machine_that_is_no_runner_is_refused() {
 
     // Its machine key, as code that read it would hold it, says it offers a project.
     let server_key: PublicKey = serde_json::from_value(seen["this"]["key"].clone()).unwrap();
-    let address: SocketAddr = seen["this"]["listening"].as_str().unwrap().parse().unwrap();
     assert!(tablet.user.run(&["daemon", "stop"]).status.success());
     server.wait_for("tablet", "offline");
-    let machine_key = MachineKey::load_or_make(&tablet.folder()).unwrap();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap();
     let refusal = runtime.block_on(async {
-        let endpoint = Endpoint::dialler(&machine_key).unwrap();
+        let endpoint = remote::endpoint_of(&tablet.folder()).await;
         let link = tokio::time::timeout(
             WAIT,
-            endpoint.connect(
-                server_key,
-                &[address],
-                Traffic::Machine,
-                &Hello::ours("0.4.1"),
-                "server",
-            ),
+            remote::dial(&endpoint, server_key, Traffic::Machine, "server"),
         )
         .await
         .unwrap()

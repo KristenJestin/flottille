@@ -1,28 +1,25 @@
 //! The daemon's link to the user's other machines (`docs/remote.md`, "Architecture", "The
 //! transport", "The version"), with remote on: one endpoint, whose links go through the user's hub
 //! over the session this machine keeps to it (`hub_session.rs`); a link kept to every machine this
-//! one trusts that the hub says is online. The direct path stays: listening where `daemon.toml`
-//! says (`[remote] listen`, nowhere by default), dialling the addresses it knows for a machine
-//! first, each side telling the other its addresses whenever they change.
+//! one trusts that the hub says is online. Nothing listens and no address is dialled: the direct
+//! link was removed on 2026-11-21.
 //!
-//! No NAT traversal, no discovery: with the hub unreachable, machines that know no address of
-//! each other do not link, and say so with the hub's own sentence.
+//! No NAT traversal, no discovery: with the hub unreachable, machines do not link, and say so with
+//! the hub's own sentence.
 //!
-//! The machines it trusts, and their addresses, are in `remote/peers.json`, which the control
-//! session to the hub writes from the member list once the machine is set up (`hub_session.rs`);
-//! without a hub, a test writes it. The addresses declared by hand are in
-//! `remote/addresses.json`. Both are in the key folder, which no agent reaches (`gate::keys`).
+//! The machines it trusts are in `remote/peers.json`, which the control session to the hub writes
+//! from the member list once the machine is set up (`hub_session.rs`). It is in the key folder,
+//! which no agent reaches (`gate::keys`).
 
 use std::collections::{HashMap, HashSet};
-use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use flottille_core::paths::Paths;
 use flottille_link::{
-    Address, Capabilities, ConnectionShare, Endpoint, Hello, Link, LinkError, MachineKey,
-    MachineMessage, Message, Offered, PeerState, PublicKey, Role, Share, Traffic,
+    Capabilities, ConnectionShare, Endpoint, Hello, Link, LinkError, MachineKey, MachineMessage,
+    Message, Offered, PeerState, PublicKey, Role, Share, Traffic,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -31,18 +28,19 @@ use crate::VERSION;
 use crate::daemon::Daemon;
 use crate::projects::Failure;
 
-/// The machines this one trusts, and the addresses it knows for them.
+/// The machines this one trusts.
 const PEERS_FILE: &str = "peers.json";
-/// The addresses of this machine declared by hand.
+/// The addresses of this machine declared by hand for the direct link, removed on 2026-11-21: a
+/// key folder of before holds it, which the link's start takes away.
 const ADDRESSES_FILE: &str = "addresses.json";
-/// How often the daemon looks for a machine to dial, and for addresses of its own that changed.
+/// How often the daemon looks for a machine to dial.
 const ROUND: Duration = Duration::from_secs(1);
 /// The longest a machine that cannot be reached waits before it is dialled again.
 const LONGEST_WAIT: Duration = Duration::from_secs(5);
-/// The most addresses taken from another machine at once.
-const MOST_ADDRESSES: usize = 64;
 /// What a machine this one does not trust is told.
 const NOT_TRUSTED: &str = "refused: this machine's key is not one of the user's";
+/// What closes the link to a machine the hub no longer says online.
+const GONE_FROM_HUB: &str = "it is no longer connected to the hub";
 /// What closes the second link two machines that dialled each other at once made.
 const LINKED_ALREADY: &str = "linked already";
 /// How long a key refused is not said again in the log.
@@ -50,8 +48,6 @@ const SAID_AGAIN: Duration = Duration::from_secs(60);
 /// The most keys refused said in the log within `SAID_AGAIN`: a key costs a stranger nothing, so
 /// each of its dials may bring a new one. The others are counted, and the count said.
 const MOST_SAID: usize = 16;
-/// How often the addresses one machine told are written, at most: the latest told is kept.
-const LEARN_EVERY: Duration = Duration::from_secs(2);
 /// How long the links wait at start for the hub's list, before they go on with the one kept.
 const FIRST_LIST: Duration = Duration::from_secs(10);
 
@@ -66,25 +62,6 @@ struct Peers {
 struct Peer {
     name: String,
     key: PublicKey,
-    /// The addresses it was given, by the hub or by hand: a machine never changes them.
-    #[serde(default)]
-    addresses: Vec<String>,
-    /// The addresses the machine itself told, beside them.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    told: Vec<String>,
-}
-
-impl Peer {
-    /// Every address known for it: those it was given, then those it told.
-    fn known(&self) -> Vec<String> {
-        let mut known = self.addresses.clone();
-        for address in &self.told {
-            if !known.contains(address) {
-                known.push(address.clone());
-            }
-        }
-        known
-    }
 }
 
 /// The peers' file as last read whole: one caught half written, or broken by hand, leaves it as
@@ -113,13 +90,6 @@ impl Refused {
             others: 0,
         }
     }
-}
-
-/// What `remote/addresses.json` holds.
-#[derive(Default, Serialize, Deserialize)]
-struct Declared {
-    #[serde(default)]
-    addresses: Vec<String>,
 }
 
 /// What this daemon sees of another machine.
@@ -176,13 +146,9 @@ pub struct Remote {
     hello: Hello,
     peers: Mutex<Kept>,
     seen: Mutex<HashMap<[u8; 32], Seen>>,
-    /// The addresses last told to the other machines.
-    told: Mutex<Vec<String>>,
     links: std::sync::atomic::AtomicU64,
     /// The keys refused lately, as the log said them.
     refused: Mutex<Refused>,
-    /// The machines whose addresses told are being written: the latest told, not written yet.
-    learning: Mutex<HashMap<[u8; 32], Option<Vec<String>>>>,
     /// The closes of sessions of this machine served, so that one is served once.
     closes: Mutex<flottille_link::ClosesServed>,
     /// Held while the peers' file is read and written again: apart from `peers`, so that a link
@@ -233,8 +199,8 @@ pub struct Remote {
     halt: Arc<tokio::sync::watch::Sender<bool>>,
 }
 
-/// Starts the link: the endpoint, the loop that accepts and the one that dials. A link that
-/// cannot listen is said, and the daemon goes on without it.
+/// Starts the link: the endpoint, the loop that accepts and the one that dials, every link
+/// through the hub. A link that cannot start is said, and the daemon goes on without it.
 pub fn start(
     paths: &Paths,
     key: MachineKey,
@@ -242,22 +208,16 @@ pub fn start(
     emit: Emit,
     daemon: std::sync::Weak<Daemon>,
 ) -> Result<Arc<Remote>, String> {
-    let endpoint = match crate::remote::listen(paths)? {
-        Some(listen) => Endpoint::bind(&key, listen),
-        None => Endpoint::dialler(&key),
+    let endpoint = Endpoint::new(&key).map_err(|error| error.to_string())?;
+    if crate::remote::says_listen(paths) {
+        eprintln!(
+            "flottille daemon: [remote] listen in daemon.toml is no longer read: every link goes through \
+             the hub, and nothing listens (the key may be removed)"
+        );
     }
-    .map_err(|error| error.to_string())?;
-    match endpoint.listening() {
-        Some(local) => eprintln!("flottille daemon: the link listens on {local}"),
-        None => {
-            eprintln!("flottille daemon: the link listens nowhere (Settings, Machines); it dials")
-        }
-    }
-    let remote = Arc::new(Remote::new(
-        endpoint,
-        crate::remote::folder(paths),
-        emit.clone(),
-    ));
+    let folder = crate::remote::folder(paths);
+    migrate(&folder);
+    let remote = Arc::new(Remote::new(endpoint, folder, emit.clone()));
     let _ = remote.daemon.set(daemon);
     // The daemon's stop is this link's, and so is the link's own.
     tokio::spawn({
@@ -287,6 +247,46 @@ pub fn start(
     tokio::spawn(keep_offering(remote.clone(), stopping.clone()));
     tokio::spawn(dial(remote.clone(), stopping));
     Ok(remote)
+}
+
+/// Takes the direct link's addresses, removed on 2026-11-21, out of a key folder of before: the
+/// addresses declared by hand (`addresses.json`), and those each machine trusted was given or told
+/// (`addresses` and `told` in `peers.json`). The machines trusted stay. A file that cannot be read
+/// or written is said, and left as it is: nothing reads those addresses any more.
+fn migrate(folder: &Path) {
+    let declared = folder.join(ADDRESSES_FILE);
+    match std::fs::remove_file(&declared) {
+        Ok(()) => eprintln!(
+            "flottille daemon: {} of the direct link is removed: every link goes through the hub",
+            declared.display()
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => eprintln!(
+            "flottille daemon: {} is not removed: {error}",
+            declared.display()
+        ),
+    }
+    let file = folder.join(PEERS_FILE);
+    let Ok(Some(before)) = read_json::<Option<Value>>(&file) else {
+        return;
+    };
+    let addressed = before["machines"].as_array().is_some_and(|machines| {
+        machines
+            .iter()
+            .any(|machine| machine.get("addresses").is_some() || machine.get("told").is_some())
+    });
+    if !addressed {
+        return;
+    }
+    let peers = serde_json::from_value::<Peers>(before)
+        .map_err(|error| error.to_string())
+        .and_then(|peers| write_json(&file, &peers).map_err(|error| error.to_string()));
+    if let Err(error) = peers {
+        eprintln!(
+            "flottille daemon: the addresses in {} are not removed: {error}",
+            file.display()
+        );
+    }
 }
 
 /// Until `stopping` says so; nothing held of it, so that a `select!` holding it stays `Send`.
@@ -335,10 +335,8 @@ impl Remote {
                 read: None,
             }),
             seen: Mutex::new(HashMap::new()),
-            told: Mutex::new(Vec::new()),
             links: Default::default(),
             refused: Mutex::new(Refused::new(Instant::now())),
-            learning: Mutex::new(HashMap::new()),
             closes: Mutex::new(flottille_link::ClosesServed::default()),
             writing: Mutex::new(()),
             control: std::sync::OnceLock::new(),
@@ -375,11 +373,11 @@ impl Remote {
         seen["reason"].as_str().map(str::to_owned)
     }
 
-    /// `error` in a sentence: a machine with no address and no hub to go through says why the hub
-    /// is out of reach.
+    /// `error` in a sentence: a machine with no session to the hub says why the hub is out of
+    /// reach.
     fn said(&self, error: &LinkError) -> String {
         match (error, self.hub_down()) {
-            (LinkError::NoAddress(name), Some(why)) => format!("{name} cannot be reached: {why}"),
+            (LinkError::NoHub(name), Some(why)) => format!("{name} cannot be reached: {why}"),
             _ => error.to_string(),
         }
     }
@@ -389,14 +387,11 @@ impl Remote {
         self.endpoint.name_as(name);
     }
 
-    /// The machines the member list says this one trusts: `(name, key, addresses)`, the addresses
-    /// those the hub told, or, when it told none, those kept. Written over the peers' file, the
-    /// addresses each machine told kept beside; the link to a machine no longer there is cut at
-    /// once, and it is let go at the next
+    /// The machines the member list says this one trusts: `(name, key)`. Written over the peers'
+    /// file; the link to a machine no longer there is cut at once, and it is let go at the next
     /// round.
-    pub(crate) fn trust_machines(&self, machines: Vec<(String, PublicKey, Option<Vec<String>>)>) {
-        let trusted: HashSet<[u8; 32]> =
-            machines.iter().map(|(_, key, _)| *key.as_bytes()).collect();
+    pub(crate) fn trust_machines(&self, machines: Vec<(String, PublicKey)>) {
+        let trusted: HashSet<[u8; 32]> = machines.iter().map(|(_, key)| *key.as_bytes()).collect();
         let file = self.folder.join(PEERS_FILE);
         {
             let _writing = self.writing.lock().unwrap();
@@ -405,17 +400,7 @@ impl Remote {
             let peers = Peers {
                 machines: machines
                     .into_iter()
-                    .map(|(name, key, addresses)| {
-                        let kept = before.machines.iter().find(|peer| peer.key == key);
-                        Peer {
-                            name,
-                            key,
-                            addresses: addresses
-                                .or_else(|| kept.map(|peer| peer.addresses.clone()))
-                                .unwrap_or_default(),
-                            told: kept.map(|peer| peer.told.clone()).unwrap_or_default(),
-                        }
-                    })
+                    .map(|(name, key)| Peer { name, key })
                     .collect(),
             };
             let same = serde_json::to_value(&peers).ok() == serde_json::to_value(&before).ok();
@@ -510,16 +495,10 @@ impl Remote {
         self.endpoint.close().await;
     }
 
-    /// Stops this link for good: its tasks end and every link closes (remote turned off, or the
-    /// link made again where it listens).
+    /// Stops this link for good: its tasks end and every link closes (remote turned off).
     pub async fn stop(&self) {
         self.halt.send_replace(true);
         self.close().await;
-    }
-
-    /// Where the link listens, when it does.
-    pub fn listening(&self) -> Option<SocketAddr> {
-        self.endpoint.listening()
     }
 
     /// The machines this one trusts: the file as last read whole.
@@ -529,14 +508,6 @@ impl Remote {
         kept.read = stamp(&file);
         match read_json::<Peers>(&file) {
             Ok(peers) => {
-                // A machine trusted dials from one of its addresses, as often as not.
-                self.endpoint.know(
-                    peers
-                        .machines
-                        .iter()
-                        .flat_map(Peer::known)
-                        .filter_map(|text| Address::parse(&text).ok()?.ip()),
-                );
                 kept.said = false;
                 kept.last = peers.clone();
                 peers
@@ -551,66 +522,6 @@ impl Remote {
                 }
                 kept.last.clone()
             }
-        }
-    }
-
-    fn declared(&self) -> Declared {
-        read_json(&self.folder.join(ADDRESSES_FILE)).unwrap_or_default()
-    }
-
-    /// This machine's addresses: those it listens on, then those declared by hand, which take
-    /// the link's port when they say none.
-    fn addresses(&self) -> Vec<(String, &'static str)> {
-        let port = self
-            .endpoint
-            .listening()
-            .map_or(crate::remote::PORT, |local| local.port());
-        let found = self
-            .endpoint
-            .addresses()
-            .into_iter()
-            .map(|address| (Address::from(address).to_string(), "found"));
-        let declared = self
-            .declared()
-            .addresses
-            .into_iter()
-            .filter_map(|text| Address::parse(&text).ok())
-            .map(|address| (address.with_port(port).to_string(), "declared"));
-        let mut addresses: Vec<(String, &'static str)> = Vec::new();
-        for (address, how) in found.chain(declared) {
-            if !addresses.iter().any(|(known, _)| *known == address) {
-                addresses.push((address, how));
-            }
-        }
-        addresses
-    }
-
-    pub(crate) fn told_addresses(&self) -> Vec<String> {
-        self.addresses()
-            .into_iter()
-            .map(|(address, _)| address)
-            .collect()
-    }
-
-    /// Tells every machine linked to this one its addresses, when they changed since last told.
-    fn tell_if_changed(&self) {
-        let now = self.told_addresses();
-        {
-            let mut told = self.told.lock().unwrap();
-            if *told == now {
-                return;
-            }
-            told.clone_from(&now);
-        }
-        let links: Vec<Link> = self
-            .seen
-            .lock()
-            .unwrap()
-            .values()
-            .filter_map(|seen| seen.link.as_ref().map(|(_, link, _)| link.clone()))
-            .collect();
-        for link in links {
-            tokio::spawn(tell(link, now.clone()));
         }
     }
 
@@ -676,8 +587,7 @@ impl Remote {
         lines
     }
 
-    /// A link made, `dialled` by this machine or by the other: kept, told this machine's
-    /// addresses, and served. When the two dialled each other at once, each holds two links: both
+    /// A link made, `dialled` by this machine or by the other: kept, and served. When the two dialled each other at once, each holds two links: both
     /// keep the one the machine of the lower key dialled, and close the other.
     fn linked(self: &Arc<Self>, link: Link, name: String, dialled: bool) {
         let generation = self
@@ -723,7 +633,6 @@ impl Remote {
             "remote.connected",
             json!({"name": name, "fingerprint": link.peer().fingerprint()}),
         );
-        tokio::spawn(tell(link.clone(), self.told_addresses()));
         tokio::spawn(offer(
             link.clone(),
             self.offered.subscribe(),
@@ -759,80 +668,6 @@ impl Remote {
         seen.wait = (seen.wait * 2).min(LONGEST_WAIT);
     }
 
-    /// The addresses another machine told: kept for it in the peers' file, beside those it was
-    /// given, so that the two can link again without the hub. A file not read whole is not
-    /// written over; one changed by another hand while it is updated is read again, once, rather
-    /// than written over.
-    fn learn(&self, key: &PublicKey, addresses: &[String]) {
-        let addresses: Vec<String> = addresses
-            .iter()
-            .filter_map(|text| Address::parse(text).ok())
-            .map(|address| address.to_string())
-            .take(MOST_ADDRESSES)
-            .collect();
-        let file = self.folder.join(PEERS_FILE);
-        // Held across the read and the write: two machines telling at once lose nothing.
-        let _writing = self.writing.lock().unwrap();
-        for _ in 0..2 {
-            let read = stamp(&file);
-            let Ok(mut peers) = read_json::<Peers>(&file) else {
-                return;
-            };
-            let Some(peer) = peers.machines.iter_mut().find(|peer| peer.key == *key) else {
-                return;
-            };
-            if peer.told == addresses {
-                return;
-            }
-            peer.told.clone_from(&addresses);
-            let name = peer.name.clone();
-            let written = write_json_unless(&file, &peers, || stamp(&file) != read);
-            match written {
-                Ok(true) => return,
-                Ok(false) => continue,
-                Err(error) => {
-                    eprintln!("flottille daemon: the addresses {name} told were not kept: {error}");
-                    return;
-                }
-            }
-        }
-        eprintln!(
-            "flottille daemon: {} kept changing, the addresses told were not kept",
-            file.display()
-        );
-    }
-
-    /// The addresses the machine of `key` told: written by `learn`, away from the tasks that
-    /// take links, at most once every `LEARN_EVERY` for it; the latest told is the one written.
-    fn told_by(self: &Arc<Self>, key: PublicKey, addresses: Vec<String>) {
-        {
-            let mut learning = self.learning.lock().unwrap();
-            if let Some(latest) = learning.get_mut(key.as_bytes()) {
-                *latest = Some(addresses);
-                return;
-            }
-            learning.insert(*key.as_bytes(), Some(addresses));
-        }
-        let remote = self.clone();
-        tokio::spawn(async move {
-            loop {
-                let addresses = {
-                    let mut learning = remote.learning.lock().unwrap();
-                    match learning.get_mut(key.as_bytes()).and_then(Option::take) {
-                        Some(addresses) => addresses,
-                        None => {
-                            learning.remove(key.as_bytes());
-                            return;
-                        }
-                    }
-                };
-                let writing = remote.clone();
-                let _ = tokio::task::spawn_blocking(move || writing.learn(&key, &addresses)).await;
-                tokio::time::sleep(LEARN_EVERY).await;
-            }
-        });
-    }
-
     /// `remote.machines`: this machine, and the others as it sees them, with their roles and what
     /// the runners offer, this machine's looked at now; with `project`, the runners that would
     /// take a session of it on `agent` too (`offered`). It reads files and checks the list: called
@@ -855,10 +690,6 @@ impl Remote {
             "offers": offers,
             "key": key,
             "fingerprint": key.fingerprint(),
-            "listening": self.endpoint.listening().map(|local| local.to_string()),
-            "addresses": self.addresses().into_iter()
-                .map(|(address, how)| json!({"address": address, "how": how}))
-                .collect::<Vec<_>>(),
         });
         // Read before the lock is taken: no file is read under it.
         let peers = self.peers().machines;
@@ -889,16 +720,10 @@ impl Remote {
                     "state": seen.state.to_string(),
                     "since": seen.since,
                     "reason": seen.reason,
-                    // Where the live link goes (`dialled`) or came from.
-                    "reached": seen.link.as_ref().map(|(_, link, dialled)| {
-                        let address = if link.through_hub() {
-                            "the hub".to_owned()
-                        } else {
-                            link.remote().to_string()
-                        };
-                        json!({"address": address, "dialled": dialled})
+                    // The live link, through the hub, and whether this machine dialled it.
+                    "reached": seen.link.as_ref().map(|(_, _, dialled)| {
+                        json!({"address": "the hub", "dialled": dialled})
                     }),
-                    "addresses": peer.known(),
                 })
             })
             .collect();
@@ -1286,13 +1111,6 @@ async fn offer<T: Clone>(
     }
 }
 
-/// Tells a machine this one's addresses.
-async fn tell(link: Link, addresses: Vec<String>) {
-    let _ = link
-        .send(&Message::Machine(MachineMessage::Addresses(addresses)))
-        .await;
-}
-
 /// The machines that dial this one: kept when trusted, refused otherwise.
 async fn accept(remote: Arc<Remote>) {
     // A test makes both machines take a link they are dialled on late, so that they dial each
@@ -1371,10 +1189,8 @@ impl Drop for Waiting<'_> {
 async fn serve(remote: Arc<Remote>, link: Link, name: String, generation: u64) {
     while let Some(received) = link.next().await {
         match received.message() {
-            Message::Machine(MachineMessage::Addresses(addresses)) => {
-                remote.told_by(link.peer(), addresses.clone());
-                received.answer(Ok(json!({})));
-            }
+            // A machine of the previous version tells its addresses on every link: ignored.
+            Message::Machine(MachineMessage::Addresses(_)) => received.answer(Ok(json!({}))),
             Message::Machine(MachineMessage::Capabilities(offers)) => {
                 // The list is checked, its signatures too: away from the tasks that take links.
                 let (taking, key, offers) = (remote.clone(), link.peer(), offers.clone());
@@ -2083,13 +1899,7 @@ impl Remote {
         }
         let link = self
             .endpoint
-            .connect(
-                peer.key,
-                &sockets_of(peer).await,
-                Traffic::Client,
-                &self.hello,
-                &peer.name,
-            )
+            .connect(peer.key, Traffic::Client, &self.hello, &peer.name)
             .await?;
         if let Some(seen) = self.seen.lock().unwrap().get_mut(peer.key.as_bytes()) {
             seen.client = Some(link.clone());
@@ -2469,31 +2279,48 @@ pub(crate) async fn forward(
     }
 }
 
-/// Every round: dials each machine trusted and not linked whose turn has come, and tells the
-/// linked ones the addresses of this machine that changed.
+/// Every round, and whenever the hub says another list of the members online: dials each machine
+/// trusted and not linked whose turn has come, and lets go of the links of those gone from it.
 async fn dial(remote: Arc<Remote>, mut stopping: tokio::sync::watch::Receiver<bool>) {
     let mut round = tokio::time::interval(ROUND);
     loop {
         tokio::select! {
             _ = round.tick() => {}
+            // A machine that stops and starts again is off the hub for less than a round.
+            _ = remote.endpoint.online_changed() => {}
             _ = stopping.wait_for(|stopping| *stopping) => return,
         }
         if remote.holding() {
             continue;
         }
-        remote.tell_if_changed();
         for line in remote.refused_lines(None, Instant::now()) {
             eprintln!("flottille daemon: {line}");
         }
         let peers = remote.peers().machines;
+        // Every link goes through the hub: a machine it no longer says online has none, though the
+        // close it sent may have been lost with its session. Its link is let go now, not when it
+        // times out, so that the link it makes again is not refused for the dead one.
+        let online = remote.endpoint.online();
         let mut due = Vec::new();
         {
             let mut seen = remote.seen.lock().unwrap();
-            // A machine no longer trusted is let go.
+            for (key, seen) in seen.iter_mut() {
+                if online.iter().any(|member| member.as_bytes() == key) {
+                    continue;
+                }
+                if let Some((_, link, _)) = &seen.link {
+                    link.close(GONE_FROM_HUB);
+                }
+                if let Some(client) = seen.client.take() {
+                    client.close(GONE_FROM_HUB);
+                }
+            }
+            // A machine no longer trusted is let go, once its link ended and said so.
             seen.retain(|key, seen| {
                 let trusted = peers.iter().any(|peer| peer.key.as_bytes() == key);
                 if !trusted && let Some((_, link, _)) = &seen.link {
                     link.close(NOT_TRUSTED);
+                    return true;
                 }
                 trusted
             });
@@ -2511,34 +2338,11 @@ async fn dial(remote: Arc<Remote>, mut stopping: tokio::sync::watch::Receiver<bo
     }
 }
 
-/// The sockets of every address known for `peer`.
-async fn sockets_of(peer: &Peer) -> Vec<SocketAddr> {
-    let mut sockets: Vec<SocketAddr> = Vec::new();
-    for text in &peer.known() {
-        if let Ok(address) = Address::parse(text) {
-            // An address told always has its port; one the user gave without uses the default.
-            for socket in address.resolve(crate::remote::PORT).await {
-                if !sockets.contains(&socket) {
-                    sockets.push(socket);
-                }
-            }
-        }
-    }
-    sockets
-}
-
 async fn dial_one(remote: Arc<Remote>, peer: Peer) {
-    let sockets = sockets_of(&peer).await;
     let key = *peer.key.as_bytes();
     let made = remote
         .endpoint
-        .connect(
-            peer.key,
-            &sockets,
-            Traffic::Machine,
-            &remote.hello,
-            &peer.name,
-        )
+        .connect(peer.key, Traffic::Machine, &remote.hello, &peer.name)
         .await;
     match made {
         Ok(link) => {
@@ -2565,17 +2369,6 @@ fn read_json<T: Default + for<'de> Deserialize<'de>>(file: &Path) -> Result<T, S
 /// Writes a JSON file of the key folder whole: a temporary file, the user's only, renamed into
 /// place.
 pub(crate) fn write_json(file: &Path, value: &impl Serialize) -> std::io::Result<()> {
-    write_json_unless(file, value, || false).map(|_| ())
-}
-
-/// Writes a JSON file of the key folder whole, as `write_json`, unless `changed` says, just
-/// before it is renamed into place, that the file changed since it was read: then it is left
-/// as it is, and `false` said.
-fn write_json_unless(
-    file: &Path,
-    value: &impl Serialize,
-    changed: impl Fn() -> bool,
-) -> std::io::Result<bool> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
     let temporary = file.with_extension("json.new");
@@ -2587,12 +2380,7 @@ fn write_json_unless(
         .open(&temporary)?;
     out.write_all(serde_json::to_string_pretty(value)?.as_bytes())?;
     out.sync_all()?;
-    if changed() {
-        std::fs::remove_file(&temporary)?;
-        return Ok(false);
-    }
-    std::fs::rename(&temporary, file)?;
-    Ok(true)
+    std::fs::rename(&temporary, file)
 }
 
 /// A file's inode, size and time it was modified.
@@ -2682,50 +2470,6 @@ pub async fn call(daemon: Arc<Daemon>, method: &str, params: Value) -> Result<Va
                 .await
                 .map_err(Failure::refused)
         }
-        "remote.address.add" | "remote.address.remove" => {
-            let text = params["address"].as_str().unwrap_or_default();
-            let address = Address::parse(text)
-                .map_err(|why| Failure::new(flottille_protocol::code::INVALID_PARAMS, why))?;
-            let file = remote.folder.join(ADDRESSES_FILE);
-            let mut declared: Declared = read_json(&file).map_err(|error| {
-                Failure::new(
-                    flottille_protocol::code::UNAVAILABLE,
-                    format!("{} is not read: {error}", file.display()),
-                )
-            })?;
-            let at = declared
-                .addresses
-                .iter()
-                .position(|known| Address::parse(known).ok().as_ref() == Some(&address));
-            match (method, at) {
-                ("remote.address.add", None) => declared.addresses.push(address.to_string()),
-                ("remote.address.add", Some(_)) => {}
-                (_, Some(at)) => {
-                    declared.addresses.remove(at);
-                }
-                (_, None) => {
-                    return Err(Failure::new(
-                        flottille_protocol::code::NOT_FOUND,
-                        format!("{address} is not an address declared on this machine"),
-                    ));
-                }
-            }
-            write_json(&file, &declared).map_err(|error| {
-                Failure::new(
-                    flottille_protocol::code::UNAVAILABLE,
-                    format!("{} cannot be written: {error}", file.display()),
-                )
-            })?;
-            remote.tell_if_changed();
-            tokio::task::spawn_blocking(move || remote.machines(None, None)["this"].clone())
-                .await
-                .map_err(|_| {
-                    Failure::new(
-                        flottille_protocol::code::UNAVAILABLE,
-                        "the machines could not be read",
-                    )
-                })
-        }
         _ => Err(Failure::new(
             flottille_protocol::code::UNKNOWN_METHOD,
             format!("unknown method `{method}`"),
@@ -2779,7 +2523,6 @@ mod tests {
         let peers: Peers = read_json(&file).unwrap();
         assert_eq!(peers.machines.len(), 1);
         assert_eq!(peers.machines[0].name, "server");
-        assert!(peers.machines[0].addresses.is_empty());
 
         // Written back whole, the user's only.
         write_json(&file, &peers).unwrap();
@@ -2802,8 +2545,35 @@ mod tests {
         assert!(read_json::<Peers>(&file).is_err());
     }
 
+    #[test]
+    fn the_direct_link_s_addresses_are_taken_out_of_the_key_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a";
+        let (declared, peers) = (dir.path().join(ADDRESSES_FILE), dir.path().join(PEERS_FILE));
+        std::fs::write(&declared, r#"{"addresses": ["192.0.2.7"]}"#).unwrap();
+        std::fs::write(
+            &peers,
+            format!(
+                r#"{{"machines": [{{"name": "server", "key": "{key}",
+                    "addresses": ["192.0.2.8:7447"], "told": ["192.0.2.9:7447"]}}]}}"#
+            ),
+        )
+        .unwrap();
+        migrate(dir.path());
+        assert!(!declared.exists());
+        let kept: Value = read_json::<Option<Value>>(&peers).unwrap().unwrap();
+        assert_eq!(kept, json!({"machines": [{"name": "server", "key": key}]}));
+
+        // A folder with none is left as it is, byte for byte.
+        let before = std::fs::read(&peers).unwrap();
+        let stamped = stamp(&peers);
+        migrate(dir.path());
+        assert_eq!(std::fs::read(&peers).unwrap(), before);
+        assert_eq!(stamp(&peers), stamped);
+    }
+
     /// A daemon's side of the link over a key folder of a test's, linked to nothing; and the keys
-    /// of `peers` machines it trusts, each with no address.
+    /// of `peers` machines it trusts.
     fn remote_in(folder: &Path, peers: usize) -> (Remote, Vec<PublicKey>) {
         let key = MachineKey::load_or_make(&folder.join("key")).unwrap();
         let keys: Vec<PublicKey> = (0..peers)
@@ -2820,28 +2590,15 @@ mod tests {
                 .map(|(at, key)| Peer {
                     name: format!("machine-{at}"),
                     key: *key,
-                    addresses: vec!["192.0.2.1:7447".to_owned()],
-                    told: Vec::new(),
                 })
                 .collect(),
         };
         write_json(&folder.join(PEERS_FILE), &peers).unwrap();
-        let endpoint = Endpoint::dialler(&key).unwrap();
+        let endpoint = Endpoint::new(&key).unwrap();
         (
             Remote::new(endpoint, folder.to_owned(), Arc::new(|_: &str, _| {})),
             keys,
         )
-    }
-
-    fn told(folder: &Path, key: &PublicKey) -> Vec<String> {
-        let peers: Peers = read_json(&folder.join(PEERS_FILE)).unwrap();
-        let peer = peers.machines.iter().find(|peer| peer.key == *key).unwrap();
-        assert_eq!(
-            peer.addresses,
-            ["192.0.2.1:7447"],
-            "the given addresses are kept"
-        );
-        peer.told.clone()
     }
 
     /// Whether `remote` would let a link go on within `within`.
@@ -2923,8 +2680,23 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (remote, _) = remote_in(dir.path(), 1);
         let key = MachineKey::load_or_make(&dir.path().join("key")).unwrap();
+        let stranger = MachineKey::load_or_make(&dir.path().join("stranger")).unwrap();
+        let trusted = MachineKey::load_or_make(&dir.path().join("peer-0")).unwrap();
+        // Joined as the hub joins its members' sessions, the stranger with them, as a hub that
+        // carries a stranger's packets would.
+        let ports =
+            flottille_link::relays_in_memory(&[key.public(), stranger.public(), trusted.public()]);
+        let endpoints: Vec<Endpoint> = [&key, &stranger, &trusted]
+            .into_iter()
+            .zip(ports)
+            .map(|(key, port)| {
+                let endpoint = Endpoint::new(key).unwrap();
+                endpoint.through(port);
+                endpoint
+            })
+            .collect();
         let mut remote = Remote {
-            endpoint: Endpoint::bind(&key, "127.0.0.1:0".parse().unwrap()).unwrap(),
+            endpoint: endpoints[0].clone(),
             ..remote
         };
         // A hold far longer than any of the waits below: a link that waits for it is told apart
@@ -2933,19 +2705,16 @@ mod tests {
         let remote = Arc::new(remote);
         remote.peers();
         remote.lost_hub();
-        let at = [remote.endpoint.listening().unwrap()];
         let public = key.public();
         tokio::spawn(accept(remote.clone()));
-        let dial = |from: MachineKey| async move {
-            let endpoint = Endpoint::dialler(&from).unwrap();
+        let dial = |endpoint: Endpoint| async move {
             endpoint
-                .connect(public, &at, Traffic::Machine, &hello(), "this")
+                .connect(public, Traffic::Machine, &hello(), "this")
                 .await
         };
 
         // A key the list kept does not trust: refused now, not once the hold ends.
-        let stranger = MachineKey::load_or_make(&dir.path().join("stranger")).unwrap();
-        let refused = tokio::time::timeout(Duration::from_secs(5), dial(stranger))
+        let refused = tokio::time::timeout(Duration::from_secs(5), dial(endpoints[1].clone()))
             .await
             .expect("an unknown key waits for the hold");
         assert!(
@@ -2955,11 +2724,10 @@ mod tests {
         );
 
         // A key it trusts waits for the list; a second link of the same key meanwhile does not.
-        let trusted = || MachineKey::load_or_make(&dir.path().join("peer-0")).unwrap();
-        let waiting = tokio::spawn(dial(trusted()));
+        let waiting = tokio::spawn(dial(endpoints[2].clone()));
         tokio::time::sleep(Duration::from_millis(500)).await;
         assert!(!waiting.is_finished());
-        let again = tokio::time::timeout(Duration::from_secs(5), dial(trusted()))
+        let again = tokio::time::timeout(Duration::from_secs(5), dial(endpoints[2].clone()))
             .await
             .expect("a second link of a key that waits waits too");
         assert!(
@@ -2973,51 +2741,6 @@ mod tests {
             .expect("the list releases the link waiting")
             .unwrap();
         assert!(linked.is_ok(), "{:?}", linked.err());
-    }
-
-    #[tokio::test]
-    async fn a_machine_telling_many_addresses_has_64_kept() {
-        let dir = tempfile::tempdir().unwrap();
-        let (remote, keys) = remote_in(dir.path(), 1);
-        let many: Vec<String> = (0..100).map(|at| format!("192.0.2.{at}:4000")).collect();
-        remote.learn(&keys[0], &many);
-        assert_eq!(told(dir.path(), &keys[0]), many[..MOST_ADDRESSES]);
-    }
-
-    #[tokio::test]
-    async fn learning_leaves_a_broken_peers_file_byte_for_byte() {
-        let dir = tempfile::tempdir().unwrap();
-        let (remote, keys) = remote_in(dir.path(), 1);
-        let file = dir.path().join(PEERS_FILE);
-        let broken = br#"{"machines": [{"name": "machine-0", "ke"#;
-        std::fs::write(&file, broken).unwrap();
-        remote.learn(&keys[0], &["192.0.2.7:4000".to_owned()]);
-        assert_eq!(std::fs::read(&file).unwrap(), broken);
-    }
-
-    #[tokio::test]
-    async fn machines_telling_at_once_lose_no_address() {
-        let dir = tempfile::tempdir().unwrap();
-        let (remote, keys) = remote_in(dir.path(), 16);
-        for round in 0..5 {
-            let start = std::sync::Barrier::new(keys.len());
-            std::thread::scope(|scope| {
-                for (at, key) in keys.iter().enumerate() {
-                    let (remote, start) = (&remote, &start);
-                    scope.spawn(move || {
-                        start.wait();
-                        remote.learn(key, &[format!("192.0.2.{at}:{}", 4000 + round)]);
-                    });
-                }
-            });
-            for (at, key) in keys.iter().enumerate() {
-                assert_eq!(
-                    told(dir.path(), key),
-                    [format!("192.0.2.{at}:{}", 4000 + round)],
-                    "round {round}, machine {at}"
-                );
-            }
-        }
     }
 
     #[tokio::test]
@@ -3057,41 +2780,26 @@ mod tests {
         assert_eq!(remote.refused_lines(Some(&keys[0]), later).len(), 1);
     }
 
-    #[tokio::test]
-    async fn a_machine_telling_again_and_again_has_its_latest_written_every_2_s() {
-        let dir = tempfile::tempdir().unwrap();
-        let (remote, keys) = remote_in(dir.path(), 1);
-        let remote = Arc::new(remote);
-        remote.told_by(keys[0], vec!["192.0.2.0:4000".to_owned()]);
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        for at in 1..50 {
-            remote.told_by(keys[0], vec![format!("192.0.2.{at}:4000")]);
-        }
-        // The first is written at once; those told after it wait, the latest kept.
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        assert_eq!(told(dir.path(), &keys[0]), ["192.0.2.0:4000"]);
-        tokio::time::sleep(LEARN_EVERY).await;
-        assert_eq!(told(dir.path(), &keys[0]), ["192.0.2.49:4000"]);
-        // Once written, nothing waits.
-        tokio::time::sleep(LEARN_EVERY).await;
-        assert!(remote.learning.lock().unwrap().is_empty());
-    }
-
-    /// A link over loopback between two machines of a test's: one end and the other, and the
-    /// endpoints that hold them.
+    /// A link between two machines of a test's, through relay ports joined as the hub joins
+    /// them: one end and the other, and the endpoints that hold them.
     async fn linked(folder: &Path) -> ((Endpoint, Endpoint), Link, Link) {
         let ours = MachineKey::load_or_make(&folder.join("ours")).unwrap();
         let theirs = MachineKey::load_or_make(&folder.join("theirs")).unwrap();
-        let listening = Endpoint::bind(&theirs, "127.0.0.1:0".parse().unwrap()).unwrap();
-        let at = listening.addresses();
+        let mut ports =
+            flottille_link::relays_in_memory(&[ours.public(), theirs.public()]).into_iter();
+        let (dialler, listening) = (
+            Endpoint::new(&ours).unwrap(),
+            Endpoint::new(&theirs).unwrap(),
+        );
+        dialler.through(ports.next().unwrap());
+        listening.through(ports.next().unwrap());
         let accepting = listening.clone();
         let accepted = tokio::spawn(async move {
             let accepting = accepting.accept().await.unwrap();
             accepting.handshake(&hello(), "ours").await.unwrap()
         });
-        let dialler = Endpoint::dialler(&ours).unwrap();
         let link = dialler
-            .connect(theirs.public(), &at, Traffic::Machine, &hello(), "theirs")
+            .connect(theirs.public(), Traffic::Machine, &hello(), "theirs")
             .await
             .unwrap();
         let other = accepted.await.unwrap();

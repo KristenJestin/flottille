@@ -230,6 +230,9 @@ pub struct Composer {
     /// What the daemon keeps of the draft, and the wait before it is written.
     keeping: Keeping,
     places: Vec<PlaceChoice>,
+    /// The machines, other than this one, that would take a session of the project on the agent
+    /// picked (`remote.machines` with the project and the agent, read each time the menu opens).
+    runners: Vec<String>,
     choice: Choice,
     /// A workspace made from the picker, which becomes the place once the daemon lists it.
     wanted: Option<String>,
@@ -314,6 +317,7 @@ impl Composer {
             has_text: false,
             focused: false,
             places: Vec::new(),
+            runners: Vec::new(),
             choice: Choice::Main,
             wanted: None,
             menu: None,
@@ -708,7 +712,39 @@ impl Composer {
         } else {
             Some(menu)
         };
+        if self.menu == Some(Menu::Place) {
+            self.ask_runners(cx);
+        }
         cx.notify();
+    }
+
+    /// Asks the daemon which machines would take a session of this project on the agent picked,
+    /// what `flottille remote members --runners --project --agent` asks.
+    fn ask_runners(&self, cx: &mut Context<Self>) {
+        let mut params = serde_json::json!({"project": self.project});
+        if let Some(agent) = &self.pick.provider {
+            params["agent"] = serde_json::Value::from(agent.clone());
+        }
+        let then = crate::extensions::Then::Runners {
+            project: self.project.clone(),
+        };
+        self.shell
+            .update(cx, |shell, _| {
+                shell.perform(Command::Ask {
+                    method: "remote.machines".into(),
+                    params,
+                    then,
+                })
+            })
+            .ok();
+    }
+
+    /// What the daemon answered: the machines that can run the project, this one left out.
+    pub fn set_runners(&mut self, runners: Vec<String>, cx: &mut Context<Self>) {
+        if self.runners != runners {
+            self.runners = runners;
+            cx.notify();
+        }
     }
 
     /// Why the chosen place cannot take a session now: a workspace prepared again. The choice is
@@ -1077,6 +1113,24 @@ impl Composer {
                 (!place.ready).then_some("not ready"),
                 place.ready.then(|| Choice::Workspace(name.clone())),
             ));
+        }
+        // Another machine that can run the project: choosing it shows that machine, where the
+        // session then starts.
+        for name in &self.runners {
+            let machine = name.clone();
+            items.push(
+                MenuItem::new(format!("place-choice-machine-{name}"), name.clone())
+                    .leading(Icon::Service)
+                    .note("other machine")
+                    .on_click(Self::handler(cx, move |this, _, cx| {
+                        this.menu = None;
+                        let machine = machine.clone();
+                        this.shell
+                            .update(cx, |shell, cx| shell.choose_machine(Some(machine), cx))
+                            .ok();
+                        cx.notify();
+                    })),
+            );
         }
         // Not a place: it opens the page's new-workspace modal, the one its own button opens.
         items.push(

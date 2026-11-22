@@ -7,7 +7,6 @@
 //! zeroized when dropped. This crate knows no daemon and no store: the caller names the key folder
 //! and hands its keyring in.
 
-mod address;
 mod control;
 mod hello;
 mod link;
@@ -31,12 +30,11 @@ use ed25519_dalek::{SECRET_KEY_LENGTH, SigningKey, VerifyingKey};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
-pub use address::Address;
 pub use control::{
     Arriving, Ask, Asked, Asker, ControlError, Device, Facts, HANDSHAKE_LIMIT, HUB_PORT,
     HubSession, HubUrl, KEEPALIVE, LINE_LIMIT, LinkPacket, PairProof, Paired, Pairing, PresenceOf,
-    Pushed, RELAY_PACKET, RelayPort, Relays, SILENCE, Session, Stream, Tls, ToDevice, Told,
-    Transcript, arrive,
+    Pushed, RELAY_PACKET, RelayPort, Relays, SILENCE, Session, Stream, Tls, ToDevice, Transcript,
+    arrive, relays_in_memory,
 };
 pub use hello::{Hello, NeedsUpdate, PeerState, choose, choose_hub};
 pub use link::{

@@ -376,19 +376,6 @@ async fn one_device_cannot_fill_the_hub() {
     );
 }
 
-/// Every machine of `place` tells the hub as many addresses as it keeps, each as long as it
-/// keeps: what a session's news holds at most, and what the hub would copy again for every packet.
-fn tell_long_addresses(place: &Place, machines: &[PublicKey]) {
-    for machine in machines {
-        let addresses: Vec<String> = (0..64)
-            .map(|n| format!("{}{n:02}.example.org:7447", "relay-harbour-".repeat(20)))
-            .collect();
-        place
-            .served
-            .with_hub(|hub| hub.tell_addresses(machine, addresses).unwrap());
-    }
-}
-
 #[tokio::test(flavor = "multi_thread")]
 async fn a_flood_leaves_the_other_sessions_answered() {
     let mut place = Place::new().await;
@@ -402,14 +389,6 @@ async fn a_flood_leaves_the_other_sessions_answered() {
     let mut server_session = server_session;
     let mut server_port = port(&mut server_session);
     let _server_session = drain(server_session);
-    tell_long_addresses(
-        &place,
-        &[
-            place.pc_machine.public(),
-            server_machine.public(),
-            laptop_machine.public(),
-        ],
-    );
     let pc_port = port(&mut place.pc_session);
     online(
         &mut laptop_port,
