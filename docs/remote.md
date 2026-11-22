@@ -826,11 +826,13 @@ local child's work; nothing moves your branch.*
   there. One it has: a new workspace on the caller's branch, only the missing commits sent. None:
   it makes the project itself, under the caller's name of it (or `-2`, `-3`… when that name is
   another project's), in its folder for projects from other machines,
-  `$XDG_DATA_HOME/flottille/projects/<project>`; each repository is cloned from the bundle, its
+  `$XDG_DATA_HOME/flottille/projects/<project>` (the project's, not Flottille's, to the gate, as
+  a workspace in the data folder is: a session the user starts there writes in it); each repository is cloned from the bundle, its
   whole history the first time, never from its remote; then the workspace and the session as
   above. The project is then that machine's like any other, on its side of the list, its file
-  marked `from_machine = "pc"`. The words of the launch say which project it runs in, and when it
-  makes one.
+  marked with that machine's key (`from_machine = "<key>"`): its member's name is not kept, since
+  a runner may rename any member and another may take it. The words of the launch say which
+  project it runs in, and when it makes one.
 - **The project's settings travel with each launch**: its branch rules (`branch_prefix`,
   `branch_format`), `never`, its tasks and services (`tasks`), its `setup`, its `message_checks`,
   its pull request conventions, its `rules` and `rules_alone`, and each repository's `base`,
@@ -842,7 +844,13 @@ local child's work; nothing moves your branch.*
   A project the user registered by hand keeps the settings the user gave it there: the caller's
   are not laid over them, and the launch's words say so. A project made for one machine's launches
   takes only that machine's: another machine's launch runs in it and leaves its settings as they
-  are, its words saying whose they keep. Settings that cannot be used there (a task needing a
+  are, its words saying whose they keep (a project whose file names the machine instead, as the
+  first builds of dev wrote it, is no machine's: it keeps its settings; removed, the next launch
+  makes it again). The settings
+  are laid only on the project file they were classed against, as a held write is done only while
+  its words still hold: when the user (or anything else) changed that file meanwhile, the launch
+  is refused when it is allowed, saying the project changed, and nothing is laid; the caller
+  launches again. Settings that cannot be used there (a task needing a
   service that machine lacks) refuse the launch, saying why.
 - **What the settings change is classed as the same writes of an agent there** (`docs/tools.md`,
   "The project"), by the receiving machine's gate, against the project as it is there: each task
@@ -850,7 +858,12 @@ local child's work; nothing moves your branch.*
   line or a sensitive path is base; asking turned off, `check` or `read_only` set are base), each
   setup step as `setup add`, the rules and `rules_alone` as `set_rules` (base), each repository's
   base branches and dependencies as `set_settings`; what no agent's tool writes there is the
-  user's word, base: an entry removed from `never`, the message checks and the commit checks. The
+  user's word, base: an entry removed from `never`, the message checks and the commit checks, the
+  branch and pull request conventions (its template is text given to the agents, as the rules
+  are), and a repository the project lacks, which is checked as one the user adds there: no link
+  out of the project's folder, no repository of another project (`It adds the repository lib to
+  the project`). In a project Flottille made, a repository whose folder leads out of the project
+  is never the launch's. The
   launch takes the strongest class: one base change makes it the user's to decide, never the
   judge's (in Full it passes, as a base write does); a line the gate refuses refuses the launch.
   Its words name each line and key that changes (`It adds the task deploy: `make deploy``, `It

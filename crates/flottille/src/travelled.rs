@@ -208,6 +208,14 @@ async fn is_the_launch_s(project: &Project, asked: &LaunchAsk) -> bool {
             "." => project.folder.clone(),
             path => project.folder.join(path),
         };
+        // A link in a project Flottille made, which came with a launch's code, leads nowhere
+        // else: never to one of the user's own repositories.
+        if project.from_machine.is_some()
+            && std::fs::symlink_metadata(&folder).is_ok()
+            && projects::leads_inside(&project.folder, path).is_err()
+        {
+            return false;
+        }
         if !folder.join(".git").exists() {
             if project.name != asked.project {
                 return false;
@@ -282,22 +290,27 @@ pub(crate) struct Classed {
     pub reasons: Vec<String>,
     /// Each line and key that would change, in words.
     pub words: Vec<String>,
+    /// The project's file they were classed against, as it is written: they are laid only on it
+    /// (`projects::take_travelled`). None when nothing is laid.
+    pub text: Option<String>,
 }
 
-/// Whether the settings of a launch of `from` are laid on `project`: only on one Flottille made
-/// for that very machine's launches.
-fn takes(project: &Project, from: &str) -> bool {
-    project.from_machine.as_deref() == Some(from)
+/// Whether the settings of a launch of the machine `machine` (its key) are laid on `project`:
+/// only on one Flottille made for that very machine's launches. Its key, never its member's name,
+/// which another member may rename it from and take.
+fn takes(project: &Project, machine: &str) -> bool {
+    project.from_machine.as_deref() == Some(machine)
 }
 
-/// Classes what laying the settings of `asked`, from `from`, would change in the project `found`
-/// names (nothing for a project they are not laid on), as the gate classes the same writes of an
-/// agent here. Refused when the gate refuses one of them.
+/// Classes what laying the settings of `asked`, from `from` (its machine's key `machine`), would
+/// change in the project `found` names (nothing for a project they are not laid on), as the gate
+/// classes the same writes of an agent here. Refused when the gate refuses one of them.
 pub(crate) fn classed(
     daemon: &Daemon,
     found: &Found,
     asked: &LaunchAsk,
     from: &str,
+    machine: &str,
 ) -> Result<Classed, String> {
     let Some(settings) = &asked.settings else {
         return Ok(Classed::default());
@@ -310,18 +323,21 @@ pub(crate) fn classed(
                 asked.repositories.clone(),
                 &daemon.paths.data,
             );
-            project.from_machine = Some(from.to_owned());
+            project.from_machine = Some(machine.to_owned());
             let text = project.to_toml().map_err(|error| error.to_string())?;
             (project, text)
         }
-        Found::Here(project) if takes(project, from) => {
+        Found::Here(project) if takes(project, machine) => {
+            // The project as the very text classed says it, which is what it is laid on.
             let text = projects::text(daemon, &project.name).map_err(|f| f.message)?;
-            ((**project).clone(), text)
+            let before = projects::parsed(daemon, &project.name, &text).map_err(|f| f.message)?;
+            (before, text)
         }
         Found::Here(_) => return Ok(Classed::default()),
     };
     let after = projects::as_travelled(daemon, &before.name, &text, settings, from)
         .map_err(|failure| failure.message)?;
+    let others = projects::all(daemon);
     let mut classing = Classing {
         daemon,
         grant: crate::mcp::Grant {
@@ -333,14 +349,17 @@ pub(crate) fn classed(
         },
         after: &after,
         from,
-        classed: Classed::default(),
+        classed: Classed {
+            text: Some(text),
+            ..Classed::default()
+        },
     };
     classing.tasks(&before)?;
     classing.setup(&before)?;
     classing.never(&before);
     classing.rules(&before)?;
     classing.checks(&before);
-    classing.repositories(&before)?;
+    classing.repositories(&before, &others)?;
     classing.conventions(&before);
     Ok(classing.classed)
 }
@@ -622,8 +641,10 @@ impl Classing<'_> {
         }
     }
 
-    /// Each repository's base branches and dependencies, classed as `project set_settings` is.
-    fn repositories(&mut self, before: &Project) -> Result<(), String> {
+    /// Each repository's base branches and dependencies, classed as `project set_settings` is;
+    /// a repository the project lacks, which no agent's tool adds, is the user's word, and checked
+    /// as one the user adds (`projects::refused_repository`).
+    fn repositories(&mut self, before: &Project, others: &[Project]) -> Result<(), String> {
         let after = self.after;
         for repository in &after.repositories {
             let was = before
@@ -631,6 +652,15 @@ impl Classing<'_> {
                 .iter()
                 .find(|r| r.path == repository.path);
             let path = &repository.path;
+            if was.is_none() {
+                if let Some(why) = projects::refused_repository(others, before, path) {
+                    return Err(format!("the repository {path} from {}: {why}", self.from));
+                }
+                self.say(format!("It adds the repository {path} to the project"));
+                self.base(format!(
+                    "it adds the repository {path} to the project: only the user's word adds one"
+                ));
+            }
             let mut changed = serde_json::json!({"path": path});
             if was.is_none_or(|was| was.base != repository.base) {
                 self.say(format!(
@@ -659,24 +689,27 @@ impl Classing<'_> {
         Ok(())
     }
 
-    /// The branch and pull request conventions: settings like any other, to judge.
+    /// The branch and pull request conventions, which no agent's tool writes: the user's word,
+    /// base. A pull request's template is text given to the agents, as the rules are.
     fn conventions(&mut self, before: &Project) {
         let after = self.after;
+        let why = "it sets the project's branch or pull request conventions: only the user's word \
+                   sets them";
         if before.branch_prefix != after.branch_prefix {
             self.say(format!("Its branch prefix: {:?}", after.branch_prefix));
-            self.settings();
+            self.base(why.into());
         }
         if before.branch_format != after.branch_format {
             match &after.branch_format {
                 Some(format) => self.say(format!("Its branch format: {format}")),
                 None => self.say("It removes its branch format".into()),
             }
-            self.settings();
+            self.base(why.into());
         }
         if before.pull_requests != after.pull_requests {
             let conventions = serde_json::to_string(&after.pull_requests).unwrap_or_default();
             self.say(format!("Its pull request conventions: {conventions}"));
-            self.settings();
+            self.base(why.into());
         }
     }
 }
@@ -707,11 +740,13 @@ fn said(task: &flottille_core::project::Task) -> String {
 }
 
 /// The words that say, to the judge and the user, which project of this machine the launch runs
-/// in, and each setting of the sender's it lays there (`classed`).
+/// in, and each setting of the sender's it lays there (`classed`). `from` is the sender's name,
+/// `machine` its key, and `name_of` the name of the member whose machine has a key.
 pub(crate) fn words(
     found: &Found,
     asked: &LaunchAsk,
-    from: &str,
+    (from, machine): (&str, &str),
+    name_of: impl Fn(&str) -> Option<String>,
     classed: &Classed,
 ) -> Vec<String> {
     let mut said = Vec::new();
@@ -728,11 +763,14 @@ pub(crate) fn words(
             let name = &project.name;
             match project.from_machine.as_deref() {
                 _ if asked.settings.is_none() => {}
-                Some(owner) if owner == from => {}
-                Some(owner) => said.push(format!(
-                    "In the project {name}, which Flottille made here for {owner}'s launches: it \
-                     keeps {owner}'s settings, not {from}'s"
-                )),
+                Some(owner) if owner == machine => {}
+                Some(owner) => {
+                    let owner = name_of(owner).unwrap_or_else(|| "another machine".to_owned());
+                    said.push(format!(
+                        "In the project {name}, which Flottille made here for {owner}'s launches: \
+                         it keeps {owner}'s settings, not {from}'s"
+                    ))
+                }
                 None => said.push(format!(
                     "In the project {name}, which the user registered here: it keeps its own \
                      settings, not {from}'s"
@@ -741,7 +779,13 @@ pub(crate) fn words(
             name
         }
     };
-    if !classed.words.is_empty() {
+    // Recognised again (`again`), a project to make may be one made meanwhile for another
+    // machine: it takes none of these settings.
+    let laid = match found {
+        Found::Made { .. } => true,
+        Found::Here(project) => takes(project, machine),
+    };
+    if laid && !classed.words.is_empty() {
         said.push(format!(
             "{name} takes these settings of {} on {from}",
             asked.project
@@ -751,19 +795,24 @@ pub(crate) fn words(
     said
 }
 
-/// The project `found` names, recognised again and made now when it is to be, under
-/// `making_projects`: two launches of a new project at once make it once. Refused when it is no
-/// longer the one the launch was judged for.
+/// The project `found` names, recognised again, under `making_projects`, held until the launch
+/// is recorded and its project made: two launches of a new project at once make it once, and a
+/// project made for a launch that did not start is not removed (`unmake`) under one that runs in
+/// it. Refused when it is no longer the one the launch was judged for.
 pub(crate) async fn again<'a>(
     daemon: &'a Daemon,
     found: Found,
     asked: &LaunchAsk,
     here: &str,
-) -> Result<(Found, Option<tokio::sync::MutexGuard<'a, ()>>), String> {
-    let Found::Made { name, .. } = &found else {
-        return Ok((found, None));
-    };
+) -> Result<(Found, tokio::sync::MutexGuard<'a, ()>), String> {
     let making = daemon.making_projects.lock().await;
+    let name = match &found {
+        Found::Here(project) if projects::exists(daemon, &project.name) => {
+            return Ok((found, making));
+        }
+        Found::Here(project) => &project.name,
+        Found::Made { name, .. } => name,
+    };
     let again = recognise(daemon, asked, here).await?;
     let same = match &again {
         Found::Here(project) => &project.name == name,
@@ -774,54 +823,57 @@ pub(crate) async fn again<'a>(
             "the projects of {here} changed while the launch was judged: launch it again"
         ));
     }
-    Ok((again, Some(making)))
+    Ok((again, making))
 }
 
-/// Makes the project `found` names when it is to be made, for a launch of `from`.
+/// Makes the project `found` names when it is to be made, for a launch of the machine `machine`
+/// (its key).
 pub(crate) fn made(
     daemon: &Daemon,
     found: &Found,
     asked: &LaunchAsk,
-    from: &str,
+    machine: &str,
 ) -> Result<(), String> {
     match found {
         Found::Here(_) => Ok(()),
         Found::Made { name, folder } => {
-            projects::make_travelled(daemon, name, folder, &asked.repositories, from)
+            projects::make_travelled(daemon, name, folder, &asked.repositories, machine)
                 .map(|_| ())
                 .map_err(|failure| failure.message)
         }
     }
 }
 
-/// Lays the settings of the launch `asked`, from `from`, on `project` when Flottille made it for
-/// that very machine's launches: a project the user registered keeps its own, and one made for
-/// another machine keeps that machine's. Refused when they cannot be used here.
+/// Lays the settings of the launch `asked`, from the machine `machine` (its key), on `project`
+/// when Flottille made it for that very machine's launches, and only on the file `classed` was
+/// (`Classed::text`): a project the user registered keeps its own, and one made for another
+/// machine keeps that machine's. Refused when they cannot be used here, or the project changed
+/// since.
 pub(crate) fn take_settings(
     daemon: &Daemon,
     project: &str,
     asked: &Value,
-    from: &str,
+    machine: &str,
+    classed: Option<&str>,
 ) -> Result<(), String> {
     let Some(settings) = asked.get("settings").filter(|settings| !settings.is_null()) else {
         return Ok(());
     };
     let here = projects::load_project(daemon, project).map_err(|failure| failure.message)?;
-    if !takes(&here, from) {
+    if !takes(&here, machine) {
         return Ok(());
     }
-    projects::take_travelled(daemon, project, settings, from)
+    projects::take_travelled(daemon, project, settings, machine, classed)
         .map(|_| ())
         .map_err(|failure| failure.message)
 }
 
-/// Removes the project made for the launch `launch` of `from`, which did not start, once nothing
-/// uses it: its agent ended, its workspace removed.
+/// Removes the project made for the launch `launch`, which did not start, once nothing uses it:
+/// its agent ended, its workspace removed.
 pub(crate) fn unmake(daemon: &std::sync::Arc<Daemon>, launch: &flottille_core::store::Launch) {
     if launch.asked["made"] != true {
         return;
     }
-    let from = launch.asked["from"].as_str().unwrap_or_default().to_owned();
     let name = launch.project.clone();
     let folder = folder_for_others(daemon).join(&name);
     let daemon = daemon.clone();
@@ -830,6 +882,8 @@ pub(crate) fn unmake(daemon: &std::sync::Arc<Daemon>, launch: &flottille_core::s
     tokio::spawn(async move {
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(90);
         loop {
+            // A launch being recorded in it finds it gone, or is seen here (`again`).
+            let making = daemon.making_projects.lock().await;
             // Another launch of that machine that may still start in it keeps it.
             let others = daemon
                 .read(|store| {
@@ -847,12 +901,13 @@ pub(crate) fn unmake(daemon: &std::sync::Arc<Daemon>, launch: &flottille_core::s
             }) {
                 return;
             }
-            match projects::unmake_travelled(&daemon, &name, &folder, &from) {
+            match projects::unmake_travelled(&daemon, &name, &folder, &machine) {
                 Ok(()) => return,
                 Err(failure)
                     if failure.message.ends_with("is in use")
                         && tokio::time::Instant::now() < deadline =>
                 {
+                    drop(making);
                     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
                 }
                 Err(failure) => {
