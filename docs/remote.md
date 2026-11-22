@@ -740,7 +740,8 @@ machine's name.
   project: a project registered on several machines under the same name is one group. Sessions
   are ordered by last exchange, as on one machine. A session of another machine carries that
   machine's name as a tag (`server`); a session of this machine carries none. The machine is
-  chosen where a page is a machine's: Settings' `Settings of` and Add project's `On` (#1182); the
+  chosen where a page is a machine's: Settings' `Settings of` and Add project's `On` (#1182), and
+  in a project's composer (the machine picker); the
   machines' states (online, offline since, needs an update) are in those choosers and in Settings,
   Machines.
 - **Live everywhere.** A runner tells each machine it links to its list of sessions, light (the
@@ -1392,9 +1393,24 @@ on a real phone, by hand, and reported.
   dialog opens them one after the other, and a folder that is a repository itself is picked; a
   folder that only holds repositories (not one itself) is opened, not picked. It is `drive`, as
   adding is.
-- **The choosers name each machine with its role and state, without its icon and colour**
-  (#1182): the kit has no device icons and its select and radios no mark for an option yet; it is
-  a follow-up of the kit. The choosers offer the runners only: a controller holds no project.
+- **The choosers name each machine with its icon, its role and its state** (#1182): the machine
+  chosen is drawn as its icon in its colour before its name (`server in teal` is its label, for the
+  ones who do not see colours), and each row of the list has the icon of the machine, its role and
+  state, the chosen one filled. The kit's lists draw a row's icon in their own ink and mark the chosen
+  row by its fill, with no check: the colour is the chooser's own mark, outside the list, and a kit
+  option for a tinted icon and a check is a follow-up. The choosers offer the runners only: a
+  controller holds no project.
+- **The composer's machine picker lists the machines that have the project** (#1182): the runners
+  that offered it over their link, or whose light list of sessions names it (kept while a machine is
+  off, which offers nothing). One that is off is greyed and says `offline since 22:14`; it is not
+  picked. A project on one machine has no picker. Choosing a machine brings it in front on the
+  project's page, like every page of another machine, and the place is `main` again. A machine in
+  front that goes off says under the composer to pick another or wait; the composer stays free for
+  the picker, and nothing is started.
+- **A session started on another machine is a row of its pilot's rail** (#1182): its machine's icon
+  and its title in the rail's Agents, and, for a child, a line of the sub-agents list; both bring
+  that machine in front on it. The header of a session names the machine it runs on when the user
+  has several (`[icon] server / main`).
 
 - One list of every machine (#1150): the window follows the other machines through its own
   daemon, which keeps each machine's list as that machine tells it over the link (the `sessions`
