@@ -2,15 +2,24 @@
 //! it names that machine's own loopback, and the port it writes. The daemon takes the port of a
 //! tunnel from it (`docs/remote.md`, "Tunnels"), and the window decides from it whether a link of
 //! another machine opens through one.
+//!
+//! An address is read as the web view of the phone reads it, which is as a browser does: a `\`
+//! ends the authority like a `/` (`http://evil.example\@localhost:5173/` is `evil.example`), and
+//! one that holds a login (`@`) is none of ours. A run's address is not normalised on its way here:
+//! the daemon keeps the line the run printed once it parses as an `http(s)` address.
+
+/// What ends an address's authority: a browser reads `\` as `/` in an `http(s)` address.
+const AUTHORITY_ENDS: [char; 4] = ['/', '\\', '?', '#'];
 
 /// The host and the port written in an address, the host without its brackets and in lower
-/// case; the port is none when it is not written or is no number.
+/// case; the port is none when it is not written or is no number. None for an authority that
+/// holds a login: it is not worth guessing who the host is.
 fn authority(url: &str) -> Option<(String, Option<u16>)> {
     let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
-    let authority = rest.split(['/', '?', '#']).next()?;
-    let authority = authority
-        .rsplit_once('@')
-        .map_or(authority, |(_, host)| host);
+    let authority = rest.split(AUTHORITY_ENDS).next()?;
+    if authority.contains('@') {
+        return None;
+    }
     let (host, port) = match authority.strip_prefix('[') {
         Some(bracketed) => {
             let (host, after) = bracketed.split_once(']')?;
@@ -56,7 +65,7 @@ pub fn through(url: &str, local_port: u16) -> String {
         Some((scheme, rest)) => (format!("{scheme}://"), rest),
         None => (String::new(), url),
     };
-    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let end = rest.find(AUTHORITY_ENDS).unwrap_or(rest.len());
     let (authority_text, tail) = rest.split_at(end);
     let (login, host_part) = match authority_text.rsplit_once('@') {
         Some((login, host)) => (format!("{login}@"), host),
