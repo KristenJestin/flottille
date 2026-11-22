@@ -6253,6 +6253,20 @@ fn android_sign_runs_on_a_push_and_on_a_release_build_of_main_only() {
     }
 }
 
+/// Every file under `dir`, folders walked.
+fn files_under(dir: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            files.extend(files_under(&path));
+        } else {
+            files.push(path);
+        }
+    }
+    files
+}
+
 #[test]
 fn the_android_tests_never_fetch_at_test_time() {
     let gradle = std::fs::read_to_string(tool("apps/android/app/build.gradle.kts")).unwrap();
@@ -6274,6 +6288,40 @@ fn the_android_tests_never_fetch_at_test_time() {
         gradle.contains("dependsOn(fetchRobolectricJars)"),
         "a test never runs before its jars are there: {gradle}"
     );
+
+    // One jar per SDK a test can run on: the SDKs the tests name (`@Config(sdk = [..])`) and the
+    // app's `targetSdk`, which Robolectric asks for too (the first run of this job found 35's
+    // missing: every test failed with "Path is not a file"). The version of each is the one
+    // Robolectric 4.14.1's `DefaultSdkProvider` names for it.
+    let jar = |sdk: u32| match sdk {
+        34 => "14-robolectric-10818077-i7",
+        35 => "15-robolectric-12650502-i7",
+        other => panic!("SDK {other}: add its Robolectric version to this test"),
+    };
+    let mut sdks = std::collections::BTreeSet::new();
+    let target = gradle
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("targetSdk = "))
+        .expect("a targetSdk");
+    sdks.insert(target.trim().parse::<u32>().unwrap());
+    let tests = tool("apps/android/app/src/test");
+    for entry in files_under(&tests) {
+        let text = std::fs::read_to_string(&entry).unwrap_or_default();
+        for list in text.split("sdk = [").skip(1) {
+            let list = &list[..list.find(']').unwrap()];
+            sdks.extend(list.split(',').map(|n| n.trim().parse::<u32>().unwrap()));
+        }
+    }
+    for sdk in sdks {
+        assert!(
+            gradle.contains(&format!("\"{}\"", jar(sdk))),
+            "the jar of SDK {sdk} is a dependency: {gradle}"
+        );
+    }
+    // Each in a configuration of its own: in one, Gradle keeps the newest version of the module
+    // and drops the others (the second run of this job found only SDK 35's jar in the folder).
+    assert!(gradle.contains("detachedConfiguration("), "{gradle}");
+    assert!(!gradle.contains("robolectricJars("), "{gradle}");
 
     // The job fetches them in a step of their own, before the tests, which may retry; the tests
     // are not run with the network's help.
@@ -6299,12 +6347,27 @@ fn the_android_tests_never_fetch_at_test_time() {
     );
 }
 
-/// The `prune` step of the job that deletes the old betas, run against `FAKE_RELEASES_GH`.
+/// The `prune` step of `beta-cleanup.yml`, run against `FAKE_RELEASES_GH`, with no pause between
+/// two deletions: the other settings of the workflow (`env`) are the ones the tests below read.
 fn prune(fake: &Fake) -> Output {
     fake.run(
-        &step_script(".github/workflows/ci.yml", "prune"),
-        &[("GH_TOKEN", "unused")],
+        &step_script(".github/workflows/beta-cleanup.yml", "prune"),
+        &[
+            ("GH_TOKEN", "unused"),
+            ("KEEP", &prune_setting("KEEP")),
+            ("MAX_DELETIONS", &prune_setting("MAX_DELETIONS")),
+            ("PAUSE", "0"),
+        ],
     )
+}
+
+/// The value of an `env` entry of the pruning step, as the workflow says it.
+fn prune_setting(name: &str) -> String {
+    let text = std::fs::read_to_string(tool(".github/workflows/beta-cleanup.yml")).unwrap();
+    let prefix = format!("{name}: ");
+    text.lines()
+        .find_map(|l| l.trim().strip_prefix(&prefix).map(str::to_owned))
+        .unwrap_or_else(|| panic!("beta-cleanup.yml sets no {name}"))
 }
 
 #[test]
@@ -6359,43 +6422,67 @@ fn the_betas_of_a_version_keep_the_last_ten() {
 }
 
 #[test]
-fn the_pruning_of_the_betas_cannot_fail_a_release_nor_reach_a_key() {
-    let workflow = std::fs::read_to_string(tool(".github/workflows/ci.yml")).unwrap();
-    let job = ci_job("prune-betas");
-    // After the release is published, in a job of its own: a deletion the settings refuse (the
-    // tag rule) never fails `publish`, nor holds back the hub's image.
-    assert!(job.contains("needs: [build, publish]"), "{job}");
-    let condition = condition_of(&job);
-    for (channel, publish, runs) in [
-        ("beta", "success", true),
-        ("beta", "failure", false),
-        ("beta", "skipped", false),
-        ("stable", "success", false),
-        ("rc", "success", false),
-        ("next", "success", false),
-        ("alpha", "success", false),
-    ] {
-        let context = [
-            ("needs.build.outputs.channel", channel),
-            ("needs.publish.result", publish),
-        ];
-        assert_eq!(holds(&condition, &context), runs, "{channel} {publish}");
-    }
+fn the_pruning_of_the_betas_never_touches_a_release_run() {
+    let ci = std::fs::read_to_string(tool(".github/workflows/ci.yml")).unwrap();
+    // In a workflow of its own, not a job of `ci`: its failure, or its cancellation by a
+    // concurrency group, would fail or cancel the push run `verified-on-dev` reads, and `main`
+    // would run the whole verification again.
     assert!(
-        !workflow.contains("needs: [build, hub, publish, prune-betas]")
-            && !ci_job("hub-image").contains("prune-betas"),
-        "nothing waits for the pruning"
+        !ci.contains("prune-betas") && !ci.contains("release delete"),
+        "ci.yml prunes nothing"
     );
+    let workflow = std::fs::read_to_string(tool(".github/workflows/beta-cleanup.yml")).unwrap();
+    let triggers = &workflow[..workflow.find("\npermissions:").expect("permissions")];
+    // On a schedule and by hand: a release made with the workflow's token starts no `release`
+    // run, and nothing here runs on a push or a pull request.
+    assert!(
+        triggers.contains("schedule:") && triggers.contains("workflow_dispatch:"),
+        "{triggers}"
+    );
+    for event in ["push:", "pull_request", "workflow_run:", "release:"] {
+        assert!(!triggers.contains(event), "{event} in {triggers}");
+    }
     // Least privilege: it deletes releases and their tags, and nothing else.
-    assert!(job.contains("permissions:\n      contents: write"), "{job}");
-    assert!(!job.contains("actions/"), "no action, no checkout: {job}");
-    assert!(!job.contains("secrets."), "{job}");
+    assert!(
+        workflow.contains("permissions:\n  contents: write\n"),
+        "{workflow}"
+    );
+    assert!(!workflow.contains("actions/"), "no action, no checkout");
+    assert!(!workflow.contains("secrets."), "{workflow}");
     // Nothing of the event reaches a command.
-    let script = step_script(".github/workflows/ci.yml", "prune");
+    let script = step_script(".github/workflows/beta-cleanup.yml", "prune");
     assert!(!script.contains("${{"), "{script}");
     // One at a time, none cancelled half-way.
-    assert!(job.contains("concurrency:"), "{job}");
-    assert!(job.contains("cancel-in-progress: false"), "{job}");
-    // The betas' tags only: a release candidate, a release or an alpha is never listed for deletion.
+    assert!(workflow.contains("concurrency:"), "{workflow}");
+    assert!(workflow.contains("cancel-in-progress: false"), "{workflow}");
+    // The betas' tags only: a release candidate, a release or an alpha is never listed.
     assert!(script.contains("-beta\\."), "{script}");
+}
+
+#[test]
+fn the_pruning_deletes_a_few_betas_per_run_with_a_pause_between_calls() {
+    let fake = Fake::new();
+    // The pile of today: far more than a run may delete (GitHub's secondary rate limit).
+    let state: Vec<String> = (1..=80).map(|n| format!("v0.2.0-beta.{n}")).collect();
+    fake.state(&state.iter().map(String::as_str).collect::<Vec<_>>());
+    let per_run: usize = prune_setting("MAX_DELETIONS").parse().expect("a number");
+    assert_eq!(per_run, 30, "the issue says thirty");
+
+    // 70 are older than the last ten: thirty go, then thirty, then ten, then nothing.
+    let mut gone = 0;
+    for (run, expected) in [(1, 30), (2, 30), (3, 10), (4, 0)] {
+        let output = prune(&fake);
+        assert!(output.status.success(), "run {run}: {output:?}");
+        let now = state.len() - fake.tags().len();
+        assert_eq!(now - gone, expected, "run {run}");
+        gone = now;
+    }
+    let expected: Vec<String> = (71..=80).map(|n| format!("v0.2.0-beta.{n}")).collect();
+    assert_eq!(fake.tags(), expected);
+
+    // A pause between two calls, as the workflow says it, never none.
+    let script = step_script(".github/workflows/beta-cleanup.yml", "prune");
+    assert!(script.contains("sleep \"$PAUSE\""), "{script}");
+    let pause: u32 = prune_setting("PAUSE").parse().expect("a number");
+    assert!(pause >= 1, "a pause of {pause} s");
 }
