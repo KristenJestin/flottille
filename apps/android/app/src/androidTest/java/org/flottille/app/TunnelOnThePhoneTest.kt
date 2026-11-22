@@ -131,6 +131,20 @@ class TunnelOnThePhoneTest {
     }
 
     @Test
+    fun closing_the_in_app_browser_stops_its_listener() {
+        start()
+        rule.onNodeWithTag("run-open:r1").performClick()
+        until("the tunnel opened") { phone.state.value.tunnels.isNotEmpty() }
+        val tunnel = phone.state.value.tunnels.single()
+        assertTrue(phone.listening(tunnel))
+        rule.onNodeWithTag("browser-close").performClick()
+        // Another app of the phone could reach a listener left open: it goes with the page.
+        until("the tunnel closed") { phone.closed.isNotEmpty() }
+        assertEquals(listOf(tunnel.tunnel), phone.closed.toList())
+        until("nothing listens any more") { !phone.listening(tunnel) }
+    }
+
+    @Test
     fun open_in_browser_keeps_the_tunnel_with_a_foreground_service() {
         start()
         rule.onNodeWithTag("run-browser:r1").performClick()
