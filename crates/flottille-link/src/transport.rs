@@ -887,33 +887,33 @@ fn system_roots() -> Vec<CertificateDer<'static>> {
     rustls_native_certs::load_native_certs().certs
 }
 
-/// The roots Android trusts, from its folders: the certificates of the first of `system` that
-/// exists, but those the user removed (a file of the same name in `user`'s `cacerts-removed`),
-/// and those the user added (`user`'s `cacerts-added`). Each file is a certificate in PEM, text
-/// may follow it; a file that is not is passed over.
+/// The roots Android trusts for this app, from its folders: the certificates of the first of
+/// `system` that lists at least one file, as Conscrypt chooses, but those the user removed (the
+/// same certificate in `user`'s `cacerts-removed`). Each file is a certificate in PEM, text may
+/// follow it; a file that is not is passed over. The certificates the user added are not read:
+/// an app targeting Android 7 or later trusts them only when its network security configuration
+/// says `<certificates src="user"/>`, which this app's does not.
 // Not gated, so that its tests run off Android.
 #[cfg_attr(not(target_os = "android"), allow(dead_code))]
 fn android_roots(system: &[&Path], user: &Path) -> Vec<CertificateDer<'static>> {
     use rustls::pki_types::pem::PemObject;
-    fn files(folder: &Path) -> Vec<std::path::PathBuf> {
-        std::fs::read_dir(folder)
-            .map(|entries| entries.flatten().map(|entry| entry.path()).collect())
-            .unwrap_or_default()
+    fn certificates(folder: &Path) -> Option<Vec<CertificateDer<'static>>> {
+        let files: Vec<_> = std::fs::read_dir(folder).ok()?.flatten().collect();
+        (!files.is_empty()).then(|| {
+            files
+                .iter()
+                .filter_map(|file| CertificateDer::from_pem_file(file.path()).ok())
+                .collect()
+        })
     }
-    let removed = user.join("cacerts-removed");
-    let system = system
+    // By content, not by name: a hash's suffix may move between two updates of the system.
+    let removed = certificates(&user.join("cacerts-removed")).unwrap_or_default();
+    system
         .iter()
-        .find(|folder| folder.is_dir())
-        .map(|folder| files(folder))
+        .find_map(|folder| certificates(folder))
         .unwrap_or_default()
         .into_iter()
-        .filter(|file| {
-            file.file_name()
-                .is_none_or(|name| !removed.join(name).exists())
-        });
-    system
-        .chain(files(&user.join("cacerts-added")))
-        .filter_map(|file| CertificateDer::from_pem_file(file).ok())
+        .filter(|certificate| !removed.contains(certificate))
         .collect()
 }
 
