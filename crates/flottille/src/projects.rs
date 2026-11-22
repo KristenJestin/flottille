@@ -1599,12 +1599,17 @@ fn key_renamed(table: &mut toml_edit::Table, from: &str, to: &str) -> bool {
     true
 }
 
+/// The file of the project `name`, as it is written.
+pub fn text(daemon: &Daemon, name: &str) -> std::result::Result<String, Failure> {
+    let file = daemon.projects.lock().unwrap().registry.file(name);
+    std::fs::read_to_string(&file)
+        .map_err(|error| Failure::new("unavailable", format!("projects/{name}.toml: {error}")))
+}
+
 /// The settings of the project `name` that travel with a launch to another machine, as its file
 /// writes them (`docs/remote.md`, "What travels").
 pub fn travelling(daemon: &Daemon, name: &str) -> std::result::Result<Value, Failure> {
-    let file = daemon.projects.lock().unwrap().registry.file(name);
-    let text = std::fs::read_to_string(&file)
-        .map_err(|error| Failure::new("unavailable", format!("projects/{name}.toml: {error}")))?;
+    let text = text(daemon, name)?;
     flottille_core::project::travelling(&text)
         .map_err(|why| Failure::new("invalid-config", format!("projects/{name}.toml: {why}")))
 }
@@ -1634,84 +1639,169 @@ pub fn make_travelled(
     Ok(project)
 }
 
+/// The project `name` as its file `text` would be with `settings`, which came with a launch of
+/// the machine `from`, laid on it (`lay_travelled`), nothing written: what the gate classes
+/// before the launch is allowed. Refused when the result is not a configuration this machine can
+/// use.
+pub fn as_travelled(
+    daemon: &Daemon,
+    name: &str,
+    text: &str,
+    settings: &Value,
+    from: &str,
+) -> std::result::Result<Project, Failure> {
+    let came = came(name, settings, from)?;
+    let mut document: toml_edit::DocumentMut =
+        text.parse().map_err(|error: toml_edit::TomlError| {
+            Failure::new(
+                "invalid-config",
+                format!("projects/{name}.toml: {}", error.message()),
+            )
+        })?;
+    lay_travelled(name, &mut document, &came)?;
+    let projects = daemon.projects.lock().unwrap();
+    projects
+        .registry
+        .parse(name, &document.to_string())
+        .map_err(|error| Failure::refused(format!("the settings of {name} from {from}: {error}")))
+}
+
+/// The TOML of `settings` that came from `from` for the project `name`, refused when it holds a
+/// key that does not travel.
+fn came(
+    name: &str,
+    settings: &Value,
+    from: &str,
+) -> std::result::Result<toml_edit::DocumentMut, Failure> {
+    let refused =
+        |why: String| Failure::refused(format!("the settings of {name} from {from}: {why}"));
+    let text = flottille_core::project::travelled_toml(settings).map_err(refused)?;
+    text.parse()
+        .map_err(|error: toml_edit::TomlError| refused(error.message().to_owned()))
+}
+
 /// Lays `settings`, which came with a launch of the machine `from`, in the file of the project
-/// `name`, which Flottille made for that kind of launch: each key that travels is replaced by the
-/// one that came (removed when none came), each repository's own keys too, a repository that
-/// came and the file lacks is added; every other key stays the machine's own. Refused, nothing
-/// written, when the result is not a configuration this machine can use.
+/// `name`, which Flottille made for a launch of that very machine: each key that travels is
+/// replaced by the one that came (removed when none came), each repository's own keys too, a
+/// repository that came and the file lacks is added; every other key stays the machine's own.
+/// Refused, nothing written, for a project the user registered or one made for another machine,
+/// and when the result is not a configuration this machine can use.
 pub fn take_travelled(
     daemon: &Daemon,
     name: &str,
     settings: &Value,
     from: &str,
 ) -> std::result::Result<Project, Failure> {
-    use flottille_core::project::{TRAVELLING, TRAVELLING_REPOSITORY};
-    let refused =
-        |why: String| Failure::refused(format!("the settings of {name} from {from}: {why}"));
-    let text = flottille_core::project::travelled_toml(settings).map_err(refused)?;
-    let came: toml_edit::DocumentMut = text
-        .parse()
-        .map_err(|error: toml_edit::TomlError| refused(error.message().to_owned()))?;
+    let came = came(name, settings, from)?;
     rewrite(daemon, name, |project, document| {
-        if project.from_machine.is_none() {
-            return Err(Failure::refused(format!(
+        match &project.from_machine {
+            None => Err(Failure::refused(format!(
                 "{name} was registered by the user here: it keeps its own settings"
-            )));
+            ))),
+            Some(owner) if owner != from => Err(Failure::refused(format!(
+                "{name} was made here for {owner}'s launches: it keeps {owner}'s settings"
+            ))),
+            Some(_) => lay_travelled(name, document, &came),
         }
-        for key in TRAVELLING {
-            document.remove(key);
-            if let Some(item) = came.get(key) {
-                document.insert(key, item.clone());
-            }
-        }
-        let invalid = || {
-            Failure::new(
-                "invalid-config",
-                format!("projects/{name}.toml: repositories: must be a list of tables"),
-            )
-        };
-        let mut here = document
-            .remove("repositories")
-            .and_then(|item| item.into_array_of_tables().ok())
-            .ok_or_else(invalid)?;
-        let path_of = |table: &toml_edit::Table| {
-            table
-                .get("path")
-                .and_then(toml_edit::Item::as_str)
-                .map(str::to_owned)
-        };
-        for repository in came
-            .get("repositories")
-            .and_then(toml_edit::Item::as_array_of_tables)
-            .into_iter()
-            .flat_map(toml_edit::ArrayOfTables::iter)
-        {
-            let Some(path) = path_of(repository) else {
-                continue;
-            };
-            let at = here
-                .iter()
-                .position(|table| path_of(table).as_ref() == Some(&path));
-            let table = match at {
-                Some(at) => here.get_mut(at).expect("found"),
-                None => {
-                    let mut added = toml_edit::Table::new();
-                    added.insert("path", toml_edit::value(path.as_str()));
-                    here.push(added);
-                    here.get_mut(here.len() - 1).expect("added")
-                }
-            };
-            for key in TRAVELLING_REPOSITORY {
-                table.remove(key);
-                if let Some(item) = repository.get(key) {
-                    table.insert(key, item.clone());
-                }
-            }
-        }
-        document.insert("repositories", toml_edit::Item::ArrayOfTables(here));
-        document.insert("from_machine", toml_edit::value(from));
-        Ok(())
     })
+}
+
+/// Each key that travels of `document` replaced by `came`'s, as `take_travelled` says.
+fn lay_travelled(
+    name: &str,
+    document: &mut toml_edit::DocumentMut,
+    came: &toml_edit::DocumentMut,
+) -> std::result::Result<(), Failure> {
+    use flottille_core::project::{TRAVELLING, TRAVELLING_REPOSITORY};
+    for key in TRAVELLING {
+        document.remove(key);
+        if let Some(item) = came.get(key) {
+            document.insert(key, item.clone());
+        }
+    }
+    let invalid = || {
+        Failure::new(
+            "invalid-config",
+            format!("projects/{name}.toml: repositories: must be a list of tables"),
+        )
+    };
+    let mut here = document
+        .remove("repositories")
+        .and_then(|item| item.into_array_of_tables().ok())
+        .ok_or_else(invalid)?;
+    let path_of = |table: &toml_edit::Table| {
+        table
+            .get("path")
+            .and_then(toml_edit::Item::as_str)
+            .map(str::to_owned)
+    };
+    for repository in came
+        .get("repositories")
+        .and_then(toml_edit::Item::as_array_of_tables)
+        .into_iter()
+        .flat_map(toml_edit::ArrayOfTables::iter)
+    {
+        let Some(path) = path_of(repository) else {
+            continue;
+        };
+        let at = here
+            .iter()
+            .position(|table| path_of(table).as_ref() == Some(&path));
+        let table = match at {
+            Some(at) => here.get_mut(at).expect("found"),
+            None => {
+                let mut added = toml_edit::Table::new();
+                added.insert("path", toml_edit::value(path.as_str()));
+                here.push(added);
+                here.get_mut(here.len() - 1).expect("added")
+            }
+        };
+        for key in TRAVELLING_REPOSITORY {
+            table.remove(key);
+            if let Some(item) = repository.get(key) {
+                table.insert(key, item.clone());
+            }
+        }
+    }
+    document.insert("repositories", toml_edit::Item::ArrayOfTables(here));
+    Ok(())
+}
+
+/// Removes the project `name` Flottille made in `folder` for a launch of `from` that did not
+/// start: its file and its folder, which hold nothing but what that launch sent. Only while it is
+/// still that machine's, and nothing else of this machine uses it: no agent, no workspace.
+pub fn unmake_travelled(
+    daemon: &Daemon,
+    name: &str,
+    folder: &Path,
+    from: &str,
+) -> std::result::Result<(), Failure> {
+    let mut projects = daemon.projects.lock().unwrap();
+    let projects = &mut *projects;
+    let project = load(projects, name)?;
+    if project.from_machine.as_deref() != Some(from) || project.folder != folder {
+        return Err(Failure::refused(format!(
+            "{name} is no longer the project made for {from}'s launch"
+        )));
+    }
+    if !live_agents(daemon, name)?.is_empty() || !workspaces_of(daemon, name)?.is_empty() {
+        return Err(Failure::refused(format!("{name} is in use")));
+    }
+    projects.registry.remove(name)?;
+    let removed = std::fs::remove_dir_all(folder);
+    announce_edits(daemon, projects)?;
+    if let Err(error) = removed
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        return Err(Failure::new(
+            "unavailable",
+            format!("{}: {error}", folder.display()),
+        ));
+    }
+    eprintln!(
+        "flottille daemon: project {name}, made for a launch of {from} that did not start, removed"
+    );
+    Ok(())
 }
 
 /// Every project whose file can be used, as the files say now.

@@ -566,17 +566,26 @@ async fn judged(
         },
         _ => GateMode::Auto,
     };
+    // Its project's settings, classed as the same writes of an agent here: one base makes the
+    // launch the user's to decide, never the judge's.
+    let classed = crate::travelled::classed(daemon, &found, &asked, sender)?;
     let mut says = words(kind, &asked, sender);
-    says.splice(1..1, crate::travelled::words(&found, &asked, sender));
+    says.splice(
+        1..1,
+        crate::travelled::words(&found, &asked, sender, &classed),
+    );
     let judgement = match mode {
         GateMode::Full => None,
         GateMode::Ask => None,
+        GateMode::Auto if classed.base => None,
         GateMode::Auto => match crate::judge::chosen(daemon).await {
             Some(judge) => {
                 let place = Place::main(&project, project.folder.clone());
                 let args = json!({"kind": asked.kind, "machine": sender, "title": asked.title,
                     "brief": asked.brief});
-                Some(crate::judge::judge_launch(daemon, &judge, &place, &args, &says).await)
+                let mut reasons = says.clone();
+                reasons.extend(classed.reasons.iter().cloned());
+                Some(crate::judge::judge_launch(daemon, &judge, &place, &args, &reasons).await)
             }
             None => None,
         },
@@ -586,20 +595,20 @@ async fn judged(
             .as_ref()
             .is_some_and(|judged| judged.verdict == "allow");
     let state = if accepted { "accepted" } else { "held" };
-    let project = crate::travelled::made(daemon, found, &asked, sender)?;
-    // Its project's settings are laid only once the launch is allowed: now, or at the user's
-    // answer.
-    if accepted {
-        let came = serde_json::to_value(&asked).unwrap_or_default();
-        crate::travelled::take_settings(daemon, &project.name, &came, sender)?;
-    }
+    // A project to make is recognised again first, two launches of it at once making it once;
+    // it is made only once the launch is recorded.
+    let (found, _making) = crate::travelled::again(daemon, found, &asked, here).await?;
+    let (name, made) = match &found {
+        crate::travelled::Found::Here(project) => (project.name.clone(), false),
+        crate::travelled::Found::Made { name, .. } => (name.clone(), true),
+    };
     let record = Launch {
         way: "in".into(),
         machine,
         launch: asked.launch.clone(),
         caller: asked.caller.clone(),
         kind: asked.kind.clone(),
-        project: project.name.clone(),
+        project: name.clone(),
         state: state.into(),
         request: None,
         agent: None,
@@ -610,7 +619,10 @@ async fn judged(
             "from": sender,
             "mode": mode.as_str(),
             "says": says,
+            "reasons": classed.reasons,
+            "base": classed.base,
             "judgement": judgement,
+            "made": made,
         }),
         at: now_ms(),
     };
@@ -629,6 +641,24 @@ async fn judged(
         }
         Some(LaunchRefused::Waiting) => return Err(too_many_waiting(sender)),
         Some(LaunchRefused::Held) => return Err(too_many_held(sender)),
+    }
+    // Its project's settings are laid only once the launch is allowed: now, or at the user's
+    // answer.
+    let prepared = crate::travelled::made(daemon, &found, &asked, sender).and_then(|()| {
+        if !accepted {
+            return Ok(());
+        }
+        let came = serde_json::to_value(&asked).unwrap_or_default();
+        crate::travelled::take_settings(daemon, &name, &came, sender)
+    });
+    if let Err(why) = prepared {
+        let _ = daemon.write(|store| {
+            store
+                .forget_launch("in", &record.machine, &record.launch)
+                .map(|()| ((), None))
+        });
+        crate::travelled::unmake(daemon, &record);
+        return Err(why);
     }
     eprintln!(
         "flottille daemon: launch {} of agent {} of {sender} {state} ({})",
@@ -704,10 +734,12 @@ async fn sweep(daemon: &Arc<Daemon>, machine: &str) {
                 .forget_launch("in", machine, &launch.launch)
                 .map(|()| ((), None))
         });
-        // Nothing of it is set up: what was made of its code goes with it.
+        // Nothing of it is set up: what was made of its code goes with it, and the project made
+        // for it.
         if let Some(workspace) = launch.workspace_id {
             remove_workspace(daemon, workspace, None);
         }
+        crate::travelled::unmake(daemon, &launch);
     }
 }
 
@@ -920,11 +952,16 @@ async fn with_agent(
             tool: "agent_launch".into(),
             arguments: shown.clone(),
             shown,
-            reasons: vec![format!(
+            reasons: std::iter::once(format!(
                 "it starts an agent {} asked for on this machine",
                 launch.asked["from"].as_str().unwrap_or_default()
-            )],
-            base: false,
+            ))
+            .chain(
+                serde_json::from_value::<Vec<String>>(launch.asked["reasons"].clone())
+                    .unwrap_or_default(),
+            )
+            .collect(),
+            base: launch.asked["base"] == true,
             kind: Kind::Action,
             says,
             judgement,
@@ -1052,10 +1089,12 @@ pub(crate) fn decided(daemon: &Arc<Daemon>, mut launch: Launch, request: &Reques
     }
     if !allowed {
         crate::tree::stop_tree(daemon, &agent, "the user refused its launch");
-        // Its setup never runs: the workspace made of its code goes once its agent ended.
+        // Its setup never runs: the workspace made of its code goes once its agent ended, and
+        // the project made for it then.
         if let Some(workspace) = launch.workspace_id {
             remove_workspace(daemon, workspace, Some(agent));
         }
+        crate::travelled::unmake(daemon, &launch);
         return;
     }
     go_on(daemon, &launch, &agent);
@@ -1080,6 +1119,9 @@ pub(crate) fn cancelled(daemon: &Arc<Daemon>, agent: &str) {
     });
     if let Ok(Some(Some(workspace))) = settled {
         remove_workspace(daemon, workspace, Some(agent.to_owned()));
+    }
+    if matches!(settled, Ok(Some(_))) {
+        crate::travelled::unmake(daemon, &launch);
     }
 }
 
