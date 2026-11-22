@@ -634,6 +634,32 @@ fn a_repository_a_launch_adds_through_a_link_out_of_the_project_is_refused() {
 }
 
 #[test]
+fn a_new_repository_under_a_link_out_of_the_project_is_refused_when_the_launch_is_classed() {
+    let (_hub, pc, server) = pc_and_server(server_user(allowing()), None);
+    no_branch_prefix(&pc);
+    signed_in_there(&pc);
+    led_there(&pc, &server, "First");
+    // A folder of the user's, and a link to it in a middle folder of the new repository's path.
+    let outside = server.user.path("elsewhere/x");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::os::unix::fs::symlink(&outside, there_folder(&server, "app").join("sub")).unwrap();
+    let key = pc.stand_in();
+
+    let answer = forged_with_settings(
+        &key,
+        &server,
+        "l-sub",
+        json!({"repositories": [{"path": ".", "base": ["main"]}, {"path": "sub/lib", "base": ["main"]}]}),
+    );
+
+    let why = answer.expect_err("a repository leading out of the project was taken");
+    assert!(why.contains("sub/lib"), "{why}");
+    assert!(why.contains("outside the project folder"), "{why}");
+    assert!(server.requests().is_empty(), "the user was asked of it");
+    assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0);
+}
+
+#[test]
 fn a_renamed_member_cannot_lay_settings_on_another_machine_s_project() {
     let (hub, pc, server) = pc_and_server(server_user(allowing()), None);
     pc.register("rules = \"Pc's.\"\n");

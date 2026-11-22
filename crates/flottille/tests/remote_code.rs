@@ -849,3 +849,27 @@ fn a_place_whose_worktree_fails_fails_and_is_sent_again() {
         "b\n"
     );
 }
+
+#[test]
+fn a_new_repository_s_code_is_refused_through_a_link_planted_before_it_comes() {
+    let (_hub, pc, server) = pc_and_server();
+    pc.register_with(&["sub/lib"], "");
+    let repo = pc.folder().join("sub/lib");
+    pc.user.git_init(&repo);
+    pc.git(&repo, &["checkout", "--quiet", "-b", "feat/export"]);
+    commit(&pc, &repo, "x.txt", "lib\n");
+    // The server's project names sub/lib, not there yet, as a launch the user allowed adds it;
+    // a link at sub, planted after that, leads out of the project.
+    server.register_with(&["sub/lib"], "");
+    let outside = server.user.path("elsewhere/x");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::create_dir_all(server.folder()).unwrap();
+    std::os::unix::fs::symlink(&outside, server.folder().join("sub")).unwrap();
+
+    let (_, refused) = pc.travel("server", "l1", json!({})).unwrap_err();
+
+    assert!(refused.contains("sub/lib"), "{refused}");
+    assert!(refused.contains("outside the project folder"), "{refused}");
+    // Nothing was made through the link.
+    assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0);
+}
