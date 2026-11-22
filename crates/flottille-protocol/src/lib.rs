@@ -295,6 +295,9 @@ pub struct AgentRun {
     /// Large pasted texts, sent as files with the first message.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub texts: Vec<TextUpload>,
+    /// The upload whose files are its pictures and texts, sent in chunks before it (`agent.upload`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upload: Option<String>,
 }
 
 /// The parameters of `agent.send`.
@@ -309,6 +312,9 @@ pub struct AgentSend {
     /// Large pasted texts, written as files the message names.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub texts: Vec<TextUpload>,
+    /// The upload whose files are its pictures and texts, sent in chunks before it (`agent.upload`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upload: Option<String>,
     /// When the agent's cache expired: compact it first (true) or send to its session as it is
     /// (false), whatever the setting; the setting decides when left out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -330,6 +336,35 @@ pub struct ImageUpload {
 pub struct TextUpload {
     pub name: String,
     pub text: String,
+}
+
+/// The parameters of `agent.upload`: one chunk of a picture or a pasted text of a message to come,
+/// which names the upload (`docs/remote.md`, "Pictures sent to another machine").
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentUpload {
+    /// The sender's name of the upload: 1 to 64 letters, digits, `_` or `-`.
+    pub upload: String,
+    /// The picture's number among the message's pictures, or the text's among its texts, from 1.
+    pub file: u32,
+    pub kind: UploadKind,
+    /// A picture's type, as `agent.send` takes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mime: Option<String>,
+    /// The whole file's size, in bytes.
+    pub size: u64,
+    /// Where this chunk starts in the file: where the chunks before it ended.
+    pub offset: u64,
+    /// The chunk's bytes, in base64.
+    pub data: String,
+}
+
+/// What a file of an upload is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UploadKind {
+    Image,
+    Text,
 }
 
 /// The parameters of `agent.image`: an image of the agent's folder, by the name an event gave.

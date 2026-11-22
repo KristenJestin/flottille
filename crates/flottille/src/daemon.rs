@@ -321,6 +321,8 @@ pub struct Daemon {
     pub updates: crate::updates::Live,
     /// What is new since the version last run (`whatsnew`).
     pub whatsnew: crate::whatsnew::Live,
+    /// The pictures and texts of messages sent in chunks, waiting for their messages (`uploads`).
+    pub uploads: crate::uploads::Uploads,
     /// Becomes true when the daemon stops.
     stopping: watch::Sender<bool>,
 }
@@ -429,6 +431,7 @@ impl Daemon {
             remote: std::sync::RwLock::new(None),
             updates: crate::updates::Live::default(),
             whatsnew: crate::whatsnew::Live::default(),
+            uploads: crate::uploads::Uploads::default(),
             stopping: watch::Sender::new(false),
         }
     }
@@ -681,6 +684,8 @@ async fn serve(
         Some(bus),
     ));
     watchdog::start(&daemon.watch)?;
+    // What came in chunks to a daemon that stopped waits for no message any more.
+    crate::uploads::clear(&daemon);
     if let Some(key) = machine_key
         && let Err(why) = start_link(&daemon, key)
     {

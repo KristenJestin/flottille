@@ -289,6 +289,7 @@ no device calls a `local` one over a link (`docs/remote.md`, "Roles").
 | `agent.start` | drive |
 | `agent.run` | drive |
 | `agent.send` | drive |
+| `agent.upload` | drive |
 | `agent.send_now` | drive |
 | `agent.unqueue` | drive |
 | `agent.answer` | drive |
@@ -2195,6 +2196,30 @@ message so). The name it says is always the daemon's, `pasted-text.txt`, whateve
 A message carries 20 texts at most, 5 MiB each (`refused` for more, an empty text, or one too
 big); a text with no marker is marked after the message; with texts, the message may be empty. The
 files go with the images of the agent. `agent.start` takes `texts` as it takes `images`.
+
+`upload` names the upload of `agent.upload` whose files are the message's pictures and pasted
+texts, in their numbers' order, as if it carried them inline (`docs/remote.md`, "Pictures sent to
+another machine"): the upload is gone once the message took it. `not-found` when the sender has no
+such upload (dropped 2 minutes after its last chunk, or another device's); `refused` when a file
+of it arrived in part (the upload stays, for the rest), or when the message carries `images` or
+`texts` too. `agent.start` takes `upload` as it takes `images`.
+
+#### `agent.upload`
+
+`{"upload", "file", "kind", "mime"?, "size", "offset", "data"}`. One chunk of a picture or a pasted
+text of a message to come, which names the upload in `agent.send` or `agent.start`: `{"upload",
+"file", "received"}`, `received` the bytes of that file kept so far. `upload` is the sender's name
+for it, 1 to 64 letters, digits, `_` or `-`; `file` the picture's number among the message's
+pictures (`kind` `image`, with its `mime`, as `agent.send` takes it) or the text's among its texts
+(`kind` `text`, UTF-8, no `mime`), from 1; `size` the whole file's bytes; `data` the chunk in base64,
+512 KiB at most, starting at `offset`, which is where the chunks before it ended. The bounds of a
+local message hold at each chunk, before any of it is kept: `refused` for a number past 20, a type
+not taken, a size of 0 or over 5 MiB, a chunk too big, empty or not base64, one out of order, a
+file whose size or type changed, one longer than its size, and a sender with 2 uploads waiting
+already (the machine holds 8, `busy:` past them); each refusal says which picture or text. An
+upload is its sender's (the device that signed it, or this machine's clients), kept in the
+daemon's data folder under names of its own, and dropped 2 minutes after its last chunk unless a
+message took it.
 
 #### `agent.answer`
 
