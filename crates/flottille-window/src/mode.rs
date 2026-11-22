@@ -1,4 +1,4 @@
-//! The session's mode in the composer's bar: a small Ask | Auto | Full control, which only the
+//! The session's mode in the composer's bar: a small Ask, Auto or Full select, which only the
 //! user changes (`agent.mode`). In Auto without a judge chosen, calls to judge come to the user as
 //! in Ask: a warning icon beside the control says so in a tooltip and leads to Settings. Full, where
 //! nothing is asked, is drawn in the alarm colour so that it is never on by mistake. The composer
@@ -6,7 +6,7 @@
 //! what the session starts in.
 
 use gpui_design_system::motion::PANEL;
-use gpui_design_system::{Button, Icon, Segmented, enter, fade, palette, space};
+use gpui_design_system::{Button, Icon, Select, SelectOption, Tone, enter, fade, palette, space};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     Context, InteractiveElement, IntoElement, ParentElement, Render, SharedString, Styled,
@@ -22,10 +22,29 @@ use crate::shell::Shell;
 pub const NO_JUDGE: &str =
     "Auto has no judge, so every call to judge comes to you, as in Ask. Choose one in Settings.";
 
-/// The modes, in the control's order.
-const MODES: [(&str, &str); 3] = [("ask", "Ask"), ("auto", "Auto"), ("full", "Full")];
-/// Full's place in [`MODES`].
-const FULL: usize = 2;
+/// The modes, in the select's order: the daemon's word, the word said, the line under it (what
+/// `docs/design.md` says of each) and how the pill is drawn while it is chosen. Full, where
+/// nothing is asked, is in the alarm colour so that it is never on by mistake.
+const MODES: [(&str, &str, &str, Tone); 3] = [
+    (
+        "ask",
+        "Ask",
+        "Every call to judge comes to you.",
+        Tone::Outline,
+    ),
+    (
+        "auto",
+        "Auto",
+        "The judge allows a call or asks you.",
+        Tone::Quiet,
+    ),
+    (
+        "full",
+        "Full",
+        "Nothing is asked: the agent acts as you.",
+        Tone::Fail,
+    ),
+];
 const AUTO: &str = "auto";
 
 pub struct ModeSwitch {
@@ -147,12 +166,14 @@ impl Render for ModeSwitch {
         let p = palette(cx);
         let chosen = MODES
             .iter()
-            .position(|(mode, _)| self.mode() == Some(*mode))
+            .position(|(mode, ..)| self.mode() == Some(*mode))
             .unwrap_or(0);
         let prefix = self.prefix;
         let id = move |suffix: &str| SharedString::from(format!("{prefix}{suffix}"));
-        let control = Segmented::new(id(""), "Mode", MODES, chosen)
-            .alarm(FULL)
+        let options = MODES
+            .map(|(mode, title, line, tone)| SelectOption::new(mode, title).line(line).tone(tone));
+        let control = Select::new(id(""), options, chosen)
+            .compact()
             .disabled(self.mode.is_none() || self.pending.is_some())
             .on_choose({
                 let this = cx.entity().downgrade();
@@ -171,7 +192,15 @@ impl Render for ModeSwitch {
             .flex()
             .items_center()
             .text_size(px(12.5))
-            .child(control)
+            // A compact select sits at the start of its flex line: a column centres it in the bar.
+            .child(
+                div()
+                    .h_full()
+                    .flex()
+                    .flex_col()
+                    .justify_center()
+                    .child(control),
+            )
             .when(warn > 0.0, |d| {
                 d.child(
                     div()
