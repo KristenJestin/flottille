@@ -1024,44 +1024,6 @@ jobs:
             gh release create "$TAG" release/assets/* hub/assets/* "${apk[@]}" --target "$sha" --title "$title" --notes-file release/notes.md --prerelease --latest=false
           fi
 
-  # The betas pile up, one per merge into dev, and GitHub counts them all: after a beta is
-  # published, those of each version but its last ten are deleted, with their tags (docs/releases.md,
-  # "What CI publishes"). A job of its own, after `publish`: a deletion the repository's settings
-  # refuse (the tag rule must exclude `refs/tags/v*-beta.*`) fails this job, never a release, and
-  # nothing waits for it. It holds the token that deletes releases and nothing else: no checkout, no
-  # action, no code of the branch. Only the betas: a release, a release candidate, a next build and
-  # an alpha (alpha-cleanup.yml's) are never named here.
-  prune-betas:
-    needs: [build, publish]
-    if: ${{ !cancelled() && needs.publish.result == 'success' && needs.build.outputs.channel == 'beta' }}
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    # Two at once would delete the same release twice.
-    concurrency:
-      group: prune-betas
-      cancel-in-progress: false
-    steps:
-      - name: Delete the old betas
-        id: prune
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          # A listing that fails fails the job, not a deletion that finds nothing.
-          set -o pipefail
-          # `v<version>-beta.<n>` only, of the pre-releases, split into the version and the number;
-          # each version's numbers in order, all but the last ten go, the oldest first.
-          gh release list --repo "$GITHUB_REPOSITORY" --limit 1000 --json tagName,isPrerelease \
-            --jq '.[] | select(.isPrerelease) | .tagName' |
-            { grep -E -x 'v[0-9]+\.[0-9]+\.[0-9]+-beta\.[0-9]+' || true; } |
-            sed -E 's/-beta\./ /' |
-            sort -k1,1 -k2,2n |
-            awk -v keep=10 '{ n[$1]++; tag[$1, n[$1]] = $1 "-beta." $2 }
-              END { for (v in n) for (i = 1; i <= n[v] - keep; i++) print tag[v, i] }' |
-            while read -r tag; do
-              gh release delete "$tag" --yes --cleanup-tag --repo "$GITHUB_REPOSITORY"
-            done
-
   # The hub's image (docs/releases.md): once its release is published, the image the `hub` job made
   # is pushed to the repository's container registry under the release's version, and `latest` when
   # that release is the latest. It loads what `hub` saved and pushes it: no Dockerfile, no build and
