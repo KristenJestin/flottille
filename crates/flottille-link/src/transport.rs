@@ -9,6 +9,7 @@
 //! listens, and there is no NAT traversal and no discovery.
 
 use std::net::SocketAddr;
+use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -864,6 +865,23 @@ fn verify(
     )
 }
 
+/// Stub: the roots Android trusts.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+fn android_roots(_system: &[&Path], _user: &Path) -> Vec<CertificateDer<'static>> {
+    Vec::new()
+}
+
+/// Stub: a store of the system's roots.
+fn system_store(
+    certificates: Vec<CertificateDer<'static>>,
+) -> Result<rustls::RootCertStore, String> {
+    let mut store = rustls::RootCertStore::empty();
+    for certificate in certificates {
+        let _ = store.add(certificate);
+    }
+    Ok(store)
+}
+
 /// TLS over a TCP stream to a hub (`control.rs`): TLS 1.3, the certificate checked against the
 /// system's roots, or against `roots` (certificates in DER) when given. Why it failed, otherwise.
 pub(crate) async fn tls_client(
@@ -959,6 +977,63 @@ impl TlsServer {
 mod tests {
     use super::*;
     use quinn::AsyncUdpSocket;
+
+    /// A test certificate of `tests/roots/`, in DER.
+    fn certificate(pem: &str) -> CertificateDer<'static> {
+        use rustls::pki_types::pem::PemObject;
+        CertificateDer::from_pem_slice(pem.as_bytes()).unwrap()
+    }
+
+    #[test]
+    fn the_phone_trusts_the_systems_and_the_users_roots_but_not_the_removed() {
+        let system = include_str!("../tests/roots/system.pem");
+        let removed = include_str!("../tests/roots/removed.pem");
+        let user = include_str!("../tests/roots/user.pem");
+        let folder = tempfile::tempdir().unwrap();
+        // Laid out as Android 14's: the system's roots in the module of Conscrypt, an older
+        // folder beside it, and the user's own, one of the system's removed by them.
+        let apex = folder.path().join("apex/com.android.conscrypt/cacerts");
+        let older = folder.path().join("system/etc/security/cacerts");
+        let mine = folder.path().join("data/misc/user/0");
+        for made in [
+            &apex,
+            &older,
+            &mine.join("cacerts-added"),
+            &mine.join("cacerts-removed"),
+        ] {
+            std::fs::create_dir_all(made).unwrap();
+        }
+        std::fs::write(apex.join("1a2b3c4d.0"), system).unwrap();
+        std::fs::write(apex.join("5e6f7a8b.0"), removed).unwrap();
+        std::fs::write(mine.join("cacerts-removed/5e6f7a8b.0"), removed).unwrap();
+        std::fs::write(mine.join("cacerts-added/9c0d1e2f.0"), user).unwrap();
+        // An older folder the phone no longer reads, and a file that holds no certificate.
+        std::fs::write(older.join("5e6f7a8b.0"), removed).unwrap();
+        std::fs::write(apex.join("README"), "not a certificate").unwrap();
+
+        let mut found = android_roots(&[apex.as_path(), older.as_path()], &mine);
+        found.sort_by(|a, b| a.as_ref().cmp(b.as_ref()));
+        let mut expected = vec![certificate(system), certificate(user)];
+        expected.sort_by(|a, b| a.as_ref().cmp(b.as_ref()));
+        assert_eq!(found, expected);
+        // Before Android 14, the older folder is the system's.
+        std::fs::remove_dir_all(folder.path().join("apex")).unwrap();
+        assert_eq!(
+            android_roots(&[apex.as_path(), older.as_path()], &mine),
+            vec![certificate(user)]
+        );
+    }
+
+    #[test]
+    fn an_empty_root_store_says_no_root_was_found() {
+        let error = system_store(Vec::new()).err();
+        assert_eq!(
+            error.as_deref(),
+            Some("no root certificate found on this system")
+        );
+        let system = include_str!("../tests/roots/system.pem");
+        assert!(system_store(vec![certificate(system)]).is_ok());
+    }
 
     /// The length of the next packet `socket` lets in, within half a second.
     async fn received(socket: &RelaySocket) -> Option<usize> {
