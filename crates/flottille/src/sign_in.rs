@@ -12,6 +12,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
@@ -478,6 +479,7 @@ fn shown(program: Program, flow: &Running) -> Value {
 /// Says that `program`'s sign-in changed: its name, its host and the state only, since every
 /// event is stored (`docs/events.md`).
 fn announce(daemon: &Daemon, program: Program, host: Option<&str>, state: &str, why: Option<&str>) {
+    LIST_CHANGES.fetch_add(1, Ordering::SeqCst);
     let mut data = json!({"program": program.name(), "host": host, "state": state});
     if let Some(why) = why {
         data["why"] = json!(why);
@@ -519,15 +521,40 @@ fn host_of(daemon: &Daemon, program: Program) -> Option<String> {
         .and_then(|(_, host)| host)
 }
 
-/// `signin.list`: every program, its state and what can be done about it.
+/// How long a list's answer is given again to the callers that ask it, unless a sign-in changed.
+const LIST_KEPT: Duration = Duration::from_secs(2);
+
+/// Bumped by each change of a sign-in: a list read before it is not given again.
+static LIST_CHANGES: AtomicU64 = AtomicU64::new(0);
+
+/// The last list, when it was read and the change it was read at: one list runs at a time, and
+/// the callers that ask meanwhile wait for it.
+fn last_list() -> &'static tokio::sync::Mutex<Option<(tokio::time::Instant, u64, Value)>> {
+    static LAST: OnceLock<tokio::sync::Mutex<Option<(tokio::time::Instant, u64, Value)>>> =
+        OnceLock::new();
+    LAST.get_or_init(Default::default)
+}
+
+/// `signin.list`: every program, its state and what can be done about it. Each row runs two
+/// programs: callers that ask together or right after one another share one list.
 async fn list(daemon: &Daemon) -> Value {
+    let mut last = last_list().lock().await;
+    let changes = LIST_CHANGES.load(Ordering::SeqCst);
+    if let Some((at, read_at, listed)) = &*last
+        && *read_at == changes
+        && at.elapsed() < LIST_KEPT
+    {
+        return listed.clone();
+    }
     let rows = futures::future::join_all(
         programs(daemon)
             .into_iter()
             .map(|(program, host)| row(program, host)),
     )
     .await;
-    json!({"programs": rows})
+    let listed = json!({"programs": rows});
+    *last = Some((tokio::time::Instant::now(), changes, listed.clone()));
+    listed
 }
 
 async fn row(program: Program, host: Option<String>) -> Value {
