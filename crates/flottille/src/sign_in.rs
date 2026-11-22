@@ -982,6 +982,61 @@ mod tests {
     }
 
     #[test]
+    fn the_code_of_a_recent_gh_is_read_from_its_parentheses() {
+        assert_eq!(
+            read(&[
+                "",
+                "! One-time code (ABCD-1234) copied to clipboard",
+                "Open this URL to continue in your web browser: https://github.com/login/device",
+            ]),
+            (
+                Some("https://github.com/login/device".into()),
+                Some("ABCD-1234".into())
+            )
+        );
+    }
+
+    #[test]
+    fn the_code_of_an_older_gh_is_read_after_its_colon() {
+        assert_eq!(
+            read(&["! First copy your one-time code: ABCD-1234"]).1,
+            Some("ABCD-1234".into())
+        );
+        // glab says it on a line of its own, the same way.
+        assert_eq!(
+            read(&["", "First copy your one-time code: WDJB-MJHT", ""]).1,
+            Some("WDJB-MJHT".into())
+        );
+    }
+
+    #[test]
+    fn a_word_that_is_not_a_code_is_never_shown_as_one() {
+        // What gh 2.104.0 prints where no clipboard utility is installed: the line that names the
+        // code holds none and the line under it is a sentence ("No" was shown as the code); the
+        // code comes on the line after.
+        assert_eq!(
+            read(&[
+                "! Failed to copy one-time code to clipboard",
+                "  No clipboard utilities available. Please install xsel, xclip, wl-clipboard",
+                "! First copy your one-time code: ABCD-1234",
+                "Open this URL to continue in your web browser: https://github.com/login/device",
+            ])
+            .1,
+            Some("ABCD-1234".into())
+        );
+        // With no code printed at all, none is found: never the first word of the next line.
+        assert_eq!(
+            read(&[
+                "! One-time code copied to clipboard",
+                "Open this URL to continue in your web browser: https://github.com/login/device",
+            ])
+            .1,
+            None
+        );
+        assert_eq!(read(&["one-time code: soon", "and then"]).1, None);
+    }
+
+    #[test]
     fn codex_says_the_code_on_the_line_under() {
         assert_eq!(
             read(&[

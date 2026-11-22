@@ -457,6 +457,31 @@ fn a_sign_in_started_while_the_last_one_ends_can_be_cancelled() {
     });
 }
 
+/// #1248: gh as it was before (the code after a colon) and gh as 2.104.0 prints it without a
+/// clipboard utility (a sentence under the line that names the code) are both read right.
+#[test]
+fn the_code_of_every_wording_of_gh_is_shown() {
+    for wording in ["older", "no clipboard"] {
+        let user = User::new().with_sign_in_programs(&["gh"]);
+        user.sign_in_script(
+            "gh",
+            json!({"signed_in": false,
+                   "sign_in": {"address": "https://github.com/login/device",
+                               "code": "ABCD-1234", "wording": wording}}),
+        );
+
+        let started = user.call("signin.start", json!({"program": "gh"})).unwrap();
+
+        assert_eq!(started["code"], "ABCD-1234", "{wording}: {started}");
+        assert_eq!(
+            started["address"], "https://github.com/login/device",
+            "{wording}"
+        );
+        user.call("signin.cancel", json!({"program": "gh"}))
+            .unwrap();
+    }
+}
+
 /// #1185 round 2: an address a program prints with a user and a token in it is shown without
 /// them, and the code beside it is left as it is.
 #[test]
