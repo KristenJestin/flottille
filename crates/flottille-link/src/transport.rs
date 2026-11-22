@@ -9,6 +9,7 @@
 //! listens, and there is no NAT traversal and no discovery.
 
 use std::net::SocketAddr;
+use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -864,6 +865,73 @@ fn verify(
     )
 }
 
+/// The roots this system trusts. On Android they are the phone's own, as Android trusts them:
+/// `rustls_native_certs` looks only where a Linux distribution keeps them, none of which a phone
+/// has.
+#[cfg(target_os = "android")]
+fn system_roots() -> Vec<CertificateDer<'static>> {
+    // An app's user is its uid's hundred thousands, as Android numbers them.
+    let user = unsafe { libc::getuid() } / 100_000;
+    android_roots(
+        &[
+            // Android 14 and later: the roots come with the module of Conscrypt.
+            Path::new("/apex/com.android.conscrypt/cacerts"),
+            Path::new("/system/etc/security/cacerts"),
+        ],
+        Path::new(&format!("/data/misc/user/{user}")),
+    )
+}
+
+#[cfg(not(target_os = "android"))]
+fn system_roots() -> Vec<CertificateDer<'static>> {
+    rustls_native_certs::load_native_certs().certs
+}
+
+/// The roots Android trusts for this app, from its folders: the certificates of the first of
+/// `system` that lists at least one file, as Conscrypt chooses, but those the user removed (the
+/// same certificate in `user`'s `cacerts-removed`). Each file is a certificate in PEM, text may
+/// follow it; a file that is not is passed over. The certificates the user added are not read:
+/// an app targeting Android 7 or later trusts them only when its network security configuration
+/// says `<certificates src="user"/>`, which this app's does not.
+// Not gated, so that its tests run off Android.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+fn android_roots(system: &[&Path], user: &Path) -> Vec<CertificateDer<'static>> {
+    use rustls::pki_types::pem::PemObject;
+    fn certificates(folder: &Path) -> Option<Vec<CertificateDer<'static>>> {
+        let files: Vec<_> = std::fs::read_dir(folder).ok()?.flatten().collect();
+        (!files.is_empty()).then(|| {
+            files
+                .iter()
+                .filter_map(|file| CertificateDer::from_pem_file(file.path()).ok())
+                .collect()
+        })
+    }
+    // By content, not by name: a hash's suffix may move between two updates of the system.
+    let removed = certificates(&user.join("cacerts-removed")).unwrap_or_default();
+    system
+        .iter()
+        .find_map(|folder| certificates(folder))
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|certificate| !removed.contains(certificate))
+        .collect()
+}
+
+/// A store of the system's roots, or why there is none.
+fn system_store(
+    certificates: Vec<CertificateDer<'static>>,
+) -> Result<rustls::RootCertStore, String> {
+    let mut store = rustls::RootCertStore::empty();
+    for certificate in certificates {
+        let _ = store.add(certificate);
+    }
+    if store.is_empty() {
+        // Said as such, rather than as every hub's certificate refused.
+        return Err("no root certificate found on this system".to_owned());
+    }
+    Ok(store)
+}
+
 /// TLS over a TCP stream to a hub (`control.rs`): TLS 1.3, the certificate checked against the
 /// system's roots, or against `roots` (certificates in DER) when given. Why it failed, otherwise.
 pub(crate) async fn tls_client(
@@ -872,19 +940,16 @@ pub(crate) async fn tls_client(
     roots: Option<&[Vec<u8>]>,
 ) -> Result<Box<dyn crate::Stream>, String> {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let mut store = rustls::RootCertStore::empty();
-    match roots {
-        None => {
-            for certificate in rustls_native_certs::load_native_certs().certs {
-                let _ = store.add(certificate);
-            }
-        }
+    let store = match roots {
+        None => system_store(system_roots())?,
         Some(roots) => {
+            let mut store = rustls::RootCertStore::empty();
             for certificate in roots {
                 let _ = store.add(CertificateDer::from(certificate.clone()));
             }
+            store
         }
-    }
+    };
     let config = rustls::ClientConfig::builder_with_provider(provider)
         .with_protocol_versions(&[&rustls::version::TLS13])
         .map_err(|error| error.to_string())?
@@ -959,6 +1024,103 @@ impl TlsServer {
 mod tests {
     use super::*;
     use quinn::AsyncUdpSocket;
+
+    /// A test certificate of `tests/roots/`, in DER.
+    fn certificate(pem: &str) -> CertificateDer<'static> {
+        use rustls::pki_types::pem::PemObject;
+        CertificateDer::from_pem_slice(pem.as_bytes()).unwrap()
+    }
+
+    /// A tree laid out as Android 14's: the system's roots in the module of Conscrypt, an older
+    /// folder beside it, and the user's own, one of the system's removed by them and one added.
+    /// The folder, the system's folders in Android's order, and the user's.
+    fn android_tree() -> (
+        tempfile::TempDir,
+        [std::path::PathBuf; 2],
+        std::path::PathBuf,
+    ) {
+        let folder = tempfile::tempdir().unwrap();
+        let apex = folder.path().join("apex/com.android.conscrypt/cacerts");
+        let previous = folder.path().join("system/etc/security/cacerts");
+        let mine = folder.path().join("data/misc/user/0");
+        for made in [
+            &apex,
+            &previous,
+            &mine.join("cacerts-added"),
+            &mine.join("cacerts-removed"),
+        ] {
+            std::fs::create_dir_all(made).unwrap();
+        }
+        let removed = include_str!("../tests/roots/removed.pem");
+        std::fs::write(
+            apex.join("1a2b3c4d.0"),
+            include_str!("../tests/roots/system.pem"),
+        )
+        .unwrap();
+        std::fs::write(apex.join("5e6f7a8b.0"), removed).unwrap();
+        std::fs::write(apex.join("README"), "not a certificate").unwrap();
+        // Removed by its content: the name its hash had when the user removed it may have moved.
+        std::fs::write(mine.join("cacerts-removed/0f0f0f0f.1"), removed).unwrap();
+        std::fs::write(
+            mine.join("cacerts-added/9c0d1e2f.0"),
+            include_str!("../tests/roots/user.pem"),
+        )
+        .unwrap();
+        std::fs::write(
+            previous.join("7c7c7c7c.0"),
+            include_str!("../tests/roots/older.pem"),
+        )
+        .unwrap();
+        (folder, [apex, previous], mine)
+    }
+
+    fn roots_of(system: &[std::path::PathBuf; 2], user: &Path) -> Vec<CertificateDer<'static>> {
+        android_roots(&[system[0].as_path(), system[1].as_path()], user)
+    }
+
+    #[test]
+    fn the_phone_trusts_the_systems_roots_but_not_the_removed_nor_the_users() {
+        let (_folder, system, user) = android_tree();
+        // Android trusts the user's own authorities only in an app that asks for them, which
+        // this one does not; a file that is no certificate is passed over.
+        assert_eq!(
+            roots_of(&system, &user),
+            vec![certificate(include_str!("../tests/roots/system.pem"))]
+        );
+    }
+
+    #[test]
+    fn the_phone_reads_the_older_folder_when_the_modules_is_empty() {
+        let (_folder, system, user) = android_tree();
+        for entry in std::fs::read_dir(&system[0]).unwrap() {
+            std::fs::remove_file(entry.unwrap().path()).unwrap();
+        }
+        assert_eq!(
+            roots_of(&system, &user),
+            vec![certificate(include_str!("../tests/roots/older.pem"))]
+        );
+    }
+
+    #[test]
+    fn the_phone_reads_the_older_folder_before_android_14() {
+        let (_folder, system, user) = android_tree();
+        std::fs::remove_dir_all(&system[0]).unwrap();
+        assert_eq!(
+            roots_of(&system, &user),
+            vec![certificate(include_str!("../tests/roots/older.pem"))]
+        );
+    }
+
+    #[test]
+    fn an_empty_root_store_says_no_root_was_found() {
+        let error = system_store(Vec::new()).err();
+        assert_eq!(
+            error.as_deref(),
+            Some("no root certificate found on this system")
+        );
+        let system = include_str!("../tests/roots/system.pem");
+        assert!(system_store(vec![certificate(system)]).is_ok());
+    }
 
     /// The length of the next packet `socket` lets in, within half a second.
     async fn received(socket: &RelaySocket) -> Option<usize> {

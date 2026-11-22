@@ -373,8 +373,10 @@ refused, saying to give a certificate or to put a proxy in front.
 
 **The control session.** A device reaches the hub at its URL (`http://` or `https://`, its port
 80 or 443 when the URL says none) over TCP, TLS for `https://` (the certificate checked against
-the system's roots), and asks for an HTTP/1.1 upgrade to `flottille-hub`, so that a reverse proxy
-carries it as it carries a WebSocket (it must pass upgrades on). Then each side says one JSON
+the system's roots: on Android the phone's system roots but those the user removed, and no
+certificate the user added, as Android does for this app; no root found is an error that says
+so), and asks for an HTTP/1.1 upgrade to `flottille-hub`, so that a reverse proxy carries it as it
+carries a WebSocket (it must pass upgrades on). Then each side says one JSON
 object per line (`crates/flottille-link/src/control.rs`): the device its key, a fresh nonce and
 its hello ("The version"); the hub its key, a nonce of its own, its hello and its proof, a
 signature over `flottille-hub-session-v1`, a zero byte, the side, the device's key and both
