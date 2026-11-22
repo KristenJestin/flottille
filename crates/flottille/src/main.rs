@@ -100,6 +100,7 @@ mod test_time;
 mod tickets;
 mod titles;
 mod travel;
+mod travelled;
 mod tree;
 mod tunnel;
 mod tunnel_command;

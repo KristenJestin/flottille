@@ -2942,8 +2942,20 @@ fn launch_elsewhere_verdict(
 
 fn classified(daemon: &Daemon, grant: &Grant, tool: &str, args: &Value) -> gate::Verdict {
     let project = projects::load_project(daemon, &grant.place.project).ok();
+    classified_in(daemon, grant, project.as_ref(), tool, args)
+}
+
+/// The gate's verdict on a call of `grant` in `project` as it is given, which may be one not
+/// written yet: the settings a launch from another machine would lay (`travelled.rs`).
+pub(crate) fn classified_in(
+    daemon: &Daemon,
+    grant: &Grant,
+    project: Option<&Project>,
+    tool: &str,
+    args: &Value,
+) -> gate::Verdict {
     let no_tasks = BTreeMap::new();
-    let tasks = project.as_ref().map_or(&no_tasks, |project| &project.tasks);
+    let tasks = project.map_or(&no_tasks, |project| &project.tasks);
     // A write of a task or a setup step is judged as the run it leaves for later, resolved the
     // way that run will be.
     let sets =
@@ -2984,7 +2996,7 @@ fn classified(daemon: &Daemon, grant: &Grant, tool: &str, args: &Value) -> gate:
     decided(
         daemon,
         grant,
-        project.as_ref(),
+        project,
         tool,
         args,
         (&words, &paths, command),

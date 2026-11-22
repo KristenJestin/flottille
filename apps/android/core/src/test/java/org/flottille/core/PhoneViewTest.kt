@@ -6,6 +6,7 @@ import org.flottille.core.ffi.MemberView
 import org.flottille.core.ffi.ProjectView
 import org.flottille.core.ffi.RequestView
 import org.flottille.core.ffi.SessionView
+import org.flottille.core.ffi.TunnelView
 import org.flottille.core.ffi.ViewState
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -32,6 +33,8 @@ class PhoneViewTest {
         requests: List<RequestView> = emptyList(),
         asks: List<AskView> = emptyList(),
         role: String = "controller",
+        tunnels: List<TunnelView> = emptyList(),
+        ended: List<org.flottille.core.ffi.TunnelEnd> = emptyList(),
     ) = ViewState(
         role = role,
         name = "pixel",
@@ -44,6 +47,8 @@ class PhoneViewTest {
         conversation = null,
         requests = requests,
         asks = asks,
+        tunnels = tunnels,
+        tunnelsEnded = ended,
         said = emptyList(),
     )
 
@@ -98,11 +103,13 @@ class PhoneViewTest {
                 machine = "server", agent = "a1", title = "Fix the login", mode = "full", state = "working", working = true,
                 child = false, ended = false, more = true,
                 entries = listOf(
-                    org.flottille.core.ffi.Entry(seq = 3uL, kind = "user", text = "look [Image 1: shot.png]", images = listOf("shot.png")),
+                    org.flottille.core.ffi.Entry(seq = 3uL, kind = "user", text = "look [Image 1: shot.png]", images = listOf("shot.png"), link = ""),
+                    org.flottille.core.ffi.Entry(seq = 4uL, kind = "link", text = "The app", images = emptyList(), link = "http://localhost:5173/"),
                 ),
                 children = listOf(
                     org.flottille.core.ffi.ChildView(agent = "c1", title = "Check", doing = "running", role = "worker", depth = 1u),
                 ),
+                runs = listOf(org.flottille.core.ffi.RunView(run = "r1", line = "pnpm dev", url = "http://localhost:5173/")),
             ),
             requests = listOf(
                 RequestView(
@@ -124,8 +131,15 @@ class PhoneViewTest {
         ).toPhoneView()
 
         val page = view.conversation!!
-        assertEquals(Conversation("server", "a1", "Fix the login", "full", true, false, false, true, page.entries, page.children), page)
-        assertEquals(Entry(3, "user", "look [Image 1: shot.png]", listOf("shot.png")), page.entries.single())
+        assertEquals(
+            Conversation(
+                "server", "a1", "Fix the login", "full", true, false, false, true, page.entries, page.children,
+                listOf(Run("r1", "pnpm dev", "http://localhost:5173/")),
+            ),
+            page,
+        )
+        assertEquals(Entry(3, "user", "look [Image 1: shot.png]", listOf("shot.png")), page.entries.first())
+        assertEquals(Entry(4, "link", "The app", emptyList(), "http://localhost:5173/"), page.entries.last())
         assertEquals(Child("c1", "Check", "running", "worker", 1), page.children.single())
         assertEquals(
             Request(
@@ -137,5 +151,17 @@ class PhoneViewTest {
         val ask = view.asks.single()
         assertEquals(12L, ask.asked)
         assertEquals(AskQuestion("Push?", listOf(AskOption("Yes", "Squash first")), multiple = true), ask.questions.single())
+    }
+
+    @Test
+    fun the_tunnels_and_why_they_ended_are_the_module_s_types() {
+        val view = state(
+            tunnels = listOf(TunnelView(tunnel = "t1", machine = "server", run = "r1", port = 5173u, localPort = 5174u)),
+            ended = listOf(
+                org.flottille.core.ffi.TunnelEnd(tunnel = "t0", machine = "server", run = "r0", reason = "run r0 ended"),
+            ),
+        ).toPhoneView()
+        assertEquals(Tunnel("t1", "server", "r1", 5173, 5174), view.tunnels.single())
+        assertEquals(TunnelEnd("t0", "server", "r0", "run r0 ended"), view.tunnelsEnded.single())
     }
 }

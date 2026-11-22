@@ -18,8 +18,29 @@ data class SessionRow(
     val waiting: Boolean = false,
 )
 
-/** One entry of a conversation: `user`, `agent`, `thought` or `tool`. [seq] orders and names it. */
-data class Entry(val seq: Long, val kind: String, val text: String, val images: List<String> = emptyList())
+/**
+ * One entry of a conversation: `user`, `agent`, `thought`, `tool` or `link`. [seq] orders and names
+ * it. A `link` is one an agent showed: [text] is its title (or host), [link] its address.
+ */
+data class Entry(
+    val seq: Long,
+    val kind: String,
+    val text: String,
+    val images: List<String> = emptyList(),
+    val link: String = "",
+)
+
+/** A command of the session that runs and reports an address: [url] opens through a tunnel. */
+data class Run(val run: String, val line: String, val url: String)
+
+/** A tunnel the phone holds to the port of a run on a machine; it listens on `127.0.0.1:`[localPort]. */
+data class Tunnel(val tunnel: String, val machine: String, val run: String, val port: Int, val localPort: Int)
+
+/** A tunnel that ended, and why in the machine's or the link's words (`run r1 ended`). */
+data class TunnelEnd(val tunnel: String, val machine: String, val run: String, val reason: String)
+
+/** A tunnel opened: [url] is the address as it is read on this phone, through it. */
+data class OpenedTunnel(val tunnel: Tunnel, val url: String)
 
 /** An agent of the session's tree, read only. */
 data class Child(val agent: String, val title: String, val doing: String, val role: String, val depth: Int)
@@ -40,6 +61,8 @@ data class Conversation(
     val more: Boolean,
     val entries: List<Entry>,
     val children: List<Child>,
+    /** The commands that run and report an address, oldest first. */
+    val runs: List<Run> = emptyList(),
 )
 
 /**
@@ -117,6 +140,10 @@ data class PhoneView(
     /** What waits for the user's Allow or Deny, and the questions that wait for an answer. */
     val requests: List<Request> = emptyList(),
     val asks: List<Ask> = emptyList(),
+    /** The tunnels held to the runs of the machines, oldest first. */
+    val tunnels: List<Tunnel> = emptyList(),
+    /** The tunnels that ended, the newest last. */
+    val tunnelsEnded: List<TunnelEnd> = emptyList(),
 ) {
     val joined: Boolean get() = role.isNotEmpty()
 }
@@ -173,4 +200,27 @@ interface Phone {
 
     /** The bytes of a picture of the conversation, by name. */
     suspend fun picture(machine: String, agent: String, name: String): ByteArray
+
+    /**
+     * Opens [url], an address of [machine] (`localhost…`), through a tunnel: [run]'s own address
+     * when a run is named, else the run that serves the port the link writes. A tunnel held to the
+     * same run and use is the one answered. [browser] says the address goes to the user's browser
+     * (its tunnel ends by itself after ten minutes with no connection), not to the app's own web
+     * view (whose panel closes its tunnel). The machine decides what it reaches and refuses with a
+     * sentence ([PhoneException]).
+     */
+    suspend fun openAddress(machine: String, run: String?, url: String, browser: Boolean): OpenedTunnel
+
+    /** Closes the tunnel [tunnel]. */
+    fun closeTunnel(tunnel: String)
+
+    /** Whether [url] names the machine it is read on: it opens through a tunnel, any other as it is. */
+    fun isLocal(url: String): Boolean
+
+    /**
+     * Keeps the core connected, whichever screen is on, until the returned handle is closed: the
+     * foreground service that keeps a tunnel for the user's browser holds it, since the app is
+     * then in the background and its screens no longer collect [views].
+     */
+    fun keepConnected(): AutoCloseable
 }
