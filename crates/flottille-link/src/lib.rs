@@ -18,6 +18,7 @@ mod serial;
 mod sessions;
 mod transport;
 mod tunnel;
+mod upload;
 
 use std::fmt;
 use std::fs::{File, OpenOptions};
@@ -56,6 +57,7 @@ pub use request::{
 pub use sessions::{LightSession, MOST_SESSIONS, STATES, SessionList, TITLE_LIMIT};
 pub use transport::TlsServer;
 pub use tunnel::TunnelStream;
+pub use upload::{Attached, UPLOAD_CHUNK, fits, upload_chunks, upload_name};
 
 /// The machine key's file in the key folder: the daemon's alone.
 pub const MACHINE_FILE: &str = "machine.key";
