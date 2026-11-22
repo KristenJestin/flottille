@@ -3245,6 +3245,17 @@ impl Store {
             .optional()?)
     }
 
+    /// Refuses the launch `launch` of `machine`, which the user allowed (`settle_launch`) but
+    /// which cannot start after all: its project's settings could not be laid.
+    pub fn refuse_started_launch(&mut self, machine: &str, launch: &str) -> Result<()> {
+        self.connection.execute(
+            "UPDATE launches SET state = 'refused' WHERE way = 'in' AND machine = ?1 \
+             AND launch = ?2 AND state = 'started'",
+            params![machine, launch],
+        )?;
+        Ok(())
+    }
+
     /// Records a new launch `in` from its machine, unless it was asked already or that machine
     /// has `most_waiting` launches waiting for their code, or `most_held` waiting for the user
     /// (when this one is held): counted and recorded in one transaction, so that launches asked at
@@ -9102,6 +9113,28 @@ mod tests {
             (read.state.as_str(), read.workspace_id),
             ("refused", Some(id))
         );
+    }
+
+    #[test]
+    fn an_allowed_launch_whose_settings_cannot_be_laid_is_refused() {
+        let mut store = Store::open_in_memory().unwrap();
+        let launch = a_launch_in();
+        store.add_launch(&launch, 8, 4).unwrap();
+        // Only a started launch: one still held is the user's to answer.
+        store
+            .refuse_started_launch(&launch.machine, &launch.launch)
+            .unwrap();
+        let read = &store.launches("in", None, LaunchFilter::All).unwrap()[0];
+        assert_eq!(read.state, launch.state);
+
+        store
+            .settle_launch(&launch.machine, &launch.launch, "started")
+            .unwrap();
+        store
+            .refuse_started_launch(&launch.machine, &launch.launch)
+            .unwrap();
+        let read = &store.launches("in", None, LaunchFilter::All).unwrap()[0];
+        assert_eq!(read.state, "refused");
     }
 
     #[test]
