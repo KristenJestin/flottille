@@ -99,7 +99,7 @@ window reads the providers again.
 ### `provider.models_learning`
 
 The daemon started listing a provider's models (`"learning": true`), or the listing ended,
-whatever its outcome (`"learning": false`). The window shows the effort picker's skeleton for a
+whatever its outcome (`"learning": false`). The window's agent picker has no effort to say for a
 model whose efforts are not known while it lists, and reads the providers again.
 
 | Field | |
