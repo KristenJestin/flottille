@@ -85,7 +85,8 @@ The methods are in `docs/protocol.md` ("The sign-in methods"): they are the user
 
 **Whether it is signed in** is the program's own status, read for its exit code and the account's
 name only, the rest of what it prints dropped at once: never stored, logged, put in an event or
-shown, and the account masked as every text is.
+shown. The account's name is masked to its first letter, and its domain's for an address
+(`o***`, `s***@e***`).
 
 **What a sign-in shows and keeps.** The daemon runs the program's command below, spawned without
 a shell with the daemon's environment (the user's own configuration, where the program keeps its

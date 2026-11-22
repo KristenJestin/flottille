@@ -2758,10 +2758,13 @@ the registered projects use first: `{"programs": [{"program", "title", "kind", "
 names, else `github.com`, `gitlab.com` or `bitbucket.org`; the Jira site for `acli`, `null` when no
 project names one), `null` for an agent. `signed_in` is what the program's own status says
 (`null` when it is not installed or could not say), `account` the account's name it says (`gh`'s
-login, Claude's email), masked, else `null`. `can_sign_in` is `true` when Flottille can run its
+login, Claude's email), masked to its first letter and its domain's (`o***`, `s***@e***`), else
+`null`. `can_sign_in` is `true` when Flottille can run its
 sign-in here; `line` is the line to type in a terminal on that machine when it cannot
 (`opencode auth login`, a Bitbucket Data Center server's `--web-token`), and `sign_out_line` the
-same for its sign-out. `running` is `true` while a sign-in of it runs.
+same for its sign-out. `running` is `true` while a sign-in of it runs. One list runs at a time:
+the callers that ask meanwhile, or within 2 s, are given the same answer, unless a sign-in changed
+since.
 
 #### `signin.start`
 
