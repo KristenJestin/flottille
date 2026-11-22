@@ -1907,7 +1907,14 @@ impl Remote {
             .endpoint
             .connect(peer.key, Traffic::Client, &self.hello, &peer.name)
             .await?;
-        if let Some(seen) = self.seen.lock().unwrap().get_mut(peer.key.as_bytes()) {
+        let mut seen = self.seen.lock().unwrap();
+        // Judged again under the lock `trust_machines` cuts the links under, as a machine link is
+        // (`linked`): a removal that came while this link was dialled would miss it.
+        if self.trusted(&peer.key).is_none() {
+            link.close(REMOVED);
+            return Err(LinkError::Closed(format!("{}: {REMOVED}", peer.name)));
+        }
+        if let Some(seen) = seen.get_mut(peer.key.as_bytes()) {
             seen.client = Some(link.clone());
         }
         Ok(link)

@@ -1666,7 +1666,8 @@ on a real phone, by hand, and reported.
   are written again, and its link to the removed member's machine is cut at once
   (`remote.disconnected`, `it was removed from the member list`). A link to it that was being made
   when the list came is judged again as it is kept, and closed (`refused: this machine's key is not
-  one of the user's`): it never gets `remote.connected`. The removed machine's own session
+  one of the user's`): it never gets `remote.connected`. So is a client's link to it dialled for a
+  request then: closed, and the request answered `unavailable`. The removed machine's own session
   to the hub is refused, so it never sees the removal itself; its links are cut by the others.
 - `remote.connected` and `remote.disconnected` are the machines' links, not the hub's session
   (its state is `remote.machines`' `hub`, and `remote.hub` says it changed).
