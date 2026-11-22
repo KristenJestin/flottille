@@ -2,7 +2,6 @@
 //! daemon's configuration (`daemon.toml`, `[remote] on = true`). Off, nothing of it is made or
 //! read.
 
-use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use flottille_core::paths::Paths;
@@ -11,9 +10,6 @@ use flottille_link::{KeyError, MachineKey};
 /// The folder of Flottille's state that holds its keys: a login's place, which no agent reaches
 /// (`gate::keys`).
 pub const FOLDER: &str = "remote";
-
-/// The port of an address given without one, and the one the examples listen on.
-pub const PORT: u16 = 7447;
 
 /// Whether the user turned remote on: off when `daemon.toml`, its table `remote` or its switch
 /// `on` is missing, or is not a boolean.
@@ -25,22 +21,18 @@ pub fn on(paths: &Paths) -> bool {
         .unwrap_or(false)
 }
 
-/// Where the link listens: `[remote] listen` in `daemon.toml`, an IP address and a port; nowhere
-/// when it says none, since how the machine is reached is the user's to choose (it still dials).
-pub fn listen(paths: &Paths) -> Result<Option<SocketAddr>, String> {
-    let Some(text) = std::fs::read_to_string(paths.config.join("daemon.toml"))
+/// Whether `daemon.toml` still holds `[remote] listen`, which the direct link removed on
+/// 2026-11-21 read: the key is left in the user's file, and no longer read.
+pub fn says_listen(paths: &Paths) -> bool {
+    std::fs::read_to_string(paths.config.join("daemon.toml"))
         .ok()
         .and_then(|text| text.parse::<toml_edit::DocumentMut>().ok())
-        .and_then(|document| Some(document.get("remote")?.get("listen")?.as_str()?.to_owned()))
-    else {
-        return Ok(None);
-    };
-    text.parse().map(Some).map_err(|_| {
-        format!(
-            "[remote] listen = \"{text}\" in daemon.toml is not an IP address and a port \
-             (0.0.0.0:{PORT}, 100.64.0.7:{PORT})"
-        )
-    })
+        .is_some_and(|document| {
+            document
+                .get("remote")
+                .and_then(|remote| remote.get("listen"))
+                .is_some()
+        })
 }
 
 /// The machine's key folder, `$XDG_STATE_HOME/flottille/remote`.

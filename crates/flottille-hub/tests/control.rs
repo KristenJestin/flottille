@@ -1048,7 +1048,7 @@ async fn the_hubs_host_changes_a_role_and_every_device_sees_it() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn the_hub_tells_every_member_the_addresses_their_machines_told() {
+async fn a_machine_of_the_previous_version_that_tells_addresses_keeps_its_session() {
     let place = Place::new();
     let served = place.serve("127.0.0.1:0").await;
     let mut two = two(&place, &served).await;
@@ -1057,34 +1057,91 @@ async fn the_hub_tells_every_member_the_addresses_their_machines_told() {
         .connect(&two.server_machine, &hello(), &Tls::System)
         .await
         .unwrap();
+    // What such a machine asks at every session, whatever it holds: answered, nothing kept.
+    for addresses in [
+        vec!["192.0.2.10:7447".to_owned()],
+        vec!["not an address".to_owned()],
+    ] {
+        server_session
+            .ask(flottille_link::Ask::Addresses { addresses })
+            .await
+            .unwrap();
+    }
+    // Its session goes on: its next ask is taken, and the pc still hears the hub's news.
     server_session
-        .ask(flottille_link::Ask::Addresses {
-            addresses: vec!["192.0.2.10:7447".to_owned()],
+        .ask(flottille_link::Ask::About {
+            device: "computer".to_owned(),
+            system: "linux".to_owned(),
         })
         .await
         .unwrap();
-    // Not an address: refused, the ones told kept.
-    let refused = server_session
-        .ask(flottille_link::Ask::Addresses {
-            addresses: vec!["not an address".to_owned()],
-        })
-        .await
-        .unwrap_err();
-    assert!(refused.to_string().contains("not addresses"), "{refused}");
-    let told = tokio::time::timeout(Duration::from_secs(10), async {
+    let facts = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            if let Some(Pushed::Addresses(told)) = two.pc_session.next().await
-                && !told.is_empty()
+            if let Some(Pushed::Facts(facts)) = two.pc_session.next().await
+                && facts
+                    .iter()
+                    .any(|facts| facts.kind.as_deref() == Some("computer"))
             {
-                return told;
+                return facts;
             }
         }
     })
     .await
     .unwrap();
-    assert_eq!(told.len(), 1);
-    assert_eq!(told[0].key, two.server_machine.public());
-    assert_eq!(told[0].addresses, ["192.0.2.10:7447"]);
+    assert!(!facts.is_empty());
+    served.stop().await;
+}
+
+/// A proxy in front of the hub at `hub`, for one connection: what the hub sends through it is
+/// recorded.
+fn recording_proxy(hub: SocketAddr) -> (SocketAddr, std::sync::Arc<std::sync::Mutex<Vec<u8>>>) {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let recorded = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let keeping = recorded.clone();
+    std::thread::spawn(move || {
+        let (device, _) = listener.accept().unwrap();
+        let upstream = std::net::TcpStream::connect(hub).unwrap();
+        let (mut device_in, mut upstream_out) =
+            (device.try_clone().unwrap(), upstream.try_clone().unwrap());
+        std::thread::spawn(move || {
+            let _ = std::io::copy(&mut device_in, &mut upstream_out);
+        });
+        let (mut upstream_in, mut device_out) = (upstream, device);
+        let mut buffer = [0u8; 4096];
+        while let Ok(read) = upstream_in.read(&mut buffer) {
+            if read == 0 || device_out.write_all(&buffer[..read]).is_err() {
+                return;
+            }
+            keeping.lock().unwrap().extend_from_slice(&buffer[..read]);
+        }
+    });
+    (address, recorded)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_session_is_told_no_address_once_for_a_phone_of_the_previous_version() {
+    let place = Place::new();
+    let served = place.serve("127.0.0.1:0").await;
+    let two = two(&place, &served).await;
+    let (proxy, recorded) = recording_proxy(served.address());
+    let mut device = two.server_device.clone();
+    device.url = format!("http://{proxy}");
+    let mut session = device
+        .connect(&two.server_machine, &hello(), &Tls::System)
+        .await
+        .unwrap();
+    // The list comes with it: the device reads the line and goes on.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !matches!(session.next().await, Some(Pushed::List(_))) {}
+    })
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let said = String::from_utf8_lossy(&recorded.lock().unwrap()).into_owned();
+    assert_eq!(said.matches(r#""addresses""#).count(), 1, "{said}");
+    assert!(said.contains(r#"{"addresses":[]}"#), "{said}");
     served.stop().await;
 }
 
@@ -1387,8 +1444,9 @@ async fn a_pairing_session_that_declares_no_machine_is_closed() {
     let asking = tokio::spawn(async move {
         loop {
             let _ = asker
-                .ask(flottille_link::Ask::Addresses {
-                    addresses: Vec::new(),
+                .ask(flottille_link::Ask::Presence {
+                    active: true,
+                    last_input: 0,
                 })
                 .await;
             tokio::time::sleep(QUICK_PAIR / 4).await;

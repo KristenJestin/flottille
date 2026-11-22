@@ -1,7 +1,6 @@
 //! A tunnel's connections on a link (`docs/remote.md`, "Tunnels"): raw bytes both ways on a
 //! stream of a client link, each direction ending alone, and refused on a machine link.
 
-use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
 use flottille_link::{Endpoint, Hello, Link, MachineKey, Traffic};
@@ -15,11 +14,10 @@ struct Machine {
 }
 
 impl Machine {
-    async fn new() -> Machine {
+    fn new() -> Machine {
         let state = tempfile::tempdir().unwrap();
         let key = MachineKey::load_or_make(&state.path().join("remote")).unwrap();
-        let ip: IpAddr = "127.0.0.1".parse().unwrap();
-        let endpoint = Endpoint::bind(&key, SocketAddr::new(ip, 0)).unwrap();
+        let endpoint = Endpoint::new(&key).unwrap();
         Machine {
             _state: state,
             endpoint,
@@ -27,9 +25,17 @@ impl Machine {
     }
 }
 
-/// A link from `laptop` to `server` of `traffic`: both ends.
+/// A link from `laptop` to `server` of `traffic`, through relay ports joined as the hub joins
+/// them: both ends.
 async fn linked(traffic: Traffic) -> (Machine, Machine, Link, Link) {
-    let (laptop, server) = (Machine::new().await, Machine::new().await);
+    let (laptop, server) = (Machine::new(), Machine::new());
+    let keys = [laptop.endpoint.key(), server.endpoint.key()];
+    for (machine, port) in [&laptop, &server]
+        .into_iter()
+        .zip(flottille_link::relays_in_memory(&keys))
+    {
+        machine.endpoint.through(port);
+    }
     let ours = Hello::ours("0.4.1");
     let endpoint = server.endpoint.clone();
     let hello = ours.clone();
@@ -39,13 +45,9 @@ async fn linked(traffic: Traffic) -> (Machine, Machine, Link, Link) {
     });
     let link = tokio::time::timeout(
         WAIT,
-        laptop.endpoint.connect(
-            server.endpoint.key(),
-            &server.endpoint.addresses(),
-            traffic,
-            &ours,
-            "server",
-        ),
+        laptop
+            .endpoint
+            .connect(server.endpoint.key(), traffic, &ours, "server"),
     )
     .await
     .unwrap()

@@ -3,8 +3,8 @@
 //! it on a runtime of its own.
 //!
 //! Behind `connect`: the control session to the hub, which says the phone is present and sends
-//! the member list (checked back to the pinned root, a list that does not check refused) and the
-//! runners' addresses; a link to each runner, through which every request goes signed with the
+//! the member list (checked back to the pinned root, a list that does not check refused); a link
+//! to each runner through the hub, through which every request goes signed with the
 //! device key; on each link, `events.watch` resumed after the last event seen of that runner, so
 //! that a new link misses nothing and repeats nothing. The events go to the view state in
 //! batches: what arrives together is drawn together.
@@ -18,7 +18,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use flottille_link::{
     Action, Ask, Change, Device, DeviceKey, Endpoint, Link, MachineKey, Message, PeerState,
-    PublicKey, Pushed, Request, Role, Session, Tls, Told,
+    PublicKey, Pushed, Request, Role, Session, Tls,
 };
 use serde_json::{Value, json};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
@@ -57,6 +57,36 @@ pub struct Event {
     pub data: String,
 }
 
+/// A picture the user chose for a message: its type and its bytes.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct Picture {
+    /// `image/png`, `image/jpeg`, `image/gif` or `image/webp`.
+    pub mime: String,
+    pub data: Vec<u8>,
+}
+
+/// What the user answered to one question of an ask: the options chosen and the words written.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct Reply {
+    pub choices: Vec<String>,
+    pub text: String,
+}
+
+/// A message carries 20 pictures at most, 5 MiB each, as the window's composer does
+/// (`docs/protocol.md`, `agent.send`).
+const PICTURES_MOST: usize = 20;
+const PICTURE_MOST: usize = 5 * 1024 * 1024;
+const PICTURE_TYPES: [&str; 4] = ["image/png", "image/jpeg", "image/gif", "image/webp"];
+/// What the daemon says of a request or a question that is decided already (`approvals.rs`,
+/// `agents.rs`, `agent_command.rs`): the card that asked for the answer folds.
+const GONE: [&str; 3] = [
+    " is already decided",
+    " does not wait for an answer",
+    " has no question waiting for you",
+];
+/// A `before` past every event: the daemon then gives the latest page.
+const LATEST: u64 = i64::MAX as u64;
+
 /// What takes the batches: the Kotlin module's, which hands them to a `Flow`.
 #[uniffi::export(with_foreign)]
 pub trait Listener: Send + Sync {
@@ -78,8 +108,6 @@ pub(crate) struct Inner {
     ids: AtomicU64,
     /// The number of the next connection.
     connections: AtomicU64,
-    /// Rings when the hub told new addresses: a runner waiting to dial again tries at once.
-    told_again: tokio::sync::Notify,
 }
 
 struct State {
@@ -105,9 +133,6 @@ struct Connection {
     links: HashMap<String, Link>,
     /// The runners a task links to, by name: the machine key it links to, and the task.
     linking: HashMap<String, (PublicKey, tokio::task::AbortHandle)>,
-    /// The addresses the hub told, none before its first telling: a runner is linked to once it
-    /// came, so that the addresses are tried before the hub (`docs/remote.md`, "The transport").
-    told: Option<HashMap<[u8; 32], Vec<String>>>,
     tasks: Vec<tokio::task::AbortHandle>,
 }
 
@@ -137,11 +162,6 @@ enum Note {
         machine: String,
         agents: Value,
         requests: Value,
-    },
-    Shown {
-        machine: String,
-        agent: String,
-        events: Value,
     },
     Changed,
 }
@@ -199,7 +219,6 @@ impl Core {
             }),
             ids: AtomicU64::new(1),
             connections: AtomicU64::new(1),
-            told_again: tokio::sync::Notify::new(),
         });
         Ok(Arc::new(Core {
             inner,
@@ -372,22 +391,194 @@ impl Core {
             .await
     }
 
-    /// Follows the conversation of the session `agent` of `machine`: what it holds, then each
-    /// event, in the view state's `conversation`.
+    /// Follows the conversation of the session `agent` of `machine`: its latest page and its tree
+    /// read at once, then each event, in the view state's `conversation`.
     pub async fn follow(&self, machine: String, agent: String) -> Result<(), MobileError> {
         self.inner.state().view.follow(&machine, &agent);
         let inner = self.inner.clone();
         self.inner
             .on(async move {
-                let events = inner
-                    .call(&machine, "agent.show", json!({"agent": agent}))
+                // The latest page only: a long conversation pages in with `older`, never whole.
+                let shown = inner
+                    .call(
+                        &machine,
+                        "agent.show",
+                        json!({"agent": agent, "before": LATEST}),
+                    )
                     .await?;
-                inner.note(Note::Shown {
-                    machine,
-                    agent,
-                    events,
-                });
+                let tree = inner
+                    .call(&machine, "agent.tree", json!({"agent": agent}))
+                    .await;
+                {
+                    let mut state = inner.state();
+                    state.view.shown(&machine, &agent, &shown);
+                    if let Ok(tree) = &tree {
+                        state.view.tree(&machine, &agent, tree);
+                    }
+                }
+                inner.note(Note::Changed);
                 Ok(())
+            })
+            .await
+    }
+
+    /// The page of `agent` is on screen no more: nothing of it is kept, and no event of it is
+    /// followed.
+    pub fn unfollow(&self) {
+        self.inner.state().view.unfollow();
+        self.inner.note(Note::Changed);
+    }
+
+    /// The page before the oldest events the followed conversation holds.
+    pub async fn older(&self, machine: String, agent: String) -> Result<(), MobileError> {
+        let Some(first) = self.inner.state().view.first_followed(&machine, &agent) else {
+            return Ok(());
+        };
+        let inner = self.inner.clone();
+        self.inner
+            .on(async move {
+                let shown = inner
+                    .call(
+                        &machine,
+                        "agent.show",
+                        json!({"agent": agent, "before": first}),
+                    )
+                    .await?;
+                inner.state().view.shown(&machine, &agent, &shown);
+                inner.note(Note::Changed);
+                Ok(())
+            })
+            .await
+    }
+
+    /// A message of the user to the session `agent` of `machine`, with pictures. The window's
+    /// limits hold here before anything is sent: 20 pictures, 5 MiB each, png, jpeg, gif or webp.
+    pub async fn send(
+        &self,
+        machine: String,
+        agent: String,
+        text: String,
+        pictures: Vec<Picture>,
+    ) -> Result<(), MobileError> {
+        if pictures.len() > PICTURES_MOST {
+            return Err(MobileError::new(format!(
+                "a message carries {PICTURES_MOST} pictures at most"
+            )));
+        }
+        for picture in &pictures {
+            if !PICTURE_TYPES.contains(&picture.mime.as_str()) {
+                return Err(MobileError::new(format!(
+                    "{} is not a picture Flottille takes (png, jpeg, gif or webp)",
+                    picture.mime.escape_debug()
+                )));
+            }
+            if picture.data.len() > PICTURE_MOST {
+                return Err(MobileError::new("a picture is 5 MiB at most"));
+            }
+            if picture.data.is_empty() {
+                return Err(MobileError::new("a picture is empty"));
+            }
+        }
+        if text.trim().is_empty() && pictures.is_empty() {
+            return Err(MobileError::new("the message is empty"));
+        }
+        let mut params = json!({"agent": agent, "message": text});
+        if !pictures.is_empty() {
+            use base64::Engine;
+            params["images"] = pictures
+                .iter()
+                .map(|picture| {
+                    json!({"mime": picture.mime,
+                        "data": base64::engine::general_purpose::STANDARD.encode(&picture.data)})
+                })
+                .collect();
+        }
+        let inner = self.inner.clone();
+        self.inner
+            .on(async move { inner.call(&machine, "agent.send", params).await.map(drop) })
+            .await
+    }
+
+    /// The user's answers to the ask `asked` of the session `agent` (the number of its
+    /// `agent.asked` event), one per question in order: the daemon sends the agent one message.
+    pub async fn answer_ask(
+        &self,
+        machine: String,
+        agent: String,
+        asked: u64,
+        replies: Vec<Reply>,
+    ) -> Result<(), MobileError> {
+        let answers: Vec<Value> = replies
+            .iter()
+            .map(|reply| {
+                let mut answer = json!({});
+                if !reply.choices.is_empty() {
+                    answer["choices"] = json!(reply.choices);
+                }
+                if !reply.text.is_empty() {
+                    answer["text"] = json!(reply.text);
+                }
+                answer
+            })
+            .collect();
+        let params = json!({"agent": agent, "question": asked, "answers": answers});
+        let inner = self.inner.clone();
+        self.inner
+            .on(async move { inner.call(&machine, "agent.answer", params).await.map(drop) })
+            .await
+    }
+
+    /// Puts the session `agent`'s tree in `mode`: `ask`, `auto` or `full`.
+    pub async fn set_mode(
+        &self,
+        machine: String,
+        agent: String,
+        mode: String,
+    ) -> Result<(), MobileError> {
+        if !["ask", "auto", "full"].contains(&mode.as_str()) {
+            return Err(MobileError::new(format!(
+                "{} is not a mode: ask, auto or full",
+                mode.escape_debug()
+            )));
+        }
+        let inner = self.inner.clone();
+        self.inner
+            .on(async move {
+                inner
+                    .call(
+                        &machine,
+                        "agent.mode",
+                        json!({"agent": agent, "mode": mode}),
+                    )
+                    .await
+                    .map(drop)
+            })
+            .await
+    }
+
+    /// The bytes of a picture of the conversation of `agent`, by the name its message gave.
+    pub async fn image(
+        &self,
+        machine: String,
+        agent: String,
+        name: String,
+    ) -> Result<Vec<u8>, MobileError> {
+        let inner = self.inner.clone();
+        self.inner
+            .on(async move {
+                use base64::Engine;
+                let image = inner
+                    .call(
+                        &machine,
+                        "agent.image",
+                        json!({"agent": agent, "name": name}),
+                    )
+                    .await?;
+                base64::engine::general_purpose::STANDARD
+                    .decode(image["data"].as_str().unwrap_or_default())
+                    .map_err(|error| {
+                        MobileError::new(format!("the picture is not readable: {error}"))
+                    })
             })
             .await
     }
@@ -520,19 +711,6 @@ impl Inner {
         gone
     }
 
-    /// The addresses the hub told for the members' machines.
-    fn told(self: &Arc<Self>, told: Vec<Told>) {
-        if let Some(connection) = &mut self.state().connection {
-            connection.told = Some(
-                told.into_iter()
-                    .map(|told| (*told.key.as_bytes(), told.addresses))
-                    .collect(),
-            );
-        }
-        self.told_again.notify_waiters();
-        self.link_runners();
-    }
-
     /// The runners of the list, by name, with their machine keys.
     fn runners(state: &State) -> Vec<(String, PublicKey)> {
         let (Some(device), Some(key)) = (&state.device, &state.key) else {
@@ -556,9 +734,6 @@ impl Inner {
         let Some(connection) = &mut state.connection else {
             return;
         };
-        if connection.told.is_none() {
-            return;
-        }
         for (name, machine) in runners {
             if let std::collections::hash_map::Entry::Vacant(vacant) =
                 connection.linking.entry(name)
@@ -611,7 +786,19 @@ impl Inner {
         let request = Request::sign(&key, &id, machine, method, &params, SystemTime::now())
             .map_err(|error| MobileError::new(error.to_string()))?;
         let request = serde_json::to_value(&request).expect("a request is JSON");
-        link.ask(&Message::Client(request))
+        let message = Message::Client(request);
+        // A request is one frame of the link: what cannot fit, once signed (its parameters travel
+        // as a string, escaped again, besides the key, the signature and the nonce), is refused
+        // here saying why, rather than ending the link.
+        let size = serde_json::to_vec(&message)
+            .expect("a message is JSON")
+            .len();
+        if size > flottille_link::FRAME_LIMIT {
+            return Err(MobileError::new(
+                "this message is too big for the link: its pictures and its words take 1 MiB at most together, about 700 KiB of pictures",
+            ));
+        }
+        link.ask(&message)
             .await
             .map_err(|error| MobileError::new(error.to_string()))
     }
@@ -632,12 +819,20 @@ impl Inner {
         let mut answers = self.ask(machine, link, method, params).await?;
         match answers.next().await {
             Some(Ok(answer)) => match answer.get("error") {
-                Some(error) => Err(MobileError::new(
-                    error["message"]
+                Some(error) => {
+                    let why = error["message"]
                         .as_str()
                         .unwrap_or("the runner refused it")
-                        .to_owned(),
-                )),
+                        .to_owned();
+                    // The daemon's own words for a request or a question it does not wait for any
+                    // more.
+                    let gone = error["code"] == "not-found"
+                        || GONE.iter().any(|words| why.contains(words));
+                    Err(match gone {
+                        true => MobileError::Gone { why },
+                        false => MobileError::new(why),
+                    })
+                }
                 None => Ok(answer["result"].clone()),
             },
             Some(Err(error)) => Err(MobileError::new(error.to_string())),
@@ -726,7 +921,8 @@ impl Inner {
             }
             return;
         }
-        let through_hub = link.as_ref().is_some_and(Link::through_hub);
+        // Every link goes through the hub.
+        let through_hub = link.is_some();
         state.view.online(machine, peer, through_hub, why);
         if let Some(connection) = &mut state.connection {
             match link {
@@ -774,10 +970,8 @@ async fn connect(inner: Arc<Inner>, listener: Arc<dyn Listener>) -> Result<(), M
         })
         .await
         .map_err(said)?;
-    let endpoint =
-        Endpoint::dialler(&machine).map_err(|error| MobileError::new(error.to_string()))?;
-    // The phone listens nowhere: its links to the runners go through this session to the hub,
-    // after any address the hub told, as a daemon's do.
+    let endpoint = Endpoint::new(&machine).map_err(|error| MobileError::new(error.to_string()))?;
+    // Its links to the runners go through this session to the hub, as a daemon's do.
     if let Some(port) = session.relay() {
         endpoint.through(port);
     }
@@ -798,7 +992,6 @@ async fn connect(inner: Arc<Inner>, listener: Arc<dyn Listener>) -> Result<(), M
             endpoint,
             links: HashMap::new(),
             linking: HashMap::new(),
-            told: None,
             tasks: vec![pump.abort_handle(), control.abort_handle()],
         });
     }
@@ -812,7 +1005,6 @@ async fn control(inner: Arc<Inner>, mut session: Session) {
     while let Some(pushed) = session.next().await {
         match pushed {
             Pushed::List(list) => inner.took_list(list),
-            Pushed::Addresses(told) => inner.told(told),
             Pushed::Presence(_) | Pushed::Facts(_) => {}
         }
     }
@@ -829,22 +1021,15 @@ async fn keep_linked(inner: Arc<Inner>, name: String, machine: PublicKey) {
     loop {
         let found = {
             let state = inner.state();
-            state.connection.as_ref().map(|connection| {
-                (
-                    connection.endpoint.clone(),
-                    connection
-                        .told
-                        .as_ref()
-                        .and_then(|told| told.get(machine.as_bytes()))
-                        .cloned()
-                        .unwrap_or_default(),
-                )
-            })
+            state
+                .connection
+                .as_ref()
+                .map(|connection| connection.endpoint.clone())
         };
-        let Some((endpoint, told)) = found else {
+        let Some(endpoint) = found else {
             return;
         };
-        match link::dial(&endpoint, machine, &told, &name).await {
+        match link::dial(&endpoint, machine, &name).await {
             Ok(linked) => {
                 wait = FIRST_WAIT;
                 inner.online(&name, machine, Some(linked.clone()), PeerState::Online, "");
@@ -870,9 +1055,10 @@ async fn keep_linked(inner: Arc<Inner>, name: String, machine: PublicKey) {
             }
             return;
         }
+        // A runner that comes online is dialled at once.
         tokio::select! {
             _ = tokio::time::sleep(wait) => {}
-            _ = inner.told_again.notified() => {}
+            _ = endpoint.online_changed() => {}
         }
         wait = (wait * 2).min(LONGEST_WAIT);
     }
@@ -941,11 +1127,6 @@ async fn pump(
                         agents,
                         requests,
                     } => state.view.load(&machine, &agents, &requests),
-                    Note::Shown {
-                        machine,
-                        agent,
-                        events,
-                    } => state.view.shown(&machine, &agent, &events),
                     Note::Changed => {}
                 }
             }

@@ -33,6 +33,8 @@ mod window_developer_reports;
 mod window_drafts;
 #[path = "../window_first_frame.rs"]
 mod window_first_frame;
+#[path = "../window_health_check.rs"]
+mod window_health_check;
 #[path = "../window_instance.rs"]
 mod window_instance;
 #[path = "../window_link.rs"]
@@ -67,6 +69,8 @@ mod window_raise;
 mod window_remote_tree;
 #[path = "../window_repositories.rs"]
 mod window_repositories;
+#[path = "../window_runners.rs"]
+mod window_runners;
 #[path = "../window_selection.rs"]
 mod window_selection;
 #[path = "../window_services.rs"]

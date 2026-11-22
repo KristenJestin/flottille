@@ -13,7 +13,8 @@ use common::User;
 use flottille_hub::{Hub, Served, SystemClock};
 use flottille_link::{
     Action, Change, ChangeHash, Colour, Device, DeviceKey, Endpoint, Hello, HubKey, Icon, Keyring,
-    KeyringError, MachineKey, MemberList, Proposed, PublicKey, Role, ToDevice, Traffic,
+    KeyringError, LinkError, MachineKey, MemberList, Proposed, PublicKey, Role, Tls, ToDevice,
+    Traffic,
 };
 use serde_json::{Value, json};
 use zeroize::Zeroizing;
@@ -118,19 +119,16 @@ struct Machine {
 }
 
 impl Machine {
-    /// A machine with remote on, listening at `listen` (none: it only dials).
-    fn new(listen: Option<&str>) -> Machine {
-        Machine::of(User::new(), listen)
+    /// A machine with remote on: its links go through the hub.
+    fn new() -> Machine {
+        Machine::of(User::new())
     }
 
-    /// `user`'s machine, with remote on, listening at `listen`.
-    fn of(user: User, listen: Option<&str>) -> Machine {
-        let listen = listen
-            .map(|listen| format!("listen = \"{listen}\"\n"))
-            .unwrap_or_default();
+    /// `user`'s machine, with remote on.
+    fn of(user: User) -> Machine {
         std::fs::write(
             user.path("config/flottille/daemon.toml"),
-            format!("[remote]\non = true\n{listen}"),
+            "[remote]\non = true\n",
         )
         .unwrap();
         user.status();
@@ -274,23 +272,19 @@ fn pair(hub: &TestHub, machine: &Machine, name: &str, role: &str) -> String {
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
-/// `pc` paired as the hub's first device, then `server`, a runner; each machine's addresses told
-/// to the hub by its daemon.
+/// `pc` paired as the hub's first device, then `server`, a runner.
 fn members(hub: &TestHub, pc: &Machine, server: &Machine) {
     set_up(hub, pc);
     pair(hub, server, "server", "runner");
 }
 
 #[test]
-fn links_go_on_while_the_hub_is_down() {
+fn the_hub_down_is_said_with_since_when_and_the_links_end() {
     let mut hub = TestHub::new();
-    let (pc, server) = (
-        Machine::new(Some("127.0.0.1:0")),
-        Machine::new(Some("127.0.0.1:0")),
-    );
+    let (pc, server) = (Machine::new(), Machine::new());
     members(&hub, &pc, &server);
 
-    // Each learns the other from the hub, and its addresses: they link, directly.
+    // Each learns the other from the hub: they link, through it.
     let seen = pc.wait_for("server", "online");
     assert_eq!(seen["key"], json!(server.key()));
     server.wait_for("pc", "online");
@@ -310,26 +304,16 @@ fn links_go_on_while_the_hub_is_down() {
         "{reason}"
     );
     assert!(pc.log().contains("is unreachable since"), "{}", pc.log());
-    // ...and the link goes on.
-    std::thread::sleep(Duration::from_secs(3));
-    assert_eq!(pc.machine("server").unwrap()["state"], "online");
-    assert_eq!(server.machine("pc").unwrap()["state"], "online");
-
-    // A machine off and on again links again, without the hub.
-    server.restart();
-    server.wait_for("pc", "online");
-    pc.wait_for("server", "online");
-    assert_eq!(server.remote()["hub"]["state"], "unreachable");
+    // ...and the link, which went through it, ends.
+    pc.wait_for("server", "offline");
+    server.wait_for("pc", "offline");
     let _ = hub.folder.path();
 }
 
 #[test]
 fn the_hub_s_state_is_said_as_an_event_when_it_changes() {
     let mut hub = TestHub::new();
-    let (pc, server) = (
-        Machine::new(Some("127.0.0.1:0")),
-        Machine::new(Some("127.0.0.1:0")),
-    );
+    let (pc, server) = (Machine::new(), Machine::new());
     members(&hub, &pc, &server);
     pc.wait_for("server", "online");
 
@@ -346,37 +330,11 @@ fn the_hub_s_state_is_said_as_an_event_when_it_changes() {
 }
 
 #[test]
-fn two_machines_whose_addresses_answer_nothing_link_through_the_hub() {
-    let hub = TestHub::new();
-    // Neither listens; each declares an address nobody listens on, which the hub tells the other:
-    // the direct path fails, and the link goes through the hub (`docs/remote.md`, "The transport").
-    let (pc, server) = (Machine::new(None), Machine::new(None));
-    for machine in [&pc, &server] {
-        machine
-            .user
-            .call(
-                "remote.address.add",
-                json!({"address": format!("127.0.0.1:{}", free_port())}),
-            )
-            .unwrap();
-    }
-    members(&hub, &pc, &server);
-
-    for (machine, other) in [(&pc, "server"), (&server, "pc")] {
-        let seen = machine.wait_for(other, "online");
-        assert_eq!(seen["reached"]["address"], "the hub", "{seen}");
-    }
-}
-
-#[test]
 fn the_daemon_keeps_a_list_the_hub_forged_out() {
     // A member list that does not check back to the pinned root is never taken: the machines the
     // daemon trusts stay those the members signed.
     let hub = TestHub::new();
-    let (pc, server) = (
-        Machine::new(Some("127.0.0.1:0")),
-        Machine::new(Some("127.0.0.1:0")),
-    );
+    let (pc, server) = (Machine::new(), Machine::new());
     members(&hub, &pc, &server);
     pc.wait_for("server", "online");
     // The server's hub file, as a hub that lied would leave it if the daemon took its word: the
@@ -397,13 +355,13 @@ fn the_daemon_keeps_a_list_the_hub_forged_out() {
 }
 
 /// A hub of the test's own, which a machine pinned: it holds its key, welcomes the machine's
-/// daemon, sends `list` once the daemon asked to tell its addresses, and answers the n-th ask of addresses as
-/// `answer(n)` says: never (`None`), done (`Some(None)`), or refused for a reason.
+/// daemon, sends `list` once the daemon asked something, and answers the n-th ask as `answer(n)`
+/// says: never (`None`), done (`Some(None)`), or refused for a reason.
 struct FakeHub {
     runtime: tokio::runtime::Runtime,
     address: SocketAddr,
     key: PublicKey,
-    addresses_asked: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    asked_count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     _folder: tempfile::TempDir,
 }
 
@@ -417,8 +375,8 @@ impl FakeHub {
         let folder = tempfile::tempdir().unwrap();
         let key = HubKey::load_or_make(&folder.path().join("hub")).unwrap();
         let public = key.public();
-        let addresses_asked = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let counted = addresses_asked.clone();
+        let asked_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = asked_count.clone();
         let address = runtime.block_on(async {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let address = listener.local_addr().unwrap();
@@ -436,23 +394,13 @@ impl FakeHub {
                         let mut session = arriving.welcome().await.unwrap();
                         let mut sent = false;
                         while let Ok(asked) = session.ask().await {
-                            // Sent once the daemon asks to tell its addresses: its first ask is
-                            // what it is, answered at once.
-                            let addresses =
-                                matches!(asked.ask, flottille_link::Ask::Addresses { .. });
-                            if !sent && addresses {
+                            // Sent once the daemon asks something: what it is, at its start.
+                            if !sent {
                                 sent = true;
                                 session.send(&ToDevice::List(list.clone())).await.unwrap();
                             }
-                            let answer = match asked.ask {
-                                flottille_link::Ask::Addresses { .. } => {
-                                    let n = counted
-                                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-                                        + 1;
-                                    answer(n)
-                                }
-                                _ => Some(None),
-                            };
+                            let n = counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                            let answer = answer(n);
                             if let Some(refused) = answer {
                                 let answer = ToDevice::Answer {
                                     id: asked.id,
@@ -472,14 +420,13 @@ impl FakeHub {
             runtime,
             address,
             key: public,
-            addresses_asked,
+            asked_count,
             _folder: folder,
         }
     }
 
     fn asked(&self) -> usize {
-        self.addresses_asked
-            .load(std::sync::atomic::Ordering::SeqCst)
+        self.asked_count.load(std::sync::atomic::Ordering::SeqCst)
     }
 }
 
@@ -543,7 +490,7 @@ fn seeded(n: u8) -> DeviceKey {
 
 #[test]
 fn the_daemon_takes_the_hub_s_news_while_its_ask_waits() {
-    let pc = Machine::new(None);
+    let pc = Machine::new();
     // A hub that never answers the daemon's ask, and sends the list meanwhile.
     let hub = FakeHub::new(list_for(&pc), |_| None);
     pin(&pc, &hub);
@@ -555,25 +502,6 @@ fn the_daemon_takes_the_hub_s_news_while_its_ask_waits() {
             .any(|machine| machine["name"] == "laptop")
     });
     assert!(hub.asked() >= 1);
-    drop(hub.runtime);
-}
-
-#[test]
-fn addresses_the_hub_refused_are_told_again() {
-    let pc = Machine::new(None);
-    let hub = FakeHub::new(list_for(&pc), |n| {
-        Some((n == 1).then(|| "not now".to_owned()))
-    });
-    pin(&pc, &hub);
-    let deadline = Instant::now() + Duration::from_secs(20);
-    while hub.asked() < 2 {
-        assert!(
-            Instant::now() < deadline,
-            "the addresses the hub refused were not told again\n{}",
-            pc.log()
-        );
-        std::thread::sleep(Duration::from_millis(200));
-    }
     drop(hub.runtime);
 }
 
@@ -615,7 +543,7 @@ fn pair_call(
 #[test]
 fn a_machine_paired_with_a_hub_pairs_with_another_only_when_asked_to_replace_it() {
     let (first, second) = (TestHub::new(), TestHub::new());
-    let pc = Machine::new(None);
+    let pc = Machine::new();
     pair_call(&pc, &first, &seeded(41), "pc", false).unwrap();
     let (_, refused) = pair_call(&pc, &second, &seeded(41), "pc", false).unwrap_err();
     assert!(refused.contains("--replace"), "{refused}");
@@ -636,7 +564,7 @@ fn a_machine_paired_with_a_hub_pairs_with_another_only_when_asked_to_replace_it(
 #[test]
 fn the_pair_code_is_read_from_the_standard_input_never_from_the_command_line() {
     let hub = TestHub::new();
-    let pc = Machine::new(None);
+    let pc = Machine::new();
     let code = hub.code();
     let output = pc.user.run(&["remote", "pair", &code, "--name", "pc"]);
     assert!(
@@ -668,22 +596,10 @@ fn the_pair_code_is_read_from_the_standard_input_never_from_the_command_line() {
     );
 }
 
-/// A port nobody uses now on loopback: the system's choice, let go at once.
-fn free_port() -> u16 {
-    std::net::UdpSocket::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
-}
-
 #[test]
 fn a_headless_machine_pairs_with_the_code_and_is_in_every_list() {
     let hub = TestHub::new();
-    let (pc, server) = (
-        Machine::new(Some("127.0.0.1:0")),
-        Machine::new(Some("127.0.0.1:0")),
-    );
+    let (pc, server) = (Machine::new(), Machine::new());
     set_up(&hub, &pc);
     let paired = pair(&hub, &server, "server", "runner");
     assert!(
@@ -720,7 +636,7 @@ fn a_headless_machine_pairs_with_the_code_and_is_in_every_list() {
 #[test]
 fn a_device_paired_again_keeps_its_key_and_its_card() {
     let hub = TestHub::new();
-    let (pc, server) = (Machine::new(None), Machine::new(None));
+    let (pc, server) = (Machine::new(), Machine::new());
     set_up(&hub, &pc);
     pair(&hub, &server, "server", "runner");
     let key = server.device().public();
@@ -754,7 +670,7 @@ fn a_device_paired_again_keeps_its_key_and_its_card() {
 #[test]
 fn the_name_icon_and_role_proposed_are_this_machines_own() {
     let hub = TestHub::new();
-    let pc = Machine::new(None);
+    let pc = Machine::new();
     let proposed = pc.remote()["proposed"].clone();
     // The host's name; an icon among the five; a role by the agents signed in here (none).
     assert!(
@@ -789,7 +705,7 @@ fn the_name_icon_and_role_proposed_are_this_machines_own() {
 #[test]
 fn name_icon_and_colour_change_from_any_device_and_the_role_on_the_hub_only() {
     let hub = TestHub::new();
-    let (pc, server) = (Machine::new(None), Machine::new(None));
+    let (pc, server) = (Machine::new(), Machine::new());
     members(&hub, &pc, &server);
     pc.wait_for_member("server", true);
     // From the server, pc's card; from pc, the server's name.
@@ -864,7 +780,7 @@ fn name_icon_and_colour_change_from_any_device_and_the_role_on_the_hub_only() {
 #[test]
 fn a_device_card_holds_what_it_says_of_itself_and_what_the_hub_knows() {
     let hub = TestHub::new();
-    let pc = Machine::new(None);
+    let pc = Machine::new();
     set_up(&hub, &pc);
     let deadline = Instant::now() + WAIT;
     let this = loop {
@@ -890,7 +806,7 @@ fn a_hub_set_up_before_pair_mode_keeps_its_machine_and_pairs_the_next() {
     let hub_dir = tempfile::tempdir().unwrap();
     let state = hub_dir.path().join("hub");
     let hub_key = HubKey::load_or_make(&state).unwrap().public();
-    let pc = Machine::new(Some("127.0.0.1:0"));
+    let pc = Machine::new();
     let device = seeded(51);
     std::fs::write(pc.folder().join("device.key"), [51u8; 32]).unwrap();
     std::fs::set_permissions(
@@ -938,7 +854,7 @@ fn a_hub_set_up_before_pair_mode_keeps_its_machine_and_pairs_the_next() {
     });
 
     // The next device pairs in pair mode; the old machine takes the list and links to it.
-    let server = Machine::new(Some("127.0.0.1:0"));
+    let server = Machine::new();
     pair(&hub, &server, "server", "runner");
     assert_eq!(
         pc.wait_for_member("server", true),
@@ -962,7 +878,7 @@ fn a_hub_set_up_before_pair_mode_keeps_its_machine_and_pairs_the_next() {
 #[test]
 fn an_addition_is_announced_as_an_event_on_every_machine() {
     let hub = TestHub::new();
-    let (pc, server, laptop) = (Machine::new(None), Machine::new(None), Machine::new(None));
+    let (pc, server, laptop) = (Machine::new(), Machine::new(), Machine::new());
     set_up(&hub, &pc);
     pair(&hub, &server, "server", "runner");
     pair(&hub, &laptop, "laptop", "viewer");
@@ -987,10 +903,7 @@ fn an_addition_is_announced_as_an_event_on_every_machine() {
 #[test]
 fn a_removed_device_is_cut_at_once_and_comes_back_only_paired_on_the_hub() {
     let hub = TestHub::new();
-    let (pc, server) = (
-        Machine::new(Some("127.0.0.1:0")),
-        Machine::new(Some("127.0.0.1:0")),
-    );
+    let (pc, server) = (Machine::new(), Machine::new());
     members(&hub, &pc, &server);
     pc.wait_for("server", "online");
     server.wait_for("pc", "online");
@@ -1047,7 +960,7 @@ fn a_removed_device_is_cut_at_once_and_comes_back_only_paired_on_the_hub() {
 #[test]
 fn the_daemon_never_reads_the_device_key() {
     let hub = TestHub::new();
-    let (pc, server) = (Machine::new(None), Machine::new(None));
+    let (pc, server) = (Machine::new(), Machine::new());
     // Each machine's device key file is there, as a client without a Secret Service keeps it;
     // what signs here is the test's, as a client's would, so that any open of the file is the
     // daemon's.
@@ -1131,11 +1044,7 @@ fn opened(mut watcher: &std::fs::File) -> Vec<String> {
 #[test]
 fn a_machine_off_during_a_removal_never_links_to_the_removed_machine() {
     let hub = TestHub::new();
-    let (pc, server, laptop) = (
-        Machine::new(Some("127.0.0.1:0")),
-        Machine::new(Some("127.0.0.1:0")),
-        Machine::new(Some("127.0.0.1:0")),
-    );
+    let (pc, server, laptop) = (Machine::new(), Machine::new(), Machine::new());
     members(&hub, &pc, &server);
     pair(&hub, &laptop, "laptop", "runner");
     server.wait_for("laptop", "online");
@@ -1172,8 +1081,11 @@ fn a_machine_off_during_a_removal_never_links_to_the_removed_machine() {
 }
 
 /// A fake hub whose sessions the test cuts, which then sends the list it holds by then; a session
-/// after the first waits `HELD` before it sends it, as a hub slow to answer a machine that comes
-/// back. It pushes nothing else: a list changed meanwhile is sent at the next session.
+/// of the pc's after its first waits `HELD` before it sends it, as a hub slow to answer a machine
+/// that comes back. It pushes nothing else: a list changed meanwhile is sent at the next session.
+/// It carries the links' packets between whichever sessions are open, which it says online, as a
+/// hub that carries a removed machine's packets would: what keeps such a machine out is the pc's
+/// own judgement.
 struct CuttingHub {
     runtime: tokio::runtime::Runtime,
     address: SocketAddr,
@@ -1190,8 +1102,23 @@ struct CuttingHub {
 /// the 10 s a machine holds its links for one.
 const HELD: Duration = Duration::from_secs(5);
 
+/// The sessions open on a cutting hub, by their device's key: what is sent to each.
+type Open = std::sync::Arc<
+    std::sync::Mutex<Vec<(PublicKey, tokio::sync::mpsc::UnboundedSender<ToDevice>)>>,
+>;
+
+/// Tells every session open the keys online.
+fn tell_online(open: &Open) {
+    let open = open.lock().unwrap();
+    let keys: Vec<PublicKey> = open.iter().map(|(key, _)| *key).collect();
+    for (_, sender) in open.iter() {
+        let _ = sender.send(ToDevice::Online(keys.clone()));
+    }
+}
+
 impl CuttingHub {
-    fn new(list: MemberList) -> CuttingHub {
+    /// A cutting hub that holds `list`, whose sessions of the machine `pc` it counts.
+    fn new(list: MemberList, pc: PublicKey) -> CuttingHub {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
@@ -1204,6 +1131,7 @@ impl CuttingHub {
         let sessions = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let sent = std::sync::Arc::new(std::sync::Mutex::new(None));
         let cut = tokio::sync::watch::Sender::new(0);
+        let open = Open::default();
         let (held, counted, cuts, told) =
             (list.clone(), sessions.clone(), cut.clone(), sent.clone());
         let address = runtime.block_on(async {
@@ -1212,8 +1140,13 @@ impl CuttingHub {
             let key = std::sync::Arc::new(key);
             tokio::spawn(async move {
                 while let Ok((stream, _)) = listener.accept().await {
-                    let (key, held, counted, told) =
-                        (key.clone(), held.clone(), counted.clone(), told.clone());
+                    let (key, held, counted, told, open) = (
+                        key.clone(),
+                        held.clone(),
+                        counted.clone(),
+                        told.clone(),
+                        open.clone(),
+                    );
                     let mut cut = cuts.subscribe();
                     let generation = *cut.borrow_and_update();
                     tokio::spawn(async move {
@@ -1224,37 +1157,66 @@ impl CuttingHub {
                             return;
                         };
                         let mut session = arriving.welcome().await.unwrap();
-                        let n = counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                        let device = session.device();
+                        let n = if device == pc {
+                            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1
+                        } else {
+                            1
+                        };
+                        let mut relays = session.relays().unwrap();
+                        let (sender, mut outgoing) = tokio::sync::mpsc::unbounded_channel();
+                        open.lock().unwrap().push((device, sender.clone()));
+                        tell_online(&open);
+                        // The list, once the device asked something: after `HELD` for a session of
+                        // the pc's after its first.
+                        let mut list_at: Option<tokio::time::Instant> = None;
                         let mut sent = false;
                         loop {
-                            let asked = tokio::select! {
-                                asked = session.ask() => asked,
-                                _ = cut.wait_for(|now| *now > generation) => return,
-                            };
-                            let Ok(asked) = asked else {
-                                return;
-                            };
-                            if !sent {
-                                sent = true;
-                                if n > 1 {
-                                    tokio::time::sleep(HELD).await;
+                            let due = list_at.filter(|_| !sent);
+                            tokio::select! {
+                                asked = session.ask() => {
+                                    let Ok(asked) = asked else { break };
+                                    if list_at.is_none() {
+                                        let wait = if n > 1 { HELD } else { Duration::ZERO };
+                                        list_at = Some(tokio::time::Instant::now() + wait);
+                                    }
+                                    let answer = ToDevice::Answer { id: asked.id, refused: None };
+                                    if sender.send(answer).is_err() {
+                                        break;
+                                    }
                                 }
-                                let list = held.lock().unwrap().clone();
-                                if session.send(&ToDevice::List(list)).await.is_err() {
-                                    return;
+                                _ = async { tokio::time::sleep_until(due.unwrap()).await }, if due.is_some() => {
+                                    sent = true;
+                                    let list = held.lock().unwrap().clone();
+                                    if sender.send(ToDevice::List(list)).is_err() {
+                                        break;
+                                    }
+                                    if n > 1 {
+                                        told.lock().unwrap().get_or_insert_with(Instant::now);
+                                    }
                                 }
-                                if n > 1 {
-                                    told.lock().unwrap().get_or_insert_with(Instant::now);
+                                frame = outgoing.recv() => {
+                                    let Some(frame) = frame else { break };
+                                    if session.send(&frame).await.is_err() {
+                                        break;
+                                    }
                                 }
-                            }
-                            let answer = ToDevice::Answer {
-                                id: asked.id,
-                                refused: None,
-                            };
-                            if session.send(&answer).await.is_err() {
-                                return;
+                                (to, packet) = relays.next() => {
+                                    let open = open.lock().unwrap();
+                                    if let Some((_, to)) = open.iter().find(|(key, _)| *key == to) {
+                                        let _ = to.send(ToDevice::Relayed {
+                                            from: device,
+                                            packet: flottille_link::LinkPacket(packet),
+                                        });
+                                    }
+                                }
+                                _ = async { let _ = cut.wait_for(|now| *now > generation).await; } => break,
                             }
                         }
+                        open.lock()
+                            .unwrap()
+                            .retain(|(_, open)| !open.same_channel(&sender));
+                        tell_online(&open);
                     });
                 }
             });
@@ -1315,7 +1277,7 @@ impl Trusting {
             &device,
         );
         list.declare(&laptop_device, laptop);
-        let hub = CuttingHub::new(list.clone());
+        let hub = CuttingHub::new(list.clone(), pc.machine_key().public());
         let pinned = Device {
             url: format!("http://{}", hub.address),
             hub: hub.key,
@@ -1365,17 +1327,6 @@ fn trusts_laptop(seen: &Value) -> bool {
         .any(|machine| machine["name"] == "laptop")
 }
 
-/// The address `machine` listens on, on 127.0.0.1.
-fn local_address(machine: &Machine) -> String {
-    machine.remote()["this"]["addresses"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|address| address["address"].as_str().unwrap().to_owned())
-        .find(|address| address.starts_with("127.0.0.1:"))
-        .unwrap()
-}
-
 /// A machine key of a machine that runs no daemon: the test dials with it.
 fn machine_key_apart() -> (tempfile::TempDir, MachineKey) {
     let dir = tempfile::tempdir().unwrap();
@@ -1383,34 +1334,71 @@ fn machine_key_apart() -> (tempfile::TempDir, MachineKey) {
     (dir, key)
 }
 
-/// Dials `pc` at `at` as the machine whose key is `key`: whether a link was made, or why not.
-fn dial_as(key: &MachineKey, pc: PublicKey, at: &str) -> Result<(), String> {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    runtime.block_on(async {
-        let endpoint = Endpoint::dialler(key).map_err(|error| error.to_string())?;
-        let made = endpoint
-            .connect(
-                pc,
-                &[at.parse().unwrap()],
-                Traffic::Machine,
-                &Hello::ours(env!("CARGO_PKG_VERSION")),
-                "pc",
-            )
-            .await;
-        endpoint.close().await;
-        made.map(|_| ()).map_err(|error| error.to_string())
-    })
+impl Trusting {
+    /// The endpoint of the machine whose key is `key`, through a session of its own to the
+    /// cutting hub, in the hub's runtime.
+    fn endpoint_of(&self, key: &MachineKey) -> Endpoint {
+        let pinned = Device {
+            url: format!("http://{}", self.hub.address),
+            hub: self.hub.key,
+            root: self.device.public(),
+            list: MemberList::default(),
+        };
+        self.hub.runtime.block_on(async {
+            let hello = Hello::ours(env!("CARGO_PKG_VERSION"));
+            let mut session = pinned.connect(key, &hello, &Tls::System).await.unwrap();
+            let endpoint = Endpoint::new(key).unwrap();
+            endpoint.through(session.relay().unwrap());
+            tokio::spawn(async move { while session.next().await.is_some() {} });
+            endpoint
+        })
+    }
+
+    /// Dials `pc` through the cutting hub as the machine whose key is `key`, until it links or is
+    /// refused: whether a link was made, or why not.
+    fn dial_as(&self, key: &MachineKey, pc: PublicKey) -> Result<(), String> {
+        let endpoint = self.endpoint_of(key);
+        self.hub.runtime.block_on(async {
+            let deadline = Instant::now() + WAIT;
+            let made = loop {
+                match crate::remote::dial(&endpoint, pc, Traffic::Machine, "pc").await {
+                    Err(error)
+                        if !matches!(error, LinkError::Refused { .. })
+                            && Instant::now() < deadline =>
+                    {
+                        tokio::time::sleep(Duration::from_millis(200)).await;
+                    }
+                    made => break made,
+                }
+            };
+            endpoint.close().await;
+            made.map(|_| ()).map_err(|error| error.to_string())
+        })
+    }
+
+    /// The machine whose key is `key` on the cutting hub, taking every link that comes to it: how
+    /// many it took.
+    fn take_links(&self, key: &MachineKey) -> std::sync::Arc<std::sync::atomic::AtomicUsize> {
+        let endpoint = self.endpoint_of(key);
+        let taken = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = taken.clone();
+        self.hub.runtime.spawn(async move {
+            while let Some(accepting) = endpoint.accept().await {
+                counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let _ = accepting
+                    .handshake(&Hello::ours(env!("CARGO_PKG_VERSION")), "pc")
+                    .await;
+            }
+        });
+        taken
+    }
 }
 
 #[test]
 fn a_link_while_the_session_is_lost_is_judged_by_the_next_list() {
-    let pc = Machine::new(Some("127.0.0.1:0"));
+    let pc = Machine::new();
     let (_laptop_dir, laptop) = machine_key_apart();
     let mut trusting = Trusting::new(&pc, &laptop);
-    let at = local_address(&pc);
 
     // The laptop is removed while the pc's session is cut: the list the pc kept still trusts it.
     trusting.remove_laptop();
@@ -1422,7 +1410,7 @@ fn a_link_while_the_session_is_lost_is_judged_by_the_next_list() {
         "the hub sent the next list before the laptop dialled: nothing was held\n{}",
         pc.log()
     );
-    let dialled = dial_as(&laptop, pc.key(), &at);
+    let dialled = trusting.dial_as(&laptop, pc.key());
     let ended = Instant::now();
     let error = dialled.expect_err("the pc linked to the removed laptop by the list it kept");
     assert!(error.contains("not one of the user's"), "{error}");
@@ -1446,24 +1434,15 @@ fn a_link_while_the_session_is_lost_is_judged_by_the_next_list() {
 
 #[test]
 fn a_machine_whose_session_is_lost_dials_no_one_until_the_next_list() {
-    let (pc, laptop) = (
-        Machine::new(Some("127.0.0.1:0")),
-        Machine::new(Some("127.0.0.1:0")),
-    );
-    // The laptop, with no hub, takes a link from the pc; it never dials the pc itself.
-    let peers = json!({"machines": [{"name": "pc", "key": pc.key(), "addresses": []}]});
-    std::fs::write(laptop.folder().join("peers.json"), peers.to_string()).unwrap();
-    let mut trusting = Trusting::new(&pc, &laptop.machine_key());
+    let pc = Machine::new();
+    let (_laptop_dir, laptop) = machine_key_apart();
+    let mut trusting = Trusting::new(&pc, &laptop);
 
-    // While the next list is held back, the pc learns where the laptop is, by the list it kept.
+    // While the next list is held back, the laptop comes online on the hub: the list the pc kept
+    // still trusts it. It takes every link that comes; it never dials the pc itself.
     trusting.remove_laptop();
     trusting.cut(&pc);
-    let peers = json!({"machines": [{
-        "name": "laptop",
-        "key": laptop.key(),
-        "addresses": [local_address(&laptop)],
-    }]});
-    std::fs::write(pc.folder().join("peers.json"), peers.to_string()).unwrap();
+    let taken = trusting.take_links(&laptop);
     let deadline = Instant::now() + WAIT;
     while trusting.hub.sent().is_none() {
         assert!(Instant::now() < deadline, "no next list\n{}", pc.log());
@@ -1481,6 +1460,12 @@ fn a_machine_whose_session_is_lost_dials_no_one_until_the_next_list() {
         "the pc dialled the removed laptop by the list it kept: {linked:#?}\n{}",
         pc.log()
     );
+    assert_eq!(
+        taken.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "the pc dialled the removed laptop by the list it kept\n{}",
+        pc.log()
+    );
     drop(trusting.hub.runtime);
 }
 
@@ -1488,19 +1473,15 @@ fn a_machine_whose_session_is_lost_dials_no_one_until_the_next_list() {
 fn a_machine_that_wakes_from_a_suspend_judges_links_by_the_next_list() {
     let user = User::new();
     let ahead = user.path("wall-ahead");
-    let pc = Machine::of(
-        user.with_env("FLOTTILLE_TEST_WALL_AHEAD_FILE", ahead.to_str().unwrap()),
-        Some("127.0.0.1:0"),
-    );
+    let pc = Machine::of(user.with_env("FLOTTILLE_TEST_WALL_AHEAD_FILE", ahead.to_str().unwrap()));
     let (_laptop_dir, laptop) = machine_key_apart();
     let mut trusting = Trusting::new(&pc, &laptop);
-    let at = local_address(&pc);
 
     // The laptop is removed while the pc sleeps: the hub's session looks alive on its waking, and
     // the list it kept still trusts the laptop, which dials the pc in the first second.
     trusting.remove_laptop();
     std::fs::write(&ahead, "60").unwrap();
-    let dialled = dial_as(&laptop, pc.key(), &at);
+    let dialled = trusting.dial_as(&laptop, pc.key());
 
     let error = dialled.expect_err("the pc linked to the removed laptop by the list it kept");
     assert!(error.contains("not one of the user's"), "{error}");
@@ -1521,7 +1502,7 @@ fn a_machine_that_wakes_from_a_suspend_judges_links_by_the_next_list() {
 #[test]
 fn the_hubs_address_is_shown_without_its_default_port_or_a_trailing_slash() {
     let hub = TestHub::new();
-    let pc = Machine::new(None);
+    let pc = Machine::new();
     // A code whose address has a trailing slash: it is not shown with one, and the port the hub is
     // on, which is not its scheme's own, stays. The default ports are the unit test's of
     // `HubUrl::shown`.

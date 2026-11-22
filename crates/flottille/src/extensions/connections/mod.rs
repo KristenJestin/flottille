@@ -2684,6 +2684,10 @@ fn edited(old: &Declaration, params: &Value) -> std::result::Result<Declaration,
             Value::Null => {
                 table.remove(key);
             }
+            // The window cannot send a `null`: an empty client id takes the saved one away.
+            Value::String(id) if key == "client_id" && id.is_empty() => {
+                table.remove(key);
+            }
             value => {
                 table.insert(key.clone(), value.clone());
             }

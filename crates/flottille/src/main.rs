@@ -177,7 +177,7 @@ enum Command {
         #[command(subcommand)]
         action: VaultAction,
     },
-    /// Flottille on the user's other machines: this machine's addresses
+    /// Flottille on the user's other machines: the hub, the members, remote on and off
     Remote {
         #[command(subcommand)]
         action: RemoteAction,

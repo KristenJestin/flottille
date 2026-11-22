@@ -2,8 +2,8 @@
 //! whether remote is on (a **Turn on** button while it is off, a **Remote** switch once it is),
 //! **Connect to your hub** while this machine is in no member list, a dialog where the code
 //! `flottille-hub pair` printed is pasted and the card this machine proposes confirmed; then the
-//! devices of the list, each renamed or removed from its "⋯", and the addresses this machine is
-//! reached at. The page says the state and holds the buttons: what is typed is a dialog of the
+//! devices of the list, each renamed or removed from its "⋯". The page says the state and holds
+//! the buttons: what is typed is a dialog of the
 //! window's host. A device is added on the hub only: every new member, and every result, is a
 //! toast. What is asked goes to this machine's daemon, signed with the
 //! device key ([`crate::machines::Remote`]); what it answers comes back as news.
@@ -11,9 +11,9 @@
 use std::collections::HashMap;
 
 use gpui_design_system::{
-    Button, Confirm, EmptyLine, Field, Icon, ListCard, ListRow, Listing, Menu, Modal, RadioChoices,
-    Section, Select, SelectOption, Switch, Toast, changed, changing, enter, palette, presence,
-    presence_of, space, tipped_when_cut, toast,
+    Button, Confirm, Field, Icon, ListCard, ListRow, Listing, Menu, Modal, RadioChoices, Section,
+    Select, SelectOption, Switch, Toast, changed, changing, enter, palette, presence, presence_of,
+    space, tipped_when_cut, toast,
 };
 use gpui_kit::base::input::{Input, InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -36,8 +36,6 @@ pub const CONNECT_MODAL: &str = "hub-connect";
 pub const RENAME_MODAL: &str = "member-rename";
 /// The confirmation of a removal, over any page.
 pub const REMOVAL_DIALOG: &str = "member-removal-dialog";
-/// The dialog that declares an address.
-pub const ADDRESS_MODAL: &str = "address-new";
 
 const REMOTE_OFF: &str = "Remote is off. This machine can join a hub and link to your other \
                           machines.";
@@ -53,17 +51,14 @@ const CONNECT_SAID: &str = "Paste the code flottille-hub pair printed on your hu
 const DEVICES_SENTENCE: &str = "Each device in this list reaches your machines with the role it \
                                 was given. A device is added on your hub's host, with \
                                 flottille-hub pair, and its role changed there.";
-const HUB_SENTENCE: &str = "The hub tells your machines each other's addresses and keeps the \
-                            list of your devices. It carries nothing of what they say to each \
+const HUB_SENTENCE: &str = "The hub keeps the list of your devices and carries their links, \
+                            encrypted end to end: it reads nothing of what they say to each \
                             other.";
-const ADDRESSES_SENTENCE: &str = "Where your other machines reach this one: found on its network, \
-                                  or declared by hand (a VPN address, a name, a forwarded port).";
 
 /// What is asked to be removed, until it is confirmed or cancelled.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Removal {
     Member(String),
-    Address(String),
     /// Turning remote off: the links close.
     Remote,
 }
@@ -86,15 +81,12 @@ pub struct MachinesSection {
     /// A change of remote was asked and not answered yet.
     configuring: bool,
     members: Listing<Member>,
-    addresses: Listing<crate::machines::Address>,
     menus: HashMap<String, Entity<Menu>>,
     removal: Option<Removal>,
     /// What the confirmation said last, which it still shows while it fades out.
     removal_said: Removal,
     renaming: Option<String>,
     rename: Option<Entity<InputState>>,
-    adding_address: bool,
-    address: Option<Entity<InputState>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -114,14 +106,11 @@ impl MachinesSection {
             kept: None,
             configuring: false,
             members: Listing::default(),
-            addresses: Listing::default(),
             menus: HashMap::new(),
             removal: None,
             removal_said: Removal::Member(String::new()),
             renaming: None,
             rename: None,
-            adding_address: false,
-            address: None,
             _subscriptions: Vec::new(),
         }
     }
@@ -158,10 +147,6 @@ impl MachinesSection {
         self.renaming.is_some()
     }
 
-    pub fn address_is_open(&self) -> bool {
-        self.adding_address
-    }
-
     pub fn connect_focus(&self, cx: &App) -> Option<FocusHandle> {
         self.connect_code
             .as_ref()
@@ -170,10 +155,6 @@ impl MachinesSection {
 
     pub fn rename_focus(&self, cx: &App) -> Option<FocusHandle> {
         self.rename.as_ref().map(|field| field.focus_handle(cx))
-    }
-
-    pub fn address_focus(&self, cx: &App) -> Option<FocusHandle> {
-        self.address.as_ref().map(|field| field.focus_handle(cx))
     }
 
     /// The fields of the dialogs, made once with the window.
@@ -199,7 +180,6 @@ impl MachinesSection {
         self.connect_code = Some(code);
         self.connect_name = Some(name);
         self.rename = Some(line_field("laptop", window, cx));
-        self.address = Some(line_field("100.64.0.7", window, cx));
     }
 
     pub fn connect_code_field(&self) -> Option<&Entity<InputState>> {
@@ -212,10 +192,6 @@ impl MachinesSection {
 
     pub fn rename_field(&self) -> Option<&Entity<InputState>> {
         self.rename.as_ref()
-    }
-
-    pub fn address_field(&self) -> Option<&Entity<InputState>> {
-        self.address.as_ref()
     }
 
     /// What the machines' worker said.
@@ -296,20 +272,6 @@ impl MachinesSection {
             (Asked::Remove(name), Ok(_)) => toast(Toast::success(format!("Removed {name}")), cx),
             (Asked::Remove(name), Err(why)) => toast(
                 Toast::failure(format!("{name} was not removed")).detail(why),
-                cx,
-            ),
-            (Asked::AddressAdd(address), Ok(_)) => {
-                toast(Toast::success(format!("Declared {address}")), cx)
-            }
-            (Asked::AddressAdd(address), Err(why)) => toast(
-                Toast::failure(format!("{address} was not declared")).detail(why),
-                cx,
-            ),
-            (Asked::AddressRemove(address), Ok(_)) => {
-                toast(Toast::success(format!("Removed {address}")), cx)
-            }
-            (Asked::AddressRemove(address), Err(why)) => toast(
-                Toast::failure(format!("{address} was not removed")).detail(why),
                 cx,
             ),
         }
@@ -400,7 +362,6 @@ impl MachinesSection {
     fn confirm_removal(&mut self, cx: &mut Context<Self>) {
         match self.removal.take() {
             Some(Removal::Member(name)) => self.remote.ask(Ask::Remove { name }),
-            Some(Removal::Address(address)) => self.remote.ask(Ask::AddressRemove(address)),
             Some(Removal::Remote) => self.configure(false, cx),
             None => {}
         }
@@ -437,30 +398,6 @@ impl MachinesSection {
         }
         self.renaming = None;
         self.remote.ask(Ask::Rename { name, new_name });
-        cx.notify();
-    }
-
-    pub fn ask_address(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(field) = &self.address {
-            field.update(cx, |field, cx| field.set_value("", window, cx));
-        }
-        self.adding_address = true;
-        self.modals
-            .update(cx, |modals, cx| modals.open(ADDRESS_MODAL, cx));
-        cx.notify();
-    }
-
-    fn declare(&mut self, cx: &mut Context<Self>) {
-        let address = self
-            .address
-            .as_ref()
-            .map(|field| field.read(cx).value().trim().to_owned())
-            .unwrap_or_default();
-        if address.is_empty() {
-            return;
-        }
-        self.adding_address = false;
-        self.remote.ask(Ask::AddressAdd(address));
         cx.notify();
     }
 
@@ -574,33 +511,6 @@ impl MachinesSection {
             .action(
                 Button::primary("member-rename-save", "Rename")
                     .on_click(cx.listener(|this, _, _, cx| this.rename(cx))),
-            )
-    }
-
-    pub fn address_dialog(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> Modal {
-        let this = cx.entity().downgrade();
-        let field = self.address.clone().map(|field| {
-            Field::new(
-                "address-new-field",
-                "Address",
-                boxed("address-new-value", Input::new(&field), cx),
-            )
-            .hint("A host name or an IP address, and its port when it is not the link's own.")
-        });
-        Modal::new(ADDRESS_MODAL, "New address")
-            .open(self.adding_address)
-            .takes_focus()
-            .on_close(move |_, cx| {
-                this.update(cx, |this, cx| {
-                    this.adding_address = false;
-                    cx.notify();
-                })
-                .ok();
-            })
-            .children(field)
-            .action(
-                Button::primary("address-new-save", "Declare")
-                    .on_click(cx.listener(|this, _, _, cx| this.declare(cx))),
             )
     }
 
@@ -746,10 +656,9 @@ impl MachinesSection {
             .then(|| read.seen(member))
             .flatten()
             .map(|machine| {
-                let usable = read.hub.as_ref().is_none_or(|hub| hub.usable());
                 address_line(
                     format!("member-address-{name}"),
-                    machine.address_words(usable).into(),
+                    machine.address_words().into(),
                     window,
                     cx,
                 )
@@ -823,92 +732,6 @@ impl MachinesSection {
             )
     }
 
-    fn address_row(
-        &mut self,
-        address: &crate::machines::Address,
-        cx: &mut Context<Self>,
-    ) -> ListRow {
-        let key = address.address.clone();
-        let row = ListRow::new(
-            ElementId::Name(format!("address-{key}").into()),
-            key.clone(),
-        )
-        .mono()
-        .tag(address.how.clone());
-        if address.how != "declared" {
-            return row;
-        }
-        let this = cx.entity().downgrade();
-        let menu = menu_of(&mut self.menus, "address", &key, cx, move |key, menu| {
-            let removed = key.to_owned();
-            menu.danger(
-                ElementId::Name(format!("address-remove-{key}").into()),
-                "Remove…",
-                move |_, cx| {
-                    this.update(cx, |this, cx| {
-                        this.ask_removal(Removal::Address(removed.clone()), cx)
-                    })
-                    .ok();
-                },
-            )
-        });
-        row.more(menu)
-    }
-
-    fn addresses_section(&mut self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let listed = self.read.as_ref().map(|read| read.addresses.clone());
-        if let Some(listed) = listed {
-            let now = cx.background_executor().now();
-            let reduce = cx.reduce_motion();
-            self.addresses.sync(
-                listed.into_iter().map(|a| (a.address.clone(), a)),
-                now,
-                reduce,
-            );
-        }
-        let drawn: Vec<_> = self
-            .addresses
-            .rows()
-            .map(|row| (row.key.to_owned(), row.placement, row.value.clone()))
-            .collect();
-        let mut list = ListCard::new("address-list");
-        for (key, placement, address) in drawn {
-            let row = self.address_row(&address, cx);
-            list = list.item(
-                ElementId::Name(format!("address-item-{key}").into()),
-                placement,
-                row,
-            );
-        }
-        let count = self.addresses.len();
-        let empty = self.read.as_ref().is_some_and(|r| r.addresses.is_empty());
-        Section::new("addresses", "Addresses")
-            .count(count.to_string())
-            .sentence(ADDRESSES_SENTENCE)
-            .action(
-                Button::secondary("add-address", "New address")
-                    .leading(Icon::Plus)
-                    .on_click(cx.listener(|this, _, window, cx| this.ask_address(window, cx))),
-            )
-            .child(
-                stack(space::MD)
-                    .child(presence("address-list-block", count > 0, list).space(space::MD))
-                    .child(
-                        presence(
-                            "no-address-block",
-                            empty,
-                            EmptyLine::new(
-                                "no-address",
-                                Icon::Service,
-                                "No address yet: this machine listens on none. Declare one your \
-                                 other machines reach it at.",
-                            ),
-                        )
-                        .space(space::MD),
-                    ),
-            )
-    }
-
     fn removal_confirm(&self, cx: &mut Context<Self>) -> Confirm {
         let (question, sentence, action) = match &self.removal_said {
             Removal::Member(name) => (
@@ -916,11 +739,6 @@ impl MachinesSection {
                 "Its links are cut on every machine at once; it comes back only paired again on \
                  your hub.",
                 "Remove device",
-            ),
-            Removal::Address(address) => (
-                format!("Remove the address {address}?"),
-                "Your other machines no longer try this machine there.",
-                "Remove address",
             ),
             Removal::Remote => (
                 "Turn remote off?".to_owned(),
@@ -942,7 +760,7 @@ impl MachinesSection {
     }
 
     /// The sections of the tab, top to bottom, each entering on its own: whether remote is on, then
-    /// (while it is) where this machine is reached, the hub, the devices and the addresses. They
+    /// (while it is) the hub and the devices. They
     /// fold away, as they were, when remote is turned off.
     pub fn blocks(
         &mut self,
@@ -998,7 +816,6 @@ impl MachinesSection {
             "devices",
             self.devices_section(window, cx).into_any_element(),
         ));
-        blocks.push(("addresses", self.addresses_section(cx).into_any_element()));
         blocks
     }
 }

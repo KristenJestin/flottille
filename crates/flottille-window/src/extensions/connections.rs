@@ -203,6 +203,8 @@ pub struct Server {
     /// query parameter, a cookie, basic authentication.
     pub secrets: Vec<ServerSecret>,
     pub only: BTreeMap<String, Vec<String>>,
+    /// The OAuth client id registered with the authorization server of its URL.
+    pub client_id: Option<String>,
     /// Whether an adapter's browser is shown on the screen.
     pub headed: bool,
     /// Why the browser of its running server is not shown though it is meant to be.
@@ -264,6 +266,7 @@ impl Server {
                     (argument.clone(), values)
                 })
                 .collect(),
+            client_id: value["client_id"].as_str().map(str::to_owned),
             headed: value["headed"] == true,
             headless: value["headless"].as_str().map(str::to_owned),
             state: text(&value["state"]),
@@ -694,6 +697,8 @@ pub struct FormFields {
     pub about: Entity<InputState>,
     pub command: Entity<InputState>,
     pub url: Entity<InputState>,
+    /// The OAuth client id, for a URL.
+    pub client_id: Entity<InputState>,
 }
 
 /// A variable of the form (a header, for a URL): its name typed, its entry picked.
@@ -1682,8 +1687,15 @@ impl ConnectionsSection {
                 about: line_field("The notes and decisions I keep", window, cx),
                 command: line_field("almanac mcp", window, cx),
                 url: line_field("https://notes.example.com/mcp", window, cx),
+                client_id: line_field("the id the server gave you", window, cx),
             };
-            for input in [&fields.name, &fields.about, &fields.command, &fields.url] {
+            for input in [
+                &fields.name,
+                &fields.about,
+                &fields.command,
+                &fields.url,
+                &fields.client_id,
+            ] {
                 self.watch(input, cx);
             }
             self.fields = Some(fields);
@@ -1737,6 +1749,10 @@ impl ConnectionsSection {
                     .filter(|s| s.url_fault.is_none())
                     .and_then(|s| s.url.clone())
                     .unwrap_or_default(),
+            ),
+            (
+                &fields.client_id,
+                server.and_then(|s| s.client_id.clone()).unwrap_or_default(),
             ),
         ] {
             field.update(cx, |f, cx| f.set_value(value, window, cx));
@@ -2005,6 +2021,8 @@ impl ConnectionsSection {
                 if editing {
                     params["headers"] = json!({});
                     params["secrets"] = json!([]);
+                    // Only a URL signs in with OAuth: an empty id takes a saved one away.
+                    params["client_id"] = json!("");
                 }
             }
             Reach::Url => {
@@ -2021,6 +2039,14 @@ impl ConnectionsSection {
                 if editing {
                     params["env"] = json!({});
                     params["headed"] = json!(false);
+                }
+                let client_id = value(&fields.client_id);
+                if client_id.chars().any(char::is_control) {
+                    return Err("A client id is one line, with no control character.".into());
+                }
+                // An empty id in an edit takes the saved one away.
+                if editing || !client_id.is_empty() {
+                    params["client_id"] = json!(client_id);
                 }
             }
         }
@@ -2746,6 +2772,16 @@ impl ConnectionsSection {
         )
         .hint("https://, or http:// on this machine.")
         .error(url_fault);
+        let client_id = Field::new(
+            "connection-client-id-field",
+            "OAuth client id",
+            boxed("connection-client-id", Input::new(&fields.client_id), cx),
+        )
+        .optional()
+        .hint(
+            "The id you registered with the server's authorization server, when it takes no \
+             registration of its own.",
+        );
         let offered = self.offered(original.as_deref().unwrap_or_default(), cx);
         let mut variables = div().flex().flex_col();
         for row in self
@@ -2923,6 +2959,14 @@ impl ConnectionsSection {
                     "connection-secrets-block",
                     self.reach == Reach::Url,
                     secrets_field,
+                )
+                .space(space::LG),
+            )
+            .child(
+                presence(
+                    "connection-client-id-block",
+                    self.reach == Reach::Url,
+                    client_id,
                 )
                 .space(space::LG),
             )

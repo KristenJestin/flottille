@@ -1283,7 +1283,6 @@ mod tests {
                 reason: None,
                 role: Some("runner".to_owned()),
                 reached: None,
-                addresses: Vec::new(),
             }],
             lists: crate::machines::Lists {
                 this: vec![listed("r1", "app", 5)],
@@ -2194,7 +2193,6 @@ mod tests {
             reason: None,
             role: Some("runner".into()),
             reached: None,
-            addresses: Vec::new(),
         };
         let online = machine("online");
         let words = |l, m| last_known(&l, m).0;

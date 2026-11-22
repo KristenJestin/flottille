@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use gpui_design_system::appearance::{self, Appearance, Source};
 use gpui_design_system::theme::Shade;
 use gpui_design_system::{
-    Button, Chosen, EmptyLine, Field, Fold, Icon, ListCard, Listing, ModelChoice, PageHeader,
+    Button, Chosen, EmptyLine, Field, Fold, Icon, ListCard, Listing, Menu, ModelChoice, PageHeader,
     Section, Segmented, Select, SelectOption, Skeleton, Subpage, Switch, Tabs, Toast, Type as _,
     awaiting, enter, hoverable, icon, palette, presence, presence_of, space, tipped, toast,
     turning,
@@ -65,7 +65,14 @@ const AGENTS_BLOCKS: [&str; 6] = [
 ];
 
 /// The blocks of the General tab, top to bottom.
-const GENERAL_BLOCKS: [&str; 5] = ["about", "appearance", "workspaces", "developer", "version"];
+const GENERAL_BLOCKS: [&str; 6] = [
+    "about",
+    "appearance",
+    "workspaces",
+    "developer",
+    "check",
+    "version",
+];
 
 /// The blocks of the Approvals tab: the Auto judge, then what it is told.
 const APPROVALS_BLOCKS: [&str; 2] = ["judge", "guidance"];
@@ -306,6 +313,8 @@ pub struct SettingsPage {
     connections: Entity<ConnectionsSection>,
     /// This build's version and its update.
     version: Entity<crate::version::VersionSection>,
+    /// What `flottille doctor` checks.
+    check: Entity<crate::check::CheckSection>,
     /// A judge chosen, until the daemon lists it.
     judge_pending: bool,
     /// The judge's switch flipped, until the daemon answers: what it was asked to become.
@@ -321,6 +330,9 @@ pub struct SettingsPage {
     /// The findings agents filed about Flottille itself, once the daemon said them.
     findings: Option<Vec<crate::findings::Finding>>,
     finding_rows: Listing<crate::findings::Finding>,
+    /// The dialog that marks a finding filed, and the "⋯" of each open finding.
+    filing: Entity<crate::findings::Filing>,
+    finding_menus: HashMap<u64, Entity<Menu>>,
     /// The export asked, until the daemon answers.
     exporting: bool,
     /// The limit above which a tool result is cut, once the daemon said it (`Some(None)` is Off).
@@ -413,9 +425,12 @@ impl SettingsPage {
         machines: Entity<crate::machines_page::MachinesSection>,
         version: Entity<crate::version::VersionSection>,
         sign_in: Entity<crate::sign_in::SignInSection>,
+        filing: Entity<crate::findings::Filing>,
+        check: Entity<crate::check::CheckSection>,
     ) -> Self {
         Self {
             sign_in,
+            check,
             machines,
             version,
             rules,
@@ -440,6 +455,8 @@ impl SettingsPage {
             developer_pending: None,
             findings: None,
             finding_rows: Listing::default(),
+            filing,
+            finding_menus: HashMap::new(),
             exporting: false,
             tool_results: None,
             tool_results_pending: None,
@@ -1311,6 +1328,16 @@ impl SettingsPage {
         cx.notify();
     }
 
+    /// The Check Flottille section.
+    pub fn check(&self) -> &Entity<crate::check::CheckSection> {
+        &self.check
+    }
+
+    /// The dialog that marks a finding filed.
+    pub fn filing(&self) -> &Entity<crate::findings::Filing> {
+        &self.filing
+    }
+
     /// The findings as they are listed.
     pub fn findings(&self) -> &[crate::findings::Finding] {
         self.findings.as_deref().unwrap_or_default()
@@ -1344,7 +1371,7 @@ impl SettingsPage {
 
     /// What the findings add under the developer mode's switch: the list, and the export that
     /// writes it for the lead agent. It comes with the switch and folds away with it.
-    fn findings_block(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn findings_block(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
         let mut list = ListCard::new("findings-list");
         let drawn: Vec<_> = self
@@ -1352,8 +1379,21 @@ impl SettingsPage {
             .rows()
             .map(|row| (row.key.to_owned(), row.placement, row.value.clone()))
             .collect();
+        let open: Vec<u64> = drawn
+            .iter()
+            .filter(|(_, _, finding)| finding.filed.is_none())
+            .map(|(_, _, finding)| finding.id)
+            .collect();
+        self.finding_menus.retain(|id, _| open.contains(id));
+        for id in open {
+            if !self.finding_menus.contains_key(&id) {
+                let menu = crate::findings::menu(id, self.filing.downgrade(), cx);
+                self.finding_menus.insert(id, menu);
+            }
+        }
         for (key, placement, finding) in drawn {
-            let row = crate::findings::row(&finding, cx);
+            let menu = self.finding_menus.get(&finding.id).cloned();
+            let row = crate::findings::row(&finding, menu, cx);
             list = list.item(
                 ElementId::Name(format!("findings-item-{key}").into()),
                 placement,
@@ -1400,6 +1440,7 @@ impl SettingsPage {
                     ),
             )
             .child(presence("findings-list-block", count > 0, list).space(space::MD))
+            .child(self.filing.clone())
             .child(
                 presence(
                     "no-findings-block",
@@ -1415,7 +1456,7 @@ impl SettingsPage {
             )
     }
 
-    fn developer_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn developer_section(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let p = palette(cx);
         let switch = Switch::new(
             "developer-switch",
@@ -2496,6 +2537,9 @@ impl Render for SettingsPage {
         let header = PageHeader::new("settings-header", "Settings");
         // Only the tab shown is built: what a tab holds enters again as it is shown.
         let tab = self.tab.min(SECTIONS.len() - 1);
+        if SECTIONS[tab].0 == "general" {
+            self.check.update(cx, |check, cx| check.ensure(cx));
+        }
         let blocks: Vec<(&str, AnyElement)> = match SECTIONS[tab].0 {
             "agents" => vec![
                 ("providers", self.providers_section(window, cx)),
@@ -2524,6 +2568,7 @@ impl Render for SettingsPage {
                 ("appearance", self.appearance_section(cx).into_any_element()),
                 ("workspaces", self.workspaces.clone().into_any_element()),
                 ("developer", self.developer_section(cx).into_any_element()),
+                ("check", self.check.clone().into_any_element()),
                 ("version", self.version.clone().into_any_element()),
             ],
         };
