@@ -1,8 +1,7 @@
 //! The daemon's control session to the user's hub (`docs/remote.md`, "The hub", "Architecture"),
 //! with remote on and the machine paired: it keeps the member list, checked back to the root and
-//! the hub's key pinned when it paired, the addresses the hub tells of the members' machines and
-//! what it knows of their devices, and writes from them the machines the link trusts
-//! (`remote/peers.json`); it tells the hub this machine's addresses and what it is.
+//! the hub's key pinned when it paired, and what it knows of their devices, and writes from them
+//! the machines the link trusts (`remote/peers.json`); it tells the hub what this machine is.
 //!
 //! The hub adds the devices and changes their roles, signed with its key; a list a change of which
 //! neither the hub nor a member that may make it signed is refused here, whatever the hub said, and
@@ -24,7 +23,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use flottille_link::{
-    Action, Ask, Asker, Change, ControlError, Device, Facts, HubUrl, ListError, MachineKey,
+    Action, Ask, Asker, Change, ControlError, Device, Facts, Hello, HubUrl, ListError, MachineKey,
     MemberList, Members, PairCode, Paired, Proposed, PublicKey, Pushed, Role, Session, Tls,
 };
 use serde_json::{Value, json};
@@ -35,7 +34,7 @@ use crate::link::{Emit, Remote};
 pub const HUB_FILE: &str = "hub.json";
 /// The longest a hub that cannot be reached waits before it is tried again.
 const LONGEST_WAIT: Duration = Duration::from_secs(30);
-/// How often this machine's addresses are compared with those the hub was told.
+/// How often the session looks whether this machine slept.
 const ROUND: Duration = Duration::from_secs(1);
 /// How long the hub may take to answer an ask before it is asked again.
 const ASK_WAIT: Duration = Duration::from_secs(10);
@@ -49,6 +48,9 @@ struct Seen {
     /// Since when, in milliseconds since the Unix epoch.
     since: u64,
     reason: Option<String>,
+    /// The hub answered that it no longer knows this machine: its list was reset, or it dropped
+    /// this device. A client offers to pair again.
+    forgotten: bool,
 }
 
 /// A pairing this machine made, its session to the hub open until its machine is declared.
@@ -84,6 +86,7 @@ impl Control {
                 state: "none",
                 since: now(),
                 reason: None,
+                forgotten: false,
             }),
             again: tokio::sync::Notify::new(),
             asker: tokio::sync::watch::Sender::new(None),
@@ -121,8 +124,18 @@ impl Control {
 
     /// The hub's state, said once in the log when it changes.
     fn set(&self, state: &'static str, reason: Option<String>) {
+        self.set_as(state, reason, false);
+    }
+
+    /// [`Control::set`], for a hub that no longer knows this machine: a client offers to pair
+    /// again.
+    fn forget(&self, state: &'static str, reason: String) {
+        self.set_as(state, Some(reason), true);
+    }
+
+    fn set_as(&self, state: &'static str, reason: Option<String>, forgotten: bool) {
         let mut seen = self.seen.lock().unwrap();
-        let changed = seen.state != state || seen.reason != reason;
+        let changed = seen.state != state || seen.reason != reason || seen.forgotten != forgotten;
         if changed {
             match &reason {
                 Some(reason) => eprintln!("flottille daemon: {reason}"),
@@ -134,6 +147,7 @@ impl Control {
         }
         seen.state = state;
         seen.reason = reason;
+        seen.forgotten = forgotten;
         drop(seen);
         // The clients that watch read it again at once.
         if changed {
@@ -154,6 +168,7 @@ impl Control {
             "state": seen.state,
             "since": seen.since,
             "reason": seen.reason,
+            "forgotten": seen.forgotten,
         })
     }
 
@@ -177,8 +192,13 @@ impl Control {
         }
         let seen = self.seen.lock().unwrap();
         Err(match &seen.reason {
-            Some(reason) => format!("the hub cannot be asked now: {reason}"),
-            None => "the hub cannot be asked now: this machine has no session to it".to_owned(),
+            Some(reason) => format!(
+                "The hub cannot be asked now: {}. Nothing was changed; try again once it answers.",
+                reason.trim_end_matches('.')
+            ),
+            None => "The hub cannot be asked now: this machine has no session to it yet. Nothing \
+                     was changed; try again in a moment."
+                .to_owned(),
         })
     }
 
@@ -197,18 +217,29 @@ impl Control {
         let mut watching = self.list.subscribe();
         tokio::time::timeout(ASK_WAIT, self.asker().await?.ask(Ask::Submit { change }))
             .await
-            .map_err(|_| format!("the hub did not answer in {} s", ASK_WAIT.as_secs()))?
+            .map_err(|_| {
+                format!(
+                    "The hub did not answer in {} s. Nothing was changed; try again once it \
+                     answers.",
+                    ASK_WAIT.as_secs()
+                )
+            })?
             .map_err(|error| error.to_string())?;
         let holds = |list: &MemberList| list.changes().iter().any(|change| change.hash() == hash);
         tokio::time::timeout(ASK_WAIT, watching.wait_for(holds))
             .await
             .map_err(|_| {
                 format!(
-                    "the hub withheld this change: it sent back no list holding it in {} s",
+                    "The hub did not confirm this change in {} s: it may be busy, or it refused \
+                     it. Nothing was changed; try again once the hub answers.",
                     ASK_WAIT.as_secs()
                 )
             })?
-            .map_err(|_| "the session to the hub ended".to_owned())?;
+            .map_err(|_| {
+                "The connection to the hub closed before it confirmed this change. Nothing was \
+                 changed; try again."
+                    .to_owned()
+            })?;
         self.members()
     }
 
@@ -242,7 +273,7 @@ impl Control {
             &code,
             proposed,
             &self.key,
-            &crate::link::hello(),
+            &Hello::ours(crate::VERSION),
             &Tls::System,
         )
         .await
@@ -576,7 +607,9 @@ pub async fn run(
             let authority = HubUrl::parse(&device.url)
                 .map(|url| url.host_shown())
                 .unwrap_or_else(|_| device.url.clone());
-            let hello = crate::link::hello();
+            // This build's own: a test's hello (`FLOTTILLE_TEST_LINK_HELLO`) is its links' only, so
+            // that a machine of another protocol still reaches the hub, which its links go through.
+            let hello = Hello::ours(crate::VERSION);
             let connected = tokio::select! {
                 connected = device.connect(&control.key, &hello, &Tls::System) => connected,
                 _ = stopped(&mut stopping) => return,
@@ -599,7 +632,11 @@ pub async fn run(
                     }
                 }
                 Err(ControlError::Reset) => {
-                    control.set("reset", Some(ListError::Reset.to_string()));
+                    control.forget("reset", ListError::Reset.to_string());
+                    None
+                }
+                Err(error @ ControlError::NotMember { .. }) => {
+                    control.forget("refused", error.to_string());
                     None
                 }
                 Err(error @ (ControlError::AnotherKey { .. } | ControlError::Refused { .. })) => {
@@ -613,6 +650,8 @@ pub async fn run(
                 Err(ControlError::Unreachable { why, .. } | ControlError::Lost { why, .. }) => {
                     Some(why)
                 }
+                // Said of a change, never of a connection.
+                Err(error @ ControlError::Unconfirmed) => Some(error.to_string()),
             };
             // No list from the hub at start: the links go on with the one kept. After a session
             // was lost, they wait for the bound.
@@ -682,8 +721,7 @@ enum Ended {
     Lost(String),
 }
 
-/// One session, until it ends: the lists and addresses the hub sends, checked and kept; this
-/// machine's addresses told whenever they change.
+/// One session, until it ends: the lists the hub sends, checked and kept.
 async fn keep_session(
     control: &Control,
     remote: &Arc<Remote>,
@@ -691,8 +729,6 @@ async fn keep_session(
     mut session: Session,
     stopping: &mut tokio::sync::watch::Receiver<bool>,
 ) -> Ended {
-    let mut told: Option<Vec<String>> = None;
-    let mut addresses: HashMap<[u8; 32], Vec<String>> = HashMap::new();
     let mut members: Option<Members> = device.members().ok();
     let mut round = tokio::time::interval(ROUND);
     let asker = session.asker();
@@ -706,9 +742,8 @@ async fn keep_session(
         }
     }
     let _forget = Forget(control);
-    // The ask of this machine's addresses on its way, at most one: dropped with the session.
+    // The asks on their way: dropped with the session.
     let mut telling = tokio::task::JoinSet::new();
-    let mut said: Option<String> = None;
     // The links to the other machines go through this session while it lasts.
     if let Some(port) = session.relay() {
         remote.through(port);
@@ -723,7 +758,6 @@ async fn keep_session(
             system: std::env::consts::OS.to_owned(),
         });
         let _ = tokio::time::timeout(ASK_WAIT, asked).await;
-        (None, Ok(()))
     });
     loop {
         tokio::select! {
@@ -753,12 +787,6 @@ async fn keep_session(
                             continue;
                         }
                     },
-                    Pushed::Addresses(given) => {
-                        addresses = given
-                            .into_iter()
-                            .map(|told| (*told.key.as_bytes(), told.addresses))
-                            .collect();
-                    }
                     // Read by the notifications, later (`docs/remote.md`, "Notifications").
                     Pushed::Presence(_) => continue,
                     Pushed::Facts(facts) => {
@@ -767,7 +795,7 @@ async fn keep_session(
                     }
                 }
                 if let Some(members) = &members {
-                    trust(remote, &control.key.public(), members, &addresses);
+                    trust(remote, &control.key.public(), members);
                     remote.heard_hub();
                 }
             }
@@ -778,49 +806,16 @@ async fn keep_session(
                     // Ended as lost: the links wait for the next session's list.
                     return Ended::Lost("this machine was asleep".to_owned());
                 }
-                let now = remote.told_addresses();
-                if telling.is_empty() && told.as_ref() != Some(&now) {
-                    // Answered later: the session goes on meanwhile.
-                    let asker = asker.clone();
-                    telling.spawn(async move {
-                        let asked = asker.ask(Ask::Addresses { addresses: now.clone() });
-                        let answer = match tokio::time::timeout(ASK_WAIT, asked).await {
-                            Ok(answer) => answer.map_err(|error| error.to_string()),
-                            Err(_) => Err(format!("it did not answer in {} s", ASK_WAIT.as_secs())),
-                        };
-                        (Some(now), answer)
-                    });
-                }
             }
-            Some(Ok((sent, answer))) = telling.join_next() => match answer {
-                // Told only once the hub took them: a refusal is asked again at the next round.
-                Ok(()) => {
-                    if let Some(sent) = sent {
-                        told = Some(sent);
-                        said = None;
-                    }
-                }
-                Err(error) => {
-                    if said.as_ref() != Some(&error) {
-                        eprintln!("flottille daemon: the hub was not told this machine's addresses: {error}");
-                    }
-                    said = Some(error);
-                }
-            },
+            Some(_) = telling.join_next() => {}
             _ = control.again.notified() => return Ended::Again,
             _ = stopped(stopping) => return Ended::Stopping,
         }
     }
 }
 
-/// The machines the link trusts: every member's machine but this one, named as the member, with
-/// the addresses the hub told for it (those kept before, when the hub told none in this session).
-fn trust(
-    remote: &Remote,
-    own: &PublicKey,
-    members: &Members,
-    addresses: &HashMap<[u8; 32], Vec<String>>,
-) {
+/// The machines the link trusts: every member's machine but this one, named as the member.
+fn trust(remote: &Remote, own: &PublicKey, members: &Members) {
     if let Some(this) = members.by_machine(own) {
         remote.name_as(&this.name);
     }
@@ -829,13 +824,7 @@ fn trust(
         .iter()
         .filter_map(|member| {
             let machine = member.machine?;
-            (machine != *own).then(|| {
-                (
-                    member.name.clone(),
-                    machine,
-                    addresses.get(machine.as_bytes()).cloned(),
-                )
-            })
+            (machine != *own).then(|| (member.name.clone(), machine))
         })
         .collect();
     remote.trust_machines(machines);

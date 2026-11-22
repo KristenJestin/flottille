@@ -1392,13 +1392,11 @@ GPUI Fast with gpui-kit, English only (no translation layer). Screens of the mil
   a hub and link to your other machines.")
   and **Turn on**; on, a **Remote** switch ("Turn it off and the links close; this machine stays paired with
   your hub."), whose off asks once, in the one confirmation dialog. The notice folds away and the
-  settings unfold, and back. The window offers no choice of address to listen on, on purpose: the
-  traffic between devices is to go through the hub, so a device needs none (`remote.md`, "Defaults
-  taken"); the daemon's `listen` stays, set from the command line. While this machine is in no hub,
+  settings unfold, and back. Nothing listens and no address is given: every link goes through the
+  hub (`remote.md`, decision 3). While this machine is in no hub,
   **Connect to your hub** opens its dialog (the code `flottille-hub pair` printed and the card this
   machine proposes, the refusal under its fields, a toast when it is done); a device is added on
-  the hub's host, never from a device. Then the hub's state, **Devices** (Rename is a dialog) and
-  **Addresses** (**New address** is a dialog);
+  the hub's host, never from a device. Then the hub's state and **Devices** (Rename is a dialog);
 - a session page: the root's conversation, live (messages, the user's own as selectable as the agent's, thoughts collapsed (their head says how long the thinking lasted, from the event before it
   to the one after it, and no time when it lasted less than a tenth of a second), tool calls with
   their result (a result cut at the source says so on its step, with the number of characters left out), the children launched, a session started for the user as one line, `started the session "<title>"` (it is no sub-agent), reports and an edit's diff, each folded to one line until a click unfolds it), one compact line for each command a

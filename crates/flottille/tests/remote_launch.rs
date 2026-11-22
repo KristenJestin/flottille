@@ -6,6 +6,7 @@
 //! test gate (`FLOTTILLE_TEST_TRAVEL`): code travels only with a launch.
 
 use crate::common;
+use crate::remote;
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -15,8 +16,7 @@ use common::User;
 use common::mcp::{Answer, Mcp, server_of};
 use flottille_hub::{Hub, Served, SystemClock};
 use flottille_link::{
-    Endpoint, Git, GitOffer, GitPlace, Hello, LaunchAsk, Link, MachineKey, MachineMessage, Message,
-    PublicKey, Traffic,
+    Git, GitOffer, GitPlace, Hello, LaunchAsk, Link, MachineMessage, Message, PublicKey, Traffic,
 };
 use serde_json::{Value, json};
 
@@ -95,11 +95,11 @@ pub(crate) fn sign_in(user: &User) {
 }
 
 impl Machine {
-    /// `user`'s machine, with remote on, its link on loopback.
+    /// `user`'s machine, with remote on: its links go through the hub.
     pub(crate) fn of(user: User) -> Machine {
         std::fs::write(
             user.path("config/flottille/daemon.toml"),
-            "[remote]\non = true\nlisten = \"127.0.0.1:0\"\n",
+            "[remote]\non = true\n",
         )
         .unwrap();
         user.status();
@@ -114,21 +114,16 @@ impl Machine {
         serde_json::from_value(self.this()["key"].clone()).unwrap()
     }
 
-    pub(crate) fn addresses(&self) -> Vec<SocketAddr> {
-        self.this()["addresses"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|address| address["address"].as_str().unwrap().parse().unwrap())
-            .collect()
-    }
-
-    /// The key this machine's daemon holds, as a test that stands in for it reads it; its
-    /// daemon stopped, so that the other machines take a link of that key again.
-    pub(crate) fn stand_in(&self) -> MachineKey {
+    /// The key folder of this machine's daemon, as a test that stands in for it reads it; its
+    /// daemon stopped, so that the other machines take a link of that key again, and the hub a
+    /// session of it.
+    pub(crate) fn stand_in(&self) -> PathBuf {
         let stopped = self.user.run(&["daemon", "stop"]);
         assert!(stopped.status.success(), "{}", self.log());
-        MachineKey::load_or_make(&self.user.path("state/flottille/remote")).unwrap()
+        // The others let its link go at their next round, once the hub says it is gone: the
+        // test's link of its key is not refused for that one.
+        std::thread::sleep(Duration::from_secs(2));
+        self.user.path("state/flottille/remote")
     }
 
     pub(crate) fn seen(&self, name: &str) -> Value {
@@ -536,7 +531,7 @@ fn the_agent_has_no_tool_or_network_to_move_code() {
     // `machine` is the name of one of the user's machines, never an address.
     let answer = launched(
         &mcp,
-        json!({"kind": "child", "machine": server.addresses()[0].to_string(),
+        json!({"kind": "child", "machine": "127.0.0.1:7447",
             "title": "Elsewhere", "brief": "Go."}),
     );
     let text = refused(&answer);
@@ -780,21 +775,13 @@ fn full_needs_the_user_s_signed_switch_otherwise_auto() {
     assert_eq!(titled(&server, "Again")["gate_mode"], "auto");
 }
 
-/// A link to `to` dialled with `key`, as the daemon holding that key would dial it.
-pub(crate) async fn dial(
-    key: &MachineKey,
-    to: &Machine,
-    to_key: PublicKey,
-    addresses: &[SocketAddr],
-) -> Link {
-    let endpoint = Endpoint::dialler(key).unwrap();
+/// A link to `to` dialled through the hub with the key in the key folder `key`, as the daemon
+/// holding that key would dial it.
+pub(crate) async fn dial(key: &Path, to: &Machine, to_key: PublicKey) -> Link {
+    let endpoint = remote::endpoint_of(key).await;
     let deadline = Instant::now() + WAIT;
     loop {
-        let hello = Hello::ours(env!("CARGO_PKG_VERSION"));
-        match endpoint
-            .connect(to_key, addresses, Traffic::Machine, &hello, "to")
-            .await
-        {
+        match remote::dial(&endpoint, to_key, Traffic::Machine, "to").await {
             Ok(link) => return link,
             Err(error) => assert!(Instant::now() < deadline, "{error}\n{}", to.log()),
         }
@@ -804,17 +791,17 @@ pub(crate) async fn dial(
 
 /// What `machine` answers each of `messages`, sent in turn on one link dialled with `key`.
 pub(crate) fn sent_with(
-    key: &MachineKey,
+    key: &Path,
     machine: &Machine,
     messages: Vec<MachineMessage>,
 ) -> Vec<Result<Value, String>> {
-    let (to_key, addresses) = (machine.key(), machine.addresses());
+    let to_key = machine.key();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap();
     runtime.block_on(async {
-        let link = dial(key, machine, to_key, &addresses).await;
+        let link = dial(key, machine, to_key).await;
         let mut answers = Vec::new();
         for message in messages {
             answers.push(
@@ -1311,17 +1298,17 @@ fn a_machine_leaves_a_bounded_number_of_launches_held_for_the_user() {
 
 /// What `machine` answers each of `messages`, all sent at once on one link dialled with `key`.
 fn sent_together(
-    key: &MachineKey,
+    key: &Path,
     machine: &Machine,
     messages: Vec<MachineMessage>,
 ) -> Vec<Result<Value, String>> {
-    let (to_key, addresses) = (machine.key(), machine.addresses());
+    let to_key = machine.key();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .unwrap();
     runtime.block_on(async {
-        let link = dial(key, machine, to_key, &addresses).await;
+        let link = dial(key, machine, to_key).await;
         let sending: Vec<_> = messages
             .into_iter()
             .map(|message| {

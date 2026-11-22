@@ -6,7 +6,10 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use flottille_link::{Members, PublicKey, Role};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use flottille_link::{Members, PeerState, PublicKey, Role};
+use flottille_protocol::words::{self, THE_CONVERSATION};
 use serde_json::Value;
 
 /// What the app draws, whole, with every batch.
@@ -20,6 +23,8 @@ pub struct ViewState {
     /// unreachable since 22:14`).
     pub hub: String,
     pub machines: Vec<MachineView>,
+    /// The members of the user's list, in the order they were added: this device among them.
+    pub members: Vec<MemberView>,
     /// The sessions of every machine, by project: a project of the same name on two machines is
     /// one group. Projects by name, so that groups never move; sessions by last exchange.
     pub projects: Vec<ProjectView>,
@@ -37,10 +42,32 @@ pub struct MachineView {
     pub name: String,
     pub role: String,
     pub online: bool,
-    /// Why it is not, when it is not: the link's own sentence.
+    /// `online`, `offline` or `needs an update`: a machine that needs an update is never said
+    /// offline (`docs/remote.md`, "The version").
+    pub state: String,
+    /// When it came to be in that state, in milliseconds since the Unix epoch.
+    pub since: u64,
+    /// Why it is not online, when it is not: the link's own sentence (the hub, which side to
+    /// update).
     pub why: String,
-    /// Whether its link goes through the hub, not to an address (#1167).
+    /// Whether its link goes through the hub (#1167): every link does since 2026-11-21, so it is
+    /// whether it is online; kept for the app.
     pub through_hub: bool,
+}
+
+/// A member of the user's list.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct MemberView {
+    pub name: String,
+    pub role: String,
+    /// `desktop`, `laptop`, `server`, `phone`, `tablet`; empty for a member added before icons.
+    pub icon: String,
+    /// One of the eight colours; empty for a member added before colours.
+    pub colour: String,
+    /// Whether this member is this device.
+    pub you: bool,
+    /// Who added it: `the hub`, or a member's name; empty for the root.
+    pub added_by: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
@@ -61,29 +88,81 @@ pub struct SessionView {
     pub last: u64,
 }
 
-/// The conversation of the session the app follows (`Core::follow`).
+/// The conversation of the session the app follows (`Core::follow`): its latest page of events,
+/// live, with what the page needs to draw its controls.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct ConversationView {
     pub machine: String,
     pub agent: String,
+    pub title: String,
+    /// The session's mode, `ask`, `auto` or `full`; empty before the daemon said it.
+    pub mode: String,
+    /// The agent's state as its events say it (`working`, `idle`, `ended`…).
+    pub state: String,
+    /// Whether a turn runs: what Stop interrupts.
+    pub working: bool,
+    /// Whether the agent is a child: it is written to by its parent only, its page reads.
+    pub child: bool,
+    pub ended: bool,
+    /// Whether older events remain on the machine than the ones held (`Core::older`).
+    pub more: bool,
     pub entries: Vec<Entry>,
+    /// The agents of the session's tree under its root, read only.
+    pub children: Vec<ChildView>,
 }
 
 /// One entry of a conversation: `user`, `agent`, `thought` or `tool`, and its text.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct Entry {
+    /// The number of the event the entry starts at: stable, and what orders the page.
+    pub seq: u64,
     pub kind: String,
     pub text: String,
+    /// The names of the pictures that went with a message of the user (`Core::image` reads each).
+    pub images: Vec<String>,
 }
 
-/// A request of an agent's that waits for the user's Allow or Deny.
+/// An agent of the session's tree, as `agent.tree` gives it.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct ChildView {
+    pub agent: String,
+    pub title: String,
+    /// What it does, in the daemon's words (`running \`cargo test\` for 12 min`).
+    pub doing: String,
+    pub role: String,
+    pub depth: u32,
+}
+
+/// A request of an agent's that waits for the user's Allow or Deny. What the card says is the
+/// window's, word for word (`flottille_protocol::words`): the daemon's reasons and the sentences of
+/// the agents that forwarded it, who asked, what the judge said, and why a base request always asks.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct RequestView {
     pub machine: String,
     pub number: u64,
     pub agent: String,
     pub tool: String,
-    pub reasons: Vec<String>,
+    /// `call`, or `action`: a change of the project the agent asks for. An `action` of the tool
+    /// `connections` is a proposal to write a connection, which a card never allows: the window
+    /// opens a dialog of what it would write.
+    pub kind: String,
+    /// The call on one line as the window shows it: a command's line, else the tool and its
+    /// arguments, the daemon's own text.
+    pub call: String,
+    /// A base request: it always asks, in every mode.
+    pub base: bool,
+    /// What the user allows, in the daemon's words, for a request that changes a project.
+    pub says: Vec<String>,
+    /// What the Auto judge said, when it was judged; else empty.
+    pub judgement: String,
+    /// Every reason it was held and every sentence of the agents that forwarded it, each a
+    /// sentence of its own.
+    pub why: String,
+    /// Why a base request always asks (the window's sentence, which names a first message to
+    /// another session apart); empty when it is not a base request.
+    pub always: String,
+    /// Who asked and who forwarded it, with its number: `asked by the conversation · #4`.
+    pub source: String,
 }
 
 /// A question of an agent's that waits for the user's answer.
@@ -93,7 +172,25 @@ pub struct AskView {
     pub agent: String,
     /// The number of its `agent.asked` event, which `agent.answer` names.
     pub asked: u64,
+    /// The ask as one text.
     pub question: String,
+    /// Each question with its options, as the daemon sent them: one question without options when
+    /// the ask came without a list.
+    pub questions: Vec<AskQuestion>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct AskQuestion {
+    pub question: String,
+    pub options: Vec<AskOption>,
+    /// Whether several options may be chosen.
+    pub multiple: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct AskOption {
+    pub label: String,
+    pub description: String,
 }
 
 /// What the view is computed from.
@@ -104,14 +201,43 @@ pub(crate) struct View {
     hub: String,
     /// The runners, in the list's order, with whether each is linked.
     machines: Vec<MachineView>,
+    members: Vec<MemberView>,
     /// The sessions by machine and agent.
     sessions: BTreeMap<(String, String), Session>,
-    requests: BTreeMap<(String, u64), RequestView>,
+    requests: BTreeMap<(String, u64), Held>,
     asks: BTreeMap<(String, u64), AskView>,
     /// The followed session and its events by number: an event seen twice (loaded, then live) is
     /// one.
-    followed: Option<(String, String, BTreeMap<u64, Value>)>,
+    followed: Option<Followed>,
     said: Vec<String>,
+}
+
+/// The session whose page is on screen.
+struct Followed {
+    machine: String,
+    agent: String,
+    events: BTreeMap<u64, Value>,
+    /// The agent as `agent.show` gave it: its title, its mode, whether it has a parent.
+    info: Value,
+    state: String,
+    mode: String,
+    more: bool,
+    children: Vec<ChildView>,
+}
+
+/// A request as the daemon gave it. Who asked and who forwarded it are named when the view is
+/// computed: the names are the followed page's tree.
+struct Held {
+    number: u64,
+    agent: String,
+    tool: String,
+    kind: String,
+    call: String,
+    base: bool,
+    says: Vec<String>,
+    judgement: Option<(String, String, String)>,
+    reasons: Vec<String>,
+    forwards: Vec<(String, String)>,
 }
 
 struct Session {
@@ -143,6 +269,33 @@ impl View {
                 self.name.clear();
             }
         }
+        self.members = members
+            .members()
+            .iter()
+            .map(|member| MemberView {
+                name: member.name.clone(),
+                role: member.role.word().to_owned(),
+                icon: member
+                    .icon
+                    .map(|icon| icon.word().to_owned())
+                    .unwrap_or_default(),
+                colour: member
+                    .colour
+                    .map(|colour| colour.word().to_owned())
+                    .unwrap_or_default(),
+                you: member.key == *own,
+                added_by: if member.added_by == members.hub() {
+                    "the hub".to_owned()
+                } else if member.added_by == member.key {
+                    String::new()
+                } else {
+                    members
+                        .get(&member.added_by)
+                        .map(|adder| adder.name.clone())
+                        .unwrap_or_default()
+                },
+            })
+            .collect();
         let before: HashMap<String, MachineView> = self
             .machines
             .drain(..)
@@ -158,6 +311,8 @@ impl View {
                     name: member.name.clone(),
                     role: member.role.word().to_owned(),
                     online: false,
+                    state: PeerState::Offline.to_string(),
+                    since: now_millis(),
                     why: "not linked yet".to_owned(),
                     through_hub: false,
                 },
@@ -177,21 +332,31 @@ impl View {
         self.sessions.retain(|(of, _), _| of != machine);
         self.requests.retain(|(of, _), _| of != machine);
         self.asks.retain(|(of, _), _| of != machine);
-        if self
-            .followed
-            .as_ref()
-            .is_some_and(|(of, _, _)| of == machine)
-        {
+        if self.followed.as_ref().is_some_and(|f| f.machine == machine) {
             self.followed = None;
         }
     }
 
-    pub(crate) fn online(&mut self, machine: &str, online: bool, through_hub: bool, why: &str) {
+    /// The link to `machine` is in `state`, for `why`. `since` moves only when the state does: a
+    /// machine that fails again is offline since the first time.
+    pub(crate) fn online(&mut self, machine: &str, state: PeerState, through_hub: bool, why: &str) {
         if let Some(view) = self.machines.iter_mut().find(|view| view.name == machine) {
-            view.online = online;
-            view.through_hub = online && through_hub;
+            let state = state.to_string();
+            if view.state != state {
+                view.since = now_millis();
+                view.state = state;
+            }
+            view.online = view.state == PeerState::Online.to_string();
+            view.through_hub = view.online && through_hub;
             why.clone_into(&mut view.why);
         }
+    }
+
+    /// This phone removed itself from the list: the hub does not send the list to a device it just
+    /// removed, so nothing of the user's is left to show, and the user is told why.
+    pub(crate) fn removed(&mut self) {
+        *self = View::default();
+        self.say("this phone was removed from the user's hub: pair it again".to_owned());
     }
 
     pub(crate) fn hub(&mut self, hub: &str) {
@@ -237,23 +402,101 @@ impl View {
     /// Follows the session `agent` of `machine`: its conversation, from what `agent.show` gives
     /// and the events that come.
     pub(crate) fn follow(&mut self, machine: &str, agent: &str) {
-        self.followed = Some((machine.to_owned(), agent.to_owned(), BTreeMap::new()));
+        self.followed = Some(Followed {
+            machine: machine.to_owned(),
+            agent: agent.to_owned(),
+            events: BTreeMap::new(),
+            info: Value::Null,
+            state: String::new(),
+            mode: String::new(),
+            more: false,
+            children: Vec::new(),
+        });
     }
 
-    /// The events `agent.show` gave of the followed session.
-    pub(crate) fn shown(&mut self, machine: &str, agent: &str, events: &Value) {
-        for event in events["events"].as_array().into_iter().flatten() {
-            self.keep_followed(machine, agent, event);
+    /// The page is left: nothing of it is kept.
+    pub(crate) fn unfollow(&mut self) {
+        self.followed = None;
+    }
+
+    /// The number of the first event the followed page holds: where older ones end.
+    pub(crate) fn first_followed(&self, machine: &str, agent: &str) -> Option<u64> {
+        self.followed
+            .as_ref()
+            .filter(|f| f.machine == machine && f.agent == agent)
+            .and_then(|f| f.events.keys().next().copied())
+    }
+
+    /// A page of events `agent.show` gave of the followed session (the latest, or older ones).
+    pub(crate) fn shown(&mut self, machine: &str, agent: &str, shown: &Value) {
+        let Some(followed) = self
+            .followed
+            .as_mut()
+            .filter(|f| f.machine == machine && f.agent == agent)
+        else {
+            return;
+        };
+        for event in shown["events"].as_array().into_iter().flatten() {
+            if let Some(seq) = event["seq"].as_u64() {
+                followed.events.insert(seq, event.clone());
+            }
+        }
+        followed.more = shown["more"] == true;
+        if shown["agent"].is_object() {
+            followed.info = shown["agent"].clone();
+            followed.state = text(&followed.info["state"]);
+            followed.mode = text(&followed.info["gate_mode"]);
+        }
+    }
+
+    /// The tree of the followed session's root: its agents under it, read only, and the questions
+    /// its root asks the user and still waits for.
+    pub(crate) fn tree(&mut self, machine: &str, agent: &str, tree: &Value) {
+        let Some(followed) = self
+            .followed
+            .as_mut()
+            .filter(|f| f.machine == machine && f.agent == agent)
+        else {
+            return;
+        };
+        followed.children = tree["agents"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|entry| !entry["agent"]["parent"].is_null())
+            .map(|entry| ChildView {
+                agent: text(&entry["agent"]["id"]),
+                title: text(&entry["agent"]["title"]),
+                doing: text(&entry["doing"]),
+                role: text(&entry["agent"]["role"]),
+                depth: entry["agent"]["depth"].as_u64().unwrap_or(1) as u32,
+            })
+            .collect();
+        for entry in tree["agents"].as_array().into_iter().flatten() {
+            if !entry["agent"]["parent"].is_null() {
+                continue;
+            }
+            let root = text(&entry["agent"]["id"]);
+            self.asks
+                .retain(|(at, _), ask| at != machine || ask.agent != root);
+            for ask in entry["questions"].as_array().into_iter().flatten() {
+                if let Some(asked) = ask["seq"].as_u64() {
+                    self.asks.insert(
+                        (machine.to_owned(), asked),
+                        ask_view(machine, &root, asked, ask),
+                    );
+                }
+            }
         }
     }
 
     fn keep_followed(&mut self, machine: &str, agent: &str, event: &Value) {
-        if let Some((followed_machine, followed_agent, events)) = &mut self.followed
-            && followed_machine == machine
-            && followed_agent == agent
+        if let Some(followed) = &mut self.followed
+            && followed.machine == machine
+            && followed.agent == agent
             && let Some(seq) = event["seq"].as_u64()
         {
-            events.insert(seq, event.clone());
+            followed.events.insert(seq, event.clone());
         }
     }
 
@@ -294,12 +537,7 @@ impl View {
                 if let Some(asked) = event["seq"].as_u64() {
                     self.asks.insert(
                         (machine.to_owned(), asked),
-                        AskView {
-                            machine: machine.to_owned(),
-                            agent: agent.clone(),
-                            asked,
-                            question: text(&data["question"]),
-                        },
+                        ask_view(machine, &agent, asked, data),
                     );
                 }
             }
@@ -329,27 +567,121 @@ impl View {
                 state.clone_into(&mut session.state);
             }
         }
+        if let Some(followed) = &mut self.followed
+            && followed.machine == machine
+            && followed.agent == agent
+        {
+            if let Some(state) = state {
+                state.clone_into(&mut followed.state);
+            }
+            if name == "agent.gate_mode_changed" {
+                followed.mode = text(&data["mode"]);
+            }
+        }
     }
 
     fn requested(&mut self, machine: &str, request: &Value) {
         let Some(number) = request["number"].as_u64() else {
             return;
         };
+        let strings = |value: &Value| -> Vec<String> {
+            value.as_array().into_iter().flatten().map(text).collect()
+        };
+        let tool = text(&request["tool"]);
         self.requests.insert(
             (machine.to_owned(), number),
-            RequestView {
-                machine: machine.to_owned(),
+            Held {
                 number,
                 agent: text(&request["agent"]),
-                tool: text(&request["tool"]),
-                reasons: request["reasons"]
+                call: call_line(&tool, &request["call"]),
+                tool,
+                kind: match request["kind"].as_str() {
+                    Some(kind) if !kind.is_empty() => kind.to_owned(),
+                    _ => "call".to_owned(),
+                },
+                base: request["class"] == "base",
+                says: strings(&request["says"]),
+                judgement: request["judgement"].is_object().then(|| {
+                    let judgement = &request["judgement"];
+                    (
+                        text(&judgement["by"]),
+                        text(&judgement["verdict"]),
+                        text(&judgement["reason"]),
+                    )
+                }),
+                reasons: strings(&request["reasons"]),
+                forwards: request["forwards"]
                     .as_array()
                     .into_iter()
                     .flatten()
-                    .map(text)
+                    .map(|forward| (text(&forward["by"]), text(&forward["why"])))
                     .collect(),
             },
         );
+    }
+
+    /// How a request's card names an agent, as the window does: the followed session is the
+    /// conversation, a child of its tree is its title, any other `agent <id>`.
+    fn said_name(&self, machine: &str, id: &str) -> String {
+        match &self.followed {
+            Some(followed) if followed.machine == machine => {
+                if followed.agent == id {
+                    return THE_CONVERSATION.to_owned();
+                }
+                if let Some(child) = followed.children.iter().find(|child| child.agent == id)
+                    && !child.title.trim().is_empty()
+                {
+                    return child.title.clone();
+                }
+            }
+            _ => {}
+        }
+        format!("agent {id}")
+    }
+
+    /// The request as the app draws it.
+    fn request_view(&self, machine: &str, held: &Held) -> RequestView {
+        let forwards: Vec<String> = held
+            .forwards
+            .iter()
+            .map(|(by, said)| words::forwarded(&self.said_name(machine, by), said))
+            .collect();
+        let why = words::sentences(
+            held.reasons
+                .iter()
+                .map(String::as_str)
+                .chain(forwards.iter().map(String::as_str)),
+        );
+        let forwarders: Vec<String> = held
+            .forwards
+            .iter()
+            .map(|(by, _)| self.said_name(machine, by))
+            .collect();
+        RequestView {
+            machine: machine.to_owned(),
+            number: held.number,
+            agent: held.agent.clone(),
+            tool: held.tool.clone(),
+            kind: held.kind.clone(),
+            call: held.call.clone(),
+            base: held.base,
+            says: held.says.clone(),
+            judgement: held
+                .judgement
+                .as_ref()
+                .map(|(by, verdict, reason)| words::judged(by, verdict, reason))
+                .unwrap_or_default(),
+            always: match held.base {
+                true => words::always_says(&why).to_owned(),
+                false => String::new(),
+            },
+            source: words::source(
+                held.number,
+                &self.said_name(machine, &held.agent),
+                forwarders.iter().map(String::as_str),
+            ),
+            why,
+        }
     }
 
     /// The state the app draws.
@@ -382,16 +714,35 @@ impl View {
             name: self.name.clone(),
             hub: self.hub.clone(),
             machines: self.machines.clone(),
+            members: self.members.clone(),
             projects,
-            conversation: self
-                .followed
-                .as_ref()
-                .map(|(machine, agent, events)| ConversationView {
-                    machine: machine.clone(),
-                    agent: agent.clone(),
-                    entries: entries(events.values()),
-                }),
-            requests: self.requests.values().cloned().collect(),
+            conversation: self.followed.as_ref().map(|followed| {
+                let session = self
+                    .sessions
+                    .get(&(followed.machine.clone(), followed.agent.clone()));
+                let title = session
+                    .map(|session| session.title.clone())
+                    .filter(|title| !title.is_empty())
+                    .unwrap_or_else(|| text(&followed.info["title"]));
+                ConversationView {
+                    machine: followed.machine.clone(),
+                    agent: followed.agent.clone(),
+                    title,
+                    mode: followed.mode.clone(),
+                    working: followed.state == "working",
+                    child: !followed.info["parent"].is_null(),
+                    ended: matches!(followed.state.as_str(), "ended" | "failed"),
+                    state: followed.state.clone(),
+                    more: followed.more,
+                    entries: entries(followed.events.values()),
+                    children: followed.children.clone(),
+                }
+            }),
+            requests: self
+                .requests
+                .iter()
+                .map(|((machine, _), held)| self.request_view(machine, held))
+                .collect(),
             asks: self.asks.values().cloned().collect(),
             said: self.said.clone(),
         }
@@ -424,13 +775,86 @@ fn entries<'a>(events: impl Iterator<Item = &'a Value>) -> Vec<Entry> {
         match entries.last_mut() {
             Some(last) if goes_on => last.text.push_str(&text),
             _ => entries.push(Entry {
+                seq: event["seq"].as_u64().unwrap_or_default(),
                 kind: kind.to_owned(),
                 text,
+                images: data["images"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(self::text)
+                    .collect(),
             }),
         }
         message = if piece { id } else { None };
     }
     entries
+}
+
+/// A question of the agent `agent`, from an `agent.asked` event or a question of `agent.tree`:
+/// each question with its options, or the ask's own text as the one question when it came
+/// without a list.
+fn ask_view(machine: &str, agent: &str, asked: u64, ask: &Value) -> AskView {
+    let question = text(&ask["question"]);
+    let mut questions: Vec<AskQuestion> = ask["questions"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|each| AskQuestion {
+            question: text(&each["question"]),
+            options: each["options"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|option| AskOption {
+                    label: text(&option["label"]),
+                    description: text(&option["description"]),
+                })
+                .collect(),
+            multiple: each["multiple"] == true,
+        })
+        .collect();
+    if questions.is_empty() {
+        questions.push(AskQuestion {
+            question: question.clone(),
+            options: Vec::new(),
+            multiple: false,
+        });
+    }
+    AskView {
+        machine: machine.to_owned(),
+        agent: agent.to_owned(),
+        asked,
+        question,
+        questions,
+    }
+}
+
+/// The prefix of the tools a connection offers (`conn_<name>`).
+const CONNECTION: &str = "conn_";
+
+/// The call of a request on one line, as the window shows it: a command's line, else the tool and
+/// its arguments. The daemon's own words, masked and cut by it: nothing is summarised here.
+fn call_line(tool: &str, call: &Value) -> String {
+    match (tool, call["line"].as_str()) {
+        ("run", Some(line)) => line.to_owned(),
+        (tool, _) if tool.starts_with(CONNECTION) => {
+            let name = &tool[CONNECTION.len()..];
+            let action = call["action"].as_str().unwrap_or("?");
+            match &call["arguments"] {
+                Value::Null => format!("{name} {action}"),
+                arguments => format!("{name} {action} {arguments}"),
+            }
+        }
+        (tool, _) => format!("{tool} {call}"),
+    }
+}
+
+fn now_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|since| since.as_millis() as u64)
+        .unwrap_or_default()
 }
 
 fn text(value: &Value) -> String {

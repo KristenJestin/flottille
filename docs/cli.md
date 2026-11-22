@@ -25,6 +25,11 @@ and an agent running outside Flottille drives it through [`flottille mcp`](#the-
 - **The program answers to `flottille` and to `flot`** (see [The `flot` name](#the-flot-name)).
   The examples below write `flottille`.
 - The examples below use invented projects and paths.
+- **Each command has its place in the window**, except the few a script alone has a use for
+  (`daemon`, `watch`, `agent run`, `vault provide`, `window`, `bridge`, `read-page`, `mcp`): the
+  screen, dialog or menu entry that calls the same daemon method. The table is
+  `crates/flottille/tests/window_parity.rs`, and the test `every_cli_command_has_its_place_in_the_window`
+  refuses a command heading of this file that is in neither list.
 
 ## The `flot` name
 
@@ -137,6 +142,9 @@ ok   gh: 2.60.0 (/usr/bin/gh), signed in to github.com
 warn acli is not on PATH, and example.atlassian.net (shop: tracker) needs it: install it from https://developer.atlassian.com/cloud/acli/guides/install-acli/; the rest of Flottille works without it
 warn claude is 2.1.300, and this Flottille was checked against 2.1.295: its stream-json mode may have changed
 ```
+
+The window's **Settings › General › Check Flottille** shows the same checks (`provider.list`, `daemon.status`, `project.programs`), with *Check again*, and *Turn on* for a provider that is off.
+
 
 ### `flottille provider list [--json]`
 
@@ -270,45 +278,43 @@ $ flottille update --stage
 ### `flottille changes [--since <version>] [--json]`
 
 What changed since the version you last ran, the list the window's **What's new** page shows
-(`docs/releases.md`, "What's new"): every change between that version and this one, from the
-channel's release notes, grouped as the changelog groups them (breaking changes, features, fixes,
-performance, other changes), then by scope, each change once and with its pull request's number.
-`--since <version>` counts from that version instead, reading the notes now whatever the check for
-updates says (the daemon makes no request of its own with the check off). When the notes of the
-version last run were not read yet (a build installed by hand reads them at its first start), the
-command reads them. `--json` prints what `whatsnew.show` answers (`docs/protocol.md`). When
-nothing is new (the first version run, the same one again), it says so.
+(`docs/releases.md`, "What's new"): what you can do now, in a sentence each, as the release notes
+say it, grouped by area (the **Highlights** of a release when it has some, then Remote, Window,
+Agents, Tools, Projects, Other, the fixes under **Fixed**), each note once and with its pull
+request's number. The raw list of subjects, which the window keeps in a fold, is `--json`'s
+(`all`). `--since <version>` counts from that version instead, reading the notes now whatever the
+check for updates says (the daemon makes no request of its own with the check off). When the notes
+of the version last run were not read yet (a build installed by hand reads them at its first
+start), the command reads them. `--json` prints what `whatsnew.show` answers (`docs/protocol.md`).
+When nothing is new (the first version run, the same one again), it says so.
 
 ```
 $ flottille changes
 What's new since 0.4.0-beta.103 (now 0.4.0-beta.105)
 
-Features
-  cli
-    - changes prints what is new (#1120)
-  gui
-    - a mark at the sidebar's foot says what is new (#1120)
+Window
+  - See what is new from the sidebar. (#1120)
 
-Fixes
-  gui
-    - a link opens (#1103)
+Other
+  - Read what is new from the command line. (#1120)
+
+Fixed
+  - A link opens. (#1103)
 $ flottille changes --since 0.4.0-beta.104
 ```
 
-### `flottille remote on [--listen <address>|tailnet|nowhere] [--json]`
+### `flottille remote on [--json]`
 
 Remote is off until it is turned on (`docs/remote.md`, "Identity and keys"): `remote on` turns
-it on, `remote off` closes the links and keeps this machine paired with its hub, and `remote listen` says where this
-machine is reached, as Settings, Machines does. `--listen` and `listen` take an address and its port
-(7447 when it has none), `tailnet` (this machine's first Tailscale or WireGuard address) or `nowhere`
-(the default: it dials the others, nobody dials it). The daemon writes `daemon.toml` itself, keeping
-every other key and comment, and takes the change at once, with no restart; while an agent runs,
-a new address waits for the next start, and the command says so. `--json` prints what
-`remote.settings` answers (`protocol.md`, "The remote methods"). `remote.configure`.
+it on, and `remote off` closes the links and keeps this machine paired with its hub, as Settings,
+Machines does. Every link goes through the hub: nothing listens, and no address is given. The
+daemon writes `daemon.toml` itself, keeping every other key and comment, and takes the change at
+once, with no restart. `--json` prints what `remote.settings` answers (`protocol.md`, "The remote
+methods"). `remote.configure`.
 
 ```
-$ flottille remote on --listen tailnet
-Remote is on. This machine is reached at 100.64.0.7:7447.
+$ flottille remote on
+Remote is on: its links go through the hub.
 $ flottille remote off
 Remote is off: the links are closed, this machine stays paired with its hub.
 ```
@@ -316,10 +322,6 @@ Remote is off: the links are closed, this machine stays paired with its hub.
 ### `flottille remote off [--json]`
 
 As `remote on` above: closes the links and keeps this machine paired with its hub.
-
-### `flottille remote listen <address> [--json]`
-
-As `remote on` above: says where this machine is reached, with the same addresses as `--listen`.
 
 ### `flottille remote pair [--name <name>] [--role runner|controller|viewer] [--icon <icon>] [--colour <colour>] [--replace] [--json]`
 
@@ -387,31 +389,6 @@ session's device key. A role is changed on the hub's host only (`flottille-hub r
 Removes a member: a change signed by this session's device key. Every machine that hears it cuts
 its links to the removed member's machine at once; a machine that was off hears it from the hub
 before it links to anything. The device comes back only paired again on the hub. `remote.change`.
-
-### `flottille remote address list [--json]`
-
-With remote on (`docs/remote.md`, "Identity and keys"), the addresses another machine reaches this
-one at: the one its link listens on, `found` (its interfaces' when it listens on all of them; none
-until `[remote] listen` is set), and those declared by hand, `declared`. They serve the direct path
-only, unused by default: links go through the hub (`docs/remote.md`, "The transport").
-`remote.machines` (`docs/protocol.md`).
-
-```
-$ flottille remote address list
-192.168.1.20:7447  found
-100.64.0.7:7447  declared
-```
-
-### `flottille remote address add <address> [--json]`
-
-Declares an address of this machine: a VPN address, a DNS name, a forwarded port, with its port
-when it is not the link's own (`100.64.0.7`, `server.example.net:7447`). It is told at once to the
-machines linked to this one. `remote.address.add`.
-
-### `flottille remote address remove <address> [--json]`
-
-Removes an address declared by hand, and tells the machines linked to this one.
-`remote.address.remove`.
 
 ## Tunnels
 

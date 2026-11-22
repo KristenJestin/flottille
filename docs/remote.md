@@ -78,8 +78,7 @@ window, the command line, the tools and the docs.
 1. **Generic, and no network channel of its own.** No dependency on Tailscale, on one network or
    on a service of a third party. Identity and the link are Flottille's own; the network under
    them is the user's. Whether they have a LAN, a VPN, Tailscale, a VPS or a public address is not
-   Flottille's concern: the one thing it asks is that two devices can reach each other. A tailnet
-   address is one more address, told by the hub or given by the user like a LAN or public one.
+   Flottille's concern: the one thing it asks is that every device can reach the user's hub.
 2. **A hub, the user's own** (replaced on 2026-11-20; it said "no relay"). One `flottille-hub` per
    user, self-hosted: the members, pair mode, the presence, the signed member list, and
    **the links between the devices, which go through it**, over the connection every device
@@ -89,11 +88,12 @@ window, the command line, the tools and the docs.
    traversal"). The data between two devices goes over a link, encrypted and authenticated by
    their keys; its packets travel in the two devices' control sessions to the hub, which hands each
    to the device whose key it names and can neither read nor change it. A device needs no address,
-   no port and no `listen`: only the hub is reached. Flottille does no NAT traversal, no hole
-   punching, no port mapping and runs no address discovery service. The direct link (`listen`, a
-   dial to an address) stays in the code, unused by default, until the maintainer decides whether
-   to keep it. **No queue on the hub** beyond the packets in flight: what waits for a machine that
-   is off waits on the machine that sends it.
+   no port and no `listen`: only the hub is reached, and nothing of a device listens. Flottille does
+   no NAT traversal, no hole punching, no port mapping and runs no address discovery service. **The
+   direct link was removed on 2026-11-21** (the maintainer's decision): no device listens on an
+   address, none is dialled at one, and no address is found, declared or told. **No queue on the
+   hub** beyond the packets in flight: what waits for a machine that is off waits on the machine
+   that sends it.
 4. **The hub adds the devices, behind access to its host** (decided 2026-11-20, in place of the
    devices adding each other). A device pairs in pair mode, which only a command on the hub's host
    opens (`flottille-hub pair`); its entry is signed with the hub's key, which every device pinned
@@ -141,8 +141,8 @@ window, the command line, the tools and the docs.
     role is changed on the hub's host, never from a device.
 18. **Presence goes through the hub.** With the hub unreachable, a runner counts the user as away,
     and the phone is notified.
-19. **The CLI's commands are `flottille remote …`** (`pair`, `members`, `rename`, `icon`,
-    `colour`, `remove`, `address`), and the key folder is `remote/`; the hub's host's are
+19. **The CLI's commands are `flottille remote …`** (`on`, `off`, `pair`, `members`, `rename`,
+    `icon`, `colour`, `remove`), and the key folder is `remote/`; the hub's host's are
     `flottille-hub pair`, `role`, `remove`, `devices` and `reset`.
 
 ## Architecture
@@ -164,9 +164,8 @@ window, the command line, the tools and the docs.
   user's clients, and which members are online; and its links' packets go in it ("The
   transport"). The hub forwards a link's packets and never terminates a link: it holds none of its
   keys.
-- **Each machine's daemon holds one link endpoint**, whose links go through its session to the hub
-  (and, unused by default, listens on the addresses it is configured with, "Paths"). The local
-  socket is unchanged, with its refusal of a client an agent started (`protocol.md`,
+- **Each machine's daemon holds one link endpoint**, whose links go through its session to the hub;
+  it listens on no address. The local socket is unchanged, with its refusal of a client an agent started (`protocol.md`,
   "Transport").
 - **The window and the command line reach another machine through their own machine's daemon**: a
   request names `machine`, is signed with the device key by the client, and the local daemon
@@ -186,8 +185,7 @@ window, the command line, the tools and the docs.
   at hub.example.net is unreachable since 22:14: …`), for the hub and for each machine it cannot
   link to (`server cannot be reached: the hub at … is unreachable since 22:14: …`); a request for
   another machine is refused saying it. What waits for a machine that is off waits on the machine
-  that sends it, as it does for a machine that is off. A machine that listens (the direct path,
-  unused by default) dials addresses only, as before, and its direct links go on.
+  that sends it, as it does for a machine that is off.
 
 ## The transport
 
@@ -198,12 +196,10 @@ library that gives it, chosen in #811, is hidden in `flottille-link`:
   the key it was dialed for is refused;
 - **encrypted end to end and authenticated by the devices' keys**, on both sides, with nothing
   between the two devices that can read or change it;
-- **through the user's hub** (since 2026-11-20): a link is dialled by key, and its packets travel in
-  the control sessions both devices keep to their hub, which forwards them between members only;
-  no NAT traversal, no hole punching, no port mapping (UPnP, NAT-PMP, PCP), no address discovery
-  service, and no server of a third party in the path. The direct path (a device listens on the
-  address it is configured with, a peer dials an address it knows for that key, "Paths") stays,
-  unused by default;
+- **through the user's hub** (since 2026-11-20, the only path since 2026-11-21): a link is dialled
+  by key, and its packets travel in the control sessions both devices keep to their hub, which
+  forwards them between members only; no NAT traversal, no hole punching, no port mapping (UPnP,
+  NAT-PMP, PCP), no address discovery service, and no server of a third party in the path;
 - **streams**: requests, events, a git transfer and tunnels at once on one link, kept apart;
 - **it runs** on Linux, macOS later, and Android.
 
@@ -214,8 +210,8 @@ against the needs above, not one library: "an endpoint", "an address", "a stream
 
 **The transport built** (#811) is QUIC (`quinn`), whose TLS 1.3 runs on the devices' own Ed25519
 keys sent as raw public keys (RFC 7250, `rustls`): the dialler checks the other side holds the very
-key it dialled, the listener reads the key the dialler proved and refuses it unless trusted, with a
-sentence (`refused: this machine's key is not one of the user's`). Both libraries were in the
+key it dialled, the side dialled reads the key the dialler proved and refuses it unless trusted,
+with a sentence (`refused: this machine's key is not one of the user's`). Both libraries were in the
 lock already, their default features off; they are dependencies of weight, said in #811's pull
 request. iroh, with its relays and discovery off, was not kept: its NAT traversal cannot be turned
 off (its QUIC settings enforce a minimum of traversal addresses, and its endpoint runs the hole
@@ -231,8 +227,9 @@ bytes at first, up to 1452 once QUIC's discovery of the path's size grew them, 1
 takes); the hub hands it to the session
 of the member whose key it names as `{"relayed": {"from": <key>, "packet": …}}`. QUIC knows
 addresses, not keys: each key is given an address of the relay's own, in a unique local IPv6 range
-(`fd46:6c74::/32`) no network reaches through it. Nothing above changes: the TLS 1.3 of QUIC, on
-the devices' raw Ed25519 keys, checks the other side's key end to end, as on a direct link; a
+(`fd46:6c74::/32`) no network reaches through it: the device opens no socket of the network for
+its links, and none listens. The TLS 1.3 of QUIC, on the devices' raw Ed25519 keys, checks the
+other side's key end to end; a
 packet the hub changed fails QUIC's authentication and is dropped, and a link whose packets are all
 changed ends. Each session to the hub is a transport of its own: when it ends (the hub down, the
 session lost), every link through it ends, with it. The hub tells every member which members'
@@ -276,25 +273,6 @@ version"). The protocol names are `flottille-machine` and `flottille-client`; a 
 other kind is refused by the receiver, the link going on (`a machine's message is not taken on a
 client link`).
 
-**Paths** (the direct path: unused by default since 2026-11-20, kept until the maintainer decides).
-A device listens on the address it is configured with, in the daemon's remote
-configuration (`[remote] listen`; none until the user sets one, and a device that listens nowhere
-still dials the others). It tells the hub those addresses
-whenever they change, and the hub tells the other members; the user may also give an address by
-hand (`flottille remote address add 100.64.0.7`, Settings, Machines): a tailnet address, a DNS name,
-a forwarded port, a public address. Members linked to each other tell each other too, so that two
-devices that have linked once can link again without the hub. A peer dials the addresses it knows
-for a key, whoever told it; the hub's list is a help, not a path.
-
-A machine that listens nowhere (the default) dials the addresses it knows for another first,
-then the hub: with no address, it goes through the hub at once. A machine that listens chose this
-path: it dials addresses only, and takes the links that come through the hub too. **Two devices that cannot reach each other say so plainly**, on both sides and in the clients: which
-address was tried, from where, and how it failed (`server is unreachable: tried 192.0.2.10:7421
-from pc, no answer in 10 s`). Flottille does not work around it: the fix is the user's network (a
-firewall rule, a forwarded port, a VPN, another address). A device no one can dial (a phone on a
-mobile network) still links to every device it can dial, and what they send it travels over that
-link.
-
 ## Identity and keys
 
 - **Remote is off** until the user turns it on: **Turn on** in Settings, Machines, or
@@ -304,20 +282,16 @@ link.
   ```toml
   [remote]
   on = true
-  # Where other devices reach this one: nowhere until it is set. An example, not a default.
-  # listen = "0.0.0.0:7447"
   ```
 
-  Off, nothing of it is made or read. Nothing is opened until the user says where this machine is
-  reached (`listen`): **Nowhere** (the default: it dials the others, nobody dials it), an address
-  of one of its interfaces, a Tailscale or WireGuard one offered first and marked, **Every
-  network** (`0.0.0.0`, which opens a port on any network the machine joins) or an address typed.
-  Whether remote is on is set in the window (Settings, Machines) and from the command line; where
-  it is reached (`listen`) from the command line only (`flottille remote on [--listen
-  <address>|tailnet|nowhere]`, `flottille remote off`, `flottille remote listen <address>`;
-  `remote.configure`, `protocol.md`), and taken at once: the link starts, stops, or listens
-  elsewhere, with no restart. Turning remote off closes the links and keeps the pairing with the
-  hub and the keys. A file edited by hand is still read at the daemon's start.
+  Off, nothing of it is made or read. On, nothing listens: every link goes through the hub.
+  Whether remote is on is set in the window (Settings, Machines) and from the command line
+  (`flottille remote on`, `flottille remote off`; `remote.configure`, `protocol.md`), and taken at
+  once: the link starts or stops, with no restart. Turning remote off closes the links and keeps
+  the pairing with the hub and the keys. A file edited by hand is still read at the daemon's
+  start. A `listen` in it, which the direct link read until 2026-11-21, is left where the user
+  wrote it and not read: the daemon starts, and says once in its log, at each start of the link,
+  that the key is no longer read.
 - **Keys are Ed25519** (`crates/flottille-link`): a device's identity is its public key, shown as
   its fingerprint, the first 8 bytes of the key's SHA-256 in hexadecimal by groups of four
   (`3f2a-91bc-0d4e-77a1`). A private key is made from the operating system's random generator,
@@ -375,7 +349,6 @@ serves one user.
   what the device says of itself, when it was paired and last seen.
 - **The presence**: which of the user's clients is active ("Notifications"), as each client tells
   it.
-- **The addresses** of the members, as they tell it, for the direct path (unused by default).
 - **The sessions open**, by key, and for each the packets of links waiting for it (128 at most from
   each member's device).
 
@@ -384,7 +357,7 @@ encrypted end to end by the devices, which it forwards and never opens; it keeps
 content of what they say, only the packets in flight for a device whose session is open.
 
 **What it sees**: which keys connect to it, when, from which IP addresses; the member list (names,
-keys, roles, never a secret); the presence; the addresses members tell it; what each device says
+keys, roles, never a secret); the presence; what each device says
 of itself; and of the links, which devices talk to which, when, and how much. Never what they say.
 
 **Its configuration**: a listen address (a device must be able to reach it, like any other), TLS (a certificate given, ACME, or plain behind a reverse
@@ -411,11 +384,15 @@ device that pinned the hub's key, from its pair code or since, refuses another o
 it proves anything. The hub then welcomes a member's device, a member's machine, or a device whose
 pairing it took, and refuses any other key; the refusal says the list was reset when the device
 pinned a list that starts otherwise, and nothing else of the list: a stranger learns neither its
-root nor its members. Once welcomed, a device asks (a member's change, what it is, its addresses,
-its presence) and is answered by number; each ask is taken only while the device is still welcome,
+root nor its members. Once welcomed, a device asks (a member's change, what it is, its presence)
+and is answered by number; each ask is taken only while the device is still welcome,
 so that a session opened before a change that leaves it out asks nothing more. The hub sends the
-list whole, the addresses every member's machine told, what it knows of each device, and, to a
-runner, the presence, at once and whenever they change. Text the hub or anything at its address says is shown with its control and format
+list whole, what it knows of each device, and, to a runner, the presence, at once and whenever
+they change. A machine of before 2026-11-21 still asks to tell its addresses: the hub answers and
+keeps nothing of them; a hub of before then still sends the addresses its members told: a device
+reads and ignores them, so that neither loses its session while the other is updated. The hub
+sends each session an empty list of addresses once, `{"addresses": []}`, which a phone's core of
+before waits for before it links to its runners. Text the hub or anything at its address says is shown with its control and format
 characters replaced.
 
 **Its limits.** Someone with no key holds little of it: 64 connections at most that have not proved
@@ -435,7 +412,7 @@ its machine again and again, mostly): past them, the hub refuses, saying when to
 A machine's daemon keeps the session with its machine key; what it pinned is
 `remote/hub.json` (the hub's URL and key, the list's root and the list as last checked), and it
 writes `remote/peers.json` (the machines the link trusts) from the members' machines of the list
-that checked, with the addresses the hub told.
+that checked.
 
 **Its state folder** is `--state <dir>`, `$XDG_STATE_HOME/flottille-hub` by default, made 700. It
 holds the hub's key, `hub.key` (600, made at the first start with the machine key's care),
@@ -445,8 +422,8 @@ the socket its host's commands reach the running hub on (600; a connection of an
 hub's, root aside, is refused). One process uses the folder at a time (a lock on `hub.lock`): a
 second hub, or `flottille-hub reset`, is refused while a hub runs (`another flottille-hub uses
 <folder>: stop it first`). A list in it that does not check stops the hub's start, saying to reset
-it. Pair mode, the presence and the addresses are kept in memory: they last minutes, or are told
-again when a device connects.
+it. Pair mode and the presence are kept in memory: they last minutes, or are told again when a
+device connects.
 
 **Its host's commands** talk to the hub that runs, on its socket, beside it (in a container, with
 `docker exec`): `flottille-hub pair` ("Pairing"), `flottille-hub role <device> <role>` (the hub
@@ -548,14 +525,14 @@ Attached to its key: renamed, it keeps the rest; paired again with the same key,
 - **What it says itself**, kept by the hub: what it is (`computer`), its system (`linux`), Flottille's
   version (from its hello, at each session).
 - **What the hub knows**: when it was paired, when it was last seen (a session that starts or
-  ends), its machine's addresses.
+  ends).
 
 `remote.members` says all of it (`protocol.md`); a member added before pair mode has no icon nor
 colour until one is chosen.
 
 ### What exists stays
 
-A hub set up before pair mode, and the machines in it, keep working as they are: the list a device
+A hub set up before pair mode, and the machines in it, keep working as they are (`a_hub_updated_over_its_data_keeps_its_members` holds it: a `hub.json` of a hub of protocol 1, with its key, is read by the hub of today and its members are welcome): the list a device
 checks may start with the first member's own entry (the root of a list made then) or with the
 hub's (one made since), and the members' additions of before still check. Every device pinned the
 hub's key already, so the hub's changes after them are taken. From the first change the hub signs,
@@ -570,6 +547,20 @@ with the device key; the daemon carries what they signed (`remote.*`, `protocol.
 changed as events (`remote.*`, `events.md`). The phone pairs through the mobile core ("The Android
 app"); its screens are #826.
 
+**Built (#1177), in the window**: the page tells the hub's truth. A hub that answers that it no
+longer knows this machine (its list was reset, or it dropped this device: `hub.forgotten` in
+`remote.machines`) is said at the top of Devices, `The hub no longer knows this machine`, the kept
+list greyed as old, and **Pair again** opens the pairing dialog in place of Connect to your hub; a
+successful pairing replaces the old membership (`remote.pair {replace: true}`). While the hub
+refuses or cannot be reached, a device's Rename, Change look… and Remove… are in its "⋯" disabled
+with the reason in one line, and the section says `Changes wait for the hub, which cannot be reached
+now: …`; one click is one request, its buttons busy until it is answered, a failure one toast, said
+in words (what happened, what to do). Removing this machine says it leaves the hub and its links
+close. Each device row, and the machine of each session of the sidebar, shows its icon in its
+colour (a member with none gets a desktop and the colour of its key), and **Change look…** opens a
+dialog (the five icons as a select, the eight colours as swatches, a live preview) whose save is a
+signed change as `flottille remote icon` and `colour` make. The page shows no addresses (every link goes through the hub, decision 3): its Addresses section is gone, and so is the place that asks where this machine listens; the direct link stays in the daemon, unused here (`flottille remote listen` still sets it).
+
 **Built (#814, #1146, #1144), in the window**: Settings, Machines, a tab of its own, says first
 whether remote is on (a **Turn on** button while it is off, a **Remote** switch once it is, whose
 off asks once), then offers **Connect to your hub** while this machine is in no member list: one button, which opens a dialog where the code is pasted
@@ -578,7 +569,7 @@ device is, a select of the five icons, This device can, Run agents / Control onl
 a refusal stays in the dialog, a success closes it with a toast. There is no Add a device and no
 join request: a device is added on the hub's host. Then the page shows the devices of the
 list (each row its name, its machine's state, its role and who added it; Rename and Remove… in its
-"⋯", Remove asking once), and this machine's addresses, found or declared (New address, Remove…).
+"⋯", Remove asking once); #1177 took this machine's addresses off the page.
 Every new member is a toast, `New device: pixel (control only), added at 18:42 by the hub`, with
 Remove. The sidebar lists the sessions of every machine ("One list of every machine"); opening one
 of another machine brings that machine in front, its projects and its sessions, every request of the
@@ -632,7 +623,10 @@ protocol versions it speaks (a number, `protocol` in `daemon.status` too, raised
 method, an answer or an event that an older client would misread). They use the highest one both
 speak; with none in common the link is refused on both sides with a sentence that says which to
 update: `server runs Flottille 0.4.3 (protocol 9), this machine 0.4.1 (protocol 8): update one of
-them (flottille update)`. The window and the app show the machine as **needs an update**, never as
+them (flottille update)`. The hub is said as the hub, with the side to update named by the older
+protocol: `The hub runs 0.1.0 (protocol 1), this machine 0.4.0 (protocol 2): update the hub on its
+host.` or, the hub being the newer, `…: update this machine.`; the hub sends its own hello with its
+refusal so that a device it refuses says the same. The window and the app show the machine as **needs an update**, never as
 offline. At first each side speaks one version; the list lets the Android app, published apart,
 speak two.
 
@@ -766,7 +760,7 @@ what it recorded (that this agent of that machine started that session, or is th
 | `call` | One of the tree's tools aimed at a session it started: `agent_send`, `agent_status`, `agent_stop`, `session_send`, `session_read`, `approval_answer`. Judged as on one machine. |
 | `capabilities` | What a runner offers: its projects, its agents signed in, its free slots ("Roles"). |
 | `share` | A vault entry or a connection the user shared, signed by their device ("Sharing"): `{"request", "entry", "secret"}`, the device's signed `vault.share` as the client wrote it, the entry's metadata, its secret; for a connection (`share_connection`), `{"request", "connection", "entries": [{"entry", "secret"}]}`, the signed `connection.share`, the declaration, and each entry the request names with its secret. |
-| `addresses` | Every address the sender may be reached at now: kept for it, so that the two link again without the hub ("The transport"). |
+| `addresses` | Sent by a machine of before 2026-11-21, whose direct link was removed then: answered `{}` and ignored, so that it still links while the other machine is updated. No machine sends it since. |
 | `sessions` | A runner's live root sessions, light: each one's id, title, project, state, last exchange, and the session leading it there; 500 at most, a title 200 characters at most, no id twice and no cycle of pilots. Kept by the receiver, in place of the one before ("One list of every machine"). |
 | `close` | The user's close of a session of the receiver (`agent.stop`, as their device signed it), kept by the sender while the receiver was off. Taken when its signature is a member's that may stop a session, for the receiver, signed less than 30 days ago; served once (its nonce is remembered 30 days), and not for a session started or resumed after it was signed. |
 
@@ -977,7 +971,8 @@ As built (#818):
   gives.
 
 **The mobile core, as built (#824).** `crates/flottille-mobile` holds a `Core` over a folder of the
-app's private storage that no backup copies (`FlottilleCore(context)`: `noBackupFilesDir`): the
+app's private storage that no backup copies (`FlottilleCore(context)`: `noBackupFilesDir`; the
+manifest also excludes every domain from the cloud backup and the device transfer): the
 endpoint's key is there in clear, and a sealed device key restored elsewhere opens with no
 Keystore there.
 
@@ -999,8 +994,8 @@ Keystore there.
   no role and says it was removed.
 - **Connected** (`connect`, the Kotlin `Flow` of batches): the control session (what it is and
   its presence told), a
-  link to each runner of the list, dialled by one function of the core (the addresses the hub
-  tells, then through the hub, #1167), each request signed with the device key, and each runner's
+  link to each runner of the list through the hub, dialled by one function of the core (#1167),
+  each request signed with the device key, and each runner's
   `events.watch` resumed after the last event handed over of it, kept in the folder by its machine
   key: a new link, or the app's next start, misses nothing and repeats nothing. An event counts as
   seen once its batch reached the app, so that one on its way when the connection ends, or the app
@@ -1008,14 +1003,12 @@ Keystore there.
   (the turn) and `follow` (a conversation) go over those links.
 - **The links go through the hub** (#1167): the core gives the endpoint of the connection the
   relay of its session (`Session::relay`, `Endpoint::through`), as a daemon does, and dials each
-  runner by its machine key: the addresses the hub told first, then the hub when the runner is
-  online there, so that a phone on mobile data reaches a runner that listens nowhere. The core
-  links to the runners once the hub told its addresses for the first time, so that a runner with an
-  address is never taken through the hub by haste. The key of the runner is the one the signed
-  member list holds for its machine on every path: a hub that hands the phone another member's
-  packets as the runner's is refused by the link's handshake, and the view says why. The view's
-  machine says `through_hub` when its link goes through the hub, as the window's Machines page
-  does.
+  runner by its machine key when the hub says it online, so that a phone on mobile data reaches
+  any runner; a runner that comes online is dialled at once. The key of the runner is the one the
+  signed member list holds for its machine: a hub that hands the phone another member's packets as
+  the runner's is refused by the link's handshake, and the view says why. The view's machine says
+  `through_hub` while it is linked: every link goes through the hub since 2026-11-21, and the
+  field stays for the app.
 - **The view state** is computed in Rust and handed whole with every batch: the runners and their
   state, one list of sessions for every machine by project (#1150), the followed conversation, the
   requests and the questions that wait for the user, and this device's name and role. A batch is
@@ -1027,6 +1020,119 @@ Keystore there.
   `build/rust/symbols/<abi>`, the shipped ones stripped; the Kotlin bindings generated by the
   crate's `uniffi-bindgen` from the library. CI's `android` job runs the Gradle unit tests (the
   bindings on the JVM, the libraries' alignment) and the instrumentation tests on an emulator.
+
+**The app, as built (#825).** `apps/android/app`, Kotlin and Jetpack Compose, over the `core`
+module's `Phone` (its own types: `PhoneView`, `Machine`, `SessionRow`, `Member`…; `RealPhone` is the
+core behind it, the screens' tests play a fake) and never the generated bindings.
+
+- **Joining**: **Connect to your hub**: the camera reads the QR of `flottille-hub pair` (CameraX,
+  frames decoded by ZXing, no Google service), or the code is pasted (a field that hides what is
+  typed); the hub's **card** is shown before anything is sent (`hub_card` of the core: its address
+  and its key's fingerprint, read from the code, no network); the user confirms this phone's name
+  (the model's) and its role (**Control** or **View only**); the result says the role the hub gave.
+  A refused code or a refused join stays on its screen, said.
+- **The screens**: a bottom bar, **Sessions** (the one list, #1150: grouped by project, the machine a
+  tag on each row, in a project the sessions that wait for the user first, the ended ones last, then
+  the most recent; a session of a machine that is offline is greyed and not opened) and **Machines**
+  (the hub, reachable or not, and each machine: `Online`, `Offline since 22:14` with why, `Needs an
+  update`); **Settings**, from the top bar: this device's name and role, the
+  members, **Remove this device** (it asks once). There is no Add a device. The hub's card says
+  that the link is in clear when its URL is `http://`.
+- **The core's view state** gained what the screens say: a machine's `state` (`online`, `offline`,
+  `needs an update`) and `since`, the `members` (this device marked, who added each), `hub_card`
+  and `leave` (the phone's own removal, signed with its device key and sent to the hub, which ends
+  its session without sending the list: once the hub took it, the core ends its links, the view
+  claims no role and says the phone was removed, and the app asks to join again). The core also
+  deletes the hub's file and the kept device key: started again, the phone is not joined and never
+  dials with a revoked key.
+- **Motion**, as the window's: the kit's durations and its ease-out cubic are `ui/Tokens.kt`
+  (`Motion`); every press fades and sinks (`FButton`), a choice's fill and ring move over `PANEL`, a
+  row inserted, removed or moved animates (`animateItem`), a state that changes fades (machine
+  state, hub state, a greyed row, the selected tab), a page and its sections come in staggered
+  (`Entrance`), a message unfolds and fades in (`Message`), the confirmation and Settings come and go
+  with `MODAL` and `PANEL`.
+- **Tested** against a fake core by Compose UI tests under Robolectric (`app/src/test`), one per
+  scenario of the issue; the core's mapping by JVM tests (`core/src/test`); the app starting on the
+  real core by an instrumentation test on the emulator (`app/src/androidTest`); the Rust side by
+  `crates/flottille-mobile/tests`. A real phone proves what none of those can: the camera reading a
+  QR, and how it feels.
+- **Not here**: Needs you, the foreground service and the notifications (#826's followers);
+  closing a session of an offline machine (#1157's kept close).
+
+**The session page, as built (#826).** Tapping a session opens `SessionPage`; its one entry point is
+a `SessionKey` (machine and agent), which an intent can carry too (`MainActivity` reads the extras
+`org.flottille.app.MACHINE` and `AGENT`), so that a notification opens a session by those two ids.
+**Only the app's own intents do**: the main activity is exported (the launcher, the share sheet),
+so any app could name a session in it; the extras are honoured only on an intent that came through
+`org.flottille.app.OpenSession`, an alias of the activity that is not exported, which a
+notification's PendingIntent targets. What is shared is read once, not again when the activity is
+recreated.
+
+- **Reading**: the page follows its session through the core (`follow`: the latest page of the
+  conversation, `agent.show` with a `before` past every event, and the tree, `agent.tree`) **only
+  while it is on screen and the machine is linked**, and drops it when it is left (`unfollow`). A
+  conversation is never loaded whole: **Earlier messages** asks the page before the oldest one held
+  (`older`). The thoughts and tool calls between two messages are one line (`3 steps`) until a tap
+  unfolds them; a message that arrives unfolds and fades in, what the page held when it opened is
+  simply there. A picture sent in a message is read back (`agent.image`) and shown above its words,
+  a placeholder fading into it.
+- **Writing**: the composer sends text and pictures (`send`: `agent.send` with `images`). Pictures
+  come from the gallery (the system's photo picker, no storage permission), the camera (it writes one
+  shot into a file of the app's cache that a `FileProvider` gives the camera app alone, then the
+  file is deleted) and the share sheet (an intent filter for `image/*` only: the pictures wait in
+  the composer of the session the user picks, and are never sent without a tap). The window's limits
+  hold in the composer and again in the core, before anything is sent: 20 pictures a message, 5
+  MiB each, png, jpeg, gif or webp. **A message is one signed request, so one frame of the link
+  (1 MiB), pictures in base64 included: about 700 KB of pictures together, which is the limit that
+  binds.** The core refuses a message that does not fit, saying so, and the app scales a jpeg, png
+  or webp over 230 KB down to 2000 px and re-encodes it, so that a camera shot fits (the window's
+  own messages to another machine meet the same frame: a follow-up may carry pictures in chunks).
+  What another app hands over is never trusted: a uri the app has no grant for, one that fails or
+  one whose extra is of another type is left out (said once), a picture is refused before it is
+  held when it is over 5 MiB and is never sent cut short, and reading stops when the pictures held
+  pass the frame's 700 KB; the frame is measured on the signed request itself, escapes included. A
+  camera shot is read, then deleted, and what a dead process left is cleared at the start.
+  Nothing of a picture is logged. A message to a machine
+  that is off is refused, said as a toast with since when (`server is offline since 22:14`) and kept
+  in the composer: nothing is queued.
+- **Answering**: the ask card docks above the composer, one question at a time (Previous, `2 of 4`,
+  a dot per question, Next), its options as rows, **Something else…** with its field, a note once a
+  choice is made, one **Answer** once every question has a choice or words (`answer_ask`:
+  `agent.answer`). A request is a card with the call **as the daemon gave it** (the same one line
+  the window shows: a command's line, else the tool and its arguments, computed in the core, never
+  summarised by the app), what the judge said, **every** reason it was held and every agent that
+  forwarded it, which agent of the tree asked (`asked by the conversation · #4`), **Allow** and
+  **Deny**, and, for a base request, the tag `Always asks` and the window's own warning (the first
+  message of a session to another says what it leaves, not the generic one). Those sentences are
+  the window's, shared in `flottille-protocol` (`words`), never written twice. **A proposal to
+  write a connection** (the tool `connections`, kind `action`) has **Deny** only and says to open
+  it on a computer, as the window never offers Allow on it: what it would write is read in its
+  dialog. An answer the machine refuses because the request is decided already or gone (or the ask
+  is answered) is said on the card, which then folds; any other refusal (a link that ended, a time
+  out) is a toast and the card stays, to answer again.
+- **Controls**: the mode as three choices (Ask, Auto, Full; Full's fill is the alarm colour; **Full
+  asks for a confirmation on the phone**, the one confirmation dialog, since one tap in a pocket
+  must not give the agents the run of the machine), Stop
+  in Send's place while a turn runs and there is nothing to send (`agent.cancel`: the agent
+  stays), and the session's tree read only. **A child's page has no composer**, no mode and no
+  Stop; an ended session says it has ended in place of the composer.
+- **A `viewer` reads only**: the page draws no composer, no pictures buttons, no answer (the
+  ask card is read, its options are text), no Allow or Deny, no mode, no Stop, and says `View only`.
+  That is the app's half: **the machine refuses a viewer's write too** (`Roles`, `read` and
+  `drive`), which `remote_requests` and the catalogue's tests pin for each write this page makes.
+- **The core gained**, for the page: `follow` reads a page and the tree, `unfollow`, `older`, `send`
+  (checks the pictures' limits), `answer_ask`, `set_mode`, `image`; the conversation of the view
+  state carries the title, the mode, `working`, `child`, `ended`, `more`, each entry's number and
+  picture names, and the tree; a request carries the call line, its kind and class (`base`), what it
+  says, the judge's sentence, every reason and forward, who asked and the warning; an ask carries each question with its options.
+- **Motion**, each with the kit's durations: a message or a tree row unfolds and fades in
+  (`ENTER`); the steps fold and unfold, with their chevron turning (`PANEL`); the ask card and the
+  request cards dock, slide into place and fade away (`animateItem`); a question slides in from
+  the side of the move, the dots and the option rows move their fill and ring (`PANEL`), the field
+  of "Something else…" and the note unfold and fold; a refusal comes in on its card; the mode's
+  fill and ink move (`PANEL`) and Full's turns to the alarm colour; Send and Stop cross-fade; the
+  attached pictures unfold in the composer and fold away; a picture fades in once read; the page
+  and the banner for a shared picture come in and out as Settings does.
 
 ## Notifications
 
@@ -1227,8 +1333,9 @@ repository layout and CI by paths. This milestone builds on it.
 
 As everywhere (`AGENTS.md`, "Testing"): no real agent, no real configuration, no real keyring, no
 network but loopback. A hub and two (or three) daemons in one test, each with its own temporary
-`HOME` and XDG folders and its own in-memory keyring, on `127.0.0.1`, with no discovery; two devices
-that cannot reach each other are tested with an address nobody listens on. Fake agents, throwaway repositories. A machine
+`HOME` and XDG folders and its own in-memory keyring, on `127.0.0.1`, with no discovery; their links
+go through the hub, and the link crate's own tests join their endpoints' relay ports in memory as a
+hub joins them (`relays_in_memory`). Fake agents, throwaway repositories. A machine
 "off" is a daemon stopped and started again on the same folders; a hub "down" the same. The Android
 app is tested with its unit and Compose tests, and on an emulator in CI; the Doze proof is done once
 on a real phone, by hand, and reported.
@@ -1266,18 +1373,17 @@ on a real phone, by hand, and reported.
 - A close of a session of another machine goes through this machine's daemon whether that machine
   is on or off: kept, then sent at once when it is linked. A close is kept 30 days, as every
   message kept for another machine.
-- **A change of where this machine is reached is taken by closing the link and making it again,
-  not by the daemon starting again** (#1144): simpler, and no client reconnects. It cuts what the
-  link carries, so while an agent runs the change is written and waits for the next start, and
-  the command says so (`remote.settings`' `waits`). Turning remote on or off is not held:
-  the user asked for it, the off one after a confirmation.
-- **The window offers no `listen`** (#1144, the maintainer's decision): the traffic between devices
-  is to go through the hub (a relay, its own coming issue), so a device will not need to listen on
-  any address. The direct link, `remote.configure {listen}`, `remote.settings` and the command line
-  stay as they are until a later decision.
-- **The interfaces `remote.settings` lists** are the IPv4 ones the system lists (`getifaddrs`), loopback and
-  interfaces that are down left out: a Tailscale or WireGuard one (an address of 100.64.0.0/10, or
-  an interface named `tailscale*` or `wg*`) first.
+- **Turning remote on or off is not held** (#1144): the user asked for it, the off one after a
+  confirmation.
+- **Nothing of the direct link is left** (#1184, the maintainer's decision of 2026-11-21): no
+  `listen`, no address found, declared or told, no dial of an address. What a user had before
+  still works at the update, with no protocol version changed: a `daemon.toml` with `listen`
+  starts, the key left as written and said once in the log as no longer read; a key folder with
+  `addresses.json`, or `addresses` and `told` in `peers.json`, has them removed at the link's start
+  (the machines trusted kept); a peer of before that tells its addresses on a link is answered and
+  ignored; a hub of before that sends them, and a machine of before that asks the hub to keep them,
+  keep their sessions (each side reads the field and ignores it). A setting of `listen` sent to
+  `remote.configure` is not read.
 
 - The project must be registered by hand on the other machine, under the same name.
 - A launch on another machine is judged by the receiving machine's gate, `child` as `led`; a child
@@ -1393,46 +1499,21 @@ on a real phone, by hand, and reported.
   row says the copy's state there (`On server: not signed in yet`, `signing in`, `signed in`) for
   as long as the window runs.
 
-- The link listens nowhere until the user sets `[remote] listen` (an IP address and a port,
-  `0.0.0.0:7447` in the examples): how a machine is reached is the user's business, and a laptop
-  with remote on does not open a port on every network it joins. Listening nowhere, it opens no
-  socket until it dials, and links to every machine that listens. Reversible: listening on
-  `0.0.0.0:7447` by default again is one line. An address declared without a port takes the link's,
-  7447 when it listens nowhere. A link that came in is asked to prove its address (a QUIC retry),
-  takes at most 5 seconds to finish its TLS, 256 at once (a stalled handshake costs a few
-  kilobytes), 2 from one host (an IPv4 address, an IPv6 /64) and 8 from one IPv6 /48; one that
-  finds no place free is refused at once, and dials again, so that a host that stalls its
-  handshakes holds no other back. 8 more places are kept for the IP addresses written in
-  `peers.json` (`addresses` and `told`; a name is not looked up for it), which a host not there
-  cannot take: a machine the daemon trusts that dials from one of them still finds a place when
-  strangers hold all the others. The trade-off: machines behind one IPv4 address (a NAT, a
-  carrier-grade NAT) are one host and share its 2 places, so a stranger behind the same address
-  can hold them; a trusted machine whose address is in `peers.json` still has the kept places, one
-  that dials from an address not there (behind a NAT, its told addresses are its own, not the
-  NAT's) waits until a place frees, 5 seconds at most. Whether a key is trusted is said after its
-  TLS, so that the other side is told why it is refused, by the peers' file as last read (read
-  again only when it changed since). A key refused is said in the log once a minute at most, and
-  16 keys a minute at most, since a key costs a stranger nothing: past them, one line says the
-  others are counted, and the count is said when the minute ends. The
-  machines a daemon trusts, and the addresses it knows them at, are in `remote/peers.json` (`{"machines": [{"name", "key", "addresses", "told"}]}`),
-  which the control session to the hub writes from the member list once the machine is paired
-  (a test writes it for machines with no hub); the addresses declared by hand in
-  `remote/addresses.json`. Both are read at every round (each second): the daemon dials each
-  machine it trusts and is not linked to, waiting longer after each failure (5 seconds at most).
-  A file caught half written, or broken by hand, leaves the last one read whole in use (said once
-  in the log), and a told address is not written over it. A file another hand changed while the
-  told addresses were being written is read again, once, rather than written over; this is a
-  check, not a lock: a change made in the microseconds between the check and the rename is still
-  written over, and when the file changes again during the retry the told addresses are dropped
-  (said in the log) until the machine tells them again, at its next link or address change. The
-  told addresses are written away from the tasks that take links, at most once every 2 seconds
-  for one machine, the latest told kept.
+- The link listens nowhere and opens no socket of the network: its packets go in the session to the
+  hub. A link that came in through the hub takes at most 5 seconds to finish its TLS, 256 at once
+  (a stalled handshake costs a few kilobytes), 2 from one key (the relay gives each key an IPv6 /64
+  and /48 of its own) and 8 from one /48; one that finds no place free is refused at once, and
+  dials again. Whether a key is trusted is said after its TLS, so that the other side is told why
+  it is refused, by the peers' file as last read (read again only when it changed since). A key
+  refused is said in the log once a minute at most, and 16 keys a minute at most: past them, one
+  line says the others are counted, and the count is said when the minute ends. The machines a
+  daemon trusts are in `remote/peers.json` (`{"machines": [{"name", "key"}]}`), which the control
+  session to the hub writes from the member list once the machine is paired. It is read at every
+  round (each second): the daemon dials each machine it trusts, the hub says online, and is not
+  linked to, waiting longer after each failure (5 seconds at most). A file caught half written,
+  or broken by hand, leaves the last one read whole in use (said once in the log).
 - Two machines that dial each other at once each hold two links: both keep the one the machine of
   the lower key dialled, and close the other (`linked already`).
-- Two machines linked tell each other their addresses at once, then whenever they change (a
-  machine message `{"machine": {"addresses": […]}}`); the one told keeps them in `peers.json`,
-  under `told`, in place of those told before, 64 at most, beside the `addresses` it was given
-  (by the hub, by hand), which it never changes: the two link again without the hub.
 - The version handshake is the first stream of a link: the dialler sends its hello, the other
   answers its own, and each chooses or refuses by itself; the dialler closes a refused link. A
   link that hears nothing for 15 seconds is lost (each side says something every 5).
@@ -1458,9 +1539,8 @@ on a real phone, by hand, and reported.
   signed each time. The window's switcher is a later ticket.
 - `flottille daemon`, `window`, `update`, `mcp`, `bridge` and `remote` are this machine's own and
   refuse `--machine`; `flottille --machine server daemon stop` asks that daemon to stop.
-- The client's link is dialled by the machine that carries the request: a machine that listens
-  nowhere can be driven only by a machine it can be dialled by today. Carrying the user's
-  requests over a link the other machine dialled is left for the phone.
+- The client's link is dialled through the hub by the machine that carries the request. Carrying
+  the user's requests over a link the other machine dialled is left for the phone.
 
 - A tunnel (#829) is held by the command that opened it, which stays in the foreground
   (`flottille --machine server tunnel open r1`): Ctrl+C closes it. A tunnel that outlives its
@@ -1597,15 +1677,13 @@ on a real phone, by hand, and reported.
   clear. Another address takes TLS, or `--plain` for a reverse proxy elsewhere.
 - ACME is not built (a dependency of weight): `--acme` is refused with what to do instead. TLS,
   on the hub and to it, is TLS 1.3 only.
-- A machine that cannot reach another says every address it tried, from where, and how each
-  failed: `server is unreachable: tried 127.0.0.1:7447 from pc, no answer in 10 s`; `from` is the
-  machine's name in the member list (its key's fingerprint before it has one). A hub that cannot
+- A machine that cannot reach another says why, from where: `server is offline: it is not connected
+  to the hub`, `server is unreachable: tried through the hub from pc, no answer in 10 s`; `from` is
+  the machine's name in the member list (its key's fingerprint before it has one). A hub that cannot
   be reached is said the same way, with since when: `the hub at hub.example.net is
   unreachable since 22:14: tried 192.0.2.10:443: Connection refused`.
-- A machine paired tells the hub what it is and its addresses at once, then its addresses whenever
-  they change; the hub keeps them in memory, 64 at most per machine, each a host and a port, and
-  sends every member all of them. An ask the hub does not answer
-  in 10 s, or refuses, is asked again at the next round; the session goes on meanwhile.
+- A machine paired tells the hub what it is at once; an ask the hub does not answer in 10 s is let
+  go, and the session goes on meanwhile.
 - A refusal of a role names what was asked in the user's words for what they do most (`answer a
   request`, `send a message`, `start a session`, `remove, rename or restyle a device`, …), the method otherwise (`may call project.add`). Each method's class is said beside
   it in the table of `protocol.md`, "The classes", which a test holds to the catalogue.
@@ -1702,9 +1780,9 @@ on a real phone, by hand, and reported.
   back is taken only for a repository of a launch this machine sent to that very machine, into the
   repository it was sent from, under the name this machine gives that machine; the way back sends
   the commits past the sender's tip, its snapshot, and what came back already.
-- The window's Machines are a tab of Settings of their own (Remote on or off, the hub, Devices,
-  Addresses; `docs/reference/gpui.md`, rule 13, revised for it), and nothing of it is typed on
-  the page: Connect to your hub, a rename and an address are dialogs. Its switcher offers the
+- The window's Machines are a tab of Settings of their own (Remote on or off, the hub, Devices;
+  `docs/reference/gpui.md`, rule 13, revised for it), and nothing of it is typed on the page:
+  Connect to your hub and a rename are dialogs. Its switcher offers the
   runners, and the machines whose role is not known yet (linked with no hub's list), never a
   controller or a viewer. While the
   window shows another machine, what it keeps of itself (its folds, the drafts, its appearance)
@@ -1788,23 +1866,46 @@ on a real phone, by hand, and reported.
   and lists what its agents started elsewhere on its own machine only.
 - Links through the hub (#1151): a link's packets travel in the control session as JSON lines, the
   packet in base64, not as binary WebSocket frames: the session is one JSON object a line since
-  #820, and a reverse proxy carries it the same. A device dials the addresses it knows for another
-  first (the direct path, none by default), then the hub. The hub's bounds: 4 MiB a second for each
+  #820, and a reverse proxy carries it the same. A device dials another through the hub only. The
+  hub's bounds: 4 MiB a second for each
   device's packets to the others, 1 MiB at once, each packet charged before anything else is
   looked at; 128 packets from one device waiting for another, a share for each sender, so at most
   128 × the members' devices for one device; a packet past them is dropped, never queued further.
   The keepalive is 25 s each way, a session silent 80 s is lost, on the device and on the hub (on
-  the hub too a line the device reads nothing of for 80 s). A machine that listens (`[remote] listen`, the direct path the user chose) dials
-  addresses only, never through the hub, and takes the links that come either way: two machines
-  that both listen link as before #1151, and a test or a user who set `listen` keeps that path.
+  the hub too a line the device reads nothing of for 80 s).
 
 - The mobile core (#824): a batch is what arrives within 30 ms of its first event, 256 events at
   most; a runner that cannot be linked is dialled again after 250 ms, doubling up to 30 s, and at
-  once when the hub tells new addresses. Its sessions list holds root sessions only, by project
+  once when the hub says another list of the members online. Its sessions list holds root sessions only, by project
   name, projects by name (rows never move between groups), sessions by last exchange. The
   questions that wait come from the events seen (`agent.asked`), not from a read when the phone
   links: one asked before the phone's first link shows from the next one. The phone links to the
   runners of the list only, never to another phone or a controller's computer.
+
+- The Android app (#825): the bottom bar has **Sessions** and **Machines** and Settings is reached
+  from the top bar (Needs you, which `docs/remote.md` puts first, comes with the session page);
+  the app opens on Sessions. In a project, the sessions that wait for the user come first and the
+  ended ones last, then the most recent; the groups stay by project name as the core gives them.
+  An ended session stays in its project, said **Ended**, rather than disappearing. Tapping a
+  session of an online machine opens its page (#826). The app connects to the hub only while it is on screen (the foreground
+  service comes later) and dials it again after a wait that grows (1 s, up to 30 s) when it cannot
+  be reached. A phone proposes its model's name, as a computer proposes its host's. The QR reader is
+  ZXing over CameraX, not Google's ML Kit: no proprietary library in a public repository's app.
+  A pull request's APK is debug-signed (the release key is never given to the run of a pull
+  request, which runs the branch's own scripts); only a push, which runs merged code, signs with
+  it. The launcher icon is Android's default until the brand's is added.
+
+- The session page (#826): a request's call is the window's `call_line` computed again in the
+  mobile core (a few lines, the same words), not moved to a shared crate (`flottille-core` carries
+  SQLite, which the phone does not need): a follow-up may move both to `flottille-protocol`. A
+  question that waits when the page opens is read from the tree (`agent.tree`), so a question asked
+  before the phone linked shows on the page; the sessions' list marks it waiting from the events
+  only, as before. Pictures shown by an agent (`agent.file`) and the request lines inside the
+  conversation, the queued messages (Send now, Edit, Cancel) and Resume of an ended session are not
+  on the page yet: this page shows the pictures of the user's messages, the live conversation, the
+  cards and the controls. Full asks for a confirmation on the phone (the window has none: a tap in a pocket is not a click). A shared picture asks the
+  user to pick the session in the list (a banner, with Discard) rather than a picker of its own. The
+  answered card folds 2.5 s after a refusal, long enough to be read.
 
 ## Open questions
 

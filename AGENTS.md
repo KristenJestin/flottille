@@ -117,6 +117,16 @@ tags. A component that is missing or must change is added there first: a pull re
 then the bump of that tag here, in the pull request that needs it (`docs/reference/gpui.md`, "The
 stack"). Nothing of Flottille goes into the kit, and no component is drawn here instead.
 
+## A command comes with its place in the window (non-negotiable)
+
+**Everything the command line does has its place in the window**, unless it is a script's
+business alone. A pull request that adds a `flottille <command>` (a heading of `docs/cli.md`)
+adds, in the same pull request, its place in the window: the screen, dialog or menu entry that
+calls the same daemon method, or a line of `crates/flottille/tests/window_parity.rs` saying why it is
+for scripts only (what starts the daemon or the window, what a process pipes: a short list, each
+with its reason). The test `every_cli_command_has_its_place_in_the_window` refuses a command that
+has neither. A place needs its animations and its test as any window change does.
+
 ## Agents and safety (non-negotiable)
 
 - **Bare mode is the product.** An agent Flottille runs has no built-in tool, no user setting,
@@ -215,6 +225,15 @@ each test in a process of its own, which hides such a test: CI is not what finds
   `android`, `site`.
 - **Pull requests into `dev` are merged by squash only.** The title is a plain Angular subject.
   The description is written in the first person as the maintainer and ends with `Closes #<n>`.
+- **A pull request the user can see carries a `Note:` line** in its description, at the start of its
+  line: `Note: <one sentence, capitalised, what the user can do now>` (`Note: Drive another machine
+  from the window, each action signed.`). A fix says what no longer goes wrong (`Note: A device can
+  be removed while the hub is slow.`). It is written in the user's words: short, concrete, no crate,
+  scope or protocol name, no pull request number. `tools/changelog.sh` builds the release's body from
+  these lines and the "What's new" page says them (`docs/releases.md`, "What's new"). A pull request
+  with no `Note:` line (ci, refactor, test, docs, chore, or invisible) is not on the page. The
+  `shape` check warns, without failing, when a `feat` or `fix` touching the product has none; the
+  pull request template has the place.
 - **`main` gets no squash and no merge commit**: the release pull request `dev → main` is opened
   for review, and the `Release` workflow, not the merge button, closes it by moving `main`
   forward to a commit of `dev` (`docs/releases.md`, "Releasing").

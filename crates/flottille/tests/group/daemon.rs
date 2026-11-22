@@ -7,6 +7,8 @@
 #[path = "../common/mod.rs"]
 mod common;
 
+#[path = "../android_apk.rs"]
+mod android_apk;
 #[path = "../appearance.rs"]
 mod appearance;
 #[path = "../cli_open.rs"]
@@ -59,3 +61,5 @@ mod tool_list_cost;
 mod update_staged;
 #[path = "../whats_new.rs"]
 mod whats_new;
+#[path = "../window_parity.rs"]
+mod window_parity;
