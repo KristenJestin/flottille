@@ -1,13 +1,16 @@
 package org.flottille.app
 
 import android.webkit.CookieManager
+import androidx.activity.ComponentActivity
+import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.hasAnyDescendant
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.hasText
-import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performSemanticsAction
 import java.time.Instant
 import java.time.ZoneOffset
 import org.flottille.core.Conversation
@@ -52,7 +55,7 @@ class FakeTunnelHost : TunnelHost {
 @Config(sdk = [34], qualifiers = "w360dp-h900dp-night-xhdpi", application = android.app.Application::class)
 class TunnelPageTest {
     @get:Rule
-    val rule = createComposeRule()
+    val rule = createAndroidComposeRule<ComponentActivity>()
 
     private val since = Instant.parse("2026-11-21T22:14:00Z").toEpochMilli()
     private val host = FakeTunnelHost()
@@ -122,6 +125,34 @@ class TunnelPageTest {
         // The listener of a tunnel is reachable by any app of the phone: it does not outlive its page.
         assertEquals(listOf("t1"), phone.closedTunnels)
         rule.onNodeWithTag("tunnel:r1").assertDoesNotExist()
+    }
+
+    @Test
+    fun pressing_back_in_the_in_app_browser_closes_its_tunnel() {
+        val phone = phone()
+        start(phone)
+        rule.onNodeWithTag("run-open:r1").performClick()
+        rule.waitForIdle()
+        assertEquals(emptyList<String>(), phone.closedTunnels)
+        // Back with no page to go back to leaves the panel, as Close does.
+        rule.runOnUiThread { rule.activity.onBackPressedDispatcher.onBackPressed() }
+        rule.waitForIdle()
+        assertEquals(listOf("t1"), phone.closedTunnels)
+        rule.onNodeWithTag("browser-page").assertDoesNotExist()
+        rule.onNodeWithTag("tunnel:r1").assertDoesNotExist()
+    }
+
+    @Test
+    fun a_tunnel_does_not_outlive_the_page_it_was_opened_from() {
+        val phone = phone()
+        start(phone)
+        rule.onNodeWithTag("run-open:r1").performClick()
+        rule.waitForIdle()
+        // The session page itself goes (the screen under the browser's panel): the tunnel goes with it.
+        rule.onNodeWithTag("page-back").performSemanticsAction(SemanticsActions.OnClick)
+        rule.waitForIdle()
+        rule.onNodeWithTag("page").assertDoesNotExist()
+        assertEquals(listOf("t1"), phone.closedTunnels)
     }
 
     @Test

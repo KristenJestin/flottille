@@ -70,6 +70,9 @@ class SystemTunnelHost(
     }
 
     override fun keepForBrowser(opened: OpenedTunnel) {
+        // The core reads an address through `localhost`, so this holds; checked all the same, since
+        // the system's default handler is handed the address: only a web address is.
+        if (!isWebAddress(opened.url)) return
         val go = {
             TunnelService.keep(activity, opened.tunnel)
             launch(opened.url)

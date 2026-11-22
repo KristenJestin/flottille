@@ -171,6 +171,8 @@ struct Runner {
     tunnel_connections: Arc<AtomicUsize>,
     /// The tunnels it opened: each is `t<n>`.
     tunnels_opened: Arc<AtomicUsize>,
+    /// How long it takes to answer `tunnel.open`: a machine that is slow to say yes.
+    tunnel_delay: Arc<Mutex<Duration>>,
     /// What it says first on a link: another protocol than the phone's makes it a runner that needs
     /// an update.
     hello: Hello,
@@ -200,6 +202,7 @@ impl Runner {
             tunnel_gone: Arc::default(),
             tunnel_connections: Arc::default(),
             tunnels_opened: Arc::default(),
+            tunnel_delay: Arc::default(),
             hello: hello(),
             name: name.to_owned(),
             machine,
@@ -406,6 +409,8 @@ impl Runner {
                         // tunnel ends, and its last frame says why.
                         let mut ends = runner.tunnel_ends.subscribe();
                         let gone = stream.gone();
+                        let delay = *runner.tunnel_delay.lock().unwrap();
+                        tokio::time::sleep(delay).await;
                         let number = runner.tunnels_opened.fetch_add(1, Ordering::SeqCst) + 1;
                         let shown = json!({"tunnel": format!("t{number}"), "run": accepted.params["run"],
                             "port": accepted.params["port"].as_u64().unwrap_or(result["port"].as_u64().unwrap_or(5173))});
@@ -2825,6 +2830,64 @@ async fn closing_a_tunnel_stops_its_listener_and_tells_the_machine() {
     // A tunnel that is not held is said.
     let why = phone.close_tunnel(opened.tunnel.tunnel).unwrap_err();
     assert!(why.to_string().contains("no tunnel"), "{why}");
+    place.served.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_tunnel_still_opening_when_its_caller_goes_is_not_left_open() {
+    let place = Place::new().await;
+    let (phone, _taken) = with_a_run(&place).await;
+    *place.runner.tunnel_delay.lock().unwrap() = Duration::from_millis(400);
+    // The panel opens the page, then the user presses Back before the machine answers: the
+    // coroutine is cancelled, which drops this future; the open itself runs on the core's runtime.
+    let asking = tokio::spawn({
+        let phone = phone.clone();
+        async move {
+            phone
+                .open_address(
+                    "server".to_owned(),
+                    Some("r1".to_owned()),
+                    "http://localhost:5173/".to_owned(),
+                    false,
+                )
+                .await
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    asking.abort();
+    // Past the machine's answer: nothing is held, nothing listens.
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    assert!(
+        phone.view().tunnels.is_empty(),
+        "{:?}",
+        phone.view().tunnels
+    );
+    place.served.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cancelled_open_leaves_a_tunnel_held_before_alone() {
+    let place = Place::new().await;
+    let (phone, _taken) = with_a_run(&place).await;
+    let held = phone
+        .open_address(
+            "server".to_owned(),
+            Some("r1".to_owned()),
+            "http://localhost:5173/".to_owned(),
+            true,
+        )
+        .await
+        .unwrap();
+    // The same address again, dropped at once: it finds the tunnel held and opens none, so it
+    // has none to close.
+    let again = phone.open_address(
+        "server".to_owned(),
+        Some("r1".to_owned()),
+        "http://localhost:5173/".to_owned(),
+        true,
+    );
+    let _ = tokio::time::timeout(Duration::from_millis(0), again).await;
+    assert!(still_held(&phone, &held.tunnel.tunnel, Duration::from_millis(500)).await);
     place.served.stop().await;
 }
 
