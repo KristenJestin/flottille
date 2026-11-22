@@ -113,6 +113,19 @@ fn text(value: &Value) -> Option<String> {
     value.as_str().filter(|s| !s.is_empty()).map(str::to_owned)
 }
 
+/// What the agent or the daemon said at length, without an invisible character: a remote daemon
+/// built before the daemon refused them could still send one, and a bidirectional override would
+/// make the report read as another text. Its lines and its markdown stay.
+fn unhidden(value: &Value) -> Option<String> {
+    text(value)
+        .map(|said| {
+            said.chars()
+                .filter(|c| !flottille_link::hidden(*c))
+                .collect()
+        })
+        .filter(|said: &String| !said.is_empty())
+}
+
 impl Event {
     fn of(value: &Value) -> Option<Event> {
         let kind = text(&value["kind"])?;
@@ -266,8 +279,8 @@ impl Run {
             ended_at: value["ended_at"].as_u64(),
             session: text(&value["session"]),
             outcome: text(&value["outcome"])?,
-            summary: text(&value["summary"]),
-            why: text(&value["why"]),
+            summary: unhidden(&value["summary"]),
+            why: unhidden(&value["why"]),
             opened: value["opened"] == true,
             items: value["items"]
                 .as_array()
@@ -281,7 +294,7 @@ impl Run {
                 .flatten()
                 .filter_map(|left| plain(&left["id"]))
                 .collect(),
-            body: text(&value["body"]),
+            body: unhidden(&value["body"]),
         })
     }
 
@@ -603,6 +616,20 @@ mod tests {
         assert_eq!(item.text.as_deref(), Some("onetwo"));
         assert_eq!(item.tags, ["x"]);
         assert_eq!(item.group.as_deref(), Some("G"));
+    }
+
+    #[test]
+    fn what_a_run_says_shows_no_invisible_character() {
+        // A remote daemon built before the daemon refused them may still send one.
+        let run = Run::of(&json!({
+            "id": 1, "outcome": "failed", "summary": "done \u{202E}gnp.exe",
+            "why": "no\u{2066}pe", "body": "# Title\n\u{2067}text\u{FE0F}",
+        }))
+        .unwrap();
+        assert_eq!(run.summary.as_deref(), Some("done gnp.exe"));
+        assert_eq!(run.why.as_deref(), Some("nope"));
+        assert_eq!(run.body.as_deref(), Some("# Title\ntext"));
+        assert_eq!(run.said(), "Failed: nope");
     }
 
     #[test]
