@@ -2240,15 +2240,16 @@ async fn a_signed_refusal_sets_forgotten() {
     assert!(matches!(refused, ControlError::Reset), "{refused}");
 
     // Both said with the hub's signature over the session.
-    let said = said.lock().unwrap();
-    let refusals: Vec<&String> = said
+    let refusals: Vec<String> = said
+        .lock()
+        .unwrap()
         .iter()
         .filter(|line| line.starts_with(r#"{"refused":{"#))
+        .cloned()
         .collect();
-    assert_eq!(refusals.len(), 2, "{said:?}");
+    assert_eq!(refusals.len(), 2, "{refusals:?}");
     for refusal in refusals {
         assert!(refusal.contains(r#""proof":""#), "{refusal}");
     }
-    drop(said);
     served.stop().await;
 }
