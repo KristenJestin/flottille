@@ -570,6 +570,7 @@ impl SignInSection {
             flow.shows_code && flow.code.is_none() && flow.address.is_some(),
             div()
                 .id("sign-in-no-code")
+                .aria_label(NO_CODE_SENTENCE)
                 .text_size(px(12.5))
                 .text_color(p.mute)
                 .child(NO_CODE_SENTENCE)
