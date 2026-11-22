@@ -3018,7 +3018,7 @@ mod tests {
         };
         let (offered, receiver) = tokio::sync::watch::channel(Some(list.clone()));
         tokio::spawn(offer(
-            ours,
+            ours.clone(),
             receiver,
             MachineMessage::Projects,
             Some("server".to_owned()),

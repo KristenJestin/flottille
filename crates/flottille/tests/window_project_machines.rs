@@ -255,7 +255,11 @@ fn one_project_on_two_machines_is_one_row_with_both_icons(cx: &mut TestAppContex
         "the marks are in the right half of the row: {pc:?} in {row:?}"
     );
     assert!(pc.origin.x < server.origin.x, "side by side, in order");
-    assert!(!present(cx, project_id("ledgerly")), "one row, not two");
+    // One row, not two: a row of the same project folds away over a moment, as any row that
+    // leaves a list does, so the second one is waited for to be gone, not asked at once.
+    until(&shell, cx, "one row, not two", |cx| {
+        !present(cx, project_id("ledgerly"))
+    });
     assert!(!present(cx, project_id("app@server")));
 }
 
