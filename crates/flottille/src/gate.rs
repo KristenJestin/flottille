@@ -4796,15 +4796,18 @@ pub fn forbidden(
             ));
         }
     }
-    // A project's workspaces may sit in Flottille's data folder, the first of its own: they are
-    // the project's, not Flottille's.
+    // A project's workspaces may sit in Flottille's data folder, the first of its own, and so
+    // does a project made for another machine's launches (`docs/remote.md`, "Which project"):
+    // they are the project's, not Flottille's.
     let folders = own_folders(own);
     let data = own_folders(&own[..own.len().min(1)]);
     let flottille_s = |path: &Path| {
         folders.iter().any(|own| path.starts_with(own))
             && !data.iter().any(|data| {
-                path.strip_prefix(data.join("workspaces"))
-                    .is_ok_and(|rest| rest.components().count() >= 2)
+                ["workspaces", "projects"].iter().any(|projects_s| {
+                    path.strip_prefix(data.join(projects_s))
+                        .is_ok_and(|rest| rest.components().count() >= 2)
+                })
             })
     };
     if seen(path).iter().any(|path| flottille_s(path)) {
@@ -7155,6 +7158,23 @@ mod tests {
         assert_eq!(fixture.file("fs_write", "notes.md"), Verdict::Allow);
         // The folder that holds every workspace is Flottille's.
         assert!(denied(&fixture.run("rm -r ../../../workspaces")));
+    }
+
+    #[test]
+    fn a_project_made_for_another_machine_in_flottille_s_data_folder_is_the_project_s() {
+        // A session the user starts in its main folder.
+        let mut fixture = Fixture::main();
+        let data = fixture.root.parent().unwrap().to_owned();
+        fixture.own = vec![data.clone()];
+        let main = data.join("projects/app");
+        std::fs::create_dir_all(&main).unwrap();
+        fixture.root = main.clone();
+        fixture.grant.place.root = main.clone();
+        fixture.grant.place.repositories = vec![(".".into(), main)];
+        // Judged as a write in any project's main folder is, never refused as Flottille's.
+        assert!(to_judge(&fixture.file("fs_write", "notes.md")));
+        // The folder that holds every such project is Flottille's.
+        assert!(denied(&fixture.run("rm -r ../../projects")));
     }
 
     #[test]

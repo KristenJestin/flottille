@@ -384,7 +384,22 @@ device that pinned the hub's key, from its pair code or since, refuses another o
 it proves anything. The hub then welcomes a member's device, a member's machine, or a device whose
 pairing it took, and refuses any other key; the refusal says the list was reset when the device
 pinned a list that starts otherwise, and nothing else of the list: a stranger learns neither its
-root nor its members. Once welcomed, a device asks (a member's change, what it is, its presence)
+root nor its members. **What a refusal proves**: the hub signs it with its key, over
+`flottille-hub-refused-v1`, a zero byte, the device's key, both nonces, what it received of the
+device's proof (the hash it pinned, or none; the pairing it asked, or none), `reset` and the
+reason, so that it holds for this session, and this request, only. The device's own signature
+covers neither the hash nor the pairing: something on the way could add a pairing to a member's
+proof, or change the hash, to have the hub refuse it; the device checks the refusal against what it
+sent, and such a refusal does not check. A device acts on a refusal (it forgets the hub, or says
+its list was reset) only once that signature checks; an unsigned refusal, or one whose signature
+does not check (said by something on the way to an `http://` hub, answering a request changed on
+the way, or caught in another session), changes nothing, and the device says the hub could not be
+reached. A refusal said before the handshake (`{"refused": "…"}` with no hello both can use) is
+unsigned too: the device says the hub could not be reached, and shows its words as what answered,
+not as the hub's. A hub of before 2026-11-22 signs no
+refusal: a device of this version that it refuses says it cannot reach it, and keeps trying, until
+the hub is updated; a device of before takes this hub's signed refusal as it took an unsigned one.
+A refusal later in a session (a member removed meanwhile) only ends the session. Once welcomed, a device asks (a member's change, what it is, its presence)
 and is answered by number; each ask is taken only while the device is still welcome,
 so that a session opened before a change that leaves it out asks nothing more. The hub sends the
 list whole, what it knows of each device, and, to a runner, the presence, at once and whenever
@@ -856,11 +871,13 @@ local child's work; nothing moves your branch.*
   there. One it has: a new workspace on the caller's branch, only the missing commits sent. None:
   it makes the project itself, under the caller's name of it (or `-2`, `-3`… when that name is
   another project's), in its folder for projects from other machines,
-  `$XDG_DATA_HOME/flottille/projects/<project>`; each repository is cloned from the bundle, its
+  `$XDG_DATA_HOME/flottille/projects/<project>` (the project's, not Flottille's, to the gate, as
+  a workspace in the data folder is: a session the user starts there writes in it); each repository is cloned from the bundle, its
   whole history the first time, never from its remote; then the workspace and the session as
   above. The project is then that machine's like any other, on its side of the list, its file
-  marked `from_machine = "pc"`. The words of the launch say which project it runs in, and when it
-  makes one.
+  marked with that machine's key (`from_machine = "<key>"`): its member's name is not kept, since
+  a runner may rename any member and another may take it. The words of the launch say which
+  project it runs in, and when it makes one.
 - **The project's settings travel with each launch**: its branch rules (`branch_prefix`,
   `branch_format`), `never`, its tasks and services (`tasks`), its `setup`, its `message_checks`,
   its pull request conventions, its `rules` and `rules_alone`, and each repository's `base`,
@@ -872,7 +889,13 @@ local child's work; nothing moves your branch.*
   A project the user registered by hand keeps the settings the user gave it there: the caller's
   are not laid over them, and the launch's words say so. A project made for one machine's launches
   takes only that machine's: another machine's launch runs in it and leaves its settings as they
-  are, its words saying whose they keep. Settings that cannot be used there (a task needing a
+  are, its words saying whose they keep (a project whose file names the machine instead, as the
+  first builds of dev wrote it, is no machine's: it keeps its settings; removed, the next launch
+  makes it again). The settings
+  are laid only on the project file they were classed against, as a held write is done only while
+  its words still hold: when the user (or anything else) changed that file meanwhile, the launch
+  is refused when it is allowed, saying the project changed, and nothing is laid; the caller
+  launches again. Settings that cannot be used there (a task needing a
   service that machine lacks) refuse the launch, saying why.
 - **What the settings change is classed as the same writes of an agent there** (`docs/tools.md`,
   "The project"), by the receiving machine's gate, against the project as it is there: each task
@@ -880,7 +903,12 @@ local child's work; nothing moves your branch.*
   line or a sensitive path is base; asking turned off, `check` or `read_only` set are base), each
   setup step as `setup add`, the rules and `rules_alone` as `set_rules` (base), each repository's
   base branches and dependencies as `set_settings`; what no agent's tool writes there is the
-  user's word, base: an entry removed from `never`, the message checks and the commit checks. The
+  user's word, base: an entry removed from `never`, the message checks and the commit checks, the
+  branch and pull request conventions (its template is text given to the agents, as the rules
+  are), and a repository the project lacks, which is checked as one the user adds there: no link
+  out of the project's folder, no repository of another project (`It adds the repository lib to
+  the project`). In a project Flottille made, a repository whose folder leads out of the project
+  is never the launch's. The
   launch takes the strongest class: one base change makes it the user's to decide, never the
   judge's (in Full it passes, as a base write does); a line the gate refuses refuses the launch.
   Its words name each line and key that changes (`It adds the task deploy: `make deploy``, `It
@@ -1313,6 +1341,12 @@ recreated.
   closes, and the notice says so (`no connection for 10 minutes`); the in-app browser's tunnels
   and those of the two uses are never shared (`open_address(…, browser)`). A `viewer`'s page draws
   no tunnel control (the machine would refuse it).
+  Built (#1230), what the second review of that left: an **Open** whose panel is left before the
+  machine has answered (Back, say) opens no tunnel, and closes the one it had opened if the answer
+  came first (`Core.open_address` is undone with its caller; a tunnel held before, which that call
+  only found, stays); a form that posts to another site, which the web view does not report to
+  `shouldOverrideUrlLoading`, is stopped when its load starts (`onPageStarted`) and the page goes
+  back; the web view's HTTP cache goes with the cookies and the storage.
 - **Built (#829), from the command line**: `flottille --machine server tunnel open <run> [--port
   <p>]` signs `tunnel.open {run, port?}` for the machine and carries on listening: the daemon of
   the client's machine listens on `127.0.0.1` (never another address) on the run's port when it is
@@ -1738,6 +1772,21 @@ on a real phone, by hand, and reported.
   (`shouldInterceptRequest` over a stream of the link) would remove it for the in-app view, but
   needs a raw-stream API in the core and the web view's own request handling (cookies, redirects,
   websockets) rebuilt over it: not done. Reversible: the listener is `bind_local`.
+- **What the idle end counts, and what it leaves (#1230).** The idle end of an **Open in browser**
+  tunnel counts connections, not bytes: a connection that only opens and closes starts the 10
+  minutes again, and a page that keeps a connection open (a dev server's live-reload websocket)
+  keeps the tunnel for as long as the page stays open in the browser. That is the use (the page is
+  in the user's browser and is in use), and the notification's Close is the way out; counting bytes
+  would end a tunnel under a page that is only listening. Reversible: `accept` is the one place.
+  The in-app browser's tunnel has no idle end either: with an **Open in browser** tunnel kept, the
+  service keeps the core connected with the app in the background, and an in-app panel left open
+  then keeps its tunnel until the user comes back and leaves it. Closing it when the app stops
+  would lose the page at every switch of app; the panel is on screen when the user returns.
+- **Cache and service workers (#1230).** When a tunnel's panel closes or its tunnel ends, the
+  cookies, the web storage and the HTTP cache of the web view are cleared. The platform has no call
+  of its own for service workers: `WebStorage.deleteAllData` is the one that may include them, and
+  what remains is keyed by the origin `localhost:<port>`, a port the system picked at random for that
+  tunnel, which another page is unlikely to be given again.
 - A tunnel carries at most 64 connections at once and a device has at most 8 tunnels open on a
   machine: a small cap for one person's pages and APIs, said in the refusal; raising it is one
   constant.
@@ -1823,7 +1872,10 @@ on a real phone, by hand, and reported.
   replace the hub (`--replace`): a machine has one hub.
 - A removal is carried out by every daemon that takes the list holding it: the machines it trusts
   are written again, and its link to the removed member's machine is cut at once
-  (`remote.disconnected`, `it was removed from the member list`). The removed machine's own session
+  (`remote.disconnected`, `it was removed from the member list`). A link to it that was being made
+  when the list came is judged again as it is kept, and closed (`refused: this machine's key is not
+  one of the user's`): it never gets `remote.connected`. So is a client's link to it dialled for a
+  request then: closed, and the request answered `unavailable`. The removed machine's own session
   to the hub is refused, so it never sees the removal itself; its links are cut by the others.
 - `remote.connected` and `remote.disconnected` are the machines' links, not the hub's session
   (its state is `remote.machines`' `hub`, and `remote.hub` says it changed).

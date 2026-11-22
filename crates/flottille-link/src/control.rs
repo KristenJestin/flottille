@@ -17,7 +17,9 @@
 //! device → hub   {"key": K, "nonce": Nd, "hello": {…}}
 //! hub → device   {"hub": H, "nonce": Nh, "hello": {…}, "proof": sign_H(session, 1, K, Nd, Nh)}
 //! device → hub   {"proof": sign_K(session, 2, H, Nh, Nd), "pinned": P | null, "pair"?: {…}}
-//! hub → device   {"welcome": {}}  or  {"refused": {"reason": "…", "reset": true | false}}
+//! hub → device   {"welcome": {}}  or  {"refused": {"reason": "…", "reset": true | false,
+//!                                                 "proof": sign_H(refused, K, Nd, Nh, P, pair,
+//!                                                                 reset, reason)}}
 //! then           device → hub {"ask": {"id": n, …}}; hub → device {"answer": {"id": n, …}},
 //!                {"list": […]}, {"presence": […]}, {"facts": […]}
 //! and            device → hub {"relay": {"to": K', "packet": P}}; hub → device
@@ -39,6 +41,19 @@
 //! again, nor sent back to the side that made it. `pinned` is the hash of the first change of the
 //! list the device checked, if it has one: a hub that refuses the device says `reset` when its own
 //! list starts otherwise, and tells a device nothing else of its list.
+//!
+//! The welcome or the refusal is said over a connection nothing protects on an `http://` hub. The
+//! refusal is a verdict a device acts on (it forgets the hub, or says its list was reset), so the
+//! hub signs it over the handshake: `refused` is `flottille-hub-refused-v1` and a zero byte, then
+//! the device's key, both nonces, what the hub received of the device's proof, `reset` as one byte
+//! and the reason's bytes. What it received is `pinned` (a zero byte when there is none, else a one
+//! and the hash) and `pair` (a zero byte, else a one, the pairing's proof and `Proposed::bytes`):
+//! the device's signature covers neither, so something on the way could add a `pair` to a member's
+//! proof, or change `pinned`, to have the hub refuse it; the device checks the refusal against what
+//! it sent, and such a refusal does not check. A refusal whose proof is missing (a hub of before
+//! 2026-11-22) or does not check (said by something on the way, answering a request changed on the
+//! way, or caught in another session) changes nothing: the device says the hub could not be
+//! reached.
 //!
 //! A device that pairs (`docs/remote.md`, "Pairing") is no member yet: its proof carries `pair`,
 //! the card it proposes (`Proposed`) and its proof that it holds the pair code's secret, which
@@ -83,6 +98,8 @@ const UPGRADE: &str = "flottille-hub";
 const SESSION: &[u8] = b"flottille-hub-session-v1\0";
 /// The start of what a device proves with a pair code's secret.
 const PAIR: &[u8] = b"flottille-hub-pair-v1\0";
+/// The start of what the hub signs when it refuses a device at the end of the handshake.
+const REFUSED: &[u8] = b"flottille-hub-refused-v1\0";
 /// The longest line a device takes from its hub: a list of `MOST_CHANGES + MANAGING_HEADROOM`
 /// changes fits.
 pub const LINE_LIMIT: usize = 4 << 20;
@@ -354,6 +371,43 @@ impl Transcript {
             .is_ok()
     }
 
+    /// What the hub signs when it refuses the device of this handshake: bound to its keys and
+    /// nonces, so that a refusal caught in one session says nothing in another, and to what the
+    /// hub received of the device's proof (`pinned`, `pair`), which the device's own signature
+    /// does not cover: a refusal answering a request changed on the way does not check for the
+    /// device that sent another one.
+    fn refusal_bytes(
+        &self,
+        pinned: Option<ChangeHash>,
+        pair: Option<&Pairing>,
+        reason: &str,
+        reset: bool,
+    ) -> Vec<u8> {
+        let mut bytes = REFUSED.to_vec();
+        bytes.extend_from_slice(self.device.as_bytes());
+        bytes.extend_from_slice(&self.device_nonce.0);
+        bytes.extend_from_slice(&self.hub_nonce.0);
+        match pinned {
+            Some(pinned) => {
+                bytes.push(1);
+                bytes.extend_from_slice(&pinned.0);
+            }
+            None => bytes.push(0),
+        }
+        match pair {
+            // `Proposed::bytes` says its own length, so the reason after it reads one way only.
+            Some(pairing) => {
+                bytes.push(1);
+                bytes.extend_from_slice(&pairing.proof.0);
+                bytes.extend_from_slice(&pairing.proposed.bytes());
+            }
+            None => bytes.push(0),
+        }
+        bytes.push(u8::from(reset));
+        bytes.extend_from_slice(reason.as_bytes());
+        bytes
+    }
+
     fn pair_mac(&self, secret: &PairSecret, proposed: &Proposed) -> Hmac<Sha256> {
         let mut mac =
             Hmac::<Sha256>::new_from_slice(&secret.0).expect("HMAC takes a key of any length");
@@ -491,11 +545,15 @@ pub enum ToDevice {
     /// The session is a member's, or a pairing's.
     Welcome {},
     /// The device is not one of the members; `reset` when the list it pinned is not the hub's
-    /// any more, the hub having been set up again.
+    /// any more, the hub having been set up again. At the end of the handshake, `proof` is the
+    /// hub's signature of it over the handshake (`Transcript::refusal_bytes`); a hub of before
+    /// 2026-11-22 sends none.
     Refused {
         reason: String,
         #[serde(default)]
         reset: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        proof: Option<Signature>,
     },
     Answer {
         id: u64,
@@ -1080,9 +1138,15 @@ impl Session {
                 {
                     return Err(ControlError::NeedsUpdate(refusal));
                 }
-                return Err(ControlError::Refused {
+                // Said before any key is proved, so by anything on the way to an `http://` hub:
+                // no verdict, and its words are said as what answered, not as the hub's.
+                return Err(ControlError::Unreachable {
                     hub: authority.clone(),
-                    reason: shown(reason, SHOWN),
+                    why: format!(
+                        "what answered refused this device before the handshake, unsigned, \
+                         saying \"{}\": the hub could not be reached",
+                        shown(reason, SHOWN)
+                    ),
                 });
             }
             let theirs: HubHello = serde_json::from_value(answer)
@@ -1118,7 +1182,7 @@ impl Session {
                 &DeviceProof {
                     proof,
                     pinned: pinned_list,
-                    pair,
+                    pair: pair.clone(),
                 },
             )
             .await
@@ -1126,9 +1190,9 @@ impl Session {
             let welcome: ToDevice = read_frame(&mut reader, HANDSHAKE_LIMIT)
                 .await
                 .map_err(lost)?;
-            Ok((transcript, protocol, welcome))
+            Ok((transcript, protocol, welcome, pair))
         };
-        let (transcript, protocol, welcome) =
+        let (transcript, protocol, welcome, pair) =
             tokio::time::timeout(WAIT, handshake).await.map_err(|_| {
                 lost(format!(
                     "it did not finish its handshake in {} s",
@@ -1151,7 +1215,32 @@ impl Session {
                 ));
                 None
             }
-            ToDevice::Refused { reason, reset } => Some((shown(&reason, SHOWN), reset)),
+            ToDevice::Refused {
+                reason,
+                reset,
+                proof,
+            } => {
+                // Anything on the way to an `http://` hub can say a refusal, or change what the
+                // device asked: only the hub's signature over this handshake and over what this
+                // device sent makes it the hub's verdict on this device.
+                let signed = proof.is_some_and(|proof| {
+                    verify(
+                        &transcript.hub,
+                        &transcript.refusal_bytes(pinned_list, pair.as_ref(), &reason, reset),
+                        &proof,
+                    )
+                });
+                if !signed {
+                    return Err(ControlError::Unreachable {
+                        hub: authority.clone(),
+                        why: "what answered refused this device without the hub's signature, as \
+                              an older flottille-hub or something on the way to it does: the hub \
+                              could not be reached"
+                            .to_owned(),
+                    });
+                }
+                Some((shown(&reason, SHOWN), reset))
+            }
             _ => {
                 return Err(lost(
                     "it said what is not Flottille's hub protocol".to_owned(),
@@ -1429,6 +1518,8 @@ async fn drive(
 
 /// A device that connected to the hub and proved its key: the hub decides whether it is welcome.
 pub struct Arriving {
+    /// The hub's key, which signs a refusal.
+    key: SigningKey,
     transcript: Transcript,
     pinned: Option<ChangeHash>,
     pair: Option<Pairing>,
@@ -1469,13 +1560,21 @@ impl Arriving {
         self.protocol
     }
 
-    /// Refuses the device, saying why, and whether the list it pinned was reset.
+    /// Refuses the device, saying why, and whether the list it pinned was reset, signed over the
+    /// handshake.
     pub async fn refuse(mut self, reason: &str, reset: bool) {
+        let proof = sign(
+            &self.key,
+            &self
+                .transcript
+                .refusal_bytes(self.pinned, self.pair.as_ref(), reason, reset),
+        );
         let _ = write_line(
             &mut self.writer,
             &ToDevice::Refused {
                 reason: reason.to_owned(),
                 reset,
+                proof: Some(proof),
             },
         )
         .await;
@@ -1710,6 +1809,7 @@ pub async fn arrive(
         .await
         .map_err(|_| "the handshake did not finish in time".to_owned())??;
     Ok(Arriving {
+        key: key.0.clone(),
         transcript,
         pinned,
         pair,
