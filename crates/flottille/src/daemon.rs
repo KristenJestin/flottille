@@ -1004,6 +1004,7 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
             "remote.",
             "tunnel.",
             "whatsnew.",
+            "signin.",
         ]
         .iter()
         .any(|prefix| request.method.starts_with(prefix))
@@ -1044,6 +1045,8 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
                     crate::link::call(daemon, &request.method, request.params).await
                 } else if request.method.starts_with("tunnel.") {
                     crate::tunnel::call(daemon, &request.method, request.params).await
+                } else if request.method.starts_with("signin.") {
+                    crate::sign_in::call(daemon, &request.method, request.params).await
                 } else if request.method.starts_with("whatsnew.") {
                     crate::whatsnew::call(daemon, &request.method, request.params).await
                 } else if request.method.starts_with("items.") {

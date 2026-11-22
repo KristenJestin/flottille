@@ -107,6 +107,13 @@ pub enum Update {
     /// An entry of the vault was set or removed, from any client: the settings page reads the
     /// list again.
     VaultChanged,
+    /// A program's own sign-in or sign-out moved (`signin.changed`): its name, its state and,
+    /// when it failed, Flottille's sentence of why; never what the program printed.
+    ProgramSignIn {
+        program: String,
+        state: String,
+        why: Option<String>,
+    },
     /// Where workspaces go was chosen (a project's own when it names one, the default of every
     /// project when `None`), from any client: the sections read it again.
     WorkspacesFolderChanged { project: Option<String> },
@@ -413,6 +420,14 @@ fn follow(
         }
         if event.name == "vault.changed" {
             let _ = updates.unbounded_send(Update::VaultChanged);
+        }
+        if event.name == "signin.changed" {
+            let text = |key: &str| event.data[key].as_str().map(str::to_owned);
+            let _ = updates.unbounded_send(Update::ProgramSignIn {
+                program: text("program").unwrap_or_default(),
+                state: text("state").unwrap_or_default(),
+                why: text("why"),
+            });
         }
         if event.name == "sessions.changed" {
             let _ = updates.unbounded_send(Update::SessionsChanged);

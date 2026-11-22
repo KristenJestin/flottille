@@ -60,6 +60,7 @@ pub mod settings;
 pub mod setup;
 pub mod shell;
 pub mod shown_files;
+pub mod sign_in;
 pub mod skills;
 pub mod state;
 pub mod steps;

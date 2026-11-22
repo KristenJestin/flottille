@@ -263,7 +263,13 @@ const LEFT: [&str; 16] = [
 ];
 
 /// Elements that are not navigation, by the start of their id.
-const LEFT_PREFIXES: [&str; 3] = ["tree-row-", "project-items-state-", "provider-"];
+// A program's sign-in row (#1185) is clicked by its buttons alone, as a provider's row is.
+const LEFT_PREFIXES: [&str; 4] = [
+    "tree-row-",
+    "project-items-state-",
+    "provider-",
+    "sign-in-row-",
+];
 
 fn is_hex12(id: &str) -> bool {
     id.len() == 12 && id.chars().all(|c| c.is_ascii_hexdigit())

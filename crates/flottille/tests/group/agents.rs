@@ -47,6 +47,8 @@ mod quota;
 mod reload_tools;
 #[path = "../rules.rs"]
 mod rules;
+#[path = "../sign_in.rs"]
+mod sign_in;
 #[path = "../tool_results.rs"]
 mod tool_results;
 #[path = "../turn_usage.rs"]

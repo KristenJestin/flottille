@@ -670,6 +670,11 @@ pub(crate) async fn has_bitbucket_context(host: &str) -> Result<bool, String> {
     bitbucket::has_context(host).await
 }
 
+/// Whether `bkt context list --json`'s answer names a context on `host` (`sign_in`).
+pub(crate) fn bitbucket_lists_host(listed: &Value, host: &str) -> bool {
+    bitbucket::lists_host(listed, host)
+}
+
 /// Whether `gh` is there and signed in: its exit code, nothing it prints.
 pub(crate) async fn signed_in() -> Result<(), String> {
     match gh(&["auth", "status", "--hostname", "github.com"]).await {

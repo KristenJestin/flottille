@@ -760,6 +760,124 @@ fn a_viewer_reads_but_cannot_send_answer_or_start() {
     assert_eq!(server.log().matches(SERVED).count(), 1, "{}", server.log());
 }
 
+/// #1185: a program's sign-in is the user's, from a device that may drive the machine: a viewer
+/// starts none, gives no code, cancels none and signs nothing out.
+#[test]
+fn a_viewer_cannot_sign_in() {
+    let (_hub, _pc, server, laptop) = pc_server_and(User::new(), User::new(), "laptop", "viewer");
+    let device = laptop.device();
+
+    let read = laptop.raw(&signed(&device, "1", "server", "signin.list", json!({})));
+    assert!(read["error"].is_null(), "{read}");
+    assert!(read["result"]["programs"].is_array(), "{read}");
+
+    for (n, (method, deed)) in [
+        ("signin.start", "sign a program in"),
+        ("signin.code", "call signin.code"),
+        ("signin.cancel", "call signin.cancel"),
+        ("signin.sign_out", "sign a program out"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let id = format!("{}", n + 2);
+        let answer = laptop.raw(&signed(
+            &device,
+            &id,
+            "server",
+            method,
+            json!({"program": "gh"}),
+        ));
+        assert_eq!(answer["id"], id.as_str());
+        assert_eq!(
+            error_of(&answer),
+            format!("refused: laptop may only view: a controller or a runner may {deed}"),
+            "{method}"
+        );
+    }
+    assert_eq!(server.log().matches(SERVED).count(), 1, "{}", server.log());
+}
+
+/// #1185 round 2: a program's sign-in is the caller's that started it, as `connection.login` is:
+/// another caller is told that it runs and where it was started from, never its address or its
+/// code, and neither gives it a code nor cancels it.
+#[test]
+fn another_machine_never_sees_the_code_of_a_sign_in_it_did_not_start() {
+    let server_user = User::new().with_sign_in_programs(&["gh"]);
+    server_user.sign_in_script("gh", json!({"signed_in": false}));
+    let (_hub, _pc, server, laptop) =
+        pc_server_and(server_user, User::new(), "laptop", "controller");
+    let device = laptop.device();
+    let ask = |id: &str, method: &str| {
+        laptop.raw(&signed(
+            &device,
+            id,
+            "server",
+            method,
+            json!({"program": "gh"}),
+        ))
+    };
+
+    // Started here, on the server: the laptop is told it runs, without its code.
+    let started = server
+        .user
+        .call("signin.start", json!({"program": "gh"}))
+        .unwrap();
+    assert_eq!(started["code"], "WDJB-MJHT", "{started}");
+    for (id, method) in [("1", "signin.start"), ("2", "signin.cancel")] {
+        let answer = ask(id, method);
+        assert!(
+            error_of(&answer).contains("a sign-in of gh runs, started from server"),
+            "{method}: {answer}"
+        );
+        assert!(!answer.to_string().contains("WDJB-MJHT"), "{answer}");
+        assert!(
+            !answer.to_string().contains("login.example.test"),
+            "{answer}"
+        );
+    }
+    let code = laptop.raw(&signed(
+        &device,
+        "3",
+        "server",
+        "signin.code",
+        json!({"program": "gh", "code": "invented"}),
+    ));
+    assert!(
+        error_of(&code).contains("a sign-in of gh runs, started from server"),
+        "{code}"
+    );
+    server
+        .user
+        .call("signin.cancel", json!({"program": "gh"}))
+        .unwrap();
+    eventually("the server's sign-in ended", || {
+        server.user.call("signin.list", json!({})).unwrap()["programs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["program"] == "gh" && row["running"] == false)
+    });
+
+    // Started from the laptop: the laptop has the code, the server's own clients do not.
+    let started = ask("4", "signin.start");
+    assert_eq!(started["result"]["code"], "WDJB-MJHT", "{started}");
+    for method in ["signin.start", "signin.cancel"] {
+        let (kind, said) = server
+            .user
+            .call(method, json!({"program": "gh"}))
+            .unwrap_err();
+        assert_eq!(kind, "refused", "{method}: {said}");
+        assert!(
+            said.contains("a sign-in of gh runs, started from laptop"),
+            "{method}: {said}"
+        );
+        assert!(!said.contains("WDJB-MJHT"), "{said}");
+    }
+    let cancelled = ask("5", "signin.cancel");
+    assert!(cancelled["error"].is_null(), "{cancelled}");
+}
+
 #[test]
 fn a_controller_answers_a_request_and_starts_a_session_on_a_runner() {
     let (_hub, _pc, server, tablet) =

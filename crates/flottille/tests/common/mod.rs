@@ -190,7 +190,7 @@ impl User {
             .prefix("flottille-test")
             .tempdir()
             .unwrap();
-        for sub in ["home", "state", "config", "data"] {
+        for sub in ["home", "state", "config", "data", "sign-in-bin"] {
             std::fs::DirBuilder::new()
                 .mode(0o700)
                 .create(dir.path().join(sub))
@@ -201,10 +201,13 @@ impl User {
             .tempdir()
             .unwrap();
         std::os::unix::fs::symlink(runtime.path(), dir.path().join("runtime")).unwrap();
+        // The programs a sign-in runs are looked for there alone (`docs/agents.md`, "Signing in"):
+        // a program the machine has installed is never run, and a test puts its fakes there.
+        let programs = dir.path().join("sign-in-bin").display().to_string();
         let mut user = User {
             dir,
             _runtime: runtime,
-            env: Vec::new(),
+            env: vec![("FLOTTILLE_TEST_PROGRAMS".to_owned(), programs)],
             closed: Arc::new(Mutex::new(false)),
             reaper: None,
         };
@@ -423,6 +426,49 @@ impl User {
         let dir = user.path("claude");
         user.with_env("PATH", &path)
             .with_env("FLOTTILLE_FAKE_CLAUDE_DIR", dir.to_str().unwrap())
+    }
+
+    /// The programs this user's daemon signs in with (#1185, `docs/agents.md`, "Signing in"): the
+    /// fakes named (`gh`, `glab`, `acli`, `bkt`, `claude`, `codex`), each a link in `programs`
+    /// with a folder of its own, `sign-in-<name>`. No other program is found there, whatever the
+    /// machine has installed.
+    pub fn with_sign_in_programs(self, names: &[&str]) -> User {
+        let mut user = self;
+        for name in names {
+            let fake = match *name {
+                "gh" | "glab" => fake_gh(),
+                "acli" => fake_acli(),
+                "bkt" => fake_bkt(),
+                "claude" => fake_claude(),
+                "codex" => fake_codex(),
+                other => panic!("no fake {other}"),
+            };
+            std::os::unix::fs::symlink(fake, user.path("sign-in-bin").join(name)).unwrap();
+            let dir = user.path(&format!("sign-in-{name}"));
+            std::fs::create_dir(&dir).unwrap();
+            let variable = format!("FLOTTILLE_FAKE_{}_DIR", name.to_uppercase());
+            user = user.with_env(&variable, dir.to_str().unwrap());
+        }
+        user
+    }
+
+    /// The script of the fake `name` a sign-in runs.
+    pub fn sign_in_script(&self, name: &str, script: Value) {
+        std::fs::write(
+            self.path(&format!("sign-in-{name}/script.json")),
+            script.to_string(),
+        )
+        .unwrap();
+    }
+
+    /// What the fake `name` did of its sign-in, the first first (`sign_in.rs` of the fake `gh`).
+    pub fn sign_in_record(&self, name: &str) -> Vec<Value> {
+        records(&self.path(&format!("sign-in-{name}/sign-in.jsonl")))
+    }
+
+    /// The user finishes the sign-in of the fake `name` in their browser.
+    pub fn approve_sign_in(&self, name: &str) {
+        std::fs::write(self.path(&format!("sign-in-{name}/approve")), "").unwrap();
     }
 
     /// The fake `claude`'s script.
