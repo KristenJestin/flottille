@@ -690,3 +690,24 @@ impl Render for SignInSection {
             .child(self.confirm(cx))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::opens;
+
+    /// #1185 round 2: the dialog opens an address of the web only, whatever a daemon answered.
+    #[test]
+    fn the_dialog_opens_only_an_address_of_the_web() {
+        assert!(opens("https://github.com/login/device"));
+        assert!(opens("http://127.0.0.1:8080/callback"));
+        for refused in [
+            "file:///etc/passwd",
+            "javascript:alert(1)",
+            "ssh://git.example.com",
+            "/home/someone/.bashrc",
+            "",
+        ] {
+            assert!(!opens(refused), "{refused}");
+        }
+    }
+}

@@ -120,7 +120,7 @@ fn each_program_says_whether_it_is_signed_in() {
     assert_eq!(gh["found"], true, "{gh}");
     assert_eq!(gh["version"], "2.60.0", "{gh}");
     assert_eq!(gh["signed_in"], true, "{gh}");
-    assert_eq!(gh["account"], "octocat", "{gh}");
+    assert_eq!(gh["account"], "o***", "{gh}");
     assert_eq!(gh["can_sign_in"], true, "{gh}");
 
     let glab = row(&listed, "glab");
@@ -131,7 +131,7 @@ fn each_program_says_whether_it_is_signed_in() {
     let claude = row(&listed, "claude");
     assert_eq!(claude["kind"], "agent", "{claude}");
     assert_eq!(claude["signed_in"], true, "{claude}");
-    assert_eq!(claude["account"], "someone@example.com", "{claude}");
+    assert_eq!(claude["account"], "s***@e***", "{claude}");
 
     assert_eq!(row(&listed, "codex")["signed_in"], false);
 
@@ -392,4 +392,111 @@ fn a_program_without_a_flow_says_the_line_to_type() {
         refused.1.contains("`opencode auth login`") && refused.1.contains("terminal"),
         "{refused:?}"
     );
+}
+
+/// #1185 round 2: the account a status names is masked for real, its first letter and its
+/// domain's first letter kept at most, wherever the list is asked from.
+#[test]
+fn an_account_name_is_shown_masked() {
+    let user = User::new().with_sign_in_programs(&["gh", "claude"]);
+    user.sign_in_script("gh", json!({"user": {"login": "octocat"}}));
+    user.sign_in_script("claude", json!({"account": "someone@example.com"}));
+
+    let listed = list(&user);
+
+    assert_eq!(row(&listed, "gh")["account"], "o***");
+    assert_eq!(row(&listed, "claude")["account"], "s***@e***");
+    for said in ["octocat", "someone", "example.com"] {
+        assert!(!listed.to_string().contains(said), "{said}: {listed}");
+    }
+}
+
+/// #1185 round 2: a sign-in started while the last one of the same program is ending (its
+/// status still being read) is its own: the end of the last one leaves it running, and it can be
+/// cancelled.
+#[test]
+fn a_sign_in_started_while_the_last_one_ends_can_be_cancelled() {
+    let user = User::new().with_sign_in_programs(&["gh"]);
+    // Each status takes 3 s: the window in which the last sign-in is ending.
+    user.sign_in_script("gh", json!({"signed_in": false, "delay_ms": 3000}));
+    let logins = |user: &User| {
+        user.sign_in_record("gh")
+            .into_iter()
+            .filter(|entry| entry.get("login").is_some())
+            .collect::<Vec<_>>()
+    };
+
+    user.call("signin.start", json!({"program": "gh"})).unwrap();
+    std::fs::write(user.path("sign-in-gh/refuse"), "").unwrap();
+    eventually("the first sign-in ended refused", || {
+        user.sign_in_record("gh")
+            .iter()
+            .any(|entry| entry["ended"] == "refused")
+    });
+    std::fs::remove_file(user.path("sign-in-gh/refuse")).unwrap();
+    // Started again while the first one's status is read: a second program runs.
+    let deadline = Instant::now() + Duration::from_millis(2500);
+    while logins(&user).len() < 2 {
+        assert!(Instant::now() < deadline, "no second sign-in started");
+        user.call("signin.start", json!({"program": "gh"})).unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let pid = logins(&user)[1]["pid"].as_u64().unwrap();
+    // The first one's end is said once its status was read.
+    eventually("the first sign-in's end was said", || {
+        events(&user)
+            .iter()
+            .any(|event| event["name"] == "signin.changed" && event["data"]["state"] == "failed")
+    });
+
+    let cancelled = user.call("signin.cancel", json!({"program": "gh"}));
+
+    assert!(cancelled.is_ok(), "{cancelled:?}");
+    eventually("the second sign-in's process ended", || {
+        !Path::new(&format!("/proc/{pid}")).exists()
+    });
+}
+
+/// #1185 round 2: an address a program prints with a user and a token in it is shown without
+/// them, and the code beside it is left as it is.
+#[test]
+fn an_address_is_shown_without_its_credentials() {
+    let user = User::new().with_sign_in_programs(&["gh"]);
+    user.sign_in_script(
+        "gh",
+        json!({"signed_in": false,
+               "sign_in": {"address": "https://oauth2:glpat-inventedTokenOfATest0042@git.example.com/login/device",
+                           "code": "ABCD-1234"}}),
+    );
+
+    let started = user.call("signin.start", json!({"program": "gh"})).unwrap();
+
+    assert_eq!(started["address"], "https://git.example.com/login/device");
+    assert_eq!(started["code"], "ABCD-1234");
+    assert!(!started.to_string().contains("glpat"), "{started}");
+    user.call("signin.cancel", json!({"program": "gh"}))
+        .unwrap();
+}
+
+/// #1185 round 2: the list runs each program's status once for callers that ask it together or
+/// right after one another, not once each.
+#[test]
+fn a_list_asked_at_once_runs_each_status_once() {
+    let user = User::new().with_sign_in_programs(&["gh"]);
+    user.sign_in_script("gh", json!({"delay_ms": 500}));
+
+    std::thread::scope(|scope| {
+        let asked: Vec<_> = (0..3).map(|_| scope.spawn(|| list(&user))).collect();
+        for asked in asked {
+            assert_eq!(row(&asked.join().unwrap(), "gh")["signed_in"], true);
+        }
+    });
+    assert_eq!(row(&list(&user), "gh")["signed_in"], true);
+
+    let statuses = std::fs::read_to_string(user.path("sign-in-gh/received.jsonl"))
+        .unwrap()
+        .lines()
+        .filter(|line| line.contains(r#""args":["auth","status""#))
+        .count();
+    assert_eq!(statuses, 1);
 }

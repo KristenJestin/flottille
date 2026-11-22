@@ -175,7 +175,7 @@ fn sign_in_shows_the_address_and_the_code_and_ends_signed_in(cx: &mut TestAppCon
     // The user finishes in their browser: the dialog closes and the row says it.
     user.approve_sign_in("gh");
     until(&shell, cx, "gh's row says it is signed in", |cx| {
-        label(cx, "sign-in-state-gh").as_deref() == Some("Signed in as someone")
+        label(cx, "sign-in-state-gh").as_deref() == Some("Signed in as s***")
     });
     settle(cx);
     assert!(!visible(cx, "sign-in-modal"), "the dialog closed");
@@ -204,7 +204,7 @@ fn a_pasted_code_is_written_once_and_never_kept(cx: &mut TestAppContext) {
     click(cx, "sign-in-send-code");
 
     until(&shell, cx, "Claude's row says it is signed in", |cx| {
-        label(cx, "sign-in-state-claude").as_deref() == Some("Signed in as someone@example.com")
+        label(cx, "sign-in-state-claude").as_deref() == Some("Signed in as s***@e***")
     });
     let pasted: Vec<Value> = user
         .sign_in_record("claude")
@@ -247,7 +247,7 @@ fn sign_out_is_asked_once(cx: &mut TestAppContext) {
     let (shell, cx) = window(&user, cx);
     open_settings(&shell, cx);
     until(&shell, cx, "gh's row says it is signed in", |cx| {
-        label(cx, "sign-in-state-gh").as_deref() == Some("Signed in as someone")
+        label(cx, "sign-in-state-gh").as_deref() == Some("Signed in as s***")
     });
 
     click(cx, "sign-out-gh");

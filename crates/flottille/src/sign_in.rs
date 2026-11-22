@@ -908,4 +908,58 @@ mod tests {
             Way::Terminal("opencode auth login".into())
         );
     }
+
+    /// Whether the process `pid` still runs: a zombie waiting for its parent does not.
+    fn runs(pid: &str) -> bool {
+        std::fs::read_to_string(format!("/proc/{pid}/stat"))
+            .ok()
+            .and_then(|stat| {
+                let state = stat.rsplit_once(") ")?.1.chars().next()?;
+                Some(state != 'Z' && state != 'X')
+            })
+            .unwrap_or(false)
+    }
+
+    /// #1185 round 2: a status cut after its time leaves nothing of it running, not even what it
+    /// started itself.
+    #[tokio::test]
+    async fn a_timed_out_status_leaves_no_process_behind() {
+        use std::os::unix::fs::PermissionsExt;
+        let folder = tempfile::tempdir().unwrap();
+        let started = folder.path().join("started");
+        let program = folder.path().join("status");
+        std::fs::write(
+            &program,
+            format!(
+                "#!/bin/sh\nsleep 60 &\necho $! > {}\nwait\n",
+                started.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let ran = ran(&program, &[], Duration::from_millis(500)).await;
+
+        assert!(ran.is_none(), "it was cut");
+        let pid = std::fs::read_to_string(&started).unwrap();
+        let pid = pid.trim();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while runs(pid) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "what the status started still runs"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    #[test]
+    fn an_address_with_credentials_is_read_without_them() {
+        assert_eq!(
+            read(&[
+                "Open https://oauth2:glpat-inventedTokenOfATest0042@git.example.com/device now"
+            ]),
+            (Some("https://git.example.com/device".into()), None)
+        );
+    }
 }
