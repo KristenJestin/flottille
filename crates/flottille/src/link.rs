@@ -414,7 +414,10 @@ impl Remote {
                     file.display()
                 );
             }
+            // Kept again with the file's stamp: a `peers()` that read the file before it was
+            // written set the list before back, and the stamp would keep it from being read again.
             let mut kept = self.peers.lock().unwrap();
+            kept.last = peers;
             kept.read = stamp(&file);
             kept.said = false;
         }
