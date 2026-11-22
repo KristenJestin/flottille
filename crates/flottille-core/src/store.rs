@@ -1070,6 +1070,21 @@ const NAMED_MIGRATIONS: &[(&str, &str)] = &[
 "#,
     ),
     (
+        "routine_events",
+        r#"
+    -- A routine that runs on an event instead of a schedule (#1125): `event` its trigger (JSON),
+    -- its `schedule` empty; `seen` what its watch last read (the workflow runs it saw end), so
+    -- that a restart of the daemon neither misses nor repeats one; `held_at` and `held` the
+    -- events held until its `not_before`, with when they are due.
+    ALTER TABLE routines ADD COLUMN event TEXT;
+    ALTER TABLE routines ADD COLUMN seen TEXT;
+    ALTER TABLE routines ADD COLUMN held_at INTEGER;
+    ALTER TABLE routines ADD COLUMN held TEXT;
+    -- What started a run of an event, as the forge or the tracker said it.
+    ALTER TABLE routine_runs ADD COLUMN trigger TEXT;
+"#,
+    ),
+    (
         "routine_opened",
         r#"
     -- When the user opened a run's result: the windows' dot says a result with something to say

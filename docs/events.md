@@ -423,15 +423,15 @@ A routine was added, edited, paused, resumed, delayed or removed, or a run of it
 ### `routine.ran`
 
 A run of a routine has its outcome: it ended with its result (`something`, `nothing`, or
-`goes_on`, its session going on), it was skipped (its last run still ran, or it was missed too
-long ago), or it failed (its session ended without its result, or could not start). The
+`goes_on`, its session going on), it was skipped (its last run still ran, it was missed too
+long ago, or its event was delivered to the last run's session still open), or it failed (its session ended without its result, or could not start). The
 notification centre makes a row of a run with something to say whose routine rings (`rings`
 `something`), and of a run that could not start; nothing else rings.
 
 | Field | |
 |---|---|
 | `routine` | The routine, as `routine.show` gives it. |
-| `run` | The run, its `outcome`, `summary`, `why` and `session`. |
+| `run` | The run, its `outcome`, `summary`, `why`, `session` and `trigger` (what started a run of an event). |
 | `project` | The routine's project. |
 
 ### `routine.opened`

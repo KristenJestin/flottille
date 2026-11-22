@@ -64,7 +64,8 @@ const SSH_TIME: Duration = Duration::from_secs(5);
 const COMMENT_CHARS: usize = 2000;
 /// What `gh pr view` is asked for.
 const FIELDS: &str = "number,title,state,isDraft,headRefName,headRefOid,baseRefName,\
-    isCrossRepository,url,mergeable,reviewDecision,statusCheckRollup,comments,reviews,body,mergedBy,mergedAt";
+    isCrossRepository,url,mergeable,reviewDecision,statusCheckRollup,comments,reviews,body,mergedBy,mergedAt,\
+    reviewRequests";
 /// The ways `forge` `merge` merges a pull request, the first by default.
 pub const MERGE_METHODS: [&str; 3] = ["squash", "merge", "rebase"];
 pub(crate) use pipelines::{HIDDEN_EVERYWHERE, bitbucket_key, with_branch};
@@ -3962,6 +3963,15 @@ impl Pulls {
             .ok_or_else(|| format!("gh pr view {number} answered no pull request"))?;
         let read = fetched_pull(&self.path, "github", &pull, true);
         fetched.item.details = read.item.details;
+        // Whose review is asked: the logins of the people. A team's name is not a login, and a
+        // request to a team is not the user's (`docs/forges.md`, "Routines").
+        fetched.item.details["requested"] = viewed["reviewRequests"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|asked| asked["login"].as_str())
+            .map(masked)
+            .collect();
         fetched.item.checks = github_checks(&viewed);
         fetched.comments = read.comments;
         fetched.reviews = read.reviews;

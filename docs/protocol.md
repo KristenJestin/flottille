@@ -2866,13 +2866,13 @@ shows, it rings nothing (`docs/design.md`, §11).
 ### The routine methods
 
 Routines (`docs/design.md`, "Routines"): work the daemon starts by itself, each run a new root
-session of the routine's project, at its time. A routine in a result:
+session of the routine's project, at its time or when its event comes. A routine in a result:
 
 ```json
 {"id": "a1b2c3d4e5f6", "name": "Tickets to review", "project": "app",
  "prompt": "List the tickets waiting for my review",
  "agent": {"provider": null, "model": null, "effort": null},
- "schedule": "weekdays 08:30", "zone": "Europe/Paris", "mode": "read_only",
+ "schedule": "weekdays 08:30", "event": null, "zone": "Europe/Paris", "mode": "read_only",
  "rings": "something", "paused": false, "missed_hours": 12,
  "next_at": 1795000200000, "delayed": null, "created_at": 1794900000000,
  "updated_at": 1794900000000}
@@ -2880,23 +2880,48 @@ session of the routine's project, at its time. A routine in a result:
 
 - `schedule`: days and an hour, never a cron line: `every day 07:00` (`daily 07:00`),
   `weekdays 08:30`, `weekends 10:00`, a day of the week (`mondays 09:00`, `monday 09:00`).
-  `zone`: the IANA zone it is read in, the machine's when null.
+  `zone`: the IANA zone it is read in, the machine's when null. Null for a routine that runs on an
+  event.
+- `event`: what it runs on instead of a schedule, null for a scheduled one; a routine has one or
+  the other, never both:
+
+  ```json
+  {"kind": "workflow_run", "repository": null, "workflow": "nightly.yml", "branch": "dev",
+   "started_by": "schedule", "outcome": "failed",
+   "not_before": "08:00", "at_most_once": "day", "new_session": false}
+  ```
+
+  `kind` and its own fields: `workflow_run` (`repository`, `workflow`, `branch`, each null for any
+  of the project's; `started_by` one of `schedule`, `push`, `manual`, `pull_request`, `any`: `any`
+  is a schedule, a push or a run by hand, never a pull request's, and a fork's run never counts;
+  `outcome` `failed` or `any`), `review_requested` (`repository`, null for any), `mentioned` (`tracker_project`, null for
+  any), `assigned` (`tracker_project`, `type`, each null for any). A repository is named by its
+  path in the project or `owner/name`; a tracker's project by its Jira key (`ABC`), or the
+  `owner/name` of a tracker of GitHub issues. Every kind also has `not_before` (`HH:MM` in the
+  routine's zone, or null: an event earlier in the day is held until then), `at_most_once` (`day`,
+  `hour` or null: an event once a run started in that period is let go) and `new_session` (false:
+  an event while the last run's session is open is delivered to it). A field left out is its
+  default (null, `any`, false); a field that is not the kind's is `invalid-params`
+  (`docs/design.md`, "Routines").
 - `mode`: `read_only` (every call that writes is refused, in every mode of the session, whatever
   the prompt says; reads go through), `ask` or `auto` (the gate as for any session in that mode).
 - `rings`: `something` (a notification when the run has something to say) or `never` (its
   history only).
 - `agent`: the provider, model and effort each run starts on; null for those of a new session.
-- `next_at`: when the next run is due, null while it is paused; `delayed`: why that is later than
+- `next_at`: when the next run is due, null while it is paused and for a routine of an event;
+  `delayed`: why that is later than
   the schedule says (the quota of its provider is spent: the run waits for the reset), null
   otherwise.
 - `missed_hours`: a run missed while the daemon was off runs once at its next start when it was
   due less than that many hours before (1 to 168, 12 by default); an older one is skipped.
 
 A run in a result: `{"id", "routine", "due_at", "started_at", "ended_at", "session", "mode",
-"outcome", "summary", "why", "opened"}`. `session` is its root session (null for a skipped run), kept once it
+"outcome", "summary", "why", "trigger", "opened"}`. `session` is its root session (null for a skipped run), kept once it
 ended; `mode` the routine's when it started; `outcome` is `running`, `something`, `nothing`,
 `goes_on` (it said something and its session goes on as any session), `skipped` or `failed`;
-`summary` the one line its result said; `why` why it was skipped or failed; `opened` whether the
+`summary` the one line its result said; `why` why it was skipped or failed (`delivered to its
+session still open, <session>` for an event given to the last run's session instead); `trigger`
+what started a run of an event, as the forge or the tracker said it (masked), null otherwise; `opened` whether the
 user opened its result (`routine.open`).
 
 #### `routine.list`
@@ -2911,17 +2936,20 @@ first.
 
 #### `routine.add`
 
-`{"name", "project", "prompt", "schedule", "zone"?, "mode"?, "rings"?, "provider"?, "model"?,
-"effort"?, "missed_hours"?}`; `mode` is `read_only` and `rings` `something` when left out.
-Answers `{"routine"}`. `invalid-params` for a schedule, zone, mode or ring it cannot read, an empty
-name or prompt; `not-found` for a project Flottille does not know; `refused` for a name another
+`{"name", "project", "prompt", "schedule" | "event", "zone"?, "mode"?, "rings"?, "provider"?,
+"model"?, "effort"?, "missed_hours"?}`, a `schedule` or an `event`; `mode` is `read_only` and
+`rings` `something` when left out.
+Answers `{"routine"}`. `invalid-params` for both a schedule and an event, or neither, a schedule,
+event, zone, mode or ring it cannot read, an empty name or prompt; `not-found` for a project Flottille does not know; `refused` for a name another
 routine has, or an agent that cannot be chosen.
 
 #### `routine.edit`
 
 `{"routine", ...}` with any field of `routine.add`; `name` renames it. An empty `zone`,
 `provider`, `model` or `effort` goes back to the default. A new schedule or zone sets the next run
-again. Answers `{"routine"}`.
+again. A `schedule` replaces the routine's event, an `event` its schedule (the whole event: its
+fields left out are their defaults), and what the old event saw or held is forgotten; both at once
+are `invalid-params`. Answers `{"routine"}`.
 
 #### `routine.run`
 
