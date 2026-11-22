@@ -82,6 +82,7 @@ mod results;
 mod rings;
 mod roles;
 mod routine_command;
+mod routine_tool;
 mod routines;
 mod rules;
 mod run_methods;

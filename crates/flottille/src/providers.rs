@@ -124,7 +124,7 @@ const FILE_AND_COMMAND_TOOLS: [&str; 8] = [
     "run_status",
 ];
 const AGENT_TOOLS: [&str; 4] = ["agent_launch", "agent_send", "agent_status", "agent_stop"];
-const ACTION_TOOLS: [&str; 4] = ["skills", "commands", "setup", "project"];
+const ACTION_TOOLS: [&str; 5] = ["skills", "commands", "setup", "project", "routine"];
 
 impl Provider {
     /// The exact tool names an agent gets, as the provider names them: what it can do decides
@@ -1998,6 +1998,7 @@ mod tests {
                 "commands",
                 "setup",
                 "project",
+                "routine",
                 "wake",
                 "report",
                 "ask",
@@ -2060,7 +2061,7 @@ mod tests {
         assert_eq!(forge[10], "workspace", "after skill_read");
         assert!(!forge.contains(&"tickets".to_owned()));
         let both = short(claude::PROVIDER.tools(true, false, true, true, false));
-        assert_eq!(both.len(), 30);
+        assert_eq!(both.len(), 31);
         assert_eq!(both[10], "tickets", "after skill_read");
         assert_eq!(both[11], "workspace", "after tickets");
         assert_eq!(

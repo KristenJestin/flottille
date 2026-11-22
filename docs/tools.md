@@ -1568,6 +1568,39 @@ The file is written where it stands, its comments kept.
   unknown command, a skill outside the project folder, a repository the project has not) is
   refused before anything is asked.
 
+## Routines
+
+A root has the tool `routine` on its own project, as the user has the Routines tab
+(`docs/design.md` §5.10): everything the user does with a routine, the agent they talk to does
+too ("make me a routine that lists my reviews every morning", "what did last night's run find?",
+"pause the nightly one"). A child has none of it.
+
+| Tool | |
+|---|---|
+| `routine {action: list \| show \| result \| create \| edit \| pause \| resume \| run \| remove, routine?, name?, prompt?, schedule?, event?, zone?, mode?, rings?, provider?, model?, effort?, missed_hours?, date?}` | The routines of the caller's project, each named by its name in `routine`, answered as the daemon's methods answer the user (`docs/protocol.md`, "The routine methods"), in JSON. `list`: the project's routines, each with its last run. `show`: one, its settings, its next run and its history, each run with its session's id. `result`: a run's result, its summary, its items with their `new` marks, what `left`, and its report (`body`), with its session's id: the last run that gave one, or with `date` (`YYYY-MM-DD`, in the routine's zone) the last of that day; a run that failed or was skipped gave none. `create {name, prompt, schedule \| event, zone?, mode?, rings?, provider?, model?, effort?, missed_hours?}` makes one in the caller's project, as `routine.add` does, marked as made by the caller's session (`made_by`); `edit` changes what it is given (`name` renames it), as `routine.edit`; `pause`, `resume`, `run` (now: a new session, refused while a run is under way) and `remove`, as their methods. |
+
+- **Reads run at once**: `list`, `show` and `result`, a read-only routine's run included.
+- **Every write is to judge**, as the other writes of the project ("The project"): a card in
+  Ask, the judge in Auto, through in Full. Its request says what it does in words, the prompt
+  whole (`Create the routine Tickets to review in project app: weekdays 08:30, Read only, rings
+  something`, `Its prompt: …`; `Run the routine Nightly now: a new session in Auto, asked: …`).
+  A write that cannot be done (a routine of another project, a name taken, no schedule nor event)
+  is refused before anything is asked. A read-only routine's run writes none of them.
+- **A routine never gets more than its author.** A `create`, or an `edit` that leaves the routine
+  (its `mode` given, or the one it has) above the caller's session's mode, is refused, in every
+  mode: an Ask session makes and edits only `read_only` and `ask` routines, an Auto or a Full one
+  `auto` too (`refused: this session is in ask mode: a routine it creates or edits is read_only or
+  ask, never auto: …`). It is checked when the call is made and again when it is done, the
+  session's mode read then: a request allowed after the session went down to Ask is not done.
+  Without it, a session could schedule an Auto session for itself, with its own words for prompt.
+- **What a run said is data.** A result's summary, items and report are the run's agent's words,
+  masked when they were kept and given as JSON values, never as instructions of Flottille's.
+- **A run's session is read with `session_read`**, as any root session of the project ("Sessions
+  that read each other"), running or ended: `show` and `result` give its id.
+- **No other project.** `project` is not an argument: a routine of another project is none
+  (`refused: project app has no routine …: list names them`), and `create` makes it in the
+  caller's.
+
 ## Specs
 
 With Specs active in a project (`docs/extensions.md`, "Specs"), each root of the project has the
@@ -2382,6 +2415,7 @@ says who answers a call to judge (`docs/design.md` §7.1).
      `types`, `fields`, `link_types`, `sprints`, `milestones`, `progress`, `time_spent`,
      `worklogs`, the `list` and `show` of `tasks`, `skills`, `commands`, `workspace`,
      `services` and `connections`, `setup` and `vault` `list`, `project` `settings` and `rules`,
+     `routine` `list`, `show` and `result`,
      and a `web` `GET` with no body, no header, no vault entry and no auth that shows nothing.
      Any other tool or action, one of an extension or a connection included, is a write
      (`refused: this session is the run of a read-only routine: …`), in Ask, Auto and Full

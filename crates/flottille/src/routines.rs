@@ -1292,6 +1292,7 @@ pub fn reads(tool: &str, args: &Value) -> bool {
             matches!(action, "list" | "show")
         }
         "setup" | "vault" => action == "list",
+        crate::routine_tool::TOOL => crate::routine_tool::reads(args),
         "project" => matches!(action, "settings" | "rules"),
         // A bodiless GET of no one's: headers can make it another method
         // (`X-HTTP-Method-Override`), and an entry signs it in as the user, where such a GET
