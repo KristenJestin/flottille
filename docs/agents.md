@@ -73,6 +73,59 @@ has Codex settings of its own, `/etc/codex`, Codex is not ready.
 An agent is refused at its start, with a sentence that says why and names the providers that
 are ready, while its provider is not enabled or not ready ("Providers", below).
 
+## Signing in
+
+Flottille provides no login of its own. It can drive each program's **own** sign-in from the
+window (Settings, Agents), on the machine shown, so that a runner without a screen is signed in
+without a terminal: the user finishes it in their browser, on any device. The agents' programs
+(`claude`, `opencode`, `codex`) are signed in on their provider's row; the forges' and trackers'
+(`gh`, `glab`, `acli`, `bkt`, `docs/forges.md`) in the section **Forges and trackers** under it.
+The methods are in `docs/protocol.md` ("The sign-in methods"): they are the user's (`drive`), a
+`viewer` is refused them, and no tool of an agent starts one; bare mode does not move.
+
+**Whether it is signed in** is the program's own status, read for its exit code and the account's
+name only, the rest of what it prints dropped at once: never stored, logged, put in an event or
+shown. The account's name is masked to its first letter, and its domain's for an address
+(`o***`, `s***@e***`).
+
+**What a sign-in shows and keeps.** The daemon runs the program's command below, spawned without
+a shell with the daemon's environment (the user's own configuration, where the program keeps its
+login), its input closed unless it asks for a code. It reads what the program prints line by line
+for two things only: the first address it names and the one-time code it shows; every line is
+dropped once read. The address and the code are held in the daemon's memory while the sign-in
+runs and given only in the answer to `signin.start` (and `signin.list` says that one runs), to the
+caller that started it alone (the device that signed its request, or this machine's own clients):
+another one is told that it runs and where it was started from. The address is kept without the
+user and password it may hold, and masked. The window shows it, opened with the system's default
+handler of the machine the window runs on when it is an `http://` or `https://` address only, and
+the code with a copy button. A code the browser shows for the user to paste back is typed
+in the dialog's hidden field and sent once (`signin.code`): written to the program's input with a
+line's end, which then closes, and kept nowhere. When the program ends, its own status says
+whether it is signed in now; `signin.changed` says the program and the state only. A sign-in is
+cut after 15 minutes (a device code lasts that long); Cancel kills its process group.
+
+| Program | Signed in | Sign-in run | It asks for | Sign-out | Source |
+|---|---|---|---|---|---|
+| `claude` | `claude auth status` (exit 0; the account is its JSON's `email`) | `claude auth login` | the address, then the code the browser shows, pasted back | `claude auth logout` | Claude Code's CLI reference (`claude auth login`, `status`, `logout`) and its authentication page ("Paste code here if prompted") |
+| `opencode` | its login file's presence (above) | none: `opencode auth login` asks its questions in a terminal; the row says that line | | `opencode auth logout`, in a terminal | OpenCode's `auth login`, an interactive prompt |
+| `codex` | `codex login status` (exit 0) | `codex login --device-auth` | the address and the device code | `codex logout` | OpenAI's Codex authentication page (device code for remote or headless machines) |
+| `gh` | `gh auth status --hostname <host>` (exit 0; the account is the word after `account` on the host's line) | `gh auth login --web --hostname <host> --git-protocol https`, with `GH_PROMPT_DISABLED=1` | the address and the device code (`internal/authflow/flow.go`: without a terminal it prints both and waits) | `gh auth logout --hostname <host>` | `gh auth login --help`, `gh auth status --help` |
+| `glab` | `glab auth status --hostname <host>` (exit 0) | `glab auth login --hostname <host> --device` | the address and the device code (`internal/oauth2/device.go`); GitLab 17.9 or later | `glab auth logout --hostname <host>` | glab's `docs/source/auth/login.md` (`--device`, "for headless environments") |
+| `acli` | `acli jira auth status` (exit 0; its `Site:` line, as the tickets read it) | `acli jira auth login --web` | the address when it prints one; its browser must be on the machine signing in (Atlassian's CLOUD-13014 asks for a device flow) | `acli jira auth logout` | Atlassian's `acli jira auth login` reference |
+| `bkt`, Bitbucket Cloud | a context for the host (`docs/forges.md`), never `bkt auth` | `bkt auth login https://bitbucket.org --kind cloud --web` | the address it prints when it cannot open a browser itself; it waits on `127.0.0.1` of the machine signing in, so its browser must be there | `bkt auth logout api.bitbucket.org` (it removes the host's contexts too) | `bkt`'s README, `pkg/cmd/auth/auth.go`, `pkg/oauth/flow.go` and `server.go` |
+| `bkt`, Data Center | the same | none: its token is asked in a terminal ("token is required when not running in a TTY"); the row says `bkt auth login https://<host> --web-token` | | `bkt auth logout <host>` | the same |
+
+A program with no flow that works without a terminal says, in its row, the one line the user
+would type in a terminal on that machine, with a Copy button, and nothing else. After a Bitbucket
+Cloud sign-in, `bkt` still needs a context for the workspace (`docs/forges.md`, "The programs it
+needs"): until one exists, its row says it is not signed in.
+
+The tests never run a real program: the daemon looks the programs of a sign-in up in the folder
+`FLOTTILLE_TEST_PROGRAMS` names, when it names one, instead of `PATH`, and every test's user names
+its own (`crates/flottille/tests/common`), where the fakes are linked (`crates/flottille-fake-gh`,
+whose `sign_in.rs` the other fakes share; the fake `gh` is the fake `glab` through a link of that
+name).
+
 ## Providers
 
 A provider is what an agent runs on: `claude`, `opencode` and `codex`, in this order. Each is a

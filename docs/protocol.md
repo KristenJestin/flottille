@@ -289,6 +289,7 @@ no device calls a `local` one over a link (`docs/remote.md`, "Roles").
 | `agent.start` | drive |
 | `agent.run` | drive |
 | `agent.send` | drive |
+| `agent.upload` | drive |
 | `agent.send_now` | drive |
 | `agent.unqueue` | drive |
 | `agent.answer` | drive |
@@ -328,6 +329,11 @@ no device calls a `local` one over a link (`docs/remote.md`, "Roles").
 | `provider.set_judge` | drive |
 | `provider.set_new_session` | drive |
 | `provider.judge_noticed` | drive |
+| `signin.list` | read |
+| `signin.start` | drive |
+| `signin.code` | drive |
+| `signin.cancel` | drive |
+| `signin.sign_out` | drive |
 
 ### `daemon.status`
 
@@ -2191,6 +2197,30 @@ A message carries 20 texts at most, 5 MiB each (`refused` for more, an empty tex
 big); a text with no marker is marked after the message; with texts, the message may be empty. The
 files go with the images of the agent. `agent.start` takes `texts` as it takes `images`.
 
+`upload` names the upload of `agent.upload` whose files are the message's pictures and pasted
+texts, in their numbers' order, as if it carried them inline (`docs/remote.md`, "Pictures sent to
+another machine"): the upload is gone once the message took it. `not-found` when the sender has no
+such upload (dropped 2 minutes after its last chunk, or another device's); `refused` when a file
+of it arrived in part (the upload stays, for the rest), or when the message carries `images` or
+`texts` too. `agent.start` takes `upload` as it takes `images`.
+
+#### `agent.upload`
+
+`{"upload", "file", "kind", "mime"?, "size", "offset", "data"}`. One chunk of a picture or a pasted
+text of a message to come, which names the upload in `agent.send` or `agent.start`: `{"upload",
+"file", "received"}`, `received` the bytes of that file kept so far. `upload` is the sender's name
+for it, 1 to 64 letters, digits, `_` or `-`; `file` the picture's number among the message's
+pictures (`kind` `image`, with its `mime`, as `agent.send` takes it) or the text's among its texts
+(`kind` `text`, UTF-8, no `mime`), from 1; `size` the whole file's bytes; `data` the chunk in base64,
+512 KiB at most, starting at `offset`, which is where the chunks before it ended. The bounds of a
+local message hold at each chunk, before any of it is kept: `refused` for a number past 20, a type
+not taken, a size of 0 or over 5 MiB, a chunk too big, empty or not base64, one out of order, a
+file whose size or type changed, one longer than its size, and a sender with 2 uploads waiting
+already (the machine holds 8, `busy:` past them); each refusal says which picture or text. An
+upload is its sender's (the device that signed it, or this machine's clients), kept in the
+daemon's data folder under names of its own, and dropped 2 minutes after its last chunk unless a
+message took it.
+
 #### `agent.answer`
 
 `{"agent", "question", "answers"}`. The user's answers to an ask of the root (`docs/tools.md`,
@@ -2721,6 +2751,67 @@ picked), a `[judge]` removed by hand is no choice of none: a judge is picked aga
 `{}`. The user saw the notice of the judge Flottille picked: the daemon removes `picked` from
 `[judge]`, which stays the user's judge, and emits `provider.judge_changed`. Answers `{}`; nothing
 changes when the judge was not picked.
+
+### The sign-in methods
+
+A program's own sign-in, started from the window (`docs/agents.md`, "Signing in"): the agents'
+programs (`claude`, `opencode`, `codex`) and the forges' and trackers' (`gh`, `glab`, `acli`,
+`bkt`). Flottille provides no login of its own and never reads a credential: of a status it reads
+the exit code and the account's name, of a sign-in the address to open and the one-time code,
+which only the answers of these methods hold (never an event, the store or a log). The list is a
+`read`; every other method is the user's (`drive`), refused to a `viewer`, and no tool of an agent
+reaches them. A method that names no program Flottille signs in is `not-found`.
+
+#### `signin.list`
+
+`{}`. Every program, the agents first in the providers' order, then the forges and trackers, those
+the registered projects use first: `{"programs": [{"program", "title", "kind", "host", "found",
+"path", "version", "signed_in", "account", "can_sign_in", "line", "sign_out_line", "running"}]}`.
+`kind` is `agent` or `forge`; `host` the one a forge program is checked for (the first a project
+names, else `github.com`, `gitlab.com` or `bitbucket.org`; the Jira site for `acli`, `null` when no
+project names one), `null` for an agent. `signed_in` is what the program's own status says
+(`null` when it is not installed or could not say), `account` the account's name it says (`gh`'s
+login, Claude's email), masked to its first letter and its domain's (`o***`, `s***@e***`), else
+`null`. `can_sign_in` is `true` when Flottille can run its
+sign-in here; `line` is the line to type in a terminal on that machine when it cannot
+(`opencode auth login`, a Bitbucket Data Center server's `--web-token`), and `sign_out_line` the
+same for its sign-out. `running` is `true` while a sign-in of it runs. One list runs at a time:
+the callers that ask meanwhile, or within 2 s, are given the same answer, unless a sign-in changed
+since.
+
+#### `signin.start`
+
+`{"program"}`. Starts the program's own sign-in on this machine, without a shell, one at a time
+for each program (a second start answers the one that runs), and answers once the program said
+the address to open and, for a device flow, the code (20 s at most), or ended: `{"program",
+"host", "running", "address", "code", "asks_code"}`. A sign-in is bound to the caller that
+started it, as `connection.login` is: the device that signed the request, or this machine's own
+clients. Only that caller is answered its address and its code, and gives it a code or cancels it;
+another one is `refused` with `a sign-in of <program> runs, started from <machine>`, without them.
+The address is the first the program prints, without the user and password it may hold, and
+masked. `asks_code` is `true` while the program waits
+for a code the browser shows, to give with `signin.code`. Its end is `signin.changed`
+(`docs/events.md`); it is cut after 15 minutes. `refused` when the program is not installed or
+signs in only in a terminal (the sentence names the line to type).
+
+#### `signin.code`
+
+`{"program", "code"}`. Writes the code the user pasted, one line, to the input of the program's
+sign-in, once, and closes that input: `{"program"}`. The code is not kept. `refused` when the
+program is not signing in, asks for no code, was given its code already, or was started by another
+caller.
+
+#### `signin.cancel`
+
+`{"program"}`. Stops the sign-in, its whole process group: `{"program"}`, then `signin.changed`
+with `cancelled`. `refused` when it is not signing in, or was started by another caller.
+
+#### `signin.sign_out`
+
+`{"program"}`. Runs the program's own sign-out (30 s at most) and answers what its status says
+then: `{"program", "host", "signed_in"}`, and `signin.changed` with `signed_out`. `unavailable`
+when the program still says it is signed in; `refused` when it is not installed or signs out only
+in a terminal.
 
 ### `inbox.list`
 

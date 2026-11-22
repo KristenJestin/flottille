@@ -321,6 +321,8 @@ pub struct Daemon {
     pub updates: crate::updates::Live,
     /// What is new since the version last run (`whatsnew`).
     pub whatsnew: crate::whatsnew::Live,
+    /// The pictures and texts of messages sent in chunks, waiting for their messages (`uploads`).
+    pub uploads: crate::uploads::Uploads,
     /// Becomes true when the daemon stops.
     stopping: watch::Sender<bool>,
 }
@@ -429,6 +431,7 @@ impl Daemon {
             remote: std::sync::RwLock::new(None),
             updates: crate::updates::Live::default(),
             whatsnew: crate::whatsnew::Live::default(),
+            uploads: crate::uploads::Uploads::default(),
             stopping: watch::Sender::new(false),
         }
     }
@@ -681,6 +684,8 @@ async fn serve(
         Some(bus),
     ));
     watchdog::start(&daemon.watch)?;
+    // What came in chunks to a daemon that stopped waits for no message any more.
+    crate::uploads::clear(&daemon);
     if let Some(key) = machine_key
         && let Err(why) = start_link(&daemon, key)
     {
@@ -972,6 +977,7 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
             "remote.",
             "tunnel.",
             "whatsnew.",
+            "signin.",
         ]
         .iter()
         .any(|prefix| request.method.starts_with(prefix))
@@ -1012,6 +1018,8 @@ async fn connection(daemon: Arc<Daemon>, stream: UnixStream) {
                     crate::link::call(daemon, &request.method, request.params).await
                 } else if request.method.starts_with("tunnel.") {
                     crate::tunnel::call(daemon, &request.method, request.params).await
+                } else if request.method.starts_with("signin.") {
+                    crate::sign_in::call(daemon, &request.method, request.params).await
                 } else if request.method.starts_with("whatsnew.") {
                     crate::whatsnew::call(daemon, &request.method, request.params).await
                 } else if request.method.starts_with("items.") {

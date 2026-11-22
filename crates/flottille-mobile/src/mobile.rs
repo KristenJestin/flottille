@@ -84,6 +84,9 @@ const GONE: [&str; 3] = [
     " does not wait for an answer",
     " has no question waiting for you",
 ];
+/// Why a message whose words alone do not fit one frame of the link is refused: its pictures go in
+/// chunks, its words cannot.
+const TOO_BIG: &str = "this message is too big for the link: its words take 1 MiB at most";
 /// A `before` past every event: the daemon then gives the latest page.
 const LATEST: u64 = i64::MAX as u64;
 
@@ -482,20 +485,10 @@ impl Core {
         if text.trim().is_empty() && pictures.is_empty() {
             return Err(MobileError::new("the message is empty"));
         }
-        let mut params = json!({"agent": agent, "message": text});
-        if !pictures.is_empty() {
-            use base64::Engine;
-            params["images"] = pictures
-                .iter()
-                .map(|picture| {
-                    json!({"mime": picture.mime,
-                        "data": base64::engine::general_purpose::STANDARD.encode(&picture.data)})
-                })
-                .collect();
-        }
+        let words = json!({"agent": agent, "message": text});
         let inner = self.inner.clone();
         self.inner
-            .on(async move { inner.call(&machine, "agent.send", params).await.map(drop) })
+            .on(async move { inner.send_message(&machine, words, &pictures).await })
             .await
     }
 
@@ -794,13 +787,57 @@ impl Inner {
             .expect("a message is JSON")
             .len();
         if size > flottille_link::FRAME_LIMIT {
-            return Err(MobileError::new(
-                "this message is too big for the link: its pictures and its words take 1 MiB at most together, about 700 KiB of pictures",
-            ));
+            return Err(MobileError::new(TOO_BIG));
         }
         link.ask(&message)
             .await
             .map_err(|error| MobileError::new(error.to_string()))
+    }
+
+    /// The message `words` to `machine` with its `pictures`: inline when, signed, it fits one frame
+    /// of the link, else the pictures sent first in chunks, each a signed request of its own, then
+    /// the message naming their upload (`docs/remote.md`, "Pictures sent to another machine"). It
+    /// is judged from the pictures' sizes, and one is encoded only as it goes: a phone never holds
+    /// 20 large pictures encoded at once. What the runner refuses says which picture and why.
+    async fn send_message(
+        &self,
+        machine: &str,
+        mut words: Value,
+        pictures: &[Picture],
+    ) -> Result<(), MobileError> {
+        let files: Vec<flottille_link::Attached> = pictures
+            .iter()
+            .map(|picture| flottille_link::Attached::Picture {
+                mime: &picture.mime,
+                bytes: &picture.data,
+            })
+            .collect();
+        if files.is_empty() || flottille_link::fits_with("agent.send", &words, &files) {
+            if !files.is_empty() {
+                use base64::Engine;
+                words["images"] = pictures
+                    .iter()
+                    .map(|picture| {
+                        json!({"mime": picture.mime,
+                            "data": base64::engine::general_purpose::STANDARD.encode(&picture.data)})
+                    })
+                    .collect();
+            }
+            return self.call(machine, "agent.send", words).await.map(drop);
+        }
+        // The words still travel in one frame: when they cannot, nothing is sent.
+        if !flottille_link::fits("agent.send", &words) {
+            return Err(MobileError::new(TOO_BIG));
+        }
+        let link = self.link_of(machine)?;
+        let upload = flottille_link::upload_name().map_err(MobileError::new)?;
+        for chunk in flottille_link::upload_chunks(&upload, &files) {
+            self.call_on(machine, &link, "agent.upload", chunk).await?;
+        }
+        words["upload"] = json!(upload);
+        self.call_on(machine, &link, "agent.send", words)
+            .await
+            .map(drop)
     }
 
     /// `method` on `machine`: its result, or its refusal.

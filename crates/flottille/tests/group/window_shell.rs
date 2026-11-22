@@ -81,6 +81,8 @@ mod window_settings;
 mod window_setup_output;
 #[path = "../window_sidebar.rs"]
 mod window_sidebar;
+#[path = "../window_sign_in.rs"]
+mod window_sign_in;
 #[path = "../window_switcher.rs"]
 mod window_switcher;
 #[path = "../window_tunnels.rs"]
