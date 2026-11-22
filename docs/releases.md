@@ -302,15 +302,20 @@ cannot write, and a branch of another name never had an alpha):
   they pile up, one per push, until the branch is deleted.
 
   **The betas are pruned**: one is published per merge into `dev`, and GitHub counts them all.
-  After a beta is published, **`prune-betas`**, a job of its own after `publish` (a deletion the
-  settings refuse fails it, never a release, and nothing waits for it), keeps the **last ten
-  betas of each version** (`vX.Y.Z-beta.N`, by `N`) and deletes the older, each with its tag
-  (`gh release delete --cleanup-tag`). It holds the token that deletes releases and nothing else
-  (no checkout, no action), lists the pre-releases whose tag is `v<X.Y.Z>-beta.<N>` and no other:
-  **a release, its release candidates, a next build or an alpha is never deleted by it** (the
-  alphas are `alpha-cleanup.yml`'s). A beta a newer one has replaced is no longer a build anyone
-  installs: `install.sh` and `flottille update` read the newest, and a version is counted from
-  the commits, not from the tags, so pruning moves no number.
+  **`.github/workflows/beta-cleanup.yml`**, a workflow of its own, keeps the **last ten betas of
+  each version** (`vX.Y.Z-beta.N`, by `N`) and deletes the older, each with its tag
+  (`gh release delete --cleanup-tag`). It is never a job of `ci.yml`: a failure (a deletion the
+  settings refuse) or a cancellation there would fail or cancel the push run of `dev`, which
+  `verified-on-dev` reads to let `main` skip its verification. It runs every six hours and by
+  hand (a release made with the workflow's token starts no `release` run, so there is none to
+  wait for), **deletes at most thirty betas per run, two seconds apart** (each is two writes, and
+  GitHub's secondary rate limit refuses a burst), so a pile drains over a few runs and a run with
+  nothing to delete is a listing. It holds the token that deletes releases and nothing else (no
+  checkout, no action, nothing of a branch), lists the pre-releases whose tag is
+  `v<X.Y.Z>-beta.<N>` and no other: **a release, its release candidates, a next build or an alpha
+  is never deleted by it** (the alphas are `alpha-cleanup.yml`'s). A beta a newer one has replaced
+  is no longer a build anyone installs: `install.sh` and `flottille update` read the newest, and a
+  version is counted from the commits, not from the tags, so pruning moves no number.
 
 ### The hub
 
@@ -471,7 +476,7 @@ as applied today):
 - **Tags `v*`, but the alphas' and the betas'**: a ruleset on `refs/tags/v*`, excluding
   `refs/tags/v*-alpha.*` and `refs/tags/v*-beta.*`, that lets nobody update or delete them. The
   exclusions are the tags the workflows delete: `alpha-cleanup.yml` deletes a branch's alphas,
-  and `prune-betas` the betas beyond the last ten of a version (a stable release and a release
+  and `beta-cleanup.yml` the betas beyond the last ten of a version (a stable release and a release
   candidate stay protected). **Creating a tag is not restricted**: a personal repository cannot
   give GitHub Actions a bypass, and the CI creates the betas' tags (and `Release` the lines').
 - **Bypass**: the repository's admin (the maintainer) only.
