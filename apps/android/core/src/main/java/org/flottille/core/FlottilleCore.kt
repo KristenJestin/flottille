@@ -14,6 +14,7 @@ import org.flottille.core.ffi.Picture
 import org.flottille.core.ffi.Reply
 import org.flottille.core.ffi.Sealer
 import org.flottille.core.ffi.ViewState
+import org.flottille.core.ffi.addressIsLocal as addressIsLocalIn
 import org.flottille.core.ffi.hubCard as hubCardOf
 import org.flottille.core.ffi.keepPanics as keepPanicsIn
 import org.flottille.core.ffi.lastPanic as lastPanicIn
@@ -98,6 +99,13 @@ class FlottilleCore(folder: File, sealer: Sealer = KeystoreSealer()) : AutoClose
     /** The bytes of a picture of the conversation. */
     suspend fun image(machine: String, agent: String, name: String): ByteArray = core.image(machine, agent, name)
 
+    /** The tunnel to the run of `machine` that `url` names, and the address read through it. */
+    suspend fun openAddress(machine: String, run: String?, url: String, browser: Boolean) =
+        core.openAddress(machine, run, url, browser)
+
+    /** Closes a tunnel the phone holds. */
+    fun closeTunnel(tunnel: String) = core.closeTunnel(tunnel)
+
     override fun close() = core.close()
 
     companion object {
@@ -110,6 +118,9 @@ class FlottilleCore(folder: File, sealer: Sealer = KeystoreSealer()) : AutoClose
 
         /** The hub a pair code names, read with no network: its address and its key's fingerprint. */
         fun card(code: String): org.flottille.core.ffi.HubCard = hubCardOf(code)
+
+        /** Whether an address names the machine it is read on (so that it opens through a tunnel). */
+        fun isLocal(url: String): Boolean = addressIsLocalIn(url)
 
         /** At the app's start: a panic of the core is kept in `folder`. */
         fun keepPanics(folder: File) = keepPanicsIn(folder.path)
