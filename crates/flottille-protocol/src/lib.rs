@@ -1,6 +1,7 @@
 //! The socket protocol: one JSON object per line (`docs/protocol.md`). Serde only, so that a
 //! client speaks it without the store or the daemon.
 
+pub mod address;
 mod catalogue;
 pub mod words;
 
