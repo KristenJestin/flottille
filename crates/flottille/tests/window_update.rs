@@ -328,6 +328,8 @@ fn restart_to_update_asks_while_a_session_only_waits(cx: &mut TestAppContext) {
         visible(cx, "version-restart-button")
     });
 
+    // The section has finished unfolding: a click while it still fades in can land on nothing.
+    settle(cx);
     click(cx, "version-restart-button");
 
     let section = shell.read_with(cx, |s, _| s.version().clone());
@@ -674,7 +676,7 @@ fn selected(cx: &mut VisualTestContext, id: &str) -> bool {
     cx.update(|window, _| {
         window
             .try_find(id.to_owned())
-            .is_some_and(|found| found.selected())
+            .is_some_and(|found| found.selected() == Some(true))
     })
 }
 
@@ -682,7 +684,10 @@ fn selected(cx: &mut VisualTestContext, id: &str) -> bool {
 fn remembering(kept: &str) -> User {
     let user = User::new();
     let file = user.path("state/flottille/update-channel.json");
-    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    // The folder is the daemon's own: private, or it refuses to start.
+    std::os::unix::fs::DirBuilderExt::mode(std::fs::DirBuilder::new().recursive(true), 0o700)
+        .create(file.parent().unwrap())
+        .unwrap();
     std::fs::write(file, kept).unwrap();
     user
 }

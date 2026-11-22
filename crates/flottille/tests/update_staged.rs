@@ -876,7 +876,10 @@ fn an_alpha_build_shows_its_branch_and_offers_stable_or_beta() {
     let user = User::new().with_env("FLOTTILLE_RELEASES", &releases.api());
     // `flottille update --channel alpha --branch feat/x` left this behind.
     let file = user.path("state/flottille/update-channel.json");
-    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    // The folder is the daemon's own: private, or it refuses to start.
+    std::os::unix::fs::DirBuilderExt::mode(std::fs::DirBuilder::new().recursive(true), 0o700)
+        .create(file.parent().unwrap())
+        .unwrap();
     std::fs::write(&file, r#"{"channel":"alpha","branch":"feat/x"}"#).unwrap();
 
     let shown = user.call("update.show", json!({})).unwrap();
