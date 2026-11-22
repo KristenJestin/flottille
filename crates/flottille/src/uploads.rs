@@ -34,6 +34,14 @@ fn lasts() -> Duration {
     crate::test_time::tuned("FLOTTILLE_TEST_UPLOAD_MS", LASTS)
 }
 
+/// A test makes the read of each file last as a slow disk's does, to show what it holds up.
+fn slow_read() {
+    std::thread::sleep(crate::test_time::tuned(
+        "FLOTTILLE_TEST_UPLOAD_READ_MS",
+        Duration::ZERO,
+    ));
+}
+
 /// The uploads waiting for their messages, by sender and name.
 #[derive(Default)]
 pub struct Uploads(Held);
@@ -131,19 +139,59 @@ async fn drop_when_late(held: Held, key: (String, String)) {
     let mut wait = lasts;
     loop {
         tokio::time::sleep(wait).await;
-        let mut uploads = held.lock().unwrap();
-        let Some(upload) = uploads.get(&key) else {
-            return;
-        };
-        let idle = upload.last.elapsed();
-        if idle >= lasts {
-            // The folder goes under the guard: a chunk that starts an upload of the same name
-            // waits for it, and never finds this one's folder to lose.
+        let aside = {
+            let mut uploads = held.lock().unwrap();
+            let Some(upload) = uploads.get(&key) else {
+                return;
+            };
+            let idle = upload.last.elapsed();
+            if idle < lasts {
+                wait = lasts - idle;
+                continue;
+            }
             let upload = uploads.remove(&key).expect("it is there");
-            let _ = std::fs::remove_dir_all(&upload.folder);
-            return;
+            set_aside(&upload.folder)
+        };
+        // Deleted where it holds no thread of the runtime and no sender's chunk.
+        let _ = tokio::task::spawn_blocking(move || aside.delete()).await;
+        return;
+    }
+}
+
+/// The folder of an upload that left the table, to be deleted outside the lock: a name of this
+/// daemon's alone (a dot, which no sender's folder starts with, then a counter), so that a chunk
+/// of the same name that comes next finds the table without the upload and a folder of its own
+/// to make, never this one to lose.
+enum Aside {
+    Renamed(PathBuf),
+    Gone,
+}
+
+impl Aside {
+    fn delete(self) {
+        if let Aside::Renamed(folder) = self {
+            let _ = std::fs::remove_dir_all(folder);
         }
-        wait = lasts - idle;
+    }
+}
+
+/// Moves `folder` out of the way, a rename that takes no time whatever the files hold. Called
+/// under the lock. When it cannot be renamed it is deleted there, as it cannot be left to a
+/// chunk of the same name.
+fn set_aside(folder: &std::path::Path) -> Aside {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNT: AtomicU64 = AtomicU64::new(0);
+    let aside = folder.with_file_name(format!(
+        ".gone-{}-{}",
+        std::process::id(),
+        COUNT.fetch_add(1, Ordering::Relaxed)
+    ));
+    match std::fs::rename(folder, &aside) {
+        Ok(()) => Aside::Renamed(aside),
+        Err(_) => {
+            let _ = std::fs::remove_dir_all(folder);
+            Aside::Gone
+        }
     }
 }
 
@@ -262,7 +310,9 @@ fn keep(
         // A chunk that failed may have written a part of itself: the upload is not trusted any
         // more, nor its folder; the sender sends it again from its start.
         uploads.remove(&key);
-        let _ = std::fs::remove_dir_all(&folder);
+        let aside = set_aside(&folder);
+        drop(uploads);
+        aside.delete();
         return Err(Failure::new(
             "unavailable",
             format!("{said} {number} cannot be kept: {error}"),
@@ -335,10 +385,9 @@ fn read(
     key: (String, String),
 ) -> Result<(Vec<ImageUpload>, Vec<TextUpload>), Failure> {
     use base64::Engine as _;
-    // The files are read and the folder deleted under the guard that took the upload out of the
-    // table: a chunk of the same name that comes after finds the table without it and its own
-    // folder to make, never this one to lose.
-    let read = {
+    // Only the table is touched under the guard: the upload leaves it and its folder is renamed,
+    // so that a chunk of the same name finds neither, and no sender waits for the read.
+    let (upload, aside) = {
         let mut uploads = held.lock().unwrap();
         let Some(upload) = uploads.get(&key) else {
             return Err(Failure::new(
@@ -363,23 +412,13 @@ fn read(
             )));
         }
         let upload = uploads.remove(&key).expect("it is there");
-        let files: Result<Vec<_>, Failure> = upload
-            .files
-            .iter()
-            .map(|((kind, number), file)| {
-                let bytes =
-                    std::fs::read(upload.folder.join(file_name(*kind, *number))).map_err(|e| {
-                        Failure::new(
-                            "unavailable",
-                            format!("{} {number} cannot be read: {e}", kind.said()),
-                        )
-                    })?;
-                Ok((*kind, *number, file.mime.clone(), bytes))
-            })
-            .collect();
-        let _ = std::fs::remove_dir_all(&upload.folder);
-        files?
+        let aside = set_aside(&upload.folder);
+        (upload, aside)
     };
+    let read = read_files(&upload, &aside);
+    // Whatever the read did, the folder goes.
+    aside.delete();
+    let read = read?;
     let (mut images, mut texts) = (Vec::new(), Vec::new());
     for (kind, number, mime, bytes) in read {
         match kind {
@@ -396,4 +435,30 @@ fn read(
         }
     }
     Ok((images, texts))
+}
+
+/// A file read: its kind, number, mime and bytes.
+type Read = (Kind, u32, Option<String>, Vec<u8>);
+
+/// Every file of `upload`, read from its folder, which is `aside`.
+fn read_files(upload: &Upload, aside: &Aside) -> Result<Vec<Read>, Failure> {
+    upload
+        .files
+        .iter()
+        .map(|((kind, number), file)| {
+            slow_read();
+            let unavailable = |e: std::io::Error| {
+                Failure::new(
+                    "unavailable",
+                    format!("{} {number} cannot be read: {e}", kind.said()),
+                )
+            };
+            let Aside::Renamed(folder) = aside else {
+                return Err(unavailable(std::io::Error::other("its folder is gone")));
+            };
+            let bytes =
+                std::fs::read(folder.join(file_name(*kind, *number))).map_err(unavailable)?;
+            Ok((*kind, *number, file.mime.clone(), bytes))
+        })
+        .collect()
 }
