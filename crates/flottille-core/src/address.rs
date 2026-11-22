@@ -29,13 +29,15 @@ fn authority(url: &str) -> Option<(String, Option<u16>)> {
 
 /// The authority (host, and port when written) of a web address (`http` or `https`) that has no
 /// userinfo. An address with one (`https://github.com@evil.example/`) reads as another place than
-/// it goes to, so it is none, as is any other scheme.
+/// it goes to, so it is none, as is any other scheme and an authority with a backslash, which a
+/// browser reads as the slash that ends it (`https://evil.example\.github.com/` goes to
+/// evil.example).
 pub fn web_authority(url: &str) -> Option<&str> {
     let rest = url
         .strip_prefix("https://")
         .or_else(|| url.strip_prefix("http://"))?;
     let authority = rest.split(['/', '?', '#']).next()?;
-    (!authority.is_empty() && !authority.contains('@')).then_some(authority)
+    (!authority.is_empty() && !authority.contains(['@', '\\'])).then_some(authority)
 }
 
 /// Whether the host is a name of the machine it is read on: `localhost`, a name under it,
@@ -105,6 +107,12 @@ mod tests {
         );
         assert_eq!(web_authority("javascript:alert(1)"), None);
         assert_eq!(web_authority("https:///path"), None);
+        // A browser reads a backslash as a slash: this goes to evil.example.
+        assert_eq!(web_authority("https://evil.example\\.github.com/"), None);
+        assert_eq!(
+            web_authority("http://host.example/a\\b"),
+            Some("host.example")
+        );
     }
 
     #[test]

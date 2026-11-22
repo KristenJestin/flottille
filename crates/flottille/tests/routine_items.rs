@@ -219,6 +219,10 @@ fn a_result_that_is_not_a_clean_list_is_refused() {
             json!([{"id": "a", "title": "A", "link": "https://github.com@evil.example/x"}]),
         ),
         (
+            "a link whose host a browser reads as another",
+            json!([{"id": "a", "title": "A", "link": "https://evil.example\\.github.com/"}]),
+        ),
+        (
             "a link with a password",
             json!([{"id": "a", "title": "A", "link": "http://user:pw@host.example/"}]),
         ),
