@@ -1753,15 +1753,16 @@ pub fn take_travelled(
 
 /// Why a repository a launch adds at `path` to `project` is refused, as one the user adds is
 /// (`add_repository`): a path out of its folder, a link leading out of it, or a repository of
-/// another project of `others`. Nothing there yet is not refused: its code comes from the
-/// launch's machine.
+/// another project of `others`. Nothing there yet is not refused, unless a folder on its way
+/// leads out (`stays_inside`): its code comes from the launch's machine.
 pub fn refused_repository(others: &[Project], project: &Project, path: &str) -> Option<String> {
     if repository_path(path).as_deref() != Some(path) {
         return Some(format!("{path} is not a folder of {}", project.name));
     }
     let folder = project.folder.join(path);
     if std::fs::symlink_metadata(&folder).is_err() {
-        return None;
+        return (!stays_inside(&project.folder, path))
+            .then(|| format!("{path} leads outside the project folder"));
     }
     let Ok(inside) = leads_inside(&project.folder, path) else {
         return Some(format!("{path} leads outside the project folder"));
@@ -1782,6 +1783,24 @@ pub fn refused_repository(others: &[Project], project: &Project, path: &str) -> 
             other.name
         )
     })
+}
+
+/// Whether what is made at `path` of the project folder `folder` lands inside it: the deepest
+/// part of the path that exists, links followed, is inside the project's folder. A path that is
+/// not there yet can lead out through a link in a middle folder.
+pub fn stays_inside(folder: &Path, path: &str) -> bool {
+    let Ok(root) = std::fs::canonicalize(folder) else {
+        // No project folder: nothing in it leads anywhere yet; a link that leads nowhere does not
+        // lead inside.
+        return std::fs::symlink_metadata(folder).is_err();
+    };
+    let mut deepest = folder.join(path);
+    while std::fs::symlink_metadata(&deepest).is_err() {
+        if !deepest.pop() {
+            return false;
+        }
+    }
+    std::fs::canonicalize(&deepest).is_ok_and(|at| at.starts_with(&root))
 }
 
 /// The folder of the repository at `path` of `project`, canonical, when it is inside the
