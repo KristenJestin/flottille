@@ -1282,7 +1282,7 @@ pub fn where_line(
             .aria_label(said.clone())
             .flex()
             .items_center()
-            .gap(px(4.))
+            .gap(gpui_design_system::space::XS)
             .text_size(px(13.))
             .child(
                 div()
