@@ -2857,7 +2857,11 @@ async fn a_tunnel_still_opening_when_its_caller_goes_is_not_left_open() {
     asking.abort();
     // Past the machine's answer: nothing is held, nothing listens.
     tokio::time::sleep(Duration::from_millis(800)).await;
-    assert!(phone.view().tunnels.is_empty(), "{:?}", phone.view().tunnels);
+    assert!(
+        phone.view().tunnels.is_empty(),
+        "{:?}",
+        phone.view().tunnels
+    );
     place.served.stop().await;
 }
 
