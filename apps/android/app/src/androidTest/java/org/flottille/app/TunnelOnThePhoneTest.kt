@@ -105,7 +105,15 @@ class TunnelOnThePhoneTest {
         // The web view asks the tunnel's local port; the run's server answers through it.
         until("the run's server was asked through the tunnel", detail = {
             val failed = rule.onAllNodesWithTag("browser-failed").fetchSemanticsNodes().size
-            "(opened: ${phone.opened.toList()}, tunnels: ${phone.state.value.tunnels}, browser shown: " +
+            val probe = phone.state.value.tunnels.firstOrNull()?.let { tunnel ->
+                try {
+                    java.net.URL("http://127.0.0.1:${tunnel.localPort}/probe").readText().take(40)
+                } catch (broken: java.io.IOException) {
+                    "probe failed: $broken"
+                }
+            }
+            val webview = android.webkit.WebView.getCurrentWebViewPackage()?.let { "${it.packageName} ${it.versionName}" }
+            "(probe: $probe, webview: $webview, requests: ${server.requests.toList()}, opened: ${phone.opened.toList()}, tunnels: ${phone.state.value.tunnels}, browser shown: " +
                 "${rule.onAllNodesWithTag("browser-page").fetchSemanticsNodes().size}, failed message nodes: $failed, " +
                 "texts: ${rule.onAllNodesWithTag("browser-failed").fetchSemanticsNodes().map { it.config.toString() }})"
         }) { server.requests.isNotEmpty() }
