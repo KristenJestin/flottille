@@ -396,6 +396,8 @@ struct Running {
     address: Option<String>,
     code: Option<String>,
     asks_code: bool,
+    /// The program prints a one-time code for the user to enter in the browser.
+    shows_code: bool,
     /// The program's input, while a pasted code may still be written to it: taken by the first.
     input: Option<ChildStdin>,
     pid: u32,
@@ -443,8 +445,9 @@ fn not_yours(program: Program, flow: &Running) -> Failure {
 }
 
 /// What a line of a sign-in says the user needs: the first address it holds, and the one-time
-/// code after `one-time code`, on its line or the next (gh and glab say it after a colon, Codex
-/// on the line under).
+/// code after `one-time code`: after a colon (gh and glab), in parentheses (a recent gh), or
+/// alone on the line under (Codex). Only a word that looks like a code is taken (below): with
+/// none found, the dialog says so rather than show a wrong one (#1248).
 #[derive(Default)]
 struct Reading {
     address: Option<String>,
@@ -453,11 +456,33 @@ struct Reading {
     code_next: bool,
 }
 
+/// Whether `word` looks like a one-time code: groups of capital letters and digits joined by
+/// dashes, as gh, glab and Codex print theirs (`WDJB-MJHT`).
+fn looks_like_a_code(word: &str) -> bool {
+    let mut groups = word.split('-');
+    let group = |group: &str| {
+        !group.is_empty()
+            && group
+                .bytes()
+                .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
+    };
+    groups.next().is_some_and(group) && word.contains('-') && groups.all(group)
+}
+
+/// The first word of `text` that looks like a code, without the punctuation around it.
+fn code_in(text: &str) -> Option<String> {
+    text.split_whitespace()
+        .map(|word| word.trim_matches(|c: char| !c.is_ascii_alphanumeric()))
+        .find(|word| looks_like_a_code(word))
+        .map(str::to_owned)
+}
+
 impl Reading {
     fn line(&mut self, line: &str) {
         let line = line.trim();
         if self.code_next && self.code.is_none() && !line.is_empty() {
-            self.code = line.split_whitespace().next().map(str::to_owned);
+            // The line under the announcement is the code, or it is not: never a guess.
+            self.code = line.split_whitespace().next().and_then(code_in);
             self.code_next = false;
         }
         if self.address.is_none()
@@ -468,12 +493,12 @@ impl Reading {
                 .next()
                 .map(|address| masked(&declared::without_credentials(address)));
         }
-        if self.code.is_none() && line.to_ascii_lowercase().contains("one-time code") {
-            let after = line.rsplit_once(':').map(|(_, after)| after.trim());
-            match after.and_then(|after| after.split_whitespace().next()) {
-                Some(code) if !code.contains("//") => self.code = Some(code.to_owned()),
-                _ => self.code_next = true,
-            }
+        const SAYING: &str = "one-time code";
+        if self.code.is_none()
+            && let Some(at) = line.to_ascii_lowercase().find(SAYING)
+        {
+            self.code = code_in(&line[at + SAYING.len()..]);
+            self.code_next = self.code.is_none();
         }
     }
 }
@@ -513,6 +538,7 @@ fn shown(program: Program, flow: &Running) -> Value {
         "address": flow.address,
         "code": flow.code,
         "asks_code": flow.asks_code && flow.input.is_some(),
+        "shows_code": flow.shows_code,
     })
 }
 
@@ -667,6 +693,7 @@ async fn start(daemon: Arc<Daemon>, program: Program) -> Answer {
             ));
         }
     };
+    let wants_code = !asks_code && !matches!(program, Program::Acli | Program::Bkt);
     let (starter, from) = caller(&daemon);
     let id = NEXT_FLOW.fetch_add(1, Ordering::Relaxed);
     let said = {
@@ -707,6 +734,7 @@ async fn start(daemon: Arc<Daemon>, program: Program) -> Answer {
                 address: None,
                 code: None,
                 asks_code,
+                shows_code: wants_code,
                 input: child.stdin.take(),
                 pid: child.id().unwrap_or_default(),
                 cancelled: false,
@@ -719,7 +747,6 @@ async fn start(daemon: Arc<Daemon>, program: Program) -> Answer {
     };
     announce(&daemon, program, host.as_deref(), "started", None);
     // The answer waits for what the user needs: the address, and the code a device flow shows.
-    let wants_code = !asks_code && !matches!(program, Program::Acli | Program::Bkt);
     let deadline = tokio::time::Instant::now() + SAID_TIME;
     loop {
         let notified = said.notified();
@@ -1034,6 +1061,22 @@ mod tests {
             None
         );
         assert_eq!(read(&["one-time code: soon", "and then"]).1, None);
+    }
+
+    #[test]
+    fn claude_says_the_address_on_the_line_under_and_no_code() {
+        assert_eq!(
+            read(&[
+                "Opening browser to sign in…",
+                "If the browser didn't open, visit:",
+                "https://claude.example.test/oauth/authorize?state=x",
+                "Paste code here if prompted >",
+            ]),
+            (
+                Some("https://claude.example.test/oauth/authorize?state=x".into()),
+                None
+            )
+        );
     }
 
     #[test]

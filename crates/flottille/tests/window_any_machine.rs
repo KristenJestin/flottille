@@ -367,6 +367,7 @@ fn the_code_of_a_recent_gh_is_shown_for_another_machine_s_sign_in(cx: &mut TestA
         label(cx, "sign-in-state-gh").as_deref() == Some("Not signed in")
     });
 
+    settle(&shell, cx);
     click(&shell, "sign-in-gh", cx);
 
     until(&shell, cx, "the dialog shows the server's code", |cx| {
