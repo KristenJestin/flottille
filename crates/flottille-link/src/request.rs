@@ -481,6 +481,8 @@ fn deed(method: &str) -> String {
         "agent.mode" => "switch the mode",
         "remote.change" => "remove, rename or restyle a device",
         "tunnel.open" => "open a tunnel",
+        "signin.start" => "sign a program in",
+        "signin.sign_out" => "sign a program out",
         _ => return format!("call {method}"),
     };
     words.to_owned()

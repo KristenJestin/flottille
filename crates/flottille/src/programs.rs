@@ -169,7 +169,7 @@ fn locate(name: &str) -> Option<PathBuf> {
 }
 
 /// `<program> --version`: the first dotted number it prints, none when it prints none.
-async fn version_of(program: &Path) -> Option<String> {
+pub(crate) async fn version_of(program: &Path) -> Option<String> {
     let child = crate::children::spawn(
         tokio::process::Command::new(program)
             .arg("--version")

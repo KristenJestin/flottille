@@ -11,6 +11,9 @@
 //! - `received.jsonl`, written by the fake: one `{"args": [...], "env": {...}}` per call, `env`
 //!   holding the forge variables it was given (`BKT_TOKEN`, `BKT_CONFIG_DIR`).
 //!
+//! `auth login` and `auth logout` play the scripted sign-in every fake shares
+//! (`crates/flottille-fake-gh/src/sign_in.rs`, #1185); signed out, it lists no context.
+//!
 //! # The script
 //!
 //! ```json
@@ -103,9 +106,12 @@
 //! as the pipelines endpoint's query does. The fake reads no other filter.
 
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value, json};
+
+#[path = "../../flottille-fake-gh/src/sign_in.rs"]
+mod sign_in;
 
 /// The largest `pagelen` the fake accepts: Bitbucket Cloud's pull request list takes 50 at most.
 const MAX_PAGELEN: usize = 50;
@@ -137,7 +143,35 @@ fn main() {
         .ok()
         .and_then(|text| serde_json::from_str(&text).ok())
         .unwrap_or_else(|| json!({}));
+    if let Some(code) = auth(&dir, &script, &args) {
+        std::process::exit(code);
+    }
+    // Signed out, `bkt auth logout` removed the host's contexts with its credentials.
+    let script = match sign_in::signed_in(&dir, &script) {
+        true => script,
+        false => {
+            let mut script = script;
+            script["contexts"] = json!([]);
+            script
+        }
+    };
     std::process::exit(answer(&script, &args));
+}
+
+/// `bkt auth login` and `bkt auth logout` (`pkg/cmd/auth/auth.go`, `pkg/oauth/flow.go`): Cloud's
+/// `--web` says the address to open when it cannot open a browser itself, and waits for the
+/// browser's answer; none for any other command.
+fn auth(dir: &Path, script: &Value, args: &[String]) -> Option<i32> {
+    let words: Vec<&str> = args.iter().map(String::as_str).collect();
+    Some(match words.as_slice() {
+        ["auth", "login", ..] => sign_in::login(dir, script, args, |address, _| {
+            println!("Authenticating with Bitbucket Cloud via OAuth...");
+            println!("Failed to open browser: no browser here");
+            println!("Open this URL manually:\n  {address}");
+        }),
+        ["auth", "logout", ..] => sign_in::logout(dir, args),
+        _ => return None,
+    })
 }
 
 /// The contexts `bkt context list --json` lists.

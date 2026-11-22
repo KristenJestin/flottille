@@ -165,6 +165,25 @@ pub(crate) async fn has_context(host: &str) -> Result<bool, String> {
     Ok(list().await?.iter().any(|context| on_host(context, host)))
 }
 
+/// Whether `bkt context list --json`'s answer names a context on `host` (`sign_in`).
+pub(crate) fn lists_host(listed: &Value, host: &str) -> bool {
+    listed["contexts"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|context| context["host"].as_str())
+        .any(|named| {
+            on_host(
+                &Context {
+                    name: String::new(),
+                    host: named.to_owned(),
+                    active: false,
+                },
+                host,
+            )
+        })
+}
+
 /// A host key without its port, lowercase.
 fn hostname(key: &str) -> String {
     key.split(':').next().unwrap_or(key).to_ascii_lowercase()
