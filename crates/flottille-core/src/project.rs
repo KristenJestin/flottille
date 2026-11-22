@@ -1481,12 +1481,12 @@ pub fn slug(text: &str) -> String {
 /// The keys of a project's file that travel with a launch to another machine (`docs/remote.md`,
 /// "What travels"): how its workspaces are prepared, its tasks and services, its checks, its
 /// rules, its branch and commit conventions. Its folder, its workspaces' folder, its caps, its
-/// provider, its forges, its tracker and every other key are the machine's own.
-pub const TRAVELLING: [&str; 10] = [
+/// provider, its forges, its tracker, its variables (whose values may be secrets) and every other
+/// key are the machine's own.
+pub const TRAVELLING: [&str; 9] = [
     "branch_prefix",
     "branch_format",
     "never",
-    "variables",
     "tasks",
     "setup",
     "message_checks",
@@ -1600,6 +1600,8 @@ mod tests {
             branch_format = "^feat/"
             rules = "Small commits."
             message_checks = ["check {message}"]
+            [variables]
+            TOKEN = "kept-here"
             [tasks.test]
             line = "cargo test"
             check = true
@@ -1615,7 +1617,13 @@ mod tests {
 
         let settings = travelling(text).unwrap();
 
-        for own in ["folder", "workspaces_root", "max_children", "provider"] {
+        for own in [
+            "folder",
+            "workspaces_root",
+            "max_children",
+            "provider",
+            "variables",
+        ] {
             assert!(settings.get(own).is_none(), "{own}: {settings}");
         }
         assert_eq!(settings["branch_format"], "^feat/");
@@ -1635,6 +1643,14 @@ mod tests {
             travelled_toml(&sent)
                 .unwrap_err()
                 .contains("folder is no setting that travels")
+        );
+        // Nor do the variables, whose values may be secrets.
+        let mut sent = settings.clone();
+        sent["variables"] = serde_json::json!({"TOKEN": "x"});
+        assert!(
+            travelled_toml(&sent)
+                .unwrap_err()
+                .contains("variables is no setting that travels")
         );
         let mut sent = settings;
         sent["repositories"][0]["remote"] = "evil".into();
