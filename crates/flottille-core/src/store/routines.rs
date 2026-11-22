@@ -21,8 +21,7 @@ fn earlier_of(line: &str) -> Option<u64> {
         .ok()
 }
 
-const RUN: &str =
-    "id, routine, due_at, started_at, ended_at, session, mode, outcome, summary, why, trigger, \
+const RUN: &str = "id, routine, due_at, started_at, ended_at, session, mode, outcome, summary, why, trigger, \
     opened_at";
 
 fn routine_row(row: &rusqlite::Row) -> rusqlite::Result<Routine> {
